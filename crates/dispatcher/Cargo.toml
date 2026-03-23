@@ -1,0 +1,29 @@
+[package]
+name = "forge2-dispatcher"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+forge2-types = { workspace = true }
+anyhow = { workspace = true }
+async-nats = { workspace = true }
+async-stream = { workspace = true }
+axum = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+dashmap = { workspace = true }
+futures = { workspace = true }
+petgraph = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+ntest = "0.9.5"
+testcontainers = "0.27.2"
+testcontainers-modules = { version = "0.15.0", features = ["nats"] }
+tokio-test = "0.4.5"
+uuid = { workspace = true, features = ["v4"] }

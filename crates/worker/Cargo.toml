@@ -1,0 +1,20 @@
+[package]
+name = "forge2-worker"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+forge2-types = { workspace = true }
+forge2-forgejo-api = { workspace = true }
+async-nats = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+bytes.workspace = true
+futures.workspace = true
+anyhow.workspace = true
+async-trait = "0.1.89"
+tokio-util = "0.7.18"

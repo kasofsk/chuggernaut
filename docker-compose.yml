@@ -1,0 +1,29 @@
+services:
+  nats:
+    image: nats:latest
+    command: ["--jetstream", "--store_dir", "/data", "--config", "/etc/nats/nats-server.conf"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+    restart: unless-stopped
+
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:11
+    ports:
+      - "3000:3000"
+      - "2222:22"
+    volumes:
+      - forgejo-data:/data
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - FORGEJO__server__ROOT_URL=http://localhost:3000
+      - FORGEJO__server__SSH_PORT=2222
+    restart: unless-stopped
+
+volumes:
+  nats-data:
+  forgejo-data:

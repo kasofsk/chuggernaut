@@ -1,0 +1,8 @@
+{
+  "jobs": [
+    { "title": "Setup database schema", "deps": [] },
+    { "title": "Add user model", "deps": [1] },
+    { "title": "Add auth endpoints", "deps": [1, 2] },
+    { "title": "Add API tests", "deps": [3] }
+  ]
+}

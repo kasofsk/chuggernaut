@@ -1,0 +1,12 @@
+{
+  "extraKnownMarketplaces": {
+    "kasofsk-plugins": {
+      "source": "github",
+      "repo": "kasofsk/claude-plugins"
+    }
+  },
+  "enabledPlugins": {
+    "rust-lint@kasofsk-plugins": true,
+    "check-duplication@kasofsk-plugins": true
+  }
+}
