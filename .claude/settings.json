@@ -1,8 +1,10 @@
 {
   "extraKnownMarketplaces": {
     "kasofsk-plugins": {
-      "source": "github",
-      "repo": "kasofsk/claude-plugins"
+      "source": {
+        "source": "github",
+        "repo": "kasofsk/claude-plugins"
+      }
     }
   },
   "enabledPlugins": {

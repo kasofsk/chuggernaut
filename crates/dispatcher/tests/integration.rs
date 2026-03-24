@@ -13,33 +13,39 @@ use forge2_dispatcher::{
 use forge2_types::*;
 
 // ---------------------------------------------------------------------------
-// Shared NATS container — one per test process, leaked for lifetime
+// Shared NATS container — one per test process, leaked for lifetime.
+// Started on a dedicated OS thread to avoid tokio runtime conflicts
+// when multiple #[tokio::test] instances race to initialise.
 // ---------------------------------------------------------------------------
 
-static TEST_NATS_PORT: tokio::sync::OnceCell<u16> = tokio::sync::OnceCell::const_new();
+static TEST_NATS_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
 
-async fn test_nats_port() -> u16 {
-    *TEST_NATS_PORT
-        .get_or_init(|| async {
-            let nats_cmd = NatsServerCmd::default().with_jetstream();
-            let container = Nats::default()
-                .with_cmd(&nats_cmd)
-                .start()
-                .await
-                .unwrap();
-            let port = container.get_host_port_ipv4(4222).await.unwrap();
-            // Leak the container so it lives for the entire test process
-            Box::leak(Box::new(container));
-            port
+fn test_nats_port() -> u16 {
+    *TEST_NATS_PORT.get_or_init(|| {
+        std::thread::spawn(|| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let nats_cmd = NatsServerCmd::default().with_jetstream();
+                let container = Nats::default()
+                    .with_cmd(&nats_cmd)
+                    .start()
+                    .await
+                    .unwrap();
+                let port = container.get_host_port_ipv4(4222).await.unwrap();
+                // Leak the container so it lives for the entire test process
+                Box::leak(Box::new(container));
+                port
+            })
         })
-        .await
+        .join()
+        .unwrap()
+    })
 }
 
 /// Each test gets its own UUID-namespaced dispatcher state.
 /// All KV buckets and NATS subjects are prefixed so tests run in parallel
 /// without interfering with each other.
 async fn setup() -> Arc<DispatcherState> {
-    let port = test_nats_port().await;
+    let port = test_nats_port();
     let nats_url = format!("nats://127.0.0.1:{port}");
     let prefix = uuid::Uuid::new_v4().simple().to_string();
 

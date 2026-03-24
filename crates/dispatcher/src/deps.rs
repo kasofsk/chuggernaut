@@ -164,25 +164,31 @@ pub async fn propagate_unblock(
         };
 
         if all_done {
-            // Check that the dependent is actually in Blocked state
-            if let Some(job) = state.jobs.get(dependent_key) {
-                if job.state == JobState::Blocked {
-                    match crate::jobs::transition_job(
-                        state,
-                        dependent_key,
-                        JobState::OnDeck,
-                        "deps_resolved",
-                        None,
-                    )
-                    .await
-                    {
-                        Ok(_) => {
-                            debug!(dependent_key, "unblocked by {done_job_key}");
-                            unblocked.push(dependent_key.clone());
-                        }
-                        Err(e) => {
-                            warn!(dependent_key, "failed to unblock: {e}");
-                        }
+            // Check that the dependent is actually in Blocked state.
+            // Important: drop the Ref before calling transition_job,
+            // which needs a write lock on the same DashMap shard.
+            let is_blocked = state
+                .jobs
+                .get(dependent_key)
+                .map(|job| job.state == JobState::Blocked)
+                .unwrap_or(false);
+
+            if is_blocked {
+                match crate::jobs::transition_job(
+                    state,
+                    dependent_key,
+                    JobState::OnDeck,
+                    "deps_resolved",
+                    None,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        debug!(dependent_key, "unblocked by {done_job_key}");
+                        unblocked.push(dependent_key.clone());
+                    }
+                    Err(e) => {
+                        warn!(dependent_key, "failed to unblock: {e}");
                     }
                 }
             }
