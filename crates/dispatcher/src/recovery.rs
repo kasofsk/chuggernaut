@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use tracing::{debug, info, warn};
 
-use forge2_types::*;
+use chuggernaut_types::*;
 
 use crate::error::DispatcherResult;
 use crate::jobs::kv_get;

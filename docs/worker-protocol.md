@@ -13,25 +13,25 @@ Workers are stateless executors that communicate with the dispatcher exclusively
      │
      ▼
 ┌─────────────────────┐
-│ Register             │ forge2.worker.register (request-reply)
+│ Register             │ chuggernaut.worker.register (request-reply)
 │ Wait for ack         │ Includes: worker_id, capabilities, worker_type, platform
 └────┬────────────────┘
      │
      ▼
 ┌─────────────────────┐◄──────────────────────────────────┐
-│ Idle                 │ forge2.worker.idle                 │
+│ Idle                 │ chuggernaut.worker.idle                 │
 │ Wait for assignment  │ Re-register every 15s             │
 └────┬────────────────┘                                    │
      │                                                     │
-     │ forge2.dispatch.assign.{worker_id}                  │
+     │ chuggernaut.dispatch.assign.{worker_id}                  │
      ▼                                                     │
 ┌─────────────────────┐                                    │
 │ Execute             │ Content ops via Forgejo git/API     │
-│ Heartbeat every 10s │ forge2.worker.heartbeat            │
-│ May request help    │ forge2.interact.help               │
+│ Heartbeat every 10s │ chuggernaut.worker.heartbeat            │
+│ May request help    │ chuggernaut.interact.help               │
 └────┬────────────────┘                                    │
      │                                                     │
-     │ forge2.worker.outcome                               │
+     │ chuggernaut.worker.outcome                               │
      ▼                                                     │
 ┌─────────────────────┐                                    │
 │ Report outcome      │ Yield / Fail / Abandon             │
@@ -40,7 +40,7 @@ Workers are stateless executors that communicate with the dispatcher exclusively
      └─────────────────────────────────────────────────────┘
 
 On SIGTERM/CTRL-C:
-  → forge2.worker.unregister
+  → chuggernaut.worker.unregister
   → exit
 ```
 
@@ -49,7 +49,7 @@ On SIGTERM/CTRL-C:
 ## Registration
 
 ```
-Worker → forge2.worker.register (request-reply)
+Worker → chuggernaut.worker.register (request-reply)
 
 Payload: WorkerRegistration {
   worker_id: "agent-rust-1",
@@ -61,7 +61,7 @@ Payload: WorkerRegistration {
 Dispatcher → reply with empty payload (ack)
 ```
 
-The dispatcher CAS-creates the `forge2.workers` KV entry (revision 0). If the worker_id already exists (another process is using it), the create fails and the dispatcher replies with an error — the worker must exit or use a different ID.
+The dispatcher CAS-creates the `chuggernaut.workers` KV entry (revision 0). If the worker_id already exists (another process is using it), the create fails and the dispatcher replies with an error — the worker must exit or use a different ID.
 
 The worker blocks until the ack arrives. If no ack within 5 seconds, retry with backoff.
 
@@ -74,7 +74,7 @@ Every 15 seconds while idle, the worker re-registers via request-reply. Re-annou
 ## Idle
 
 ```
-Worker → forge2.worker.idle
+Worker → chuggernaut.worker.idle
 
 Payload: IdleEvent {
   worker_id: "agent-rust-1"
@@ -85,17 +85,17 @@ Published after registration and after each job completion. The dispatcher may i
 
 ### Pending Rework Check
 
-When the dispatcher receives an `IdleEvent`, it first checks `forge2.pending-reworks` KV for a deferred rework for this worker. If found, the rework takes priority over normal assignment.
+When the dispatcher receives an `IdleEvent`, it first checks `chuggernaut.pending-reworks` KV for a deferred rework for this worker. If found, the rework takes priority over normal assignment.
 
 ---
 
 ## Assignment
 
 ```
-Dispatcher → forge2.dispatch.assign.{worker_id}
+Dispatcher → chuggernaut.dispatch.assign.{worker_id}
 
 Payload: Assignment {
-  job: Job,           // Full job from forge2.jobs KV
+  job: Job,           // Full job from chuggernaut.jobs KV
   claim: ClaimState,  // The claim just acquired
   is_rework: false,   // true if re-assigned after review feedback
   review_feedback: null  // present if is_rework, contains reviewer's feedback
@@ -150,7 +150,7 @@ When `assignment.is_rework == true`:
 Workers can publish progress updates:
 
 ```
-Worker → forge2.activity.append
+Worker → chuggernaut.activity.append
 
 Payload: ActivityAppend {
   job_key: "acme.payments.57",
@@ -162,14 +162,14 @@ Payload: ActivityAppend {
 }
 ```
 
-These are fire-and-forget. The dispatcher appends to `forge2.activities` KV (separate from the job record to avoid CAS contention with state transitions). Capped at 50 entries per job — messages beyond the limit are silently dropped.
+These are fire-and-forget. The dispatcher appends to `chuggernaut.activities` KV (separate from the job record to avoid CAS contention with state transitions). Capped at 50 entries per job — messages beyond the limit are silently dropped.
 
 ---
 
 ## Heartbeat
 
 ```
-Worker → forge2.worker.heartbeat (every 10 seconds)
+Worker → chuggernaut.worker.heartbeat (every 10 seconds)
 
 Payload: WorkerHeartbeat {
   worker_id: "agent-rust-1",
@@ -192,7 +192,7 @@ This is a local safeguard. The monitor also detects lease expiry from the dispat
 ## Outcome
 
 ```
-Worker → forge2.worker.outcome
+Worker → chuggernaut.worker.outcome
 
 Payload: WorkerOutcome {
   worker_id: "agent-rust-1",
@@ -216,7 +216,7 @@ The `pr_url` in Yield is stored in the job's `pr_url` field so the reviewer know
 ## Preemption
 
 ```
-Dispatcher → forge2.dispatch.preempt.{worker_id}
+Dispatcher → chuggernaut.dispatch.preempt.{worker_id}
 
 Payload: PreemptNotice {
   reason: "Higher-priority job acme.payments.99 (priority 95) needs this worker",
@@ -241,7 +241,7 @@ Interactive workers can pause for human assistance.
 ### Request
 
 ```
-Worker → forge2.interact.help
+Worker → chuggernaut.interact.help
 
 Payload: HelpRequest {
   worker_id: "agent-rust-1",
@@ -259,13 +259,13 @@ Dispatcher:
 
 Human responds via CLI:
 ```
-$ forge2 interact respond acme.payments.57 "Use v2, the breaking changes are acceptable"
+$ chuggernaut interact respond acme.payments.57 "Use v2, the breaking changes are acceptable"
 ```
 
-CLI publishes to `forge2.interact.respond.{job_key}` (e.g., `forge2.interact.respond.acme.payments.57`)
+CLI publishes to `chuggernaut.interact.respond.{job_key}` (e.g., `chuggernaut.interact.respond.acme.payments.57`)
 
 Dispatcher:
-1. Publishes `HelpResponse` to `forge2.interact.deliver.{worker_id}`
+1. Publishes `HelpResponse` to `chuggernaut.interact.deliver.{worker_id}`
 2. Transitions job back to OnTheStack
 
 Worker receives response and continues execution.
@@ -278,7 +278,7 @@ Interactive workers (Claude Code in tmux/ttyd) support peek/attach/detach.
 
 ### Session Registration
 
-When an interactive session starts, the worker writes to `forge2.sessions` KV:
+When an interactive session starts, the worker writes to `chuggernaut.sessions` KV:
 
 ```json
 {
@@ -293,8 +293,8 @@ When an interactive session starts, the worker writes to `forge2.sessions` KV:
 ### Attach / Detach
 
 ```
-CLI → forge2.interact.attach.{worker_id}   (switch to interactive mode)
-CLI → forge2.interact.detach.{worker_id}   (switch to peek/headless mode)
+CLI → chuggernaut.interact.attach.{worker_id}   (switch to interactive mode)
+CLI → chuggernaut.interact.detach.{worker_id}   (switch to peek/headless mode)
 ```
 
 The worker handles mode transitions:
@@ -340,16 +340,16 @@ Helper scripts in the work directory:
 - `workflow-fail "reason"` → writes "fail: reason" to result.txt
 - `workflow-request-help "reason"` → writes help_request.txt, polls for response
 
-These scripts are the interface between the Claude Code subprocess (running in tmux) and the worker process. The worker process monitors the filesystem and translates file events into NATS messages — e.g., detecting help_request.txt triggers a `HelpRequest` publish to `forge2.interact.help`. This is a pragmatic bridge: Claude Code doesn't speak NATS directly.
+These scripts are the interface between the Claude Code subprocess (running in tmux) and the worker process. The worker process monitors the filesystem and translates file events into NATS messages — e.g., detecting help_request.txt triggers a `HelpRequest` publish to `chuggernaut.interact.help`. This is a pragmatic bridge: Claude Code doesn't speak NATS directly.
 
 The worker monitors for result.txt (job done), help_request.txt (pause), and attach/detach signals.
 
 ### Session Recording
 
 After job completion, if a Claude output log exists:
-- Upload to NATS JetStream object store (`forge2-session-recordings`)
+- Upload to NATS JetStream object store (`chuggernaut-session-recordings`)
 - Key: `sessions/{job_key}/{session_name}`
-- Optional TTL via `FORGE2_RECORDING_TTL_SECS`
+- Optional TTL via `CHUGGERNAUT_RECORDING_TTL_SECS`
 
 ---
 
@@ -358,7 +358,7 @@ After job completion, if a Claude output log exists:
 On SIGTERM or CTRL-C:
 
 1. If executing: cancel execution, report `Outcome::Abandon`
-2. Publish `forge2.worker.unregister` (UnregisterEvent with worker_id)
+2. Publish `chuggernaut.worker.unregister` (UnregisterEvent with worker_id)
 3. Exit
 
 The dispatcher:
@@ -372,13 +372,13 @@ The dispatcher:
 
 | Env Var | Default | Notes |
 |---------|---------|-------|
-| `FORGE2_WORKER_ID` | (required) | Unique worker identifier |
-| `FORGE2_NATS_URL` | `nats://localhost:4222` | NATS connection |
-| `FORGE2_FORGEJO_URL` | (required) | Forgejo base URL |
-| `FORGE2_FORGEJO_TOKEN` | (required) | Forgejo API token for content ops |
-| `FORGE2_HEARTBEAT_INTERVAL_SECS` | `10` | Heartbeat period |
-| `FORGE2_REREGISTER_INTERVAL_SECS` | `15` | Idle re-registration period |
-| `FORGE2_CAPABILITIES` | (none) | Comma-separated capability tags |
-| `FORGE2_WORKER_TYPE` | `"unknown"` | Worker type classification |
-| `FORGE2_PLATFORM` | (auto-detect) | Platform tags |
-| `FORGE2_RECORDING_TTL_SECS` | (none) | TTL for session recordings in object store |
+| `CHUGGERNAUT_WORKER_ID` | (required) | Unique worker identifier |
+| `CHUGGERNAUT_NATS_URL` | `nats://localhost:4222` | NATS connection |
+| `CHUGGERNAUT_FORGEJO_URL` | (required) | Forgejo base URL |
+| `CHUGGERNAUT_FORGEJO_TOKEN` | (required) | Forgejo API token for content ops |
+| `CHUGGERNAUT_HEARTBEAT_INTERVAL_SECS` | `10` | Heartbeat period |
+| `CHUGGERNAUT_REREGISTER_INTERVAL_SECS` | `15` | Idle re-registration period |
+| `CHUGGERNAUT_CAPABILITIES` | (none) | Comma-separated capability tags |
+| `CHUGGERNAUT_WORKER_TYPE` | `"unknown"` | Worker type classification |
+| `CHUGGERNAUT_PLATFORM` | (auto-detect) | Platform tags |
+| `CHUGGERNAUT_RECORDING_TTL_SECS` | (none) | TTL for session recordings in object store |

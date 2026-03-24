@@ -1,12 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use chrono::Utc;
 use futures::StreamExt;
 use tracing::{debug, info, warn};
 
-use forge2_types::*;
+use chuggernaut_types::*;
 
 use crate::error::DispatcherResult;
 use crate::jobs::kv_get;
@@ -64,7 +63,7 @@ async fn scan_lease_expiry(state: &Arc<DispatcherState>) -> DispatcherResult<()>
                         lease_deadline: claim.lease_deadline,
                         detected_at: now,
                     };
-                    publish_monitor_event(state, subjects::MONITOR_LEASE_EXPIRED, &event).await;
+                    publish_monitor_event(state, &subjects::MONITOR_LEASE_EXPIRED, &event).await;
                 }
             }
         }
@@ -89,7 +88,7 @@ async fn scan_job_timeout(state: &Arc<DispatcherState>) -> DispatcherResult<()> 
                         timeout_secs: claim.timeout_secs,
                         detected_at: now,
                     };
-                    publish_monitor_event(state, subjects::MONITOR_TIMEOUT, &event).await;
+                    publish_monitor_event(state, &subjects::MONITOR_TIMEOUT, &event).await;
                 }
             }
         }
@@ -114,7 +113,7 @@ async fn scan_orphans(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
                         kind: OrphanKind::ClaimUnknownWorker,
                         detected_at: now,
                     };
-                    publish_monitor_event(state, subjects::MONITOR_ORPHAN, &event).await;
+                    publish_monitor_event(state, &subjects::MONITOR_ORPHAN, &event).await;
                 }
             }
         }
@@ -131,7 +130,7 @@ async fn scan_orphans(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
                     kind: OrphanKind::ClaimlessOnTheStack,
                     detected_at: now,
                 };
-                publish_monitor_event(state, subjects::MONITOR_ORPHAN, &event).await;
+                publish_monitor_event(state, &subjects::MONITOR_ORPHAN, &event).await;
             }
         }
     }
@@ -153,7 +152,7 @@ async fn scan_orphans(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
                             kind: OrphanKind::StaleSession,
                             detected_at: now,
                         };
-                        publish_monitor_event(state, subjects::MONITOR_ORPHAN, &event).await;
+                        publish_monitor_event(state, &subjects::MONITOR_ORPHAN, &event).await;
                     }
                 }
             }
@@ -178,7 +177,7 @@ async fn scan_retry(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
                 retry_after: job.retry_after.unwrap(),
                 detected_at: now,
             };
-            publish_monitor_event(state, subjects::MONITOR_RETRY, &event).await;
+            publish_monitor_event(state, &subjects::MONITOR_RETRY, &event).await;
         }
     }
 
@@ -244,17 +243,10 @@ async fn scan_archival(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
 
 async fn publish_monitor_event<T: serde::Serialize>(
     state: &Arc<DispatcherState>,
-    subject: &'static str,
+    subject: &Subject<T>,
     event: &T,
 ) {
-    match serde_json::to_vec(event) {
-        Ok(payload) => {
-            if let Err(e) = state.nats.publish(subject, Bytes::from(payload)).await {
-                warn!(subject, "failed to publish monitor event: {e}");
-            }
-        }
-        Err(e) => {
-            warn!(subject, "failed to serialize monitor event: {e}");
-        }
+    if let Err(e) = state.nats.publish_msg(subject, event).await {
+        warn!(subject.name, "failed to publish monitor event: {e}");
     }
 }

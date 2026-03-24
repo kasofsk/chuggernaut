@@ -7,7 +7,7 @@ pub mod handlers;
 pub mod http;
 pub mod jobs;
 pub mod monitor;
-pub mod nats_client;
+pub use chuggernaut_nats::NatsClient;
 pub mod nats_init;
 pub mod recovery;
 pub mod state;

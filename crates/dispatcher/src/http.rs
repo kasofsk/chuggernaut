@@ -10,7 +10,7 @@ use futures::stream::Stream;
 use serde::Deserialize;
 use tracing::warn;
 
-use forge2_types::*;
+use chuggernaut_types::*;
 
 use crate::error::DispatcherError;
 use crate::jobs::kv_get;
@@ -100,11 +100,15 @@ async fn get_job(
     };
 
     let claim = kv_get::<ClaimState>(&state.kv.claims, &key)
-        .await?
+        .await
+        .ok()
+        .flatten()
         .map(|(c, _)| c);
 
     let activities = kv_get::<ActivityLog>(&state.kv.activities, &key)
-        .await?
+        .await
+        .ok()
+        .flatten()
         .map(|(log, _)| log.entries)
         .unwrap_or_default();
 
@@ -327,7 +331,7 @@ async fn sse_events(
 // ---------------------------------------------------------------------------
 
 async fn get_schema() -> impl IntoResponse {
-    let schema = forge2_types::generate_schema();
+    let schema = chuggernaut_types::generate_schema();
     Json(schema)
 }
 

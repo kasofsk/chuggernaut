@@ -19,6 +19,7 @@ pub struct KvStores {
     pub pending_reworks: kv::Store,
     pub abandon_blacklist: kv::Store,
     pub journal: kv::Store,
+    pub channels: kv::Store,
 }
 
 /// Create or verify all KV buckets and JetStream streams.
@@ -49,7 +50,7 @@ pub async fn initialize_with_prefix(
 
     let jobs = js
         .create_key_value(kv::Config {
-            bucket: name(forge2_types::buckets::JOBS),
+            bucket: name(chuggernaut_types::buckets::JOBS),
             history: 1,
             storage: StorageType::File,
             ..Default::default()
@@ -58,7 +59,7 @@ pub async fn initialize_with_prefix(
 
     let claims = js
         .create_key_value(kv::Config {
-            bucket: name(forge2_types::buckets::CLAIMS),
+            bucket: name(chuggernaut_types::buckets::CLAIMS),
             history: 1,
             storage: StorageType::File,
             ..Default::default()
@@ -67,7 +68,7 @@ pub async fn initialize_with_prefix(
 
     let deps = js
         .create_key_value(kv::Config {
-            bucket: name(forge2_types::buckets::DEPS),
+            bucket: name(chuggernaut_types::buckets::DEPS),
             history: 1,
             storage: StorageType::File,
             ..Default::default()
@@ -76,7 +77,7 @@ pub async fn initialize_with_prefix(
 
     let workers = js
         .create_key_value(kv::Config {
-            bucket: name(forge2_types::buckets::WORKERS),
+            bucket: name(chuggernaut_types::buckets::WORKERS),
             history: 1,
             storage: StorageType::File,
             ..Default::default()
@@ -85,7 +86,7 @@ pub async fn initialize_with_prefix(
 
     let counters = js
         .create_key_value(kv::Config {
-            bucket: name(forge2_types::buckets::COUNTERS),
+            bucket: name(chuggernaut_types::buckets::COUNTERS),
             history: 1,
             storage: StorageType::File,
             ..Default::default()
@@ -94,7 +95,7 @@ pub async fn initialize_with_prefix(
 
     let sessions = js
         .create_key_value(kv::Config {
-            bucket: name(forge2_types::buckets::SESSIONS),
+            bucket: name(chuggernaut_types::buckets::SESSIONS),
             history: 1,
             storage: StorageType::File,
             max_age: Duration::from_secs(lease_secs),
@@ -104,7 +105,7 @@ pub async fn initialize_with_prefix(
 
     let activities = js
         .create_key_value(kv::Config {
-            bucket: name(forge2_types::buckets::ACTIVITIES),
+            bucket: name(chuggernaut_types::buckets::ACTIVITIES),
             history: 1,
             storage: StorageType::File,
             ..Default::default()
@@ -113,7 +114,7 @@ pub async fn initialize_with_prefix(
 
     let pending_reworks = js
         .create_key_value(kv::Config {
-            bucket: name(forge2_types::buckets::PENDING_REWORKS),
+            bucket: name(chuggernaut_types::buckets::PENDING_REWORKS),
             history: 1,
             storage: StorageType::File,
             ..Default::default()
@@ -122,7 +123,7 @@ pub async fn initialize_with_prefix(
 
     let abandon_blacklist = js
         .create_key_value(kv::Config {
-            bucket: name(forge2_types::buckets::ABANDON_BLACKLIST),
+            bucket: name(chuggernaut_types::buckets::ABANDON_BLACKLIST),
             history: 1,
             storage: StorageType::File,
             max_age: Duration::from_secs(blacklist_ttl_secs),
@@ -132,7 +133,7 @@ pub async fn initialize_with_prefix(
 
     let journal = js
         .create_key_value(kv::Config {
-            bucket: name(forge2_types::buckets::JOURNAL),
+            bucket: name(chuggernaut_types::buckets::JOURNAL),
             history: 1,
             storage: StorageType::File,
             max_age: Duration::from_secs(7 * 24 * 3600),
@@ -140,15 +141,24 @@ pub async fn initialize_with_prefix(
         })
         .await?;
 
+    let channels = js
+        .create_key_value(kv::Config {
+            bucket: name(chuggernaut_types::buckets::CHANNELS),
+            history: 1,
+            storage: StorageType::File,
+            ..Default::default()
+        })
+        .await?;
+
     // JetStream streams — prefix both name and subjects
     let (trans_name, trans_subjects) = match prefix {
         Some(p) => (
-            format!("{}_{p}", forge2_types::streams::TRANSITIONS),
-            vec![format!("{p}_forge2.transitions.>")],
+            format!("{}_{p}", chuggernaut_types::streams::TRANSITIONS),
+            vec![format!("{p}_chuggernaut.transitions.>")],
         ),
         None => (
-            forge2_types::streams::TRANSITIONS.to_string(),
-            vec!["forge2.transitions.>".to_string()],
+            chuggernaut_types::streams::TRANSITIONS.to_string(),
+            vec!["chuggernaut.transitions.>".to_string()],
         ),
     };
     js.create_stream(jetstream::stream::Config {
@@ -163,21 +173,21 @@ pub async fn initialize_with_prefix(
 
     let (we_name, we_subjects) = match prefix {
         Some(p) => (
-            format!("{}_{p}", forge2_types::streams::WORKER_EVENTS),
+            format!("{}_{p}", chuggernaut_types::streams::WORKER_EVENTS),
             vec![
-                format!("{p}_{}", forge2_types::subjects::WORKER_REGISTER),
-                format!("{p}_{}", forge2_types::subjects::WORKER_IDLE),
-                format!("{p}_{}", forge2_types::subjects::WORKER_OUTCOME),
-                format!("{p}_{}", forge2_types::subjects::WORKER_UNREGISTER),
+                format!("{p}_{}", chuggernaut_types::subjects::WORKER_REGISTER.name),
+                format!("{p}_{}", chuggernaut_types::subjects::WORKER_IDLE.name),
+                format!("{p}_{}", chuggernaut_types::subjects::WORKER_OUTCOME.name),
+                format!("{p}_{}", chuggernaut_types::subjects::WORKER_UNREGISTER.name),
             ],
         ),
         None => (
-            forge2_types::streams::WORKER_EVENTS.to_string(),
+            chuggernaut_types::streams::WORKER_EVENTS.to_string(),
             vec![
-                forge2_types::subjects::WORKER_REGISTER.to_string(),
-                forge2_types::subjects::WORKER_IDLE.to_string(),
-                forge2_types::subjects::WORKER_OUTCOME.to_string(),
-                forge2_types::subjects::WORKER_UNREGISTER.to_string(),
+                chuggernaut_types::subjects::WORKER_REGISTER.name.to_string(),
+                chuggernaut_types::subjects::WORKER_IDLE.name.to_string(),
+                chuggernaut_types::subjects::WORKER_OUTCOME.name.to_string(),
+                chuggernaut_types::subjects::WORKER_UNREGISTER.name.to_string(),
             ],
         ),
     };
@@ -193,12 +203,12 @@ pub async fn initialize_with_prefix(
 
     let (mon_name, mon_subjects) = match prefix {
         Some(p) => (
-            format!("{}_{p}", forge2_types::streams::MONITOR),
-            vec![format!("{p}_forge2.monitor.>")],
+            format!("{}_{p}", chuggernaut_types::streams::MONITOR),
+            vec![format!("{p}_chuggernaut.monitor.>")],
         ),
         None => (
-            forge2_types::streams::MONITOR.to_string(),
-            vec!["forge2.monitor.>".to_string()],
+            chuggernaut_types::streams::MONITOR.to_string(),
+            vec!["chuggernaut.monitor.>".to_string()],
         ),
     };
     js.create_stream(jetstream::stream::Config {
@@ -224,5 +234,6 @@ pub async fn initialize_with_prefix(
         pending_reworks,
         abandon_blacklist,
         journal,
+        channels,
     })
 }

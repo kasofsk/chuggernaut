@@ -23,7 +23,7 @@ pub fn clone_repo(forgejo_url: &str, repo: &str, token: &str, workdir: &Path) ->
     }
 
     let clone_url = format!(
-        "{}://forge2-worker:{token}@{}/{repo}.git",
+        "{}://chuggernaut-worker:{token}@{}/{repo}.git",
         if forgejo_url.starts_with("https") {
             "https"
         } else {

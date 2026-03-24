@@ -5,10 +5,11 @@ use dashmap::DashMap;
 use petgraph::graph::{DiGraph, NodeIndex};
 use tokio::sync::RwLock;
 
-use forge2_types::{Job, WorkerInfo};
+use chuggernaut_types::{Job, WorkerInfo};
+
+use chuggernaut_nats::NatsClient;
 
 use crate::config::Config;
-use crate::nats_client::NatsClient;
 use crate::nats_init::KvStores;
 
 /// Shared dispatcher state, wrapped in Arc for use across tasks.
@@ -83,7 +84,7 @@ impl DispatcherState {
     ) -> Arc<Self> {
         Arc::new(Self {
             config,
-            nats: NatsClient::new(client, js),
+            nats: NatsClient::with_jetstream(client, js),
             kv,
             jobs: DashMap::new(),
             workers: DashMap::new(),

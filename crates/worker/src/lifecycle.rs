@@ -1,13 +1,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_nats::Client;
-use bytes::Bytes;
+use chuggernaut_nats::NatsClient;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use forge2_types::*;
+use chuggernaut_types::*;
 
 use crate::config::WorkerConfig;
 
@@ -24,20 +23,17 @@ pub trait WorkerExecutor: Send + Sync {
 
 /// Run the worker lifecycle loop.
 pub async fn run(config: WorkerConfig, executor: Arc<dyn WorkerExecutor>) -> anyhow::Result<()> {
-    let nats = async_nats::connect(&config.nats_url).await?;
+    let client = async_nats::connect(&config.nats_url).await?;
+    let nats = NatsClient::new(client);
     info!(worker_id = config.worker_id, "connected to NATS");
 
     // Register
     register(&nats, &config).await?;
 
     // Subscribe to assignment and preempt channels
-    let assign_subject = subjects::dispatch_assign(&config.worker_id);
-    let preempt_subject = subjects::dispatch_preempt(&config.worker_id);
-    let help_deliver_subject = subjects::interact_deliver(&config.worker_id);
-
-    let mut assign_sub = nats.subscribe(assign_subject).await?;
-    let mut preempt_sub = nats.subscribe(preempt_subject).await?;
-    let _help_sub = nats.subscribe(help_deliver_subject).await?;
+    let mut assign_sub = nats.subscribe_dynamic(&subjects::DISPATCH_ASSIGN, &config.worker_id).await?;
+    let mut preempt_sub = nats.subscribe_dynamic(&subjects::DISPATCH_PREEMPT, &config.worker_id).await?;
+    let _help_sub = nats.subscribe_dynamic(&subjects::INTERACT_DELIVER, &config.worker_id).await?;
 
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
@@ -110,10 +106,7 @@ pub async fn run(config: WorkerConfig, executor: Arc<dyn WorkerExecutor>) -> any
                     job_key: hb_job_key.clone(),
                 };
                 match nats_hb
-                    .publish(
-                        subjects::WORKER_HEARTBEAT,
-                        Bytes::from(serde_json::to_vec(&hb).unwrap()),
-                    )
+                    .publish_msg(&subjects::WORKER_HEARTBEAT, &hb)
                     .await
                 {
                     Ok(_) => {
@@ -164,8 +157,7 @@ pub async fn run(config: WorkerConfig, executor: Arc<dyn WorkerExecutor>) -> any
             job_key: job_key.clone(),
             outcome,
         };
-        let payload = serde_json::to_vec(&worker_outcome)?;
-        nats.publish(subjects::WORKER_OUTCOME, Bytes::from(payload))
+        nats.publish_msg(&subjects::WORKER_OUTCOME, &worker_outcome)
             .await?;
 
         info!(job_key, "outcome reported");
@@ -180,19 +172,18 @@ pub async fn run(config: WorkerConfig, executor: Arc<dyn WorkerExecutor>) -> any
     Ok(())
 }
 
-async fn register(nats: &Client, config: &WorkerConfig) -> anyhow::Result<()> {
+async fn register(nats: &NatsClient, config: &WorkerConfig) -> anyhow::Result<()> {
     let reg = WorkerRegistration {
         worker_id: config.worker_id.clone(),
         capabilities: config.capabilities.clone(),
         worker_type: config.worker_type.clone(),
         platform: config.platform.clone(),
     };
-    let payload = Bytes::from(serde_json::to_vec(&reg)?);
 
     // Request-reply with timeout
     let reply = tokio::time::timeout(
         Duration::from_secs(5),
-        nats.request(subjects::WORKER_REGISTER, payload),
+        nats.request_msg(&subjects::WORKER_REGISTER, &reg),
     )
     .await;
 
@@ -212,26 +203,24 @@ async fn register(nats: &Client, config: &WorkerConfig) -> anyhow::Result<()> {
     }
 }
 
-async fn publish_idle(nats: &Client, worker_id: &str) {
+async fn publish_idle(nats: &NatsClient, worker_id: &str) {
     let event = IdleEvent {
         worker_id: worker_id.to_string(),
     };
-    let payload = serde_json::to_vec(&event).unwrap();
     if let Err(e) = nats
-        .publish(subjects::WORKER_IDLE, Bytes::from(payload))
+        .publish_msg(&subjects::WORKER_IDLE, &event)
         .await
     {
         warn!("failed to publish idle: {e}");
     }
 }
 
-async fn unregister(nats: &Client, worker_id: &str) {
+async fn unregister(nats: &NatsClient, worker_id: &str) {
     let event = UnregisterEvent {
         worker_id: worker_id.to_string(),
     };
-    let payload = serde_json::to_vec(&event).unwrap();
     if let Err(e) = nats
-        .publish(subjects::WORKER_UNREGISTER, Bytes::from(payload))
+        .publish_msg(&subjects::WORKER_UNREGISTER, &event)
         .await
     {
         warn!("failed to publish unregister: {e}");
@@ -240,7 +229,7 @@ async fn unregister(nats: &Client, worker_id: &str) {
 }
 
 /// Re-register periodically while idle.
-async fn reregister_loop(nats: &Client, config: &WorkerConfig) {
+async fn reregister_loop(nats: &NatsClient, config: &WorkerConfig) {
     let mut interval = tokio::time::interval(Duration::from_secs(config.reregister_interval_secs));
     loop {
         interval.tick().await;
@@ -251,7 +240,7 @@ async fn reregister_loop(nats: &Client, config: &WorkerConfig) {
 }
 
 /// Publish an activity update for the current job.
-pub async fn publish_activity(nats: &Client, job_key: &str, kind: &str, message: &str) {
+pub async fn publish_activity(nats: &NatsClient, job_key: &str, kind: &str, message: &str) {
     let append = ActivityAppend {
         job_key: job_key.to_string(),
         entry: ActivityEntry {
@@ -260,9 +249,8 @@ pub async fn publish_activity(nats: &Client, job_key: &str, kind: &str, message:
             message: message.to_string(),
         },
     };
-    let payload = serde_json::to_vec(&append).unwrap();
     if let Err(e) = nats
-        .publish(subjects::ACTIVITY_APPEND, Bytes::from(payload))
+        .publish_msg(&subjects::ACTIVITY_APPEND, &append)
         .await
     {
         debug!("failed to publish activity: {e}");

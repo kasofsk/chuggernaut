@@ -1,6 +1,6 @@
 # Dispatcher
 
-The dispatcher is the single coordinator in forge2. It owns all job state transitions, dependency management, claim lifecycle, and worker assignment.
+The dispatcher is the single coordinator in chuggernaut. It owns all job state transitions, dependency management, claim lifecycle, and worker assignment.
 
 **Invariants:**
 - All KV writes use CAS (compare-and-swap) with bounded retry on conflict: up to 5 retries with exponential backoff (10ms/20ms/40ms/80ms/160ms). On exhaustion, heartbeat CAS failures are logged and dropped (benign); state transition CAS failures are logged as errors for investigation.
@@ -25,7 +25,7 @@ The dispatcher is the single coordinator in forge2. It owns all job state transi
                          ┌────▼────┐
                          │ OnDeck  │  claimable by dispatcher
                          └────┬────┘
-                              │ dispatcher assigns (CAS on forge2.claims)
+                              │ dispatcher assigns (CAS on chuggernaut.claims)
                          ┌────▼──────────┐
                          │ OnTheStack    │  exclusively held by one worker
                          └──┬────┬────┬──┘
@@ -83,7 +83,7 @@ The dispatcher is the single coordinator in forge2. It owns all job state transi
 | OnIce | OnDeck or Blocked | Admin requeue | Check deps; if all Done → OnDeck, else → Blocked |
 | Blocked | OnDeck | All deps Done | Update job KV (CAS), publish transition, try assign |
 | OnDeck | OnTheStack | Dispatcher assigns worker | CAS claim, update job + worker KV |
-| OnTheStack | NeedsHelp | Worker publishes HelpRequest | Update job KV (CAS), store reason in `forge2.activities` |
+| OnTheStack | NeedsHelp | Worker publishes HelpRequest | Update job KV (CAS), store reason in `chuggernaut.activities` |
 | NeedsHelp | OnTheStack | Human responds via CLI | Update job KV (CAS), deliver response to worker |
 | OnTheStack | InReview | Worker outcome: yield | Release claim, store pr_url, update job KV (CAS) |
 | InReview | Done | Reviewer decision: approved + merge | Update job KV (CAS), walk reverse deps |
@@ -92,8 +92,8 @@ The dispatcher is the single coordinator in forge2. It owns all job state transi
 | Escalated | Done | Reviewer detects human approval, merges | Update job KV (CAS), walk reverse deps |
 | Escalated | ChangesRequested | Reviewer detects human requests changes | Update job KV (CAS), route to worker |
 | ChangesRequested | OnTheStack | Dispatcher assigns rework | CAS claim, update job + worker KV |
-| OnTheStack | OnDeck | Worker outcome: abandon | Release claim, add (job, worker) to `forge2.abandon-blacklist` |
-| OnTheStack | Failed | Lease expiry / job timeout / worker fail | Release claim, store reason in `forge2.activities` |
+| OnTheStack | OnDeck | Worker outcome: abandon | Release claim, add (job, worker) to `chuggernaut.abandon-blacklist` |
+| OnTheStack | Failed | Lease expiry / job timeout / worker fail | Release claim, store reason in `chuggernaut.activities` |
 | Failed | OnDeck | Auto-retry (retry_count < max_retries) | Increment retry_count, set `retry_after` = now + min(30s × 2^retry_count, 10min). Monitor detects eligible jobs and publishes advisory; dispatcher transitions to OnDeck. |
 | Failed | Failed | Retry exhausted | Stay; manual requeue required |
 | Failed | OnDeck or Blocked | Admin requeue | Check deps; route accordingly |
@@ -114,7 +114,7 @@ The dispatcher is the single coordinator in forge2. It owns all job state transi
 
 ### Storage
 
-Dependencies are stored in `forge2.deps` KV with both forward and reverse indexes:
+Dependencies are stored in `chuggernaut.deps` KV with both forward and reverse indexes:
 
 ```json
 // Key: acme.payments.57
@@ -137,7 +137,7 @@ The dispatcher maintains a `petgraph::graph::DiGraph` in memory:
 - **Nodes:** job keys (indexed by a `HashMap<String, NodeIndex>`)
 - **Edges:** `depends_on` relationships (A → B means "A depends on B")
 
-**Rebuilt on startup:** scan all keys in `forge2.deps` KV, reconstruct adjacency.
+**Rebuilt on startup:** scan all keys in `chuggernaut.deps` KV, reconstruct adjacency.
 
 **Used for:**
 - Cycle detection (DFS before adding any edge)
@@ -155,10 +155,10 @@ Before adding a new dependency edge A → B:
 ### Unblock Propagation
 
 When job X transitions to Done:
-1. Read X's `depended_on_by` from `forge2.deps` (or traverse petgraph reverse edges)
+1. Read X's `depended_on_by` from `chuggernaut.deps` (or traverse petgraph reverse edges)
 2. For each dependent Y:
    a. Read Y's `depends_on` list
-   b. For each dep, read job state from `forge2.jobs` KV
+   b. For each dep, read job state from `chuggernaut.jobs` KV
    c. If ALL deps are Done → transition Y from Blocked to OnDeck
 3. Recursion is not needed: Y transitioning to OnDeck doesn't trigger further unblocking (only Done does)
 
@@ -170,21 +170,21 @@ When job X transitions to Done:
 
 ```
 Dispatcher finds idle worker matching job requirements
-  → CAS create on forge2.claims KV key for the job
+  → CAS create on chuggernaut.claims KV key for the job
     - If no entry exists: create succeeds (revision 0)
     - If tombstone: CAS overwrites
     - If active entry: fail (already claimed)
   → On success:
-    - CAS update forge2.jobs KV: state → OnTheStack, last_worker_id → worker_id
-    - CAS update forge2.workers KV: state → Busy, current_job → job_key
-    - Publish Assignment to forge2.dispatch.assign.{worker_id}
+    - CAS update chuggernaut.jobs KV: state → OnTheStack, last_worker_id → worker_id
+    - CAS update chuggernaut.workers KV: state → Busy, current_job → job_key
+    - Publish Assignment to chuggernaut.dispatch.assign.{worker_id}
     - Publish JobTransition{OnDeck → OnTheStack}
 ```
 
 ### Heartbeat
 
 Workers publish `WorkerHeartbeat` every 10 seconds. The dispatcher:
-1. Reads current claim from `forge2.claims` KV
+1. Reads current claim from `chuggernaut.claims` KV
 2. Verifies `worker_id` matches
 3. CAS update: `last_heartbeat = now`, `lease_deadline = now + lease_secs`
 4. CAS collision → treat as success (claim still valid, another heartbeat won the race)
@@ -192,7 +192,7 @@ Workers publish `WorkerHeartbeat` every 10 seconds. The dispatcher:
 ### Release
 
 On worker outcome (yield/fail/abandon):
-1. Delete claim from `forge2.claims` KV (tombstone)
+1. Delete claim from `chuggernaut.claims` KV (tombstone)
 2. Process outcome-specific logic (state transition, retry, etc.)
 3. Worker registry is NOT updated here — the worker remains marked as Busy until it publishes its next `IdleEvent`, at which point the dispatcher sets state → Idle, current_job → null
 
@@ -201,7 +201,7 @@ On worker outcome (yield/fail/abandon):
 Monitor detects `now > claim.lease_deadline`:
 1. Publishes `LeaseExpiredEvent` (advisory)
 2. Dispatcher receives, re-reads claim from KV
-3. If still expired: release claim, delete worker from `forge2.workers` KV (prune), transition job to Failed (auto-retry may then move to OnDeck if retry_count < max_retries)
+3. If still expired: release claim, delete worker from `chuggernaut.workers` KV (prune), transition job to Failed (auto-retry may then move to OnDeck if retry_count < max_retries)
 4. If renewed since: ignore (heartbeat arrived between monitor scan and dispatcher handling)
 
 The worker entry is pruned rather than set to idle — the worker is absent or misbehaving. If the process is still alive (e.g., network partition), it will re-register within 15s and get a fresh entry.
@@ -211,7 +211,7 @@ The worker entry is pruned rather than set to idle — the worker is absent or m
 Monitor detects `now - claim.claimed_at > claim.timeout_secs`:
 1. Publishes `JobTimeoutEvent` (advisory)
 2. Dispatcher receives, re-reads claim from KV
-3. Release claim, delete worker from `forge2.workers` KV (prune), transition to Failed with reason "job timeout"
+3. Release claim, delete worker from `chuggernaut.workers` KV (prune), transition to Failed with reason "job timeout"
 
 ---
 
@@ -221,12 +221,12 @@ Monitor detects `now - claim.claimed_at > claim.timeout_secs`:
 
 When a job reaches OnDeck (from creation, unblock, requeue, or auto-retry):
 
-1. Get all idle workers from `forge2.workers` KV (or in-memory registry)
+1. Get all idle workers from `chuggernaut.workers` KV (or in-memory registry)
 2. Filter by job requirements:
    - `capabilities`: worker must have all required capabilities
    - `worker_type`: if set on job, worker must match
    - `platform`: if set on job, worker must match
-3. Filter by abandon blacklist: skip workers in `forge2.abandon-blacklist` for this job (blacklist is not checked for rework routing — see Rework Routing)
+3. Filter by abandon blacklist: skip workers in `chuggernaut.abandon-blacklist` for this job (blacklist is not checked for rework routing — see Rework Routing)
 4. Sort by: longest idle time (fairness)
 5. Attempt CAS claim with first matching worker
 6. If claim fails (race): try next worker
@@ -238,7 +238,7 @@ When a high-priority job reaches OnDeck and no idle workers are available:
 
 1. Find workers busy with lower-priority jobs
 2. Select the worker with the lowest-priority current job
-3. Publish `PreemptNotice` to `forge2.dispatch.preempt.{worker_id}`
+3. Publish `PreemptNotice` to `chuggernaut.dispatch.preempt.{worker_id}`
 4. Worker cancels execution, reports `Outcome::Abandon`
 5. Dispatcher requeues abandoned job to OnDeck
 6. Dispatcher assigns the high-priority job to the now-idle worker
@@ -248,15 +248,15 @@ When a high-priority job reaches OnDeck and no idle workers are available:
 When a job transitions to ChangesRequested:
 
 1. Read `job.last_worker_id` (set when the job was assigned to OnTheStack)
-2. Check if worker exists and is idle in `forge2.workers` KV
+2. Check if worker exists and is idle in `chuggernaut.workers` KV
 3. If idle: assign immediately with `is_rework: true` + review feedback (bypasses abandon blacklist)
-4. If busy: write to `forge2.pending-reworks` KV (includes worker_id + review feedback)
+4. If busy: write to `chuggernaut.pending-reworks` KV (includes worker_id + review feedback)
 5. If worker is gone (pruned): fall back to normal assignment with `is_rework: true` to any capable idle worker
 6. When the worker next publishes `IdleEvent`:
-   - Dispatcher checks `forge2.pending-reworks` before normal assignment
+   - Dispatcher checks `chuggernaut.pending-reworks` before normal assignment
    - If pending rework found: assign with `is_rework: true` + stored feedback
 
-**On worker prune:** When the dispatcher prunes a worker (lease expiry, job timeout), it scans `forge2.pending-reworks` for entries pointing to that worker. Any found are reassigned to a capable idle worker, or the job stays in ChangesRequested until one becomes available.
+**On worker prune:** When the dispatcher prunes a worker (lease expiry, job timeout), it scans `chuggernaut.pending-reworks` for entries pointing to that worker. Any found are reassigned to a capable idle worker, or the job stays in ChangesRequested until one becomes available.
 
 ---
 
@@ -265,20 +265,20 @@ When a job transitions to ChangesRequested:
 On startup:
 
 1. **Create/verify KV buckets and streams** (idempotent)
-2. **Rebuild job index:** scan all keys in `forge2.jobs` KV, build in-memory `HashMap<String, Job>`
-3. **Rebuild petgraph:** scan all keys in `forge2.deps` KV, reconstruct DAG
+2. **Rebuild job index:** scan all keys in `chuggernaut.jobs` KV, build in-memory `HashMap<String, Job>`
+3. **Rebuild petgraph:** scan all keys in `chuggernaut.deps` KV, reconstruct DAG
 4. **Repair dep indexes:** for every forward dep A → B, verify B's `depended_on_by` contains A. If not, CAS-update B's dep entry to add A. This repairs partial writes from a crash during dep creation.
-5. **Rebuild worker registry:** scan `forge2.workers` KV (partially stale — workers re-register within 15s)
+5. **Rebuild worker registry:** scan `chuggernaut.workers` KV (partially stale — workers re-register within 15s)
 6. **Resume stream consumers:** durable consumers resume from last ack position
-7. **Reconcile claims against jobs:** scan all keys in `forge2.claims` KV. For each active claim:
+7. **Reconcile claims against jobs:** scan all keys in `chuggernaut.claims` KV. For each active claim:
    - If the job is in `on-the-stack` or `needs-help`: valid, keep
    - If the job is in any other state: stale claim from a mid-transition crash — delete it
    - If the job doesn't exist: delete the claim
 8. **Reconcile jobs against claims:** scan jobs in `on-the-stack` or `needs-help` state. For each:
    - If a matching claim exists: valid
    - If no claim exists: transition to Failed (claim was lost — mid-transition crash)
-9. **Scan pending-reworks:** for each entry, verify the target worker exists in `forge2.workers`. If not, clear the entry so the rework can be reassigned to another worker.
-10. **Monitor scan:** immediately scan `forge2.claims` for any stale claims that accumulated during downtime
+9. **Scan pending-reworks:** for each entry, verify the target worker exists in `chuggernaut.workers`. If not, clear the entry so the rework can be reassigned to another worker.
+10. **Monitor scan:** immediately scan `chuggernaut.claims` for any stale claims that accumulated during downtime
 
 Workers that were running during the restart:
 - Continue heartbeating → dispatcher sees heartbeats and recognizes the claim
@@ -327,7 +327,7 @@ GET /events
   Then: incremental updates on any KV change
 ```
 
-The SSE handler watches the backing streams of `forge2.jobs`, `forge2.workers`, `forge2.claims`, and `forge2.deps` KV buckets, plus the `FORGE2-TRANSITIONS` stream for state change events. Any mutation triggers an SSE event to all connected clients.
+The SSE handler watches the backing streams of `chuggernaut.jobs`, `chuggernaut.workers`, `chuggernaut.claims`, and `chuggernaut.deps` KV buckets, plus the `CHUGGERNAUT-TRANSITIONS` stream for state change events. Any mutation triggers an SSE event to all connected clients.
 
 **Lag recovery:** If a client falls behind, the server detects via SSE delivery failure and sends a full snapshot on the next successful delivery.
 
@@ -355,12 +355,12 @@ These HTTP endpoints publish the corresponding NATS admin messages internally. P
 
 | Env Var | Default | Notes |
 |---------|---------|-------|
-| `FORGE2_NATS_URL` | `nats://localhost:4222` | NATS connection |
-| `FORGE2_HTTP_LISTEN` | `0.0.0.0:8080` | HTTP API + SSE listen address |
-| `FORGE2_LEASE_SECS` | `60` | Default claim lease duration |
-| `FORGE2_DEFAULT_TIMEOUT_SECS` | `3600` | Default job timeout if not set on job |
-| `FORGE2_CAS_MAX_RETRIES` | `5` | CAS retry attempts before giving up |
-| `FORGE2_MONITOR_SCAN_INTERVAL_SECS` | `10` | Monitor scan tick interval |
-| `FORGE2_JOB_RETENTION_SECS` | `86400` | Time after terminal state before archival |
-| `FORGE2_ACTIVITY_LIMIT` | `50` | Max activity entries per job |
-| `FORGE2_BLACKLIST_TTL_SECS` | `3600` | Abandon blacklist duration per (job, worker) pair |
+| `CHUGGERNAUT_NATS_URL` | `nats://localhost:4222` | NATS connection |
+| `CHUGGERNAUT_HTTP_LISTEN` | `0.0.0.0:8080` | HTTP API + SSE listen address |
+| `CHUGGERNAUT_LEASE_SECS` | `60` | Default claim lease duration |
+| `CHUGGERNAUT_DEFAULT_TIMEOUT_SECS` | `3600` | Default job timeout if not set on job |
+| `CHUGGERNAUT_CAS_MAX_RETRIES` | `5` | CAS retry attempts before giving up |
+| `CHUGGERNAUT_MONITOR_SCAN_INTERVAL_SECS` | `10` | Monitor scan tick interval |
+| `CHUGGERNAUT_JOB_RETENTION_SECS` | `86400` | Time after terminal state before archival |
+| `CHUGGERNAUT_ACTIVITY_LIMIT` | `50` | Max activity entries per job |
+| `CHUGGERNAUT_BLACKLIST_TTL_SECS` | `3600` | Abandon blacklist duration per (job, worker) pair |

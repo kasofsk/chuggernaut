@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
-use bytes::Bytes;
 use chrono::Utc;
 use futures::StreamExt;
 use tokio::sync::Barrier;
 use tracing::{debug, error, info, warn};
 
-use forge2_types::*;
+use chuggernaut_types::*;
 
 use crate::error::{DispatcherError, DispatcherResult};
 use crate::jobs::{self, kv_get};
@@ -59,7 +58,7 @@ pub async fn start_handlers(state: Arc<DispatcherState>) -> DispatcherResult<()>
 async fn handle_worker_register(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
     let mut sub = state
         .nats
-        .subscribe(subjects::WORKER_REGISTER)
+        .subscribe_request(&subjects::WORKER_REGISTER)
         .await
         .map_err(|e| DispatcherError::Nats(e.to_string()))?;
     ready.wait().await;
@@ -71,8 +70,8 @@ async fn handle_worker_register(state: Arc<DispatcherState>, ready: Arc<Barrier>
                 Ok(reg) => {
                     let result = crate::workers::register_worker(&s, reg).await;
                     let reply_payload = match &result {
-                        Ok(_) => Bytes::from("{}"),
-                        Err(e) => Bytes::from(
+                        Ok(_) => bytes::Bytes::from("{}"),
+                        Err(e) => bytes::Bytes::from(
                             serde_json::to_vec(&ErrorResponse {
                                 error: e.to_string(),
                             })
@@ -95,7 +94,7 @@ async fn handle_worker_register(state: Arc<DispatcherState>, ready: Arc<Barrier>
 async fn handle_worker_idle(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
     let mut sub = state
         .nats
-        .subscribe(subjects::WORKER_IDLE)
+        .subscribe_subject(&subjects::WORKER_IDLE)
         .await
         .map_err(|e| DispatcherError::Nats(e.to_string()))?;
     ready.wait().await;
@@ -119,7 +118,7 @@ async fn handle_worker_idle(state: Arc<DispatcherState>, ready: Arc<Barrier>) ->
 async fn handle_worker_heartbeat(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
     let mut sub = state
         .nats
-        .subscribe(subjects::WORKER_HEARTBEAT)
+        .subscribe_subject(&subjects::WORKER_HEARTBEAT)
         .await
         .map_err(|e| DispatcherError::Nats(e.to_string()))?;
     ready.wait().await;
@@ -153,7 +152,7 @@ async fn handle_worker_heartbeat(state: Arc<DispatcherState>, ready: Arc<Barrier
 async fn handle_worker_outcome(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
     let mut sub = state
         .nats
-        .subscribe(subjects::WORKER_OUTCOME)
+        .subscribe_subject(&subjects::WORKER_OUTCOME)
         .await
         .map_err(|e| DispatcherError::Nats(e.to_string()))?;
     ready.wait().await;
@@ -255,7 +254,7 @@ async fn process_outcome(
 async fn handle_worker_unregister(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
     let mut sub = state
         .nats
-        .subscribe(subjects::WORKER_UNREGISTER)
+        .subscribe_subject(&subjects::WORKER_UNREGISTER)
         .await
         .map_err(|e| DispatcherError::Nats(e.to_string()))?;
     ready.wait().await;
@@ -283,7 +282,7 @@ async fn handle_worker_unregister(state: Arc<DispatcherState>, ready: Arc<Barrie
 async fn handle_admin_create_job(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
     let mut sub = state
         .nats
-        .subscribe(subjects::ADMIN_CREATE_JOB)
+        .subscribe_request(&subjects::ADMIN_CREATE_JOB)
         .await
         .map_err(|e| DispatcherError::Nats(e.to_string()))?;
     ready.wait().await;
@@ -306,7 +305,7 @@ async fn handle_admin_create_job(state: Arc<DispatcherState>, ready: Arc<Barrier
                 Err(e) => serde_json::to_vec(&ErrorResponse { error: format!("invalid payload: {e}") }).unwrap_or_default(),
             };
             if let Some(reply) = msg.reply {
-                if let Err(e) = s.nats.publish_raw(reply.to_string(), Bytes::from(reply_payload)).await {
+                if let Err(e) = s.nats.publish_raw(reply.to_string(), bytes::Bytes::from(reply_payload)).await {
                     warn!("failed to reply to create-job: {e}");
                 }
             }
@@ -318,7 +317,7 @@ async fn handle_admin_create_job(state: Arc<DispatcherState>, ready: Arc<Barrier
 async fn handle_admin_requeue(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
     let mut sub = state
         .nats
-        .subscribe(subjects::ADMIN_REQUEUE)
+        .subscribe_request(&subjects::ADMIN_REQUEUE)
         .await
         .map_err(|e| DispatcherError::Nats(e.to_string()))?;
     ready.wait().await;
@@ -334,7 +333,7 @@ async fn handle_admin_requeue(state: Arc<DispatcherState>, ready: Arc<Barrier>) 
                 Err(e) => serde_json::to_vec(&ErrorResponse { error: format!("invalid payload: {e}") }).unwrap_or_default(),
             };
             if let Some(reply) = msg.reply {
-                if let Err(e) = s.nats.publish_raw(reply.to_string(), Bytes::from(reply_payload)).await {
+                if let Err(e) = s.nats.publish_raw(reply.to_string(), bytes::Bytes::from(reply_payload)).await {
                     warn!("failed to reply to requeue: {e}");
                 }
             }
@@ -372,9 +371,7 @@ async fn process_requeue(state: &Arc<DispatcherState>, req: &RequeueRequest) -> 
     if needs_preempt {
         if let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &req.job_key).await? {
             let notice = PreemptNotice { reason: "Admin requeue".to_string(), new_job_key: String::new() };
-            let subject = subjects::dispatch_preempt(&claim.worker_id);
-            let payload = serde_json::to_vec(&notice)?;
-            let _ = state.nats.publish(&subject, Bytes::from(payload)).await;
+            let _ = state.nats.publish_to(&subjects::DISPATCH_PREEMPT, &claim.worker_id, &notice).await;
             crate::claims::release_claim(state, &req.job_key).await?;
         }
     }
@@ -390,7 +387,7 @@ async fn process_requeue(state: &Arc<DispatcherState>, req: &RequeueRequest) -> 
 async fn handle_admin_close_job(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
     let mut sub = state
         .nats
-        .subscribe(subjects::ADMIN_CLOSE_JOB)
+        .subscribe_request(&subjects::ADMIN_CLOSE_JOB)
         .await
         .map_err(|e| DispatcherError::Nats(e.to_string()))?;
     ready.wait().await;
@@ -406,7 +403,7 @@ async fn handle_admin_close_job(state: Arc<DispatcherState>, ready: Arc<Barrier>
                 Err(e) => serde_json::to_vec(&ErrorResponse { error: format!("invalid payload: {e}") }).unwrap_or_default(),
             };
             if let Some(reply) = msg.reply {
-                if let Err(e) = s.nats.publish_raw(reply.to_string(), Bytes::from(reply_payload)).await {
+                if let Err(e) = s.nats.publish_raw(reply.to_string(), bytes::Bytes::from(reply_payload)).await {
                     warn!("failed to reply to close-job: {e}");
                 }
             }
@@ -433,9 +430,7 @@ async fn process_close_job(state: &Arc<DispatcherState>, req: &CloseJobRequest) 
                 reason: format!("Admin close ({})", if req.revoke { "revoke" } else { "done" }),
                 new_job_key: String::new(),
             };
-            let subject = subjects::dispatch_preempt(&claim.worker_id);
-            let payload = serde_json::to_vec(&notice)?;
-            let _ = state.nats.publish(&subject, Bytes::from(payload)).await;
+            let _ = state.nats.publish_to(&subjects::DISPATCH_PREEMPT, &claim.worker_id, &notice).await;
             crate::claims::release_claim(state, &req.job_key).await?;
         }
     }
@@ -458,7 +453,7 @@ async fn process_close_job(state: &Arc<DispatcherState>, req: &CloseJobRequest) 
 async fn handle_review_decision(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
     let mut sub = state
         .nats
-        .subscribe(subjects::REVIEW_DECISION)
+        .subscribe_subject(&subjects::REVIEW_DECISION)
         .await
         .map_err(|e| DispatcherError::Nats(e.to_string()))?;
     ready.wait().await;
@@ -525,7 +520,7 @@ async fn process_review_decision(state: &Arc<DispatcherState>, decision: ReviewD
 async fn handle_interact_help(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
     let mut sub = state
         .nats
-        .subscribe(subjects::INTERACT_HELP)
+        .subscribe_subject(&subjects::INTERACT_HELP)
         .await
         .map_err(|e| DispatcherError::Nats(e.to_string()))?;
     ready.wait().await;
@@ -551,7 +546,7 @@ async fn handle_interact_help(state: Arc<DispatcherState>, ready: Arc<Barrier>) 
 async fn handle_interact_respond(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
     let mut sub = state
         .nats
-        .subscribe("forge2.interact.respond.>")
+        .subscribe("chuggernaut.interact.respond.>")
         .await
         .map_err(|e| DispatcherError::Nats(e.to_string()))?;
     ready.wait().await;
@@ -562,9 +557,7 @@ async fn handle_interact_respond(state: Arc<DispatcherState>, ready: Arc<Barrier
             match serde_json::from_slice::<HelpResponse>(&msg.payload) {
                 Ok(resp) => {
                     if let Ok(Some((claim, _))) = kv_get::<ClaimState>(&s.kv.claims, &resp.job_key).await {
-                        let subject = subjects::interact_deliver(&claim.worker_id);
-                        let payload = serde_json::to_vec(&resp).unwrap_or_default();
-                        if let Err(e) = s.nats.publish(&subject, Bytes::from(payload)).await {
+                        if let Err(e) = s.nats.publish_to(&subjects::INTERACT_DELIVER, &claim.worker_id, &resp).await {
                             warn!(job_key = resp.job_key, "failed to deliver help response: {e}");
                         }
                         if let Err(e) = jobs::transition_job(&s, &resp.job_key, JobState::OnTheStack, "human_responded", None).await {
@@ -588,7 +581,7 @@ async fn handle_interact_respond(state: Arc<DispatcherState>, ready: Arc<Barrier
 async fn handle_activity_append(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
     let mut sub = state
         .nats
-        .subscribe(subjects::ACTIVITY_APPEND)
+        .subscribe_subject(&subjects::ACTIVITY_APPEND)
         .await
         .map_err(|e| DispatcherError::Nats(e.to_string()))?;
     ready.wait().await;
@@ -608,7 +601,7 @@ async fn handle_activity_append(state: Arc<DispatcherState>, ready: Arc<Barrier>
 async fn handle_journal_append(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
     let mut sub = state
         .nats
-        .subscribe(subjects::JOURNAL_APPEND)
+        .subscribe_subject(&subjects::JOURNAL_APPEND)
         .await
         .map_err(|e| DispatcherError::Nats(e.to_string()))?;
     ready.wait().await;
@@ -641,7 +634,7 @@ async fn handle_journal_append(state: Arc<DispatcherState>, ready: Arc<Barrier>)
 async fn handle_monitor_events(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
     let mut sub = state
         .nats
-        .subscribe("forge2.monitor.>")
+        .subscribe("chuggernaut.monitor.>")
         .await
         .map_err(|e| DispatcherError::Nats(e.to_string()))?;
     ready.wait().await;
@@ -662,16 +655,16 @@ async fn dispatch_monitor_event(state: &Arc<DispatcherState>, subject: &str, pay
     // Strip namespace prefix from the incoming subject to compare against constants
     let base = state.nats.strip_prefix(subject);
 
-    if base == subjects::MONITOR_LEASE_EXPIRED {
+    if base == subjects::MONITOR_LEASE_EXPIRED.name {
         let event: LeaseExpiredEvent = serde_json::from_slice(payload)?;
         handle_lease_expired(state, event).await
-    } else if base == subjects::MONITOR_TIMEOUT {
+    } else if base == subjects::MONITOR_TIMEOUT.name {
         let event: JobTimeoutEvent = serde_json::from_slice(payload)?;
         handle_job_timeout(state, event).await
-    } else if base == subjects::MONITOR_ORPHAN {
+    } else if base == subjects::MONITOR_ORPHAN.name {
         let event: OrphanDetectedEvent = serde_json::from_slice(payload)?;
         handle_orphan(state, event).await
-    } else if base == subjects::MONITOR_RETRY {
+    } else if base == subjects::MONITOR_RETRY.name {
         let event: RetryEligibleEvent = serde_json::from_slice(payload)?;
         handle_retry(state, event).await
     } else {

@@ -415,6 +415,158 @@ dependencies = [
 ]
 
 [[package]]
+name = "chuggernaut-channel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "bytes",
+ "chrono",
+ "chuggernaut-types",
+ "clap",
+ "futures",
+ "serde",
+ "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "chuggernaut-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "bytes",
+ "chrono",
+ "chuggernaut-nats",
+ "chuggernaut-types",
+ "chuggernaut-worker",
+ "clap",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "chuggernaut-dispatcher"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "async-stream",
+ "axum",
+ "bytes",
+ "chrono",
+ "chuggernaut-nats",
+ "chuggernaut-types",
+ "dashmap",
+ "futures",
+ "ntest",
+ "petgraph",
+ "serde",
+ "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "chuggernaut-forgejo-api"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "chuggernaut-nats"
+version = "0.1.0"
+dependencies = [
+ "async-nats",
+ "bytes",
+ "chuggernaut-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "chuggernaut-reviewer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "axum",
+ "bytes",
+ "chrono",
+ "chuggernaut-dispatcher",
+ "chuggernaut-forgejo-api",
+ "chuggernaut-nats",
+ "chuggernaut-types",
+ "dashmap",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "chuggernaut-types"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "chuggernaut-worker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "chuggernaut-forgejo-api",
+ "chuggernaut-nats",
+ "chuggernaut-types",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -795,94 +947,6 @@ name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
-
-[[package]]
-name = "forge2-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-nats",
- "bytes",
- "chrono",
- "clap",
- "forge2-types",
- "forge2-worker",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "forge2-dispatcher"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-nats",
- "async-stream",
- "axum",
- "bytes",
- "chrono",
- "dashmap",
- "forge2-types",
- "futures",
- "ntest",
- "petgraph",
- "serde",
- "serde_json",
- "testcontainers",
- "testcontainers-modules",
- "thiserror 2.0.18",
- "tokio",
- "tokio-test",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "forge2-forgejo-api"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "forge2-types"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "schemars 1.2.1",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "forge2-worker"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-nats",
- "async-trait",
- "bytes",
- "chrono",
- "forge2-forgejo-api",
- "forge2-types",
- "futures",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
-]
 
 [[package]]
 name = "form_urlencoded"
@@ -2854,6 +2918,7 @@ dependencies = [
  "memchr",
  "parse-display",
  "pin-project-lite",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_with",

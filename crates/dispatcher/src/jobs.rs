@@ -6,7 +6,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use tracing::{debug, error, warn};
 
-use forge2_types::*;
+use chuggernaut_types::*;
 
 use crate::error::{DispatcherError, DispatcherResult};
 use crate::state::DispatcherState;
@@ -357,20 +357,11 @@ async fn publish_transition(
         worker_id: worker_id.map(String::from),
     };
 
-    let subject = subjects::transitions(job_key_str);
-    let payload = match serde_json::to_vec(&transition) {
-        Ok(p) => p,
-        Err(e) => {
-            error!("failed to serialize transition: {e}");
-            return;
-        }
-    };
-
     // Use regular publish (fire-and-forget) for transitions.
     // The stream captures them via subject matching. No need to await JS ack.
     if let Err(e) = state
         .nats
-        .publish(&subject, Bytes::from(payload))
+        .publish_to(&subjects::TRANSITIONS, job_key_str, &transition)
         .await
     {
         error!(job_key = job_key_str, "failed to publish transition: {e}");

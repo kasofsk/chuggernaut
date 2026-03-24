@@ -2,21 +2,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use bytes::Bytes;
 use clap::{Parser, Subcommand};
+use futures::StreamExt;
 use tracing::info;
 
-use forge2_types::*;
+use chuggernaut_nats::NatsClient;
+use chuggernaut_types::*;
 
 #[derive(Parser)]
-#[command(name = "forge2", about = "forge2 workflow orchestration CLI")]
+#[command(name = "chuggernaut", about = "chuggernaut workflow orchestration CLI")]
 struct Cli {
     /// NATS server URL
-    #[arg(long, env = "FORGE2_NATS_URL", default_value = "nats://localhost:4222")]
+    #[arg(long, env = "CHUGGERNAUT_NATS_URL", default_value = "nats://localhost:4222")]
     nats_url: String,
 
     /// Dispatcher HTTP API URL
-    #[arg(long, env = "FORGE2_DISPATCHER_URL", default_value = "http://localhost:8080")]
+    #[arg(long, env = "CHUGGERNAUT_DISPATCHER_URL", default_value = "http://localhost:8080")]
     dispatcher_url: String,
 
     #[command(subcommand)]
@@ -84,16 +85,21 @@ enum Commands {
         #[command(subcommand)]
         action: InteractAction,
     },
+    /// Channel communication with a running Claude session
+    Channel {
+        #[command(subcommand)]
+        action: ChannelAction,
+    },
     /// Launch a SimWorker
     Sim {
         /// Worker ID
-        #[arg(long, env = "FORGE2_WORKER_ID")]
+        #[arg(long, env = "CHUGGERNAUT_WORKER_ID")]
         worker_id: Option<String>,
         /// Forgejo URL
-        #[arg(long, env = "FORGE2_FORGEJO_URL")]
+        #[arg(long, env = "CHUGGERNAUT_FORGEJO_URL")]
         forgejo_url: String,
         /// Forgejo token
-        #[arg(long, env = "FORGE2_FORGEJO_TOKEN")]
+        #[arg(long, env = "CHUGGERNAUT_FORGEJO_TOKEN")]
         forgejo_token: String,
         /// Simulated work delay in seconds
         #[arg(long, default_value = "5")]
@@ -108,6 +114,30 @@ enum Commands {
         repo: String,
         /// Path to fixture JSON file
         fixture: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ChannelAction {
+    /// Send a message to a running Claude session
+    Send {
+        /// Job key (e.g. acme.payments.57)
+        key: String,
+        /// Message to send
+        message: String,
+        /// Sender identity
+        #[arg(long, default_value = "cli")]
+        sender: String,
+    },
+    /// Watch outgoing messages from a Claude session
+    Watch {
+        /// Job key (e.g. acme.payments.57)
+        key: String,
+    },
+    /// Read the latest status from a Claude session
+    Status {
+        /// Job key (e.g. acme.payments.57)
+        key: String,
     },
 }
 
@@ -164,11 +194,10 @@ async fn main() -> Result<()> {
                 initial_state: initial,
             };
 
-            let nats = async_nats::connect(&cli.nats_url).await?;
-            let payload = Bytes::from(serde_json::to_vec(&req)?);
+            let nats = NatsClient::new(async_nats::connect(&cli.nats_url).await?);
             let reply = tokio::time::timeout(
                 Duration::from_secs(5),
-                nats.request(subjects::ADMIN_CREATE_JOB, payload),
+                nats.request_msg(&subjects::ADMIN_CREATE_JOB, &req),
             )
             .await??;
 
@@ -231,11 +260,10 @@ async fn main() -> Result<()> {
                 job_key: key.clone(),
                 target,
             };
-            let nats = async_nats::connect(&cli.nats_url).await?;
-            let payload = Bytes::from(serde_json::to_vec(&req)?);
+            let nats = NatsClient::new(async_nats::connect(&cli.nats_url).await?);
             let reply = tokio::time::timeout(
                 Duration::from_secs(5),
-                nats.request(subjects::ADMIN_REQUEUE, payload),
+                nats.request_msg(&subjects::ADMIN_REQUEUE, &req),
             )
             .await??;
 
@@ -252,11 +280,10 @@ async fn main() -> Result<()> {
                 job_key: key.clone(),
                 revoke,
             };
-            let nats = async_nats::connect(&cli.nats_url).await?;
-            let payload = Bytes::from(serde_json::to_vec(&req)?);
+            let nats = NatsClient::new(async_nats::connect(&cli.nats_url).await?);
             let reply = tokio::time::timeout(
                 Duration::from_secs(5),
-                nats.request(subjects::ADMIN_CLOSE_JOB, payload),
+                nats.request_msg(&subjects::ADMIN_CLOSE_JOB, &req),
             )
             .await??;
 
@@ -269,16 +296,84 @@ async fn main() -> Result<()> {
             println!("{action} {key}");
         }
 
+        Commands::Channel { action } => match action {
+            ChannelAction::Send {
+                key,
+                message,
+                sender,
+            } => {
+                let msg = chuggernaut_types::ChannelMessage {
+                    sender,
+                    body: message,
+                    timestamp: chrono::Utc::now(),
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    in_reply_to: None,
+                };
+                let nats = NatsClient::new(async_nats::connect(&cli.nats_url).await?);
+                nats.publish_to(&subjects::CHANNEL_INBOX, &key, &msg).await?;
+                nats.raw().flush().await?;
+                println!("Sent to {key}");
+            }
+
+            ChannelAction::Watch { key } => {
+                let nats = NatsClient::new(async_nats::connect(&cli.nats_url).await?);
+                let mut sub = nats.subscribe_dynamic(&subjects::CHANNEL_OUTBOX, &key).await?;
+                println!("Watching channel outbox for {key} (Ctrl-C to stop)");
+                while let Some(msg) = tokio::time::timeout(
+                    Duration::from_secs(3600),
+                    sub.next(),
+                )
+                .await
+                .ok()
+                .flatten()
+                {
+                    if let Ok(channel_msg) =
+                        serde_json::from_slice::<chuggernaut_types::ChannelMessage>(&msg.payload)
+                    {
+                        println!(
+                            "[{}] {}: {}",
+                            channel_msg.timestamp.format("%H:%M:%S"),
+                            channel_msg.sender,
+                            channel_msg.body
+                        );
+                    }
+                }
+            }
+
+            ChannelAction::Status { key } => {
+                let client = async_nats::connect(&cli.nats_url).await?;
+                let js = async_nats::jetstream::new(client);
+                match js.get_key_value(chuggernaut_types::buckets::CHANNELS).await {
+                    Ok(kv) => match kv.entry(&key).await? {
+                        Some(entry) => {
+                            let status: chuggernaut_types::ChannelStatus =
+                                serde_json::from_slice(&entry.value)?;
+                            println!("Job:      {}", status.job_key);
+                            println!("Status:   {}", status.status);
+                            if let Some(p) = status.progress {
+                                println!("Progress: {:.0}%", p * 100.0);
+                            }
+                            println!("Updated:  {}", status.updated_at);
+                        }
+                        None => {
+                            println!("No status available for {key}");
+                        }
+                    },
+                    Err(_) => {
+                        println!("No status available for {key} (channels bucket not found)");
+                    }
+                }
+            }
+        },
+
         Commands::Interact { action } => match action {
             InteractAction::Respond { key, message } => {
                 let resp = HelpResponse {
                     job_key: key.clone(),
                     message,
                 };
-                let nats = async_nats::connect(&cli.nats_url).await?;
-                let subject = subjects::interact_respond(&key);
-                let payload = Bytes::from(serde_json::to_vec(&resp)?);
-                nats.publish(subject, payload).await?;
+                let nats = NatsClient::new(async_nats::connect(&cli.nats_url).await?);
+                nats.publish_to(&subjects::INTERACT_RESPOND, &key, &resp).await?;
                 println!("Response sent to {key}");
             }
         },
@@ -295,7 +390,7 @@ async fn main() -> Result<()> {
             });
             info!(worker_id = id, "starting SimWorker");
 
-            let config = forge2_worker::config::WorkerConfig::new(
+            let config = chuggernaut_worker::config::WorkerConfig::new(
                 id,
                 cli.nats_url,
                 forgejo_url,
@@ -304,15 +399,15 @@ async fn main() -> Result<()> {
                 capabilities,
             );
 
-            let executor = Arc::new(forge2_worker::sim::SimWorker::new(config.clone(), delay));
-            forge2_worker::lifecycle::run(config, executor).await?;
+            let executor = Arc::new(chuggernaut_worker::sim::SimWorker::new(config.clone(), delay));
+            chuggernaut_worker::lifecycle::run(config, executor).await?;
         }
 
         Commands::Seed { repo, fixture } => {
             let content = std::fs::read_to_string(&fixture)?;
             let fixture: SeedFixture = serde_json::from_str(&content)?;
 
-            let nats = async_nats::connect(&cli.nats_url).await?;
+            let nats = NatsClient::new(async_nats::connect(&cli.nats_url).await?);
             let mut keys: Vec<String> = Vec::new();
 
             for job_def in &fixture.jobs {
@@ -345,10 +440,9 @@ async fn main() -> Result<()> {
                     initial_state: None,
                 };
 
-                let payload = Bytes::from(serde_json::to_vec(&req)?);
                 let reply = tokio::time::timeout(
                     Duration::from_secs(5),
-                    nats.request(subjects::ADMIN_CREATE_JOB, payload),
+                    nats.request_msg(&subjects::ADMIN_CREATE_JOB, &req),
                 )
                 .await??;
 

@@ -13,8 +13,8 @@ pub enum DispatcherError {
 
     #[error("Invalid state transition: {from:?} -> {to:?}")]
     InvalidTransition {
-        from: forge2_types::JobState,
-        to: forge2_types::JobState,
+        from: chuggernaut_types::JobState,
+        to: chuggernaut_types::JobState,
     },
 
     #[error("Job not found: {0}")]

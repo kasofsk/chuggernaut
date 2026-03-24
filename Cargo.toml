@@ -6,6 +6,9 @@ members = [
     "crates/dispatcher",
     "crates/worker",
     "crates/cli",
+    "crates/reviewer",
+    "crates/channel",
+    "crates/nats",
 ]
 
 [workspace.package]
@@ -14,9 +17,10 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-forge2-types = { path = "crates/types" }
-forge2-forgejo-api = { path = "crates/forgejo-api" }
-forge2-worker = { path = "crates/worker" }
+chuggernaut-types = { path = "crates/types" }
+chuggernaut-forgejo-api = { path = "crates/forgejo-api" }
+chuggernaut-nats = { path = "crates/nats" }
+chuggernaut-worker = { path = "crates/worker" }
 
 anyhow = "1"
 async-nats = "0.46"

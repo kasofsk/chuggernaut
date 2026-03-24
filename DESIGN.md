@@ -1,4 +1,4 @@
-# forge2 — Design Document
+# chuggernaut — Design Document
 
 ## Overview
 
@@ -6,7 +6,7 @@ NATS-first workflow orchestration for AI agents. Jobs live in NATS KV. Workers c
 
 ---
 
-## Why forge2
+## Why chuggernaut
 
 The original forge system worked but had a fundamental problem: **contention between Forgejo and NATS as source of truth**. Forgejo issues were jobs, labels were state, and a CDC process polled PostgreSQL to bridge changes into NATS. This created:
 
@@ -15,7 +15,7 @@ The original forge system worked but had a fundamental problem: **contention bet
 - Complex bidirectional reconciliation between the sidecar and Forgejo
 - Forgejo API failures blocking state transitions
 
-forge2 eliminates this by treating **NATS as the single source of truth** for all workflow state. Forgejo is used only for what it's good at: git hosting and pull requests. The single-writer principle gives each actor a clear ownership boundary. No reconciliation required.
+chuggernaut eliminates this by treating **NATS as the single source of truth** for all workflow state. Forgejo is used only for what it's good at: git hosting and pull requests. The single-writer principle gives each actor a clear ownership boundary. No reconciliation required.
 
 ---
 
@@ -23,7 +23,7 @@ forge2 eliminates this by treating **NATS as the single source of truth** for al
 
 1. **NATS is the single source of truth.** All workflow state lives in NATS KV buckets backed by JetStream. No external database, no label-based state encoding.
 
-2. **Single-writer per key.** Each NATS KV key has exactly one actor that writes to it. Most buckets are owned entirely by one actor. Where multiple actors write to the same bucket (e.g., `forge2.sessions`), each writes only the key for its current job with no cross-key contention. All KV writes use CAS (compare-and-swap) for consistency.
+2. **Single-writer per key.** Each NATS KV key has exactly one actor that writes to it. Most buckets are owned entirely by one actor. Where multiple actors write to the same bucket (e.g., `chuggernaut.sessions`), each writes only the key for its current job with no cross-key contention. All KV writes use CAS (compare-and-swap) for consistency.
 
 3. **Forgejo is for git.** Forgejo hosts repositories, pull requests, code review, and CI (Forgejo Actions). It does not store workflow state. No issues are used.
 
@@ -42,7 +42,7 @@ forge2 eliminates this by treating **NATS as the single source of truth** for al
 ```
 CLI / API
     │
-    │ forge2.admin.create-job (NATS)
+    │ chuggernaut.admin.create-job (NATS)
     ▼
 ┌─────────────────────────────────────────────────────┐
 │ Dispatcher                                           │
@@ -54,18 +54,18 @@ CLI / API
 │  SSE (real-time updates)                             │
 │                                                      │
 │  Subscriptions:                                      │
-│    forge2.worker.{register,idle,heartbeat,outcome,unregister} │
-│    forge2.review.decision                            │
-│    forge2.interact.help, forge2.interact.respond.{job_key} │
-│    forge2.monitor.{lease-expired,timeout,orphan,retry} │
-│    forge2.admin.{create-job,requeue,close-job}       │
-│    forge2.activity.append, forge2.journal.append     │
+│    chuggernaut.worker.{register,idle,heartbeat,outcome,unregister} │
+│    chuggernaut.review.decision                            │
+│    chuggernaut.interact.help, chuggernaut.interact.respond.{job_key} │
+│    chuggernaut.monitor.{lease-expired,timeout,orphan,retry} │
+│    chuggernaut.admin.{create-job,requeue,close-job}       │
+│    chuggernaut.activity.append, chuggernaut.journal.append     │
 │                                                      │
 │  Publishes:                                          │
-│    forge2.transitions.{job_key}                      │
-│    forge2.dispatch.assign.{worker_id}                │
-│    forge2.dispatch.preempt.{worker_id}               │
-│    forge2.interact.deliver.{worker_id}               │
+│    chuggernaut.transitions.{job_key}                      │
+│    chuggernaut.dispatch.assign.{worker_id}                │
+│    chuggernaut.dispatch.preempt.{worker_id}               │
+│    chuggernaut.interact.deliver.{worker_id}               │
 └──────────────────┬──────────────┬────────────────────┘
                    │              │
         ┌──────────┘              └──────────┐
@@ -77,7 +77,7 @@ CLI / API
 
 ### Monitor
 
-Runs as a background tokio task inside the dispatcher. Scans `forge2.claims` KV for lease expiry, job timeouts, and orphaned claims. Publishes advisory events — never mutates state directly. The dispatcher re-verifies before acting.
+Runs as a background tokio task inside the dispatcher. Scans `chuggernaut.claims` KV for lease expiry, job timeouts, and orphaned claims. Publishes advisory events — never mutates state directly. The dispatcher re-verifies before acting.
 
 See [docs/monitor.md](docs/monitor.md) for scan behavior, orphan detection, and open design questions.
 
@@ -90,20 +90,20 @@ See [docs/monitor.md](docs/monitor.md) for scan behavior, orphan detection, and 
 The single coordination point. All state transitions flow through it. This is a deliberate SPOF — the single-writer model trades HA for simplicity. The dispatcher rebuilds all in-memory state from KV in seconds; workers and the reviewer retry automatically. If HA is needed later, the single-writer design supports active-passive with leader election.
 
 **Owns (writes to):**
-- `forge2.jobs` — full job records (states: `on-ice`, `blocked`, `on-deck`, `on-the-stack`, `needs-help`, `in-review`, `escalated`, `changes-requested`, `done`, `failed`, `revoked`)
-- `forge2.claims` — exclusive claim state (CAS)
-- `forge2.deps` — dependency edges (forward + reverse indexes)
-- `forge2.workers` — worker registry
-- `forge2.counters` — per-repo job sequence numbers
-- `forge2.activities` — job activity logs (separate from job records to avoid CAS contention)
-- `forge2.journal` — dispatcher action log
-- `forge2.pending-reworks` — deferred rework routing
-- `forge2.abandon-blacklist` — prevent assign-abandon loops
-- `FORGE2-TRANSITIONS` — job state change event stream
+- `chuggernaut.jobs` — full job records (states: `on-ice`, `blocked`, `on-deck`, `on-the-stack`, `needs-help`, `in-review`, `escalated`, `changes-requested`, `done`, `failed`, `revoked`)
+- `chuggernaut.claims` — exclusive claim state (CAS)
+- `chuggernaut.deps` — dependency edges (forward + reverse indexes)
+- `chuggernaut.workers` — worker registry
+- `chuggernaut.counters` — per-repo job sequence numbers
+- `chuggernaut.activities` — job activity logs (separate from job records to avoid CAS contention)
+- `chuggernaut.journal` — dispatcher action log
+- `chuggernaut.pending-reworks` — deferred rework routing
+- `chuggernaut.abandon-blacklist` — prevent assign-abandon loops
+- `CHUGGERNAUT-TRANSITIONS` — job state change event stream
 
 **In-memory state:**
-- petgraph DAG — rebuilt from `forge2.deps` KV on startup, maintained incrementally
-- Worker registry — rebuilt from `forge2.workers` KV + re-announcements
+- petgraph DAG — rebuilt from `chuggernaut.deps` KV on startup, maintained incrementally
+- Worker registry — rebuilt from `chuggernaut.workers` KV + re-announcements
 
 **HTTP API:** Serves the graph viewer and CLI read operations. SSE endpoint watches KV changes for real-time updates.
 
@@ -114,10 +114,10 @@ See [docs/dispatcher.md](docs/dispatcher.md) for state machine, dep management, 
 Stateless executors. Receive assignments via NATS, do work via Forgejo git/API, report outcomes via NATS.
 
 **Writes to (KV):**
-- `forge2.sessions` — interactive session metadata (own keys only)
+- `chuggernaut.sessions` — interactive session metadata (own keys only)
 
 **Publishes to:**
-- `forge2.activity.append` — progress updates (fire-and-forget)
+- `chuggernaut.activity.append` — progress updates (fire-and-forget)
 - Worker event subjects — register, idle, heartbeat, outcome, unregister
 
 **Three modes:**
@@ -134,9 +134,9 @@ See [docs/worker-protocol.md](docs/worker-protocol.md) for the full NATS protoco
 Automated PR review. Watches for InReview transitions, dispatches a review action, reads the decision, and merges/escalates/requests changes. For escalated PRs, the reviewer polls Forgejo for human decisions and handles the merge via the merge queue.
 
 **Owns (writes to):**
-- `forge2.merge-queue` — per-repo merge serialization (lock has 5-minute TTL, refreshed during long merges)
-- `forge2.rework-counts` — limit rework cycles
-- `forge2.review.decision` subject — review outcomes
+- `chuggernaut.merge-queue` — per-repo merge serialization (lock has 5-minute TTL, refreshed during long merges)
+- `chuggernaut.rework-counts` — limit rework cycles
+- `chuggernaut.review.decision` subject — review outcomes
 
 See [docs/reviewer.md](docs/reviewer.md) for the review lifecycle.
 
@@ -157,18 +157,18 @@ Reads from the dispatcher's HTTP API. SSE-driven — full snapshot on connect, i
 Command-line interface for job creation, listing, admin, and agent interaction.
 
 ```
-forge2 create --repo owner/repo --title "..." --body "..." [--deps 1,2,3] [--priority N]
-forge2 jobs [--state on-deck]
-forge2 show {job_key}
-forge2 requeue {job_key} [--target on-deck|on-ice]
-forge2 close {job_key} [--revoke]
-forge2 interact respond {job_key} "message"
-forge2 interact attach {worker_id}
-forge2 interact detach {worker_id}
-forge2 sim [--delay N]
-forge2 action [--workflow FILE --runner LABEL]
-forge2 agent [--capability CAP]
-forge2 seed {repo} {fixture.json}
+chuggernaut create --repo owner/repo --title "..." --body "..." [--deps 1,2,3] [--priority N]
+chuggernaut jobs [--state on-deck]
+chuggernaut show {job_key}
+chuggernaut requeue {job_key} [--target on-deck|on-ice]
+chuggernaut close {job_key} [--revoke]
+chuggernaut interact respond {job_key} "message"
+chuggernaut interact attach {worker_id}
+chuggernaut interact detach {worker_id}
+chuggernaut sim [--delay N]
+chuggernaut action [--workflow FILE --runner LABEL]
+chuggernaut agent [--capability CAP]
+chuggernaut seed {repo} {fixture.json}
 ```
 
 ---
@@ -191,7 +191,7 @@ forge2 seed {repo} {fixture.json}
 
 That's it. No PostgreSQL polling, no RocksDB, no external graph database.
 
-**Shared env vars:** `FORGE2_NATS_URL` (default `nats://localhost:4222`) and `FORGE2_FORGEJO_URL` (required) are used by all components. Per-component configuration is documented in each companion doc.
+**Shared env vars:** `CHUGGERNAUT_NATS_URL` (default `nats://localhost:4222`) and `CHUGGERNAUT_FORGEJO_URL` (required) are used by all components. Per-component configuration is documented in each companion doc.
 
 **Docker Compose:**
 ```yaml
@@ -210,14 +210,14 @@ Workers launched via `scripts/workers.sh`.
 ## Crate Structure
 
 ```
-forge2/
+chuggernaut/
   Cargo.toml                      # workspace
   crates/
-    types/                        # forge2-types: Job, JobState, ClaimState, messages
-    dispatcher/                   # forge2-dispatcher: coordinator binary
-    reviewer/                     # forge2-reviewer: PR review binary
-    worker/                       # forge2-worker: SDK library
-    cli/                          # forge2-cli: CLI binary
+    types/                        # chuggernaut-types: Job, JobState, ClaimState, messages
+    dispatcher/                   # chuggernaut-dispatcher: coordinator binary
+    reviewer/                     # chuggernaut-reviewer: PR review binary
+    worker/                       # chuggernaut-worker: SDK library
+    cli/                          # chuggernaut-cli: CLI binary
     forgejo-api/                  # generated Forgejo REST client
   static/                         # graph viewer SPA
   docs/                           # component specs

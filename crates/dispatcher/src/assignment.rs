@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
-use bytes::Bytes;
 use chrono::Utc;
 use tracing::{debug, info};
 
-use forge2_types::*;
+use chuggernaut_types::*;
 
 use crate::error::{DispatcherError, DispatcherResult};
 use crate::jobs::{kv_cas_update, kv_get};
@@ -201,11 +200,9 @@ pub async fn assign_job(
         is_rework,
         review_feedback: review_feedback.map(String::from),
     };
-    let subject = subjects::dispatch_assign(worker_id);
-    let payload = serde_json::to_vec(&assignment)?;
     state
         .nats
-        .publish(&subject, Bytes::from(payload))
+        .publish_to(&subjects::DISPATCH_ASSIGN, worker_id, &assignment)
         .await?;
 
     // Journal
@@ -232,7 +229,7 @@ pub async fn blacklist_worker(
     worker_id: &str,
 ) -> DispatcherResult<()> {
     let bl_key = format!("{job_key}.{worker_id}");
-    let data = Bytes::from("1");
+    let data = bytes::Bytes::from("1");
     state
         .kv
         .abandon_blacklist
@@ -286,11 +283,9 @@ async fn try_preempt(
             ),
             new_job_key: high_prio_job.key.clone(),
         };
-        let subject = subjects::dispatch_preempt(&worker_id);
-        let payload = serde_json::to_vec(&notice)?;
         state
             .nats
-            .publish(&subject, Bytes::from(payload))
+            .publish_to(&subjects::DISPATCH_PREEMPT, &worker_id, &notice)
             .await?;
         info!(
             worker_id,

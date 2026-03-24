@@ -1,6 +1,6 @@
 # NATS Schema
 
-Complete reference for all KV buckets, JetStream streams, and NATS subjects used by forge2.
+Complete reference for all KV buckets, JetStream streams, and NATS subjects used by chuggernaut.
 
 ---
 
@@ -8,7 +8,7 @@ Complete reference for all KV buckets, JetStream streams, and NATS subjects used
 
 Each KV bucket is backed by a JetStream stream. This provides both current-state reads (KV get/put) and event replay (stream consumer/watch). All buckets use file-backed storage for durability.
 
-### forge2.jobs
+### chuggernaut.jobs
 
 The canonical job store. Every job in the system has an entry here.
 
@@ -49,7 +49,7 @@ The canonical job store. Every job in the system has an entry here.
 
 **States:** `on-ice`, `blocked`, `on-deck`, `on-the-stack`, `needs-help`, `in-review`, `escalated`, `changes-requested`, `done`, `failed`, `revoked`
 
-### forge2.claims
+### chuggernaut.claims
 
 Exclusive claim state. CAS (compare-and-swap) operations ensure at most one worker holds a claim per job.
 
@@ -76,7 +76,7 @@ Exclusive claim state. CAS (compare-and-swap) operations ensure at most one work
 - **Lease** (short, default 60s): must be renewed by heartbeats. Expiry → requeue.
 - **Job timeout** (long, default 3600s): total execution time. Expiry → fail.
 
-### forge2.deps
+### chuggernaut.deps
 
 Dependency graph edges. Each entry has both forward (depends_on) and reverse (depended_on_by) indexes for O(1) lookups in either direction.
 
@@ -97,7 +97,7 @@ Dependency graph edges. Each entry has both forward (depends_on) and reverse (de
 
 The dispatcher maintains a petgraph DAG in memory, rebuilt from this bucket on startup. All cycle detection and traversal runs against the in-memory graph. The KV is the durable persistence layer.
 
-### forge2.workers
+### chuggernaut.workers
 
 Worker registry. Tracks all known workers and their current status.
 
@@ -123,7 +123,7 @@ Worker registry. Tracks all known workers and their current status.
 
 **Worker states:** `idle`, `busy`
 
-### forge2.counters
+### chuggernaut.counters
 
 Atomic sequence numbers for job key generation. One key per repo.
 
@@ -136,7 +136,7 @@ Atomic sequence numbers for job key generation. One key per repo.
 
 **Value:** Integer as string (e.g., `"57"`). Incremented via NATS KV CAS to generate the next job sequence number.
 
-### forge2.sessions
+### chuggernaut.sessions
 
 Interactive agent session metadata. Workers write their own keys.
 
@@ -158,7 +158,7 @@ Interactive agent session metadata. Workers write their own keys.
 }
 ```
 
-### forge2.activities
+### chuggernaut.activities
 
 Job activity log. Separated from the Job record to avoid CAS contention between progress updates and state transitions.
 
@@ -189,7 +189,7 @@ Job activity log. Separated from the Job record to avoid CAS contention between 
 
 **Entries:** Capped at 50 per job. The dispatcher silently drops entries beyond the limit.
 
-### forge2.pending-reworks
+### chuggernaut.pending-reworks
 
 Deferred rework assignments. When a review requests changes but the original worker is busy, the rework is queued here.
 
@@ -210,7 +210,7 @@ Deferred rework assignments. When a review requests changes but the original wor
 
 If the target worker is pruned (lease expiry, timeout), the dispatcher reassigns the rework to any capable idle worker.
 
-### forge2.abandon-blacklist
+### chuggernaut.abandon-blacklist
 
 Prevents tight assign → abandon loops on the same (job, worker) pair.
 
@@ -219,11 +219,11 @@ Prevents tight assign → abandon loops on the same (job, worker) pair.
 | **Owner** | Dispatcher |
 | **Key** | `{owner}.{repo}.{seq}.{worker_id}` |
 | **History** | 1 |
-| **TTL** | Configurable via `FORGE2_BLACKLIST_TTL_SECS` (default 3600 / 1 hour) |
+| **TTL** | Configurable via `CHUGGERNAUT_BLACKLIST_TTL_SECS` (default 3600 / 1 hour) |
 
 **Value:** `"1"`
 
-### forge2.merge-queue
+### chuggernaut.merge-queue
 
 Per-repo merge serialization. Prevents concurrent merges that could cause rebase conflicts.
 
@@ -246,7 +246,7 @@ Per-repo merge serialization. Prevents concurrent merges that could cause rebase
 ]
 ```
 
-### forge2.rework-counts
+### chuggernaut.rework-counts
 
 Tracks rework cycles per job to prevent infinite review loops.
 
@@ -259,7 +259,7 @@ Tracks rework cycles per job to prevent infinite review loops.
 
 **Value:** Integer as string (e.g., `"2"`). Escalates to human when rework count exceeds 3.
 
-### forge2.journal
+### chuggernaut.journal
 
 Dispatcher action log. Every significant action is recorded for observability.
 
@@ -285,18 +285,18 @@ Dispatcher action log. Every significant action is recorded for observability.
 
 ## JetStream Streams
 
-### FORGE2-TRANSITIONS
+### CHUGGERNAUT-TRANSITIONS
 
 Derived event stream. Published by the dispatcher whenever a job changes state.
 
 | Field | Value |
 |-------|-------|
-| **Subjects** | `forge2.transitions.>` |
+| **Subjects** | `chuggernaut.transitions.>` |
 | **Retention** | Limits (7 days, 10GB) |
 | **Storage** | File |
 | **Duplicates** | 5 minute window, message ID: `{job_key}.{from_state}.{to_state}` |
 
-**Subject pattern:** `forge2.transitions.{owner}.{repo}.{seq}`
+**Subject pattern:** `chuggernaut.transitions.{owner}.{repo}.{seq}`
 
 **Payload: `JobTransition` JSON**
 ```json
@@ -314,98 +314,98 @@ Derived event stream. Published by the dispatcher whenever a job changes state.
 - **Reviewer**: durable pull consumer, filters for `to_state == "in-review"`
 - **Dispatcher SSE**: ephemeral push consumer, relays transition events to graph viewer clients
 
-### FORGE2-WORKER-EVENTS
+### CHUGGERNAUT-WORKER-EVENTS
 
 Worker lifecycle events.
 
 | Field | Value |
 |-------|-------|
-| **Subjects** | `forge2.worker.register`, `forge2.worker.idle`, `forge2.worker.outcome`, `forge2.worker.unregister` |
+| **Subjects** | `chuggernaut.worker.register`, `chuggernaut.worker.idle`, `chuggernaut.worker.outcome`, `chuggernaut.worker.unregister` |
 | **Retention** | Limits (1 day) |
 | **Storage** | File |
 
-Heartbeats are excluded — they generate high volume and are already recorded in `forge2.claims` KV (`last_heartbeat` field).
+Heartbeats are excluded — they generate high volume and are already recorded in `chuggernaut.claims` KV (`last_heartbeat` field).
 
-### FORGE2-MONITOR
+### CHUGGERNAUT-MONITOR
 
 Advisory events from the monitor.
 
 | Field | Value |
 |-------|-------|
-| **Subjects** | `forge2.monitor.>` |
+| **Subjects** | `chuggernaut.monitor.>` |
 | **Retention** | Limits (1 day) |
 | **Storage** | File |
 
-Subjects: `forge2.monitor.lease-expired`, `forge2.monitor.timeout`, `forge2.monitor.orphan`, `forge2.monitor.retry`
+Subjects: `chuggernaut.monitor.lease-expired`, `chuggernaut.monitor.timeout`, `chuggernaut.monitor.orphan`, `chuggernaut.monitor.retry`
 
 ---
 
 ## Subject Hierarchy
 
-Complete NATS subject reference. All subjects are prefixed with `forge2.`.
+Complete NATS subject reference. All subjects are prefixed with `chuggernaut.`.
 
 ### Transitions (dispatcher publishes)
 
 | Subject | Payload | Pattern |
 |---------|---------|---------|
-| `forge2.transitions.{owner}.{repo}.{seq}` | `JobTransition` | Per-job state change events |
+| `chuggernaut.transitions.{owner}.{repo}.{seq}` | `JobTransition` | Per-job state change events |
 
 ### Worker Events (workers publish)
 
 | Subject | Payload | Notes |
 |---------|---------|-------|
-| `forge2.worker.register` | `WorkerRegistration` | Request-reply. Worker waits for ack. |
-| `forge2.worker.idle` | `IdleEvent` | Worker ready for assignment |
-| `forge2.worker.heartbeat` | `WorkerHeartbeat` | Periodic lease renewal |
-| `forge2.worker.outcome` | `WorkerOutcome` | Job result (yield/fail/abandon) |
-| `forge2.worker.unregister` | `UnregisterEvent` | Graceful shutdown |
+| `chuggernaut.worker.register` | `WorkerRegistration` | Request-reply. Worker waits for ack. |
+| `chuggernaut.worker.idle` | `IdleEvent` | Worker ready for assignment |
+| `chuggernaut.worker.heartbeat` | `WorkerHeartbeat` | Periodic lease renewal |
+| `chuggernaut.worker.outcome` | `WorkerOutcome` | Job result (yield/fail/abandon) |
+| `chuggernaut.worker.unregister` | `UnregisterEvent` | Graceful shutdown |
 
 ### Dispatch (dispatcher publishes to specific workers)
 
 | Subject | Payload | Notes |
 |---------|---------|-------|
-| `forge2.dispatch.assign.{worker_id}` | `Assignment` | Includes full Job + ClaimState |
-| `forge2.dispatch.preempt.{worker_id}` | `PreemptNotice` | Cancel current, take new job |
+| `chuggernaut.dispatch.assign.{worker_id}` | `Assignment` | Includes full Job + ClaimState |
+| `chuggernaut.dispatch.preempt.{worker_id}` | `PreemptNotice` | Cancel current, take new job |
 
 ### Interaction (bidirectional)
 
 | Subject | Publisher | Subscriber | Payload |
 |---------|-----------|------------|---------|
-| `forge2.interact.help` | Worker | Dispatcher | `HelpRequest` |
-| `forge2.interact.respond.{job_key}` | CLI/Human | Dispatcher | `HelpResponse` |
-| `forge2.interact.deliver.{worker_id}` | Dispatcher | Worker | `HelpResponse` |
-| `forge2.interact.attach.{worker_id}` | CLI | Worker | (empty) |
-| `forge2.interact.detach.{worker_id}` | CLI | Worker | (empty) |
+| `chuggernaut.interact.help` | Worker | Dispatcher | `HelpRequest` |
+| `chuggernaut.interact.respond.{job_key}` | CLI/Human | Dispatcher | `HelpResponse` |
+| `chuggernaut.interact.deliver.{worker_id}` | Dispatcher | Worker | `HelpResponse` |
+| `chuggernaut.interact.attach.{worker_id}` | CLI | Worker | (empty) |
+| `chuggernaut.interact.detach.{worker_id}` | CLI | Worker | (empty) |
 
 ### Review (reviewer → dispatcher)
 
 | Subject | Payload | Notes |
 |---------|---------|-------|
-| `forge2.review.decision` | `ReviewDecision` | Approved / ChangesRequested / Escalated |
+| `chuggernaut.review.decision` | `ReviewDecision` | Approved / ChangesRequested / Escalated |
 
 ### Activity (fire-and-forget → dispatcher)
 
 | Subject | Payload | Notes |
 |---------|---------|-------|
-| `forge2.activity.append` | `ActivityAppend` | Workers/reviewer append to job activities |
-| `forge2.journal.append` | `JournalAppend` | External processes add journal entries |
+| `chuggernaut.activity.append` | `ActivityAppend` | Workers/reviewer append to job activities |
+| `chuggernaut.journal.append` | `JournalAppend` | External processes add journal entries |
 
 ### Monitor (advisory → dispatcher)
 
 | Subject | Payload |
 |---------|---------|
-| `forge2.monitor.lease-expired` | `LeaseExpiredEvent` |
-| `forge2.monitor.timeout` | `JobTimeoutEvent` |
-| `forge2.monitor.orphan` | `OrphanDetectedEvent` |
-| `forge2.monitor.retry` | `RetryEligibleEvent` |
+| `chuggernaut.monitor.lease-expired` | `LeaseExpiredEvent` |
+| `chuggernaut.monitor.timeout` | `JobTimeoutEvent` |
+| `chuggernaut.monitor.orphan` | `OrphanDetectedEvent` |
+| `chuggernaut.monitor.retry` | `RetryEligibleEvent` |
 
 ### Admin (CLI → dispatcher)
 
 | Subject | Payload | Notes |
 |---------|---------|-------|
-| `forge2.admin.create-job` | `CreateJobRequest` | Request-reply. Returns job key. |
-| `forge2.admin.requeue` | `RequeueRequest` | Request-reply. Returns success/error. |
-| `forge2.admin.close-job` | `CloseJobRequest` | Request-reply. Done or revoke. |
+| `chuggernaut.admin.create-job` | `CreateJobRequest` | Request-reply. Returns job key. |
+| `chuggernaut.admin.requeue` | `RequeueRequest` | Request-reply. Returns success/error. |
+| `chuggernaut.admin.close-job` | `CloseJobRequest` | Request-reply. Done or revoke. |
 
 ---
 
@@ -618,7 +618,7 @@ Kind: `"claim_unknown_worker"`, `"stale_session"`, or `"claimless_on_the_stack"`
 
 ## Object Stores
 
-### forge2-session-recordings
+### chuggernaut-session-recordings
 
 Session recordings from interactive workers. Stored in a NATS JetStream object store.
 
@@ -626,7 +626,7 @@ Session recordings from interactive workers. Stored in a NATS JetStream object s
 |-------|-------|
 | **Owner** | Workers (each writes own recordings) |
 | **Key** | `sessions/{job_key}/{session_name}` |
-| **TTL** | Configurable via `FORGE2_RECORDING_TTL_SECS` (optional) |
+| **TTL** | Configurable via `CHUGGERNAUT_RECORDING_TTL_SECS` (optional) |
 
 **Value:** Raw session log (Claude Code output).
 
@@ -639,7 +639,7 @@ On startup, the dispatcher creates all owned KV buckets and streams if they don'
 ```rust
 // KV buckets
 jetstream.create_key_value(Config {
-    bucket: "forge2.jobs",
+    bucket: "chuggernaut.jobs",
     history: 1,
     storage: StorageType::File,
     ..Default::default()
@@ -647,8 +647,8 @@ jetstream.create_key_value(Config {
 
 // Streams (dispatcher creates all three)
 jetstream.create_stream(StreamConfig {
-    name: "FORGE2-TRANSITIONS",
-    subjects: vec!["forge2.transitions.>"],
+    name: "CHUGGERNAUT-TRANSITIONS",
+    subjects: vec!["chuggernaut.transitions.>"],
     retention: RetentionPolicy::Limits,
     max_age: Duration::from_secs(7 * 24 * 3600),
     storage: StorageType::File,
@@ -656,8 +656,8 @@ jetstream.create_stream(StreamConfig {
 });
 
 jetstream.create_stream(StreamConfig {
-    name: "FORGE2-WORKER-EVENTS",
-    subjects: vec!["forge2.worker.register", "forge2.worker.idle", "forge2.worker.outcome", "forge2.worker.unregister"],
+    name: "CHUGGERNAUT-WORKER-EVENTS",
+    subjects: vec!["chuggernaut.worker.register", "chuggernaut.worker.idle", "chuggernaut.worker.outcome", "chuggernaut.worker.unregister"],
     retention: RetentionPolicy::Limits,
     max_age: Duration::from_secs(24 * 3600),
     storage: StorageType::File,
@@ -665,8 +665,8 @@ jetstream.create_stream(StreamConfig {
 });
 
 jetstream.create_stream(StreamConfig {
-    name: "FORGE2-MONITOR",
-    subjects: vec!["forge2.monitor.>"],
+    name: "CHUGGERNAUT-MONITOR",
+    subjects: vec!["chuggernaut.monitor.>"],
     retention: RetentionPolicy::Limits,
     max_age: Duration::from_secs(24 * 3600),
     storage: StorageType::File,
@@ -674,4 +674,4 @@ jetstream.create_stream(StreamConfig {
 });
 ```
 
-The reviewer creates its own buckets (`forge2.merge-queue`, `forge2.rework-counts`) on startup.
+The reviewer creates its own buckets (`chuggernaut.merge-queue`, `chuggernaut.rework-counts`) on startup.

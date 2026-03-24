@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use tracing::{debug, info, warn};
 
-use forge2_types::*;
+use chuggernaut_types::*;
 
 use crate::error::{DispatcherError, DispatcherResult};
 use crate::jobs::{kv_cas_create, kv_cas_update, kv_get};

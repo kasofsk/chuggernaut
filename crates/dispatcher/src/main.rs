@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use forge2_dispatcher::{config, handlers, http, monitor, nats_init, recovery, state};
+use chuggernaut_dispatcher::{config, handlers, http, monitor, nats_init, recovery, state};
 use tracing::info;
 
 #[tokio::main]
@@ -8,12 +8,12 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,forge2_dispatcher=debug".parse().unwrap()),
+                .unwrap_or_else(|_| "info,chuggernaut_dispatcher=debug".parse().unwrap()),
         )
         .init();
 
     let config = config::Config::from_env();
-    info!(?config, "starting forge2-dispatcher");
+    info!(?config, "starting chuggernaut-dispatcher");
 
     // Connect to NATS
     let nats = async_nats::connect(&config.nats_url).await?;

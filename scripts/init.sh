@@ -4,10 +4,10 @@
 
 set -euo pipefail
 
-FORGEJO_URL="${FORGE2_FORGEJO_URL:-http://localhost:3000}"
-ADMIN_USER="forge2-admin"
-ADMIN_PASS="forge2-admin"
-ADMIN_EMAIL="admin@forge2.local"
+FORGEJO_URL="${CHUGGERNAUT_FORGEJO_URL:-http://localhost:3000}"
+ADMIN_USER="chuggernaut-admin"
+ADMIN_PASS="chuggernaut-admin"
+ADMIN_EMAIL="admin@chuggernaut.local"
 
 echo "Waiting for Forgejo to be ready..."
 until curl -sf "${FORGEJO_URL}/api/v1/version" > /dev/null 2>&1; do
@@ -24,7 +24,7 @@ docker compose exec -T forgejo forgejo admin user create \
 TOKEN=$(curl -sf -X POST "${FORGEJO_URL}/api/v1/users/${ADMIN_USER}/tokens" \
     -u "${ADMIN_USER}:${ADMIN_PASS}" \
     -H "Content-Type: application/json" \
-    -d '{"name":"forge2-token","scopes":["all"]}' | jq -r '.sha1')
+    -d '{"name":"chuggernaut-token","scopes":["all"]}' | jq -r '.sha1')
 
 if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
     echo "Token may already exist. Trying to list tokens..."
@@ -49,10 +49,10 @@ echo ""
 echo "Setup complete!"
 echo ""
 echo "Export these:"
-echo "  export FORGE2_FORGEJO_URL=${FORGEJO_URL}"
-echo "  export FORGE2_FORGEJO_TOKEN=${TOKEN}"
+echo "  export CHUGGERNAUT_FORGEJO_URL=${FORGEJO_URL}"
+echo "  export CHUGGERNAUT_FORGEJO_TOKEN=${TOKEN}"
 echo ""
 echo "Then run:"
-echo "  cargo run -p forge2-dispatcher"
-echo "  cargo run -p forge2-cli -- sim --forgejo-url ${FORGEJO_URL} --forgejo-token ${TOKEN}"
-echo "  cargo run -p forge2-cli -- create --repo test/repo --title 'Test job'"
+echo "  cargo run -p chuggernaut-dispatcher"
+echo "  cargo run -p chuggernaut-cli -- sim --forgejo-url ${FORGEJO_URL} --forgejo-token ${TOKEN}"
+echo "  cargo run -p chuggernaut-cli -- create --repo test/repo --title 'Test job'"

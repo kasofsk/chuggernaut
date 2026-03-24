@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tracing::{debug, warn};
 
-use forge2_types::*;
+use chuggernaut_types::*;
 
 use crate::error::{DispatcherError, DispatcherResult};
 use crate::jobs::{kv_cas_update, kv_get, kv_put};
@@ -198,7 +198,7 @@ pub async fn propagate_unblock(
     Ok(unblocked)
 }
 
-/// Rebuild the petgraph DAG from forge2.deps KV.
+/// Rebuild the petgraph DAG from chuggernaut.deps KV.
 pub async fn rebuild_graph(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
     use futures::StreamExt;
 

@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -410,63 +412,204 @@ pub struct ErrorResponse {
 }
 
 // ---------------------------------------------------------------------------
-// NATS subject constants
+// Channel types (MCP server ↔ CLI communication)
 // ---------------------------------------------------------------------------
 
-pub mod subjects {
-    // Worker events (workers publish)
-    pub const WORKER_REGISTER: &str = "forge2.worker.register";
-    pub const WORKER_IDLE: &str = "forge2.worker.idle";
-    pub const WORKER_HEARTBEAT: &str = "forge2.worker.heartbeat";
-    pub const WORKER_OUTCOME: &str = "forge2.worker.outcome";
-    pub const WORKER_UNREGISTER: &str = "forge2.worker.unregister";
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ChannelMessage {
+    pub sender: String,
+    pub body: String,
+    pub timestamp: DateTime<Utc>,
+    pub message_id: String,
+    pub in_reply_to: Option<String>,
+}
 
-    // Dispatch (dispatcher publishes to specific workers)
-    pub fn dispatch_assign(worker_id: &str) -> String {
-        format!("forge2.dispatch.assign.{worker_id}")
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ChannelStatus {
+    pub job_key: String,
+    pub status: String,
+    pub progress: Option<f32>,
+    pub updated_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Typed NATS subjects
+// ---------------------------------------------------------------------------
+
+/// A typed NATS subject for fire-and-forget or subscribe patterns.
+pub struct Subject<T> {
+    pub name: &'static str,
+    _t: PhantomData<T>,
+}
+
+impl<T> Subject<T> {
+    pub const fn new(name: &'static str) -> Self {
+        Self { name, _t: PhantomData }
     }
-    pub fn dispatch_preempt(worker_id: &str) -> String {
-        format!("forge2.dispatch.preempt.{worker_id}")
+}
+
+/// A typed NATS subject for request-reply patterns.
+pub struct RequestSubject<Req, Resp> {
+    pub name: &'static str,
+    _r: PhantomData<(Req, Resp)>,
+}
+
+impl<Req, Resp> RequestSubject<Req, Resp> {
+    pub const fn new(name: &'static str) -> Self {
+        Self { name, _r: PhantomData }
+    }
+}
+
+/// A typed parametric NATS subject (e.g., "chuggernaut.dispatch.assign.{worker_id}").
+pub struct SubjectFn<T> {
+    pub pattern: &'static str,
+    _t: PhantomData<T>,
+}
+
+impl<T> SubjectFn<T> {
+    pub const fn new(pattern: &'static str) -> Self {
+        Self { pattern, _t: PhantomData }
     }
 
-    // Transitions (dispatcher publishes per-job)
-    pub fn transitions(job_key: &str) -> String {
-        // job_key is already dotted: owner.repo.seq
-        format!("forge2.transitions.{job_key}")
+    pub fn format(&self, param: &str) -> String {
+        self.pattern.replacen("{}", param, 1)
     }
+}
 
-    // Interaction
-    pub const INTERACT_HELP: &str = "forge2.interact.help";
-    pub fn interact_respond(job_key: &str) -> String {
-        format!("forge2.interact.respond.{job_key}")
-    }
-    pub fn interact_deliver(worker_id: &str) -> String {
-        format!("forge2.interact.deliver.{worker_id}")
-    }
-    pub fn interact_attach(worker_id: &str) -> String {
-        format!("forge2.interact.attach.{worker_id}")
-    }
-    pub fn interact_detach(worker_id: &str) -> String {
-        format!("forge2.interact.detach.{worker_id}")
-    }
+/// Metadata for the subject registry.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubjectSchema {
+    pub subject: &'static str,
+    pub payload_type: &'static str,
+    pub direction: SubjectDirection,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SubjectDirection {
+    Publish,
+    RequestReply,
+    Dynamic,
+}
+
+/// Define all NATS subjects with their payload types in one place.
+/// Generates typed constants, format functions, and a complete registry.
+macro_rules! subject_registry {
+    (
+        $(
+            // Static publish subjects: pub CONST_NAME: Subject<PayloadType> = "subject.name";
+            pub $name:ident : Subject< $payload:ty > = $subject:literal ;
+        )*
+        ---request---
+        $(
+            // Request-reply subjects: pub CONST_NAME: RequestSubject<Req, Resp> = "subject.name";
+            pub $rr_name:ident : RequestSubject< $req:ty , $resp:ty > = $rr_subject:literal ;
+        )*
+        ---dynamic---
+        $(
+            // Dynamic subjects: pub FN_NAME: SubjectFn<PayloadType> = "pattern.with.{}";
+            pub $fn_name:ident : SubjectFn< $fn_payload:ty > = $pattern:literal ;
+        )*
+    ) => {
+        pub mod subjects {
+            use super::*;
+
+            // Static publish subjects
+            $(
+                pub static $name: Subject<$payload> = Subject::new($subject);
+            )*
+
+            // Request-reply subjects
+            $(
+                pub static $rr_name: RequestSubject<$req, $resp> = RequestSubject::new($rr_subject);
+            )*
+
+            // Dynamic subjects
+            $(
+                pub static $fn_name: SubjectFn<$fn_payload> = SubjectFn::new($pattern);
+            )*
+
+            /// Complete registry of all NATS subjects and their payload types.
+            pub fn registry() -> Vec<SubjectSchema> {
+                vec![
+                    $(
+                        SubjectSchema {
+                            subject: $subject,
+                            payload_type: std::any::type_name::<$payload>(),
+                            direction: SubjectDirection::Publish,
+                        },
+                    )*
+                    $(
+                        SubjectSchema {
+                            subject: $rr_subject,
+                            payload_type: std::any::type_name::<$req>(),
+                            direction: SubjectDirection::RequestReply,
+                        },
+                    )*
+                    $(
+                        SubjectSchema {
+                            subject: $pattern,
+                            payload_type: std::any::type_name::<$fn_payload>(),
+                            direction: SubjectDirection::Dynamic,
+                        },
+                    )*
+                ]
+            }
+        }
+    };
+}
+
+subject_registry! {
+    // Worker events (workers publish, dispatcher subscribes)
+    pub WORKER_IDLE: Subject<IdleEvent> = "chuggernaut.worker.idle";
+    pub WORKER_HEARTBEAT: Subject<WorkerHeartbeat> = "chuggernaut.worker.heartbeat";
+    pub WORKER_OUTCOME: Subject<WorkerOutcome> = "chuggernaut.worker.outcome";
+    pub WORKER_UNREGISTER: Subject<UnregisterEvent> = "chuggernaut.worker.unregister";
 
     // Review
-    pub const REVIEW_DECISION: &str = "forge2.review.decision";
+    pub REVIEW_DECISION: Subject<ReviewDecision> = "chuggernaut.review.decision";
 
     // Activity / journal (fire-and-forget)
-    pub const ACTIVITY_APPEND: &str = "forge2.activity.append";
-    pub const JOURNAL_APPEND: &str = "forge2.journal.append";
+    pub ACTIVITY_APPEND: Subject<ActivityAppend> = "chuggernaut.activity.append";
+    pub JOURNAL_APPEND: Subject<JournalAppend> = "chuggernaut.journal.append";
 
-    // Monitor advisories
-    pub const MONITOR_LEASE_EXPIRED: &str = "forge2.monitor.lease-expired";
-    pub const MONITOR_TIMEOUT: &str = "forge2.monitor.timeout";
-    pub const MONITOR_ORPHAN: &str = "forge2.monitor.orphan";
-    pub const MONITOR_RETRY: &str = "forge2.monitor.retry";
+    // Monitor advisories (dispatcher internal)
+    pub MONITOR_LEASE_EXPIRED: Subject<LeaseExpiredEvent> = "chuggernaut.monitor.lease-expired";
+    pub MONITOR_TIMEOUT: Subject<JobTimeoutEvent> = "chuggernaut.monitor.timeout";
+    pub MONITOR_ORPHAN: Subject<OrphanDetectedEvent> = "chuggernaut.monitor.orphan";
+    pub MONITOR_RETRY: Subject<RetryEligibleEvent> = "chuggernaut.monitor.retry";
 
-    // Admin (CLI → dispatcher, request-reply)
-    pub const ADMIN_CREATE_JOB: &str = "forge2.admin.create-job";
-    pub const ADMIN_REQUEUE: &str = "forge2.admin.requeue";
-    pub const ADMIN_CLOSE_JOB: &str = "forge2.admin.close-job";
+    // Interaction
+    pub INTERACT_HELP: Subject<HelpRequest> = "chuggernaut.interact.help";
+
+    ---request---
+
+    // Worker registration (request-reply)
+    pub WORKER_REGISTER: RequestSubject<WorkerRegistration, WorkerInfo> = "chuggernaut.worker.register";
+
+    // Admin commands (CLI → dispatcher, request-reply)
+    pub ADMIN_CREATE_JOB: RequestSubject<CreateJobRequest, CreateJobResponse> = "chuggernaut.admin.create-job";
+    pub ADMIN_REQUEUE: RequestSubject<RequeueRequest, ()> = "chuggernaut.admin.requeue";
+    pub ADMIN_CLOSE_JOB: RequestSubject<CloseJobRequest, ()> = "chuggernaut.admin.close-job";
+
+    ---dynamic---
+
+    // Dispatch (dispatcher → specific workers)
+    pub DISPATCH_ASSIGN: SubjectFn<Assignment> = "chuggernaut.dispatch.assign.{}";
+    pub DISPATCH_PREEMPT: SubjectFn<PreemptNotice> = "chuggernaut.dispatch.preempt.{}";
+
+    // Transitions (dispatcher publishes per-job, reviewer consumes via JetStream)
+    pub TRANSITIONS: SubjectFn<JobTransition> = "chuggernaut.transitions.{}";
+
+    // Interaction (dynamic)
+    pub INTERACT_RESPOND: SubjectFn<HelpResponse> = "chuggernaut.interact.respond.{}";
+    pub INTERACT_DELIVER: SubjectFn<HelpResponse> = "chuggernaut.interact.deliver.{}";
+    pub INTERACT_ATTACH: SubjectFn<()> = "chuggernaut.interact.attach.{}";
+    pub INTERACT_DETACH: SubjectFn<()> = "chuggernaut.interact.detach.{}";
+
+    // Channel (bidirectional CLI ↔ Claude session)
+    pub CHANNEL_INBOX: SubjectFn<ChannelMessage> = "chuggernaut.channel.{}.inbox";
+    pub CHANNEL_OUTBOX: SubjectFn<ChannelMessage> = "chuggernaut.channel.{}.outbox";
 }
 
 // ---------------------------------------------------------------------------
@@ -475,18 +618,19 @@ pub mod subjects {
 
 pub mod buckets {
     // NATS KV bucket names must be alphanumeric + underscores (no dots or hyphens)
-    pub const JOBS: &str = "forge2_jobs";
-    pub const CLAIMS: &str = "forge2_claims";
-    pub const DEPS: &str = "forge2_deps";
-    pub const WORKERS: &str = "forge2_workers";
-    pub const COUNTERS: &str = "forge2_counters";
-    pub const SESSIONS: &str = "forge2_sessions";
-    pub const ACTIVITIES: &str = "forge2_activities";
-    pub const PENDING_REWORKS: &str = "forge2_pending_reworks";
-    pub const ABANDON_BLACKLIST: &str = "forge2_abandon_blacklist";
-    pub const MERGE_QUEUE: &str = "forge2_merge_queue";
-    pub const REWORK_COUNTS: &str = "forge2_rework_counts";
-    pub const JOURNAL: &str = "forge2_journal";
+    pub const JOBS: &str = "chuggernaut_jobs";
+    pub const CLAIMS: &str = "chuggernaut_claims";
+    pub const DEPS: &str = "chuggernaut_deps";
+    pub const WORKERS: &str = "chuggernaut_workers";
+    pub const COUNTERS: &str = "chuggernaut_counters";
+    pub const SESSIONS: &str = "chuggernaut_sessions";
+    pub const ACTIVITIES: &str = "chuggernaut_activities";
+    pub const PENDING_REWORKS: &str = "chuggernaut_pending_reworks";
+    pub const ABANDON_BLACKLIST: &str = "chuggernaut_abandon_blacklist";
+    pub const MERGE_QUEUE: &str = "chuggernaut_merge_queue";
+    pub const REWORK_COUNTS: &str = "chuggernaut_rework_counts";
+    pub const JOURNAL: &str = "chuggernaut_journal";
+    pub const CHANNELS: &str = "chuggernaut_channels";
 }
 
 // ---------------------------------------------------------------------------
@@ -494,9 +638,9 @@ pub mod buckets {
 // ---------------------------------------------------------------------------
 
 pub mod streams {
-    pub const TRANSITIONS: &str = "FORGE2-TRANSITIONS";
-    pub const WORKER_EVENTS: &str = "FORGE2-WORKER-EVENTS";
-    pub const MONITOR: &str = "FORGE2-MONITOR";
+    pub const TRANSITIONS: &str = "CHUGGERNAUT-TRANSITIONS";
+    pub const WORKER_EVENTS: &str = "CHUGGERNAUT-WORKER-EVENTS";
+    pub const MONITOR: &str = "CHUGGERNAUT-MONITOR";
 }
 
 // ---------------------------------------------------------------------------
@@ -573,6 +717,10 @@ pub fn generate_schema() -> schemars::Schema {
     generator.subschema_for::<WorkerHeartbeat>();
     generator.subschema_for::<IdleEvent>();
     generator.subschema_for::<UnregisterEvent>();
+
+    // Channel
+    generator.subschema_for::<ChannelMessage>();
+    generator.subschema_for::<ChannelStatus>();
 
     // HTTP API responses
     generator.subschema_for::<JobListResponse>();

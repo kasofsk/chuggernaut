@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use forge2_types::*;
+use chuggernaut_types::*;
 
 use crate::config::WorkerConfig;
 use crate::git;
@@ -19,7 +19,7 @@ pub struct SimWorker {
 
 impl SimWorker {
     pub fn new(config: WorkerConfig, delay_secs: u64) -> Self {
-        let workdir = std::env::temp_dir().join(format!("forge2-sim-{}", config.worker_id));
+        let workdir = std::env::temp_dir().join(format!("chuggernaut-sim-{}", config.worker_id));
         std::fs::create_dir_all(&workdir).ok();
         Self {
             config,
@@ -106,7 +106,7 @@ impl WorkerExecutor for SimWorker {
         }
 
         // Check for existing PR or create one
-        let forgejo = forge2_forgejo_api::ForgejoClient::new(
+        let forgejo = chuggernaut_forgejo_api::ForgejoClient::new(
             &self.config.forgejo_url,
             &self.config.forgejo_token,
         );
@@ -127,7 +127,7 @@ impl WorkerExecutor for SimWorker {
                     .create_pull_request(
                         owner,
                         repo,
-                        &forge2_forgejo_api::CreatePullRequestOption {
+                        &chuggernaut_forgejo_api::CreatePullRequestOption {
                             title: pr_title,
                             body: Some(pr_body),
                             head: branch.clone(),

@@ -91,7 +91,7 @@ Full Docker Compose stack: NATS, Forgejo, dispatcher, reviewer, runner, SimWorke
 ### Setup
 
 - Docker Compose brings up all services.
-- `forge2 seed` loads test fixture DAGs into the system.
+- `chuggernaut seed` loads test fixture DAGs into the system.
 - SimWorkers register with configurable delays.
 
 ### Scenarios
@@ -106,7 +106,7 @@ Full Docker Compose stack: NATS, Forgejo, dispatcher, reviewer, runner, SimWorke
 
 ### Assertions
 
-- Job states verified via `forge2 show {key}` or dispatcher HTTP API.
+- Job states verified via `chuggernaut show {key}` or dispatcher HTTP API.
 - PR existence and merge status verified via Forgejo API.
 - Dependency resolution verified by observing downstream jobs unblock.
 - Timing assertions use generous margins (not flaky wall-clock checks).
@@ -119,7 +119,7 @@ Full Docker Compose stack: NATS, Forgejo, dispatcher, reviewer, runner, SimWorke
 
 Integration tests use one of:
 - **testcontainers:** ephemeral NATS server per test suite, torn down after.
-- **Subject prefix:** shared NATS server with a unique prefix per test (e.g., `test_{uuid}.forge2.*`), allowing parallel test execution.
+- **Subject prefix:** shared NATS server with a unique prefix per test (e.g., `test_{uuid}.chuggernaut.*`), allowing parallel test execution.
 
 ### Forgejo Stub
 
@@ -133,7 +133,7 @@ The stub is configurable per test: inject specific review decisions, merge failu
 
 ### Fixtures
 
-`forge2 seed` accepts JSON fixture files describing job DAGs:
+`chuggernaut seed` accepts JSON fixture files describing job DAGs:
 
 ```json
 {

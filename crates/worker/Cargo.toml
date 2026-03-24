@@ -1,11 +1,12 @@
 [package]
-name = "forge2-worker"
+name = "chuggernaut-worker"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-forge2-types = { workspace = true }
-forge2-forgejo-api = { workspace = true }
+chuggernaut-types = { workspace = true }
+chuggernaut-forgejo-api = { workspace = true }
+chuggernaut-nats = { workspace = true }
 async-nats = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }

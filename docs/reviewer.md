@@ -9,7 +9,7 @@ The reviewer is a standalone **singleton** process that automates PR review, mer
 ## Overview
 
 ```
-FORGE2-TRANSITIONS stream
+CHUGGERNAUT-TRANSITIONS stream
   │ filter: to_state == InReview
   ▼
 ┌─────────────────────────────────────────┐
@@ -35,10 +35,10 @@ FORGE2-TRANSITIONS stream
 
 ### 1. Trigger
 
-The reviewer subscribes to `FORGE2-TRANSITIONS` with a durable pull consumer that filters for `to_state == "in-review"`. On each transition:
+The reviewer subscribes to `CHUGGERNAUT-TRANSITIONS` with a durable pull consumer that filters for `to_state == "in-review"`. On each transition:
 
 1. Deduplicate: check an in-memory `DashSet<String>` (job_key) to prevent concurrent handling of the same job. The entry is removed after `ReviewDecision` is published, allowing the same job to be reviewed again in future rounds.
-2. Delay: wait `FORGE2_REVIEWER_DELAY_SECS` (default 3) to avoid race with PR creation
+2. Delay: wait `CHUGGERNAUT_REVIEWER_DELAY_SECS` (default 3) to avoid race with PR creation
 3. Fetch job from dispatcher API: `GET /jobs/{key}`
 4. Read `pr_url` from job metadata
 
@@ -60,8 +60,8 @@ If not `review: human`:
 1. Find the PR's head branch from `pr_url`
 2. Dispatch the `review-work.yml` Forgejo Actions workflow on that branch
 3. Pass inputs: `pr_url`, `review_level`, `job_key`
-4. Poll the action run status every `FORGE2_REVIEWER_POLL_SECS` (default 10)
-5. Timeout after `FORGE2_REVIEWER_ACTION_TIMEOUT_SECS` (default 600)
+4. Poll the action run status every `CHUGGERNAUT_REVIEWER_POLL_SECS` (default 10)
+5. Timeout after `CHUGGERNAUT_REVIEWER_ACTION_TIMEOUT_SECS` (default 600)
 6. If the action times out or errors: escalate to human (do not retry the action)
 
 The review action (a Forgejo Actions workflow) runs Claude to evaluate the PR and submits a PR review with state APPROVED, REQUEST_CHANGES, or COMMENT.
@@ -81,7 +81,7 @@ After the action completes:
 
 #### Approved → Merge
 
-1. Acquire per-repo merge lock from `forge2.merge-queue` KV (CAS)
+1. Acquire per-repo merge lock from `chuggernaut.merge-queue` KV (CAS)
 2. If lock held by another: queue this PR in `{owner}.{repo}.queue`
 3. If lock acquired:
    a. Merge PR via Forgejo API (rebase strategy)
@@ -92,7 +92,7 @@ After the action completes:
 
 #### Changes Requested → Report Back
 
-1. Increment `forge2.rework-counts` KV for this job
+1. Increment `chuggernaut.rework-counts` KV for this job
 2. If rework_count > 3: escalate to human instead
 3. Otherwise: publish `ReviewDecision{ChangesRequested, feedback: "..."}`
 
@@ -106,7 +106,7 @@ The dispatcher receives the review decision and:
 2. Publish `ReviewDecision{Escalated, reviewer_login: "..."}`
 3. Dispatcher transitions job to Escalated
 
-The reviewer then polls the Forgejo PR API every `FORGE2_REVIEWER_ESCALATION_POLL_SECS` (default 30) to detect the human's action:
+The reviewer then polls the Forgejo PR API every `CHUGGERNAUT_REVIEWER_ESCALATION_POLL_SECS` (default 30) to detect the human's action:
 
 - **Human approves:** Reviewer detects the approval via PR review state, merges the PR through the merge queue, and publishes `ReviewDecision{Approved}`. Dispatcher transitions to Done.
 - **Human requests changes:** Reviewer detects `REQUEST_CHANGES` review state and publishes `ReviewDecision{ChangesRequested, feedback}`. Dispatcher transitions to ChangesRequested and routes rework to the original worker.
@@ -122,7 +122,7 @@ Prevents concurrent merges in the same repo that could cause rebase conflicts.
 ### Lock Protocol
 
 ```
-Key: forge2.merge-queue / {owner}.{repo}.lock
+Key: chuggernaut.merge-queue / {owner}.{repo}.lock
 Value: { "holder": "job_key", "acquired_at": "..." }
 TTL: 5 minutes (refreshed during long merges)
 
@@ -137,7 +137,7 @@ The 5-minute TTL acts as a safety net: if the reviewer crashes while holding a l
 ### Queue
 
 ```
-Key: forge2.merge-queue / {owner}.{repo}.queue
+Key: chuggernaut.merge-queue / {owner}.{repo}.queue
 Value: [
   { "job_key": "acme.payments.57", "pr_url": "...", "queued_at": "..." },
   { "job_key": "acme.payments.58", "pr_url": "...", "queued_at": "..." }
@@ -173,7 +173,7 @@ The reviewer is the primary mechanism for transitioning jobs to Done:
 
 **No CDC needed.** The reviewer already knows it merged the PR — it reports success directly. No need to poll PostgreSQL or watch for issue closure.
 
-**Merge invariant:** All merges go through the reviewer and merge queue. Humans review and approve PRs in Forgejo but do not merge directly. Forgejo branch protection should be configured to prevent direct merges (require review approval, restrict merge to the `forge2-reviewer` account).
+**Merge invariant:** All merges go through the reviewer and merge queue. Humans review and approve PRs in Forgejo but do not merge directly. Forgejo branch protection should be configured to prevent direct merges (require review approval, restrict merge to the `chuggernaut-reviewer` account).
 
 ---
 
@@ -182,10 +182,10 @@ The reviewer is the primary mechanism for transitioning jobs to Done:
 The reviewer records its actions via fire-and-forget NATS messages:
 
 ```
-forge2.activity.append → { job_key, entry: { kind: "review_started", ... } }
-forge2.activity.append → { job_key, entry: { kind: "review_action_dispatched", ... } }
-forge2.activity.append → { job_key, entry: { kind: "review_approved", ... } }
-forge2.journal.append  → { action: "merged", job_key, pr_url, ... }
+chuggernaut.activity.append → { job_key, entry: { kind: "review_started", ... } }
+chuggernaut.activity.append → { job_key, entry: { kind: "review_action_dispatched", ... } }
+chuggernaut.activity.append → { job_key, entry: { kind: "review_approved", ... } }
+chuggernaut.journal.append  → { action: "merged", job_key, pr_url, ... }
 ```
 
 ---
@@ -194,7 +194,7 @@ forge2.journal.append  → { action: "merged", job_key, pr_url, ... }
 
 On startup, the reviewer:
 
-1. **Clear stale merge locks:** scan `forge2.merge-queue` for lock keys, delete any that exist (the reviewer is restarting, so any lock it held is stale)
+1. **Clear stale merge locks:** scan `chuggernaut.merge-queue` for lock keys, delete any that exist (the reviewer is restarting, so any lock it held is stale)
 2. **Resume InReview jobs:** query dispatcher API for all jobs in InReview state (`GET /jobs?state=in-review`), trigger the review flow for any not already in the dedup set
 3. **Resume Escalated jobs:** query dispatcher API for all jobs in Escalated state (`GET /jobs?state=escalated`), resume polling Forgejo for human decisions
 
@@ -218,26 +218,26 @@ All Forgejo API calls (merge, review submission, adding reviewers, fetching PR s
 
 | Env Var | Default | Notes |
 |---------|---------|-------|
-| `FORGE2_NATS_URL` | `nats://localhost:4222` | NATS connection |
-| `FORGE2_FORGEJO_URL` | (required) | Forgejo base URL |
-| `FORGE2_REVIEWER_FORGEJO_TOKEN` | (required) | Reviewer identity token |
-| `FORGE2_REVIEWER_HUMAN_LOGIN` | `you` | Human reviewer for escalation |
-| `FORGE2_REVIEWER_DELAY_SECS` | `3` | Delay before reviewing |
-| `FORGE2_REVIEWER_WORKFLOW` | `review-work.yml` | Review action workflow file |
-| `FORGE2_REVIEWER_RUNNER` | `ubuntu-latest` | Runner label for review action |
-| `FORGE2_REVIEWER_ACTION_TIMEOUT_SECS` | `600` | Review action timeout |
-| `FORGE2_REVIEWER_POLL_SECS` | `10` | Poll interval for action status |
-| `FORGE2_REVIEWER_ESCALATION_POLL_SECS` | `30` | Poll interval for human decisions on escalated PRs |
-| `FORGE2_DISPATCHER_URL` | `http://localhost:8080` | Dispatcher HTTP API |
+| `CHUGGERNAUT_NATS_URL` | `nats://localhost:4222` | NATS connection |
+| `CHUGGERNAUT_FORGEJO_URL` | (required) | Forgejo base URL |
+| `CHUGGERNAUT_REVIEWER_FORGEJO_TOKEN` | (required) | Reviewer identity token |
+| `CHUGGERNAUT_REVIEWER_HUMAN_LOGIN` | `you` | Human reviewer for escalation |
+| `CHUGGERNAUT_REVIEWER_DELAY_SECS` | `3` | Delay before reviewing |
+| `CHUGGERNAUT_REVIEWER_WORKFLOW` | `review-work.yml` | Review action workflow file |
+| `CHUGGERNAUT_REVIEWER_RUNNER` | `ubuntu-latest` | Runner label for review action |
+| `CHUGGERNAUT_REVIEWER_ACTION_TIMEOUT_SECS` | `600` | Review action timeout |
+| `CHUGGERNAUT_REVIEWER_POLL_SECS` | `10` | Poll interval for action status |
+| `CHUGGERNAUT_REVIEWER_ESCALATION_POLL_SECS` | `30` | Poll interval for human decisions on escalated PRs |
+| `CHUGGERNAUT_DISPATCHER_URL` | `http://localhost:8080` | Dispatcher HTTP API |
 
 ---
 
 ## Forgejo Identity
 
-The reviewer uses a dedicated Forgejo account (`forge2-reviewer`) for all review operations:
+The reviewer uses a dedicated Forgejo account (`chuggernaut-reviewer`) for all review operations:
 - Submitting PR reviews (both directly and via the review action — the action receives the reviewer's token)
 - Merging PRs
 - Adding human reviewers
 - Posting escalation comments
 
-This provides a clear audit trail: all automated review activity is attributable to `forge2-reviewer`.
+This provides a clear audit trail: all automated review activity is attributable to `chuggernaut-reviewer`.

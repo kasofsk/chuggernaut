@@ -1,5 +1,5 @@
 [package]
-name = "forge2-types"
+name = "chuggernaut-types"
 version.workspace = true
 edition.workspace = true
 

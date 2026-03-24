@@ -1,0 +1,11 @@
+[package]
+name = "chuggernaut-nats"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chuggernaut-types = { workspace = true }
+async-nats = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

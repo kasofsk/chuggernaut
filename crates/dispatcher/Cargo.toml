@@ -1,10 +1,11 @@
 [package]
-name = "forge2-dispatcher"
+name = "chuggernaut-dispatcher"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-forge2-types = { workspace = true }
+chuggernaut-types = { workspace = true }
+chuggernaut-nats = { workspace = true }
 anyhow = { workspace = true }
 async-nats = { workspace = true }
 async-stream = { workspace = true }

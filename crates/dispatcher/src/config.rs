@@ -16,17 +16,17 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         Self {
-            nats_url: env::var("FORGE2_NATS_URL")
+            nats_url: env::var("CHUGGERNAUT_NATS_URL")
                 .unwrap_or_else(|_| "nats://localhost:4222".to_string()),
-            http_listen: env::var("FORGE2_HTTP_LISTEN")
+            http_listen: env::var("CHUGGERNAUT_HTTP_LISTEN")
                 .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
-            lease_secs: parse_env("FORGE2_LEASE_SECS", 60),
-            default_timeout_secs: parse_env("FORGE2_DEFAULT_TIMEOUT_SECS", 3600),
-            cas_max_retries: parse_env("FORGE2_CAS_MAX_RETRIES", 5),
-            monitor_scan_interval_secs: parse_env("FORGE2_MONITOR_SCAN_INTERVAL_SECS", 10),
-            job_retention_secs: parse_env("FORGE2_JOB_RETENTION_SECS", 86400),
-            activity_limit: parse_env("FORGE2_ACTIVITY_LIMIT", 50),
-            blacklist_ttl_secs: parse_env("FORGE2_BLACKLIST_TTL_SECS", 3600),
+            lease_secs: parse_env("CHUGGERNAUT_LEASE_SECS", 60),
+            default_timeout_secs: parse_env("CHUGGERNAUT_DEFAULT_TIMEOUT_SECS", 3600),
+            cas_max_retries: parse_env("CHUGGERNAUT_CAS_MAX_RETRIES", 5),
+            monitor_scan_interval_secs: parse_env("CHUGGERNAUT_MONITOR_SCAN_INTERVAL_SECS", 10),
+            job_retention_secs: parse_env("CHUGGERNAUT_JOB_RETENTION_SECS", 86400),
+            activity_limit: parse_env("CHUGGERNAUT_ACTIVITY_LIMIT", 50),
+            blacklist_ttl_secs: parse_env("CHUGGERNAUT_BLACKLIST_TTL_SECS", 3600),
         }
     }
 }

@@ -16,21 +16,21 @@ pub struct WorkerConfig {
 impl WorkerConfig {
     pub fn from_env() -> Self {
         Self {
-            worker_id: env::var("FORGE2_WORKER_ID").expect("FORGE2_WORKER_ID is required"),
-            nats_url: env::var("FORGE2_NATS_URL")
+            worker_id: env::var("CHUGGERNAUT_WORKER_ID").expect("CHUGGERNAUT_WORKER_ID is required"),
+            nats_url: env::var("CHUGGERNAUT_NATS_URL")
                 .unwrap_or_else(|_| "nats://localhost:4222".to_string()),
-            forgejo_url: env::var("FORGE2_FORGEJO_URL").expect("FORGE2_FORGEJO_URL is required"),
-            forgejo_token: env::var("FORGE2_FORGEJO_TOKEN")
-                .expect("FORGE2_FORGEJO_TOKEN is required"),
-            heartbeat_interval_secs: parse_env("FORGE2_HEARTBEAT_INTERVAL_SECS", 10),
-            reregister_interval_secs: parse_env("FORGE2_REREGISTER_INTERVAL_SECS", 15),
-            capabilities: env::var("FORGE2_CAPABILITIES")
+            forgejo_url: env::var("CHUGGERNAUT_FORGEJO_URL").expect("CHUGGERNAUT_FORGEJO_URL is required"),
+            forgejo_token: env::var("CHUGGERNAUT_FORGEJO_TOKEN")
+                .expect("CHUGGERNAUT_FORGEJO_TOKEN is required"),
+            heartbeat_interval_secs: parse_env("CHUGGERNAUT_HEARTBEAT_INTERVAL_SECS", 10),
+            reregister_interval_secs: parse_env("CHUGGERNAUT_REREGISTER_INTERVAL_SECS", 15),
+            capabilities: env::var("CHUGGERNAUT_CAPABILITIES")
                 .unwrap_or_default()
                 .split(',')
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .collect(),
-            worker_type: env::var("FORGE2_WORKER_TYPE").unwrap_or_else(|_| "sim".to_string()),
+            worker_type: env::var("CHUGGERNAUT_WORKER_TYPE").unwrap_or_else(|_| "sim".to_string()),
             platform: vec![std::env::consts::OS.to_string()],
         }
     }

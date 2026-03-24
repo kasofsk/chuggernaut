@@ -1,15 +1,16 @@
 [package]
-name = "forge2-cli"
+name = "chuggernaut-cli"
 version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "forge2"
+name = "chuggernaut"
 path = "src/main.rs"
 
 [dependencies]
-forge2-types = { workspace = true }
-forge2-worker = { workspace = true }
+chuggernaut-types = { workspace = true }
+chuggernaut-worker = { workspace = true }
+chuggernaut-nats = { workspace = true }
 async-nats.workspace = true
 clap = { workspace = true }
 chrono = { workspace = true }
@@ -22,3 +23,4 @@ tracing-subscriber = { workspace = true }
 anyhow.workspace = true
 bytes.workspace = true
 uuid = { workspace = true, features = ["v4"] }
+futures.workspace = true
