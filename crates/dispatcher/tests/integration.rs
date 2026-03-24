@@ -1004,6 +1004,322 @@ async fn action_dispatch_creates_claim_and_transitions() {
 }
 
 // ---------------------------------------------------------------------------
+// Action runner isolation test: Forgejo + runner + NATS, no dispatcher
+// ---------------------------------------------------------------------------
+
+/// Focused test: run a Forgejo Action that executes chuggernaut-worker,
+/// which publishes WorkerOutcome to NATS. No dispatcher involved.
+///
+/// Run: `cargo test -p chuggernaut-dispatcher --test integration action_runner_publishes -- --ignored --nocapture`
+#[tokio::test]
+#[ignore]
+async fn action_runner_publishes_outcome_to_nats() {
+    let nats_port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{nats_port}");
+    let nats_internal_url = format!("nats://host.docker.internal:{nats_port}");
+
+    // Start Forgejo
+    let forgejo = GenericImage::new("codeberg.org/forgejo/forgejo", "14")
+        .with_exposed_port(3000.tcp())
+        .with_wait_for(WaitFor::seconds(5))
+        .with_env_var("FORGEJO__database__DB_TYPE", "sqlite3")
+        .with_env_var("FORGEJO__security__INSTALL_LOCK", "true")
+        .with_env_var("FORGEJO__service__DISABLE_REGISTRATION", "true")
+        .with_env_var("FORGEJO__actions__ENABLED", "true")
+        .with_env_var("FORGEJO__log__LEVEL", "Warn")
+        .with_startup_timeout(Duration::from_secs(120))
+        .start()
+        .await
+        .unwrap();
+
+    let forgejo_port = forgejo.get_host_port_ipv4(3000.tcp()).await.unwrap();
+    let forgejo_url = format!("http://127.0.0.1:{forgejo_port}");
+    let forgejo_internal_url = format!("http://host.docker.internal:{forgejo_port}");
+
+    // Wait for API
+    let http = reqwest::Client::new();
+    for _ in 0..60 {
+        if http
+            .get(format!("{forgejo_url}/api/v1/version"))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Create admin + token
+    forgejo
+        .exec(
+            ExecCommand::new([
+                "su-exec", "git", "forgejo", "admin", "user", "create",
+                "--admin", "--username", "testadmin", "--password", "testadmin",
+                "--email", "testadmin@test.local", "--must-change-password=false",
+            ])
+            .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
+        )
+        .await
+        .unwrap();
+
+    let token_resp: serde_json::Value = http
+        .post(format!("{forgejo_url}/api/v1/users/testadmin/tokens"))
+        .basic_auth("testadmin", Some("testadmin"))
+        .json(&serde_json::json!({"name": "test", "scopes": ["all"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = token_resp["sha1"].as_str().unwrap().to_string();
+
+    // Get runner registration token
+    let reg_resp: serde_json::Value = http
+        .get(format!(
+            "{forgejo_url}/api/v1/admin/runners/registration-token"
+        ))
+        .header("Authorization", format!("token {token}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let runner_reg_token = reg_resp["token"].as_str().unwrap().to_string();
+
+    // Create org + repo
+    let org = "testorg";
+    http.post(format!("{forgejo_url}/api/v1/orgs"))
+        .header("Authorization", format!("token {token}"))
+        .json(&serde_json::json!({"username": org, "visibility": "public"}))
+        .send()
+        .await
+        .unwrap();
+
+    http.post(format!("{forgejo_url}/api/v1/orgs/{org}/repos"))
+        .header("Authorization", format!("token {token}"))
+        .json(&serde_json::json!({"name": "repo", "default_branch": "main", "auto_init": true}))
+        .send()
+        .await
+        .unwrap();
+
+    // Push a simple workflow — first just echo to verify the runner works
+    let workflow = format!(
+        r#"name: test-action
+on:
+  workflow_dispatch:
+    inputs:
+      job_key:
+        required: true
+        type: string
+      nats_url:
+        required: true
+        type: string
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug
+        run: |
+          echo "=== ENV ==="
+          echo "job_key=${{{{ inputs.job_key }}}}"
+          echo "nats_url=${{{{ inputs.nats_url }}}}"
+          echo "CHUGGERNAUT_FORGEJO_TOKEN=${{{{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}}}"
+          echo "=== BINARIES ==="
+          which chuggernaut-worker || echo "chuggernaut-worker not found"
+          which mock-claude || echo "mock-claude not found"
+          echo "=== NATS connectivity ==="
+          curl -sf "${{{{ inputs.nats_url }}}}" || echo "NATS not reachable (expected for non-HTTP)"
+          echo "=== Run worker ==="
+          chuggernaut-worker \
+            --job-key "${{{{ inputs.job_key }}}}" \
+            --nats-url "${{{{ inputs.nats_url }}}}" \
+            --forgejo-url "{forgejo_internal_url}" \
+            --forgejo-token "${{{{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}}}" \
+            --command mock-claude \
+            --heartbeat-interval-secs 5 \
+            2>&1 || echo "Worker exited with code $?"
+"#
+    );
+
+    http.post(format!(
+            "{forgejo_url}/api/v1/repos/{org}/repo/contents/.forgejo/workflows/work.yml"
+        ))
+        .header("Authorization", format!("token {token}"))
+        .json(&serde_json::json!({
+            "message": "add workflow",
+            "content": base64_encode(&workflow)
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Set secret
+    let secret_resp = http
+        .put(format!(
+            "{forgejo_url}/api/v1/repos/{org}/repo/actions/secrets/CHUGGERNAUT_FORGEJO_TOKEN"
+        ))
+        .header("Authorization", format!("token {token}"))
+        .json(&serde_json::json!({"data": &token}))
+        .send()
+        .await
+        .unwrap();
+    eprintln!("Secret set: status={}", secret_resp.status());
+
+    // Start runner
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let runner_config_path = workspace_root
+        .join("infra/runner/config.yaml")
+        .canonicalize()
+        .unwrap();
+
+    let _runner = GenericImage::new("gitea/act_runner", "latest")
+        .with_env_var("GITEA_INSTANCE_URL", &forgejo_internal_url)
+        .with_env_var("GITEA_RUNNER_REGISTRATION_TOKEN", &runner_reg_token)
+        .with_env_var("GITEA_RUNNER_NAME", "test-runner")
+        .with_env_var(
+            "GITEA_RUNNER_LABELS",
+            "ubuntu-latest:docker://chuggernaut-runner-env:latest",
+        )
+        .with_env_var("CONFIG_FILE", "/config.yaml")
+        .with_mount(Mount::bind_mount(
+            "/var/run/docker.sock",
+            "/var/run/docker.sock",
+        ))
+        .with_mount(Mount::bind_mount(
+            runner_config_path.to_str().unwrap(),
+            "/config.yaml",
+        ))
+        .with_startup_timeout(Duration::from_secs(60))
+        .start()
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_secs(15)).await;
+
+    // Subscribe to NATS worker outcome BEFORE dispatching
+    let nats_client = async_nats::connect(&nats_url).await.unwrap();
+    let mut outcome_sub = nats_client
+        .subscribe("chuggernaut.worker.outcome")
+        .await
+        .unwrap();
+
+    // Also subscribe to heartbeats to see if the worker starts
+    let mut hb_sub = nats_client
+        .subscribe("chuggernaut.worker.heartbeat")
+        .await
+        .unwrap();
+
+    // Dispatch the workflow
+    let job_key = "testorg.repo.1";
+    let forgejo_client = chuggernaut_forgejo_api::ForgejoClient::new(&forgejo_url, &token);
+    forgejo_client
+        .dispatch_workflow(
+            org,
+            "repo",
+            "work.yml",
+            &chuggernaut_forgejo_api::DispatchWorkflowOption {
+                ref_field: "main".to_string(),
+                inputs: Some(serde_json::json!({
+                    "job_key": job_key,
+                    "nats_url": nats_internal_url,
+                })),
+            },
+        )
+        .await
+        .unwrap();
+    eprintln!("Workflow dispatched");
+
+    // Poll action status + check for NATS messages
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    let mut got_heartbeat = false;
+    let mut got_outcome = false;
+    let mut action_status = String::new();
+
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            break;
+        }
+
+        // Check action run status
+        let runs_resp = http
+            .get(format!(
+                "{forgejo_url}/api/v1/repos/{org}/repo/actions/runs"
+            ))
+            .header("Authorization", format!("token {token}"))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+
+        if let Some(run) = runs_resp["workflow_runs"].as_array().and_then(|a| a.first()) {
+            let status = run["status"].as_str().unwrap_or("unknown");
+            if status != action_status {
+                eprintln!("Action status: {status}");
+                action_status = status.to_string();
+            }
+            if status == "success" || status == "failure" {
+                eprintln!("Action finished: {status}");
+                // Try to get logs
+                if let Some(run_id) = run["id"].as_u64() {
+                    let log_resp = http
+                        .get(format!(
+                            "{forgejo_url}/api/v1/repos/{org}/repo/actions/runs/{run_id}/logs"
+                        ))
+                        .header("Authorization", format!("token {token}"))
+                        .send()
+                        .await
+                        .unwrap();
+                    let log_body = log_resp.text().await.unwrap_or_default();
+                    eprintln!("Action logs (first 2000 chars):\n{}", &log_body[..log_body.len().min(2000)]);
+                }
+                break;
+            }
+        }
+
+        // Check for heartbeats
+        if let Ok(msg) =
+            tokio::time::timeout(Duration::from_millis(500), hb_sub.next()).await
+        {
+            if msg.is_some() && !got_heartbeat {
+                eprintln!("Got heartbeat from worker!");
+                got_heartbeat = true;
+            }
+        }
+
+        // Check for outcome
+        if let Ok(msg) =
+            tokio::time::timeout(Duration::from_millis(100), outcome_sub.next()).await
+        {
+            if let Some(msg) = msg {
+                let outcome: WorkerOutcome =
+                    serde_json::from_slice(&msg.payload).unwrap();
+                eprintln!("Got outcome: {:?}", outcome.outcome);
+                got_outcome = true;
+                break;
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    eprintln!("Results: heartbeat={got_heartbeat} outcome={got_outcome} action_status={action_status}");
+
+    assert!(got_heartbeat, "should have received heartbeat from worker");
+    assert!(got_outcome, "should have received WorkerOutcome from worker");
+}
+
+// ---------------------------------------------------------------------------
 // Full E2E: dispatcher → Forgejo Action → runner → worker → outcome
 // ---------------------------------------------------------------------------
 
