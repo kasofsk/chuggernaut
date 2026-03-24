@@ -15,6 +15,9 @@ async fn main() -> anyhow::Result<()> {
     let config = config::Config::from_env();
     info!(?config, "starting chuggernaut-dispatcher");
 
+    // Fail fast if static files are missing
+    http::check_static_dir();
+
     // Connect to NATS
     let nats = async_nats::connect(&config.nats_url).await?;
     let js = async_nats::jetstream::new(nats.clone());

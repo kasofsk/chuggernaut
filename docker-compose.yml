@@ -37,6 +37,9 @@ services:
       CHUGGERNAUT_FORGEJO_URL: http://forgejo:3000
       CHUGGERNAUT_FORGEJO_TOKEN: ${CHUGGERNAUT_FORGEJO_TOKEN:-}
       CHUGGERNAUT_ACTION_WORKFLOW: work.yml
+      CHUGGERNAUT_STATIC_DIR: /static
+    volumes:
+      - ./static:/static:ro
     depends_on:
       - nats
       - forgejo

@@ -274,6 +274,42 @@ mod tests {
     }
 }
 
+/// Resolve the static directory containing index.html.
+/// Checks CHUGGERNAUT_STATIC_DIR env var first, then falls back to
+/// the workspace static/ directory (relative to CARGO_MANIFEST_DIR).
+fn resolve_static_dir() -> Option<std::path::PathBuf> {
+    let candidates = [
+        std::env::var("CHUGGERNAUT_STATIC_DIR")
+            .map(std::path::PathBuf::from)
+            .ok(),
+        Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("static"),
+        ),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.join("index.html").exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Call at startup to verify static files are available.
+/// Panics with a helpful message if index.html is not found.
+pub fn check_static_dir() {
+    if resolve_static_dir().is_none() {
+        panic!(
+            "static/index.html not found. Set CHUGGERNAUT_STATIC_DIR or ensure static/ exists.\n\
+             In Docker, mount the static directory: -v ./static:/static -e CHUGGERNAUT_STATIC_DIR=/static"
+        );
+    }
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(serve_spa))
@@ -295,24 +331,13 @@ pub fn router(state: AppState) -> Router {
 // ---------------------------------------------------------------------------
 
 async fn serve_spa() -> impl IntoResponse {
-    // In debug mode, read from disk so we can hot-reload HTML/JS changes.
-    // In release mode, embed the file at compile time.
-    #[cfg(debug_assertions)]
-    {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("static/index.html");
-        match std::fs::read_to_string(&path) {
+    // Read from disk on every request so mounted volumes get live updates.
+    match resolve_static_dir() {
+        Some(dir) => match std::fs::read_to_string(dir.join("index.html")) {
             Ok(content) => Html(content),
-            Err(e) => Html(format!("<pre>Failed to read {}: {e}</pre>", path.display())),
-        }
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        Html(include_str!("../../../static/index.html").to_string())
+            Err(e) => Html(format!("<pre>Failed to read index.html: {e}</pre>")),
+        },
+        None => Html("<pre>static/index.html not found</pre>".to_string()),
     }
 }
 
