@@ -26,6 +26,7 @@ uuid = { workspace = true, features = ["v4"] }
 schemars = { version = "1.2.1", features = ["chrono04"] }
 
 [dev-dependencies]
+axum.workspace = true
 chuggernaut-test-utils = { path = "../test-utils" }
 ntest = "0.9.5"
 reqwest = { workspace = true }

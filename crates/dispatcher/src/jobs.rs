@@ -158,7 +158,6 @@ pub async fn create_job(
         body: req.body,
         priority: req.priority,
         capabilities: req.capabilities,
-        worker_type: req.worker_type,
         platform: req.platform,
         timeout_secs: req.timeout_secs,
         review: req.review,
@@ -323,7 +322,7 @@ fn validate_transition(from: JobState, to: JobState) -> DispatcherResult<()> {
             | (InReview, Done | Escalated | ChangesRequested)
             | (Escalated, Done | ChangesRequested)
             | (ChangesRequested, OnTheStack)
-            | (Failed, OnDeck | Blocked)
+            | (Failed, OnDeck | Blocked | OnIce)
             // Admin close from any state
             | (_, Done | Revoked)
     );

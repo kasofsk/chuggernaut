@@ -235,7 +235,16 @@ Major architectural simplification: eliminated the standalone reviewer process. 
 - No longer need: `CHUGGERNAUT-TRANSITIONS` durable consumer for reviewer, merge queue KV lock protocol, separate reviewer Forgejo account
 - Reviewer-specific config env vars
 
-**8 crates** in workspace (was 9), **~9,500 LOC**, **~80 tests** — all green.
+**Additional cleanups in this pass:**
+- Removed `worker_type` field from `Job`, `CreateJobRequest`, and all tests/CLI/docs (was always `None` or `"action"` — vestigial from when multiple worker types existed)
+- Added `nats_worker_url` config (`CHUGGERNAUT_NATS_WORKER_URL`) — separate NATS URL for action workers in Docker (`host.docker.internal`). E2E tests now use automatic dispatcher dispatch instead of manual workarounds.
+- Static SPA serving: removed `include_str!`, always reads from disk. `CHUGGERNAUT_STATIC_DIR` env var + fail-fast `check_static_dir()` at startup. Docker Compose mounts `./static:/static:ro`.
+- Both Dockerfiles use `cargo-chef` for cached dependency builds.
+- Added `mock-review.sh` to runner-env image for review action E2E testing.
+- 3 new integration tests: `yield_dispatches_review_action` (Forgejo-backed), `token_usage_accumulated_from_work_and_review`, `token_usage_across_rework_cycle`
+- New E2E test: `e2e_full_review_cycle` — work → review (changes_requested) → rework → review (approved) → Done, with token usage verification
+
+**8 crates** in workspace, all green.
 
 ### 13. API manifest + self-describing HTTP API + fixture templating ✅ Done
 

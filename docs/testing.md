@@ -2,107 +2,154 @@
 
 Three layers: unit tests for pure logic, integration tests against real NATS, and end-to-end tests against the full stack.
 
----
+## Running Tests
 
-## Unit Tests
+```bash
+# Non-ignored integration tests (parallel, ~14s)
+cargo test -p chuggernaut-dispatcher --test integration
 
-Pure logic, no infrastructure dependencies. Fast, deterministic.
+# E2E tests (sequential, requires Docker + chuggernaut-runner-env image, ~80s)
+cargo test -p chuggernaut-dispatcher --test integration -- --ignored --test-threads=1 --nocapture
 
-### Dispatcher
+# All tests including E2E
+cargo test -p chuggernaut-dispatcher --test integration -- --include-ignored --test-threads=1
 
-- **State machine transitions:** given (current_state, trigger) → assert (new_state, side_effects). Cover every row in the state transition table, including edge cases (admin close while OnTheStack, requeue from OnIce with unresolved deps).
-- **Cycle detection:** build petgraph, attempt edge additions that would create cycles, verify rejection. Test diamond deps, self-loops, transitive chains.
-- **Unblock propagation:** given a dep graph and a job transitioning to Done, verify correct set of dependents are unblocked. Cover: partial deps done, all deps done, diamond deps, no dependents.
-- **Message serialization/deserialization:** round-trip all message types through serde. Verify backward compatibility if fields are added.
+# Code coverage (requires cargo-llvm-cov)
+bash scripts/coverage.sh          # HTML report → target/coverage/html/index.html
+bash scripts/coverage.sh --lcov   # LCOV for CI → target/coverage/lcov.info
+```
 
-### Worker
+### Coverage Setup (one-time)
 
-- **Outcome selection:** given execution results, verify correct outcome type (yield/fail).
-- **Heartbeat failure counting:** verify 1-2 failures → continue, 3+ → exit with error.
-
-### Worker (Review Mode)
-
-- **Review output parsing:** verify JSON decision parsing from subprocess output (approved, changes_requested, escalate).
-- **PR index parsing:** extract PR number from URL.
-- **Merge retry:** verify retry logic on merge failure.
-
----
-
-## Integration Tests
-
-Real NATS server (via testcontainers). Forgejo API interactions stubbed at the client boundary. Each test gets a fresh NATS server or isolated subject prefix.
-
-### Job Lifecycle
-
-- **Happy path:** create job → verify OnDeck → verify action dispatched → worker heartbeats → worker yields with pr_url → verify InReview → inject ReviewDecision{Approved} → verify Done.
-- **With dependencies:** create job A (no deps) → create job B (depends on A) → verify B is Blocked → complete A → verify B transitions to OnDeck.
-- **Diamond deps:** A depends on B and C. Complete B → A stays Blocked. Complete C → A transitions to OnDeck.
-- **On-ice flow:** create job with initial_state: on-ice → verify OnIce → admin requeue → verify OnDeck (or Blocked if deps unresolved).
-
-### Failure and Recovery
-
-- **Lease expiry:** create job, dispatch action, stop heartbeats, wait for monitor scan → verify job transitions to Failed.
-- **Job timeout:** create job with short timeout_secs, dispatch action, heartbeat continuously → verify Failed after timeout.
-- **Auto-retry with backoff:** fail a job with max_retries > 0, verify it stays Failed until retry_after, then transitions to OnDeck and new action dispatched after monitor scan.
-- **Retry exhaustion:** fail a job max_retries times → verify it stays Failed, no further retries.
-
-### Restart Recovery
-
-- Populate NATS KV with known state (jobs, claims, deps).
-- Start dispatcher, let it rebuild.
-- Verify: in-memory job index matches KV, petgraph matches deps, stale claims are cleaned, claimless OnTheStack jobs transition to Failed, partial dep indexes are repaired.
-
-### Rework Dispatch
-
-- Worker yields → InReview → inject ReviewDecision{ChangesRequested} → verify job in ChangesRequested, new action dispatched with review_feedback and is_rework=true.
-
-### Review Dispatch
-
-- Worker yields → InReview → verify review action dispatched with pr_url and review_level.
-
-### Monitor Scans
-
-- Orphan detection: set job to OnTheStack with no claim → verify OrphanDetectedEvent.
-
-### Admin Commands
-
-- Admin close while OnTheStack → verify claim released, job transitions to Done, reverse deps walked.
-- Admin close --revoke → verify Revoked state, dependents stay Blocked.
-- Admin requeue from Failed → verify dep check, route to OnDeck or Blocked.
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov
+```
 
 ---
 
-## End-to-End Tests
+## Integration Tests (57 tests)
 
-Full stack: NATS, Forgejo, runner (via testcontainers). Requires pre-built `chuggernaut-runner-env` Docker image (`docker build -t chuggernaut-runner-env -f Dockerfile.runner-env .`) and Docker socket access.
+Real NATS server via testcontainers. Each test gets a UUID-namespaced `DispatcherState` so tests run in parallel without interference. Tests that need Forgejo spin up real Forgejo containers via `chuggernaut-test-utils`.
 
-Two E2E tests exist (marked `#[ignore]`, run with `cargo test -- --ignored --nocapture`):
+### Job Creation (4 tests)
+
+- `create_job_on_deck` — new job with no deps → OnDeck
+- `create_job_on_ice` — new job with `initial_state: on-ice` → OnIce
+- `create_job_sequential_keys` — keys are `owner.repo.1`, `.2`, `.3`
+- `create_job_rejects_dots_in_name` — dots in owner name → error
+
+### Dependencies (2 tests)
+
+- `deps_blocked_then_unblocked` — B depends on A; complete A → B unblocks
+- `diamond_deps_partial_unblock` — C depends on A+B; complete A → C stays Blocked; complete B → C unblocks
+
+### Worker Outcome Processing (2 tests)
+
+- `worker_yield_to_in_review` — Yield outcome → InReview with PR URL stored
+- `worker_fail_schedules_retry` — Fail outcome → Failed with retry_count incremented and retry_after set
+
+### Admin Commands (3 tests)
+
+- `admin_close_unblocks_dependents` — close A → Done, dependent B unblocks
+- `admin_revoke_keeps_dependents_blocked` — revoke A → Revoked, dependent B stays Blocked
+- `admin_requeue_from_failed` — Failed → OnDeck via admin requeue
+
+### Heartbeat (1 test)
+
+- `heartbeat_renews_lease` — heartbeat extends claim lease_deadline
+
+### Recovery (4 tests)
+
+- `recovery_rebuilds_state` — clear in-memory state, recover from KV, verify jobs + dep graph intact
+- `recovery_cleans_stale_claims` — claim exists for non-OnTheStack job → recovery deletes it
+- `recovery_fails_claimless_on_the_stack` — OnTheStack job with no claim → recovery transitions to Failed
+- `recovery_repairs_reverse_deps` — corrupted reverse dep index → recovery repairs it
+
+### Review Decisions (2 tests)
+
+- `review_approved_completes_job_and_unblocks_deps` — Approved → Done, dependent unblocks
+- `review_changes_requested_transitions_job` — ChangesRequested → ChangesRequested state
+
+### Monitor (4 tests)
+
+- `monitor_lease_expiry_fails_job` — 1s lease, no heartbeats → monitor detects → Failed
+- `monitor_job_timeout` — 1s timeout_secs, long lease → monitor detects elapsed time → Failed
+- `monitor_orphan_detection` — OnTheStack job with no claim → monitor publishes orphan event
+- `monitor_retry_eligible_transitions_to_on_deck` — Failed job with retry_after in past → monitor transitions to OnDeck
+- `monitor_archival_removes_done_job` — Done job past retention → monitor removes from memory
+
+### State Machine Edges (6 tests)
+
+- `escalated_review_transitions_job` — ReviewDecision::Escalated → Escalated state
+- `escalated_then_approved_via_close` — Escalated → Done via admin close
+- `escalated_then_changes_requested` — Escalated → ChangesRequested (valid transition)
+- `requeue_from_failed_to_on_ice` — Failed → OnIce via admin requeue
+- `thaw_from_on_ice_via_requeue` — OnIce → OnDeck via admin requeue
+- `invalid_transition_rejected` — Done → OnTheStack → error
+
+### Error Paths (4 tests)
+
+- `action_dispatch_failure_releases_claim` — bad Forgejo URL → claim released, job Failed
+- `dependency_cycle_rejected` — adding A→B when B→A exists → CycleDetected error
+- `heartbeat_from_wrong_worker_ignored` — heartbeat with mismatched worker_id → claim unchanged
+- `rework_limit_not_enforced_yet` — documents that `rework_limit` config exists but isn't enforced
+
+### Token Usage & Concurrency (5 tests)
+
+- `token_usage_accumulated_from_work_and_review` — work + review tokens stored as separate records
+- `token_usage_across_rework_cycle` — 4 records across work→review→rework→review cycle
+- `nil_token_usage_not_appended` — Yield with `token_usage: None` → no record added
+- `concurrent_heartbeats_benign` — 10 simultaneous heartbeats → claim stays valid
+- `duplicate_outcome_handled` — same WorkerOutcome published twice → no crash
+
+### Action Dispatch with Forgejo (3 tests)
+
+These start real Forgejo containers and push workflow files:
+
+- `action_dispatch_creates_claim_and_transitions` — OnDeck → try_assign_job → OnTheStack with claim
+- `rework_dispatches_new_action_with_feedback` — full cycle: dispatch → yield → ChangesRequested → rework dispatched with feedback
+- `yield_dispatches_review_action` — worker yield triggers review action dispatch, verified via journal entry
+
+### Assignment & Capacity (4 tests)
+
+- `capacity_limit_prevents_assignment` — `max_concurrent_actions=1`, slot full → `try_assign_job` returns false
+- `dispatch_next_respects_priority` — 3 OnDeck jobs with different priorities → highest dispatched first (requires Forgejo)
+- `dispatch_next_after_yield` — yield frees slot → next OnDeck job auto-dispatched (requires Forgejo)
+- `changes_requested_in_dispatch_queue` — ChangesRequested job competes with OnDeck jobs by priority (requires Forgejo)
+
+### HTTP API (12 tests)
+
+- `http_list_jobs` — GET /jobs → correct count
+- `http_list_jobs_filter_by_state` — GET /jobs?state=on-deck → filtered results (kebab-case state names)
+- `http_get_job_detail` — GET /jobs/{key} → job + claim + activities
+- `http_get_job_not_found` — GET /jobs/nonexistent → 404
+- `http_create_job` — POST /jobs → 201 with key
+- `http_requeue_job` — POST /jobs/{key}/requeue → state change
+- `http_close_job` — POST /jobs/{key}/close → Done
+- `http_get_journal` — GET /journal → entries present
+- `http_get_job_deps` — GET /jobs/{key}/deps → dependency list
+- `http_channel_send` — POST /jobs/{key}/channel/send → 200
+- `http_channel_send_missing_job` — POST /nonexistent/channel/send → 404
+- `http_sse_snapshot` — GET /events → first SSE event is "snapshot" with jobs array
+
+---
+
+## End-to-End Tests (3 tests, `#[ignore]`)
+
+Full stack: NATS + Forgejo + Forgejo Actions runner (via testcontainers). Requires pre-built `chuggernaut-runner-env` Docker image and Docker socket access.
+
+```bash
+# Build runner-env image first
+docker build -t chuggernaut-runner-env -f Dockerfile.runner-env .
+
+# Run E2E tests (must use --test-threads=1)
+cargo test -p chuggernaut-dispatcher --test integration -- --ignored --test-threads=1 --nocapture
+```
 
 - **`action_runner_publishes_outcome_to_nats`** — Runner isolation: Forgejo Action → runner → worker binary → NATS. Verifies heartbeat, WorkerOutcome (Yield with PR URL), channel_send message, and ChannelStatus KV.
 - **`e2e_full_action_pipeline`** — Full dispatcher pipeline: create job → dispatch action → runner → mock-claude via MCP → git commit/push → PR created → Yield → InReview.
-
-### Setup
-
-- testcontainers starts Forgejo + NATS; `start_runner` launches Forgejo runner container.
-- Action workers run inside Forgejo Action containers (using `mock-claude` for testing).
-- `chuggernaut seed` loads test fixture DAGs for manual/future tests.
-
-### Scenarios
-
-- **Single job:** create → work action dispatched → mock-claude runs → PR opened in Forgejo → review action dispatched → review mock-claude → PR merged → job Done.
-- **Dependency chain:** seed A → B → C. Verify jobs execute in order. C completes last.
-- **Parallel fan-out:** A has no deps. B, C, D all depend on A. Complete A → verify B, C, D all transition to OnDeck and get dispatched concurrently.
-- **Rework cycle:** create job with review: high. Worker yields a PR that the review action flags → verify ChangesRequested → new action dispatched with feedback → re-review → eventually approved and merged.
-- **Escalation:** create job with review: human → verify PR gets human reviewer assigned, job in Escalated state.
-- **Action crash:** kill action container mid-execution → verify lease expiry → job Failed → auto-retry → new action dispatched → completes.
-- **Dispatcher restart:** mid-pipeline, restart dispatcher container → verify all in-flight jobs recover correctly, pipeline completes.
-
-### Assertions
-
-- Job states verified via `chuggernaut show {key}` or dispatcher HTTP API.
-- PR existence and merge status verified via Forgejo API.
-- Dependency resolution verified by observing downstream jobs unblock.
-- Timing assertions use generous margins (not flaky wall-clock checks).
+- **`e2e_full_review_cycle`** — Complete lifecycle: create → work action → InReview → ChangesRequested → rework action → InReview → Approved → Done. Verifies token usage records are accumulated across the rework cycle.
 
 ---
 
@@ -110,37 +157,30 @@ Two E2E tests exist (marked `#[ignore]`, run with `cargo test -- --ignored --noc
 
 ### NATS Isolation
 
-Integration tests use one of:
-- **testcontainers:** ephemeral NATS server per test suite, torn down after.
-- **Subject prefix:** shared NATS server with a unique prefix per test (e.g., `test_{uuid}.chuggernaut.*`), allowing parallel test execution.
+A single NATS JetStream container is started once per test process via `OnceLock`, on a dedicated OS thread to avoid tokio runtime conflicts. It's `Box::leak`-ed so it lives for the entire test run.
+
+Each test gets its own UUID-namespaced `DispatcherState` — all KV buckets and NATS subjects are prefixed so tests run in parallel without interference.
 
 ### Container Lifecycle
 
-Test containers are shared per process via `OnceLock` + `Box::leak` (Rust statics are never dropped). Two mechanisms ensure cleanup:
+Two mechanisms ensure cleanup:
 
-- **`watchdog` feature** (testcontainers): catches SIGTERM/SIGINT/SIGQUIT signals and removes all registered containers. Handles Ctrl-C during test runs.
-- **`register_container_cleanup()`** (`chuggernaut-test-utils`): registers container IDs for removal via `libc::atexit`. Handles normal process exit.
+- **`watchdog` feature** (testcontainers): catches SIGTERM/SIGINT/SIGQUIT signals and removes all registered containers.
+- **`register_container_cleanup()`** (`chuggernaut-test-utils`): registers container IDs for removal via `libc::atexit`.
 
-All test suites call `register_container_cleanup(container.id())` before leaking the container handle.
+### Test Helpers
+
+- **`setup()`** — creates a namespaced DispatcherState with default Config
+- **`setup_with_config(|c| ...)`** — same but with Config overrides (custom lease, timeout, capacity, etc.)
+- **`start_http(state)`** — binds the HTTP router on a random port, returns base URL
+- **`wait_for_state(state, key, target, timeout_secs)`** — polls until job reaches target state
 
 ### MCP Bridge Tests
 
-The `chuggernaut-channel` integration tests include two subprocess bridge tests that exercise the full MCP-over-NATS path without Docker runners or Forgejo:
+The `chuggernaut-channel` integration tests include subprocess bridge tests that exercise the full MCP-over-NATS path without Docker runners or Forgejo:
 
 - **`mcp_bridge_subprocess_to_nats`**: spawns a bash MCP client, bridges stdin/stdout through `handle_message`, verifies `channel_send` → NATS outbox and `update_status` → KV.
 - **`mcp_bridge_bidirectional_nats`**: round-trip test — publishes a message to the NATS inbox, mock client calls `channel_check` to receive it, replies via `channel_send`, verified on NATS outbox.
-
-These use inline bash scripts as MCP clients (no git operations, no Forgejo) and run in ~0.4s.
-
-### Forgejo Stub
-
-A lightweight HTTP server that implements the subset of Forgejo API used by the system:
-- `POST /api/v1/repos/{owner}/{repo}/pulls` — record PR creation
-- `GET /api/v1/repos/{owner}/{repo}/pulls/{id}/reviews` — return configured review state
-- `POST /api/v1/repos/{owner}/{repo}/pulls/{id}/merge` — record merge, return success/failure
-- `POST /api/v1/repos/{owner}/{repo}/actions/workflows/{file}/dispatches` — record dispatch
-
-The stub is configurable per test: inject specific review decisions, merge failures, or API errors to exercise failure paths.
 
 ### Fixtures
 
@@ -155,5 +195,3 @@ The stub is configurable per test: inject specific review decisions, merge failu
   ]
 }
 ```
-
-Used by both integration and end-to-end tests for repeatable scenarios.

@@ -65,10 +65,9 @@ CLI / API
 │                                                      │
 │  Dispatches:                                         │
 │    Forgejo Actions workflows (via API)               │
-└──────────────────┬──────────────┬────────────────────┘
-                   │              │
-        ┌──────────┘
-        ▼
+└──────────────────┬─────────────────────────────────┘
+                   │
+                   ▼
    Action Workers (ephemeral)
    Run inside Forgejo Action containers
    Two modes: work + review
@@ -195,7 +194,7 @@ The `seed` command supports `--var` for template interpolation — `{{KEY}}` pla
 
 That's it. No PostgreSQL polling, no RocksDB, no external graph database.
 
-**Shared env vars:** `CHUGGERNAUT_NATS_URL` (default `nats://localhost:4222`) and `CHUGGERNAUT_FORGEJO_URL` (required) are used by all components. Per-component configuration is documented in each companion doc.
+**Shared env vars:** `CHUGGERNAUT_NATS_URL` (default `nats://localhost:4222`) and `CHUGGERNAUT_FORGEJO_URL` (required) are used by all components. `CHUGGERNAUT_NATS_WORKER_URL` can be set separately for the dispatcher to pass a Docker-reachable NATS URL to action workers (defaults to `CHUGGERNAUT_NATS_URL`). `CHUGGERNAUT_STATIC_DIR` tells the dispatcher where to find `index.html` (required; panics at startup if missing). Per-component configuration is documented in each companion doc.
 
 **Docker Compose:**
 ```yaml
@@ -255,6 +254,6 @@ chuggernaut/
 - [NATS Schema](docs/nats-schema.md) — KV buckets, streams, subjects, payload types
 - [Dispatcher](docs/dispatcher.md) — state machine, deps, claims, assignment, restart recovery
 - [Worker Protocol](docs/worker-protocol.md) — action dispatch, heartbeat, outcomes, MCP channel
-- [Reviewer](docs/reviewer.md) — review lifecycle, merge queue, rework, done detection
+- [Review](docs/reviewer.md) — review lifecycle (via action workers), merge, rework, done detection
 - [Monitor](docs/monitor.md) — lease scanning, orphan detection, job archival
 - [Testing](docs/testing.md) — unit, integration, and end-to-end testing strategy

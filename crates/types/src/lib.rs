@@ -112,7 +112,7 @@ pub struct Job {
     pub priority: u8,
     #[serde(default)]
     pub capabilities: Vec<String>,
-    pub worker_type: Option<String>,
+
     pub platform: Option<String>,
     pub timeout_secs: u64,
     pub review: ReviewLevel,
@@ -188,7 +188,7 @@ pub struct CreateJobRequest {
     pub priority: u8,
     #[serde(default)]
     pub capabilities: Vec<String>,
-    pub worker_type: Option<String>,
+
     pub platform: Option<String>,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
@@ -792,7 +792,6 @@ mod tests {
             body: "Retry with backoff".to_string(),
             priority: 80,
             capabilities: vec!["rust".to_string()],
-            worker_type: None,
             platform: None,
             timeout_secs: 3600,
             review: ReviewLevel::High,

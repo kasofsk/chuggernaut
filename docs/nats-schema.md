@@ -29,7 +29,6 @@ The canonical job store. Every job in the system has an entry here.
   "body": "Retry failed API calls with exponential backoff...",
   "priority": 80,
   "capabilities": ["rust"],
-  "worker_type": "action",
   "platform": null,
   "timeout_secs": 3600,
   "review": "high",
@@ -37,9 +36,12 @@ The canonical job store. Every job in the system has an entry here.
   "retry_count": 0,
   "retry_after": null,
   "pr_url": null,
-  "token_usage": [],
+  "token_usage": [
+    { "action_type": "work", "token_usage": { "input_tokens": 25000, "output_tokens": 8000, "cache_read_tokens": 0, "cache_write_tokens": 0 }, "completed_at": "2026-03-23T10:30:00Z" },
+    { "action_type": "review", "token_usage": { "input_tokens": 15000, "output_tokens": 3500, "cache_read_tokens": 0, "cache_write_tokens": 0 }, "completed_at": "2026-03-23T10:35:00Z" }
+  ],
   "created_at": "2026-03-23T10:00:00Z",
-  "updated_at": "2026-03-23T10:05:00Z"
+  "updated_at": "2026-03-23T10:35:00Z"
 }
 ```
 
@@ -347,7 +349,6 @@ The channel provides bidirectional messaging between a running worker and extern
   "depends_on": [40, 41],
   "priority": 80,
   "capabilities": ["rust"],
-  "worker_type": "action",
   "platform": null,
   "timeout_secs": 3600,
   "review": "high",

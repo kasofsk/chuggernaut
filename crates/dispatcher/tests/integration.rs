@@ -94,7 +94,6 @@ async fn create_job_on_deck() {
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -116,7 +115,6 @@ async fn create_job_on_ice() {
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -137,7 +135,6 @@ async fn create_job_sequential_keys() {
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -162,7 +159,6 @@ async fn create_job_rejects_dots_in_name() {
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -186,7 +182,6 @@ async fn deps_blocked_then_unblocked() {
         depends_on: deps,
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -215,7 +210,6 @@ async fn diamond_deps_partial_unblock() {
         depends_on: deps,
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -257,7 +251,6 @@ async fn worker_yield_to_in_review() {
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -298,7 +291,6 @@ async fn worker_fail_schedules_retry() {
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -343,7 +335,6 @@ async fn admin_close_unblocks_dependents() {
         depends_on: deps,
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -378,7 +369,6 @@ async fn admin_revoke_keeps_dependents_blocked() {
         depends_on: deps,
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -413,7 +403,6 @@ async fn heartbeat_renews_lease() {
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -453,7 +442,6 @@ async fn recovery_rebuilds_state() {
         depends_on: deps,
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -493,7 +481,6 @@ async fn review_approved_completes_job_and_unblocks_deps() {
         depends_on: deps,
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -548,7 +535,6 @@ async fn review_changes_requested_transitions_job() {
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -633,7 +619,6 @@ async fn monitor_lease_expiry_fails_job() {
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -670,7 +655,6 @@ async fn admin_requeue_from_failed() {
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -786,7 +770,6 @@ async fn action_dispatch_creates_claim_and_transitions() {
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: Some("action".to_string()),
         platform: None,
         timeout_secs: 300,
         review: ReviewLevel::Low,
@@ -873,7 +856,6 @@ async fn rework_dispatches_new_action_with_feedback() {
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: Some("action".to_string()),
         platform: None,
         timeout_secs: 300,
         review: ReviewLevel::High,
@@ -993,7 +975,6 @@ async fn yield_dispatches_review_action() {
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: Some("action".to_string()),
         platform: None,
         timeout_secs: 300,
         review: ReviewLevel::High,
@@ -1055,7 +1036,6 @@ async fn token_usage_accumulated_from_work_and_review() {
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -1138,7 +1118,6 @@ async fn token_usage_across_rework_cycle() {
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: None,
         platform: None,
         timeout_secs: 3600,
         review: ReviewLevel::High,
@@ -1620,7 +1599,6 @@ jobs:
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: Some("action".to_string()),
         platform: None,
         timeout_secs: 300,
         review: ReviewLevel::Low,
@@ -1817,7 +1795,6 @@ jobs:
         depends_on: vec![],
         priority: 50,
         capabilities: vec![],
-        worker_type: Some("action".to_string()),
         platform: None,
         timeout_secs: 300,
         review: ReviewLevel::High,
@@ -1847,15 +1824,21 @@ jobs:
     state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
     eprintln!("E2E-review: injected ChangesRequested");
 
-    // The dispatcher auto-dispatches the rework action (nats_worker_url handles Docker networking).
-    // Wait a moment for the ChangesRequested → OnTheStack transition.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Wait for job to leave InReview (handler transitions to ChangesRequested → OnTheStack)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let current = state.jobs.get(&key).unwrap().state;
+        if current != JobState::InReview {
+            eprintln!("E2E-review: left InReview, now in {current:?}");
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("E2E-review: timed out waiting to leave InReview");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 
-    let current = state.jobs.get(&key).unwrap().state;
-    eprintln!("E2E-review: state after ChangesRequested = {current:?}");
-    assert_eq!(current, JobState::OnTheStack, "dispatcher should auto-dispatch rework");
-
-    // Wait for InReview again (rework yields)
+    // Wait for InReview again (rework action yields)
     wait_for_state(&state, &key, JobState::InReview, 90).await;
     eprintln!("E2E-review: reached InReview after rework");
 
@@ -1890,6 +1873,55 @@ jobs:
     eprintln!("E2E-review: PASSED — full work → review → rework → review → Done cycle");
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Like `setup()` but accepts overrides for Config fields.
+async fn setup_with_config(overrides: impl FnOnce(&mut Config)) -> Arc<DispatcherState> {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let mut config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 5,
+        default_timeout_secs: 60,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 100,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: None,
+        forgejo_token: None,
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+    };
+    overrides(&mut config);
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await
+        .unwrap();
+    DispatcherState::new_namespaced(config, client, js, kv, prefix)
+}
+
+/// Start the HTTP server and return the base URL.
+async fn start_http(state: Arc<DispatcherState>) -> String {
+    let app = chuggernaut_dispatcher::http::router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
 /// Helper: wait for a job to reach the given state, with timeout.
 async fn wait_for_state(state: &Arc<DispatcherState>, key: &str, target: JobState, timeout_secs: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
@@ -1907,4 +1939,1583 @@ async fn wait_for_state(state: &Arc<DispatcherState>, key: &str, target: JobStat
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
+}
+
+// ===========================================================================
+// NEW COVERAGE TESTS
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Group 1: State machine edges
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn escalated_review_transitions_job() {
+    let state = setup().await;
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Escalation test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Simulate on-the-stack → yield → InReview
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+
+    let outcome = WorkerOutcome {
+        worker_id: worker_id.clone(),
+        job_key: key.clone(),
+        outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        token_usage: None,
+    };
+    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::InReview);
+
+    // Publish Escalated decision
+    let decision = ReviewDecision {
+        job_key: key.clone(),
+        decision: DecisionType::Escalated { reviewer_login: "human".to_string() },
+        pr_url: Some("http://forgejo/test/repo/pulls/1".to_string()),
+        token_usage: None,
+    };
+    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Escalated);
+}
+
+#[tokio::test]
+async fn escalated_then_approved_via_close() {
+    let state = setup().await;
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Escalated close".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Get to Escalated
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::InReview, "test", None).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::Escalated, "test", None).await.unwrap();
+
+    // Admin close → Done
+    let close = CloseJobRequest { job_key: key.clone(), revoke: false };
+    let _reply = tokio::time::timeout(
+        Duration::from_secs(5),
+        state.nats.request_msg(&subjects::ADMIN_CLOSE_JOB, &close),
+    ).await.unwrap().unwrap();
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Done);
+}
+
+#[tokio::test]
+async fn escalated_then_changes_requested() {
+    let state = setup().await;
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Esc → CR".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Direct transitions to Escalated
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::InReview, "test", None).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::Escalated, "test", None).await.unwrap();
+
+    // Escalated → ChangesRequested
+    let result = jobs::transition_job(&state, &key, JobState::ChangesRequested, "human_review", None).await;
+    assert!(result.is_ok());
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::ChangesRequested);
+}
+
+#[tokio::test]
+async fn requeue_from_failed_to_on_ice() {
+    let state = setup().await;
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Failed → OnIce".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Get to Failed
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+
+    let outcome = WorkerOutcome {
+        worker_id: worker_id.clone(),
+        job_key: key.clone(),
+        outcome: OutcomeType::Fail { reason: "error".to_string(), logs: None },
+        token_usage: None,
+    };
+    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Failed);
+
+    // Requeue to OnIce
+    let requeue = RequeueRequest { job_key: key.clone(), target: RequeueTarget::OnIce };
+    let _reply = tokio::time::timeout(
+        Duration::from_secs(5),
+        state.nats.request_msg(&subjects::ADMIN_REQUEUE, &requeue),
+    ).await.unwrap().unwrap();
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnIce);
+}
+
+#[tokio::test]
+async fn thaw_from_on_ice_via_requeue() {
+    let state = setup().await;
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Thaw".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: Some(JobState::OnIce),
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnIce);
+
+    let requeue = RequeueRequest { job_key: key.clone(), target: RequeueTarget::OnDeck };
+    let _reply = tokio::time::timeout(
+        Duration::from_secs(5),
+        state.nats.request_msg(&subjects::ADMIN_REQUEUE, &requeue),
+    ).await.unwrap().unwrap();
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnDeck);
+}
+
+#[tokio::test]
+async fn invalid_transition_rejected() {
+    let state = setup().await;
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Invalid".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Close job → Done
+    let close = CloseJobRequest { job_key: key.clone(), revoke: false };
+    state.nats.request_msg(&subjects::ADMIN_CLOSE_JOB, &close).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Done);
+
+    // Try Done → OnTheStack (invalid)
+    let result = jobs::transition_job(&state, &key, JobState::OnTheStack, "test", None).await;
+    assert!(result.is_err(), "Done → OnTheStack should be rejected");
+}
+
+// ---------------------------------------------------------------------------
+// Group 3: Error paths
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn action_dispatch_failure_releases_claim() {
+    // Use a bad Forgejo URL that will fail immediately
+    let state = setup_with_config(|c| {
+        c.forgejo_url = Some("http://127.0.0.1:1".to_string());
+        c.forgejo_token = Some("fake-token".to_string());
+    }).await;
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Dispatch fail".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 300,
+        review: ReviewLevel::Low,
+        max_retries: 0,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // try_assign_job should fail internally but return Ok(false)
+    let assigned = chuggernaut_dispatcher::assignment::try_assign_job(&state, &key).await.unwrap();
+    assert!(!assigned, "assignment should fail with bad forgejo URL");
+
+    // Job should be Failed (action_dispatch releases claim and transitions to Failed)
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Failed);
+
+    // Claim should be released (may be tombstoned — kv_get fails on tombstone, which is fine)
+    let claim = jobs::kv_get::<ClaimState>(&state.kv.claims, &key).await.unwrap_or(None);
+    assert!(claim.is_none(), "claim should be released after dispatch failure");
+}
+
+#[tokio::test]
+async fn dependency_cycle_rejected() {
+    let state = setup().await;
+
+    let make = |title: &str, deps: Vec<u64>| CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: title.to_string(),
+        body: String::new(),
+        depends_on: deps,
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+
+    // Create A (no deps), B (deps on A)
+    let _key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
+    let key_b = jobs::create_job(&state, make("B", vec![1])).await.unwrap();
+
+    // Try to add A → B dep (would create cycle: A→B and B→A)
+    let result = chuggernaut_dispatcher::deps::create_deps(
+        &state,
+        &_key_a,
+        &[key_b.clone()],
+    ).await;
+    assert!(result.is_err(), "adding cycle should fail");
+}
+
+#[tokio::test]
+async fn heartbeat_from_wrong_worker_ignored() {
+    let state = setup().await;
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Wrong worker HB".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+
+    let (before, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key).await.unwrap().unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send heartbeat from a different worker
+    let hb = WorkerHeartbeat { worker_id: "wrong-worker".to_string(), job_key: key.clone() };
+    state.nats.publish_msg(&subjects::WORKER_HEARTBEAT, &hb).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let (after, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key).await.unwrap().unwrap();
+    assert_eq!(before.lease_deadline, after.lease_deadline, "lease should not be renewed by wrong worker");
+    assert_eq!(after.worker_id, worker_id, "claim owner should not change");
+}
+
+#[tokio::test]
+async fn rework_limit_not_enforced_yet() {
+    // Documents current behavior: rework_limit config exists but is not checked.
+    // Multiple rework cycles succeed without limit.
+    let state = setup_with_config(|c| c.rework_limit = 1).await;
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Rework limit".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Do 3 rework cycles (exceeding rework_limit=1)
+    for i in 0..3 {
+        let worker_id = format!("action-{key}");
+        chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+        jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+
+        let outcome = WorkerOutcome {
+            worker_id: worker_id.clone(),
+            job_key: key.clone(),
+            outcome: OutcomeType::Yield { pr_url: format!("http://forgejo/test/repo/pulls/{}", i + 1) },
+            token_usage: None,
+        };
+        state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(state.jobs.get(&key).unwrap().state, JobState::InReview);
+
+        // Changes requested
+        let decision = ReviewDecision {
+            job_key: key.clone(),
+            decision: DecisionType::ChangesRequested { feedback: format!("fix #{}", i + 1) },
+            pr_url: Some(format!("http://forgejo/test/repo/pulls/{}", i + 1)),
+            token_usage: None,
+        };
+        state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Should be ChangesRequested (rework_limit not enforced, no Forgejo to auto-dispatch)
+        assert_eq!(
+            state.jobs.get(&key).unwrap().state,
+            JobState::ChangesRequested,
+            "cycle {i}: rework_limit should not block transitions"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Group 7: Token usage + concurrency
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn nil_token_usage_not_appended() {
+    let state = setup().await;
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Nil tokens".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+
+    let outcome = WorkerOutcome {
+        worker_id: worker_id.clone(),
+        job_key: key.clone(),
+        outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        token_usage: None, // no token usage
+    };
+    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let job = state.jobs.get(&key).unwrap().clone();
+    assert_eq!(job.state, JobState::InReview);
+    assert!(job.token_usage.is_empty(), "nil token_usage should not create a record");
+}
+
+#[tokio::test]
+async fn concurrent_heartbeats_benign() {
+    let state = setup().await;
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Concurrent HB".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+
+    // Send 10 heartbeats concurrently
+    let mut handles = Vec::new();
+    for _ in 0..10 {
+        let s = state.clone();
+        let w = worker_id.clone();
+        let k = key.clone();
+        handles.push(tokio::spawn(async move {
+            let hb = WorkerHeartbeat { worker_id: w, job_key: k };
+            s.nats.publish_msg(&subjects::WORKER_HEARTBEAT, &hb).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Claim should still be valid
+    let (claim, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key).await.unwrap().unwrap();
+    assert_eq!(claim.worker_id, worker_id);
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
+}
+
+#[tokio::test]
+async fn duplicate_outcome_handled() {
+    let state = setup().await;
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Dup outcome".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+
+    let outcome = WorkerOutcome {
+        worker_id: worker_id.clone(),
+        job_key: key.clone(),
+        outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        token_usage: None,
+    };
+
+    // Send same outcome twice
+    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    // Should be InReview (first succeeds, second is a no-op or graceful error)
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::InReview);
+}
+
+// ---------------------------------------------------------------------------
+// Group 5: Recovery
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn recovery_cleans_stale_claims() {
+    let state = setup().await;
+
+    // Create a job that stays OnDeck
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Stale claim".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnDeck);
+
+    // Write a stale claim directly to KV (job is NOT OnTheStack)
+    let stale_claim = ClaimState {
+        worker_id: "stale-worker".to_string(),
+        claimed_at: chrono::Utc::now(),
+        last_heartbeat: chrono::Utc::now(),
+        lease_deadline: chrono::Utc::now() + chrono::Duration::seconds(3600),
+        timeout_secs: 3600,
+        lease_secs: 5,
+    };
+    jobs::kv_put(&state.kv.claims, &key, &stale_claim).await.unwrap();
+
+    // Verify claim exists
+    assert!(jobs::kv_get::<ClaimState>(&state.kv.claims, &key).await.unwrap().is_some());
+
+    // Run recovery
+    recovery::recover(&state).await.unwrap();
+
+    // Stale claim should be deleted (tombstoned — kv_get may fail on tombstone)
+    let claim_after = jobs::kv_get::<ClaimState>(&state.kv.claims, &key).await.unwrap_or(None);
+    assert!(claim_after.is_none(), "stale claim should be cleaned up by recovery");
+}
+
+#[tokio::test]
+async fn recovery_fails_claimless_on_the_stack() {
+    let state = setup().await;
+
+    // Create job and directly write OnTheStack state to KV (without creating a claim)
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Claimless".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Directly update the job to OnTheStack in KV (bypassing claim requirement)
+    let (mut job, rev) = jobs::kv_get::<Job>(&state.kv.jobs, &key).await.unwrap().unwrap();
+    job.state = JobState::OnTheStack;
+    jobs::kv_cas_update(&state.kv.jobs, &key, &job, rev, 3).await.unwrap();
+
+    // Clear in-memory state to simulate restart
+    state.jobs.clear();
+    { let mut g = state.graph.write().await; *g = chuggernaut_dispatcher::state::DepGraph::new(); }
+
+    // Recover — should detect OnTheStack job with no claim and fail it
+    recovery::recover(&state).await.unwrap();
+
+    // Job should be Failed (claimless on-the-stack)
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Failed);
+}
+
+#[tokio::test]
+async fn recovery_repairs_reverse_deps() {
+    let state = setup().await;
+
+    // Create two jobs with B depending on A
+    let make = |title: &str, deps: Vec<u64>| CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: title.to_string(),
+        body: String::new(),
+        depends_on: deps,
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
+    let key_b = jobs::create_job(&state, make("B", vec![1])).await.unwrap();
+
+    // Corrupt: remove the reverse dep on A (A should have depended_on_by=[B])
+    let (mut dep_a, rev) = jobs::kv_get::<DepRecord>(&state.kv.deps, &key_a).await.unwrap().unwrap();
+    dep_a.depended_on_by.clear();
+    jobs::kv_cas_update(&state.kv.deps, &key_a, &dep_a, rev, 3).await.unwrap();
+
+    // Clear in-memory state
+    state.jobs.clear();
+    { let mut g = state.graph.write().await; *g = chuggernaut_dispatcher::state::DepGraph::new(); }
+
+    // Recover
+    recovery::recover(&state).await.unwrap();
+
+    // Verify reverse dep was repaired
+    let (dep_a_after, _) = jobs::kv_get::<DepRecord>(&state.kv.deps, &key_a).await.unwrap().unwrap();
+    assert!(
+        dep_a_after.depended_on_by.contains(&key_b),
+        "recovery should repair reverse dep: A.depended_on_by should contain B"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Group 4: Monitor
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn monitor_job_timeout() {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 120, // long lease so it doesn't expire
+        default_timeout_secs: 1, // very short timeout
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 1,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: None,
+        forgejo_token: None,
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await.unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+
+    handlers::start_handlers(state.clone()).await.unwrap();
+    chuggernaut_dispatcher::monitor::start(state.clone());
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Timeout test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 1, // 1 second timeout
+        review: ReviewLevel::High,
+        max_retries: 0,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Acquire claim with 1s timeout
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 1).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+
+    // Wait for monitor to detect timeout
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Failed);
+}
+
+#[tokio::test]
+async fn monitor_orphan_detection() {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 120,
+        default_timeout_secs: 3600,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 1,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: None,
+        forgejo_token: None,
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await.unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+
+    // Subscribe to orphan events before starting monitor
+    let mut orphan_sub = state.nats.subscribe("chuggernaut.monitor.orphan").await.unwrap();
+
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Orphan test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Set job to OnTheStack directly in memory (no claim created — this is the orphan condition)
+    {
+        let mut job = state.jobs.get(&key).unwrap().clone();
+        job.state = JobState::OnTheStack;
+        state.jobs.insert(key.clone(), job);
+    }
+
+    // Start monitor
+    chuggernaut_dispatcher::monitor::start(state.clone());
+
+    // Wait for orphan event
+    let got_orphan = tokio::time::timeout(Duration::from_secs(5), orphan_sub.next()).await;
+    assert!(got_orphan.is_ok(), "should receive orphan detection event");
+}
+
+#[tokio::test]
+async fn monitor_retry_eligible_transitions_to_on_deck() {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 5,
+        default_timeout_secs: 3600,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 1,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: None,
+        forgejo_token: None,
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await.unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Retry eligible".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Simulate failure via outcome
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+
+    let outcome = WorkerOutcome {
+        worker_id: worker_id.clone(),
+        job_key: key.clone(),
+        outcome: OutcomeType::Fail { reason: "error".to_string(), logs: None },
+        token_usage: None,
+    };
+    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Failed);
+
+    // Manually set retry_after to the past so the monitor picks it up
+    {
+        let mut job = state.jobs.get(&key).unwrap().clone();
+        job.retry_after = Some(chrono::Utc::now() - chrono::Duration::seconds(10));
+        // Update both in-memory and KV
+        state.jobs.insert(key.clone(), job.clone());
+        jobs::kv_put(&state.kv.jobs, &key, &job).await.unwrap();
+    }
+
+    // Start monitor
+    chuggernaut_dispatcher::monitor::start(state.clone());
+
+    // Wait for retry scan to transition to OnDeck
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    assert_eq!(
+        state.jobs.get(&key).unwrap().state,
+        JobState::OnDeck,
+        "monitor should transition retry-eligible job to OnDeck"
+    );
+}
+
+#[tokio::test]
+async fn monitor_archival_removes_done_job() {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 5,
+        default_timeout_secs: 3600,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 1,
+        job_retention_secs: 1, // 1 second retention for quick archival
+        activity_limit: 50,
+        forgejo_url: None,
+        forgejo_token: None,
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await.unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Archival test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 0,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Close job → Done, backdate updated_at so retention window has passed
+    jobs::transition_job(&state, &key, JobState::Done, "test", None).await.unwrap();
+    {
+        let mut job = state.jobs.get(&key).unwrap().clone();
+        job.updated_at = chrono::Utc::now() - chrono::Duration::seconds(10);
+        state.jobs.insert(key.clone(), job.clone());
+        jobs::kv_put(&state.kv.jobs, &key, &job).await.unwrap();
+    }
+
+    assert!(state.jobs.contains_key(&key));
+
+    // Start monitor
+    chuggernaut_dispatcher::monitor::start(state.clone());
+
+    // Wait for archival scan
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    assert!(
+        !state.jobs.contains_key(&key),
+        "archived job should be removed from in-memory index"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Group 6: HTTP API
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn http_list_jobs() {
+    let state = setup().await;
+    let make = |title: &str| CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: title.to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    jobs::create_job(&state, make("A")).await.unwrap();
+    jobs::create_job(&state, make("B")).await.unwrap();
+
+    let base = start_http(state).await;
+    let client = reqwest::Client::new();
+    let resp: JobListResponse = client.get(format!("{base}/jobs"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(resp.jobs.len(), 2);
+}
+
+#[tokio::test]
+async fn http_list_jobs_filter_by_state() {
+    let state = setup().await;
+    let make = |title: &str, initial: Option<JobState>| CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: title.to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: initial,
+    };
+    jobs::create_job(&state, make("OnDeck1", None)).await.unwrap();
+    jobs::create_job(&state, make("OnDeck2", None)).await.unwrap();
+    jobs::create_job(&state, make("OnIce1", Some(JobState::OnIce))).await.unwrap();
+
+    let base = start_http(state).await;
+    let client = reqwest::Client::new();
+
+    // Filter by on-deck (kebab-case)
+    let resp: JobListResponse = client.get(format!("{base}/jobs?state=on-deck"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(resp.jobs.len(), 2);
+    for job in &resp.jobs {
+        assert_eq!(job.state, JobState::OnDeck);
+    }
+
+    // Filter by on-ice
+    let resp: JobListResponse = client.get(format!("{base}/jobs?state=on-ice"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(resp.jobs.len(), 1);
+    assert_eq!(resp.jobs[0].state, JobState::OnIce);
+}
+
+#[tokio::test]
+async fn http_get_job_detail() {
+    let state = setup().await;
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Detail test".to_string(),
+        body: "some body".to_string(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    let base = start_http(state).await;
+    let client = reqwest::Client::new();
+    let resp: JobDetailResponse = client.get(format!("{base}/jobs/{key}"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(resp.job.key, key);
+    assert_eq!(resp.job.title, "Detail test");
+    assert_eq!(resp.job.body, "some body");
+    assert!(resp.claim.is_none());
+}
+
+#[tokio::test]
+async fn http_get_job_not_found() {
+    let state = setup().await;
+    let base = start_http(state).await;
+    let client = reqwest::Client::new();
+    let resp = client.get(format!("{base}/jobs/nonexistent"))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn http_create_job() {
+    let state = setup().await;
+    let base = start_http(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "HTTP create".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let resp = client.post(format!("{base}/jobs"))
+        .json(&req)
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 201);
+
+    let body: CreateJobResponse = resp.json().await.unwrap();
+    assert_eq!(body.key, "test.repo.1");
+    assert!(state.jobs.contains_key(&body.key));
+}
+
+#[tokio::test]
+async fn http_requeue_job() {
+    let state = setup().await;
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Requeue".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: Some(JobState::OnIce),
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    let base = start_http(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let resp = client.post(format!("{base}/jobs/{key}/requeue"))
+        .json(&serde_json::json!({"target": "on-deck"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnDeck);
+}
+
+#[tokio::test]
+async fn http_close_job() {
+    let state = setup().await;
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Close".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    let base = start_http(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let resp = client.post(format!("{base}/jobs/{key}/close"))
+        .json(&serde_json::json!({"revoke": false}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Done);
+}
+
+#[tokio::test]
+async fn http_get_journal() {
+    let state = setup().await;
+
+    // Create a job which writes journal entries
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Journal".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    jobs::create_job(&state, req).await.unwrap();
+
+    let base = start_http(state).await;
+    let client = reqwest::Client::new();
+    let resp = client.get(format!("{base}/journal"))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: JournalListResponse = resp.json().await.unwrap();
+    // create_job writes a journal entry
+    assert!(!body.entries.is_empty(), "journal should have entries after job creation");
+}
+
+#[tokio::test]
+async fn http_get_job_deps() {
+    let state = setup().await;
+
+    let make = |title: &str, deps: Vec<u64>| CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: title.to_string(),
+        body: String::new(),
+        depends_on: deps,
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let _key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
+    let key_b = jobs::create_job(&state, make("B", vec![1])).await.unwrap();
+
+    let base = start_http(state).await;
+    let client = reqwest::Client::new();
+    let resp: JobDepsResponse = client.get(format!("{base}/jobs/{key_b}/deps"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(resp.dependencies.len(), 1);
+    assert_eq!(resp.dependencies[0].key, _key_a);
+    assert!(!resp.all_done);
+}
+
+#[tokio::test]
+async fn http_channel_send() {
+    let state = setup().await;
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Channel".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    let base = start_http(state).await;
+    let client = reqwest::Client::new();
+    let resp = client.post(format!("{base}/jobs/{key}/channel/send"))
+        .json(&serde_json::json!({"message": "hello"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn http_channel_send_missing_job() {
+    let state = setup().await;
+    let base = start_http(state).await;
+    let client = reqwest::Client::new();
+    let resp = client.post(format!("{base}/jobs/nonexistent/channel/send"))
+        .json(&serde_json::json!({"message": "hello"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn http_sse_snapshot() {
+    let state = setup().await;
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "SSE test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    jobs::create_job(&state, req).await.unwrap();
+
+    let base = start_http(state).await;
+    let client = reqwest::Client::new();
+
+    // SSE endpoint returns a stream; read the first chunk
+    let mut resp = client.get(format!("{base}/events"))
+        .header("Accept", "text/event-stream")
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Read first chunk (should contain snapshot event)
+    let chunk = tokio::time::timeout(Duration::from_secs(5), resp.chunk())
+        .await.unwrap().unwrap().unwrap();
+    let text = String::from_utf8_lossy(&chunk);
+    assert!(text.contains("event: snapshot"), "first SSE event should be snapshot, got: {text}");
+    assert!(text.contains("jobs"), "snapshot should contain jobs array");
+}
+
+// ---------------------------------------------------------------------------
+// Group 2: Assignment & capacity
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn capacity_limit_prevents_assignment() {
+    let state = setup_with_config(|c| c.max_concurrent_actions = 1).await;
+
+    let make = |title: &str| CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: title.to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key1 = jobs::create_job(&state, make("Job1")).await.unwrap();
+    let key2 = jobs::create_job(&state, make("Job2")).await.unwrap();
+
+    // Manually put job1 on-the-stack to fill the single slot
+    let worker_id = format!("action-{key1}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key1, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key1, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+
+    // Try to assign job2 — should fail due to capacity
+    let assigned = chuggernaut_dispatcher::assignment::try_assign_job(&state, &key2).await.unwrap();
+    assert!(!assigned, "should be at capacity");
+    assert_eq!(state.jobs.get(&key2).unwrap().state, JobState::OnDeck);
+}
+
+#[tokio::test]
+async fn dispatch_next_respects_priority() {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let forgejo = test_utils::start_forgejo().await;
+    let forgejo_port = test_utils::forgejo_port(&forgejo).await;
+    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+
+    let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
+    let token = creds.admin_token;
+
+    let org = format!("pri{}", &prefix[..8]);
+    test_utils::create_test_repo(forgejo_port, &token, &org, "repo").await;
+
+    let workflow = "name: work\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      review_feedback:\n        type: string\n        default: \"\"\n      is_rework:\n        type: string\n        default: \"false\"\n      runner_label:\n        type: string\n        default: \"ubuntu-latest\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
+    test_utils::push_file(
+        forgejo_port, &token, &org, "repo",
+        ".forgejo/workflows/work.yml", workflow, "add workflow",
+    ).await;
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 60,
+        default_timeout_secs: 600,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 100,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: Some(forgejo_url),
+        forgejo_token: Some(token),
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 1, // only 1 slot
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await.unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+
+    // Create 3 jobs with different priorities
+    let make = |title: &str, pri: u8| CreateJobRequest {
+        repo: format!("{org}/repo"),
+        title: title.to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: pri,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 300,
+        review: ReviewLevel::Low,
+        max_retries: 0,
+        initial_state: None,
+    };
+
+    let key_low = jobs::create_job(&state, make("Low", 10)).await.unwrap();
+    let key_high = jobs::create_job(&state, make("High", 90)).await.unwrap();
+    let key_mid = jobs::create_job(&state, make("Mid", 50)).await.unwrap();
+
+    // Dispatch next — should pick highest priority
+    chuggernaut_dispatcher::assignment::try_dispatch_next(&state).await.unwrap();
+
+    assert_eq!(state.jobs.get(&key_high).unwrap().state, JobState::OnTheStack, "highest priority job should be dispatched");
+    assert_eq!(state.jobs.get(&key_mid).unwrap().state, JobState::OnDeck, "mid priority should stay on-deck");
+    assert_eq!(state.jobs.get(&key_low).unwrap().state, JobState::OnDeck, "low priority should stay on-deck");
+}
+
+#[tokio::test]
+async fn dispatch_next_after_yield() {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let forgejo = test_utils::start_forgejo().await;
+    let forgejo_port = test_utils::forgejo_port(&forgejo).await;
+    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+
+    let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
+    let token = creds.admin_token;
+
+    let org = format!("dn{}", &prefix[..8]);
+    test_utils::create_test_repo(forgejo_port, &token, &org, "repo").await;
+
+    let workflow = "name: work\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      review_feedback:\n        type: string\n        default: \"\"\n      is_rework:\n        type: string\n        default: \"false\"\n      runner_label:\n        type: string\n        default: \"ubuntu-latest\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
+    test_utils::push_file(
+        forgejo_port, &token, &org, "repo",
+        ".forgejo/workflows/work.yml", workflow, "add workflow",
+    ).await;
+
+    let review_workflow = "name: review\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      pr_url:\n        type: string\n      review_level:\n        type: string\n        default: \"high\"\n      runner_label:\n        type: string\n        default: \"ubuntu-latest\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
+    test_utils::push_file(
+        forgejo_port, &token, &org, "repo",
+        ".forgejo/workflows/review.yml", review_workflow, "add review workflow",
+    ).await;
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 60,
+        default_timeout_secs: 600,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 100,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: Some(forgejo_url),
+        forgejo_token: Some(token),
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 1, // only 1 slot
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await.unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let make = |title: &str| CreateJobRequest {
+        repo: format!("{org}/repo"),
+        title: title.to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 300,
+        review: ReviewLevel::Low,
+        max_retries: 0,
+        initial_state: None,
+    };
+
+    let key1 = jobs::create_job(&state, make("First")).await.unwrap();
+    let key2 = jobs::create_job(&state, make("Second")).await.unwrap();
+
+    // Dispatch first job
+    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key1).await.unwrap();
+    assert_eq!(state.jobs.get(&key1).unwrap().state, JobState::OnTheStack);
+    assert_eq!(state.jobs.get(&key2).unwrap().state, JobState::OnDeck);
+
+    // Yield first job — should free slot and auto-dispatch second
+    let worker_id = format!("action-{key1}");
+    let outcome = WorkerOutcome {
+        worker_id: worker_id.clone(),
+        job_key: key1.clone(),
+        outcome: OutcomeType::Yield { pr_url: format!("http://forgejo/{org}/repo/pulls/1") },
+        token_usage: None,
+    };
+    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    assert_eq!(state.jobs.get(&key1).unwrap().state, JobState::InReview);
+    assert_eq!(
+        state.jobs.get(&key2).unwrap().state,
+        JobState::OnTheStack,
+        "second job should be auto-dispatched after first yields"
+    );
+}
+
+#[tokio::test]
+async fn changes_requested_in_dispatch_queue() {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let forgejo = test_utils::start_forgejo().await;
+    let forgejo_port = test_utils::forgejo_port(&forgejo).await;
+    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+
+    let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
+    let token = creds.admin_token;
+
+    let org = format!("cr{}", &prefix[..8]);
+    test_utils::create_test_repo(forgejo_port, &token, &org, "repo").await;
+
+    let workflow = "name: work\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      review_feedback:\n        type: string\n        default: \"\"\n      is_rework:\n        type: string\n        default: \"false\"\n      runner_label:\n        type: string\n        default: \"ubuntu-latest\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
+    test_utils::push_file(
+        forgejo_port, &token, &org, "repo",
+        ".forgejo/workflows/work.yml", workflow, "add workflow",
+    ).await;
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 60,
+        default_timeout_secs: 600,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 100,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: Some(forgejo_url),
+        forgejo_token: Some(token),
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 1,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await.unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+
+    // Create a ChangesRequested job (high priority) and an OnDeck job (low priority)
+    let req_cr = CreateJobRequest {
+        repo: format!("{org}/repo"),
+        title: "CR job".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 90,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 300,
+        review: ReviewLevel::Low,
+        max_retries: 0,
+        initial_state: None,
+    };
+    let key_cr = jobs::create_job(&state, req_cr).await.unwrap();
+
+    // Simulate work cycle → ChangesRequested (release claim so dispatch_action can re-acquire)
+    let worker_id = format!("action-{key_cr}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key_cr, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key_cr, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::release_claim(&state, &key_cr).await.unwrap();
+    jobs::transition_job(&state, &key_cr, JobState::InReview, "test", None).await.unwrap();
+    jobs::transition_job(&state, &key_cr, JobState::ChangesRequested, "test", None).await.unwrap();
+
+    let req_od = CreateJobRequest {
+        repo: format!("{org}/repo"),
+        title: "OnDeck job".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 10,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 300,
+        review: ReviewLevel::Low,
+        max_retries: 0,
+        initial_state: None,
+    };
+    let key_od = jobs::create_job(&state, req_od).await.unwrap();
+
+    // Dispatch next — ChangesRequested job has higher priority
+    chuggernaut_dispatcher::assignment::try_dispatch_next(&state).await.unwrap();
+
+    assert_eq!(
+        state.jobs.get(&key_cr).unwrap().state,
+        JobState::OnTheStack,
+        "ChangesRequested job with higher priority should be dispatched"
+    );
+    assert_eq!(state.jobs.get(&key_od).unwrap().state, JobState::OnDeck);
 }

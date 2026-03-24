@@ -69,6 +69,7 @@ The dispatcher is the single coordinator in chuggernaut. It owns all job state t
     Done     — admin close (walks reverse deps)
     Revoked  — admin close --revoke (dependents stay blocked)
     admin requeue → dispatcher checks deps → Blocked or OnDeck
+    admin requeue --target on-ice → OnIce (from Failed)
 ```
 
 ### State Transition Rules
@@ -92,6 +93,7 @@ The dispatcher is the single coordinator in chuggernaut. It owns all job state t
 | Failed | OnDeck | Auto-retry (retry_count < max_retries) | Increment retry_count, set `retry_after` = now + min(30s × 2^retry_count, 10min). Monitor detects eligible jobs and publishes advisory; dispatcher transitions to OnDeck and dispatches new action. |
 | Failed | Failed | Retry exhausted | Stay; manual requeue required |
 | Failed | OnDeck or Blocked | Admin requeue | Check deps; route accordingly |
+| Failed | OnIce | Admin requeue --target on-ice | Put failed job on hold for later |
 | Any | Done | Admin close | If claimed: release claim. Update job KV (CAS), walk reverse deps |
 | Any | Revoked | Admin close --revoke | If claimed: release claim. Update job KV (CAS) (dependents stay blocked) |
 
@@ -171,7 +173,7 @@ Job reaches OnDeck → dispatcher dispatches action:
     - If tombstone: CAS overwrites
     - If active entry: fail (already claimed)
   → On success:
-    - CAS update chuggernaut.jobs KV: state → OnTheStack, last_worker_id → worker_id
+    - CAS update chuggernaut.jobs KV: state → OnTheStack
     - Dispatch Forgejo Action workflow (job_key, nats_url, review_feedback)
     - Publish JobTransition{OnDeck → OnTheStack}
   → On dispatch failure:
@@ -337,9 +339,14 @@ POST /jobs/{key}/requeue
 POST /jobs/{key}/close
   Body: { "revoke": false }
   Returns: 200
+
+POST /jobs/{key}/channel/send
+  Body: { "message": "...", "sender": "ui" }
+  Returns: 200 (publishes to NATS channel inbox)
+  404 if job not found
 ```
 
-These HTTP endpoints publish the corresponding NATS admin messages internally. Provided for convenience (graph viewer forms, simple scripts) alongside the CLI.
+These HTTP endpoints call dispatcher logic directly (not via NATS round-trip). Provided for convenience (graph viewer forms, simple scripts) alongside the CLI.
 
 ---
 
@@ -347,8 +354,10 @@ These HTTP endpoints publish the corresponding NATS admin messages internally. P
 
 | Env Var | Default | Notes |
 |---------|---------|-------|
-| `CHUGGERNAUT_NATS_URL` | `nats://localhost:4222` | NATS connection |
+| `CHUGGERNAUT_NATS_URL` | `nats://localhost:4222` | NATS connection (dispatcher) |
+| `CHUGGERNAUT_NATS_WORKER_URL` | (same as NATS_URL) | NATS URL passed to action workers. Set to `nats://host.docker.internal:4222` when workers run in Docker. |
 | `CHUGGERNAUT_HTTP_LISTEN` | `0.0.0.0:8080` | HTTP API + SSE listen address |
+| `CHUGGERNAUT_STATIC_DIR` | (workspace `static/`) | Directory containing `index.html`. Dispatcher panics at startup if not found. In Docker, mount as volume. |
 | `CHUGGERNAUT_LEASE_SECS` | `60` | Default claim lease duration |
 | `CHUGGERNAUT_DEFAULT_TIMEOUT_SECS` | `3600` | Default job timeout if not set on job |
 | `CHUGGERNAUT_CAS_MAX_RETRIES` | `5` | CAS retry attempts before giving up |
