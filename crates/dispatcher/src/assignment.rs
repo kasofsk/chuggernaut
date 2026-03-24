@@ -63,6 +63,17 @@ pub async fn try_assign_job(
         return Ok(false);
     }
 
+    // Action-type jobs: dispatch Forgejo Action directly, no worker needed
+    if job.worker_type.as_deref() == Some("action") {
+        match crate::action_dispatch::dispatch_action(state, job_key).await {
+            Ok(()) => return Ok(true),
+            Err(e) => {
+                debug!(job_key, "action dispatch failed: {e}");
+                return Ok(false);
+            }
+        }
+    }
+
     // Get all idle workers, sorted by longest idle (oldest last_seen first)
     let mut idle_workers: Vec<WorkerInfo> = state
         .workers

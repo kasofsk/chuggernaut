@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 chuggernaut-types = { workspace = true }
 chuggernaut-nats = { workspace = true }
+chuggernaut-forgejo-api = { workspace = true }
 anyhow = { workspace = true }
 async-nats = { workspace = true }
 async-stream = { workspace = true }
@@ -24,6 +25,7 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 ntest = "0.9.5"
+reqwest = { workspace = true }
 testcontainers = "0.27.2"
 testcontainers-modules = { version = "0.15.0", features = ["nats"] }
 tokio-test = "0.4.5"

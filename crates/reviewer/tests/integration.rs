@@ -233,6 +233,9 @@ async fn setup() -> TestEnv {
         job_retention_secs: 86400,
         activity_limit: 50,
         blacklist_ttl_secs: 3600,
+        forgejo_url: Some(forgejo_url.clone()),
+        forgejo_token: Some(token.clone()),
+        action_workflow: "review-work.yml".to_string(),
     };
 
     let nats_client = async_nats::connect(&nats_url).await.unwrap();

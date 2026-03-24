@@ -2,8 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
+use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
-use testcontainers::ImageExt;
+use testcontainers::{GenericImage, ImageExt};
 use testcontainers_modules::nats::{Nats, NatsServerCmd};
 
 use chuggernaut_dispatcher::{
@@ -58,6 +59,9 @@ async fn setup() -> Arc<DispatcherState> {
         job_retention_secs: 86400,
         activity_limit: 50,
         blacklist_ttl_secs: 3600,
+        forgejo_url: None,
+        forgejo_token: None,
+        action_workflow: "work.yml".to_string(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -763,6 +767,9 @@ async fn monitor_lease_expiry_fails_job() {
         job_retention_secs: 86400,
         activity_limit: 50,
         blacklist_ttl_secs: 3600,
+        forgejo_url: None,
+        forgejo_token: None,
+        action_workflow: "work.yml".to_string(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -850,4 +857,178 @@ async fn admin_requeue_from_failed() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnDeck);
+}
+
+// ---------------------------------------------------------------------------
+// Action dispatch
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn action_dispatch_creates_claim_and_transitions() {
+    // This test verifies the dispatcher's action dispatch path WITHOUT a real
+    // Forgejo runner. It creates a Forgejo instance with a noop workflow file,
+    // then dispatches an action-type job. The dispatch should create a claim
+    // and transition the job to OnTheStack.
+    //
+    // The action won't actually run (no runner), but we verify the dispatcher
+    // side of the protocol is correct.
+
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    // Start Forgejo for this test
+    let forgejo = testcontainers::GenericImage::new("codeberg.org/forgejo/forgejo", "14")
+        .with_exposed_port(3000.tcp())
+        .with_wait_for(WaitFor::seconds(5))
+        .with_env_var("FORGEJO__database__DB_TYPE", "sqlite3")
+        .with_env_var("FORGEJO__security__INSTALL_LOCK", "true")
+        .with_env_var("FORGEJO__service__DISABLE_REGISTRATION", "true")
+        .with_env_var("FORGEJO__actions__ENABLED", "true")
+        .with_env_var("FORGEJO__log__LEVEL", "Warn")
+        .with_startup_timeout(Duration::from_secs(120))
+        .start()
+        .await
+        .unwrap();
+
+    let forgejo_port = forgejo.get_host_port_ipv4(3000.tcp()).await.unwrap();
+    let forgejo_url = format!("http://127.0.0.1:{forgejo_port}");
+
+    // Wait for API
+    let http = reqwest::Client::new();
+    for _ in 0..60 {
+        if http.get(format!("{forgejo_url}/api/v1/version"))
+            .send().await.map(|r| r.status().is_success()).unwrap_or(false) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    // Small extra wait for Forgejo to fully initialize
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Create admin user — don't require exit code 0 so we can read stderr
+    let mut exec_result = forgejo.exec(
+        ExecCommand::new([
+            "su-exec", "git", "forgejo", "admin", "user", "create",
+            "--admin", "--username", "testadmin", "--password", "testadmin",
+            "--email", "testadmin@test.local", "--must-change-password=false",
+        ]),
+    ).await.unwrap();
+    let stdout = exec_result.stdout_to_vec().await.unwrap();
+    let stderr = exec_result.stderr_to_vec().await.unwrap();
+    let exit = exec_result.exit_code().await.unwrap();
+    eprintln!("exec exit={exit:?} stdout={} stderr={}",
+        String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
+    assert_eq!(exit, Some(0), "admin user creation failed");
+
+    let token_resp: serde_json::Value = http
+        .post(format!("{forgejo_url}/api/v1/users/testadmin/tokens"))
+        .basic_auth("testadmin", Some("testadmin"))
+        .json(&serde_json::json!({"name": "test", "scopes": ["all"]}))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    let token = token_resp["sha1"].as_str().unwrap().to_string();
+
+    // Create org + repo + workflow
+    let org = format!("org{}", &prefix[..8]);
+    http.post(format!("{forgejo_url}/api/v1/orgs"))
+        .header("Authorization", format!("token {token}"))
+        .json(&serde_json::json!({"username": &org, "visibility": "public"}))
+        .send().await.unwrap();
+
+    http.post(format!("{forgejo_url}/api/v1/orgs/{org}/repos"))
+        .header("Authorization", format!("token {token}"))
+        .json(&serde_json::json!({"name": "repo", "default_branch": "main", "auto_init": true}))
+        .send().await.unwrap();
+
+    // Push a noop workflow so dispatch_workflow succeeds
+    let workflow = "name: work\non:\n  workflow_dispatch:\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
+    http.post(format!("{forgejo_url}/api/v1/repos/{org}/repo/contents/.forgejo/workflows/work.yml"))
+        .header("Authorization", format!("token {token}"))
+        .json(&serde_json::json!({
+            "message": "add workflow",
+            "content": base64_encode(workflow)
+        }))
+        .send().await.unwrap();
+
+    // Set up dispatcher with Forgejo config
+    let config = Config {
+        nats_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 60,
+        default_timeout_secs: 600,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 100,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        blacklist_ttl_secs: 3600,
+        forgejo_url: Some(forgejo_url),
+        forgejo_token: Some(token),
+        action_workflow: "work.yml".to_string(),
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, config.blacklist_ttl_secs, Some(&prefix))
+        .await.unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    // Create an action-type job
+    let req = CreateJobRequest {
+        repo: format!("{org}/repo"),
+        title: "Action dispatch test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        worker_type: Some("action".to_string()),
+        platform: None,
+        timeout_secs: 300,
+        review: ReviewLevel::Low,
+        max_retries: 0,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Trigger assignment — should dispatch action directly
+    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key).await.unwrap();
+
+    // Verify: job is OnTheStack, claim exists with action- prefix
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
+
+    let (claim, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key)
+        .await.unwrap().unwrap();
+    assert!(claim.worker_id.starts_with("action-"), "worker_id should be action-{key}");
+}
+
+fn base64_encode(s: &str) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes = s.as_bytes();
+    let mut result = String::new();
+    let mut i = 0;
+    while i + 2 < bytes.len() {
+        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | bytes[i + 2] as u32;
+        result.push(CHARS[(n >> 18 & 63) as usize] as char);
+        result.push(CHARS[(n >> 12 & 63) as usize] as char);
+        result.push(CHARS[(n >> 6 & 63) as usize] as char);
+        result.push(CHARS[(n & 63) as usize] as char);
+        i += 3;
+    }
+    let rem = bytes.len() - i;
+    if rem == 2 {
+        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
+        result.push(CHARS[(n >> 18 & 63) as usize] as char);
+        result.push(CHARS[(n >> 12 & 63) as usize] as char);
+        result.push(CHARS[(n >> 6 & 63) as usize] as char);
+        result.push('=');
+    } else if rem == 1 {
+        let n = (bytes[i] as u32) << 16;
+        result.push(CHARS[(n >> 18 & 63) as usize] as char);
+        result.push(CHARS[(n >> 12 & 63) as usize] as char);
+        result.push('=');
+        result.push('=');
+    }
+    result
 }

@@ -3,19 +3,25 @@ name = "chuggernaut-worker"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "chuggernaut-worker"
+path = "src/main.rs"
+
 [dependencies]
 chuggernaut-types = { workspace = true }
 chuggernaut-forgejo-api = { workspace = true }
 chuggernaut-nats = { workspace = true }
+chuggernaut-channel = { path = "../channel" }
 async-nats = { workspace = true }
 chrono = { workspace = true }
+clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-bytes.workspace = true
-futures.workspace = true
+tracing-subscriber = { workspace = true }
 anyhow.workspace = true
-async-trait = "0.1.89"
+futures.workspace = true
 tokio-util = "0.7.18"
+uuid = { workspace = true }

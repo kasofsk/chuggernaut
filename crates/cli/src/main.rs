@@ -1,10 +1,8 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
-use tracing::info;
 
 use chuggernaut_nats::NatsClient;
 use chuggernaut_types::*;
@@ -89,24 +87,6 @@ enum Commands {
     Channel {
         #[command(subcommand)]
         action: ChannelAction,
-    },
-    /// Launch a SimWorker
-    Sim {
-        /// Worker ID
-        #[arg(long, env = "CHUGGERNAUT_WORKER_ID")]
-        worker_id: Option<String>,
-        /// Forgejo URL
-        #[arg(long, env = "CHUGGERNAUT_FORGEJO_URL")]
-        forgejo_url: String,
-        /// Forgejo token
-        #[arg(long, env = "CHUGGERNAUT_FORGEJO_TOKEN")]
-        forgejo_token: String,
-        /// Simulated work delay in seconds
-        #[arg(long, default_value = "5")]
-        delay: u64,
-        /// Capabilities (comma-separated)
-        #[arg(long, value_delimiter = ',')]
-        capabilities: Vec<String>,
     },
     /// Seed jobs from a fixture file
     Seed {
@@ -377,31 +357,6 @@ async fn main() -> Result<()> {
                 println!("Response sent to {key}");
             }
         },
-
-        Commands::Sim {
-            worker_id,
-            forgejo_url,
-            forgejo_token,
-            delay,
-            capabilities,
-        } => {
-            let id = worker_id.unwrap_or_else(|| {
-                format!("sim-{}", &uuid::Uuid::new_v4().to_string()[..8])
-            });
-            info!(worker_id = id, "starting SimWorker");
-
-            let config = chuggernaut_worker::config::WorkerConfig::new(
-                id,
-                cli.nats_url,
-                forgejo_url,
-                forgejo_token,
-                "sim".to_string(),
-                capabilities,
-            );
-
-            let executor = Arc::new(chuggernaut_worker::sim::SimWorker::new(config.clone(), delay));
-            chuggernaut_worker::lifecycle::run(config, executor).await?;
-        }
 
         Commands::Seed { repo, fixture } => {
             let content = std::fs::read_to_string(&fixture)?;

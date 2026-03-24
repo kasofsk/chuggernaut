@@ -1,0 +1,10 @@
+log:
+  level: info
+
+runner:
+  capacity: 1
+  timeout: 10m
+
+container:
+  force_pull: false
+  privileged: false

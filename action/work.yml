@@ -1,0 +1,24 @@
+name: chuggernaut-work
+on:
+  workflow_dispatch:
+    inputs:
+      job_key:
+        description: "Job key (e.g. acme.payments.57)"
+        required: true
+        type: string
+      nats_url:
+        description: "NATS server URL"
+        required: true
+        type: string
+
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Execute chuggernaut worker
+        run: chuggernaut-worker --job-key "${{ inputs.job_key }}" --nats-url "${{ inputs.nats_url }}" --forgejo-url "${{ github.server_url }}"
+        env:
+          CHUGGERNAUT_FORGEJO_TOKEN: ${{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}
+          CHUGGERNAUT_COMMAND: claude

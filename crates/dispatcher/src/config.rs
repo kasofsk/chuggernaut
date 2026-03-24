@@ -11,6 +11,9 @@ pub struct Config {
     pub job_retention_secs: u64,
     pub activity_limit: usize,
     pub blacklist_ttl_secs: u64,
+    pub forgejo_url: Option<String>,
+    pub forgejo_token: Option<String>,
+    pub action_workflow: String,
 }
 
 impl Config {
@@ -27,6 +30,10 @@ impl Config {
             job_retention_secs: parse_env("CHUGGERNAUT_JOB_RETENTION_SECS", 86400),
             activity_limit: parse_env("CHUGGERNAUT_ACTIVITY_LIMIT", 50),
             blacklist_ttl_secs: parse_env("CHUGGERNAUT_BLACKLIST_TTL_SECS", 3600),
+            forgejo_url: env::var("CHUGGERNAUT_FORGEJO_URL").ok(),
+            forgejo_token: env::var("CHUGGERNAUT_FORGEJO_TOKEN").ok(),
+            action_workflow: env::var("CHUGGERNAUT_ACTION_WORKFLOW")
+                .unwrap_or_else(|_| "work.yml".to_string()),
         }
     }
 }

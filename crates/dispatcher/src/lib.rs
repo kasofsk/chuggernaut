@@ -1,3 +1,4 @@
+pub mod action_dispatch;
 pub mod assignment;
 pub mod claims;
 pub mod config;

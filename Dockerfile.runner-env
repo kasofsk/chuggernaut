@@ -1,0 +1,15 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates jq curl \
+  && rm -rf /var/lib/apt/lists/*
+
+# Copy the chuggernaut-worker binary (built outside Docker)
+COPY target/release/chuggernaut-worker /usr/local/bin/chuggernaut-worker
+
+# Copy mock-claude for testing
+COPY action/mock-claude/mock-claude.sh /usr/local/bin/mock-claude
+
+# Git config for commits
+RUN git config --system user.email "chuggernaut@test.local" \
+ && git config --system user.name "Chuggernaut Worker"
