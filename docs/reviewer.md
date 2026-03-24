@@ -1,32 +1,35 @@
-# Reviewer
+# Review
 
-The reviewer is a standalone **singleton** process that automates PR review, merge, and rework routing. It subscribes to job transitions and reacts when a job enters InReview. Exactly one instance must run — multiple instances would race on the in-memory dedup set and merge queue.
-
-**Dependency:** The reviewer reads job data from the dispatcher's HTTP API. If the dispatcher is down, the reviewer cannot process new reviews (it retries until the API is available).
+Review is handled by the worker binary in review mode (`--mode review`), dispatched as a Forgejo Action. There is no standalone reviewer process — the dispatcher dispatches review actions directly when a job enters InReview.
 
 ---
 
 ## Overview
 
 ```
-CHUGGERNAUT-TRANSITIONS stream
-  │ filter: to_state == InReview
+Worker yields PR → dispatcher transitions to InReview
+  │
   ▼
-┌─────────────────────────────────────────┐
-│ Reviewer                                 │
+┌──────────────────────────────────────────┐
+│ Dispatcher: dispatch_review_action       │
+│  1. Dispatch review.yml Forgejo Action   │
+│     inputs: job_key, nats_url, pr_url,   │
+│             review_level                 │
+└──────────────┬───────────────────────────┘
+               │
+               ▼
+┌──────────────────────────────────────────┐
+│ Review Action (inside container)         │
 │                                          │
-│  1. Read job from dispatcher API         │
-│  2. Read pr_url from job metadata        │
-│  3. Dispatch review action (Forgejo CI)  │
-│  4. Poll until action completes          │
-│  5. Read PR review state from Forgejo    │
-│  6. Act on decision:                     │
-│     - approve → merge PR via queue       │
-│     - changes_requested → report back    │
-│     - escalate → add human reviewer,     │
-│       poll until human acts              │
+│  1. Clone repo, checkout PR branch       │
+│  2. Get diff (origin/main...HEAD)        │
+│  3. Run Claude with review prompt        │
+│  4. Parse decision from Claude output    │
+│  5. Post PR review to Forgejo            │
+│  6. If approved: attempt merge (retries) │
 │  7. Publish ReviewDecision to NATS       │
-└─────────────────────────────────────────┘
+│  8. Exit                                 │
+└──────────────────────────────────────────┘
 ```
 
 ---
@@ -35,209 +38,161 @@ CHUGGERNAUT-TRANSITIONS stream
 
 ### 1. Trigger
 
-The reviewer subscribes to `CHUGGERNAUT-TRANSITIONS` with a durable pull consumer that filters for `to_state == "in-review"`. On each transition:
+When a worker yields (Yield outcome with pr_url), the dispatcher:
 
-1. Deduplicate: check an in-memory `DashSet<String>` (job_key) to prevent concurrent handling of the same job. The entry is removed after `ReviewDecision` is published, allowing the same job to be reviewed again in future rounds.
-2. Delay: wait `CHUGGERNAUT_REVIEWER_DELAY_SECS` (default 3) to avoid race with PR creation
-3. Fetch job from dispatcher API: `GET /jobs/{key}`
-4. Read `pr_url` from job metadata
+1. Transitions the job to InReview
+2. Reads the job's `review` level
+3. Dispatches `review.yml` Forgejo Actions workflow with inputs:
+   - `job_key` — job identifier
+   - `nats_url` — NATS server address
+   - `pr_url` — the PR to review
+   - `review_level` — low/medium/high
 
-### 2. Review Requirement
+### 2. Review Action
 
-The review requirement is stored in the job's `review` field:
+The review action runs `chuggernaut-worker --mode review`. The worker:
 
-| Value | Behavior |
-|-------|----------|
-| `"human"` | Skip automated review, immediately escalate to human reviewer |
-| `"low"` | Low confidence threshold — Claude reviewer is lenient |
-| `"medium"` | Medium confidence threshold |
-| `"high"` (default) | High confidence threshold — Claude reviewer is strict |
+1. Clones the repo and checks out the PR's head branch
+2. Gets the diff between `origin/main` and `HEAD`
+3. Runs Claude as a subprocess with the diff as context
+4. Parses Claude's stdout for a JSON decision:
+   ```json
+   {"decision": "approved", "feedback": "Looks good"}
+   ```
+   or:
+   ```json
+   {"decision": "changes_requested", "feedback": "Fix the tests"}
+   ```
+5. Posts a PR review to Forgejo (APPROVED or REQUEST_CHANGES)
+6. If approved: attempts to merge the PR
+7. Publishes `ReviewDecision` to NATS with optional `token_usage`
 
-### 3. Dispatch Review Action
+### 3. Decision Handling
 
-If not `review: human`:
+The dispatcher receives the `ReviewDecision` and acts:
 
-1. Find the PR's head branch from `pr_url`
-2. Dispatch the `review-work.yml` Forgejo Actions workflow on that branch
-3. Pass inputs: `pr_url`, `review_level`, `job_key`
-4. Poll the action run status every `CHUGGERNAUT_REVIEWER_POLL_SECS` (default 10)
-5. Timeout after `CHUGGERNAUT_REVIEWER_ACTION_TIMEOUT_SECS` (default 600)
-6. If the action times out or errors: escalate to human (do not retry the action)
+#### Approved
 
-The review action (a Forgejo Actions workflow) runs Claude to evaluate the PR and submits a PR review with state APPROVED, REQUEST_CHANGES, or COMMENT.
+1. Transition job to Done
+2. Walk reverse deps — unblock dependents
+3. Try to dispatch next queued job
 
-### 4. Read Decision
+The review action already merged the PR before publishing the Approved decision.
 
-After the action completes:
+#### Changes Requested
 
-1. Fetch PR reviews from Forgejo API
-2. Find the most recent review submitted **after the action run started** (filters out stale reviews from previous rounds on the same PR)
-3. Map review state to decision:
-   - `APPROVED` → approve
-   - `REQUEST_CHANGES` → changes_requested (extract feedback from review body)
-   - `COMMENT` → treat as informational, escalate to human
+1. Transition job to ChangesRequested
+2. Dispatch a new work action with `review_feedback` and `is_rework=true`
+3. The worker checks out the existing branch and addresses the feedback
 
-### 5. Act on Decision
+#### Escalated
 
-#### Approved → Merge
+1. Transition job to Escalated
+2. The job stays Escalated until manually resolved (admin requeue/close)
 
-1. Acquire per-repo merge lock from `chuggernaut.merge-queue` KV (CAS)
-2. If lock held by another: queue this PR in `{owner}.{repo}.queue`
-3. If lock acquired:
-   a. Merge PR via Forgejo API (rebase strategy)
-   b. On success: publish `ReviewDecision{Approved}`
-   c. On failure (merge conflict): publish `ReviewDecision{ChangesRequested, feedback: "Merge conflict..."}`
-   d. Release lock
-   e. Process next entry from queue (if any)
-
-#### Changes Requested → Report Back
-
-1. Increment `chuggernaut.rework-counts` KV for this job
-2. If rework_count > 3: escalate to human instead
-3. Otherwise: publish `ReviewDecision{ChangesRequested, feedback: "..."}`
-
-The dispatcher receives the review decision and:
-- Transitions job to ChangesRequested
-- Routes to the original worker with `is_rework: true` + feedback
-
-#### Escalate → Add Human Reviewer
-
-1. Add human reviewer to the PR via Forgejo API
-2. Publish `ReviewDecision{Escalated, reviewer_login: "..."}`
-3. Dispatcher transitions job to Escalated
-
-The reviewer then polls the Forgejo PR API every `CHUGGERNAUT_REVIEWER_ESCALATION_POLL_SECS` (default 30) to detect the human's action:
-
-- **Human approves:** Reviewer detects the approval via PR review state, merges the PR through the merge queue, and publishes `ReviewDecision{Approved}`. Dispatcher transitions to Done.
-- **Human requests changes:** Reviewer detects `REQUEST_CHANGES` review state and publishes `ReviewDecision{ChangesRequested, feedback}`. Dispatcher transitions to ChangesRequested and routes rework to the original worker.
-
-The human approves or requests changes in Forgejo's PR interface — they do not merge directly. The reviewer handles the merge to maintain merge queue serialization.
+Escalation happens when:
+- The review subprocess fails or cannot parse a decision
+- Claude returns `{"decision": "escalate"}`
+- Review level is `human` (dispatcher would skip automated review — not yet implemented)
 
 ---
 
-## Merge Queue
+## Merge Strategy
 
-Prevents concurrent merges in the same repo that could cause rebase conflicts.
+The review action attempts to merge the PR directly after approval:
 
-### Lock Protocol
+1. Call Forgejo merge API (merge strategy)
+2. If it fails (conflict, lock, etc.): retry up to 3 times with 5s/10s/15s delays
+3. If all retries fail: publish `ChangesRequested` with merge conflict feedback instead of `Approved`
 
-```
-Key: chuggernaut.merge-queue / {owner}.{repo}.lock
-Value: { "holder": "job_key", "acquired_at": "..." }
-TTL: 5 minutes (refreshed during long merges)
-
-1. CAS create (revision 0) → lock acquired
-2. On success: proceed with merge
-3. On failure (key exists): queue in {owner}.{repo}.queue
-4. After merge: delete lock, check queue, process next
-```
-
-The 5-minute TTL acts as a safety net: if the reviewer crashes while holding a lock, the lock expires and the queue unblocks. On startup, the reviewer also clears any locks it previously held (see Startup Reconciliation).
-
-### Queue
-
-```
-Key: chuggernaut.merge-queue / {owner}.{repo}.queue
-Value: [
-  { "job_key": "acme.payments.57", "pr_url": "...", "queued_at": "..." },
-  { "job_key": "acme.payments.58", "pr_url": "...", "queued_at": "..." }
-]
-```
-
-Queue is processed FIFO (by `queued_at`). After each merge, the lock holder:
-1. Reads the queue entry
-2. Pops the first entry
-3. Writes the updated queue back (CAS)
-4. Merges the next PR (or releases lock if queue empty)
-
-This serialization is important at scale: with many workers finishing concurrently, the queue prevents a storm of competing rebase attempts.
-
-### Merge Strategy
-
-Uses Forgejo's `rebase` merge method. Forgejo rebases the PR branch onto the target before fast-forwarding. This catches conflicts at merge time rather than after.
-
-If the rebase fails (conflict), the reviewer:
-1. Publishes `ReviewDecision{ChangesRequested, feedback: "Merge conflict with main. Please rebase and resolve."}`
-2. The worker gets a rework assignment and resolves the conflict
+This simplifies the old merge queue: concurrent merges to the same repo may occasionally conflict, but the retry + rework cycle handles it naturally. At the scale where multiple PRs for the same repo are approved within seconds of each other, this is rare.
 
 ---
 
 ## Done Detection
 
-The reviewer is the primary mechanism for transitioning jobs to Done:
+The review action is the mechanism for transitioning jobs to Done:
 
-1. Reviewer merges PR
+1. Review action merges PR
 2. Publishes `ReviewDecision{Approved, job_key, pr_url}`
-3. Dispatcher receives decision, transitions to Done
+3. Dispatcher transitions to Done
 4. Dispatcher walks reverse deps, unblocks dependents
 
-**No CDC needed.** The reviewer already knows it merged the PR — it reports success directly. No need to poll PostgreSQL or watch for issue closure.
-
-**Merge invariant:** All merges go through the reviewer and merge queue. Humans review and approve PRs in Forgejo but do not merge directly. Forgejo branch protection should be configured to prevent direct merges (require review approval, restrict merge to the `chuggernaut-reviewer` account).
+**No CDC needed.** The review action already knows it merged the PR — it reports success directly.
 
 ---
 
-## Activity and Journal
+## Token Usage
 
-The reviewer records its actions via fire-and-forget NATS messages:
+Both work and review actions report `TokenUsage` in their outcomes:
 
+```json
+{
+  "input_tokens": 15000,
+  "output_tokens": 3500,
+  "cache_read_tokens": 8000,
+  "cache_write_tokens": 2000
+}
 ```
-chuggernaut.activity.append → { job_key, entry: { kind: "review_started", ... } }
-chuggernaut.activity.append → { job_key, entry: { kind: "review_action_dispatched", ... } }
-chuggernaut.activity.append → { job_key, entry: { kind: "review_approved", ... } }
-chuggernaut.journal.append  → { action: "merged", job_key, pr_url, ... }
+
+The dispatcher stores each action's usage as an `ActionTokenRecord` on the Job:
+
+```json
+{
+  "action_type": "review",
+  "token_usage": { "input_tokens": 15000, "output_tokens": 3500, ... },
+  "completed_at": "2026-03-24T10:05:00Z"
+}
 ```
 
----
-
-## Startup Reconciliation
-
-On startup, the reviewer:
-
-1. **Clear stale merge locks:** scan `chuggernaut.merge-queue` for lock keys, delete any that exist (the reviewer is restarting, so any lock it held is stale)
-2. **Resume InReview jobs:** query dispatcher API for all jobs in InReview state (`GET /jobs?state=in-review`), trigger the review flow for any not already in the dedup set
-3. **Resume Escalated jobs:** query dispatcher API for all jobs in Escalated state (`GET /jobs?state=escalated`), resume polling Forgejo for human decisions
-
-This handles the case where the reviewer restarts while reviews or escalations are pending.
-
-### Crash Recovery Edge Cases
-
-**Duplicate review actions:** If the reviewer crashes mid-review, the action may still be running. On restart, before dispatching a new review action, the reviewer checks Forgejo for in-progress action runs on the PR branch. If one exists, it waits for that run instead of dispatching a duplicate.
-
-**Already-merged PR:** If the reviewer crashes after merging a PR but before acking the transition, the durable consumer replays the event. On re-processing, the reviewer detects the PR is already merged (via Forgejo API) and publishes `ReviewDecision{Approved}` without attempting to merge again.
-
----
-
-## Forgejo API Resilience
-
-All Forgejo API calls (merge, review submission, adding reviewers, fetching PR state) retry with exponential backoff: 3 attempts at 2s/4s/8s intervals. If all retries fail, the reviewer escalates the job to a human reviewer rather than retrying indefinitely.
+This allows the UI to show per-action token usage broken down by work vs review, including across rework cycles.
 
 ---
 
 ## Configuration
 
+Review-specific dispatcher config:
+
 | Env Var | Default | Notes |
 |---------|---------|-------|
-| `CHUGGERNAUT_NATS_URL` | `nats://localhost:4222` | NATS connection |
-| `CHUGGERNAUT_FORGEJO_URL` | (required) | Forgejo base URL |
-| `CHUGGERNAUT_REVIEWER_FORGEJO_TOKEN` | (required) | Reviewer identity token |
-| `CHUGGERNAUT_REVIEWER_HUMAN_LOGIN` | `you` | Human reviewer for escalation |
-| `CHUGGERNAUT_REVIEWER_DELAY_SECS` | `3` | Delay before reviewing |
-| `CHUGGERNAUT_REVIEWER_WORKFLOW` | `review-work.yml` | Review action workflow file |
-| `CHUGGERNAUT_REVIEWER_RUNNER` | `ubuntu-latest` | Runner label for review action |
-| `CHUGGERNAUT_REVIEWER_ACTION_TIMEOUT_SECS` | `600` | Review action timeout |
-| `CHUGGERNAUT_REVIEWER_POLL_SECS` | `10` | Poll interval for action status |
-| `CHUGGERNAUT_REVIEWER_ESCALATION_POLL_SECS` | `30` | Poll interval for human decisions on escalated PRs |
-| `CHUGGERNAUT_DISPATCHER_URL` | `http://localhost:8080` | Dispatcher HTTP API |
+| `CHUGGERNAUT_REVIEW_WORKFLOW` | `review.yml` | Review action workflow file |
+| `CHUGGERNAUT_REVIEW_RUNNER_LABEL` | `ubuntu-latest` | Runner label for review actions |
+| `CHUGGERNAUT_REWORK_LIMIT` | `3` | Max rework cycles before escalation |
+| `CHUGGERNAUT_HUMAN_LOGIN` | `you` | Human reviewer login for escalation |
+
+Worker review-mode args (passed as workflow inputs):
+
+| Env Var / Arg | Notes |
+|---------------|-------|
+| `CHUGGERNAUT_MODE=review` | Switches worker to review mode |
+| `CHUGGERNAUT_PR_URL` | PR URL to review |
+| `CHUGGERNAUT_REVIEW_LEVEL` | low/medium/high |
 
 ---
 
-## Forgejo Identity
+## Workflow Definition (`action/review.yml`)
 
-The reviewer uses a dedicated Forgejo account (`chuggernaut-reviewer`) for all review operations:
-- Submitting PR reviews (both directly and via the review action — the action receives the reviewer's token)
-- Merging PRs
-- Adding human reviewers
-- Posting escalation comments
-
-This provides a clear audit trail: all automated review activity is attributable to `chuggernaut-reviewer`.
+```yaml
+name: chuggernaut-review
+on:
+  workflow_dispatch:
+    inputs:
+      job_key: { required: true, type: string }
+      nats_url: { required: true, type: string }
+      pr_url: { required: true, type: string }
+      review_level: { required: false, type: string, default: "high" }
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: chuggernaut-worker --mode review
+               --job-key "${{ inputs.job_key }}"
+               --nats-url "${{ inputs.nats_url }}"
+               --forgejo-url "${{ github.server_url }}"
+               --pr-url "${{ inputs.pr_url }}"
+               --review-level "${{ inputs.review_level }}"
+        env:
+          CHUGGERNAUT_FORGEJO_TOKEN: ${{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}
+          CHUGGERNAUT_COMMAND: claude
+```

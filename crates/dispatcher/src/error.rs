@@ -20,9 +20,6 @@ pub enum DispatcherError {
     #[error("Job not found: {0}")]
     JobNotFound(String),
 
-    #[error("Worker not found: {0}")]
-    WorkerNotFound(String),
-
     #[error("Validation error: {0}")]
     Validation(String),
 

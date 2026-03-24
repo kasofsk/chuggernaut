@@ -12,4 +12,3 @@ pub use chuggernaut_nats::NatsClient;
 pub mod nats_init;
 pub mod recovery;
 pub mod state;
-pub mod workers;

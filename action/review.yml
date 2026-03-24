@@ -1,0 +1,38 @@
+name: chuggernaut-review
+on:
+  workflow_dispatch:
+    inputs:
+      job_key:
+        description: "Job key (e.g. acme.payments.57)"
+        required: true
+        type: string
+      nats_url:
+        description: "NATS server URL"
+        required: true
+        type: string
+      pr_url:
+        description: "PR URL to review"
+        required: true
+        type: string
+      review_level:
+        description: "Review level: low, medium, high"
+        required: false
+        type: string
+        default: "high"
+      runner_label:
+        description: "Runner label (maps to container image via runner config)"
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+jobs:
+  review:
+    runs-on: ${{ inputs.runner_label }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Execute chuggernaut review
+        run: chuggernaut-worker --mode review --job-key "${{ inputs.job_key }}" --nats-url "${{ inputs.nats_url }}" --forgejo-url "${{ github.server_url }}" --pr-url "${{ inputs.pr_url }}" --review-level "${{ inputs.review_level }}"
+        env:
+          CHUGGERNAUT_FORGEJO_TOKEN: ${{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}
+          CHUGGERNAUT_COMMAND: claude

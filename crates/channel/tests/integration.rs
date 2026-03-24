@@ -5,9 +5,11 @@ use futures::StreamExt;
 use testcontainers::runners::AsyncRunner;
 use testcontainers::ImageExt;
 use testcontainers_modules::nats::{Nats, NatsServerCmd};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
 
 use chuggernaut_channel::{handle_message, handle_tool_call, mcp, nats_inbox_listener, ChannelState};
+use chuggernaut_test_utils as test_utils;
 use chuggernaut_types::{ChannelMessage, ChannelStatus};
 
 // ---------------------------------------------------------------------------
@@ -27,6 +29,7 @@ fn test_nats_port() -> u16 {
                     .await
                     .unwrap();
                 let port = container.get_host_port_ipv4(4222).await.unwrap();
+                test_utils::register_container_cleanup(container.id());
                 Box::leak(Box::new(container));
                 port
             })
@@ -584,4 +587,328 @@ async fn inbox_listener_skips_invalid_json() {
     let messages = state.lock().await.drain_messages();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].body, "valid");
+}
+
+// ---------------------------------------------------------------------------
+// MCP bridge test: spawn mock subprocess, bridge stdin/stdout, verify NATS
+// ---------------------------------------------------------------------------
+
+/// Inline bash script that acts as a minimal MCP client.
+/// Sends initialize → tools/list → channel_send → update_status → exit.
+/// No git operations — purely exercises the MCP protocol over stdin/stdout.
+const MOCK_MCP_CLIENT: &str = r#"#!/usr/bin/env bash
+set -euo pipefail
+
+log() { echo "mock-mcp: $*" >&2; }
+
+REQ_ID=0
+
+send_request() {
+    local method="$1"
+    local params="$2"
+    REQ_ID=$((REQ_ID + 1))
+    local req="{\"jsonrpc\":\"2.0\",\"id\":${REQ_ID},\"method\":\"${method}\",\"params\":${params}}"
+    log ">>> $method (id=$REQ_ID)"
+    echo "$req"
+    read -r LAST_RESPONSE
+    log "<<< $LAST_RESPONSE"
+}
+
+send_notification() {
+    local method="$1"
+    local params="${2:-{}}"
+    echo "{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":${params}}"
+}
+
+call_tool() {
+    local name="$1"
+    local args="$2"
+    send_request "tools/call" "{\"name\":\"${name}\",\"arguments\":${args}}"
+}
+
+log "starting"
+
+# Initialize
+send_request "initialize" '{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"mock-mcp","version":"0.1.0"}}'
+
+# Notify initialized
+send_notification "notifications/initialized"
+
+# List tools
+send_request "tools/list" '{}'
+
+# Update status
+call_tool "update_status" '{"status":"testing mcp bridge","progress":50}'
+
+# Send channel message
+call_tool "channel_send" '{"message":"hello from mcp bridge test"}'
+
+# Final status
+call_tool "update_status" '{"status":"done","progress":100}'
+
+log "done"
+exit 0
+"#;
+
+/// Runs the MCP bridge loop: reads JSON-RPC from child stdout, dispatches
+/// through handle_message, writes responses back to child stdin.
+/// This is the same logic as worker/src/main.rs lines 204-249.
+#[tokio::test]
+async fn mcp_bridge_subprocess_to_nats() {
+    let nats = nats_client().await;
+    let js = setup_js(&nats).await;
+    let job_key = unique_job_key();
+    let state = Arc::new(Mutex::new(ChannelState::new()));
+    let channel_mode = false; // MCP mode: channel_send + channel_check
+
+    // Subscribe to outbox before spawning
+    let outbox_subject = chuggernaut_types::subjects::CHANNEL_OUTBOX.format(&job_key);
+    let mut outbox_sub = nats.subscribe(outbox_subject).await.unwrap();
+
+    // Write the mock script to a temp file
+    let tmp_dir = std::env::temp_dir().join(format!("mcp-bridge-test-{}", &job_key));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let script_path = tmp_dir.join("mock-mcp.sh");
+    std::fs::write(&script_path, MOCK_MCP_CLIENT).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // Spawn the mock MCP client
+    let mut child = tokio::process::Command::new("bash")
+        .arg(script_path.to_str().unwrap())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .expect("failed to spawn mock MCP client");
+
+    let child_stdin = child.stdin.take().unwrap();
+    let child_stdout = child.stdout.take().unwrap();
+
+    let mut stdin_writer = tokio::io::BufWriter::new(child_stdin);
+    let mut stdout_reader = BufReader::new(child_stdout);
+
+    // Run the MCP bridge loop (same as worker)
+    let bridge_result = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut line_buf = String::new();
+        loop {
+            line_buf.clear();
+            let n = stdout_reader.read_line(&mut line_buf).await?;
+            if n == 0 {
+                break; // child exited
+            }
+            let line = line_buf.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            eprintln!("bridge: read from child: {line}");
+
+            let req: mcp::JsonRpcRequest = match serde_json::from_str(line) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("bridge: non-JSON from child: {e}");
+                    continue;
+                }
+            };
+
+            if let Some(response) = handle_message(
+                req,
+                &state,
+                &nats,
+                &js,
+                &job_key,
+                channel_mode,
+            )
+            .await
+            {
+                eprintln!("bridge: writing response: {response}");
+                stdin_writer.write_all(response.as_bytes()).await?;
+                stdin_writer.write_all(b"\n").await?;
+                stdin_writer.flush().await?;
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
+
+    match &bridge_result {
+        Ok(Ok(())) => eprintln!("bridge: completed successfully"),
+        Ok(Err(e)) => panic!("bridge error: {e}"),
+        Err(_) => panic!("bridge timed out after 10s"),
+    }
+
+    let status = child.wait().await.unwrap();
+    assert!(status.success(), "mock MCP client exited with {status}");
+
+    // Verify: channel_send message arrived on NATS outbox
+    let msg = tokio::time::timeout(Duration::from_secs(2), outbox_sub.next())
+        .await
+        .expect("timeout waiting for outbox message")
+        .unwrap();
+    let channel_msg: ChannelMessage = serde_json::from_slice(&msg.payload).unwrap();
+    assert_eq!(channel_msg.body, "hello from mcp bridge test");
+    assert_eq!(channel_msg.sender, format!("claude:{job_key}"));
+    eprintln!("PASS: channel_send message received on NATS outbox");
+
+    // Verify: update_status wrote to KV
+    let kv = js
+        .get_key_value(chuggernaut_types::buckets::CHANNELS)
+        .await
+        .unwrap();
+    let entry = kv.entry(&job_key).await.unwrap().unwrap();
+    let kv_status: ChannelStatus = serde_json::from_slice(&entry.value).unwrap();
+    assert_eq!(kv_status.status, "done");
+    assert!((kv_status.progress.unwrap() - 1.0).abs() < 0.01); // 100/100 = 1.0
+    eprintln!("PASS: update_status KV entry verified (status=done, progress=1.0)");
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+/// Tests bidirectional MCP-over-NATS: external message → inbox → channel_check,
+/// plus channel_send → outbox. Verifies the full round-trip.
+#[tokio::test]
+async fn mcp_bridge_bidirectional_nats() {
+    let nats = nats_client().await;
+    let js = setup_js(&nats).await;
+    let job_key = unique_job_key();
+    let state = Arc::new(Mutex::new(ChannelState::new()));
+    let (out_tx, _out_rx) = mpsc::channel::<String>(256);
+    let channel_mode = false;
+
+    // Start inbox listener (NATS → state)
+    tokio::spawn(nats_inbox_listener(
+        nats.clone(),
+        job_key.clone(),
+        Arc::clone(&state),
+        out_tx,
+        channel_mode,
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Subscribe to outbox
+    let outbox_subject = chuggernaut_types::subjects::CHANNEL_OUTBOX.format(&job_key);
+    let mut outbox_sub = nats.subscribe(outbox_subject).await.unwrap();
+
+    // Simulate external message arriving via NATS inbox
+    let inbox_subject = chuggernaut_types::subjects::CHANNEL_INBOX.format(&job_key);
+    let ext_msg = make_msg("cli:david", "what is your status?");
+    nats.publish(inbox_subject, serde_json::to_vec(&ext_msg).unwrap().into())
+        .await
+        .unwrap();
+    nats.flush().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Mock client script: channel_check → sees the message → replies via channel_send
+    let script = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+REQ_ID=0
+send_request() {{
+    REQ_ID=$((REQ_ID + 1))
+    echo "{{\"jsonrpc\":\"2.0\",\"id\":${{REQ_ID}},\"method\":\"$1\",\"params\":$2}}"
+    read -r RESP
+    echo "RESP=$RESP" >&2
+}}
+call_tool() {{
+    send_request "tools/call" "{{\"name\":\"$1\",\"arguments\":$2}}"
+}}
+
+# Initialize
+send_request "initialize" '{{"protocolVersion":"2024-11-05","capabilities":{{}},"clientInfo":{{"name":"mock","version":"0.1.0"}}}}'
+echo '{{"jsonrpc":"2.0","method":"notifications/initialized","params":{{}}}}'
+
+# Check inbox — should have the external message
+call_tool "channel_check" '{{}}'
+
+# Reply via channel_send
+call_tool "channel_send" '{{"message":"I am working on the task"}}'
+
+exit 0
+"#
+    );
+
+    let tmp_dir = std::env::temp_dir().join(format!("mcp-bidir-{}", &job_key));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let script_path = tmp_dir.join("mock.sh");
+    std::fs::write(&script_path, &script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut child = tokio::process::Command::new("bash")
+        .arg(script_path.to_str().unwrap())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .unwrap();
+
+    let child_stdin = child.stdin.take().unwrap();
+    let child_stdout = child.stdout.take().unwrap();
+    let mut stdin_writer = tokio::io::BufWriter::new(child_stdin);
+    let mut stdout_reader = BufReader::new(child_stdout);
+
+    let mut channel_check_text = String::new();
+
+    let bridge_result = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut line_buf = String::new();
+        loop {
+            line_buf.clear();
+            let n = stdout_reader.read_line(&mut line_buf).await?;
+            if n == 0 {
+                break;
+            }
+            let line = line_buf.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            let req: mcp::JsonRpcRequest = match serde_json::from_str(line) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            if let Some(response) = handle_message(
+                req, &state, &nats, &js, &job_key, channel_mode,
+            ).await {
+                // Capture channel_check response for assertion
+                if response.contains("channel_check") || response.contains("what is your status") {
+                    channel_check_text = response.clone();
+                }
+                stdin_writer.write_all(response.as_bytes()).await?;
+                stdin_writer.write_all(b"\n").await?;
+                stdin_writer.flush().await?;
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await;
+
+    assert!(bridge_result.is_ok(), "bridge timed out");
+    let status = child.wait().await.unwrap();
+    assert!(status.success(), "mock exited with {status}");
+
+    // Verify channel_check returned the external message
+    assert!(
+        channel_check_text.contains("what is your status"),
+        "channel_check should have returned the inbox message, got: {channel_check_text}"
+    );
+    eprintln!("PASS: channel_check returned external NATS message");
+
+    // Verify channel_send reply arrived on outbox
+    let msg = tokio::time::timeout(Duration::from_secs(2), outbox_sub.next())
+        .await
+        .expect("timeout waiting for outbox")
+        .unwrap();
+    let reply: ChannelMessage = serde_json::from_slice(&msg.payload).unwrap();
+    assert_eq!(reply.body, "I am working on the task");
+    eprintln!("PASS: channel_send reply received on NATS outbox");
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }

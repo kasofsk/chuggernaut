@@ -2,7 +2,18 @@
 //!
 //! Provides standardized container images, versions, and setup helpers
 //! for NATS, Forgejo, and Forgejo Actions runner.
+//!
+//! # Container lifecycle
+//!
+//! Test containers are cleaned up via two mechanisms:
+//! - **watchdog** (testcontainers feature): cleans up on SIGTERM/SIGINT/SIGQUIT
+//! - **atexit hook**: cleans up on normal process exit
+//!
+//! Tests that share a container across the process should use `Box::leak` to
+//! keep the container alive, then call [`register_container_cleanup`] with the
+//! container ID so it gets removed when the process exits.
 
+use std::sync::Mutex;
 use std::time::Duration;
 
 use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort, Mount, WaitFor};
@@ -26,6 +37,41 @@ pub const ADMIN_USER: &str = "chuggernaut-admin";
 pub const ADMIN_PASS: &str = "chuggernaut-admin";
 pub const REVIEWER_USER: &str = "chuggernaut-reviewer";
 pub const REVIEWER_PASS: &str = "chuggernaut-reviewer";
+
+// ---------------------------------------------------------------------------
+// Container cleanup (atexit hook)
+// ---------------------------------------------------------------------------
+
+static CONTAINER_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static ATEXIT_REGISTERED: std::sync::Once = std::sync::Once::new();
+
+extern "C" fn cleanup_containers() {
+    let ids = CONTAINER_IDS.lock().unwrap();
+    if ids.is_empty() {
+        return;
+    }
+    eprintln!("test cleanup: removing {} container(s)", ids.len());
+    let _ = std::process::Command::new("docker")
+        .args(["rm", "-f"])
+        .args(ids.iter().map(|s| s.as_str()))
+        .stderr(std::process::Stdio::null())
+        .output();
+}
+
+/// Register a container ID for removal when the process exits.
+///
+/// Use this after `Box::leak`-ing a shared container so it gets cleaned up
+/// on normal exit. Signal-based cleanup is handled by the testcontainers
+/// `watchdog` feature.
+pub fn register_container_cleanup(container_id: &str) {
+    ATEXIT_REGISTERED.call_once(|| unsafe {
+        libc::atexit(cleanup_containers);
+    });
+    CONTAINER_IDS
+        .lock()
+        .unwrap()
+        .push(container_id.to_string());
+}
 
 // ---------------------------------------------------------------------------
 // NATS

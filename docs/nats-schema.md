@@ -29,7 +29,7 @@ The canonical job store. Every job in the system has an entry here.
   "body": "Retry failed API calls with exponential backoff...",
   "priority": 80,
   "capabilities": ["rust"],
-  "worker_type": null,
+  "worker_type": "action",
   "platform": null,
   "timeout_secs": 3600,
   "review": "high",
@@ -37,17 +37,17 @@ The canonical job store. Every job in the system has an entry here.
   "retry_count": 0,
   "retry_after": null,
   "pr_url": null,
-  "last_worker_id": null,
+  "token_usage": [],
   "created_at": "2026-03-23T10:00:00Z",
   "updated_at": "2026-03-23T10:05:00Z"
 }
 ```
 
-**Priority:** 0–100, higher = more urgent, default 50. Used for assignment ordering and preemption decisions.
+**Priority:** 0–100, higher = more urgent, default 50. Used for dispatch ordering.
 
 **Review levels:** `human`, `low`, `medium`, `high` (default). Determines review automation behavior; see [reviewer.md](reviewer.md).
 
-**States:** `on-ice`, `blocked`, `on-deck`, `on-the-stack`, `needs-help`, `in-review`, `escalated`, `changes-requested`, `done`, `failed`, `revoked`
+**States:** `on-ice`, `blocked`, `on-deck`, `on-the-stack`, `in-review`, `escalated`, `changes-requested`, `done`, `failed`, `revoked`
 
 ### chuggernaut.claims
 
@@ -63,7 +63,7 @@ Exclusive claim state. CAS (compare-and-swap) operations ensure at most one work
 **Value: `ClaimState` JSON**
 ```json
 {
-  "worker_id": "agent-rust-1",
+  "worker_id": "action-acme.payments.57",
   "claimed_at": "2026-03-23T10:05:00Z",
   "last_heartbeat": "2026-03-23T10:05:30Z",
   "lease_deadline": "2026-03-23T10:06:30Z",
@@ -97,32 +97,6 @@ Dependency graph edges. Each entry has both forward (depends_on) and reverse (de
 
 The dispatcher maintains a petgraph DAG in memory, rebuilt from this bucket on startup. All cycle detection and traversal runs against the in-memory graph. The KV is the durable persistence layer.
 
-### chuggernaut.workers
-
-Worker registry. Tracks all known workers and their current status.
-
-| Field | Value |
-|-------|-------|
-| **Owner** | Dispatcher |
-| **Key** | `{worker_id}` (e.g., `agent-rust-1`) |
-| **History** | 1 |
-| **TTL** | None (dispatcher prunes stale entries) |
-
-**Value: `WorkerInfo` JSON**
-```json
-{
-  "worker_id": "agent-rust-1",
-  "state": "idle",
-  "capabilities": ["rust"],
-  "worker_type": "interactive",
-  "platform": ["linux"],
-  "current_job": null,
-  "last_seen": "2026-03-23T10:05:00Z"
-}
-```
-
-**Worker states:** `idle`, `busy`
-
 ### chuggernaut.counters
 
 Atomic sequence numbers for job key generation. One key per repo.
@@ -135,28 +109,6 @@ Atomic sequence numbers for job key generation. One key per repo.
 | **TTL** | None |
 
 **Value:** Integer as string (e.g., `"57"`). Incremented via NATS KV CAS to generate the next job sequence number.
-
-### chuggernaut.sessions
-
-Interactive agent session metadata. Workers write their own keys.
-
-| Field | Value |
-|-------|-------|
-| **Owner** | Workers (each writes own key) |
-| **Key** | `{owner}.{repo}.{seq}` |
-| **History** | 1 |
-| **TTL** | 60s (matches lease duration; workers refresh on each heartbeat) |
-
-**Value: `SessionInfo` JSON**
-```json
-{
-  "worker_id": "agent-rust-1",
-  "session_url": "http://host:7681",
-  "session_name": "tmux-acme.payments.57",
-  "mode": "peek",
-  "started_at": "2026-03-23T10:05:00Z"
-}
-```
 
 ### chuggernaut.activities
 
@@ -189,47 +141,13 @@ Job activity log. Separated from the Job record to avoid CAS contention between 
 
 **Entries:** Capped at 50 per job. The dispatcher silently drops entries beyond the limit.
 
-### chuggernaut.pending-reworks
-
-Deferred rework assignments. When a review requests changes but the original worker is busy, the rework is queued here.
-
-| Field | Value |
-|-------|-------|
-| **Owner** | Dispatcher |
-| **Key** | `{owner}.{repo}.{seq}` |
-| **History** | 1 |
-| **TTL** | None |
-
-**Value: `PendingRework` JSON**
-```json
-{
-  "worker_id": "agent-rust-1",
-  "review_feedback": "Please fix the error handling in retry.rs..."
-}
-```
-
-If the target worker is pruned (lease expiry, timeout), the dispatcher reassigns the rework to any capable idle worker.
-
-### chuggernaut.abandon-blacklist
-
-Prevents tight assign → abandon loops on the same (job, worker) pair.
-
-| Field | Value |
-|-------|-------|
-| **Owner** | Dispatcher |
-| **Key** | `{owner}.{repo}.{seq}.{worker_id}` |
-| **History** | 1 |
-| **TTL** | Configurable via `CHUGGERNAUT_BLACKLIST_TTL_SECS` (default 3600 / 1 hour) |
-
-**Value:** `"1"`
-
 ### chuggernaut.merge-queue
 
 Per-repo merge serialization. Prevents concurrent merges that could cause rebase conflicts.
 
 | Field | Value |
 |-------|-------|
-| **Owner** | Reviewer |
+| **Owner** | Review action (via worker binary) |
 | **Key** | `{owner}.{repo}.lock` or `{owner}.{repo}.queue` |
 | **History** | 1 |
 | **TTL** | 5 minutes (lock keys); none (queue keys) |
@@ -252,12 +170,33 @@ Tracks rework cycles per job to prevent infinite review loops.
 
 | Field | Value |
 |-------|-------|
-| **Owner** | Reviewer |
+| **Owner** | Dispatcher |
 | **Key** | `{owner}.{repo}.{seq}` |
 | **History** | 1 |
 | **TTL** | None |
 
 **Value:** Integer as string (e.g., `"2"`). Escalates to human when rework count exceeds 3.
+
+### chuggernaut_channels
+
+Worker channel status. The MCP channel's `update_status` tool writes progress updates here.
+
+| Field | Value |
+|-------|-------|
+| **Owner** | Workers (via MCP channel) |
+| **Key** | `{owner}.{repo}.{seq}` |
+| **History** | 1 |
+| **TTL** | None |
+
+**Value: `ChannelStatus` JSON**
+```json
+{
+  "job_key": "acme.payments.57",
+  "status": "implementing feature",
+  "progress": 0.45,
+  "updated_at": "2026-03-24T10:05:00Z"
+}
+```
 
 ### chuggernaut.journal
 
@@ -311,16 +250,15 @@ Derived event stream. Published by the dispatcher whenever a job changes state.
 ```
 
 **Consumers:**
-- **Reviewer**: durable pull consumer, filters for `to_state == "in-review"`
 - **Dispatcher SSE**: ephemeral push consumer, relays transition events to graph viewer clients
 
 ### CHUGGERNAUT-WORKER-EVENTS
 
-Worker lifecycle events.
+Worker outcome events.
 
 | Field | Value |
 |-------|-------|
-| **Subjects** | `chuggernaut.worker.register`, `chuggernaut.worker.idle`, `chuggernaut.worker.outcome`, `chuggernaut.worker.unregister` |
+| **Subjects** | `chuggernaut.worker.outcome` |
 | **Retention** | Limits (1 day) |
 | **Storage** | File |
 
@@ -350,34 +288,14 @@ Complete NATS subject reference. All subjects are prefixed with `chuggernaut.`.
 |---------|---------|---------|
 | `chuggernaut.transitions.{owner}.{repo}.{seq}` | `JobTransition` | Per-job state change events |
 
-### Worker Events (workers publish)
+### Worker Events (action workers publish)
 
 | Subject | Payload | Notes |
 |---------|---------|-------|
-| `chuggernaut.worker.register` | `WorkerRegistration` | Request-reply. Worker waits for ack. |
-| `chuggernaut.worker.idle` | `IdleEvent` | Worker ready for assignment |
-| `chuggernaut.worker.heartbeat` | `WorkerHeartbeat` | Periodic lease renewal |
-| `chuggernaut.worker.outcome` | `WorkerOutcome` | Job result (yield/fail/abandon) |
-| `chuggernaut.worker.unregister` | `UnregisterEvent` | Graceful shutdown |
+| `chuggernaut.worker.heartbeat` | `WorkerHeartbeat` | Periodic lease renewal (every 10s) |
+| `chuggernaut.worker.outcome` | `WorkerOutcome` | Job result (yield/fail) |
 
-### Dispatch (dispatcher publishes to specific workers)
-
-| Subject | Payload | Notes |
-|---------|---------|-------|
-| `chuggernaut.dispatch.assign.{worker_id}` | `Assignment` | Includes full Job + ClaimState |
-| `chuggernaut.dispatch.preempt.{worker_id}` | `PreemptNotice` | Cancel current, take new job |
-
-### Interaction (bidirectional)
-
-| Subject | Publisher | Subscriber | Payload |
-|---------|-----------|------------|---------|
-| `chuggernaut.interact.help` | Worker | Dispatcher | `HelpRequest` |
-| `chuggernaut.interact.respond.{job_key}` | CLI/Human | Dispatcher | `HelpResponse` |
-| `chuggernaut.interact.deliver.{worker_id}` | Dispatcher | Worker | `HelpResponse` |
-| `chuggernaut.interact.attach.{worker_id}` | CLI | Worker | (empty) |
-| `chuggernaut.interact.detach.{worker_id}` | CLI | Worker | (empty) |
-
-### Review (reviewer → dispatcher)
+### Review (review action → dispatcher)
 
 | Subject | Payload | Notes |
 |---------|---------|-------|
@@ -398,6 +316,15 @@ Complete NATS subject reference. All subjects are prefixed with `chuggernaut.`.
 | `chuggernaut.monitor.timeout` | `JobTimeoutEvent` |
 | `chuggernaut.monitor.orphan` | `OrphanDetectedEvent` |
 | `chuggernaut.monitor.retry` | `RetryEligibleEvent` |
+
+### Channel (worker MCP ↔ orchestrator)
+
+| Subject | Publisher | Subscriber | Payload |
+|---------|-----------|------------|---------|
+| `chuggernaut.channel.{job_key}.inbox` | Orchestrator/CLI | Worker (MCP channel) | `ChannelMessage` |
+| `chuggernaut.channel.{job_key}.outbox` | Worker (MCP channel) | Orchestrator/CLI | `ChannelMessage` |
+
+The channel provides bidirectional messaging between a running worker and external callers. The MCP server inside the worker bridges these NATS subjects to Claude's stdin/stdout via JSON-RPC tools (`channel_check`, `channel_send`, `reply`, `update_status`).
 
 ### Admin (CLI → dispatcher)
 
@@ -420,7 +347,7 @@ Complete NATS subject reference. All subjects are prefixed with `chuggernaut.`.
   "depends_on": [40, 41],
   "priority": 80,
   "capabilities": ["rust"],
-  "worker_type": null,
+  "worker_type": "action",
   "platform": null,
   "timeout_secs": 3600,
   "review": "high",
@@ -430,38 +357,24 @@ Complete NATS subject reference. All subjects are prefixed with `chuggernaut.`.
 ```
 `depends_on` contains sequence numbers within the same repo. `initial_state` defaults to auto-computed (blocked if deps, on-deck if no deps). Set to `"on-ice"` to hold.
 
-### WorkerRegistration
-```json
-{
-  "worker_id": "agent-rust-1",
-  "capabilities": ["rust"],
-  "worker_type": "interactive",
-  "platform": ["linux"]
-}
-```
-
-### Assignment
-```json
-{
-  "job": { "...full Job JSON..." },
-  "claim": { "...ClaimState JSON..." },
-  "is_rework": false,
-  "review_feedback": null
-}
-```
-
 ### WorkerOutcome
 ```json
 {
-  "worker_id": "agent-rust-1",
+  "worker_id": "action-acme.payments.57",
   "job_key": "acme.payments.57",
   "outcome": {
     "type": "yield",
     "pr_url": "http://forgejo/acme/payments/pulls/3"
+  },
+  "token_usage": {
+    "input_tokens": 25000,
+    "output_tokens": 8000,
+    "cache_read_tokens": 12000,
+    "cache_write_tokens": 3000
   }
 }
 ```
-Outcome types: `yield { pr_url }`, `fail { reason, logs }`, `abandon {}`
+Outcome types: `yield { pr_url }`, `fail { reason, logs }`. `token_usage` is optional (null if not captured).
 
 ### ReviewDecision
 ```json
@@ -469,19 +382,15 @@ Outcome types: `yield { pr_url }`, `fail { reason, logs }`, `abandon {}`
   "job_key": "acme.payments.57",
   "decision": "approved",
   "pr_url": "http://forgejo/acme/payments/pulls/3",
-  "feedback": null
+  "token_usage": {
+    "input_tokens": 15000,
+    "output_tokens": 3500,
+    "cache_read_tokens": 8000,
+    "cache_write_tokens": 2000
+  }
 }
 ```
-Decisions: `approved`, `changes_requested { feedback }`, `escalated { reviewer_login }`
-
-### HelpRequest
-```json
-{
-  "worker_id": "agent-rust-1",
-  "job_key": "acme.payments.57",
-  "reason": "Unsure which API version to target"
-}
-```
+Decisions: `approved`, `changes_requested { feedback }`, `escalated { reviewer_login }`. `token_usage` is optional. Published by review actions (worker in review mode).
 
 ### ActivityAppend
 ```json
@@ -503,22 +412,6 @@ Decisions: `approved`, `changes_requested { feedback }`, `escalated { reviewer_l
   "to_state": "on-deck",
   "timestamp": "2026-03-23T10:04:00Z",
   "trigger": "deps_resolved"
-}
-```
-
-### PreemptNotice
-```json
-{
-  "reason": "Higher-priority job acme.payments.99 (priority 95) needs this worker",
-  "new_job_key": "acme.payments.99"
-}
-```
-
-### HelpResponse
-```json
-{
-  "job_key": "acme.payments.57",
-  "message": "Use v2, the breaking changes are acceptable"
 }
 ```
 
@@ -554,7 +447,7 @@ Target: `"on-deck"` or `"on-ice"`. The dispatcher checks deps — `"on-deck"` ma
 ```json
 {
   "job_key": "acme.payments.57",
-  "worker_id": "agent-rust-1",
+  "worker_id": "action-acme.payments.57",
   "lease_deadline": "2026-03-23T10:06:30Z",
   "detected_at": "2026-03-23T10:06:45Z"
 }
@@ -564,7 +457,7 @@ Target: `"on-deck"` or `"on-ice"`. The dispatcher checks deps — `"on-deck"` ma
 ```json
 {
   "job_key": "acme.payments.57",
-  "worker_id": "agent-rust-1",
+  "worker_id": "action-acme.payments.57",
   "claimed_at": "2026-03-23T10:05:00Z",
   "timeout_secs": 3600,
   "detected_at": "2026-03-23T11:05:15Z"
@@ -575,12 +468,12 @@ Target: `"on-deck"` or `"on-ice"`. The dispatcher checks deps — `"on-deck"` ma
 ```json
 {
   "job_key": "acme.payments.57",
-  "worker_id": "agent-rust-1",
-  "kind": "claim_unknown_worker",
+  "worker_id": "action-acme.payments.57",
+  "kind": "claimless_on_the_stack",
   "detected_at": "2026-03-23T10:06:45Z"
 }
 ```
-Kind: `"claim_unknown_worker"`, `"stale_session"`, or `"claimless_on_the_stack"`. `worker_id` is null for `claimless_on_the_stack`.
+Kind: `"claimless_on_the_stack"`. Indicates a dispatcher bug (claim was released but job state wasn't updated). `worker_id` is null for this kind.
 
 ### RetryEligibleEvent
 ```json
@@ -595,40 +488,33 @@ Kind: `"claim_unknown_worker"`, `"stale_session"`, or `"claimless_on_the_stack"`
 ### WorkerHeartbeat
 ```json
 {
-  "worker_id": "agent-rust-1",
+  "worker_id": "action-acme.payments.57",
   "job_key": "acme.payments.57"
 }
 ```
 
-### IdleEvent
+### ChannelMessage
 ```json
 {
-  "worker_id": "agent-rust-1"
+  "sender": "cli:david",
+  "body": "what is your status?",
+  "timestamp": "2026-03-24T10:05:00Z",
+  "message_id": "a89d3169-ec98-4553-aad8-39cd1ed82cc8",
+  "in_reply_to": null
 }
 ```
+Used on both `channel.{job_key}.inbox` and `channel.{job_key}.outbox` subjects. The `sender` field is prefixed with the source (e.g., `cli:david`, `claude:acme.payments.57`). The `in_reply_to` field references the `message_id` of a previous message when using the `reply` tool.
 
-### UnregisterEvent
+### ChannelStatus
 ```json
 {
-  "worker_id": "agent-rust-1"
+  "job_key": "acme.payments.57",
+  "status": "implementing feature",
+  "progress": 0.45,
+  "updated_at": "2026-03-24T10:05:00Z"
 }
 ```
-
----
-
-## Object Stores
-
-### chuggernaut-session-recordings
-
-Session recordings from interactive workers. Stored in a NATS JetStream object store.
-
-| Field | Value |
-|-------|-------|
-| **Owner** | Workers (each writes own recordings) |
-| **Key** | `sessions/{job_key}/{session_name}` |
-| **TTL** | Configurable via `CHUGGERNAUT_RECORDING_TTL_SECS` (optional) |
-
-**Value:** Raw session log (Claude Code output).
+Written to the `chuggernaut_channels` KV bucket by the `update_status` MCP tool. Progress is a float 0.0–1.0 (input is 0–100, divided by 100).
 
 ---
 
@@ -657,7 +543,7 @@ jetstream.create_stream(StreamConfig {
 
 jetstream.create_stream(StreamConfig {
     name: "CHUGGERNAUT-WORKER-EVENTS",
-    subjects: vec!["chuggernaut.worker.register", "chuggernaut.worker.idle", "chuggernaut.worker.outcome", "chuggernaut.worker.unregister"],
+    subjects: vec!["chuggernaut.worker.outcome"],
     retention: RetentionPolicy::Limits,
     max_age: Duration::from_secs(24 * 3600),
     storage: StorageType::File,
@@ -674,4 +560,4 @@ jetstream.create_stream(StreamConfig {
 });
 ```
 
-The reviewer creates its own buckets (`chuggernaut.merge-queue`, `chuggernaut.rework-counts`) on startup.
+The dispatcher also creates the `chuggernaut.merge-queue` and `chuggernaut.rework-counts` buckets on startup (previously owned by the standalone reviewer process, now part of the dispatcher's initialization).

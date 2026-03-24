@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chuggernaut</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #0d1117; color: #c9d1d9; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+
+header { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; background: #161b22; border-bottom: 1px solid #30363d; flex-shrink: 0; }
+header h1 { font-size: 16px; font-weight: 600; color: #58a6ff; }
+header .controls { display: flex; gap: 8px; align-items: center; }
+header button { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+header button:hover { background: #30363d; }
+.connection-dot { width: 8px; height: 8px; border-radius: 50%; background: #f85149; }
+.connection-dot.connected { background: #3fb950; }
+
+#graph-container { flex: 1; overflow: hidden; position: relative; cursor: grab; }
+#graph-container.dragging { cursor: grabbing; }
+#graph-svg { width: 100%; height: 100%; }
+
+footer { display: flex; align-items: center; gap: 16px; padding: 6px 16px; background: #161b22; border-top: 1px solid #30363d; font-size: 12px; flex-shrink: 0; }
+footer .stat { display: flex; align-items: center; gap: 4px; }
+footer .stat .dot { width: 8px; height: 8px; border-radius: 50%; }
+
+/* Node styles */
+.node-widget { cursor: pointer; }
+.node-rect { rx: 6; ry: 6; stroke-width: 1.5; }
+.node-title { font-size: 11px; font-weight: 600; fill: #c9d1d9; }
+.node-subtitle { font-size: 10px; fill: #8b949e; }
+.node-state { font-size: 10px; font-weight: 500; }
+.node-status { font-size: 9px; fill: #8b949e; font-style: italic; }
+.node-priority { font-size: 9px; fill: #8b949e; }
+.node-elapsed { font-size: 9px; fill: #8b949e; }
+.node-progress-bg { fill: #21262d; }
+.node-progress-fill { fill: #58a6ff; }
+.node-btn { cursor: pointer; }
+.node-btn rect { fill: #21262d; stroke: #30363d; stroke-width: 1; rx: 3; ry: 3; }
+.node-btn:hover rect { fill: #30363d; }
+.node-btn text { font-size: 9px; fill: #8b949e; }
+
+.edge-line { stroke: #30363d; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
+
+/* State colors */
+.state-on-ice { fill: #484f58; stroke: #484f58; }
+.state-blocked { fill: #484f58; stroke: #6e7681; }
+.state-on-deck { fill: #1f2328; stroke: #6e7681; }
+.state-on-the-stack { fill: #0c2d6b; stroke: #58a6ff; }
+.state-in-review { fill: #2a1f00; stroke: #d29922; }
+.state-escalated { fill: #2a1f00; stroke: #d29922; }
+.state-changes-requested { fill: #2a1f00; stroke: #d29922; }
+.state-done { fill: #0a3d1f; stroke: #3fb950; }
+.state-failed { fill: #3d0a0a; stroke: #f85149; }
+.state-revoked { fill: #1f2328; stroke: #484f58; }
+
+.state-dot-on-ice { fill: #484f58; }
+.state-dot-blocked { fill: #6e7681; }
+.state-dot-on-deck { fill: #6e7681; }
+.state-dot-on-the-stack { fill: #58a6ff; }
+.state-dot-in-review { fill: #d29922; }
+.state-dot-escalated { fill: #d29922; }
+.state-dot-changes-requested { fill: #d29922; }
+.state-dot-done { fill: #3fb950; }
+.state-dot-failed { fill: #f85149; }
+.state-dot-revoked { fill: #484f58; }
+
+/* Journal panel */
+#journal-panel { position: absolute; top: 0; right: 0; width: 360px; height: 100%; background: #161b22; border-left: 1px solid #30363d; transform: translateX(100%); transition: transform 0.2s; z-index: 10; display: flex; flex-direction: column; }
+#journal-panel.open { transform: translateX(0); }
+#journal-panel .panel-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid #30363d; }
+#journal-panel .panel-header h2 { font-size: 13px; font-weight: 600; }
+#journal-panel .entries { flex: 1; overflow-y: auto; padding: 8px; }
+.journal-entry { padding: 6px 8px; border-bottom: 1px solid #21262d; font-size: 11px; }
+.journal-entry .time { color: #484f58; }
+.journal-entry .action { color: #58a6ff; font-weight: 500; }
+.journal-entry .detail { color: #8b949e; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>chuggernaut</h1>
+  <div class="controls">
+    <div class="connection-dot" id="conn-dot"></div>
+    <button id="btn-journal">Journal</button>
+  </div>
+</header>
+
+<div id="graph-container">
+  <svg id="graph-svg">
+    <defs>
+      <marker id="arrowhead" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto-start-reverse">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#30363d" />
+      </marker>
+    </defs>
+    <g id="graph-root"></g>
+  </svg>
+</div>
+
+<div id="journal-panel">
+  <div class="panel-header">
+    <h2>Journal</h2>
+    <button id="btn-close-journal" style="background:none;border:none;color:#8b949e;cursor:pointer;font-size:16px;">&times;</button>
+  </div>
+  <div class="entries" id="journal-entries"></div>
+</div>
+
+<footer>
+  <span id="stats"></span>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/elkjs@0.9.3/lib/elk.bundled.min.js"></script>
+<script>
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+const state = {
+  jobs: new Map(),       // key -> Job
+  claims: new Map(),     // key -> ClaimState
+  deps: new Map(),       // key -> DepRecord
+  channels: new Map(),   // key -> ChannelStatus
+  journal: [],
+  connected: false,
+};
+
+// Layout + pan/zoom
+let layoutResult = null;
+let panX = 40, panY = 40, zoom = 1;
+let isDragging = false, dragStartX = 0, dragStartY = 0, panStartX = 0, panStartY = 0;
+
+const NODE_W = 240;
+const NODE_H = 90;
+const NODE_H_WITH_STATUS = 110;
+const NODE_H_WITH_BTN = 130;
+
+// ---------------------------------------------------------------------------
+// ELK Layout
+// ---------------------------------------------------------------------------
+const elk = new ELK();
+
+async function computeLayout() {
+  const nodes = [];
+  const edges = [];
+
+  for (const [key, job] of state.jobs) {
+    const hasStatus = state.channels.has(key);
+    const isRunning = job.state === 'on-the-stack';
+    let h = NODE_H;
+    if (hasStatus) h = NODE_H_WITH_STATUS;
+    if (isRunning) h = NODE_H_WITH_BTN;
+
+    nodes.push({ id: key, width: NODE_W, height: h });
+  }
+
+  for (const [key, dep] of state.deps) {
+    for (const depKey of (dep.depends_on || [])) {
+      if (state.jobs.has(depKey) && state.jobs.has(key)) {
+        edges.push({ id: `${depKey}->${key}`, sources: [depKey], targets: [key] });
+      }
+    }
+  }
+
+  if (nodes.length === 0) return null;
+
+  const graph = {
+    id: 'root',
+    layoutOptions: {
+      'elk.algorithm': 'layered',
+      'elk.direction': 'RIGHT',
+      'elk.spacing.nodeNode': '30',
+      'elk.layered.spacing.nodeNodeBetweenLayers': '60',
+      'elk.layered.spacing.edgeNodeBetweenLayers': '30',
+      'elk.padding': '[top=20,left=20,bottom=20,right=20]',
+    },
+    children: nodes,
+    edges: edges,
+  };
+
+  return await elk.layout(graph);
+}
+
+// ---------------------------------------------------------------------------
+// SVG Rendering
+// ---------------------------------------------------------------------------
+function render() {
+  if (!layoutResult) return;
+  const root = document.getElementById('graph-root');
+  root.setAttribute('transform', `translate(${panX},${panY}) scale(${zoom})`);
+  root.innerHTML = '';
+
+  // Edges
+  for (const edge of (layoutResult.edges || [])) {
+    for (const section of (edge.sections || [])) {
+      let d = `M ${section.startPoint.x} ${section.startPoint.y}`;
+      for (const bp of (section.bendPoints || [])) {
+        d += ` L ${bp.x} ${bp.y}`;
+      }
+      d += ` L ${section.endPoint.x} ${section.endPoint.y}`;
+      const path = svgEl('path', { d, class: 'edge-line' });
+      root.appendChild(path);
+    }
+  }
+
+  // Nodes
+  for (const node of (layoutResult.children || [])) {
+    const job = state.jobs.get(node.id);
+    if (!job) continue;
+    const g = renderNode(node, job);
+    root.appendChild(g);
+  }
+
+  updateStats();
+}
+
+function renderNode(node, job) {
+  const g = svgEl('g', { class: 'node-widget', transform: `translate(${node.x},${node.y})` });
+  const stateClass = `state-${job.state}`;
+  const claim = state.claims.get(job.key);
+  const channel = state.channels.get(job.key);
+  const isRunning = job.state === 'on-the-stack';
+
+  // Background rect
+  g.appendChild(svgEl('rect', {
+    class: `node-rect ${stateClass}`,
+    width: node.width, height: node.height,
+    fill: 'inherit', stroke: 'inherit',
+  }));
+
+  // Key + priority
+  g.appendChild(svgText(8, 16, job.key, 'node-title'));
+  g.appendChild(svgText(node.width - 8, 16, `[${job.priority}]`, 'node-priority', 'end'));
+
+  // Title (truncated)
+  const title = job.title.length > 32 ? job.title.slice(0, 30) + '...' : job.title;
+  g.appendChild(svgText(8, 30, title, 'node-subtitle'));
+
+  // State dot + label + elapsed
+  const stateLabel = job.state.replace(/-/g, ' ');
+  const dotColor = `state-dot-${job.state}`;
+
+  const dot = svgEl('circle', { cx: 14, cy: 46, r: 4, class: dotColor });
+  g.appendChild(dot);
+  g.appendChild(svgText(22, 49, stateLabel, `node-state ${stateClass.replace('state-', 'state-dot-')}`));
+
+  if (claim && isRunning) {
+    const elapsed = formatElapsed(claim.claimed_at);
+    g.appendChild(svgText(node.width - 8, 49, elapsed, 'node-elapsed', 'end'));
+  }
+
+  // PR link
+  if (job.pr_url) {
+    const prNum = job.pr_url.split('/').pop();
+    const link = svgText(node.width - 8, 30, `PR #${prNum}`, 'node-subtitle', 'end');
+    link.style.cursor = 'pointer';
+    link.style.fill = '#58a6ff';
+    link.addEventListener('click', (e) => { e.stopPropagation(); window.open(job.pr_url, '_blank'); });
+    g.appendChild(link);
+  }
+
+  let yOffset = 58;
+
+  // Channel status + progress
+  if (channel) {
+    const statusText = channel.status.length > 34 ? channel.status.slice(0, 32) + '...' : channel.status;
+    g.appendChild(svgText(8, yOffset + 10, `"${statusText}"`, 'node-status'));
+
+    if (channel.progress != null) {
+      const barW = node.width - 16;
+      const fillW = barW * Math.min(1, channel.progress);
+      g.appendChild(svgEl('rect', { x: 8, y: yOffset + 15, width: barW, height: 3, class: 'node-progress-bg', rx: 1.5 }));
+      g.appendChild(svgEl('rect', { x: 8, y: yOffset + 15, width: fillW, height: 3, class: 'node-progress-fill', rx: 1.5 }));
+
+      const pctText = `${Math.round(channel.progress * 100)}%`;
+      g.appendChild(svgText(node.width - 8, yOffset + 10, pctText, 'node-status', 'end'));
+    }
+    yOffset += 22;
+  }
+
+  // Request Update button (only when on-the-stack)
+  if (isRunning) {
+    const btnG = svgEl('g', { class: 'node-btn', transform: `translate(${node.width / 2 - 50}, ${yOffset + 2})` });
+    btnG.appendChild(svgEl('rect', { width: 100, height: 18 }));
+    btnG.appendChild(svgText(50, 13, '\u21BB Request Update', '', 'middle'));
+    btnG.addEventListener('click', (e) => {
+      e.stopPropagation();
+      requestUpdate(job.key);
+    });
+    g.appendChild(btnG);
+  }
+
+  return g;
+}
+
+function svgEl(tag, attrs) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    el.setAttribute(k, v);
+  }
+  return el;
+}
+
+function svgText(x, y, text, className, anchor) {
+  const el = svgEl('text', { x, y, class: className || '' });
+  if (anchor) el.setAttribute('text-anchor', anchor);
+  el.textContent = text;
+  return el;
+}
+
+// ---------------------------------------------------------------------------
+// Status bar
+// ---------------------------------------------------------------------------
+function updateStats() {
+  const counts = {};
+  for (const [, job] of state.jobs) {
+    counts[job.state] = (counts[job.state] || 0) + 1;
+  }
+  const total = state.jobs.size;
+  const parts = [`${total} jobs`];
+  const order = ['on-the-stack', 'on-deck', 'in-review', 'escalated', 'changes-requested', 'blocked', 'failed', 'done', 'revoked', 'on-ice'];
+  for (const s of order) {
+    if (counts[s]) {
+      parts.push(`<span class="stat"><span class="dot state-dot-${s}"></span>${counts[s]} ${s.replace(/-/g, ' ')}</span>`);
+    }
+  }
+  document.getElementById('stats').innerHTML = parts.join(' &middot; ');
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+function formatElapsed(isoDate) {
+  const ms = Date.now() - new Date(isoDate).getTime();
+  const secs = Math.floor(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  const remSecs = secs % 60;
+  if (mins < 60) return `${mins}m ${remSecs}s`;
+  const hrs = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return `${hrs}h ${remMins}m`;
+}
+
+// ---------------------------------------------------------------------------
+// SSE Connection
+// ---------------------------------------------------------------------------
+let eventSource = null;
+let needsRelayout = false;
+
+function connect() {
+  if (eventSource) eventSource.close();
+  eventSource = new EventSource('/events');
+
+  eventSource.addEventListener('snapshot', (e) => {
+    const data = JSON.parse(e.data);
+    state.jobs.clear();
+    state.claims.clear();
+    state.deps.clear();
+    state.channels.clear();
+
+    for (const job of (data.jobs || [])) {
+      state.jobs.set(job.key, job);
+    }
+    for (const [key, claim] of Object.entries(data.claims || {})) {
+      state.claims.set(key, claim);
+    }
+    for (const [key, dep] of Object.entries(data.deps || {})) {
+      state.deps.set(key, dep);
+    }
+    for (const [key, ch] of Object.entries(data.channels || {})) {
+      state.channels.set(key, ch);
+    }
+
+    setConnected(true);
+    relayout();
+  });
+
+  eventSource.addEventListener('job_update', (e) => {
+    const job = JSON.parse(e.data);
+    const existed = state.jobs.has(job.key);
+    state.jobs.set(job.key, job);
+    if (!existed) {
+      needsRelayout = true;
+    } else {
+      render(); // in-place update
+    }
+  });
+
+  eventSource.addEventListener('claim_update', (e) => {
+    const data = JSON.parse(e.data);
+    if (data.claim) {
+      state.claims.set(data.key, data.claim);
+    } else {
+      state.claims.delete(data.key);
+    }
+    render();
+  });
+
+  eventSource.addEventListener('dep_update', (e) => {
+    const data = JSON.parse(e.data);
+    state.deps.set(data.key, data.dep);
+    needsRelayout = true;
+  });
+
+  eventSource.addEventListener('channel_update', (e) => {
+    const data = JSON.parse(e.data);
+    state.channels.set(data.key, data.status);
+    render();
+  });
+
+  eventSource.addEventListener('job_removed', (e) => {
+    const data = JSON.parse(e.data);
+    state.jobs.delete(data.key);
+    state.claims.delete(data.key);
+    state.deps.delete(data.key);
+    state.channels.delete(data.key);
+    needsRelayout = true;
+  });
+
+  eventSource.onopen = () => setConnected(true);
+  eventSource.onerror = () => {
+    setConnected(false);
+    setTimeout(connect, 3000);
+  };
+}
+
+function setConnected(c) {
+  state.connected = c;
+  document.getElementById('conn-dot').classList.toggle('connected', c);
+}
+
+async function relayout() {
+  layoutResult = await computeLayout();
+  needsRelayout = false;
+  render();
+}
+
+// Periodic relayout for pending structural changes + elapsed time refresh
+setInterval(() => {
+  if (needsRelayout) {
+    relayout();
+  } else {
+    render(); // refresh elapsed times
+  }
+}, 2000);
+
+// ---------------------------------------------------------------------------
+// Channel: request update
+// ---------------------------------------------------------------------------
+async function requestUpdate(jobKey) {
+  try {
+    await fetch(`/jobs/${jobKey}/channel/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'status update requested' }),
+    });
+  } catch (e) {
+    console.error('Failed to request update:', e);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Journal
+// ---------------------------------------------------------------------------
+async function loadJournal() {
+  try {
+    const resp = await fetch('/journal?limit=50');
+    const data = await resp.json();
+    state.journal = data.entries || [];
+    renderJournal();
+  } catch (e) {
+    console.error('Failed to load journal:', e);
+  }
+}
+
+function renderJournal() {
+  const container = document.getElementById('journal-entries');
+  container.innerHTML = state.journal.map(e => {
+    const time = new Date(e.timestamp).toLocaleTimeString();
+    const key = e.job_key ? ` ${e.job_key}` : '';
+    const detail = e.details ? ` - ${e.details}` : '';
+    return `<div class="journal-entry"><span class="time">${time}</span> <span class="action">${e.action}</span><span class="detail">${key}${detail}</span></div>`;
+  }).join('');
+}
+
+document.getElementById('btn-journal').addEventListener('click', () => {
+  const panel = document.getElementById('journal-panel');
+  const opening = !panel.classList.contains('open');
+  panel.classList.toggle('open');
+  if (opening) loadJournal();
+});
+document.getElementById('btn-close-journal').addEventListener('click', () => {
+  document.getElementById('journal-panel').classList.remove('open');
+});
+
+// ---------------------------------------------------------------------------
+// Pan & Zoom
+// ---------------------------------------------------------------------------
+const container = document.getElementById('graph-container');
+
+container.addEventListener('mousedown', (e) => {
+  if (e.target.closest('.node-btn')) return;
+  isDragging = true;
+  dragStartX = e.clientX;
+  dragStartY = e.clientY;
+  panStartX = panX;
+  panStartY = panY;
+  container.classList.add('dragging');
+});
+
+window.addEventListener('mousemove', (e) => {
+  if (!isDragging) return;
+  panX = panStartX + (e.clientX - dragStartX);
+  panY = panStartY + (e.clientY - dragStartY);
+  render();
+});
+
+window.addEventListener('mouseup', () => {
+  isDragging = false;
+  container.classList.remove('dragging');
+});
+
+container.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const delta = e.deltaY > 0 ? 0.9 : 1.1;
+  const newZoom = Math.max(0.2, Math.min(3, zoom * delta));
+
+  // Zoom toward mouse position
+  const rect = container.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  panX = mx - (mx - panX) * (newZoom / zoom);
+  panY = my - (my - panY) * (newZoom / zoom);
+  zoom = newZoom;
+
+  render();
+}, { passive: false });
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+connect();
+</script>
+</body>
+</html>

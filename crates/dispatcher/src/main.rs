@@ -21,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
     info!(url = config.nats_url, "connected to NATS");
 
     // Initialize KV buckets and streams
-    let kv = nats_init::initialize(&js, config.lease_secs, config.blacklist_ttl_secs).await?;
+    let kv = nats_init::initialize(&js, config.lease_secs).await?;
 
     // Build shared state
     let state = state::DispatcherState::new(config.clone(), nats, js, kv);

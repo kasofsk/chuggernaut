@@ -3,35 +3,34 @@
 ## 2026-03-23 — Phase 1 Implementation Complete
 
 ### What was built
-- **5 Rust crates** in a workspace (now 8), all compiling on latest deps (async-nats 0.46, petgraph 0.8, reqwest 0.13, axum 0.8)
-- **chuggernaut-types**: 45 types with `JsonSchema` derive, NATS subject/bucket/stream constants, helpers. 12 unit tests.
+- **5 Rust crates** in a workspace (now 9), all compiling on latest deps (async-nats 0.46, petgraph 0.8, reqwest 0.13, axum 0.8)
+- **chuggernaut-types**: 45→~30 types with `JsonSchema` derive, NATS subject/bucket/stream constants, helpers. 12 unit tests.
 - **chuggernaut-forgejo-api**: Thin reqwest client covering PRs, reviews, merge, actions, repos (~10 endpoints).
-- **chuggernaut-dispatcher**: Full coordinator — NATS handlers (14 subscriptions), HTTP API (10 endpoints + SSE + `/schema`), monitor (5 scans), petgraph DAG, CAS claim lifecycle, worker assignment with preemption, restart recovery (10-step). 2 unit tests.
-- **chuggernaut-worker**: SDK with lifecycle loop, git helpers (clone/branch/commit/push), SimWorker.
-- **chuggernaut-cli**: All-in-one `chuggernaut` binary — create, jobs, show, requeue, close, interact respond, sim, seed.
+- **chuggernaut-dispatcher**: Full coordinator — NATS handlers (9 subscriptions), HTTP API (10 endpoints + SSE + `/schema`), monitor (4 scans), petgraph DAG, CAS claim lifecycle, action dispatch, restart recovery (8-step). 12 unit tests.
+- **chuggernaut-worker**: Action worker binary with git helpers (clone/branch/commit/push), MCP channel bridge. SimWorker retained as test-only infrastructure.
+- **chuggernaut-cli**: All-in-one `chuggernaut` binary — create, jobs, show, requeue, close, channel send/watch/status, seed.
 - **Infra**: Docker Compose (NATS + Forgejo), init script, sample fixture.
 
 ### Design consistency check
-The implementation covers ~70% of the full design. Verified consistent:
-- All 11 job states and state transition table ✓
-- All KV buckets (10 dispatcher-owned) and 3 JetStream streams ✓
+The implementation covers ~70% of the full design. Verified consistent at Phase 1 completion:
+- All job states and state transition table ✓
+- All KV buckets and JetStream streams ✓
 - All NATS subjects and message types ✓
 - All dispatcher config env vars ✓
-- All worker config env vars (minus recording TTL) ✓
+- All worker config env vars ✓
 - All HTTP API endpoints from design ✓
 - Dependency management with cycle detection and unblock propagation ✓
 - Claim lifecycle with CAS, heartbeat, lease expiry ✓
-- Worker assignment with capabilities, blacklist, preemption ✓
-- Monitor with all 5 scan types ✓
-- Restart recovery with all 10 reconciliation steps ✓
+- Monitor scan types ✓
+- Restart recovery ✓
+
+*Note: Worker assignment/preemption were part of Phase 1 but removed in Phase 2 (action-only simplification).*
 
 ### Intentionally deferred to Phase 2
 - **Reviewer process** (entire crate) — merge queue, rework counts, review action dispatch, escalation polling
-- **InteractiveWorker** — Claude Code in tmux/ttyd, peek/attach/detach
-- **ActionWorker** — Forgejo Actions dispatch + polling
+- **ActionWorker** — Forgejo Actions dispatch + polling (now the only worker type)
 - **Graph viewer SPA** — frontend
-- **Session recording** — object store upload
-- **CLI commands**: attach, detach, action, agent
+- **CLI commands**: action, agent
 
 ### Known simplifications in Phase 1
 - SSE uses 1s polling instead of KV watchers (noted in code)
@@ -46,19 +45,13 @@ The implementation covers ~70% of the full design. Verified consistent:
 - **15 dispatcher integration tests** added using testcontainers with real NATS JetStream
   - Job creation (4): on-deck, on-ice, sequential keys, dot-rejection
   - Dependencies (2): blocked-then-unblocked, diamond partial unblock
-  - Worker NATS protocol (5): register, idle→assign, yield→in-review, fail→retry, abandon→blacklist
+  - Worker protocol (3): yield→in-review, fail→retry, heartbeat renewal
   - Admin commands (2): close-unblocks-dependents, revoke-keeps-dependents-blocked
-  - Heartbeat (1): lease renewal
+  - Action dispatch (2): dispatch creates claim + transitions, rework dispatch with feedback
   - Recovery (1): rebuild state from KV
 - Test infra: shared NATS container via `OnceLock`, UUID-prefixed buckets for parallel isolation
-- **Total test count: 48** (21 dispatcher unit + 15 dispatcher integration + 12 types unit) — all green
 
-**5 additional integration tests** added covering Phase 2 priority 1:
-- Review decisions (2): approved→Done with dep unblock, ChangesRequested transition
-- Preemption (1): high-priority job sends PreemptNotice to busy worker
-- Monitor (1): lease expiry detected by scan → job Failed (1s lease, real timer)
-- Admin (1): requeue from Failed → OnDeck via NATS request-reply
-- **Updated total: 53 tests** (21 dispatcher unit + 20 dispatcher integration + 12 types unit) — all green
+*Note: Test counts below reflect the state at time of writing; final counts after Phase 2 simplification are in the latest entry.*
 
 **Reviewer crate (`chuggernaut-reviewer`)** created with full skeleton:
 - `config.rs` — all 13 env vars from spec (delay, workflow, poll intervals, rework limit, merge lock TTL)
@@ -135,11 +128,140 @@ escalation polling loop, `ChangesOutcome` enum for recursion safety — all in `
 - Deleted old `crates/dispatcher/src/nats_client.rs`
 - **8 crates** in workspace, **8,528 LOC**, **102 tests** — all green
 
+### ~~7. ActionWorker E2E — MCP channel over NATS~~ ✅ Done
+The action runner E2E test (`action_runner_publishes_outcome_to_nats`) was passing for heartbeat and outcome but silently skipping the MCP channel message. Two issues found and fixed:
+
+**Issue 1: Poll loop race condition** — The test's NATS polling loop broke immediately when the outcome arrived (`got_outcome = true; break;`) before checking the channel subscription in the same iteration. Since mock-claude publishes `channel_send` and the worker reports outcome nearly simultaneously, the channel message was consistently missed.
+- **Fix:** Deferred the `break` until after all subscriptions are checked, plus a 2s post-loop drain window for any channel messages in flight.
+- Promoted channel message assertion from soft eprintln to hard `assert!`.
+
+**Issue 2: No isolated MCP bridge test** — The only test path for MCP-over-NATS was through the full Forgejo Action pipeline (Docker runner + container + git clone). No way to isolate MCP issues from infrastructure issues.
+- **Fix:** Added two focused bridge tests to `crates/channel/tests/integration.rs`:
+  - `mcp_bridge_subprocess_to_nats` — spawns a bash MCP client subprocess, bridges stdin/stdout through `handle_message`, verifies `channel_send` → NATS outbox and `update_status` → KV.
+  - `mcp_bridge_bidirectional_nats` — round-trip: external NATS inbox message → `nats_inbox_listener` → `ChannelState` → mock client calls `channel_check` → sees the message → replies via `channel_send` → verified on NATS outbox.
+  - Both run in ~0.4s with just a NATS testcontainer (no Docker runner, no Forgejo).
+
+**Networking diagnosis added** — `action_runner_publishes_outcome_to_nats` workflow now includes a "Verify networking" step that checks NATS and Forgejo reachability from inside the action container before running the worker. Fails fast with a clear error if `host.docker.internal` can't reach the services.
+
+### ~~8. Test container cleanup~~ ✅ Done
+NATS testcontainers were accumulating across test runs because `Box::leak` prevents `Drop` from firing, and Rust statics are never dropped on process exit.
+
+- **`watchdog` feature** enabled on testcontainers — catches SIGTERM/SIGINT/SIGQUIT and removes all registered containers (handles Ctrl-C during test runs).
+- **`register_container_cleanup()`** in `chuggernaut-test-utils` — registers container IDs for removal via `libc::atexit` hook on normal process exit.
+- Both channel and dispatcher test suites call `register_container_cleanup(container.id())` before `Box::leak`.
+- Runner config (`infra/runner/config.yaml`) updated with `--add-host=host.docker.internal:host-gateway` for job container networking.
+
+**9 crates** in workspace, **~12,000 LOC**, **105 tests** (21 dispatcher unit + 21 dispatcher integration + 19 channel integration + 16 reviewer unit + 4 reviewer integration + 12 types unit + 2 ignored E2E) — all green.
+
+### 9. Action-only worker simplification ✅ Done
+Major refactor to remove the worker registration/idle/assignment/preemption protocol entirely. All jobs are now dispatched directly as Forgejo Actions.
+
+**Removed from types crate:**
+- 14 types/enums: `WorkerInfo`, `WorkerState`, `SessionInfo`, `PendingRework`, `WorkerRegistration`, `Assignment`, `HelpRequest`, `HelpResponse`, `PreemptNotice`, `IdleEvent`, `UnregisterEvent`, `WorkerListResponse`, `JobState::NeedsHelp`, `OutcomeType::Abandon`
+- 10 NATS subjects: worker.register/idle/unregister, dispatch.assign/preempt, interact.help/respond/deliver/attach/detach
+- 4 KV buckets: workers, sessions, pending-reworks, abandon-blacklist
+- 1 JetStream stream: CHUGGERNAUT-WORKER-EVENTS
+- `Job.last_worker_id` field
+
+**Removed from dispatcher:**
+- Deleted `workers.rs` entirely (register, idle, unregister, prune)
+- Gutted `assignment.rs` from ~420 lines to ~47 lines (just calls `dispatch_action`)
+- Removed 5 NATS handlers (register, idle, unregister, help, respond) — handler count 14→9
+- Removed preemption logic, abandon blacklisting, pending-rework routing
+- Simplified monitor (1 orphan condition instead of 3), recovery (8 steps instead of 10)
+- Removed `/workers` HTTP endpoint, workers DashMap from state, `blacklist_ttl_secs` config
+
+**Updated:**
+- `action_dispatch.rs` — added `review_feedback`/`is_rework` parameters, passed as workflow inputs
+- `handlers.rs` — ChangesRequested now dispatches new action with review feedback (no "route to last worker")
+- Worker binary — added `review_feedback`/`is_rework` env vars, removed preemption monitoring, `Abandon`→`Fail`
+- CLI — removed `Interact` command
+- All docs updated: DESIGN.md, worker-protocol.md (complete rewrite), nats-schema.md, dispatcher.md, monitor.md, reviewer.md, testing.md
+
+**Job states:** 11→10 (removed NeedsHelp). **Outcome types:** 3→2 (removed Abandon). **KV buckets:** 13→9. **NATS subjects:** 30+→~15.
+
+**9 crates**, **~10,000 LOC**, **92 tests** (12 dispatcher unit + 17 dispatcher integration + 19 channel integration + 16 reviewer unit + 4 reviewer integration + 12 types unit + 2 ignored E2E) — all green.
+
+### 10. Rework workflow fix + docker-compose + E2E prep ✅ Done
+- **Fixed `action/work.yml`** — added `review_feedback` and `is_rework` inputs + env vars. Rework dispatch was silently 422'ing at Forgejo API because inputs weren't declared.
+- **Completed `docker-compose.yml`** — added dispatcher, reviewer, runner, runner-env services. Runner uses official Forgejo runner:11 with register+daemon pattern.
+- **Created `Dockerfile`** — multi-stage build for dispatcher + reviewer binaries.
+- **Updated `scripts/init.sh`** — creates reviewer user + token, runner registration token, writes `.env` file.
+- **Added rework dispatch integration test** (`rework_dispatches_new_action_with_feedback`) — verifies full rework path with real Forgejo: create → dispatch → yield → InReview → ChangesRequested → new action with feedback → OnTheStack.
+- **Updated E2E test workflows** — both `action_runner_publishes_outcome_to_nats` and `e2e_full_action_pipeline` now include `review_feedback`/`is_rework` inputs + env vars. Cleaned up duplicate workflow push in e2e test.
+
+**93 tests** (12 dispatcher unit + 18 dispatcher integration + 19 channel integration + 16 reviewer unit + 4 reviewer integration + 12 types unit + 2 ignored E2E) — all green.
+
+### 11. E2E tests passing ✅ Done
+Both E2E tests pass with the pre-built `chuggernaut-runner-env` Docker image:
+
+- **`action_runner_publishes_outcome_to_nats`** (24s) — Runner isolation test: Forgejo Action → runner → worker binary → NATS. Verifies heartbeat, WorkerOutcome (Yield with PR URL), channel_send message on NATS outbox, and ChannelStatus in KV.
+- **`e2e_full_action_pipeline`** (27s) — Full dispatcher pipeline: create job → dispatch action → runner executes → mock-claude via MCP → git commit/push → PR created → Yield → dispatcher transitions to InReview.
+
+Both remain `#[ignore]` — they require `docker build -t chuggernaut-runner-env -f Dockerfile.runner-env .` and Docker socket access. Run with: `cargo test -p chuggernaut-dispatcher --test integration -- --ignored --nocapture`
+
+**93 tests** (all green) + **2 E2E tests** (passing when runner-env image is built).
+
+### 12. Token usage tracking + reviewer elimination ✅ Done
+
+Major architectural simplification: eliminated the standalone reviewer process. Review is now handled by the same worker binary in review mode, dispatched as a Forgejo Action.
+
+**Token usage tracking:**
+- `TokenUsage` struct: `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens` (with `AddAssign`)
+- `ActionTokenRecord` struct: `action_type` ("work"/"review"), `token_usage`, `completed_at`
+- `Job.token_usage: Vec<ActionTokenRecord>` — each action invocation appends a record
+- `WorkerOutcome.token_usage` and `ReviewDecision.token_usage` — optional, reported by actions
+- Dispatcher accumulates via `append_token_record()` in both `process_outcome` and `process_review_decision`
+- Per-action records allow the UI to show work vs review tokens separately, including across rework cycles
+
+**Reviewer → review action:**
+- Dispatcher dispatches `review.yml` workflow when a job transitions to InReview
+- `dispatch_review_action()` added to `action_dispatch.rs` with inputs: `job_key`, `nats_url`, `pr_url`, `review_level`
+- Worker binary (`chuggernaut-worker`) now has `--mode work|review`:
+  - Review mode: clones repo, checks out PR branch, gets diff, runs Claude, parses JSON decision, posts PR review to Forgejo, attempts merge with retries if approved, publishes `ReviewDecision`
+- `action/review.yml` created (parallel to `action/work.yml`)
+- Merge is attempted inline by the review action with 3 retries at 5s/10s/15s intervals (no separate merge queue process)
+- On review failure or subprocess error: escalates to human reviewer
+
+**Dispatcher config additions:**
+- `CHUGGERNAUT_REVIEW_WORKFLOW` (default `review.yml`)
+- `CHUGGERNAUT_REVIEW_RUNNER_LABEL` (default `ubuntu-latest`)
+- `CHUGGERNAUT_REWORK_LIMIT` (default 3)
+- `CHUGGERNAUT_HUMAN_LOGIN` (default `you`)
+
+**Removed:**
+- `crates/reviewer/` — entire crate (10 modules, 16 unit tests, 4 integration tests)
+- Reviewer service from `docker-compose.yml` and `Dockerfile`
+- No longer need: `CHUGGERNAUT-TRANSITIONS` durable consumer for reviewer, merge queue KV lock protocol, separate reviewer Forgejo account
+- Reviewer-specific config env vars
+
+**8 crates** in workspace (was 9), **~9,500 LOC**, **~80 tests** — all green.
+
+### 13. API manifest + self-describing HTTP API + fixture templating ✅ Done
+
+**`GET /api.json` — self-describing API manifest:**
+- Single JSON document containing the complete route table, SSE event definitions, and full JSON Schema for all types
+- Route metadata defined once in `api_specs()` (`http.rs`) — the authoritative source for both the manifest response and test assertions
+- Type names in route specs use `schemars::JsonSchema::schema_name()` — renaming a type in the types crate automatically updates the manifest (compile-time guarantee)
+- SSE event schemas document all four event types: `snapshot`, `job_update`, `claim_update`, `channel_update` with their payload shapes
+- `GET /schema` retained for raw JSON Schema access
+
+**Two tests enforce consistency:**
+- `api_specs_match_router` — asserts every (method, path) pair in `api_specs()` has a corresponding route in the axum router and vice versa. Catches routes added/removed without updating the manifest.
+- `api_spec_types_exist_in_schema` — asserts every type name referenced in route specs (request/response) exists in the generated schema `$defs`. Catches stale type references.
+
+**CLI `seed --var`:**
+- `chuggernaut seed {repo} {fixture.json} --var KEY=VALUE,...` — interpolates `{{KEY}}` placeholders in the fixture JSON before parsing
+- Enables fixtures to reference environment-specific values (e.g. `--var DISPATCHER_URL=https://dispatcher.example.com`)
+
+**Frontend fixture (`fixtures/frontend-wasm.json`):**
+- 11-job DAG describing a standalone Rust+WASM frontend (Leptos) that is fully decoupled from the chuggernaut workspace
+- Task 2 fetches `{{DISPATCHER_URL}}/api.json` in `build.rs` and generates typed Rust structs + API client from the schema — no compile-time dependency on chuggernaut crates
+- Graph: scaffold → codegen → SSE client → store → 3 parallel UI components → detail view → routing → styling → integration test
+
 ### Remaining Phase 2 work
-- **Dispatcher trait abstraction** — assignment/preemption behind traits for swappable strategies (e.g., AI agent vs numerical priority)
-- **InteractiveWorker** — Claude Code in tmux/ttyd, peek/attach/detach
-- **ActionWorker** — Forgejo Actions dispatch + polling
-- **Graph viewer SPA** — frontend
-- **Session recording** — object store upload
-- **CLI commands**: attach, detach, action, agent
+- **Token capture from Claude** — worker currently reports `token_usage: None`; need to parse Claude Code's output for actual usage
+- **Human escalation polling** — currently just transitions to Escalated; needs a monitor task to poll Forgejo for human action
+- **Dispatcher trait abstraction** — dispatch strategy behind traits for swappability
+- **Graph viewer SPA** — frontend (fixture ready at `fixtures/frontend-wasm.json`)
 - **Terraform** — Forgejo provisioning for test (`terraform/test/`) and deploy (`terraform/deploy/`)

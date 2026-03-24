@@ -31,7 +31,7 @@ fn test_nats_port() -> u16 {
                     .await
                     .unwrap();
                 let port = container.get_host_port_ipv4(4222).await.unwrap();
-                // Leak the container so it lives for the entire test process
+                test_utils::register_container_cleanup(container.id());
                 Box::leak(Box::new(container));
                 port
             })
@@ -51,6 +51,7 @@ async fn setup() -> Arc<DispatcherState> {
 
     let config = Config {
         nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
         http_listen: "127.0.0.1:0".to_string(),
         lease_secs: 5,
         default_timeout_secs: 60,
@@ -58,16 +59,21 @@ async fn setup() -> Arc<DispatcherState> {
         monitor_scan_interval_secs: 100,
         job_retention_secs: 86400,
         activity_limit: 50,
-        blacklist_ttl_secs: 3600,
         forgejo_url: None,
         forgejo_token: None,
         action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
 
-    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, config.blacklist_ttl_secs, Some(&prefix))
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
         .await
         .unwrap();
 
@@ -236,81 +242,8 @@ async fn diamond_deps_partial_unblock() {
 }
 
 // ---------------------------------------------------------------------------
-// Worker lifecycle via NATS (uses namespaced subjects)
+// Worker outcome processing
 // ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn worker_register_via_nats() {
-    let state = setup().await;
-    handlers::start_handlers(state.clone()).await.unwrap();
-
-    let reg = WorkerRegistration {
-        worker_id: "w1".to_string(),
-        capabilities: vec!["rust".to_string()],
-        worker_type: "sim".to_string(),
-        platform: vec!["linux".to_string()],
-    };
-    let reply = tokio::time::timeout(
-        Duration::from_secs(5),
-        state.nats.request_msg(&subjects::WORKER_REGISTER, &reg),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(!reply.payload.is_empty());
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(state.workers.contains_key("w1"));
-    assert_eq!(state.workers.get("w1").unwrap().state, WorkerState::Idle);
-}
-
-#[tokio::test]
-async fn worker_idle_triggers_assignment() {
-    let state = setup().await;
-    handlers::start_handlers(state.clone()).await.unwrap();
-
-    // Create a job
-    let req = CreateJobRequest {
-        repo: "test/repo".to_string(),
-        title: "Assign me".to_string(),
-        body: String::new(),
-        depends_on: vec![],
-        priority: 50,
-        capabilities: vec![],
-        worker_type: None,
-        platform: None,
-        timeout_secs: 3600,
-        review: ReviewLevel::High,
-        max_retries: 3,
-        initial_state: None,
-    };
-    let key = jobs::create_job(&state, req).await.unwrap();
-
-    // Subscribe to assignment channel (auto-prefixed)
-    let assign_sub = state.nats.subscribe_dynamic(&subjects::DISPATCH_ASSIGN, "w1").await.unwrap();
-
-    // Register worker
-    let reg = WorkerRegistration {
-        worker_id: "w1".to_string(),
-        capabilities: vec![],
-        worker_type: "sim".to_string(),
-        platform: vec![],
-    };
-    state.nats.request_msg(&subjects::WORKER_REGISTER, &reg).await.unwrap();
-
-    // Publish idle
-    let idle = IdleEvent { worker_id: "w1".to_string() };
-    state.nats.publish_msg(&subjects::WORKER_IDLE, &idle).await.unwrap();
-
-    // Wait for assignment
-    let msg = tokio::time::timeout(Duration::from_secs(5), assign_sub.into_future())
-        .await.unwrap().0.unwrap();
-    let assignment: Assignment = serde_json::from_slice(&msg.payload).unwrap();
-    assert_eq!(assignment.job.key, key);
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
-}
 
 #[tokio::test]
 async fn worker_yield_to_in_review() {
@@ -333,16 +266,17 @@ async fn worker_yield_to_in_review() {
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
-    // Register + assign directly
-    let reg = WorkerRegistration { worker_id: "w1".to_string(), capabilities: vec![], worker_type: "sim".to_string(), platform: vec![] };
-    state.nats.request_msg(&subjects::WORKER_REGISTER, &reg).await.unwrap();
-    chuggernaut_dispatcher::assignment::assign_job(&state, &key, "w1", false, None).await.unwrap();
+    // Simulate job being on-the-stack with a claim (as action_dispatch would do)
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
 
     // Worker yields
     let outcome = WorkerOutcome {
-        worker_id: "w1".to_string(),
+        worker_id: worker_id.clone(),
         job_key: key.clone(),
         outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        token_usage: None,
     };
     state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
 
@@ -373,14 +307,16 @@ async fn worker_fail_schedules_retry() {
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
-    let reg = WorkerRegistration { worker_id: "w1".to_string(), capabilities: vec![], worker_type: "sim".to_string(), platform: vec![] };
-    state.nats.request_msg(&subjects::WORKER_REGISTER, &reg).await.unwrap();
-    chuggernaut_dispatcher::assignment::assign_job(&state, &key, "w1", false, None).await.unwrap();
+    // Simulate on-the-stack with claim
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
 
     let outcome = WorkerOutcome {
-        worker_id: "w1".to_string(),
+        worker_id: worker_id.clone(),
         job_key: key.clone(),
         outcome: OutcomeType::Fail { reason: "compile error".to_string(), logs: None },
+        token_usage: None,
     };
     state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
 
@@ -389,45 +325,6 @@ async fn worker_fail_schedules_retry() {
     assert_eq!(job.state, JobState::Failed);
     assert_eq!(job.retry_count, 1);
     assert!(job.retry_after.is_some());
-}
-
-#[tokio::test]
-async fn worker_abandon_blacklists() {
-    let state = setup().await;
-    handlers::start_handlers(state.clone()).await.unwrap();
-
-    let req = CreateJobRequest {
-        repo: "test/repo".to_string(),
-        title: "Abandon test".to_string(),
-        body: String::new(),
-        depends_on: vec![],
-        priority: 50,
-        capabilities: vec![],
-        worker_type: None,
-        platform: None,
-        timeout_secs: 3600,
-        review: ReviewLevel::High,
-        max_retries: 3,
-        initial_state: None,
-    };
-    let key = jobs::create_job(&state, req).await.unwrap();
-
-    let reg = WorkerRegistration { worker_id: "w1".to_string(), capabilities: vec![], worker_type: "sim".to_string(), platform: vec![] };
-    state.nats.request_msg(&subjects::WORKER_REGISTER, &reg).await.unwrap();
-    chuggernaut_dispatcher::assignment::assign_job(&state, &key, "w1", false, None).await.unwrap();
-
-    let outcome = WorkerOutcome {
-        worker_id: "w1".to_string(),
-        job_key: key.clone(),
-        outcome: OutcomeType::Abandon {},
-    };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnDeck);
-
-    let bl_key = format!("{key}.w1");
-    assert!(state.kv.abandon_blacklist.entry(&bl_key).await.unwrap().is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -525,14 +422,15 @@ async fn heartbeat_renews_lease() {
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
-    let reg = WorkerRegistration { worker_id: "w1".to_string(), capabilities: vec![], worker_type: "sim".to_string(), platform: vec![] };
-    state.nats.request_msg(&subjects::WORKER_REGISTER, &reg).await.unwrap();
-    chuggernaut_dispatcher::assignment::assign_job(&state, &key, "w1", false, None).await.unwrap();
+    // Simulate on-the-stack with claim
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
 
     let (before, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key).await.unwrap().unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let hb = WorkerHeartbeat { worker_id: "w1".to_string(), job_key: key.clone() };
+    let hb = WorkerHeartbeat { worker_id: worker_id.clone(), job_key: key.clone() };
     state.nats.publish_msg(&subjects::WORKER_HEARTBEAT, &hb).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -567,7 +465,6 @@ async fn recovery_rebuilds_state() {
 
     // Simulate restart: clear in-memory state
     state.jobs.clear();
-    state.workers.clear();
     { let mut g = state.graph.write().await; *g = chuggernaut_dispatcher::state::DepGraph::new(); }
 
     recovery::recover(&state).await.unwrap();
@@ -609,15 +506,16 @@ async fn review_approved_completes_job_and_unblocks_deps() {
     let key_b = jobs::create_job(&state, make("B", vec![1])).await.unwrap();
     assert_eq!(state.jobs.get(&key_b).unwrap().state, JobState::Blocked);
 
-    // Register worker + assign A + yield (→ InReview)
-    let reg = WorkerRegistration { worker_id: "w1".to_string(), capabilities: vec![], worker_type: "sim".to_string(), platform: vec![] };
-    state.nats.request_msg(&subjects::WORKER_REGISTER, &reg).await.unwrap();
-    chuggernaut_dispatcher::assignment::assign_job(&state, &key_a, "w1", false, None).await.unwrap();
+    // Simulate on-the-stack + yield → InReview
+    let worker_id = format!("action-{key_a}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key_a, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key_a, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
 
     let outcome = WorkerOutcome {
-        worker_id: "w1".to_string(),
+        worker_id: worker_id.clone(),
         job_key: key_a.clone(),
         outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        token_usage: None,
     };
     state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -628,6 +526,7 @@ async fn review_approved_completes_job_and_unblocks_deps() {
         job_key: key_a.clone(),
         decision: DecisionType::Approved,
         pr_url: Some("http://forgejo/test/repo/pulls/1".to_string()),
+        token_usage: None,
     };
     state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -658,15 +557,16 @@ async fn review_changes_requested_transitions_job() {
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
-    // Register + assign + yield → InReview
-    let reg = WorkerRegistration { worker_id: "w1".to_string(), capabilities: vec![], worker_type: "sim".to_string(), platform: vec![] };
-    state.nats.request_msg(&subjects::WORKER_REGISTER, &reg).await.unwrap();
-    chuggernaut_dispatcher::assignment::assign_job(&state, &key, "w1", false, None).await.unwrap();
+    // Simulate on-the-stack + yield → InReview
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
 
     let outcome = WorkerOutcome {
-        worker_id: "w1".to_string(),
+        worker_id: worker_id.clone(),
         job_key: key.clone(),
         outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        token_usage: None,
     };
     state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -677,73 +577,12 @@ async fn review_changes_requested_transitions_job() {
         job_key: key.clone(),
         decision: DecisionType::ChangesRequested { feedback: "fix the tests".to_string() },
         pr_url: Some("http://forgejo/test/repo/pulls/1".to_string()),
+        token_usage: None,
     };
     state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::ChangesRequested);
-}
-
-// ---------------------------------------------------------------------------
-// Preemption
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn high_priority_job_sends_preempt_notice() {
-    let state = setup().await;
-    handlers::start_handlers(state.clone()).await.unwrap();
-
-    // Create a low-priority job
-    let low_req = CreateJobRequest {
-        repo: "test/repo".to_string(),
-        title: "Low prio".to_string(),
-        body: String::new(),
-        depends_on: vec![],
-        priority: 30,
-        capabilities: vec![],
-        worker_type: None,
-        platform: None,
-        timeout_secs: 3600,
-        review: ReviewLevel::High,
-        max_retries: 3,
-        initial_state: None,
-    };
-    let low_key = jobs::create_job(&state, low_req).await.unwrap();
-
-    // Register worker and assign the low-priority job
-    let reg = WorkerRegistration { worker_id: "w1".to_string(), capabilities: vec![], worker_type: "sim".to_string(), platform: vec![] };
-    state.nats.request_msg(&subjects::WORKER_REGISTER, &reg).await.unwrap();
-    chuggernaut_dispatcher::assignment::assign_job(&state, &low_key, "w1", false, None).await.unwrap();
-    assert_eq!(state.jobs.get(&low_key).unwrap().state, JobState::OnTheStack);
-
-    // Subscribe to preempt notices for w1
-    let preempt_sub = state.nats.subscribe_dynamic(&subjects::DISPATCH_PREEMPT, "w1").await.unwrap();
-
-    // Create a high-priority job (priority > 50 triggers preemption)
-    let high_req = CreateJobRequest {
-        repo: "test/repo".to_string(),
-        title: "High prio".to_string(),
-        body: String::new(),
-        depends_on: vec![],
-        priority: 80,
-        capabilities: vec![],
-        worker_type: None,
-        platform: None,
-        timeout_secs: 3600,
-        review: ReviewLevel::High,
-        max_retries: 3,
-        initial_state: None,
-    };
-    let high_key = jobs::create_job(&state, high_req).await.unwrap();
-
-    // Trigger assignment attempt for the high-priority job (no idle workers → preemption)
-    chuggernaut_dispatcher::assignment::try_assign_job(&state, &high_key).await.unwrap();
-
-    // Should receive preempt notice
-    let msg = tokio::time::timeout(Duration::from_secs(5), preempt_sub.into_future())
-        .await.unwrap().0.unwrap();
-    let notice: PreemptNotice = serde_json::from_slice(&msg.payload).unwrap();
-    assert_eq!(notice.new_job_key, high_key);
 }
 
 // ---------------------------------------------------------------------------
@@ -759,6 +598,7 @@ async fn monitor_lease_expiry_fails_job() {
 
     let config = Config {
         nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
         http_listen: "127.0.0.1:0".to_string(),
         lease_secs: 1,
         default_timeout_secs: 3600,
@@ -766,15 +606,20 @@ async fn monitor_lease_expiry_fails_job() {
         monitor_scan_interval_secs: 1,
         job_retention_secs: 86400,
         activity_limit: 50,
-        blacklist_ttl_secs: 3600,
         forgejo_url: None,
         forgejo_token: None,
         action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
-    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, config.blacklist_ttl_secs, Some(&prefix))
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
         .await.unwrap();
     let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
 
@@ -797,10 +642,10 @@ async fn monitor_lease_expiry_fails_job() {
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
-    // Register worker and assign
-    let reg = WorkerRegistration { worker_id: "w1".to_string(), capabilities: vec![], worker_type: "sim".to_string(), platform: vec![] };
-    state.nats.request_msg(&subjects::WORKER_REGISTER, &reg).await.unwrap();
-    chuggernaut_dispatcher::assignment::assign_job(&state, &key, "w1", false, None).await.unwrap();
+    // Simulate on-the-stack with claim
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
 
     // Don't send heartbeats — wait for lease to expire (1s lease + 1s scan interval)
@@ -834,15 +679,16 @@ async fn admin_requeue_from_failed() {
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
-    // Assign + fail the job
-    let reg = WorkerRegistration { worker_id: "w1".to_string(), capabilities: vec![], worker_type: "sim".to_string(), platform: vec![] };
-    state.nats.request_msg(&subjects::WORKER_REGISTER, &reg).await.unwrap();
-    chuggernaut_dispatcher::assignment::assign_job(&state, &key, "w1", false, None).await.unwrap();
+    // Simulate on-the-stack with claim + fail
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
 
     let outcome = WorkerOutcome {
-        worker_id: "w1".to_string(),
+        worker_id: worker_id.clone(),
         job_key: key.clone(),
         outcome: OutcomeType::Fail { reason: "compile error".to_string(), logs: None },
+        token_usage: None,
     };
     state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -891,15 +737,22 @@ async fn action_dispatch_creates_claim_and_transitions() {
     test_utils::create_test_repo(forgejo_port, &token, &org, "repo").await;
 
     // Push a noop workflow so dispatch_workflow succeeds
-    let workflow = "name: work\non:\n  workflow_dispatch:\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
+    let workflow = "name: work\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      review_feedback:\n        type: string\n        default: \"\"\n      is_rework:\n        type: string\n        default: \"false\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
     test_utils::push_file(
         forgejo_port, &token, &org, "repo",
         ".forgejo/workflows/work.yml", workflow, "add workflow",
     ).await;
 
+    let review_workflow = "name: review\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      pr_url:\n        type: string\n      review_level:\n        type: string\n        default: \"high\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
+    test_utils::push_file(
+        forgejo_port, &token, &org, "repo",
+        ".forgejo/workflows/review.yml", review_workflow, "add review workflow",
+    ).await;
+
     // Set up dispatcher with Forgejo config
     let config = Config {
         nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
         http_listen: "127.0.0.1:0".to_string(),
         lease_secs: 60,
         default_timeout_secs: 600,
@@ -907,15 +760,20 @@ async fn action_dispatch_creates_claim_and_transitions() {
         monitor_scan_interval_secs: 100,
         job_retention_secs: 86400,
         activity_limit: 50,
-        blacklist_ttl_secs: 3600,
         forgejo_url: Some(forgejo_url),
         forgejo_token: Some(token),
         action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
-    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, config.blacklist_ttl_secs, Some(&prefix))
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
         .await.unwrap();
     let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
     handlers::start_handlers(state.clone()).await.unwrap();
@@ -946,6 +804,415 @@ async fn action_dispatch_creates_claim_and_transitions() {
     let (claim, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key)
         .await.unwrap().unwrap();
     assert!(claim.worker_id.starts_with("action-"), "worker_id should be action-{key}");
+}
+
+/// Rework dispatch: ChangesRequested → new action dispatched with review_feedback
+#[tokio::test]
+async fn rework_dispatches_new_action_with_feedback() {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    // Start Forgejo via test-utils
+    let forgejo = test_utils::start_forgejo().await;
+    let forgejo_port = test_utils::forgejo_port(&forgejo).await;
+    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+
+    let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
+    let token = creds.admin_token;
+
+    let org = format!("rw{}", &prefix[..8]);
+    test_utils::create_test_repo(forgejo_port, &token, &org, "repo").await;
+
+    // Push workflow with review_feedback + is_rework inputs
+    let workflow = "name: work\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      review_feedback:\n        type: string\n        default: \"\"\n      is_rework:\n        type: string\n        default: \"false\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
+    test_utils::push_file(
+        forgejo_port, &token, &org, "repo",
+        ".forgejo/workflows/work.yml", workflow, "add workflow",
+    ).await;
+
+    let review_workflow = "name: review\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      pr_url:\n        type: string\n      review_level:\n        type: string\n        default: \"high\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
+    test_utils::push_file(
+        forgejo_port, &token, &org, "repo",
+        ".forgejo/workflows/review.yml", review_workflow, "add review workflow",
+    ).await;
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 60,
+        default_timeout_secs: 600,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 100,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: Some(forgejo_url),
+        forgejo_token: Some(token),
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await.unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    // Create job and simulate initial work cycle: OnDeck → OnTheStack → InReview
+    let req = CreateJobRequest {
+        repo: format!("{org}/repo"),
+        title: "Rework dispatch test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        worker_type: Some("action".to_string()),
+        platform: None,
+        timeout_secs: 300,
+        review: ReviewLevel::High,
+        max_retries: 0,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Dispatch initial action → OnTheStack
+    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key).await.unwrap();
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
+
+    // Simulate yield → InReview
+    let worker_id = format!("action-{key}");
+    let outcome = WorkerOutcome {
+        worker_id: worker_id.clone(),
+        job_key: key.clone(),
+        outcome: OutcomeType::Yield { pr_url: format!("http://forgejo/{org}/repo/pulls/1") },
+        token_usage: None,
+    };
+    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::InReview);
+
+    // Publish ChangesRequested with feedback
+    let decision = ReviewDecision {
+        job_key: key.clone(),
+        decision: DecisionType::ChangesRequested { feedback: "fix the tests please".to_string() },
+        pr_url: Some(format!("http://forgejo/{org}/repo/pulls/1")),
+        token_usage: None,
+    };
+    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // The handler transitions to ChangesRequested, then dispatches a rework action.
+    // The rework action dispatch creates a new claim and transitions to OnTheStack.
+    let job_state = state.jobs.get(&key).unwrap().state;
+    assert!(
+        job_state == JobState::OnTheStack,
+        "expected OnTheStack after rework dispatch, got {job_state:?}"
+    );
+
+    // Verify claim exists for the rework
+    let (claim, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key)
+        .await.unwrap().unwrap();
+    assert!(claim.worker_id.starts_with("action-"), "rework claim should have action- prefix");
+}
+
+// ---------------------------------------------------------------------------
+// Review dispatch: yield triggers review action
+// ---------------------------------------------------------------------------
+
+/// Verify that when a worker yields, the dispatcher dispatches a review action
+/// to Forgejo and records a "review_dispatched" journal entry.
+#[tokio::test]
+async fn yield_dispatches_review_action() {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let forgejo = test_utils::start_forgejo().await;
+    let forgejo_port = test_utils::forgejo_port(&forgejo).await;
+    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+
+    let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
+    let token = creds.admin_token;
+
+    let org = format!("rv{}", &prefix[..8]);
+    test_utils::create_test_repo(forgejo_port, &token, &org, "repo").await;
+
+    // Push both work and review workflows
+    let work_wf = "name: work\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      review_feedback:\n        type: string\n        default: \"\"\n      is_rework:\n        type: string\n        default: \"false\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
+    test_utils::push_file(
+        forgejo_port, &token, &org, "repo",
+        ".forgejo/workflows/work.yml", work_wf, "add work workflow",
+    ).await;
+
+    let review_wf = "name: review\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      pr_url:\n        type: string\n      review_level:\n        type: string\n        default: \"high\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
+    test_utils::push_file(
+        forgejo_port, &token, &org, "repo",
+        ".forgejo/workflows/review.yml", review_wf, "add review workflow",
+    ).await;
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 60,
+        default_timeout_secs: 600,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 100,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: Some(forgejo_url),
+        forgejo_token: Some(token),
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await.unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    // Create job, dispatch work action, simulate yield
+    let req = CreateJobRequest {
+        repo: format!("{org}/repo"),
+        title: "Review dispatch test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        worker_type: Some("action".to_string()),
+        platform: None,
+        timeout_secs: 300,
+        review: ReviewLevel::High,
+        max_retries: 0,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key).await.unwrap();
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
+
+    // Worker yields with PR URL
+    let worker_id = format!("action-{key}");
+    let outcome = WorkerOutcome {
+        worker_id: worker_id.clone(),
+        job_key: key.clone(),
+        outcome: OutcomeType::Yield { pr_url: format!("http://forgejo/{org}/repo/pulls/1") },
+        token_usage: None,
+    };
+    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    // Job should be InReview
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::InReview);
+
+    // Verify review dispatch happened by checking journal
+    let mut found_review_dispatch = false;
+    if let Ok(keys) = state.kv.journal.keys().await {
+        tokio::pin!(keys);
+        while let Some(Ok(jk)) = keys.next().await {
+            if let Ok(Some((entry, _))) = jobs::kv_get::<JournalEntry>(&state.kv.journal, &jk).await {
+                if entry.action == "review_dispatched" && entry.job_key.as_deref() == Some(&key) {
+                    found_review_dispatch = true;
+                    // Verify details contain the workflow and pr_url
+                    let details = entry.details.unwrap_or_default();
+                    assert!(details.contains("review.yml"), "journal should mention review workflow");
+                    assert!(details.contains("pr_url"), "journal should mention pr_url");
+                    break;
+                }
+            }
+        }
+    }
+    assert!(found_review_dispatch, "expected review_dispatched journal entry");
+}
+
+// ---------------------------------------------------------------------------
+// Token usage: work + review tokens accumulated on Job
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn token_usage_accumulated_from_work_and_review() {
+    let state = setup().await;
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Token tracking test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        worker_type: None,
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Simulate work: claim → OnTheStack → yield with token usage
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
+
+    let work_tokens = TokenUsage {
+        input_tokens: 25000,
+        output_tokens: 8000,
+        cache_read_tokens: 12000,
+        cache_write_tokens: 3000,
+    };
+    let outcome = WorkerOutcome {
+        worker_id: worker_id.clone(),
+        job_key: key.clone(),
+        outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        token_usage: Some(work_tokens.clone()),
+    };
+    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Verify work token record was stored
+    let job = state.jobs.get(&key).unwrap().clone();
+    assert_eq!(job.state, JobState::InReview);
+    assert_eq!(job.token_usage.len(), 1);
+    assert_eq!(job.token_usage[0].action_type, "work");
+    assert_eq!(job.token_usage[0].token_usage.input_tokens, 25000);
+    assert_eq!(job.token_usage[0].token_usage.output_tokens, 8000);
+
+    // Now simulate review decision with token usage
+    let review_tokens = TokenUsage {
+        input_tokens: 15000,
+        output_tokens: 3500,
+        cache_read_tokens: 8000,
+        cache_write_tokens: 2000,
+    };
+    let decision = ReviewDecision {
+        job_key: key.clone(),
+        decision: DecisionType::Approved,
+        pr_url: Some("http://forgejo/test/repo/pulls/1".to_string()),
+        token_usage: Some(review_tokens.clone()),
+    };
+    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Verify both records exist on the job
+    let job = state.jobs.get(&key).unwrap().clone();
+    assert_eq!(job.state, JobState::Done);
+    assert_eq!(job.token_usage.len(), 2, "expected 2 token records (work + review)");
+
+    assert_eq!(job.token_usage[0].action_type, "work");
+    assert_eq!(job.token_usage[0].token_usage.input_tokens, 25000);
+
+    assert_eq!(job.token_usage[1].action_type, "review");
+    assert_eq!(job.token_usage[1].token_usage.input_tokens, 15000);
+    assert_eq!(job.token_usage[1].token_usage.output_tokens, 3500);
+
+    // Also verify via KV (persistence)
+    let (kv_job, _) = jobs::kv_get::<Job>(&state.kv.jobs, &key).await.unwrap().unwrap();
+    assert_eq!(kv_job.token_usage.len(), 2);
+}
+
+/// Verify that a rework cycle accumulates multiple token records.
+#[tokio::test]
+async fn token_usage_across_rework_cycle() {
+    let state = setup().await;
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Rework token test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        worker_type: None,
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // First work cycle
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
+
+    let outcome = WorkerOutcome {
+        worker_id: worker_id.clone(),
+        job_key: key.clone(),
+        outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        token_usage: Some(TokenUsage { input_tokens: 20000, output_tokens: 5000, cache_read_tokens: 0, cache_write_tokens: 0 }),
+    };
+    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // First review: changes requested
+    let decision = ReviewDecision {
+        job_key: key.clone(),
+        decision: DecisionType::ChangesRequested { feedback: "fix tests".to_string() },
+        pr_url: Some("http://forgejo/test/repo/pulls/1".to_string()),
+        token_usage: Some(TokenUsage { input_tokens: 10000, output_tokens: 2000, cache_read_tokens: 0, cache_write_tokens: 0 }),
+    };
+    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Job should be in ChangesRequested (no Forgejo to dispatch rework, so it stays there)
+    let job = state.jobs.get(&key).unwrap().clone();
+    assert_eq!(job.state, JobState::ChangesRequested);
+    assert_eq!(job.token_usage.len(), 2, "expected work + review records after first cycle");
+    assert_eq!(job.token_usage[0].action_type, "work");
+    assert_eq!(job.token_usage[1].action_type, "review");
+
+    // Simulate rework: manually claim + transition + yield again
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "rework_dispatched", Some(&worker_id)).await.unwrap();
+
+    let outcome2 = WorkerOutcome {
+        worker_id: worker_id.clone(),
+        job_key: key.clone(),
+        outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        token_usage: Some(TokenUsage { input_tokens: 8000, output_tokens: 3000, cache_read_tokens: 0, cache_write_tokens: 0 }),
+    };
+    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome2).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Second review: approved
+    let decision2 = ReviewDecision {
+        job_key: key.clone(),
+        decision: DecisionType::Approved,
+        pr_url: Some("http://forgejo/test/repo/pulls/1".to_string()),
+        token_usage: Some(TokenUsage { input_tokens: 9000, output_tokens: 1500, cache_read_tokens: 0, cache_write_tokens: 0 }),
+    };
+    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision2).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let job = state.jobs.get(&key).unwrap().clone();
+    assert_eq!(job.state, JobState::Done);
+    assert_eq!(job.token_usage.len(), 4, "expected 4 records: work, review, work(rework), review");
+
+    assert_eq!(job.token_usage[0].action_type, "work");
+    assert_eq!(job.token_usage[0].token_usage.input_tokens, 20000);
+    assert_eq!(job.token_usage[1].action_type, "review");
+    assert_eq!(job.token_usage[1].token_usage.input_tokens, 10000);
+    assert_eq!(job.token_usage[2].action_type, "work");
+    assert_eq!(job.token_usage[2].token_usage.input_tokens, 8000);
+    assert_eq!(job.token_usage[3].action_type, "review");
+    assert_eq!(job.token_usage[3].token_usage.input_tokens, 9000);
 }
 
 // ---------------------------------------------------------------------------
@@ -980,7 +1247,7 @@ async fn action_runner_publishes_outcome_to_nats() {
     let org = "testorg";
     test_utils::create_test_repo(forgejo_port, &token, org, "repo").await;
 
-    // Push a simple workflow
+    // Push workflow with all inputs (including rework fields)
     let workflow = format!(
         r#"name: test-action
 on:
@@ -992,10 +1259,26 @@ on:
       nats_url:
         required: true
         type: string
+      review_feedback:
+        type: string
+        default: ""
+      is_rework:
+        type: string
+        default: "false"
 jobs:
   work:
     runs-on: ubuntu-latest
     steps:
+      - name: Verify networking
+        run: |
+          set -e
+          nats_host=$(echo "${{{{ inputs.nats_url }}}}" | sed 's|nats://||' | cut -d: -f1)
+          nats_port=$(echo "${{{{ inputs.nats_url }}}}" | sed 's|nats://||' | cut -d: -f2)
+          echo "Checking NATS at $nats_host:$nats_port ..."
+          timeout 5 bash -c "echo > /dev/tcp/$nats_host/$nats_port" || {{ echo "FATAL: cannot reach NATS"; exit 1; }}
+          echo "Checking Forgejo at {forgejo_internal_url} ..."
+          curl -sf --max-time 5 "{forgejo_internal_url}/api/v1/version" || {{ echo "FATAL: cannot reach Forgejo"; exit 1; }}
+          echo "Networking OK"
       - name: Run worker
         run: |
           chuggernaut-worker \
@@ -1005,6 +1288,9 @@ jobs:
             --forgejo-token "${{{{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}}}" \
             --command mock-claude \
             --heartbeat-interval-secs 5
+        env:
+          CHUGGERNAUT_REVIEW_FEEDBACK: ${{{{ inputs.review_feedback }}}}
+          CHUGGERNAUT_IS_REWORK: ${{{{ inputs.is_rework }}}}
 "#
     );
 
@@ -1128,7 +1414,6 @@ jobs:
                     serde_json::from_slice(&msg.payload).unwrap();
                 eprintln!("Got outcome: {:?}", outcome.outcome);
                 got_outcome = true;
-                break;
             }
         }
 
@@ -1144,17 +1429,30 @@ jobs:
             }
         }
 
+        if got_outcome {
+            break;
+        }
+
         tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    // Drain any remaining channel messages that arrived around the same time as the outcome
+    if !got_channel_msg {
+        if let Ok(Some(msg)) =
+            tokio::time::timeout(Duration::from_secs(2), channel_sub.next()).await
+        {
+            if let Ok(channel_msg) = serde_json::from_slice::<chuggernaut_types::ChannelMessage>(&msg.payload) {
+                eprintln!("Got channel message (post-loop): sender={} body={}", channel_msg.sender, channel_msg.body);
+                got_channel_msg = true;
+            }
+        }
     }
 
     eprintln!("Results: heartbeat={got_heartbeat} outcome={got_outcome} channel={got_channel_msg} action_status={action_status}");
 
     assert!(got_heartbeat, "should have received heartbeat from worker");
     assert!(got_outcome, "should have received WorkerOutcome from worker");
-    // Channel message is a stretch goal — requires MCP bridge to work end-to-end
-    if !got_channel_msg {
-        eprintln!("NOTE: no channel message received (MCP bridge not yet exercised in action)");
-    }
+    assert!(got_channel_msg, "should have received channel_send message on NATS outbox");
 
     // Check status KV
     let js = async_nats::jetstream::new(nats_client.clone());
@@ -1201,7 +1499,7 @@ async fn e2e_full_action_pipeline() {
     let org = format!("org{}", &prefix[..8]);
     test_utils::create_test_repo(forgejo_port, &token, &org, "repo").await;
 
-    // Push workflow file
+    // Push workflow that runs chuggernaut-worker with mock-claude
     let workflow = format!(
         r#"name: chuggernaut-work
 on:
@@ -1213,22 +1511,39 @@ on:
       nats_url:
         required: true
         type: string
+      review_feedback:
+        type: string
+        default: ""
+      is_rework:
+        type: string
+        default: "false"
 jobs:
   work:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - name: Execute
         run: |
-          echo "mock work for ${{{{ inputs.job_key }}}}" > work.txt
-          git add -A
-          git commit -m "work: ${{{{ inputs.job_key }}}}"
-          git push origin HEAD
+          chuggernaut-worker \
+            --job-key "${{{{ inputs.job_key }}}}" \
+            --nats-url "${{{{ inputs.nats_url }}}}" \
+            --forgejo-url "{forgejo_internal_url}" \
+            --forgejo-token "${{{{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}}}" \
+            --command mock-claude \
+            --heartbeat-interval-secs 5
+        env:
+          CHUGGERNAUT_REVIEW_FEEDBACK: ${{{{ inputs.review_feedback }}}}
+          CHUGGERNAUT_IS_REWORK: ${{{{ inputs.is_rework }}}}
 "#
     );
     test_utils::push_file(
         forgejo_port, &token, &org, "repo",
         ".forgejo/workflows/work.yml", &workflow, "add workflow",
+    ).await;
+
+    // Set repo secret for Forgejo token
+    test_utils::set_repo_secret(
+        forgejo_port, &token, &org, "repo",
+        "CHUGGERNAUT_FORGEJO_TOKEN", &token,
     ).await;
 
     // Start runner via test-utils
@@ -1260,48 +1575,11 @@ jobs:
     // NATS URL the worker binary will use from inside a Docker container
     let nats_internal_url = format!("nats://host.docker.internal:{port}");
 
-    // Push workflow that runs chuggernaut-worker with mock-claude
-    let workflow = format!(
-        r#"name: chuggernaut-work
-on:
-  workflow_dispatch:
-    inputs:
-      job_key:
-        required: true
-        type: string
-      nats_url:
-        required: true
-        type: string
-jobs:
-  work:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Execute
-        run: |
-          chuggernaut-worker \
-            --job-key "${{{{ inputs.job_key }}}}" \
-            --nats-url "${{{{ inputs.nats_url }}}}" \
-            --forgejo-url "{forgejo_internal_url}" \
-            --forgejo-token "${{{{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}}}" \
-            --command mock-claude \
-            --heartbeat-interval-secs 5
-"#
-    );
-    test_utils::push_file(
-        forgejo_port, &token, &org, "repo",
-        ".forgejo/workflows/work.yml", &workflow, "update workflow",
-    ).await;
-
-    // Set repo secret for Forgejo token
-    test_utils::set_repo_secret(
-        forgejo_port, &token, &org, "repo",
-        "CHUGGERNAUT_FORGEJO_TOKEN", &token,
-    ).await;
-
     // Set up dispatcher — NO prefix, so the worker binary's unprefixed NATS
     // messages reach the dispatcher directly
     let config = Config {
         nats_url: nats_url.clone(),
+        nats_worker_url: nats_internal_url.clone(),
         http_listen: "127.0.0.1:0".to_string(),
         lease_secs: 120,
         default_timeout_secs: 300,
@@ -1309,15 +1587,20 @@ jobs:
         monitor_scan_interval_secs: 5,
         job_retention_secs: 86400,
         activity_limit: 50,
-        blacklist_ttl_secs: 3600,
         forgejo_url: Some(forgejo_url.clone()),
         forgejo_token: Some(token.clone()),
         action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
-    let kv = nats_init::initialize(&js, config.lease_secs, config.blacklist_ttl_secs)
+    let kv = nats_init::initialize(&js, config.lease_secs)
         .await
         .unwrap();
     let state = DispatcherState::new(config, client, js, kv);
@@ -1347,36 +1630,11 @@ jobs:
     let key = jobs::create_job(&state, req).await.unwrap();
     eprintln!("E2E: created job {key}");
 
-    // Dispatch action manually so we can pass the internal NATS URL
-    let job = state.jobs.get(&key).unwrap().clone();
-    let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, job.timeout_secs)
-        .await
-        .unwrap();
-    chuggernaut_dispatcher::jobs::transition_job(
-        &state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id),
-    )
-    .await
-    .unwrap();
+    // Dispatcher auto-dispatches via try_assign_job (nats_worker_url = Docker-internal)
+    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key).await.unwrap();
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
 
-    let forgejo_client = chuggernaut_forgejo_api::ForgejoClient::new(&forgejo_url, &token);
-    forgejo_client
-        .dispatch_workflow(
-            &org,
-            "repo",
-            "work.yml",
-            &chuggernaut_forgejo_api::DispatchWorkflowOption {
-                ref_field: "main".to_string(),
-                inputs: Some(serde_json::json!({
-                    "job_key": key,
-                    "nats_url": nats_internal_url,
-                })),
-            },
-        )
-        .await
-        .expect("workflow dispatch failed");
-
-    eprintln!("E2E: action dispatched, waiting for worker outcome...");
+    eprintln!("E2E: action dispatched via dispatcher, waiting for worker outcome...");
 
     // Check action runs after a short delay
     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1439,5 +1697,214 @@ jobs:
         let pr_url = state.jobs.get(&key).unwrap().pr_url.clone();
         assert!(pr_url.is_some(), "job should have a PR URL");
         eprintln!("E2E: PR URL = {}", pr_url.unwrap());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Full E2E: work → review (changes_requested) → rework → review (approved) → Done
+// ---------------------------------------------------------------------------
+
+/// Complete lifecycle E2E: creates a job, runs a real work action via Forgejo runner,
+/// injects review decisions to drive the rework cycle, runs a second work action,
+/// and verifies the job reaches Done with token usage records.
+///
+/// Run: `cargo test -p chuggernaut-dispatcher --test integration e2e_full_review_cycle -- --test-threads=1 --ignored --nocapture`
+#[tokio::test]
+#[ignore] // requires pre-built runner-env image + Docker socket
+async fn e2e_full_review_cycle() {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let nats_internal_url = format!("nats://host.docker.internal:{port}");
+
+    let forgejo = test_utils::start_forgejo().await;
+    let forgejo_port = test_utils::forgejo_port(&forgejo).await;
+    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+    let forgejo_internal_url = test_utils::forgejo_internal_url(forgejo_port);
+
+    let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
+    let token = creds.admin_token;
+
+    let runner_reg_token = test_utils::get_runner_registration_token(forgejo_port, &token).await;
+
+    let org = format!("e2e{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    test_utils::create_test_repo(forgejo_port, &token, &org, "repo").await;
+
+    // Push work workflow (runs mock-claude for git work)
+    let work_wf = format!(
+        r#"name: chuggernaut-work
+on:
+  workflow_dispatch:
+    inputs:
+      job_key:
+        required: true
+        type: string
+      nats_url:
+        required: true
+        type: string
+      review_feedback:
+        type: string
+        default: ""
+      is_rework:
+        type: string
+        default: "false"
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Execute
+        run: |
+          chuggernaut-worker \
+            --job-key "${{{{ inputs.job_key }}}}" \
+            --nats-url "${{{{ inputs.nats_url }}}}" \
+            --forgejo-url "{forgejo_internal_url}" \
+            --forgejo-token "${{{{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}}}" \
+            --command mock-claude \
+            --heartbeat-interval-secs 5
+        env:
+          CHUGGERNAUT_REVIEW_FEEDBACK: ${{{{ inputs.review_feedback }}}}
+          CHUGGERNAUT_IS_REWORK: ${{{{ inputs.is_rework }}}}
+"#
+    );
+    test_utils::push_file(
+        forgejo_port, &token, &org, "repo",
+        ".forgejo/workflows/work.yml", &work_wf, "add work workflow",
+    ).await;
+
+    test_utils::set_repo_secret(
+        forgejo_port, &token, &org, "repo",
+        "CHUGGERNAUT_FORGEJO_TOKEN", &token,
+    ).await;
+
+    // Start runner
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+    let runner_config_path = workspace_root.join("infra/runner/config.yaml").canonicalize().unwrap();
+    let _runner = test_utils::start_runner(forgejo_port, &runner_reg_token, runner_config_path.to_str().unwrap()).await;
+    tokio::time::sleep(Duration::from_secs(15)).await;
+
+    // Set up dispatcher (unprefixed so worker NATS messages reach it)
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_internal_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 120,
+        default_timeout_secs: 300,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 5,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: Some(forgejo_url.clone()),
+        forgejo_token: Some(token.clone()),
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize(&js, config.lease_secs).await.unwrap();
+    let state = DispatcherState::new(config, client, js, kv);
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    // --- Phase 1: Create job and dispatch first work action ---
+    let req = CreateJobRequest {
+        repo: format!("{org}/repo"),
+        title: "E2E review cycle".to_string(),
+        body: "Full lifecycle test".to_string(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        worker_type: Some("action".to_string()),
+        platform: None,
+        timeout_secs: 300,
+        review: ReviewLevel::High,
+        max_retries: 0,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+    eprintln!("E2E-review: created job {key}");
+
+    // Dispatcher auto-dispatches via try_assign_job (nats_worker_url = Docker-internal)
+    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key).await.unwrap();
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
+    eprintln!("E2E-review: first work action dispatched via dispatcher");
+
+    // Wait for InReview
+    wait_for_state(&state, &key, JobState::InReview, 90).await;
+    let pr_url = state.jobs.get(&key).unwrap().pr_url.clone().expect("should have PR URL");
+    eprintln!("E2E-review: reached InReview, PR = {pr_url}");
+
+    // --- Phase 2: Inject ChangesRequested review decision ---
+    let decision = ReviewDecision {
+        job_key: key.clone(),
+        decision: DecisionType::ChangesRequested { feedback: "please add tests".to_string() },
+        pr_url: Some(pr_url.clone()),
+        token_usage: Some(TokenUsage { input_tokens: 15000, output_tokens: 3000, cache_read_tokens: 0, cache_write_tokens: 0 }),
+    };
+    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
+    eprintln!("E2E-review: injected ChangesRequested");
+
+    // The dispatcher auto-dispatches the rework action (nats_worker_url handles Docker networking).
+    // Wait a moment for the ChangesRequested → OnTheStack transition.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let current = state.jobs.get(&key).unwrap().state;
+    eprintln!("E2E-review: state after ChangesRequested = {current:?}");
+    assert_eq!(current, JobState::OnTheStack, "dispatcher should auto-dispatch rework");
+
+    // Wait for InReview again (rework yields)
+    wait_for_state(&state, &key, JobState::InReview, 90).await;
+    eprintln!("E2E-review: reached InReview after rework");
+
+    // --- Phase 3: Inject Approved review decision ---
+    let decision2 = ReviewDecision {
+        job_key: key.clone(),
+        decision: DecisionType::Approved,
+        pr_url: Some(pr_url.clone()),
+        token_usage: Some(TokenUsage { input_tokens: 12000, output_tokens: 2000, cache_read_tokens: 0, cache_write_tokens: 0 }),
+    };
+    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision2).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let final_state = state.jobs.get(&key).unwrap().state;
+    eprintln!("E2E-review: final state = {final_state:?}");
+    assert_eq!(final_state, JobState::Done, "job should be Done after approval");
+
+    // --- Verify token usage records ---
+    let job = state.jobs.get(&key).unwrap().clone();
+    eprintln!("E2E-review: token_usage records = {}", job.token_usage.len());
+    for (i, record) in job.token_usage.iter().enumerate() {
+        eprintln!("  [{i}] type={} input={} output={}", record.action_type, record.token_usage.input_tokens, record.token_usage.output_tokens);
+    }
+
+    // We expect at least the 2 review records we injected (work outcomes from the real
+    // action don't have token_usage since mock-claude doesn't report it)
+    let review_records: Vec<_> = job.token_usage.iter().filter(|r| r.action_type == "review").collect();
+    assert_eq!(review_records.len(), 2, "expected 2 review token records");
+    assert_eq!(review_records[0].token_usage.input_tokens, 15000);
+    assert_eq!(review_records[1].token_usage.input_tokens, 12000);
+
+    eprintln!("E2E-review: PASSED — full work → review → rework → review → Done cycle");
+}
+
+/// Helper: wait for a job to reach the given state, with timeout.
+async fn wait_for_state(state: &Arc<DispatcherState>, key: &str, target: JobState, timeout_secs: u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            let current = state.jobs.get(key).unwrap().state;
+            panic!("timeout waiting for {target:?}: job is in {current:?} after {timeout_secs}s");
+        }
+        let current = state.jobs.get(key).unwrap().state;
+        if current == target {
+            return;
+        }
+        if current == JobState::Failed {
+            panic!("job failed while waiting for {target:?}");
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }

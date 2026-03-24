@@ -12,12 +12,8 @@ pub struct KvStores {
     pub jobs: kv::Store,
     pub claims: kv::Store,
     pub deps: kv::Store,
-    pub workers: kv::Store,
     pub counters: kv::Store,
-    pub sessions: kv::Store,
     pub activities: kv::Store,
-    pub pending_reworks: kv::Store,
-    pub abandon_blacklist: kv::Store,
     pub journal: kv::Store,
     pub channels: kv::Store,
 }
@@ -27,16 +23,14 @@ pub struct KvStores {
 /// and stream subjects are prefixed with `{prefix}_`. Used for test isolation.
 pub async fn initialize(
     js: &jetstream::Context,
-    lease_secs: u64,
-    blacklist_ttl_secs: u64,
+    _lease_secs: u64,
 ) -> DispatcherResult<KvStores> {
-    initialize_with_prefix(js, lease_secs, blacklist_ttl_secs, None).await
+    initialize_with_prefix(js, _lease_secs, None).await
 }
 
 pub async fn initialize_with_prefix(
     js: &jetstream::Context,
-    lease_secs: u64,
-    blacklist_ttl_secs: u64,
+    _lease_secs: u64,
     prefix: Option<&str>,
 ) -> DispatcherResult<KvStores> {
     let name = |base: &str| -> String {
@@ -75,15 +69,6 @@ pub async fn initialize_with_prefix(
         })
         .await?;
 
-    let workers = js
-        .create_key_value(kv::Config {
-            bucket: name(chuggernaut_types::buckets::WORKERS),
-            history: 1,
-            storage: StorageType::File,
-            ..Default::default()
-        })
-        .await?;
-
     let counters = js
         .create_key_value(kv::Config {
             bucket: name(chuggernaut_types::buckets::COUNTERS),
@@ -93,40 +78,11 @@ pub async fn initialize_with_prefix(
         })
         .await?;
 
-    let sessions = js
-        .create_key_value(kv::Config {
-            bucket: name(chuggernaut_types::buckets::SESSIONS),
-            history: 1,
-            storage: StorageType::File,
-            max_age: Duration::from_secs(lease_secs),
-            ..Default::default()
-        })
-        .await?;
-
     let activities = js
         .create_key_value(kv::Config {
             bucket: name(chuggernaut_types::buckets::ACTIVITIES),
             history: 1,
             storage: StorageType::File,
-            ..Default::default()
-        })
-        .await?;
-
-    let pending_reworks = js
-        .create_key_value(kv::Config {
-            bucket: name(chuggernaut_types::buckets::PENDING_REWORKS),
-            history: 1,
-            storage: StorageType::File,
-            ..Default::default()
-        })
-        .await?;
-
-    let abandon_blacklist = js
-        .create_key_value(kv::Config {
-            bucket: name(chuggernaut_types::buckets::ABANDON_BLACKLIST),
-            history: 1,
-            storage: StorageType::File,
-            max_age: Duration::from_secs(blacklist_ttl_secs),
             ..Default::default()
         })
         .await?;
@@ -171,36 +127,6 @@ pub async fn initialize_with_prefix(
     })
     .await?;
 
-    let (we_name, we_subjects) = match prefix {
-        Some(p) => (
-            format!("{}_{p}", chuggernaut_types::streams::WORKER_EVENTS),
-            vec![
-                format!("{p}_{}", chuggernaut_types::subjects::WORKER_REGISTER.name),
-                format!("{p}_{}", chuggernaut_types::subjects::WORKER_IDLE.name),
-                format!("{p}_{}", chuggernaut_types::subjects::WORKER_OUTCOME.name),
-                format!("{p}_{}", chuggernaut_types::subjects::WORKER_UNREGISTER.name),
-            ],
-        ),
-        None => (
-            chuggernaut_types::streams::WORKER_EVENTS.to_string(),
-            vec![
-                chuggernaut_types::subjects::WORKER_REGISTER.name.to_string(),
-                chuggernaut_types::subjects::WORKER_IDLE.name.to_string(),
-                chuggernaut_types::subjects::WORKER_OUTCOME.name.to_string(),
-                chuggernaut_types::subjects::WORKER_UNREGISTER.name.to_string(),
-            ],
-        ),
-    };
-    js.create_stream(jetstream::stream::Config {
-        name: we_name,
-        subjects: we_subjects,
-        retention: RetentionPolicy::Limits,
-        max_age: Duration::from_secs(24 * 3600),
-        storage: StorageType::File,
-        ..Default::default()
-    })
-    .await?;
-
     let (mon_name, mon_subjects) = match prefix {
         Some(p) => (
             format!("{}_{p}", chuggernaut_types::streams::MONITOR),
@@ -227,12 +153,8 @@ pub async fn initialize_with_prefix(
         jobs,
         claims,
         deps,
-        workers,
         counters,
-        sessions,
         activities,
-        pending_reworks,
-        abandon_blacklist,
         journal,
         channels,
     })

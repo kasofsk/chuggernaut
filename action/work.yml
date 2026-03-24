@@ -10,10 +10,25 @@ on:
         description: "NATS server URL"
         required: true
         type: string
+      runner_label:
+        description: "Runner label (maps to container image via runner config)"
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      review_feedback:
+        description: "Reviewer feedback for rework cycles"
+        required: false
+        type: string
+        default: ""
+      is_rework:
+        description: "Whether this is a rework of a previously-reviewed run"
+        required: false
+        type: string
+        default: "false"
 
 jobs:
   work:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner_label }}
     steps:
       - uses: actions/checkout@v4
 
@@ -22,3 +37,5 @@ jobs:
         env:
           CHUGGERNAUT_FORGEJO_TOKEN: ${{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}
           CHUGGERNAUT_COMMAND: claude
+          CHUGGERNAUT_REVIEW_FEEDBACK: ${{ inputs.review_feedback }}
+          CHUGGERNAUT_IS_REWORK: ${{ inputs.is_rework }}

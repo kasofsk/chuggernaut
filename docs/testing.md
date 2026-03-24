@@ -12,22 +12,19 @@ Pure logic, no infrastructure dependencies. Fast, deterministic.
 
 - **State machine transitions:** given (current_state, trigger) → assert (new_state, side_effects). Cover every row in the state transition table, including edge cases (admin close while OnTheStack, requeue from OnIce with unresolved deps).
 - **Cycle detection:** build petgraph, attempt edge additions that would create cycles, verify rejection. Test diamond deps, self-loops, transitive chains.
-- **Assignment algorithm:** given a set of idle workers with capabilities and a job with requirements, verify correct selection. Cover: capability filtering, platform filtering, blacklist filtering, longest-idle-first ordering, no-match returns none.
-- **Preemption selection:** given busy workers with job priorities, verify the lowest-priority worker is selected for preemption. Cover: ties, single worker, all workers higher priority than incoming job.
 - **Unblock propagation:** given a dep graph and a job transitioning to Done, verify correct set of dependents are unblocked. Cover: partial deps done, all deps done, diamond deps, no dependents.
 - **Message serialization/deserialization:** round-trip all message types through serde. Verify backward compatibility if fields are added.
 
 ### Worker
 
-- **Outcome selection:** given execution results, verify correct outcome type (yield/fail/abandon).
-- **Heartbeat failure counting:** verify 1-2 failures → continue, 3+ → abandon.
-- **Assignment-while-busy rejection:** verify ignored with warning.
+- **Outcome selection:** given execution results, verify correct outcome type (yield/fail).
+- **Heartbeat failure counting:** verify 1-2 failures → continue, 3+ → exit with error.
 
-### Reviewer
+### Worker (Review Mode)
 
-- **Review state mapping:** APPROVED → approve, REQUEST_CHANGES → changes_requested, COMMENT → escalate.
-- **Rework count threshold:** verify escalation when count > 3.
-- **Stale review filtering:** given reviews with timestamps, verify only post-action reviews are considered.
+- **Review output parsing:** verify JSON decision parsing from subprocess output (approved, changes_requested, escalate).
+- **PR index parsing:** extract PR number from URL.
+- **Merge retry:** verify retry logic on merge failure.
 
 ---
 
@@ -37,48 +34,39 @@ Real NATS server (via testcontainers). Forgejo API interactions stubbed at the c
 
 ### Job Lifecycle
 
-- **Happy path:** create job → verify OnDeck → idle worker registers → verify assignment sent → worker heartbeats → worker yields with pr_url → verify InReview → inject ReviewDecision{Approved} → verify Done.
+- **Happy path:** create job → verify OnDeck → verify action dispatched → worker heartbeats → worker yields with pr_url → verify InReview → inject ReviewDecision{Approved} → verify Done.
 - **With dependencies:** create job A (no deps) → create job B (depends on A) → verify B is Blocked → complete A → verify B transitions to OnDeck.
 - **Diamond deps:** A depends on B and C. Complete B → A stays Blocked. Complete C → A transitions to OnDeck.
 - **On-ice flow:** create job with initial_state: on-ice → verify OnIce → admin requeue → verify OnDeck (or Blocked if deps unresolved).
 
 ### Failure and Recovery
 
-- **Lease expiry:** create job, assign, stop heartbeats, wait for monitor scan → verify job transitions to Failed.
-- **Job timeout:** create job with short timeout_secs, assign, heartbeat continuously → verify Failed after timeout.
-- **Abandon and blacklist:** assign job to worker, worker abandons → verify job back to OnDeck, worker blacklisted → re-assign skips blacklisted worker.
-- **Auto-retry with backoff:** fail a job with max_retries > 0, verify it stays Failed until retry_after, then transitions to OnDeck after monitor scan.
+- **Lease expiry:** create job, dispatch action, stop heartbeats, wait for monitor scan → verify job transitions to Failed.
+- **Job timeout:** create job with short timeout_secs, dispatch action, heartbeat continuously → verify Failed after timeout.
+- **Auto-retry with backoff:** fail a job with max_retries > 0, verify it stays Failed until retry_after, then transitions to OnDeck and new action dispatched after monitor scan.
 - **Retry exhaustion:** fail a job max_retries times → verify it stays Failed, no further retries.
 
 ### Restart Recovery
 
-- Populate NATS KV with known state (jobs, claims, deps, workers).
+- Populate NATS KV with known state (jobs, claims, deps).
 - Start dispatcher, let it rebuild.
 - Verify: in-memory job index matches KV, petgraph matches deps, stale claims are cleaned, claimless OnTheStack jobs transition to Failed, partial dep indexes are repaired.
 
-### Preemption
+### Rework Dispatch
 
-- Two workers, both busy. High-priority job arrives → verify PreemptNotice sent to worker with lowest-priority job → simulate abandon + idle → verify high-priority job assigned.
+- Worker yields → InReview → inject ReviewDecision{ChangesRequested} → verify job in ChangesRequested, new action dispatched with review_feedback and is_rework=true.
 
-### Rework Routing
+### Review Dispatch
 
-- Worker yields → InReview → inject ReviewDecision{ChangesRequested} → verify job in ChangesRequested, original worker gets rework assignment with feedback.
-- Same flow but original worker is busy → verify pending-rework written → simulate worker idle → verify rework assigned.
-- Same flow but original worker is gone (pruned) → verify rework assigned to another capable worker.
-
-### Merge Queue
-
-- Two jobs approved concurrently for same repo → verify one gets lock, other queued → first merges, second processed from queue → both Done.
+- Worker yields → InReview → verify review action dispatched with pr_url and review_level.
 
 ### Monitor Scans
 
-- Orphan detection: create claim with unknown worker_id → verify OrphanDetectedEvent.
-- Stale session: create session entry for a Done job → verify detected.
-- Claimless on-the-stack: set job to OnTheStack with no claim → verify detected.
+- Orphan detection: set job to OnTheStack with no claim → verify OrphanDetectedEvent.
 
 ### Admin Commands
 
-- Admin close while OnTheStack → verify claim released, preempt sent, job transitions to Done, reverse deps walked.
+- Admin close while OnTheStack → verify claim released, job transitions to Done, reverse deps walked.
 - Admin close --revoke → verify Revoked state, dependents stay Blocked.
 - Admin requeue from Failed → verify dep check, route to OnDeck or Blocked.
 
@@ -86,23 +74,28 @@ Real NATS server (via testcontainers). Forgejo API interactions stubbed at the c
 
 ## End-to-End Tests
 
-Full Docker Compose stack: NATS, Forgejo, dispatcher, reviewer, runner, SimWorkers.
+Full stack: NATS, Forgejo, runner (via testcontainers). Requires pre-built `chuggernaut-runner-env` Docker image (`docker build -t chuggernaut-runner-env -f Dockerfile.runner-env .`) and Docker socket access.
+
+Two E2E tests exist (marked `#[ignore]`, run with `cargo test -- --ignored --nocapture`):
+
+- **`action_runner_publishes_outcome_to_nats`** — Runner isolation: Forgejo Action → runner → worker binary → NATS. Verifies heartbeat, WorkerOutcome (Yield with PR URL), channel_send message, and ChannelStatus KV.
+- **`e2e_full_action_pipeline`** — Full dispatcher pipeline: create job → dispatch action → runner → mock-claude via MCP → git commit/push → PR created → Yield → InReview.
 
 ### Setup
 
-- Docker Compose brings up all services.
-- `chuggernaut seed` loads test fixture DAGs into the system.
-- SimWorkers register with configurable delays.
+- testcontainers starts Forgejo + NATS; `start_runner` launches Forgejo runner container.
+- Action workers run inside Forgejo Action containers (using `mock-claude` for testing).
+- `chuggernaut seed` loads test fixture DAGs for manual/future tests.
 
 ### Scenarios
 
-- **Single job:** create → SimWorker picks up → PR opened in Forgejo → review action runs → PR merged → job Done.
+- **Single job:** create → work action dispatched → mock-claude runs → PR opened in Forgejo → review action dispatched → review mock-claude → PR merged → job Done.
 - **Dependency chain:** seed A → B → C. Verify jobs execute in order. C completes last.
-- **Parallel fan-out:** A has no deps. B, C, D all depend on A. Complete A → verify B, C, D all transition to OnDeck and get assigned to separate workers concurrently.
-- **Rework cycle:** create job with review: high. SimWorker yields a PR that the review action flags → verify ChangesRequested → SimWorker reworks → re-review → eventually approved and merged.
+- **Parallel fan-out:** A has no deps. B, C, D all depend on A. Complete A → verify B, C, D all transition to OnDeck and get dispatched concurrently.
+- **Rework cycle:** create job with review: high. Worker yields a PR that the review action flags → verify ChangesRequested → new action dispatched with feedback → re-review → eventually approved and merged.
 - **Escalation:** create job with review: human → verify PR gets human reviewer assigned, job in Escalated state.
-- **Worker crash:** kill a SimWorker mid-execution → verify lease expiry → job Failed → auto-retry → new worker picks up → completes.
-- **Dispatcher restart:** mid-pipeline, restart dispatcher container → verify all in-flight jobs recover correctly, workers re-register, pipeline completes.
+- **Action crash:** kill action container mid-execution → verify lease expiry → job Failed → auto-retry → new action dispatched → completes.
+- **Dispatcher restart:** mid-pipeline, restart dispatcher container → verify all in-flight jobs recover correctly, pipeline completes.
 
 ### Assertions
 
@@ -120,6 +113,24 @@ Full Docker Compose stack: NATS, Forgejo, dispatcher, reviewer, runner, SimWorke
 Integration tests use one of:
 - **testcontainers:** ephemeral NATS server per test suite, torn down after.
 - **Subject prefix:** shared NATS server with a unique prefix per test (e.g., `test_{uuid}.chuggernaut.*`), allowing parallel test execution.
+
+### Container Lifecycle
+
+Test containers are shared per process via `OnceLock` + `Box::leak` (Rust statics are never dropped). Two mechanisms ensure cleanup:
+
+- **`watchdog` feature** (testcontainers): catches SIGTERM/SIGINT/SIGQUIT signals and removes all registered containers. Handles Ctrl-C during test runs.
+- **`register_container_cleanup()`** (`chuggernaut-test-utils`): registers container IDs for removal via `libc::atexit`. Handles normal process exit.
+
+All test suites call `register_container_cleanup(container.id())` before leaking the container handle.
+
+### MCP Bridge Tests
+
+The `chuggernaut-channel` integration tests include two subprocess bridge tests that exercise the full MCP-over-NATS path without Docker runners or Forgejo:
+
+- **`mcp_bridge_subprocess_to_nats`**: spawns a bash MCP client, bridges stdin/stdout through `handle_message`, verifies `channel_send` → NATS outbox and `update_status` → KV.
+- **`mcp_bridge_bidirectional_nats`**: round-trip test — publishes a message to the NATS inbox, mock client calls `channel_check` to receive it, replies via `channel_send`, verified on NATS outbox.
+
+These use inline bash scripts as MCP clients (no git operations, no Forgejo) and run in ~0.4s.
 
 ### Forgejo Stub
 

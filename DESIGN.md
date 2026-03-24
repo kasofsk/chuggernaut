@@ -23,15 +23,15 @@ chuggernaut eliminates this by treating **NATS as the single source of truth** f
 
 1. **NATS is the single source of truth.** All workflow state lives in NATS KV buckets backed by JetStream. No external database, no label-based state encoding.
 
-2. **Single-writer per key.** Each NATS KV key has exactly one actor that writes to it. Most buckets are owned entirely by one actor. Where multiple actors write to the same bucket (e.g., `chuggernaut.sessions`), each writes only the key for its current job with no cross-key contention. All KV writes use CAS (compare-and-swap) for consistency.
+2. **Single-writer per key.** Each NATS KV key has exactly one actor that writes to it. Most buckets are owned entirely by one actor. All KV writes use CAS (compare-and-swap) for consistency.
 
 3. **Forgejo is for git.** Forgejo hosts repositories, pull requests, code review, and CI (Forgejo Actions). It does not store workflow state. No issues are used.
 
 4. **The graph viewer is the human interface.** All job visibility, dependency graphs, worker status, and activity timelines are served by the dispatcher's HTTP API and rendered in the graph viewer. No issue tracker needed.
 
-5. **Workers are stateless executors.** They receive everything they need in the assignment payload (full job content from NATS KV). Their only external dependency during execution is Forgejo for git operations.
+5. **Workers are ephemeral.** Each worker runs inside a Forgejo Action container. The dispatcher dispatches the action directly — there is no worker registration or assignment protocol. Workers receive their job key as a workflow input and communicate via NATS (heartbeats, outcomes, MCP channel).
 
-6. **Failures are recoverable.** NATS KV survives restarts. The dispatcher rebuilds in-memory state (petgraph, worker registry) from KV on startup. Stream consumers resume from their last acknowledged position.
+6. **Failures are recoverable.** NATS KV survives restarts. The dispatcher rebuilds in-memory state (petgraph, job index) from KV on startup. Stream consumers resume from their last acknowledged position.
 
 7. **Key format constraint.** Job keys use the format `{owner}.{repo}.{seq}` and double as NATS subject tokens. Owner and repo names **must not contain dots** — the dispatcher rejects them at job creation time.
 
@@ -48,31 +48,32 @@ CLI / API
 │ Dispatcher                                           │
 │                                                      │
 │  Jobs KV ──── petgraph (in-memory DAG) ──── Deps KV │
-│  Claims KV    Workers KV    Journal KV               │
+│  Claims KV    Journal KV                             │
 │                                                      │
 │  HTTP API (graph viewer, CLI reads)                  │
 │  SSE (real-time updates)                             │
 │                                                      │
 │  Subscriptions:                                      │
-│    chuggernaut.worker.{register,idle,heartbeat,outcome,unregister} │
+│    chuggernaut.worker.{heartbeat,outcome}                 │
 │    chuggernaut.review.decision                            │
-│    chuggernaut.interact.help, chuggernaut.interact.respond.{job_key} │
 │    chuggernaut.monitor.{lease-expired,timeout,orphan,retry} │
 │    chuggernaut.admin.{create-job,requeue,close-job}       │
 │    chuggernaut.activity.append, chuggernaut.journal.append     │
 │                                                      │
 │  Publishes:                                          │
 │    chuggernaut.transitions.{job_key}                      │
-│    chuggernaut.dispatch.assign.{worker_id}                │
-│    chuggernaut.dispatch.preempt.{worker_id}               │
-│    chuggernaut.interact.deliver.{worker_id}               │
+│                                                      │
+│  Dispatches:                                         │
+│    Forgejo Actions workflows (via API)               │
 └──────────────────┬──────────────┬────────────────────┘
                    │              │
-        ┌──────────┘              └──────────┐
-        ▼                                    ▼
-   Workers (N)                          Reviewer
-   NATS: events, outcomes               NATS: transitions, decisions
-   Forgejo: git clone/push, PRs         Forgejo: PR review, merge
+        ┌──────────┘
+        ▼
+   Action Workers (ephemeral)
+   Run inside Forgejo Action containers
+   Two modes: work + review
+   NATS: heartbeat, outcome/decision, channel
+   Forgejo: git clone/push, PRs, review, merge
 ```
 
 ### Monitor
@@ -90,53 +91,57 @@ See [docs/monitor.md](docs/monitor.md) for scan behavior, orphan detection, and 
 The single coordination point. All state transitions flow through it. This is a deliberate SPOF — the single-writer model trades HA for simplicity. The dispatcher rebuilds all in-memory state from KV in seconds; workers and the reviewer retry automatically. If HA is needed later, the single-writer design supports active-passive with leader election.
 
 **Owns (writes to):**
-- `chuggernaut.jobs` — full job records (states: `on-ice`, `blocked`, `on-deck`, `on-the-stack`, `needs-help`, `in-review`, `escalated`, `changes-requested`, `done`, `failed`, `revoked`)
+- `chuggernaut.jobs` — full job records (states: `on-ice`, `blocked`, `on-deck`, `on-the-stack`, `in-review`, `escalated`, `changes-requested`, `done`, `failed`, `revoked`)
 - `chuggernaut.claims` — exclusive claim state (CAS)
 - `chuggernaut.deps` — dependency edges (forward + reverse indexes)
-- `chuggernaut.workers` — worker registry
 - `chuggernaut.counters` — per-repo job sequence numbers
 - `chuggernaut.activities` — job activity logs (separate from job records to avoid CAS contention)
 - `chuggernaut.journal` — dispatcher action log
-- `chuggernaut.pending-reworks` — deferred rework routing
-- `chuggernaut.abandon-blacklist` — prevent assign-abandon loops
 - `CHUGGERNAUT-TRANSITIONS` — job state change event stream
 
 **In-memory state:**
 - petgraph DAG — rebuilt from `chuggernaut.deps` KV on startup, maintained incrementally
-- Worker registry — rebuilt from `chuggernaut.workers` KV + re-announcements
 
-**HTTP API:** Serves the graph viewer and CLI read operations. SSE endpoint watches KV changes for real-time updates.
+**HTTP API:** Serves the graph viewer and CLI read operations. SSE endpoint watches KV changes for real-time updates. `GET /api.json` serves a self-describing manifest (routes + SSE events + JSON Schema) for client codegen. `GET /schema` serves the raw JSON Schema.
 
 See [docs/dispatcher.md](docs/dispatcher.md) for state machine, dep management, and claim lifecycle.
 
-### Workers
+### Action Workers
 
-Stateless executors. Receive assignments via NATS, do work via Forgejo git/API, report outcomes via NATS.
+Ephemeral executors that run inside Forgejo Action containers. The dispatcher dispatches a workflow directly — there is no worker registration or assignment protocol.
 
-**Writes to (KV):**
-- `chuggernaut.sessions` — interactive session metadata (own keys only)
+**How it works:**
+1. Job reaches OnDeck → dispatcher creates claim (`worker_id = "action-{job_key}"`) and dispatches Forgejo Action
+2. Worker binary starts inside the action container
+3. Clones repo, checks out `work/{job_key}` branch, launches Claude as subprocess
+4. Bridges Claude's stdin/stdout via MCP channel (NATS ↔ JSON-RPC)
+5. Heartbeats every 10s to keep the claim alive
+6. On completion: commits, pushes, finds/creates PR, reports `Yield` or `Fail`
+7. Container exits
 
 **Publishes to:**
+- `chuggernaut.worker.heartbeat` — lease renewal
+- `chuggernaut.worker.outcome` — Yield (pr_url) or Fail (reason, logs)
 - `chuggernaut.activity.append` — progress updates (fire-and-forget)
-- Worker event subjects — register, idle, heartbeat, outcome, unregister
+- `chuggernaut.channel.{job_key}.outbox` — MCP channel messages
 
-**Three modes:**
-- **Sim** — creates branch, commits file, opens PR, yields. For testing.
-- **Action** — dispatches a Forgejo Actions workflow, polls until complete, yields.
-- **Interactive** — Claude Code agent in tmux/ttyd. Supports peek/attach/detach and help requests.
+**Rework:** When a reviewer requests changes, the dispatcher dispatches a new action with the same `job_key` plus `review_feedback`. The worker checks out the existing branch and PR, addresses the feedback, and yields again.
 
-All worker types handle idempotent execution: on assignment, the worker checks for an existing remote branch and PR for the job key and continues from where the previous attempt left off.
+**Idempotent execution:** Workers check for an existing remote branch and PR for the job key and continue from where the previous attempt left off.
 
-See [docs/worker-protocol.md](docs/worker-protocol.md) for the full NATS protocol.
+See [docs/worker-protocol.md](docs/worker-protocol.md) for the full protocol.
 
-### Reviewer
+### Review (via Action Workers)
 
-Automated PR review. Watches for InReview transitions, dispatches a review action, reads the decision, and merges/escalates/requests changes. For escalated PRs, the reviewer polls Forgejo for human decisions and handles the merge via the merge queue.
+Review is handled by the same worker binary in review mode (`--mode review`), dispatched as a Forgejo Action just like work. When a job transitions to InReview, the dispatcher dispatches a `review.yml` workflow. The review action:
 
-**Owns (writes to):**
-- `chuggernaut.merge-queue` — per-repo merge serialization (lock has 5-minute TTL, refreshed during long merges)
-- `chuggernaut.rework-counts` — limit rework cycles
-- `chuggernaut.review.decision` subject — review outcomes
+1. Clones repo, checks out the PR branch
+2. Gets the diff and runs Claude to review it
+3. Posts a PR review to Forgejo (APPROVED or REQUEST_CHANGES)
+4. If approved, attempts to merge the PR (with retries for contention)
+5. Publishes `ReviewDecision` to NATS
+
+There is no separate reviewer process. The dispatcher handles rework counting, escalation transitions, and merge queue coordination is done inline by the review action with Forgejo API retries.
 
 See [docs/reviewer.md](docs/reviewer.md) for the review lifecycle.
 
@@ -145,12 +150,12 @@ See [docs/reviewer.md](docs/reviewer.md) for the review lifecycle.
 Single-page web app. Primary human interface.
 
 - Real-time DAG of all jobs with dependency edges
-- Job detail: state, priority, activities, PR link, session link
-- Worker roster: idle / busy
+- Job detail: state, priority, activities, PR link, channel status
+- Active claims (running actions)
 - Dispatcher journal
-- Peek/attach/detach for interactive agents
-
 Reads from the dispatcher's HTTP API. SSE-driven — full snapshot on connect, incremental updates thereafter.
+
+**Decoupled frontend:** The graph viewer (or any frontend) does not depend on chuggernaut Rust crates. The dispatcher exposes `GET /api.json` — a self-describing API manifest containing the route table, SSE event definitions, and the full JSON Schema for all types. A frontend can fetch this at build time to generate typed API clients and models in any language. See the `api_specs()` function in `http.rs` for the authoritative route list.
 
 ### CLI
 
@@ -162,21 +167,20 @@ chuggernaut jobs [--state on-deck]
 chuggernaut show {job_key}
 chuggernaut requeue {job_key} [--target on-deck|on-ice]
 chuggernaut close {job_key} [--revoke]
-chuggernaut interact respond {job_key} "message"
-chuggernaut interact attach {worker_id}
-chuggernaut interact detach {worker_id}
-chuggernaut sim [--delay N]
-chuggernaut action [--workflow FILE --runner LABEL]
-chuggernaut agent [--capability CAP]
-chuggernaut seed {repo} {fixture.json}
+chuggernaut channel send {job_key} "message"
+chuggernaut channel watch {job_key}
+chuggernaut channel status {job_key}
+chuggernaut seed {repo} {fixture.json} [--var KEY=VALUE,...]
 ```
+
+The `seed` command supports `--var` for template interpolation — `{{KEY}}` placeholders in fixture job bodies are replaced at seed time. This allows fixtures to reference environment-specific values (e.g. `--var DISPATCHER_URL=https://example.com`).
 
 ---
 
 ## Known Limitations (v1)
 
-- **No authentication or authorization.** The HTTP API, NATS subjects, and CLI have no auth. Workers self-assign IDs without verification. NATS supports account-based auth and subject-level permissions natively; the HTTP API can add bearer tokens. Out of scope for v1.
-- **No metrics or tracing.** No Prometheus endpoint, no OpenTelemetry, no structured tracing across NATS message chains. The journal provides an action log but not operational metrics. Out of scope for v1.
+- **No authentication or authorization.** The HTTP API, NATS subjects, and CLI have no auth. NATS supports account-based auth and subject-level permissions natively; the HTTP API can add bearer tokens. Out of scope for v1.
+- **Basic token usage metrics.** Each action (work and review) reports `TokenUsage` (input, output, cache read/write tokens) in its outcome. The dispatcher stores per-action `ActionTokenRecord` entries on the Job, so you can see token usage per action invocation and broken down by work vs review. No Prometheus endpoint or OpenTelemetry yet — out of scope for v1.
 - **No cross-repo dependencies.** `depends_on` uses sequence numbers within the same repo. Cross-repo workflows can be coordinated externally but are not modeled in the dep graph.
 - **Single-node NATS.** No clustering or replication. NATS supports clustered JetStream natively; out of scope for v1.
 
@@ -199,11 +203,10 @@ services:
   nats:          # JetStream, file-backed storage
   forgejo:       # git + PRs + Actions
   dispatcher:    # coordinator + HTTP API
-  reviewer:      # PR review automation
   runner:        # shared Forgejo Actions runner
 ```
 
-Workers launched via `scripts/workers.sh`.
+Workers run inside Forgejo Action containers — no separate worker processes to manage.
 
 ---
 
@@ -215,13 +218,15 @@ chuggernaut/
   crates/
     types/                        # chuggernaut-types: Job, JobState, ClaimState, messages
     dispatcher/                   # chuggernaut-dispatcher: coordinator binary
-    reviewer/                     # chuggernaut-reviewer: PR review binary
-    worker/                       # chuggernaut-worker: SDK library
+    worker/                       # chuggernaut-worker: action worker binary (work + review modes)
     cli/                          # chuggernaut-cli: CLI binary
-    forgejo-api/                  # generated Forgejo REST client
+    channel/                      # chuggernaut-channel: MCP channel bridge
+    nats/                         # chuggernaut-nats: typed NATS client
+    forgejo-api/                  # Forgejo REST client
+    test-utils/                   # chuggernaut-test-utils: testcontainers + cleanup
   static/                         # graph viewer SPA
   docs/                           # component specs
-  scripts/                        # init.sh, workers.sh
+  scripts/                        # init.sh
   docker-compose.yml
 ```
 
@@ -237,10 +242,10 @@ chuggernaut/
 | PR linking | `Closes #N` auto-closes Forgejo issue | Job key in PR title, branch convention |
 | Dependencies | HTML comments in issue body | NATS KV + petgraph in-memory |
 | State sync | Bidirectional (CDC ↔ sidecar ↔ Forgejo) | None needed (single source) |
-| Done detection | CDC detects merged PR from PostgreSQL | Reviewer reports merge directly |
+| Done detection | CDC detects merged PR from PostgreSQL | Review action merges and reports directly |
 | Human interface | Forgejo issues + graph viewer | Graph viewer only |
 | Persistence | RocksDB + NATS KV + PostgreSQL | NATS JetStream only |
-| Processes | CDC + Sidecar + Reviewer | Dispatcher + Reviewer |
+| Processes | CDC + Sidecar + Reviewer | Dispatcher only (review via actions) |
 | Graph queries | IndraDB/RocksDB | petgraph in-memory + NATS KV persistence |
 
 ---
@@ -249,7 +254,7 @@ chuggernaut/
 
 - [NATS Schema](docs/nats-schema.md) — KV buckets, streams, subjects, payload types
 - [Dispatcher](docs/dispatcher.md) — state machine, deps, claims, assignment, restart recovery
-- [Worker Protocol](docs/worker-protocol.md) — NATS message flows, heartbeat, outcomes, sessions
+- [Worker Protocol](docs/worker-protocol.md) — action dispatch, heartbeat, outcomes, MCP channel
 - [Reviewer](docs/reviewer.md) — review lifecycle, merge queue, rework, done detection
 - [Monitor](docs/monitor.md) — lease scanning, orphan detection, job archival
 - [Testing](docs/testing.md) — unit, integration, and end-to-end testing strategy

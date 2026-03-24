@@ -5,7 +5,7 @@ use dashmap::DashMap;
 use petgraph::graph::{DiGraph, NodeIndex};
 use tokio::sync::RwLock;
 
-use chuggernaut_types::{Job, WorkerInfo};
+use chuggernaut_types::Job;
 
 use chuggernaut_nats::NatsClient;
 
@@ -20,9 +20,6 @@ pub struct DispatcherState {
 
     /// In-memory job index: job_key -> Job
     pub jobs: DashMap<String, Job>,
-
-    /// In-memory worker registry: worker_id -> WorkerInfo
-    pub workers: DashMap<String, WorkerInfo>,
 
     /// In-memory dependency DAG + node index lookup.
     /// Protected by RwLock since graph mutations (add/remove nodes/edges)
@@ -87,7 +84,6 @@ impl DispatcherState {
             nats: NatsClient::with_jetstream(client, js),
             kv,
             jobs: DashMap::new(),
-            workers: DashMap::new(),
             graph: RwLock::new(DepGraph::new()),
         })
     }
@@ -104,7 +100,6 @@ impl DispatcherState {
             nats: NatsClient::with_prefix(client, js, prefix),
             kv,
             jobs: DashMap::new(),
-            workers: DashMap::new(),
             graph: RwLock::new(DepGraph::new()),
         })
     }

@@ -78,11 +78,6 @@ enum Commands {
         #[arg(long)]
         revoke: bool,
     },
-    /// Interact with a job
-    Interact {
-        #[command(subcommand)]
-        action: InteractAction,
-    },
     /// Channel communication with a running Claude session
     Channel {
         #[command(subcommand)]
@@ -94,6 +89,9 @@ enum Commands {
         repo: String,
         /// Path to fixture JSON file
         fixture: String,
+        /// Variable substitutions for {{KEY}} placeholders in job bodies (e.g. --var DISPATCHER_URL=https://example.com)
+        #[arg(long = "var", value_delimiter = ',')]
+        vars: Vec<String>,
     },
 }
 
@@ -118,17 +116,6 @@ enum ChannelAction {
     Status {
         /// Job key (e.g. acme.payments.57)
         key: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum InteractAction {
-    /// Respond to a help request
-    Respond {
-        /// Job key
-        key: String,
-        /// Response message
-        message: String,
     },
 }
 
@@ -346,20 +333,23 @@ async fn main() -> Result<()> {
             }
         },
 
-        Commands::Interact { action } => match action {
-            InteractAction::Respond { key, message } => {
-                let resp = HelpResponse {
-                    job_key: key.clone(),
-                    message,
-                };
-                let nats = NatsClient::new(async_nats::connect(&cli.nats_url).await?);
-                nats.publish_to(&subjects::INTERACT_RESPOND, &key, &resp).await?;
-                println!("Response sent to {key}");
-            }
-        },
+        Commands::Seed { repo, fixture, vars } => {
+            // Parse --var KEY=VALUE pairs into a map
+            let var_map: std::collections::HashMap<String, String> = vars
+                .iter()
+                .filter_map(|v| {
+                    let (k, val) = v.split_once('=')?;
+                    Some((k.to_string(), val.to_string()))
+                })
+                .collect();
 
-        Commands::Seed { repo, fixture } => {
-            let content = std::fs::read_to_string(&fixture)?;
+            let mut content = std::fs::read_to_string(&fixture)?;
+
+            // Interpolate {{KEY}} placeholders in the fixture
+            for (key, value) in &var_map {
+                content = content.replace(&format!("{{{{{key}}}}}"), value);
+            }
+
             let fixture: SeedFixture = serde_json::from_str(&content)?;
 
             let nats = NatsClient::new(async_nats::connect(&cli.nats_url).await?);

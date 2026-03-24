@@ -1,0 +1,16 @@
+# Rust + Wasm development flavor of the runner environment image.
+# Extends the base runner-env with Rust toolchain, wasm-pack, and wasm32 target.
+#
+# Build: docker build -t chuggernaut-runner-env:rust -f Dockerfile.runner-env.rust .
+# Register runner with label: "rust:docker://chuggernaut-runner-env:rust"
+# Configure dispatcher: CHUGGERNAUT_ACTION_RUNNER_LABEL=rust
+
+FROM chuggernaut-runner-env:latest
+
+# Install Rust toolchain via rustup
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
+ && . /root/.cargo/env \
+ && rustup target add wasm32-unknown-unknown \
+ && cargo install wasm-pack
+
+ENV PATH="/root/.cargo/bin:${PATH}"

@@ -20,10 +20,65 @@ services:
     environment:
       - USER_UID=1000
       - USER_GID=1000
-      - FORGEJO__server__ROOT_URL=http://localhost:3000
+      - FORGEJO__server__ROOT_URL=http://forgejo:3000
       - FORGEJO__server__SSH_PORT=2222
     restart: unless-stopped
+
+  dispatcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["chuggernaut-dispatcher"]
+    ports:
+      - "8080:8080"
+    environment:
+      CHUGGERNAUT_NATS_URL: nats://nats:4222
+      CHUGGERNAUT_HTTP_LISTEN: "0.0.0.0:8080"
+      CHUGGERNAUT_FORGEJO_URL: http://forgejo:3000
+      CHUGGERNAUT_FORGEJO_TOKEN: ${CHUGGERNAUT_FORGEJO_TOKEN:-}
+      CHUGGERNAUT_ACTION_WORKFLOW: work.yml
+    depends_on:
+      - nats
+      - forgejo
+    restart: unless-stopped
+
+
+  runner:
+    image: data.forgejo.org/forgejo/runner:11
+    command: >
+      sh -c '
+        while ! curl -sf http://forgejo:3000/api/v1/version > /dev/null 2>&1; do sleep 1; done;
+        if [ ! -f /data/.runner ]; then
+          forgejo-runner register --no-interactive
+            --instance http://forgejo:3000
+            --token $${RUNNER_TOKEN}
+            --name chuggernaut-runner
+            --labels "ubuntu-latest:docker://chuggernaut-runner-env"
+            -c /etc/runner/config.yaml;
+        fi;
+        forgejo-runner daemon -c /etc/runner/config.yaml
+      '
+    environment:
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-}
+    volumes:
+      - runner-data:/data
+      - ./infra/runner/config.yaml:/etc/runner/config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - forgejo
+    restart: unless-stopped
+
+  # Build the runner environment image (worker binary + mock-claude)
+  # Run: docker compose build runner-env
+  runner-env:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner-env
+    image: chuggernaut-runner-env
+    profiles:
+      - build
 
 volumes:
   nats-data:
   forgejo-data:
+  runner-data:

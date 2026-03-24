@@ -1,6 +1,6 @@
 # Dispatcher
 
-The dispatcher is the single coordinator in chuggernaut. It owns all job state transitions, dependency management, claim lifecycle, and worker assignment.
+The dispatcher is the single coordinator in chuggernaut. It owns all job state transitions, dependency management, claim lifecycle, and action dispatch.
 
 **Invariants:**
 - All KV writes use CAS (compare-and-swap) with bounded retry on conflict: up to 5 retries with exponential backoff (10ms/20ms/40ms/80ms/160ms). On exhaustion, heartbeat CAS failures are logged and dropped (benign); state transition CAS failures are logged as errors for investigation.
@@ -23,41 +23,39 @@ The dispatcher is the single coordinator in chuggernaut. It owns all job state t
             deps present      │ all deps Done (dispatcher walks reverse deps)
                               │
                          ┌────▼────┐
-                         │ OnDeck  │  claimable by dispatcher
+                         │ OnDeck  │  dispatcher dispatches Forgejo Action
                          └────┬────┘
-                              │ dispatcher assigns (CAS on chuggernaut.claims)
+                              │ dispatch_action (CAS claim + workflow dispatch)
                          ┌────▼──────────┐
-                         │ OnTheStack    │  exclusively held by one worker
-                         └──┬────┬────┬──┘
-                            │    │    │
-             worker asks    │    │    │ fail / lease expiry / timeout
-             for help       │    │    │
-              ┌─────────────▼┐   │  ┌─▼──────┐
-              │  NeedsHelp   │   │  │ Failed │  reason + logs in activities
-              └──────┬───────┘   │  └────┬───┘
-    claim held;      │           │       │
-    heartbeats       │ human     │       │ retry_count < max_retries
-    continue         │ responds  │       │ → OnDeck (auto-retry)
-                     │ → back to │       │
-                     │ OnTheStack│       │ retry_count >= max_retries
-                     │           │       │ → stays Failed (manual requeue)
-                     │     yield │       │
-                     │     + PR  │       │
-                    ┌▼───────────▼┐      │
-                    │  InReview   │      │
-                    └─┬──┬──┬────┘      │
-                      │  │  │           │
-   changes_requested  │  │  │ escalated │
-   (reviewer)         │  │  │ (reviewer)│
-             ┌────────▼┐ │ ┌▼─────────┐│
-             │ Changes  │ │ │ Escalated ││
-             │Requested │ │ └──┬───┬───┘│
-             └────┬─────┘ │    │   │    │
-                  │       │    │   │    │
+                         │ OnTheStack    │  action container running
+                         └──┬─────────┬──┘
+                            │         │
+                      yield │         │ fail / lease expiry / timeout
+                      + PR  │         │
+                            │       ┌─▼──────┐
+                            │       │ Failed │  reason + logs in activities
+                            │       └────┬───┘
+                            │            │
+                            │            │ retry_count < max_retries
+                            │            │ → OnDeck (auto-retry, new action)
+                            │            │
+                            │            │ retry_count >= max_retries
+                            │            │ → stays Failed (manual requeue)
+                    ┌───────▼┐           │
+                    │InReview│           │
+                    └─┬──┬──┬┘           │
+                      │  │  │            │
+   changes_requested  │  │  │ escalated  │
+   (reviewer)         │  │  │ (reviewer) │
+             ┌────────▼┐ │ ┌▼─────────┐ │
+             │ Changes  │ │ │ Escalated │ │
+             │Requested │ │ └──┬───┬───┘ │
+             └────┬─────┘ │    │   │     │
+                  │       │    │   │     │
     dispatcher    │       │ human  │ human
-    routes to     │       │ approves│ requests
-    original      │       │    │   │ changes
-    worker        │       │    │   │    │
+    dispatches    │       │ approves│ requests
+    new action    │       │    │   │ changes
+    (rework)      │       │    │   │    │
              OnTheStack   │  Done  │ Changes
              (is_rework)  │       Requested
                           │
@@ -78,27 +76,24 @@ The dispatcher is the single coordinator in chuggernaut. It owns all job state t
 | From | To | Trigger | Action |
 |------|----|---------|--------|
 | (new) | Blocked | Creation with unresolved deps | Write job + deps KV (CAS), add to petgraph |
-| (new) | OnDeck | Creation with no deps or all deps done | Write job + deps KV (CAS), try assign |
+| (new) | OnDeck | Creation with no deps or all deps done | Write job + deps KV (CAS), dispatch action |
 | (new) | OnIce | Creation with initial_state: on-ice | Write job KV (CAS) |
 | OnIce | OnDeck or Blocked | Admin requeue | Check deps; if all Done → OnDeck, else → Blocked |
-| Blocked | OnDeck | All deps Done | Update job KV (CAS), publish transition, try assign |
-| OnDeck | OnTheStack | Dispatcher assigns worker | CAS claim, update job + worker KV |
-| OnTheStack | NeedsHelp | Worker publishes HelpRequest | Update job KV (CAS), store reason in `chuggernaut.activities` |
-| NeedsHelp | OnTheStack | Human responds via CLI | Update job KV (CAS), deliver response to worker |
-| OnTheStack | InReview | Worker outcome: yield | Release claim, store pr_url, update job KV (CAS) |
-| InReview | Done | Reviewer decision: approved + merge | Update job KV (CAS), walk reverse deps |
-| InReview | Escalated | Reviewer decision: escalated | Update job KV (CAS), add human reviewer to PR |
-| InReview | ChangesRequested | Reviewer decision: changes_requested | Update job KV (CAS), route to worker |
-| Escalated | Done | Reviewer detects human approval, merges | Update job KV (CAS), walk reverse deps |
-| Escalated | ChangesRequested | Reviewer detects human requests changes | Update job KV (CAS), route to worker |
-| ChangesRequested | OnTheStack | Dispatcher assigns rework | CAS claim, update job + worker KV |
-| OnTheStack | OnDeck | Worker outcome: abandon | Release claim, add (job, worker) to `chuggernaut.abandon-blacklist` |
+| Blocked | OnDeck | All deps Done | Update job KV (CAS), publish transition, dispatch action |
+| OnDeck | OnTheStack | Dispatcher dispatches action | CAS claim (worker_id: action-{key}), dispatch Forgejo workflow |
+| OnTheStack | InReview | Worker outcome: yield | Release claim, store pr_url, update job KV (CAS), dispatch review action |
+| InReview | Done | Review decision: approved (PR already merged) | Update job KV (CAS), walk reverse deps |
+| InReview | Escalated | Review decision: escalated | Update job KV (CAS) |
+| InReview | ChangesRequested | Review decision: changes_requested | Update job KV (CAS) |
+| Escalated | Done | Admin close or manual resolution | Update job KV (CAS), walk reverse deps |
+| Escalated | ChangesRequested | Admin requeue | Update job KV (CAS) |
+| ChangesRequested | OnTheStack | Dispatcher dispatches rework action | CAS claim, dispatch Forgejo workflow with review_feedback |
 | OnTheStack | Failed | Lease expiry / job timeout / worker fail | Release claim, store reason in `chuggernaut.activities` |
-| Failed | OnDeck | Auto-retry (retry_count < max_retries) | Increment retry_count, set `retry_after` = now + min(30s × 2^retry_count, 10min). Monitor detects eligible jobs and publishes advisory; dispatcher transitions to OnDeck. |
+| Failed | OnDeck | Auto-retry (retry_count < max_retries) | Increment retry_count, set `retry_after` = now + min(30s × 2^retry_count, 10min). Monitor detects eligible jobs and publishes advisory; dispatcher transitions to OnDeck and dispatches new action. |
 | Failed | Failed | Retry exhausted | Stay; manual requeue required |
 | Failed | OnDeck or Blocked | Admin requeue | Check deps; route accordingly |
-| Any | Done | Admin close | If claimed: release claim, preempt worker. Update job KV (CAS), walk reverse deps |
-| Any | Revoked | Admin close --revoke | If claimed: release claim, preempt worker. Update job KV (CAS) (dependents stay blocked) |
+| Any | Done | Admin close | If claimed: release claim. Update job KV (CAS), walk reverse deps |
+| Any | Revoked | Admin close --revoke | If claimed: release claim. Update job KV (CAS) (dependents stay blocked) |
 
 ### Terminal and Hold States
 
@@ -106,7 +101,7 @@ The dispatcher is the single coordinator in chuggernaut. It owns all job state t
 
 **Revoked:** Job closed without completion. Dependents stay Blocked because `all_deps_done` requires every dep to be in state Done. Revoked is terminal.
 
-**Escalated:** PR has been assigned to a human reviewer. The reviewer polls Forgejo for the human's decision (approve or request changes) at a configurable interval (default 30s). The job stays Escalated until the human acts. The reviewer handles the merge via the merge queue — the human approves, but doesn't merge directly.
+**Escalated:** The review action could not make a decision (subprocess failure, unclear output). The job stays Escalated until manually resolved via admin commands (requeue or close).
 
 ---
 
@@ -169,21 +164,23 @@ When job X transitions to Done:
 ### Acquisition
 
 ```
-Dispatcher finds idle worker matching job requirements
+Job reaches OnDeck → dispatcher dispatches action:
   → CAS create on chuggernaut.claims KV key for the job
+    - worker_id: "action-{job_key}"
     - If no entry exists: create succeeds (revision 0)
     - If tombstone: CAS overwrites
     - If active entry: fail (already claimed)
   → On success:
     - CAS update chuggernaut.jobs KV: state → OnTheStack, last_worker_id → worker_id
-    - CAS update chuggernaut.workers KV: state → Busy, current_job → job_key
-    - Publish Assignment to chuggernaut.dispatch.assign.{worker_id}
+    - Dispatch Forgejo Action workflow (job_key, nats_url, review_feedback)
     - Publish JobTransition{OnDeck → OnTheStack}
+  → On dispatch failure:
+    - Release claim, transition to Failed
 ```
 
 ### Heartbeat
 
-Workers publish `WorkerHeartbeat` every 10 seconds. The dispatcher:
+The action worker publishes `WorkerHeartbeat` every 10 seconds. The dispatcher:
 1. Reads current claim from `chuggernaut.claims` KV
 2. Verifies `worker_id` matches
 3. CAS update: `last_heartbeat = now`, `lease_deadline = now + lease_secs`
@@ -191,72 +188,77 @@ Workers publish `WorkerHeartbeat` every 10 seconds. The dispatcher:
 
 ### Release
 
-On worker outcome (yield/fail/abandon):
+On worker outcome (yield/fail):
 1. Delete claim from `chuggernaut.claims` KV (tombstone)
 2. Process outcome-specific logic (state transition, retry, etc.)
-3. Worker registry is NOT updated here — the worker remains marked as Busy until it publishes its next `IdleEvent`, at which point the dispatcher sets state → Idle, current_job → null
 
 ### Lease Expiry
 
 Monitor detects `now > claim.lease_deadline`:
 1. Publishes `LeaseExpiredEvent` (advisory)
 2. Dispatcher receives, re-reads claim from KV
-3. If still expired: release claim, delete worker from `chuggernaut.workers` KV (prune), transition job to Failed (auto-retry may then move to OnDeck if retry_count < max_retries)
+3. If still expired: release claim, transition job to Failed (auto-retry may then move to OnDeck if retry_count < max_retries)
 4. If renewed since: ignore (heartbeat arrived between monitor scan and dispatcher handling)
-
-The worker entry is pruned rather than set to idle — the worker is absent or misbehaving. If the process is still alive (e.g., network partition), it will re-register within 15s and get a fresh entry.
 
 ### Job Timeout
 
 Monitor detects `now - claim.claimed_at > claim.timeout_secs`:
 1. Publishes `JobTimeoutEvent` (advisory)
 2. Dispatcher receives, re-reads claim from KV
-3. Release claim, delete worker from `chuggernaut.workers` KV (prune), transition to Failed with reason "job timeout"
+3. Release claim, transition to Failed with reason "job timeout"
 
 ---
 
-## Worker Assignment
+## Action Dispatch
 
-### Algorithm
+When a job reaches OnDeck (from creation, unblock, requeue, or auto-retry), the dispatcher dispatches a Forgejo Action immediately:
 
-When a job reaches OnDeck (from creation, unblock, requeue, or auto-retry):
+1. Create claim with `worker_id = "action-{job_key}"` (CAS-create)
+2. Transition job to OnTheStack
+3. Dispatch `work.yml` Forgejo Actions workflow with inputs: `job_key`, `nats_url`
+4. If dispatch fails (API error): release claim, transition to Failed
+5. The action container starts, runs the worker binary, communicates via NATS
 
-1. Get all idle workers from `chuggernaut.workers` KV (or in-memory registry)
-2. Filter by job requirements:
-   - `capabilities`: worker must have all required capabilities
-   - `worker_type`: if set on job, worker must match
-   - `platform`: if set on job, worker must match
-3. Filter by abandon blacklist: skip workers in `chuggernaut.abandon-blacklist` for this job (blacklist is not checked for rework routing — see Rework Routing)
-4. Sort by: longest idle time (fairness)
-5. Attempt CAS claim with first matching worker
-6. If claim fails (race): try next worker
-7. If no workers available: job stays OnDeck (will be assigned when a worker idles)
+There is no worker registration, capability matching, or idle worker selection. All jobs are dispatched as Forgejo Actions.
 
-### Preemption
-
-When a high-priority job reaches OnDeck and no idle workers are available:
-
-1. Find workers busy with lower-priority jobs
-2. Select the worker with the lowest-priority current job
-3. Publish `PreemptNotice` to `chuggernaut.dispatch.preempt.{worker_id}`
-4. Worker cancels execution, reports `Outcome::Abandon`
-5. Dispatcher requeues abandoned job to OnDeck
-6. Dispatcher assigns the high-priority job to the now-idle worker
-
-### Rework Routing
+### Rework Dispatch
 
 When a job transitions to ChangesRequested:
 
-1. Read `job.last_worker_id` (set when the job was assigned to OnTheStack)
-2. Check if worker exists and is idle in `chuggernaut.workers` KV
-3. If idle: assign immediately with `is_rework: true` + review feedback (bypasses abandon blacklist)
-4. If busy: write to `chuggernaut.pending-reworks` KV (includes worker_id + review feedback)
-5. If worker is gone (pruned): fall back to normal assignment with `is_rework: true` to any capable idle worker
-6. When the worker next publishes `IdleEvent`:
-   - Dispatcher checks `chuggernaut.pending-reworks` before normal assignment
-   - If pending rework found: assign with `is_rework: true` + stored feedback
+1. Dispatcher dispatches a **new** Forgejo Action with the same `job_key`
+2. Passes `review_feedback` and `is_rework=true` as additional workflow inputs
+3. Creates a new claim (same `worker_id = "action-{job_key}"`)
+4. The worker checks out the existing `work/{job_key}` branch and addresses the feedback
+5. The existing PR auto-updates when new commits are pushed
 
-**On worker prune:** When the dispatcher prunes a worker (lease expiry, job timeout), it scans `chuggernaut.pending-reworks` for entries pointing to that worker. Any found are reassigned to a capable idle worker, or the job stays in ChangesRequested until one becomes available.
+No attempt is made to route rework to a "previous worker" — each action run is independent and ephemeral.
+
+### Review Dispatch
+
+When a worker yields (transition to InReview), the dispatcher also dispatches a review action:
+
+1. Read the job's `review` level
+2. Dispatch `review.yml` Forgejo Actions workflow with inputs: `job_key`, `nats_url`, `pr_url`, `review_level`
+3. The review action (worker in review mode) reviews the PR, posts a review, and attempts merge if approved
+4. Publishes `ReviewDecision` to NATS — dispatcher handles the decision
+
+There is no separate reviewer process. Review is just another action type.
+
+### Token Usage Tracking
+
+Both work and review actions report `TokenUsage` in their outcomes. The dispatcher stores per-action records on the Job:
+
+```json
+{
+  "token_usage": [
+    { "action_type": "work", "token_usage": { "input_tokens": 25000, ... }, "completed_at": "..." },
+    { "action_type": "review", "token_usage": { "input_tokens": 15000, ... }, "completed_at": "..." },
+    { "action_type": "work", "token_usage": { "input_tokens": 10000, ... }, "completed_at": "..." }
+  ]
+}
+```
+
+This allows the UI to show per-action usage broken down by type, including across rework cycles.
 
 ---
 
@@ -268,22 +270,19 @@ On startup:
 2. **Rebuild job index:** scan all keys in `chuggernaut.jobs` KV, build in-memory `HashMap<String, Job>`
 3. **Rebuild petgraph:** scan all keys in `chuggernaut.deps` KV, reconstruct DAG
 4. **Repair dep indexes:** for every forward dep A → B, verify B's `depended_on_by` contains A. If not, CAS-update B's dep entry to add A. This repairs partial writes from a crash during dep creation.
-5. **Rebuild worker registry:** scan `chuggernaut.workers` KV (partially stale — workers re-register within 15s)
-6. **Resume stream consumers:** durable consumers resume from last ack position
-7. **Reconcile claims against jobs:** scan all keys in `chuggernaut.claims` KV. For each active claim:
-   - If the job is in `on-the-stack` or `needs-help`: valid, keep
+5. **Resume stream consumers:** durable consumers resume from last ack position
+6. **Reconcile claims against jobs:** scan all keys in `chuggernaut.claims` KV. For each active claim:
+   - If the job is in `on-the-stack`: valid, keep
    - If the job is in any other state: stale claim from a mid-transition crash — delete it
    - If the job doesn't exist: delete the claim
-8. **Reconcile jobs against claims:** scan jobs in `on-the-stack` or `needs-help` state. For each:
-   - If a matching claim exists: valid
+7. **Reconcile jobs against claims:** scan jobs in `on-the-stack` state. For each:
+   - If a matching claim exists: valid (action container is still running and heartbeating)
    - If no claim exists: transition to Failed (claim was lost — mid-transition crash)
-9. **Scan pending-reworks:** for each entry, verify the target worker exists in `chuggernaut.workers`. If not, clear the entry so the rework can be reassigned to another worker.
-10. **Monitor scan:** immediately scan `chuggernaut.claims` for any stale claims that accumulated during downtime
+8. **Monitor scan:** immediately scan `chuggernaut.claims` for any stale claims that accumulated during downtime
 
-Workers that were running during the restart:
+Action workers that were running during the restart:
 - Continue heartbeating → dispatcher sees heartbeats and recognizes the claim
-- If dispatcher was down long enough for lease expiry → monitor detects, prunes worker, fails job
-- Workers re-register every 15s → registry rebuilds quickly
+- If dispatcher was down long enough for lease expiry → monitor detects and fails job
 
 ---
 
@@ -303,13 +302,6 @@ GET /jobs/{key}/deps
   Returns: { "dependencies": [Job], "all_done": bool }
 ```
 
-### Worker Endpoints
-
-```
-GET /workers
-  Returns: { "workers": [WorkerInfo] }
-```
-
 ### Journal Endpoint
 
 ```
@@ -327,7 +319,7 @@ GET /events
   Then: incremental updates on any KV change
 ```
 
-The SSE handler watches the backing streams of `chuggernaut.jobs`, `chuggernaut.workers`, `chuggernaut.claims`, and `chuggernaut.deps` KV buckets, plus the `CHUGGERNAUT-TRANSITIONS` stream for state change events. Any mutation triggers an SSE event to all connected clients.
+The SSE handler watches the backing streams of `chuggernaut.jobs`, `chuggernaut.claims`, and `chuggernaut.deps` KV buckets, plus the `CHUGGERNAUT-TRANSITIONS` stream for state change events. Any mutation triggers an SSE event to all connected clients.
 
 **Lag recovery:** If a client falls behind, the server detects via SSE delivery failure and sends a full snapshot on the next successful delivery.
 
@@ -363,4 +355,7 @@ These HTTP endpoints publish the corresponding NATS admin messages internally. P
 | `CHUGGERNAUT_MONITOR_SCAN_INTERVAL_SECS` | `10` | Monitor scan tick interval |
 | `CHUGGERNAUT_JOB_RETENTION_SECS` | `86400` | Time after terminal state before archival |
 | `CHUGGERNAUT_ACTIVITY_LIMIT` | `50` | Max activity entries per job |
-| `CHUGGERNAUT_BLACKLIST_TTL_SECS` | `3600` | Abandon blacklist duration per (job, worker) pair |
+| `CHUGGERNAUT_REVIEW_WORKFLOW` | `review.yml` | Review action workflow file |
+| `CHUGGERNAUT_REVIEW_RUNNER_LABEL` | `ubuntu-latest` | Runner label for review actions |
+| `CHUGGERNAUT_REWORK_LIMIT` | `3` | Max rework cycles before escalation |
+| `CHUGGERNAUT_HUMAN_LOGIN` | `you` | Human reviewer login for escalation |

@@ -1,55 +1,28 @@
 use std::sync::Arc;
 
-use chrono::Utc;
-use tracing::{debug, info};
+use tracing::debug;
 
 use chuggernaut_types::*;
 
-use crate::error::{DispatcherError, DispatcherResult};
-use crate::jobs::{kv_cas_update, kv_get};
+use crate::error::DispatcherResult;
 use crate::state::DispatcherState;
 
-/// Try to assign any OnDeck job to a specific idle worker.
-pub async fn try_assign_to_worker(
-    state: &Arc<DispatcherState>,
-    worker_id: &str,
-) -> DispatcherResult<bool> {
-    let worker = match state.workers.get(worker_id) {
-        Some(w) => w.clone(),
-        None => return Ok(false),
-    };
-
-    // Find best matching OnDeck job for this worker
-    let mut candidates: Vec<Job> = state
+/// Count currently active actions (jobs in OnTheStack state).
+fn active_action_count(state: &DispatcherState) -> usize {
+    state
         .jobs
         .iter()
-        .filter(|entry| entry.value().state == JobState::OnDeck)
-        .map(|entry| entry.value().clone())
-        .collect();
-
-    // Sort by priority descending
-    candidates.sort_by(|a, b| b.priority.cmp(&a.priority));
-
-    for job in candidates {
-        if !matches_worker(&job, &worker) {
-            continue;
-        }
-        if is_blacklisted(state, &job.key, worker_id).await {
-            continue;
-        }
-        match assign_job(state, &job.key, worker_id, false, None).await {
-            Ok(_) => return Ok(true),
-            Err(e) => {
-                debug!(job_key = job.key, worker_id, "assignment failed: {e}");
-                continue;
-            }
-        }
-    }
-
-    Ok(false)
+        .filter(|e| e.value().state == JobState::OnTheStack)
+        .count()
 }
 
-/// Try to assign a specific OnDeck job to any idle worker.
+/// Check if we have capacity to dispatch another action.
+fn has_capacity(state: &DispatcherState) -> bool {
+    active_action_count(state) < state.config.max_concurrent_actions
+}
+
+/// Try to assign a specific OnDeck job by dispatching a Forgejo Action.
+/// Respects the max_concurrent_actions limit — returns Ok(false) if at capacity.
 pub async fn try_assign_job(
     state: &Arc<DispatcherState>,
     job_key: &str,
@@ -63,360 +36,78 @@ pub async fn try_assign_job(
         return Ok(false);
     }
 
-    // Action-type jobs: dispatch Forgejo Action directly, no worker needed
-    if job.worker_type.as_deref() == Some("action") {
-        match crate::action_dispatch::dispatch_action(state, job_key).await {
-            Ok(()) => return Ok(true),
-            Err(e) => {
-                debug!(job_key, "action dispatch failed: {e}");
-                return Ok(false);
-            }
-        }
-    }
-
-    // Get all idle workers, sorted by longest idle (oldest last_seen first)
-    let mut idle_workers: Vec<WorkerInfo> = state
-        .workers
-        .iter()
-        .filter(|entry| entry.value().state == WorkerState::Idle)
-        .map(|entry| entry.value().clone())
-        .collect();
-
-    idle_workers.sort_by(|a, b| a.last_seen.cmp(&b.last_seen));
-
-    for worker in idle_workers {
-        if !matches_worker(&job, &worker) {
-            continue;
-        }
-        if is_blacklisted(state, job_key, &worker.worker_id).await {
-            continue;
-        }
-        match assign_job(state, job_key, &worker.worker_id, false, None).await {
-            Ok(_) => return Ok(true),
-            Err(e) => {
-                debug!(job_key, worker_id = worker.worker_id, "assignment failed: {e}");
-                continue;
-            }
-        }
-    }
-
-    // No idle workers — check for preemption
-    if job.priority > 50 {
-        try_preempt(state, &job).await?;
-    }
-
-    Ok(false)
-}
-
-/// Check if a worker matches a job's requirements.
-fn matches_worker(job: &Job, worker: &WorkerInfo) -> bool {
-    // Capabilities: worker must have all required
-    for cap in &job.capabilities {
-        if !worker.capabilities.contains(cap) {
-            return false;
-        }
-    }
-    // Worker type
-    if let Some(ref wt) = job.worker_type {
-        if *wt != worker.worker_type {
-            return false;
-        }
-    }
-    // Platform
-    if let Some(ref plat) = job.platform {
-        if !worker.platform.contains(plat) {
-            return false;
-        }
-    }
-    true
-}
-
-/// Check if a (job, worker) pair is blacklisted.
-async fn is_blacklisted(
-    state: &Arc<DispatcherState>,
-    job_key: &str,
-    worker_id: &str,
-) -> bool {
-    let bl_key = format!("{job_key}.{worker_id}");
-    matches!(
-        state.kv.abandon_blacklist.entry(&bl_key).await,
-        Ok(Some(_))
-    )
-}
-
-/// Assign a specific job to a specific worker.
-pub async fn assign_job(
-    state: &Arc<DispatcherState>,
-    job_key: &str,
-    worker_id: &str,
-    is_rework: bool,
-    review_feedback: Option<&str>,
-) -> DispatcherResult<()> {
-    let job = match state.jobs.get(job_key) {
-        Some(j) => j.clone(),
-        None => return Err(DispatcherError::JobNotFound(job_key.to_string())),
-    };
-
-    // Acquire claim (CAS-create ensures exclusivity)
-    let timeout_secs = job.timeout_secs;
-    let claim = crate::claims::acquire_claim(state, job_key, worker_id, timeout_secs).await?;
-
-    // Transition job to OnTheStack
-    let trigger = if is_rework {
-        "rework_assigned"
-    } else {
-        "dispatcher_assigned"
-    };
-    let mut updated_job =
-        crate::jobs::transition_job(state, job_key, JobState::OnTheStack, trigger, Some(worker_id))
-            .await?;
-
-    // Set last_worker_id
-    updated_job.last_worker_id = Some(worker_id.to_string());
-    // Re-read to get fresh revision for the update
-    if let Some((_, revision)) = kv_get::<Job>(&state.kv.jobs, job_key).await? {
-        kv_cas_update(
-            &state.kv.jobs,
+    if !has_capacity(state) {
+        debug!(
             job_key,
-            &updated_job,
-            revision,
-            state.config.cas_max_retries,
-        )
-        .await?;
-        state.jobs.insert(job_key.to_string(), updated_job.clone());
+            active = active_action_count(state),
+            max = state.config.max_concurrent_actions,
+            "at capacity, job stays on-deck"
+        );
+        return Ok(false);
     }
 
-    // Update worker state to Busy
-    if let Some((mut worker_info, revision)) =
-        kv_get::<WorkerInfo>(&state.kv.workers, worker_id).await?
-    {
-        worker_info.state = WorkerState::Busy;
-        worker_info.current_job = Some(job_key.to_string());
-        worker_info.last_seen = Utc::now();
-        kv_cas_update(
-            &state.kv.workers,
-            worker_id,
-            &worker_info,
-            revision,
-            state.config.cas_max_retries,
-        )
-        .await?;
-        state.workers.insert(worker_id.to_string(), worker_info);
+    match crate::action_dispatch::dispatch_action(state, job_key, None, false).await {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            debug!(job_key, "action dispatch failed: {e}");
+            Ok(false)
+        }
     }
-
-    // Send assignment to worker
-    let assignment = Assignment {
-        job: updated_job.clone(),
-        claim,
-        is_rework,
-        review_feedback: review_feedback.map(String::from),
-    };
-    state
-        .nats
-        .publish_to(&subjects::DISPATCH_ASSIGN, worker_id, &assignment)
-        .await?;
-
-    // Journal
-    crate::jobs::journal_append(
-        state,
-        "assigned",
-        Some(job_key),
-        Some(worker_id),
-        Some(&format!(
-            "priority {}, is_rework: {is_rework}",
-            updated_job.priority
-        )),
-    )
-    .await;
-
-    info!(job_key, worker_id, is_rework, "job assigned");
-    Ok(())
 }
 
-/// Add a (job, worker) pair to the abandon blacklist.
-pub async fn blacklist_worker(
+/// Try to assign a job as a rework with review feedback.
+/// Respects the max_concurrent_actions limit.
+pub async fn try_assign_rework(
     state: &Arc<DispatcherState>,
     job_key: &str,
-    worker_id: &str,
-) -> DispatcherResult<()> {
-    let bl_key = format!("{job_key}.{worker_id}");
-    let data = bytes::Bytes::from("1");
-    state
-        .kv
-        .abandon_blacklist
-        .put(&bl_key, data)
-        .await
-        .map_err(|e| DispatcherError::Kv(e.to_string()))?;
-    debug!(job_key, worker_id, "blacklisted");
-    Ok(())
-}
-
-/// Try to preempt a lower-priority worker for a high-priority job.
-async fn try_preempt(
-    state: &Arc<DispatcherState>,
-    high_prio_job: &Job,
-) -> DispatcherResult<()> {
-    let mut lowest_prio_worker: Option<(String, u8)> = None;
-
-    for entry in state.workers.iter() {
-        let worker = entry.value();
-        if worker.state != WorkerState::Busy {
-            continue;
-        }
-        if !matches_worker(high_prio_job, worker) {
-            continue;
-        }
-        if let Some(ref current_job_key) = worker.current_job {
-            if let Some(current_job) = state.jobs.get(current_job_key) {
-                if current_job.priority < high_prio_job.priority {
-                    match &lowest_prio_worker {
-                        None => {
-                            lowest_prio_worker =
-                                Some((worker.worker_id.clone(), current_job.priority));
-                        }
-                        Some((_, lowest_prio)) => {
-                            if current_job.priority < *lowest_prio {
-                                lowest_prio_worker =
-                                    Some((worker.worker_id.clone(), current_job.priority));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some((worker_id, _)) = lowest_prio_worker {
-        let notice = PreemptNotice {
-            reason: format!(
-                "Higher-priority job {} (priority {}) needs this worker",
-                high_prio_job.key, high_prio_job.priority
-            ),
-            new_job_key: high_prio_job.key.clone(),
-        };
-        state
-            .nats
-            .publish_to(&subjects::DISPATCH_PREEMPT, &worker_id, &notice)
-            .await?;
-        info!(
-            worker_id,
-            new_job = high_prio_job.key,
-            "preempt notice sent"
+    review_feedback: &str,
+) -> DispatcherResult<bool> {
+    if !has_capacity(state) {
+        debug!(
+            job_key,
+            active = active_action_count(state),
+            max = state.config.max_concurrent_actions,
+            "at capacity, rework stays queued"
         );
+        return Ok(false);
     }
 
-    Ok(())
+    match crate::action_dispatch::dispatch_action(state, job_key, Some(review_feedback), true).await
+    {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            debug!(job_key, "rework action dispatch failed: {e}");
+            Ok(false)
+        }
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+/// Scan OnDeck jobs by priority and dispatch up to available capacity.
+/// Called when a slot frees up (outcome received, lease expired, admin close).
+pub async fn try_dispatch_next(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
+    while has_capacity(state) {
+        // Collect OnDeck and ChangesRequested jobs, sorted by priority (highest first)
+        let mut candidates: Vec<(String, u8)> = state
+            .jobs
+            .iter()
+            .filter(|e| {
+                let s = e.value().state;
+                s == JobState::OnDeck || s == JobState::ChangesRequested
+            })
+            .map(|e| (e.key().clone(), e.value().priority))
+            .collect();
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::Utc;
+        if candidates.is_empty() {
+            break;
+        }
 
-    fn make_job(caps: &[&str], worker_type: Option<&str>, platform: Option<&str>) -> Job {
-        Job {
-            key: "test.repo.1".to_string(),
-            repo: "test/repo".to_string(),
-            state: JobState::OnDeck,
-            title: "test".to_string(),
-            body: String::new(),
-            priority: 50,
-            capabilities: caps.iter().map(|s| s.to_string()).collect(),
-            worker_type: worker_type.map(String::from),
-            platform: platform.map(String::from),
-            timeout_secs: 3600,
-            review: ReviewLevel::High,
-            max_retries: 3,
-            retry_count: 0,
-            retry_after: None,
-            pr_url: None,
-            last_worker_id: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+        candidates.sort_by(|a, b| b.1.cmp(&a.1)); // highest priority first
+
+        let (key, _) = &candidates[0];
+        let dispatched = try_assign_job(state, key).await?;
+        if !dispatched {
+            break; // capacity check inside try_assign_job failed, or dispatch error
         }
     }
-
-    fn make_worker(
-        id: &str,
-        caps: &[&str],
-        worker_type: &str,
-        platform: &[&str],
-    ) -> WorkerInfo {
-        WorkerInfo {
-            worker_id: id.to_string(),
-            state: WorkerState::Idle,
-            capabilities: caps.iter().map(|s| s.to_string()).collect(),
-            worker_type: worker_type.to_string(),
-            platform: platform.iter().map(|s| s.to_string()).collect(),
-            current_job: None,
-            last_seen: Utc::now(),
-        }
-    }
-
-    #[test]
-    fn matches_no_requirements() {
-        let job = make_job(&[], None, None);
-        let worker = make_worker("w1", &["rust"], "sim", &["linux"]);
-        assert!(matches_worker(&job, &worker));
-    }
-
-    #[test]
-    fn matches_capabilities() {
-        let job = make_job(&["rust", "wasm"], None, None);
-        let worker = make_worker("w1", &["rust", "wasm", "python"], "sim", &["linux"]);
-        assert!(matches_worker(&job, &worker));
-    }
-
-    #[test]
-    fn rejects_missing_capability() {
-        let job = make_job(&["rust", "wasm"], None, None);
-        let worker = make_worker("w1", &["rust"], "sim", &["linux"]);
-        assert!(!matches_worker(&job, &worker));
-    }
-
-    #[test]
-    fn matches_worker_type() {
-        let job = make_job(&[], Some("interactive"), None);
-        let worker = make_worker("w1", &[], "interactive", &["linux"]);
-        assert!(matches_worker(&job, &worker));
-    }
-
-    #[test]
-    fn rejects_wrong_worker_type() {
-        let job = make_job(&[], Some("interactive"), None);
-        let worker = make_worker("w1", &[], "sim", &["linux"]);
-        assert!(!matches_worker(&job, &worker));
-    }
-
-    #[test]
-    fn matches_platform() {
-        let job = make_job(&[], None, Some("linux"));
-        let worker = make_worker("w1", &[], "sim", &["linux", "macos"]);
-        assert!(matches_worker(&job, &worker));
-    }
-
-    #[test]
-    fn rejects_wrong_platform() {
-        let job = make_job(&[], None, Some("windows"));
-        let worker = make_worker("w1", &[], "sim", &["linux"]);
-        assert!(!matches_worker(&job, &worker));
-    }
-
-    #[test]
-    fn matches_all_constraints() {
-        let job = make_job(&["rust"], Some("sim"), Some("linux"));
-        let worker = make_worker("w1", &["rust", "go"], "sim", &["linux"]);
-        assert!(matches_worker(&job, &worker));
-    }
-
-    #[test]
-    fn rejects_when_one_constraint_fails() {
-        let job = make_job(&["rust"], Some("interactive"), Some("linux"));
-        let worker = make_worker("w1", &["rust"], "sim", &["linux"]);
-        assert!(!matches_worker(&job, &worker));
-    }
+    Ok(())
 }

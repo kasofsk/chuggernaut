@@ -8,3 +8,6 @@ runner:
 container:
   force_pull: false
   privileged: false
+  # Ensure host.docker.internal resolves inside job containers so the
+  # worker can reach NATS and Forgejo on the host/mapped ports.
+  options: "--add-host=host.docker.internal:host-gateway"

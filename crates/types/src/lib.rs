@@ -15,7 +15,6 @@ pub enum JobState {
     Blocked,
     OnDeck,
     OnTheStack,
-    NeedsHelp,
     InReview,
     Escalated,
     ChangesRequested,
@@ -49,19 +48,40 @@ impl Default for ReviewLevel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "kebab-case")]
-pub enum WorkerState {
-    Idle,
-    Busy,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum OutcomeType {
     Yield { pr_url: String },
     Fail { reason: String, logs: Option<String> },
-    Abandon {},
+}
+
+/// Token usage from a single Claude invocation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+}
+
+impl std::ops::AddAssign for TokenUsage {
+    fn add_assign(&mut self, rhs: Self) {
+        self.input_tokens += rhs.input_tokens;
+        self.output_tokens += rhs.output_tokens;
+        self.cache_read_tokens += rhs.cache_read_tokens;
+        self.cache_write_tokens += rhs.cache_write_tokens;
+    }
+}
+
+/// A single action's token usage record, stored on the Job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ActionTokenRecord {
+    /// "work", "review", "rework"
+    pub action_type: String,
+    pub token_usage: TokenUsage,
+    pub completed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -75,8 +95,6 @@ pub enum DecisionType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OrphanKind {
-    ClaimUnknownWorker,
-    StaleSession,
     ClaimlessOnTheStack,
 }
 
@@ -102,7 +120,8 @@ pub struct Job {
     pub retry_count: u32,
     pub retry_after: Option<DateTime<Utc>>,
     pub pr_url: Option<String>,
-    pub last_worker_id: Option<String>,
+    #[serde(default)]
+    pub token_usage: Vec<ActionTokenRecord>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -118,33 +137,11 @@ pub struct ClaimState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct WorkerInfo {
-    pub worker_id: String,
-    pub state: WorkerState,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-    pub worker_type: String,
-    #[serde(default)]
-    pub platform: Vec<String>,
-    pub current_job: Option<String>,
-    pub last_seen: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DepRecord {
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub depended_on_by: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SessionInfo {
-    pub worker_id: String,
-    pub session_url: String,
-    pub session_name: String,
-    pub mode: String,
-    pub started_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -158,12 +155,6 @@ pub struct ActivityEntry {
 pub struct ActivityLog {
     #[serde(default)]
     pub entries: Vec<ActivityEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct PendingRework {
-    pub worker_id: String,
-    pub review_feedback: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -226,28 +217,12 @@ pub struct CreateJobResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct WorkerRegistration {
-    pub worker_id: String,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-    pub worker_type: String,
-    #[serde(default)]
-    pub platform: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Assignment {
-    pub job: Job,
-    pub claim: ClaimState,
-    pub is_rework: bool,
-    pub review_feedback: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkerOutcome {
     pub worker_id: String,
     pub job_key: String,
     pub outcome: OutcomeType,
+    #[serde(default)]
+    pub token_usage: Option<TokenUsage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -255,19 +230,8 @@ pub struct ReviewDecision {
     pub job_key: String,
     pub decision: DecisionType,
     pub pr_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct HelpRequest {
-    pub worker_id: String,
-    pub job_key: String,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct HelpResponse {
-    pub job_key: String,
-    pub message: String,
+    #[serde(default)]
+    pub token_usage: Option<TokenUsage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -296,12 +260,6 @@ pub struct JobTransition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct PreemptNotice {
-    pub reason: String,
-    pub new_job_key: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RequeueRequest {
     pub job_key: String,
     pub target: RequeueTarget,
@@ -325,16 +283,6 @@ pub struct CloseJobRequest {
 pub struct WorkerHeartbeat {
     pub worker_id: String,
     pub job_key: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct IdleEvent {
-    pub worker_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct UnregisterEvent {
-    pub worker_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -397,11 +345,6 @@ pub struct JobDepsResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct WorkerListResponse {
-    pub workers: Vec<WorkerInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct JournalListResponse {
     pub entries: Vec<JournalEntry>,
 }
@@ -460,7 +403,7 @@ impl<Req, Resp> RequestSubject<Req, Resp> {
     }
 }
 
-/// A typed parametric NATS subject (e.g., "chuggernaut.dispatch.assign.{worker_id}").
+/// A typed parametric NATS subject (e.g., "chuggernaut.channel.{job_key}.inbox").
 pub struct SubjectFn<T> {
     pub pattern: &'static str,
     _t: PhantomData<T>,
@@ -560,11 +503,9 @@ macro_rules! subject_registry {
 }
 
 subject_registry! {
-    // Worker events (workers publish, dispatcher subscribes)
-    pub WORKER_IDLE: Subject<IdleEvent> = "chuggernaut.worker.idle";
+    // Worker events (action workers publish, dispatcher subscribes)
     pub WORKER_HEARTBEAT: Subject<WorkerHeartbeat> = "chuggernaut.worker.heartbeat";
     pub WORKER_OUTCOME: Subject<WorkerOutcome> = "chuggernaut.worker.outcome";
-    pub WORKER_UNREGISTER: Subject<UnregisterEvent> = "chuggernaut.worker.unregister";
 
     // Review
     pub REVIEW_DECISION: Subject<ReviewDecision> = "chuggernaut.review.decision";
@@ -579,13 +520,7 @@ subject_registry! {
     pub MONITOR_ORPHAN: Subject<OrphanDetectedEvent> = "chuggernaut.monitor.orphan";
     pub MONITOR_RETRY: Subject<RetryEligibleEvent> = "chuggernaut.monitor.retry";
 
-    // Interaction
-    pub INTERACT_HELP: Subject<HelpRequest> = "chuggernaut.interact.help";
-
     ---request---
-
-    // Worker registration (request-reply)
-    pub WORKER_REGISTER: RequestSubject<WorkerRegistration, WorkerInfo> = "chuggernaut.worker.register";
 
     // Admin commands (CLI → dispatcher, request-reply)
     pub ADMIN_CREATE_JOB: RequestSubject<CreateJobRequest, CreateJobResponse> = "chuggernaut.admin.create-job";
@@ -594,18 +529,8 @@ subject_registry! {
 
     ---dynamic---
 
-    // Dispatch (dispatcher → specific workers)
-    pub DISPATCH_ASSIGN: SubjectFn<Assignment> = "chuggernaut.dispatch.assign.{}";
-    pub DISPATCH_PREEMPT: SubjectFn<PreemptNotice> = "chuggernaut.dispatch.preempt.{}";
-
     // Transitions (dispatcher publishes per-job, reviewer consumes via JetStream)
     pub TRANSITIONS: SubjectFn<JobTransition> = "chuggernaut.transitions.{}";
-
-    // Interaction (dynamic)
-    pub INTERACT_RESPOND: SubjectFn<HelpResponse> = "chuggernaut.interact.respond.{}";
-    pub INTERACT_DELIVER: SubjectFn<HelpResponse> = "chuggernaut.interact.deliver.{}";
-    pub INTERACT_ATTACH: SubjectFn<()> = "chuggernaut.interact.attach.{}";
-    pub INTERACT_DETACH: SubjectFn<()> = "chuggernaut.interact.detach.{}";
 
     // Channel (bidirectional CLI ↔ Claude session)
     pub CHANNEL_INBOX: SubjectFn<ChannelMessage> = "chuggernaut.channel.{}.inbox";
@@ -621,12 +546,8 @@ pub mod buckets {
     pub const JOBS: &str = "chuggernaut_jobs";
     pub const CLAIMS: &str = "chuggernaut_claims";
     pub const DEPS: &str = "chuggernaut_deps";
-    pub const WORKERS: &str = "chuggernaut_workers";
     pub const COUNTERS: &str = "chuggernaut_counters";
-    pub const SESSIONS: &str = "chuggernaut_sessions";
     pub const ACTIVITIES: &str = "chuggernaut_activities";
-    pub const PENDING_REWORKS: &str = "chuggernaut_pending_reworks";
-    pub const ABANDON_BLACKLIST: &str = "chuggernaut_abandon_blacklist";
     pub const MERGE_QUEUE: &str = "chuggernaut_merge_queue";
     pub const REWORK_COUNTS: &str = "chuggernaut_rework_counts";
     pub const JOURNAL: &str = "chuggernaut_journal";
@@ -639,7 +560,6 @@ pub mod buckets {
 
 pub mod streams {
     pub const TRANSITIONS: &str = "CHUGGERNAUT-TRANSITIONS";
-    pub const WORKER_EVENTS: &str = "CHUGGERNAUT-WORKER-EVENTS";
     pub const MONITOR: &str = "CHUGGERNAUT-MONITOR";
 }
 
@@ -692,31 +612,24 @@ pub fn generate_schema() -> schemars::Schema {
     // appear in the definitions. We use a wrapper object that includes them all.
     generator.subschema_for::<Job>();
     generator.subschema_for::<ClaimState>();
-    generator.subschema_for::<WorkerInfo>();
     generator.subschema_for::<DepRecord>();
-    generator.subschema_for::<SessionInfo>();
     generator.subschema_for::<ActivityEntry>();
     generator.subschema_for::<ActivityLog>();
     generator.subschema_for::<JournalEntry>();
     generator.subschema_for::<MergeQueueEntry>();
+    generator.subschema_for::<TokenUsage>();
+    generator.subschema_for::<ActionTokenRecord>();
     generator.subschema_for::<JobTransition>();
 
     // Messages
     generator.subschema_for::<CreateJobRequest>();
     generator.subschema_for::<CreateJobResponse>();
-    generator.subschema_for::<WorkerRegistration>();
-    generator.subschema_for::<Assignment>();
     generator.subschema_for::<WorkerOutcome>();
     generator.subschema_for::<ReviewDecision>();
-    generator.subschema_for::<HelpRequest>();
-    generator.subschema_for::<HelpResponse>();
     generator.subschema_for::<ActivityAppend>();
-    generator.subschema_for::<PreemptNotice>();
     generator.subschema_for::<RequeueRequest>();
     generator.subschema_for::<CloseJobRequest>();
     generator.subschema_for::<WorkerHeartbeat>();
-    generator.subschema_for::<IdleEvent>();
-    generator.subschema_for::<UnregisterEvent>();
 
     // Channel
     generator.subschema_for::<ChannelMessage>();
@@ -726,7 +639,6 @@ pub fn generate_schema() -> schemars::Schema {
     generator.subschema_for::<JobListResponse>();
     generator.subschema_for::<JobDetailResponse>();
     generator.subschema_for::<JobDepsResponse>();
-    generator.subschema_for::<WorkerListResponse>();
     generator.subschema_for::<JournalListResponse>();
     generator.subschema_for::<ErrorResponse>();
 
@@ -750,10 +662,6 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&JobState::OnTheStack).unwrap(),
             "\"on-the-stack\""
-        );
-        assert_eq!(
-            serde_json::to_string(&JobState::NeedsHelp).unwrap(),
-            "\"needs-help\""
         );
         assert_eq!(
             serde_json::to_string(&JobState::ChangesRequested).unwrap(),
@@ -792,10 +700,6 @@ mod tests {
         };
         let json = serde_json::to_string(&fail_outcome).unwrap();
         assert!(json.contains("\"type\":\"fail\""));
-
-        let abandon = OutcomeType::Abandon {};
-        let json = serde_json::to_string(&abandon).unwrap();
-        assert!(json.contains("\"type\":\"abandon\""));
     }
 
     #[test]
@@ -873,7 +777,6 @@ mod tests {
         // Should contain our key types in definitions
         assert!(json.contains("JobState"));
         assert!(json.contains("ClaimState"));
-        assert!(json.contains("WorkerInfo"));
         assert!(json.contains("JobTransition"));
         assert!(json.contains("ReviewDecision"));
         assert!(json.contains("JobListResponse"));
@@ -897,7 +800,7 @@ mod tests {
             retry_count: 0,
             retry_after: None,
             pr_url: None,
-            last_worker_id: None,
+            token_usage: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

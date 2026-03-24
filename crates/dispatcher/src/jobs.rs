@@ -166,7 +166,7 @@ pub async fn create_job(
         retry_count: 0,
         retry_after: None,
         pr_url: None,
-        last_worker_id: None,
+        token_usage: vec![],
         created_at: now,
         updated_at: now,
     };
@@ -319,8 +319,7 @@ fn validate_transition(from: JobState, to: JobState) -> DispatcherResult<()> {
         (OnIce, OnDeck | Blocked)
             | (Blocked, OnDeck)
             | (OnDeck, OnTheStack)
-            | (OnTheStack, NeedsHelp | InReview | Failed | OnDeck)
-            | (NeedsHelp, OnTheStack)
+            | (OnTheStack, InReview | Failed | OnDeck)
             | (InReview, Done | Escalated | ChangesRequested)
             | (Escalated, Done | ChangesRequested)
             | (ChangesRequested, OnTheStack)
@@ -440,11 +439,9 @@ mod tests {
         assert!(validate_transition(OnIce, Blocked).is_ok());
         assert!(validate_transition(Blocked, OnDeck).is_ok());
         assert!(validate_transition(OnDeck, OnTheStack).is_ok());
-        assert!(validate_transition(OnTheStack, NeedsHelp).is_ok());
         assert!(validate_transition(OnTheStack, InReview).is_ok());
         assert!(validate_transition(OnTheStack, Failed).is_ok());
-        assert!(validate_transition(OnTheStack, OnDeck).is_ok()); // abandon
-        assert!(validate_transition(NeedsHelp, OnTheStack).is_ok());
+        assert!(validate_transition(OnTheStack, OnDeck).is_ok()); // requeue
         assert!(validate_transition(InReview, Done).is_ok());
         assert!(validate_transition(InReview, Escalated).is_ok());
         assert!(validate_transition(InReview, ChangesRequested).is_ok());
@@ -465,6 +462,5 @@ mod tests {
         assert!(validate_transition(OnDeck, InReview).is_err());
         assert!(validate_transition(OnIce, OnTheStack).is_err());
         assert!(validate_transition(InReview, OnDeck).is_err());
-        // NeedsHelp → Done IS valid (admin close from any state)
     }
 }

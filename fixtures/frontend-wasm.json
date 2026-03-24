@@ -1,0 +1,72 @@
+{
+  "jobs": [
+    {
+      "title": "Scaffold standalone Leptos+WASM project with Trunk",
+      "body": "Create a new Rust project (cargo init) — this is a standalone repo, not part of the chuggernaut workspace. Set up Cargo.toml with [lib] crate-type = [\"cdylib\", \"rlib\"], dependencies: leptos, wasm-bindgen, web-sys, js-sys, gloo-net, gloo-timers, serde, serde_json. Add a Trunk.toml with a dev-server proxy: [[proxy]] rewrite = \"/api/\" backend = \"{{DISPATCHER_URL}}\". Include a minimal main() that mounts an <App/> component into the document body. Verify `trunk build` produces working .wasm + JS glue in dist/.",
+      "deps": [],
+      "priority": 90,
+      "capabilities": ["rust"]
+    },
+    {
+      "title": "Fetch API manifest and generate typed client at build time",
+      "body": "Add a build.rs that fetches the API manifest from {{DISPATCHER_URL}}/api.json (the dispatcher URL is provided via CHUGGERNAUT_API_URL env var, defaulting to http://localhost:8080). The manifest contains:\n\n- 'routes': array of {method, path, summary, request/response type names, query params, SSE event definitions}\n- 'schema': full JSON Schema with definitions for all types (Job, JobState, ClaimState, DepRecord, ChannelStatus, CreateJobRequest, JobListResponse, JobDetailResponse, etc.)\n- 'error_response': the error envelope type name\n\nFrom the schema definitions, generate Rust structs in OUT_DIR/api_types.rs with #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)] for each type. Handle enums (JobState variants like on-ice, on-deck, etc.), nested structs, Option fields, Vec fields, and DateTime<Utc> (map to chrono). Include!(concat!(env!(\"OUT_DIR\"), \"/api_types.rs\")) from src/api/types.rs.\n\nFrom the routes array, generate an ApiClient struct in OUT_DIR/api_client.rs with one method per route: list_jobs(state_filter?), get_job(key), get_job_deps(key), create_job(req), requeue_job(key, target), close_job(key, revoke), send_channel_message(key, message, sender?), list_journal(limit?). Each method uses gloo-net to make the HTTP call and deserialize into the generated response type. The client constructor takes a base_url: String.\n\nSave the raw manifest to OUT_DIR/api.json for reference. Add a unit test that the generated types round-trip deserialize from example JSON.",
+      "deps": [1],
+      "priority": 85,
+      "capabilities": ["rust"]
+    },
+    {
+      "title": "Implement SSE client with typed event deserialization",
+      "body": "Create src/sse.rs. Use web-sys EventSource to connect to {base_url}/events. The SSE event types are documented in the API manifest under the /events route's sse_events field:\n\n- 'snapshot' — initial full state: { type: \"snapshot\", jobs: Job[], claims: {key: ClaimState}, deps: {key: DepRecord}, channels: {key: ChannelStatus} }\n- 'job_update' — a single Job object\n- 'claim_update' — { key: string, claim: ClaimState | null }\n- 'channel_update' — { key: string, status: ChannelStatus }\n\nDefine an SseEvent enum with variants for each, deserializing using the generated types from task 2. Expose a connect(base_url) -> (ReadSignal<SseEvent>, ReadSignal<ConnectionStatus>) API where ConnectionStatus is Connected | Reconnecting(u32) | Disconnected. Handle reconnection with exponential backoff (1s, 2s, 4s, cap 30s). On reconnect the server resends the snapshot so no special resync logic is needed.",
+      "deps": [2],
+      "capabilities": ["rust"]
+    },
+    {
+      "title": "Build reactive state store from SSE events",
+      "body": "Create src/store.rs. On mount, call sse::connect() to open the SSE stream. Process events:\n\n- snapshot → populate all signals: jobs: RwSignal<HashMap<String, Job>>, deps: RwSignal<HashMap<String, DepRecord>>, claims: RwSignal<HashMap<String, ClaimState>>, channels: RwSignal<HashMap<String, ChannelStatus>>\n- job_update → upsert into jobs map by job.key\n- claim_update → upsert or remove from claims map by key\n- channel_update → upsert into channels map by key\n\nProvide derived signals: jobs_by_state (HashMap<JobState, Vec<Job>>), job_count, failed_count, done_count, in_progress_count. Expose the ApiClient from task 2 via the store context so components can call mutations (requeue, close, send message) and the SSE stream handles the reactive update.\n\nWrap in a StoreProvider context component so children use use_context::<Store>().",
+      "deps": [2, 3],
+      "capabilities": ["rust"]
+    },
+    {
+      "title": "Create job board component with state-grouped columns",
+      "body": "Build src/components/job_board.rs — the main dashboard view. Render a kanban-style board with columns for each JobState bucket: Blocked, On-Deck, On-The-Stack, In-Review, Done/Failed. Each column header shows the count. Jobs render as cards showing title, key, priority badge, retry count, and a colored dot for state. Cards are sorted by priority descending within each column. Use Leptos derived signals so columns re-render only when their subset of jobs changes. Clicking a card navigates to /jobs/{key} detail view. Include a top bar with SSE connection indicator (green/yellow/red dot).",
+      "deps": [4],
+      "capabilities": ["rust"]
+    },
+    {
+      "title": "Create DAG visualization component using SVG",
+      "body": "Build src/components/dag_view.rs. Render the job dependency graph as an SVG using a simple layered layout (Sugiyama-style): topologically sort the jobs, assign layers by longest-path, minimize crossings with barycenter heuristic. Draw job nodes as rounded rects colored by state (blue=on-deck, orange=on-the-stack, green=done, red=failed, gray=blocked). Draw dependency edges as SVG paths with arrowheads. Nodes are clickable and navigate to the job detail view. The graph should auto-resize to fit the container. Provide pan (mouse drag) and zoom (scroll wheel) via SVG viewBox manipulation. Re-layout reactively when deps signal changes.",
+      "deps": [4],
+      "capabilities": ["rust"]
+    },
+    {
+      "title": "Create activity log and journal timeline component",
+      "body": "Build src/components/timeline.rs. Render a unified, reverse-chronological timeline. Fetch journal entries via ApiClient::list_journal(). For per-job activity, fetch via ApiClient::get_job(key) which includes activities in the response. Merge and sort by timestamp. Each entry shows relative timestamp ('2m ago'), kind badge, message text, and job key as a link. Auto-scroll to newest on update. Support filtering by job key and entry kind. Limit rendered entries to 200 with 'load more'. Used both standalone at /timeline and embedded in the job detail view.",
+      "deps": [4],
+      "capabilities": ["rust"]
+    },
+    {
+      "title": "Create job detail view with actions panel",
+      "body": "Build src/components/job_detail.rs. Route: /jobs/{key}. Fetch full detail via ApiClient::get_job(key) on mount, then stay updated via store signals.\n\nTop section: job title, state badge, priority, capabilities tags, worker_id (if claimed from claims map), lease deadline countdown. Middle section: tabbed view with Activity (embedded timeline filtered to this job), Channel (live channel status from store + input box calling ApiClient::send_channel_message), and Deps (mini DAG from ApiClient::get_job_deps showing immediate neighbors). Bottom section: action buttons contextual to state — Requeue (calls ApiClient::requeue_job), Revoke/Close (calls ApiClient::close_job). Show confirmation dialog before destructive actions.",
+      "deps": [5, 6, 7],
+      "capabilities": ["rust"]
+    },
+    {
+      "title": "Implement client-side routing and top-level layout",
+      "body": "Set up leptos_router in src/app.rs. Routes: / -> JobBoard, /dag -> DagView, /timeline -> Timeline, /jobs/{key} -> JobDetail. Add a persistent sidebar nav with links to each route and a Chuggernaut logo/wordmark at the top. The sidebar should highlight the active route. Below the nav links, show summary stats from store derived signals: total jobs, in-progress count, failed count, done count. Use a <main> content area that fills remaining viewport. Add dark/light theme toggle that persists to localStorage.",
+      "deps": [8],
+      "capabilities": ["rust"]
+    },
+    {
+      "title": "Add CSS styling with Tailwind-compatible utility classes",
+      "body": "Create static assets in style/. Use a build-time CSS approach compatible with Trunk: either a hand-written CSS file with utility classes matching the component markup, or integrate tailwindcss via a Trunk pre-build hook. Define a color palette: primary (indigo), success (emerald), warning (amber), danger (rose), neutral (slate). Style all components for both light and dark themes. Ensure the kanban board is responsive — stack columns vertically on narrow viewports. Style the DAG SVG nodes and edges. Add transitions for state changes (cards sliding between columns, progress bar animations). Ensure text is readable and accessible (WCAG AA contrast ratios).",
+      "deps": [9],
+      "capabilities": ["rust"]
+    },
+    {
+      "title": "Integration test: seed fixture, verify UI renders correct state",
+      "body": "Create tests/integration.rs using wasm-bindgen-test. The test needs a running dispatcher — configure via CHUGGERNAUT_API_URL env var (same as the build.rs). Seed the dispatcher with test jobs via POST /jobs. Mount the App component in a headless browser context. Assert: the job board shows the correct number of cards per column, the DAG view renders the expected number of nodes and edges, the timeline shows journal entries, and clicking a job card navigates to its detail view showing the correct title and state. Test SSE reactivity: requeue a job via POST /jobs/{key}/requeue, assert the UI moves the card to the new column within 2 seconds.",
+      "deps": [9, 10],
+      "capabilities": ["rust"]
+    }
+  ]
+}

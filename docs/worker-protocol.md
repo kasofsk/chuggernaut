@@ -1,129 +1,94 @@
 # Worker Protocol
 
-Workers are stateless executors that communicate with the dispatcher exclusively via NATS. They receive everything they need in the assignment payload and interact with Forgejo only for git operations and pull requests.
+Workers run inside Forgejo Action containers. The worker binary (`chuggernaut-worker`) operates in two modes:
+
+- **Work mode** (`--mode work`, default): dispatched when a job reaches OnDeck. Clones repo, runs Claude to do work, commits/pushes, creates PR, reports `WorkerOutcome`.
+- **Review mode** (`--mode review`): dispatched when a job enters InReview. Clones repo, checks out PR branch, runs Claude to review the diff, posts PR review, attempts merge, reports `ReviewDecision`.
+
+Both modes use the same heartbeat, NATS connection, and subprocess management infrastructure. There is no worker registration, idle loop, or assignment protocol. The dispatcher creates a claim and dispatches the action directly.
 
 ---
 
 ## Lifecycle
 
 ```
-┌─────────┐
-│  Start  │
-└────┬────┘
-     │
-     ▼
-┌─────────────────────┐
-│ Register             │ chuggernaut.worker.register (request-reply)
-│ Wait for ack         │ Includes: worker_id, capabilities, worker_type, platform
-└────┬────────────────┘
-     │
-     ▼
-┌─────────────────────┐◄──────────────────────────────────┐
-│ Idle                 │ chuggernaut.worker.idle                 │
-│ Wait for assignment  │ Re-register every 15s             │
-└────┬────────────────┘                                    │
-     │                                                     │
-     │ chuggernaut.dispatch.assign.{worker_id}                  │
-     ▼                                                     │
-┌─────────────────────┐                                    │
-│ Execute             │ Content ops via Forgejo git/API     │
-│ Heartbeat every 10s │ chuggernaut.worker.heartbeat            │
-│ May request help    │ chuggernaut.interact.help               │
-└────┬────────────────┘                                    │
-     │                                                     │
-     │ chuggernaut.worker.outcome                               │
-     ▼                                                     │
-┌─────────────────────┐                                    │
-│ Report outcome      │ Yield / Fail / Abandon             │
-└────┬────────────────┘                                    │
-     │                                                     │
-     └─────────────────────────────────────────────────────┘
-
-On SIGTERM/CTRL-C:
-  → chuggernaut.worker.unregister
-  → exit
+Job reaches OnDeck
+  │
+  ▼
+┌──────────────────────────────┐
+│ Dispatcher: dispatch_action  │
+│  1. Create claim             │
+│     worker_id: action-{key}  │
+│  2. Transition → OnTheStack  │
+│  3. Dispatch Forgejo Action  │
+│     inputs: job_key, nats_url│
+│     + review_feedback (rework)│
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│ Forgejo Actions runner       │
+│  starts container with       │
+│  chuggernaut-worker binary   │
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│ Worker (inside container)    │
+│                              │
+│  1. Clone repo, checkout     │
+│     branch work/{job_key}    │
+│  2. Start heartbeat loop     │
+│     (every 10s via NATS)     │
+│  3. Launch Claude subprocess │
+│  4. Bridge MCP ↔ NATS        │
+│  5. Wait for subprocess exit │
+│  6. Commit, push, find/create│
+│     PR                       │
+│  7. Publish WorkerOutcome    │
+│     (Yield or Fail)          │
+│  8. Exit                     │
+└──────────────────────────────┘
 ```
 
 ---
 
-## Registration
+## Action Dispatch
 
-```
-Worker → chuggernaut.worker.register (request-reply)
+When a job reaches OnDeck, the dispatcher:
 
-Payload: WorkerRegistration {
-  worker_id: "agent-rust-1",
-  capabilities: ["rust"],
-  worker_type: "interactive",
-  platform: ["linux"]
-}
+1. Creates a claim with `worker_id = "action-{job_key}"` (CAS-create for exclusivity)
+2. Transitions the job to OnTheStack
+3. Dispatches the `work.yml` Forgejo Actions workflow via API with inputs:
+   - `job_key` — job identifier
+   - `nats_url` — NATS server address
+   - `review_feedback` — (optional) reviewer feedback for rework assignments
+   - `is_rework` — (optional) flag indicating this is a rework cycle
+4. If the dispatch fails (404/422): releases claim, transitions job to Failed
 
-Dispatcher → reply with empty payload (ack)
-```
+The claim enables the monitor to track the action via normal lease expiry and job timeout scans. The synthetic `worker_id` ties heartbeats and outcomes back to the correct claim.
 
-The dispatcher CAS-creates the `chuggernaut.workers` KV entry (revision 0). If the worker_id already exists (another process is using it), the create fails and the dispatcher replies with an error — the worker must exit or use a different ID.
+### Rework Dispatch
 
-The worker blocks until the ack arrives. If no ack within 5 seconds, retry with backoff.
+When a job transitions to ChangesRequested (reviewer requests changes):
 
-### Re-announcement
+1. Dispatcher dispatches a **new** Forgejo Action with the same `job_key`
+2. Passes `review_feedback` and `is_rework=true` as additional workflow inputs
+3. The worker checks out the existing `work/{job_key}` branch (already has prior work)
+4. The existing PR auto-updates when the worker pushes new commits
 
-Every 15 seconds while idle, the worker re-registers via request-reply. Re-announcements CAS-update the existing entry (not create), so they succeed for the rightful owner. This ensures recovery after dispatcher restarts without manual intervention. If the request-reply times out (dispatcher down), the worker continues retrying.
-
----
-
-## Idle
-
-```
-Worker → chuggernaut.worker.idle
-
-Payload: IdleEvent {
-  worker_id: "agent-rust-1"
-}
-```
-
-Published after registration and after each job completion. The dispatcher may immediately respond with an assignment or may wait until a suitable job appears.
-
-### Pending Rework Check
-
-When the dispatcher receives an `IdleEvent`, it first checks `chuggernaut.pending-reworks` KV for a deferred rework for this worker. If found, the rework takes priority over normal assignment.
+No attempt is made to route rework to a "previous worker" — each action run is independent and ephemeral.
 
 ---
 
-## Assignment
+## Git Workflow
 
-```
-Dispatcher → chuggernaut.dispatch.assign.{worker_id}
-
-Payload: Assignment {
-  job: Job,           // Full job from chuggernaut.jobs KV
-  claim: ClaimState,  // The claim just acquired
-  is_rework: false,   // true if re-assigned after review feedback
-  review_feedback: null  // present if is_rework, contains reviewer's feedback
-}
-```
-
-The assignment includes the **full Job** — title, body, repo, priority, everything. The worker needs no other data source to understand what to do.
-
-### Local Validation
-
-The worker may reject an assignment by immediately reporting `Outcome::Abandon`. This is used for local checks that the dispatcher can't evaluate (e.g., disk space, network access to the repo).
-
-### Assignment While Busy
-
-If a worker receives an assignment while already executing a job, it ignores the assignment and logs a warning. This indicates a dispatcher-side race condition; the unserviced claim will expire via normal lease expiry.
-
----
-
-## Execution
-
-### Git Workflow
-
-1. Read repo from `assignment.job.repo` (e.g., `"acme/payments"`)
+1. Read repo from job metadata (passed via NATS or workflow inputs)
 2. `git clone http://forgejo/{repo}` (credential helper provides auth)
 3. Check if branch `work/{job_key}` already exists on remote:
-   - If yes: checkout and pull (continuation of previous attempt)
+   - If yes: checkout and pull (continuation of previous attempt or rework)
    - If no: create branch (fresh start)
-4. Do work (varies by worker type)
+4. Launch Claude subprocess to do work
 5. Commit, push to Forgejo
 6. Check if a PR already exists for branch `work/{job_key}`:
    - If yes: push updates the existing PR automatically
@@ -133,19 +98,93 @@ If a worker receives an assignment while already executing a job, it ignores the
      - Head: `work/acme.payments.57`
      - Base: `main` (or default branch)
 
-This idempotent approach handles reassignment after abandon, preemption, or worker crash — the new worker picks up where the previous one left off.
+This idempotent approach handles rework cycles and retries — the worker always picks up where the previous run left off.
 
 ### Rework
 
-When `assignment.is_rework == true`:
+When `is_rework` is set:
 
 1. Checkout existing branch `work/{job_key}` (already exists from first pass)
-2. Pull latest from remote (reviewer may have left review comments on specific lines)
-3. Read `assignment.review_feedback` for guidance
+2. Pull latest from remote
+3. Pass `review_feedback` to Claude as additional context
 4. Address feedback, commit, push
 5. The existing PR auto-updates (same branch)
 
-### Activity Reporting
+---
+
+## Heartbeat
+
+```
+Worker → chuggernaut.worker.heartbeat (every 10 seconds)
+
+Payload: WorkerHeartbeat {
+  worker_id: "action-acme.payments.57",
+  job_key: "acme.payments.57"
+}
+```
+
+The dispatcher CAS-updates the claim's `last_heartbeat` and `lease_deadline`.
+
+### Failure Detection
+
+The worker tracks consecutive NATS publish failures:
+- 1-2 failures: log warning, continue
+- 3+ failures: assume NATS connection lost, exit with error
+
+The monitor detects lease expiry from the dispatcher side and transitions the job to Failed.
+
+---
+
+## Outcome
+
+### Work Mode
+
+```
+Worker → chuggernaut.worker.outcome
+
+Payload: WorkerOutcome {
+  worker_id: "action-acme.payments.57",
+  job_key: "acme.payments.57",
+  outcome: <one of below>,
+  token_usage: { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens } | null
+}
+```
+
+| Type | Fields | When | Dispatcher Action |
+|------|--------|------|-------------------|
+| `Yield` | `pr_url` | PR opened/updated, ready for review | Release claim → InReview → dispatch review action |
+| `Fail` | `reason`, `logs` | Unrecoverable error | Release claim → Failed (may auto-retry) |
+
+If the worker cannot fully complete the task, it should still `Yield` with a PR containing partial work. The review action will evaluate it and either approve, request changes, or escalate to a human.
+
+### Review Mode
+
+```
+Worker → chuggernaut.review.decision
+
+Payload: ReviewDecision {
+  job_key: "acme.payments.57",
+  decision: <one of below>,
+  pr_url: "http://forgejo/acme/payments/pulls/3",
+  token_usage: { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens } | null
+}
+```
+
+| Decision | When | Dispatcher Action |
+|----------|------|-------------------|
+| `approved` | PR merged successfully | → Done, unblock dependents |
+| `changes_requested { feedback }` | Review found issues or merge conflict | → ChangesRequested, dispatch rework |
+| `escalated { reviewer_login }` | Subprocess failed or decision unclear | → Escalated |
+
+### Token Usage
+
+Both work and review outcomes include an optional `token_usage` field. The dispatcher stores each action's usage as an `ActionTokenRecord` on the Job, allowing per-action breakdown of work vs review tokens across rework cycles.
+
+If the container is killed or crashes without reporting an outcome, the monitor detects lease expiry and transitions the job to Failed.
+
+---
+
+## Activity Reporting
 
 Workers can publish progress updates:
 
@@ -162,209 +201,95 @@ Payload: ActivityAppend {
 }
 ```
 
-These are fire-and-forget. The dispatcher appends to `chuggernaut.activities` KV (separate from the job record to avoid CAS contention with state transitions). Capped at 50 entries per job — messages beyond the limit are silently dropped.
+These are fire-and-forget. The dispatcher appends to `chuggernaut.activities` KV (separate from the job record to avoid CAS contention with state transitions). Capped at 50 entries per job.
 
 ---
 
-## Heartbeat
+## MCP Channel
+
+The worker acts as an MCP server, bridging between Claude's stdin/stdout and NATS:
+
+1. Spawns the command (`claude` or `mock-claude`) as a subprocess with piped stdin/stdout
+2. Reads JSON-RPC requests from the child's stdout
+3. Dispatches through `chuggernaut_channel::handle_message` (initialize, tools/list, tools/call)
+4. Writes JSON-RPC responses back to the child's stdin
+5. Forwards NATS inbox notifications to the child (in channel mode)
+
+### MCP Tools Exposed to Claude
+
+- `channel_check` — drain pending inbox messages (poll mode)
+- `channel_send` — publish a `ChannelMessage` to the NATS outbox
+- `reply` — reply to a specific message (channel mode, push notifications)
+- `update_status` — write `ChannelStatus` to the `chuggernaut_channels` KV bucket
+
+### Channel Subjects
 
 ```
-Worker → chuggernaut.worker.heartbeat (every 10 seconds)
-
-Payload: WorkerHeartbeat {
-  worker_id: "agent-rust-1",
-  job_key: "acme.payments.57"
-}
+chuggernaut.channel.{job_key}.inbox   — messages TO the worker (from CLI/orchestrator)
+chuggernaut.channel.{job_key}.outbox  — messages FROM the worker (to CLI/orchestrator)
 ```
-
-The dispatcher CAS-updates the claim's `last_heartbeat` and `lease_deadline`.
-
-### Failure Detection
-
-The worker tracks consecutive NATS publish failures:
-- 1-2 failures: log warning, continue
-- 3+ failures: assume NATS connection lost, cancel execution, report `Outcome::Abandon`
-
-This is a local safeguard. The monitor also detects lease expiry from the dispatcher side.
 
 ---
 
-## Outcome
+## Runner Environment
 
+The worker binary is distributed via the runner environment Docker image (`chuggernaut-runner-env`):
+
+- Built from `Dockerfile.runner-env`
+- Contains: `chuggernaut-worker` binary, `mock-claude` (for testing), git, standard tools
+- Used by the Forgejo Actions runner as the container image for job execution
+
+### Workflow Definition (`action/work.yml`)
+
+```yaml
+name: chuggernaut-work
+on:
+  workflow_dispatch:
+    inputs:
+      job_key: { required: true, type: string }
+      nats_url: { required: true, type: string }
+      review_feedback: { required: false, type: string }
+      is_rework: { required: false, type: string }
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: chuggernaut-worker --job-key "${{ inputs.job_key }}"
+               --nats-url "${{ inputs.nats_url }}"
+               --forgejo-url "${{ github.server_url }}"
+        env:
+          CHUGGERNAUT_FORGEJO_TOKEN: ${{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}
+          CHUGGERNAUT_COMMAND: claude
+          CHUGGERNAUT_REVIEW_FEEDBACK: ${{ inputs.review_feedback }}
+          CHUGGERNAUT_IS_REWORK: ${{ inputs.is_rework }}
 ```
-Worker → chuggernaut.worker.outcome
-
-Payload: WorkerOutcome {
-  worker_id: "agent-rust-1",
-  job_key: "acme.payments.57",
-  outcome: <one of below>
-}
-```
-
-### Outcome Types
-
-| Type | Fields | When | Dispatcher Action |
-|------|--------|------|-------------------|
-| `Yield` | `pr_url` | PR opened, ready for review | Release claim → InReview |
-| `Fail` | `reason`, `logs` | Unrecoverable error | Release claim → Failed (may auto-retry) |
-| `Abandon` | — | Preempted, shutdown, or local rejection | Release claim → OnDeck + blacklist entry |
-
-The `pr_url` in Yield is stored in the job's `pr_url` field so the reviewer knows which PR to review.
 
 ---
 
-## Preemption
+## Review Mode Workflow Definition (`action/review.yml`)
 
+```yaml
+name: chuggernaut-review
+on:
+  workflow_dispatch:
+    inputs:
+      job_key: { required: true, type: string }
+      nats_url: { required: true, type: string }
+      pr_url: { required: true, type: string }
+      review_level: { required: false, type: string, default: "high" }
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: chuggernaut-worker --mode review --job-key "${{ inputs.job_key }}"
+               --nats-url "${{ inputs.nats_url }}" --forgejo-url "${{ github.server_url }}"
+               --pr-url "${{ inputs.pr_url }}" --review-level "${{ inputs.review_level }}"
+        env:
+          CHUGGERNAUT_FORGEJO_TOKEN: ${{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}
+          CHUGGERNAUT_COMMAND: claude
 ```
-Dispatcher → chuggernaut.dispatch.preempt.{worker_id}
-
-Payload: PreemptNotice {
-  reason: "Higher-priority job acme.payments.99 (priority 95) needs this worker",
-  new_job_key: "acme.payments.99"
-}
-```
-
-The worker:
-1. Cancels current execution (via `CancellationToken`)
-2. Reports `Outcome::Abandon` for the current job
-3. The dispatcher requeues the abandoned job to OnDeck
-4. Publishes `IdleEvent` → dispatcher assigns the new job
-
-Preemption is handled as a secondary subscription in the worker's select loop — it fires alongside the heartbeat task and execution future.
-
----
-
-## NeedsHelp
-
-Interactive workers can pause for human assistance.
-
-### Request
-
-```
-Worker → chuggernaut.interact.help
-
-Payload: HelpRequest {
-  worker_id: "agent-rust-1",
-  job_key: "acme.payments.57",
-  reason: "Unsure which API version to target — v1 is deprecated but v2 has breaking changes"
-}
-```
-
-Dispatcher:
-1. Transitions job to NeedsHelp
-2. Stores reason in job activities
-3. Claim is NOT released — worker keeps heartbeating
-
-### Response
-
-Human responds via CLI:
-```
-$ chuggernaut interact respond acme.payments.57 "Use v2, the breaking changes are acceptable"
-```
-
-CLI publishes to `chuggernaut.interact.respond.{job_key}` (e.g., `chuggernaut.interact.respond.acme.payments.57`)
-
-Dispatcher:
-1. Publishes `HelpResponse` to `chuggernaut.interact.deliver.{worker_id}`
-2. Transitions job back to OnTheStack
-
-Worker receives response and continues execution.
-
----
-
-## Interactive Sessions
-
-Interactive workers (Claude Code in tmux/ttyd) support peek/attach/detach.
-
-### Session Registration
-
-When an interactive session starts, the worker writes to `chuggernaut.sessions` KV:
-
-```json
-{
-  "worker_id": "agent-rust-1",
-  "session_url": "http://agent-host:7681",
-  "session_name": "tmux-acme.payments.57",
-  "mode": "peek",
-  "started_at": "2026-03-23T10:05:00Z"
-}
-```
-
-### Attach / Detach
-
-```
-CLI → chuggernaut.interact.attach.{worker_id}   (switch to interactive mode)
-CLI → chuggernaut.interact.detach.{worker_id}   (switch to peek/headless mode)
-```
-
-The worker handles mode transitions:
-- **Peek (headless):** Claude runs in background, output logged, ttyd is read-only
-- **Interactive:** tmux session is live, ttyd allows input, human can type
-
-### Cleanup
-
-Session entries have a TTL matching the lease duration (default 60s). Workers refresh the entry alongside their heartbeat. When the job ends and heartbeats stop, the entry expires naturally — no actor needs to explicitly delete it.
-
----
-
-## Worker Types
-
-### SimWorker
-
-For testing. Creates a branch, commits a placeholder file, opens a PR, sleeps for a configurable delay, yields.
-
-```
-clone → branch work/{key} → commit "sim: {title}" → push → open PR → sleep → yield
-```
-
-### ActionWorker
-
-Dispatches a Forgejo Actions workflow on a dedicated branch.
-
-```
-clone → branch work/{key} → dispatch workflow → poll until complete → yield
-```
-
-Passes `job_key` and `runner_label` as workflow inputs. The action run is tied to the branch for traceability.
-
-### InteractiveWorker
-
-Claude Code agent in a tmux session fronted by ttyd.
-
-```
-clone → branch work/{key} → write helper scripts → launch Claude Code → monitor for result
-```
-
-Helper scripts in the work directory:
-- `workflow-yield` → writes "yield" to result.txt
-- `workflow-fail "reason"` → writes "fail: reason" to result.txt
-- `workflow-request-help "reason"` → writes help_request.txt, polls for response
-
-These scripts are the interface between the Claude Code subprocess (running in tmux) and the worker process. The worker process monitors the filesystem and translates file events into NATS messages — e.g., detecting help_request.txt triggers a `HelpRequest` publish to `chuggernaut.interact.help`. This is a pragmatic bridge: Claude Code doesn't speak NATS directly.
-
-The worker monitors for result.txt (job done), help_request.txt (pause), and attach/detach signals.
-
-### Session Recording
-
-After job completion, if a Claude output log exists:
-- Upload to NATS JetStream object store (`chuggernaut-session-recordings`)
-- Key: `sessions/{job_key}/{session_name}`
-- Optional TTL via `CHUGGERNAUT_RECORDING_TTL_SECS`
-
----
-
-## Graceful Shutdown
-
-On SIGTERM or CTRL-C:
-
-1. If executing: cancel execution, report `Outcome::Abandon`
-2. Publish `chuggernaut.worker.unregister` (UnregisterEvent with worker_id)
-3. Exit
-
-The dispatcher:
-1. Releases any held claim
-2. Requeues the job to OnDeck
-3. Removes worker from registry
 
 ---
 
@@ -372,13 +297,17 @@ The dispatcher:
 
 | Env Var | Default | Notes |
 |---------|---------|-------|
-| `CHUGGERNAUT_WORKER_ID` | (required) | Unique worker identifier |
+| `CHUGGERNAUT_JOB_KEY` | (required) | Job identifier (passed as workflow input) |
 | `CHUGGERNAUT_NATS_URL` | `nats://localhost:4222` | NATS connection |
 | `CHUGGERNAUT_FORGEJO_URL` | (required) | Forgejo base URL |
-| `CHUGGERNAUT_FORGEJO_TOKEN` | (required) | Forgejo API token for content ops |
+| `CHUGGERNAUT_FORGEJO_TOKEN` | (required) | Forgejo API token for git/PR operations |
+| `CHUGGERNAUT_COMMAND` | `claude` | Subprocess command to run |
+| `CHUGGERNAUT_COMMAND_ARGS` | (none) | Additional args for subprocess |
 | `CHUGGERNAUT_HEARTBEAT_INTERVAL_SECS` | `10` | Heartbeat period |
-| `CHUGGERNAUT_REREGISTER_INTERVAL_SECS` | `15` | Idle re-registration period |
-| `CHUGGERNAUT_CAPABILITIES` | (none) | Comma-separated capability tags |
-| `CHUGGERNAUT_WORKER_TYPE` | `"unknown"` | Worker type classification |
-| `CHUGGERNAUT_PLATFORM` | (auto-detect) | Platform tags |
-| `CHUGGERNAUT_RECORDING_TTL_SECS` | (none) | TTL for session recordings in object store |
+| `CHUGGERNAUT_CHANNEL_MODE` | `false` | Enable push notifications vs poll mode |
+| `CHUGGERNAUT_WORKDIR` | `/tmp/chuggernaut-work` | Working directory for git clone |
+| `CHUGGERNAUT_REVIEW_FEEDBACK` | (none) | Reviewer feedback for rework cycles |
+| `CHUGGERNAUT_IS_REWORK` | (none) | Flag indicating rework cycle |
+| `CHUGGERNAUT_MODE` | `work` | Operating mode: `work` or `review` |
+| `CHUGGERNAUT_PR_URL` | (none) | PR URL to review (review mode only) |
+| `CHUGGERNAUT_REVIEW_LEVEL` | `high` | Review level: low/medium/high (review mode only) |

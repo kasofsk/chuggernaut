@@ -1,10 +1,18 @@
-# Multi-stage build: compile chuggernaut-worker for Linux, then package into slim image
-FROM rust:1.88-bookworm AS builder
-
+# Multi-stage build with cargo-chef for cached dependency builds
+FROM rust:1.88-bookworm AS chef
+RUN cargo install cargo-chef
 WORKDIR /build
+
+FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+RUN cargo chef prepare --recipe-path recipe.json
 
+FROM chef AS builder
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json -p chuggernaut-worker
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
 RUN cargo build --release -p chuggernaut-worker
 
 # Runner environment image — used by Forgejo Actions runner for job containers
@@ -16,6 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /build/target/release/chuggernaut-worker /usr/local/bin/chuggernaut-worker
 COPY action/mock-claude/mock-claude.sh /usr/local/bin/mock-claude
+COPY action/mock-claude/mock-review.sh /usr/local/bin/mock-review
+RUN chmod +x /usr/local/bin/mock-claude /usr/local/bin/mock-review
 
 RUN git config --system user.email "chuggernaut@test.local" \
  && git config --system user.name "Chuggernaut Worker"

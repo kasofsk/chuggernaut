@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use chuggernaut_types::*;
 
@@ -22,21 +22,14 @@ pub async fn recover(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
     // 3. Repair dep indexes
     crate::deps::repair_reverse_indexes(state).await?;
 
-    // 4. Rebuild worker registry
-    rebuild_worker_registry(state).await?;
-
-    // 5. Reconcile claims against jobs
+    // 4. Reconcile claims against jobs
     reconcile_claims_against_jobs(state).await?;
 
-    // 6. Reconcile jobs against claims
+    // 5. Reconcile jobs against claims
     reconcile_jobs_against_claims(state).await?;
-
-    // 7. Scan pending-reworks for pruned workers
-    scan_pending_reworks(state).await?;
 
     info!(
         jobs = state.jobs.len(),
-        workers = state.workers.len(),
         "recovery complete"
     );
 
@@ -61,25 +54,7 @@ async fn rebuild_job_index(state: &Arc<DispatcherState>) -> DispatcherResult<()>
     Ok(())
 }
 
-async fn rebuild_worker_registry(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
-    let keys = state.kv.workers.keys().await?;
-    tokio::pin!(keys);
-
-    let mut count = 0u32;
-    while let Some(key) = keys.next().await {
-        if let Ok(key_str) = key {
-            if let Some((worker, _)) = kv_get::<WorkerInfo>(&state.kv.workers, &key_str).await? {
-                state.workers.insert(key_str, worker);
-                count += 1;
-            }
-        }
-    }
-
-    info!(count, "worker registry rebuilt (may be partially stale)");
-    Ok(())
-}
-
-/// For each active claim, verify the job is in on-the-stack or needs-help.
+/// For each active claim, verify the job is in on-the-stack.
 /// If not, the claim is stale from a mid-transition crash — delete it.
 async fn reconcile_claims_against_jobs(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
     let keys = state.kv.claims.keys().await?;
@@ -92,9 +67,7 @@ async fn reconcile_claims_against_jobs(state: &Arc<DispatcherState>) -> Dispatch
                 let valid = state
                     .jobs
                     .get(&key_str)
-                    .map(|j| {
-                        j.state == JobState::OnTheStack || j.state == JobState::NeedsHelp
-                    })
+                    .map(|j| j.state == JobState::OnTheStack)
                     .unwrap_or(false);
 
                 if !valid {
@@ -116,16 +89,13 @@ async fn reconcile_claims_against_jobs(state: &Arc<DispatcherState>) -> Dispatch
     Ok(())
 }
 
-/// For each job in on-the-stack or needs-help, verify a matching claim exists.
+/// For each job in on-the-stack, verify a matching claim exists.
 /// If not, the claim was lost — transition to Failed.
 async fn reconcile_jobs_against_claims(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
     let claimless: Vec<String> = state
         .jobs
         .iter()
-        .filter(|entry| {
-            let s = entry.value().state;
-            s == JobState::OnTheStack || s == JobState::NeedsHelp
-        })
+        .filter(|entry| entry.value().state == JobState::OnTheStack)
         .map(|entry| entry.key().clone())
         .collect();
 
@@ -134,7 +104,7 @@ async fn reconcile_jobs_against_claims(state: &Arc<DispatcherState>) -> Dispatch
         match kv_get::<ClaimState>(&state.kv.claims, &key).await? {
             Some(_) => {} // claim exists, all good
             None => {
-                warn!(job_key = key, "job in on-the-stack/needs-help with no claim — failing");
+                warn!(job_key = key, "job in on-the-stack with no claim — failing");
                 crate::jobs::transition_job(
                     state,
                     &key,
@@ -150,37 +120,6 @@ async fn reconcile_jobs_against_claims(state: &Arc<DispatcherState>) -> Dispatch
 
     if orphaned > 0 {
         info!(orphaned, "claimless jobs transitioned to failed");
-    }
-    Ok(())
-}
-
-/// For each pending rework, verify the target worker still exists.
-/// If not, clear the entry so the rework can be reassigned.
-async fn scan_pending_reworks(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
-    let keys = state.kv.pending_reworks.keys().await?;
-    tokio::pin!(keys);
-
-    let mut cleared = 0u32;
-    while let Some(key) = keys.next().await {
-        if let Ok(key_str) = key {
-            if let Some((rework, _)) =
-                kv_get::<PendingRework>(&state.kv.pending_reworks, &key_str).await?
-            {
-                if !state.workers.contains_key(&rework.worker_id) {
-                    let _ = state.kv.pending_reworks.delete(&key_str).await;
-                    cleared += 1;
-                    debug!(
-                        job_key = key_str,
-                        worker_id = rework.worker_id,
-                        "cleared pending rework for missing worker"
-                    );
-                }
-            }
-        }
-    }
-
-    if cleared > 0 {
-        info!(cleared, "pending reworks cleared for missing workers");
     }
     Ok(())
 }

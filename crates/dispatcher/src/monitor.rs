@@ -99,30 +99,10 @@ async fn scan_job_timeout(state: &Arc<DispatcherState>) -> DispatcherResult<()> 
 async fn scan_orphans(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
     let now = Utc::now();
 
-    // 1. Claims with unknown workers
-    let keys = state.kv.claims.keys().await?;
-    tokio::pin!(keys);
-
-    while let Some(key) = keys.next().await {
-        if let Ok(key_str) = key {
-            if let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &key_str).await? {
-                if !state.workers.contains_key(&claim.worker_id) {
-                    let event = OrphanDetectedEvent {
-                        job_key: key_str.clone(),
-                        worker_id: Some(claim.worker_id.clone()),
-                        kind: OrphanKind::ClaimUnknownWorker,
-                        detected_at: now,
-                    };
-                    publish_monitor_event(state, &subjects::MONITOR_ORPHAN, &event).await;
-                }
-            }
-        }
-    }
-
-    // 2. Claimless on-the-stack jobs
+    // Claimless on-the-stack jobs
     for entry in state.jobs.iter() {
         let job = entry.value();
-        if job.state == JobState::OnTheStack || job.state == JobState::NeedsHelp {
+        if job.state == JobState::OnTheStack {
             if let Ok(None) = kv_get::<ClaimState>(&state.kv.claims, &job.key).await {
                 let event = OrphanDetectedEvent {
                     job_key: job.key.clone(),
@@ -131,30 +111,6 @@ async fn scan_orphans(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
                     detected_at: now,
                 };
                 publish_monitor_event(state, &subjects::MONITOR_ORPHAN, &event).await;
-            }
-        }
-    }
-
-    // 3. Stale sessions — sessions for jobs no longer in OnTheStack/NeedsHelp
-    let session_keys = state.kv.sessions.keys().await?;
-    tokio::pin!(session_keys);
-
-    while let Some(key) = session_keys.next().await {
-        if let Ok(key_str) = key {
-            if let Some(job) = state.jobs.get(&key_str) {
-                if job.state != JobState::OnTheStack && job.state != JobState::NeedsHelp {
-                    if let Some((session, _)) =
-                        kv_get::<SessionInfo>(&state.kv.sessions, &key_str).await?
-                    {
-                        let event = OrphanDetectedEvent {
-                            job_key: key_str.clone(),
-                            worker_id: Some(session.worker_id),
-                            kind: OrphanKind::StaleSession,
-                            detected_at: now,
-                        };
-                        publish_monitor_event(state, &subjects::MONITOR_ORPHAN, &event).await;
-                    }
-                }
             }
         }
     }
@@ -231,7 +187,6 @@ async fn scan_archival(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
         // Clean up KV entries
         let _ = state.kv.deps.delete(&key).await;
         let _ = state.kv.activities.delete(&key).await;
-        let _ = state.kv.pending_reworks.delete(&key).await;
 
         // Set TTL on jobs KV entry (NATS KV doesn't support per-key TTL post-creation,
         // so we just leave it — the job will be queryable via API until the bucket ages it out)
