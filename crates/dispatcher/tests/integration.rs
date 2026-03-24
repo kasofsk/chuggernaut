@@ -1123,26 +1123,15 @@ jobs:
   work:
     runs-on: ubuntu-latest
     steps:
-      - name: Debug
+      - name: Run worker
         run: |
-          echo "=== ENV ==="
-          echo "job_key=${{{{ inputs.job_key }}}}"
-          echo "nats_url=${{{{ inputs.nats_url }}}}"
-          echo "CHUGGERNAUT_FORGEJO_TOKEN=${{{{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}}}"
-          echo "=== BINARIES ==="
-          which chuggernaut-worker || echo "chuggernaut-worker not found"
-          which mock-claude || echo "mock-claude not found"
-          echo "=== NATS connectivity ==="
-          curl -sf "${{{{ inputs.nats_url }}}}" || echo "NATS not reachable (expected for non-HTTP)"
-          echo "=== Run worker ==="
           chuggernaut-worker \
             --job-key "${{{{ inputs.job_key }}}}" \
             --nats-url "${{{{ inputs.nats_url }}}}" \
             --forgejo-url "{forgejo_internal_url}" \
             --forgejo-token "${{{{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}}}" \
             --command mock-claude \
-            --heartbeat-interval-secs 5 \
-            2>&1 || echo "Worker exited with code $?"
+            --heartbeat-interval-secs 5
 "#
     );
 
@@ -1181,23 +1170,22 @@ jobs:
         .canonicalize()
         .unwrap();
 
-    let _runner = GenericImage::new("gitea/act_runner", "latest")
-        .with_env_var("GITEA_INSTANCE_URL", &forgejo_internal_url)
-        .with_env_var("GITEA_RUNNER_REGISTRATION_TOKEN", &runner_reg_token)
-        .with_env_var("GITEA_RUNNER_NAME", "test-runner")
-        .with_env_var(
-            "GITEA_RUNNER_LABELS",
-            "ubuntu-latest:docker://chuggernaut-runner-env:latest",
-        )
-        .with_env_var("CONFIG_FILE", "/config.yaml")
+    let labels = "ubuntu-latest:docker://chuggernaut-runner-env:latest";
+    let register_and_run = format!(
+        "cd /data && forgejo-runner register --no-interactive --instance '{forgejo_internal_url}' --token '{runner_reg_token}' --name runner --labels '{labels}' && forgejo-runner daemon"
+    );
+
+    let _runner = GenericImage::new("data.forgejo.org/forgejo/runner", "11")
+        .with_user("root")
         .with_mount(Mount::bind_mount(
             "/var/run/docker.sock",
             "/var/run/docker.sock",
         ))
         .with_mount(Mount::bind_mount(
             runner_config_path.to_str().unwrap(),
-            "/config.yaml",
+            "/data/config.yaml",
         ))
+        .with_cmd(["sh", "-c", &register_and_run])
         .with_startup_timeout(Duration::from_secs(60))
         .start()
         .await
@@ -1218,8 +1206,14 @@ jobs:
         .await
         .unwrap();
 
-    // Dispatch the workflow
+    // Subscribe to channel outbox to verify MCP channel_send works
     let job_key = "testorg.repo.1";
+    let mut channel_sub = nats_client
+        .subscribe(format!("chuggernaut.channel.{job_key}.outbox"))
+        .await
+        .unwrap();
+
+    // Dispatch the workflow
     let forgejo_client = chuggernaut_forgejo_api::ForgejoClient::new(&forgejo_url, &token);
     forgejo_client
         .dispatch_workflow(
@@ -1242,6 +1236,7 @@ jobs:
     let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
     let mut got_heartbeat = false;
     let mut got_outcome = false;
+    let mut got_channel_msg = false;
     let mut action_status = String::new();
 
     loop {
@@ -1310,13 +1305,38 @@ jobs:
             }
         }
 
+        // Check for channel messages
+        if let Ok(msg) =
+            tokio::time::timeout(Duration::from_millis(100), channel_sub.next()).await
+        {
+            if let Some(msg) = msg {
+                if let Ok(channel_msg) = serde_json::from_slice::<chuggernaut_types::ChannelMessage>(&msg.payload) {
+                    eprintln!("Got channel message: sender={} body={}", channel_msg.sender, channel_msg.body);
+                    got_channel_msg = true;
+                }
+            }
+        }
+
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
-    eprintln!("Results: heartbeat={got_heartbeat} outcome={got_outcome} action_status={action_status}");
+    eprintln!("Results: heartbeat={got_heartbeat} outcome={got_outcome} channel={got_channel_msg} action_status={action_status}");
 
     assert!(got_heartbeat, "should have received heartbeat from worker");
     assert!(got_outcome, "should have received WorkerOutcome from worker");
+    assert!(got_channel_msg, "should have received channel message from mock-claude MCP");
+
+    // Check status KV
+    let js = async_nats::jetstream::new(nats_client.clone());
+    if let Ok(kv) = js.get_key_value("chuggernaut_channels").await {
+        if let Ok(Some(entry)) = kv.entry(job_key).await {
+            let status: chuggernaut_types::ChannelStatus = serde_json::from_slice(&entry.value).unwrap();
+            eprintln!("Channel status: {} progress={:?}", status.status, status.progress);
+            assert_eq!(status.status, "done");
+        } else {
+            eprintln!("No status KV entry found (channel KV bucket may not have been created by worker)");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1468,23 +1488,27 @@ jobs:
         .canonicalize()
         .expect("infra/runner/config.yaml not found");
 
-    let _runner = GenericImage::new("gitea/act_runner", "latest")
-        .with_env_var("GITEA_INSTANCE_URL", &forgejo_internal_url)
-        .with_env_var("GITEA_RUNNER_REGISTRATION_TOKEN", &runner_reg_token)
-        .with_env_var("GITEA_RUNNER_NAME", "e2e-runner")
-        .with_env_var(
-            "GITEA_RUNNER_LABELS",
-            "ubuntu-latest:docker://chuggernaut-runner-env:latest",
-        )
-        .with_env_var("CONFIG_FILE", "/config.yaml")
+    let e2e_labels = "ubuntu-latest:docker://chuggernaut-runner-env:latest";
+    let e2e_register_and_run = format!(
+        "forgejo-runner register --no-interactive --instance \"$INSTANCE\" --token \"$TOKEN\" --name e2e-runner --labels '{e2e_labels}' -c /data/config.yaml && forgejo-runner daemon -c /data/config.yaml -c /config.yaml"
+    );
+
+    let e2e_labels = "ubuntu-latest:docker://chuggernaut-runner-env:latest";
+    let e2e_register_and_run = format!(
+        "cd /data && forgejo-runner register --no-interactive --instance '{forgejo_internal_url}' --token '{runner_reg_token}' --name e2e-runner --labels '{e2e_labels}' && forgejo-runner daemon"
+    );
+
+    let _runner = GenericImage::new("data.forgejo.org/forgejo/runner", "11")
+        .with_user("root")
         .with_mount(Mount::bind_mount(
             "/var/run/docker.sock",
             "/var/run/docker.sock",
         ))
         .with_mount(Mount::bind_mount(
             runner_config_path.to_str().unwrap(),
-            "/config.yaml",
+            "/data/config.yaml",
         ))
+        .with_cmd(["sh", "-c", &e2e_register_and_run])
         .with_startup_timeout(Duration::from_secs(60))
         .start()
         .await
