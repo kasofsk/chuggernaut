@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort, WaitFor};
+use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort, Mount, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{GenericImage, ImageExt};
 use testcontainers_modules::nats::{Nats, NatsServerCmd};
@@ -1001,6 +1001,386 @@ async fn action_dispatch_creates_claim_and_transitions() {
     let (claim, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key)
         .await.unwrap().unwrap();
     assert!(claim.worker_id.starts_with("action-"), "worker_id should be action-{key}");
+}
+
+// ---------------------------------------------------------------------------
+// Full E2E: dispatcher → Forgejo Action → runner → worker → outcome
+// ---------------------------------------------------------------------------
+
+/// Full end-to-end test with a real Forgejo Actions runner.
+/// Requires: Docker socket available, `chuggernaut-runner-env` image built.
+///
+/// Run: `cargo test -p chuggernaut-dispatcher --test integration e2e_full -- --test-threads=1 --ignored`
+#[tokio::test]
+#[ignore] // requires pre-built runner-env image + Docker socket
+async fn e2e_full_action_pipeline() {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    // Start Forgejo
+    let forgejo = GenericImage::new("codeberg.org/forgejo/forgejo", "14")
+        .with_exposed_port(3000.tcp())
+        .with_wait_for(WaitFor::seconds(5))
+        .with_env_var("FORGEJO__database__DB_TYPE", "sqlite3")
+        .with_env_var("FORGEJO__security__INSTALL_LOCK", "true")
+        .with_env_var("FORGEJO__service__DISABLE_REGISTRATION", "true")
+        .with_env_var("FORGEJO__actions__ENABLED", "true")
+        .with_env_var("FORGEJO__actions__DEFAULT_ACTIONS_URL", "https://code.forgejo.org")
+        .with_env_var("FORGEJO__log__LEVEL", "Warn")
+        .with_startup_timeout(Duration::from_secs(120))
+        .start()
+        .await
+        .unwrap();
+
+    let forgejo_port = forgejo.get_host_port_ipv4(3000.tcp()).await.unwrap();
+    let forgejo_url = format!("http://127.0.0.1:{forgejo_port}");
+    // Internal URL the runner uses (container-to-container via host network)
+    let forgejo_internal_url = format!("http://host.docker.internal:{forgejo_port}");
+
+    // Wait for API
+    let http = reqwest::Client::new();
+    for _ in 0..60 {
+        if http
+            .get(format!("{forgejo_url}/api/v1/version"))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Create admin + token
+    forgejo
+        .exec(
+            ExecCommand::new([
+                "su-exec", "git", "forgejo", "admin", "user", "create",
+                "--admin", "--username", "testadmin", "--password", "testadmin",
+                "--email", "testadmin@test.local", "--must-change-password=false",
+            ])
+            .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
+        )
+        .await
+        .expect("admin user creation failed");
+
+    let token_resp = http
+        .post(format!("{forgejo_url}/api/v1/users/testadmin/tokens"))
+        .basic_auth("testadmin", Some("testadmin"))
+        .json(&serde_json::json!({"name": "e2e", "scopes": ["all"]}))
+        .send()
+        .await
+        .unwrap();
+    let status = token_resp.status();
+    let body = token_resp.text().await.unwrap();
+    eprintln!("E2E token create: status={status} body={body}");
+    let token_json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let token = token_json["sha1"].as_str().unwrap().to_string();
+
+    // Get runner registration token
+    let reg_token_resp: serde_json::Value = http
+        .get(format!("{forgejo_url}/api/v1/admin/runners/registration-token"))
+        .header("Authorization", format!("token {token}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let runner_reg_token = reg_token_resp["token"].as_str().unwrap().to_string();
+
+    // Create org + repo
+    let org = format!("org{}", &prefix[..8]);
+    http.post(format!("{forgejo_url}/api/v1/orgs"))
+        .header("Authorization", format!("token {token}"))
+        .json(&serde_json::json!({"username": &org, "visibility": "public"}))
+        .send()
+        .await
+        .unwrap();
+
+    http.post(format!("{forgejo_url}/api/v1/orgs/{org}/repos"))
+        .header("Authorization", format!("token {token}"))
+        .json(&serde_json::json!({"name": "repo", "default_branch": "main", "auto_init": true}))
+        .send()
+        .await
+        .unwrap();
+
+    // Push workflow file
+    let workflow = format!(
+        r#"name: chuggernaut-work
+on:
+  workflow_dispatch:
+    inputs:
+      job_key:
+        required: true
+        type: string
+      nats_url:
+        required: true
+        type: string
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Execute
+        run: |
+          echo "mock work for ${{{{ inputs.job_key }}}}" > work.txt
+          git add -A
+          git commit -m "work: ${{{{ inputs.job_key }}}}"
+          git push origin HEAD
+"#
+    );
+    http.post(format!(
+            "{forgejo_url}/api/v1/repos/{org}/repo/contents/.forgejo/workflows/work.yml"
+        ))
+        .header("Authorization", format!("token {token}"))
+        .json(&serde_json::json!({
+            "message": "add workflow",
+            "content": base64_encode(&workflow)
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Start runner with Docker socket passthrough
+    // Get absolute path to runner config
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+    let runner_config_path = workspace_root.join("infra/runner/config.yaml")
+        .canonicalize()
+        .expect("infra/runner/config.yaml not found");
+
+    let _runner = GenericImage::new("gitea/act_runner", "latest")
+        .with_env_var("GITEA_INSTANCE_URL", &forgejo_internal_url)
+        .with_env_var("GITEA_RUNNER_REGISTRATION_TOKEN", &runner_reg_token)
+        .with_env_var("GITEA_RUNNER_NAME", "e2e-runner")
+        .with_env_var(
+            "GITEA_RUNNER_LABELS",
+            "ubuntu-latest:docker://chuggernaut-runner-env:latest",
+        )
+        .with_env_var("CONFIG_FILE", "/config.yaml")
+        .with_mount(Mount::bind_mount(
+            "/var/run/docker.sock",
+            "/var/run/docker.sock",
+        ))
+        .with_mount(Mount::bind_mount(
+            runner_config_path.to_str().unwrap(),
+            "/config.yaml",
+        ))
+        .with_startup_timeout(Duration::from_secs(60))
+        .start()
+        .await
+        .unwrap();
+
+    // Give runner time to register with Forgejo
+    tokio::time::sleep(Duration::from_secs(15)).await;
+
+    // Check if runner registered
+    let runners_resp = http
+        .get(format!("{forgejo_url}/api/v1/admin/runners"))
+        .header("Authorization", format!("token {token}"))
+        .send()
+        .await
+        .unwrap();
+    let runners_body = runners_resp.text().await.unwrap();
+    eprintln!("E2E: registered runners = {runners_body}");
+
+    // NATS URL the worker binary will use from inside a Docker container
+    let nats_internal_url = format!("nats://host.docker.internal:{port}");
+
+    // Push workflow that runs chuggernaut-worker with mock-claude
+    let workflow = format!(
+        r#"name: chuggernaut-work
+on:
+  workflow_dispatch:
+    inputs:
+      job_key:
+        required: true
+        type: string
+      nats_url:
+        required: true
+        type: string
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Execute
+        run: |
+          chuggernaut-worker \
+            --job-key "${{{{ inputs.job_key }}}}" \
+            --nats-url "${{{{ inputs.nats_url }}}}" \
+            --forgejo-url "{forgejo_internal_url}" \
+            --forgejo-token "${{{{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}}}" \
+            --command mock-claude \
+            --heartbeat-interval-secs 5
+"#
+    );
+    http.post(format!(
+            "{forgejo_url}/api/v1/repos/{org}/repo/contents/.forgejo/workflows/work.yml"
+        ))
+        .header("Authorization", format!("token {token}"))
+        .json(&serde_json::json!({
+            "message": "add workflow",
+            "content": base64_encode(&workflow)
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Set repo secret for Forgejo token
+    http.put(format!(
+            "{forgejo_url}/api/v1/repos/{org}/repo/actions/secrets/CHUGGERNAUT_FORGEJO_TOKEN"
+        ))
+        .header("Authorization", format!("token {token}"))
+        .json(&serde_json::json!({"data": &token}))
+        .send()
+        .await
+        .unwrap();
+
+    // Set up dispatcher — NO prefix, so the worker binary's unprefixed NATS
+    // messages reach the dispatcher directly
+    let config = Config {
+        nats_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 120,
+        default_timeout_secs: 300,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 5,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        blacklist_ttl_secs: 3600,
+        forgejo_url: Some(forgejo_url.clone()),
+        forgejo_token: Some(token.clone()),
+        action_workflow: "work.yml".to_string(),
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize(&js, config.lease_secs, config.blacklist_ttl_secs)
+        .await
+        .unwrap();
+    let state = DispatcherState::new(config, client, js, kv);
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    // The action dispatch uses the internal NATS URL (reachable from Docker containers)
+    // We need to override the nats_url in the dispatch inputs. Let's patch the
+    // action_dispatch to use the internal URL by temporarily updating the config.
+    // Actually — action_dispatch reads nats_url from state.config. Let's just
+    // dispatch manually with the correct URL.
+
+    // Create action-type job
+    let req = CreateJobRequest {
+        repo: format!("{org}/repo"),
+        title: "E2E test".to_string(),
+        body: "Full pipeline test".to_string(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        worker_type: Some("action".to_string()),
+        platform: None,
+        timeout_secs: 300,
+        review: ReviewLevel::Low,
+        max_retries: 0,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+    eprintln!("E2E: created job {key}");
+
+    // Dispatch action manually so we can pass the internal NATS URL
+    let job = state.jobs.get(&key).unwrap().clone();
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, job.timeout_secs)
+        .await
+        .unwrap();
+    chuggernaut_dispatcher::jobs::transition_job(
+        &state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id),
+    )
+    .await
+    .unwrap();
+
+    let forgejo_client = chuggernaut_forgejo_api::ForgejoClient::new(&forgejo_url, &token);
+    forgejo_client
+        .dispatch_workflow(
+            &org,
+            "repo",
+            "work.yml",
+            &chuggernaut_forgejo_api::DispatchWorkflowOption {
+                ref_field: "main".to_string(),
+                inputs: Some(serde_json::json!({
+                    "job_key": key,
+                    "nats_url": nats_internal_url,
+                })),
+            },
+        )
+        .await
+        .expect("workflow dispatch failed");
+
+    eprintln!("E2E: action dispatched, waiting for worker outcome...");
+
+    // Check action runs after a short delay
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let runs_resp = http
+        .get(format!("{forgejo_url}/api/v1/repos/{org}/repo/actions/runs"))
+        .header("Authorization", format!("token {token}"))
+        .send()
+        .await
+        .unwrap();
+    let runs_body = runs_resp.text().await.unwrap();
+    eprintln!("E2E: action runs = {runs_body}");
+
+    // Wait for the worker binary (inside the action) to report an outcome
+    // The worker publishes WorkerOutcome to chuggernaut.worker.outcome
+    // The dispatcher's handler picks it up and transitions the job
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            let job_state = state.jobs.get(&key).unwrap().state;
+            // Check action run status before panicking
+            let runs_resp = http
+                .get(format!("{forgejo_url}/api/v1/repos/{org}/repo/actions/runs"))
+                .header("Authorization", format!("token {token}"))
+                .send().await.unwrap();
+            let runs = runs_resp.text().await.unwrap();
+            panic!("E2E timeout: job in {job_state:?} after 60s. Action runs: {runs}");
+        }
+
+        let job_state = state.jobs.get(&key).unwrap().state;
+        match job_state {
+            JobState::InReview => {
+                eprintln!("E2E: job reached InReview — worker completed successfully!");
+                break;
+            }
+            JobState::Failed => {
+                eprintln!("E2E: job failed");
+                break;
+            }
+            JobState::Done => {
+                eprintln!("E2E: job done!");
+                break;
+            }
+            _ => {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+
+    let final_state = state.jobs.get(&key).unwrap().state;
+    eprintln!("E2E: final job state = {final_state:?}");
+
+    // The worker should have yielded with a PR URL, transitioning to InReview
+    assert!(
+        final_state == JobState::InReview || final_state == JobState::Done,
+        "expected InReview or Done, got {final_state:?}"
+    );
+
+    // If InReview, check PR was created
+    if final_state == JobState::InReview {
+        let pr_url = state.jobs.get(&key).unwrap().pr_url.clone();
+        assert!(pr_url.is_some(), "job should have a PR URL");
+        eprintln!("E2E: PR URL = {}", pr_url.unwrap());
+    }
 }
 
 fn base64_encode(s: &str) -> String {
