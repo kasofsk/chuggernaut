@@ -216,7 +216,7 @@ impl ForgejoClient {
         repo: &str,
         workflow_file: &str,
         opts: &DispatchWorkflowOption,
-    ) -> Result<()> {
+    ) -> Result<DispatchWorkflowRun> {
         let path = format!(
             "/repos/{owner}/{repo}/actions/workflows/{workflow_file}/dispatches"
         );
@@ -233,7 +233,17 @@ impl ForgejoClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(ForgejoError::Api { status, body });
         }
-        Ok(())
+        // Some Forgejo versions return empty body (204), others return JSON
+        let body = resp.text().await.unwrap_or_default();
+        if body.is_empty() {
+            Ok(DispatchWorkflowRun {
+                id: None,
+                jobs: None,
+                run_number: None,
+            })
+        } else {
+            Ok(serde_json::from_str(&body)?)
+        }
     }
 
     pub async fn get_action_run(
@@ -243,6 +253,15 @@ impl ForgejoClient {
         run_id: u64,
     ) -> Result<ActionRun> {
         self.get(&format!("/repos/{owner}/{repo}/actions/runs/{run_id}"))
+            .await
+    }
+
+    pub async fn list_action_runs(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<ActionRunList> {
+        self.get(&format!("/repos/{owner}/{repo}/actions/runs"))
             .await
     }
 }

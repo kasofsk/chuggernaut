@@ -103,3 +103,16 @@ pub struct ActionRun {
     pub conclusion: Option<String>,
     pub html_url: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionRunList {
+    pub workflow_runs: Vec<ActionRun>,
+    pub total_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchWorkflowRun {
+    pub id: Option<u64>,
+    pub jobs: Option<Vec<String>>,
+    pub run_number: Option<u64>,
+}
