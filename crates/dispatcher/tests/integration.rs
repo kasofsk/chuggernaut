@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chuggernaut_test_utils as test_utils;
 use futures::StreamExt;
-use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort, Mount, WaitFor};
 use testcontainers::runners::AsyncRunner;
-use testcontainers::{GenericImage, ImageExt};
+use testcontainers::ImageExt;
 use testcontainers_modules::nats::{Nats, NatsServerCmd};
 
 use chuggernaut_dispatcher::{
@@ -877,80 +877,25 @@ async fn action_dispatch_creates_claim_and_transitions() {
     let nats_url = format!("nats://127.0.0.1:{port}");
     let prefix = uuid::Uuid::new_v4().simple().to_string();
 
-    // Start Forgejo for this test
-    let forgejo = testcontainers::GenericImage::new("codeberg.org/forgejo/forgejo", "14")
-        .with_exposed_port(3000.tcp())
-        .with_wait_for(WaitFor::seconds(5))
-        .with_env_var("FORGEJO__database__DB_TYPE", "sqlite3")
-        .with_env_var("FORGEJO__security__INSTALL_LOCK", "true")
-        .with_env_var("FORGEJO__service__DISABLE_REGISTRATION", "true")
-        .with_env_var("FORGEJO__actions__ENABLED", "true")
-        .with_env_var("FORGEJO__log__LEVEL", "Warn")
-        .with_startup_timeout(Duration::from_secs(120))
-        .start()
-        .await
-        .unwrap();
+    // Start Forgejo via test-utils
+    let forgejo = test_utils::start_forgejo().await;
+    let forgejo_port = test_utils::forgejo_port(&forgejo).await;
+    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
 
-    let forgejo_port = forgejo.get_host_port_ipv4(3000.tcp()).await.unwrap();
-    let forgejo_url = format!("http://127.0.0.1:{forgejo_port}");
-
-    // Wait for API
-    let http = reqwest::Client::new();
-    for _ in 0..60 {
-        if http.get(format!("{forgejo_url}/api/v1/version"))
-            .send().await.map(|r| r.status().is_success()).unwrap_or(false) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-
-    // Small extra wait for Forgejo to fully initialize
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Create admin user — don't require exit code 0 so we can read stderr
-    let mut exec_result = forgejo.exec(
-        ExecCommand::new([
-            "su-exec", "git", "forgejo", "admin", "user", "create",
-            "--admin", "--username", "testadmin", "--password", "testadmin",
-            "--email", "testadmin@test.local", "--must-change-password=false",
-        ]),
-    ).await.unwrap();
-    let stdout = exec_result.stdout_to_vec().await.unwrap();
-    let stderr = exec_result.stderr_to_vec().await.unwrap();
-    let exit = exec_result.exit_code().await.unwrap();
-    eprintln!("exec exit={exit:?} stdout={} stderr={}",
-        String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
-    assert_eq!(exit, Some(0), "admin user creation failed");
-
-    let token_resp: serde_json::Value = http
-        .post(format!("{forgejo_url}/api/v1/users/testadmin/tokens"))
-        .basic_auth("testadmin", Some("testadmin"))
-        .json(&serde_json::json!({"name": "test", "scopes": ["all"]}))
-        .send().await.unwrap()
-        .json().await.unwrap();
-    let token = token_resp["sha1"].as_str().unwrap().to_string();
+    // Create admin user + token
+    let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
+    let token = creds.admin_token;
 
     // Create org + repo + workflow
     let org = format!("org{}", &prefix[..8]);
-    http.post(format!("{forgejo_url}/api/v1/orgs"))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({"username": &org, "visibility": "public"}))
-        .send().await.unwrap();
-
-    http.post(format!("{forgejo_url}/api/v1/orgs/{org}/repos"))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({"name": "repo", "default_branch": "main", "auto_init": true}))
-        .send().await.unwrap();
+    test_utils::create_test_repo(forgejo_port, &token, &org, "repo").await;
 
     // Push a noop workflow so dispatch_workflow succeeds
     let workflow = "name: work\non:\n  workflow_dispatch:\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
-    http.post(format!("{forgejo_url}/api/v1/repos/{org}/repo/contents/.forgejo/workflows/work.yml"))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({
-            "message": "add workflow",
-            "content": base64_encode(workflow)
-        }))
-        .send().await.unwrap();
+    test_utils::push_file(
+        forgejo_port, &token, &org, "repo",
+        ".forgejo/workflows/work.yml", workflow, "add workflow",
+    ).await;
 
     // Set up dispatcher with Forgejo config
     let config = Config {
@@ -1018,96 +963,24 @@ async fn action_runner_publishes_outcome_to_nats() {
     let nats_url = format!("nats://127.0.0.1:{nats_port}");
     let nats_internal_url = format!("nats://host.docker.internal:{nats_port}");
 
-    // Start Forgejo
-    let forgejo = GenericImage::new("codeberg.org/forgejo/forgejo", "14")
-        .with_exposed_port(3000.tcp())
-        .with_wait_for(WaitFor::seconds(5))
-        .with_env_var("FORGEJO__database__DB_TYPE", "sqlite3")
-        .with_env_var("FORGEJO__security__INSTALL_LOCK", "true")
-        .with_env_var("FORGEJO__service__DISABLE_REGISTRATION", "true")
-        .with_env_var("FORGEJO__actions__ENABLED", "true")
-        .with_env_var("FORGEJO__log__LEVEL", "Warn")
-        .with_startup_timeout(Duration::from_secs(120))
-        .start()
-        .await
-        .unwrap();
-
-    let forgejo_port = forgejo.get_host_port_ipv4(3000.tcp()).await.unwrap();
-    let forgejo_url = format!("http://127.0.0.1:{forgejo_port}");
-    let forgejo_internal_url = format!("http://host.docker.internal:{forgejo_port}");
-
-    // Wait for API
-    let http = reqwest::Client::new();
-    for _ in 0..60 {
-        if http
-            .get(format!("{forgejo_url}/api/v1/version"))
-            .send()
-            .await
-            .map(|r| r.status().is_success())
-            .unwrap_or(false)
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Start Forgejo via test-utils
+    let forgejo = test_utils::start_forgejo().await;
+    let forgejo_port = test_utils::forgejo_port(&forgejo).await;
+    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+    let forgejo_internal_url = test_utils::forgejo_internal_url(forgejo_port);
 
     // Create admin + token
-    forgejo
-        .exec(
-            ExecCommand::new([
-                "su-exec", "git", "forgejo", "admin", "user", "create",
-                "--admin", "--username", "testadmin", "--password", "testadmin",
-                "--email", "testadmin@test.local", "--must-change-password=false",
-            ])
-            .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
-        )
-        .await
-        .unwrap();
-
-    let token_resp: serde_json::Value = http
-        .post(format!("{forgejo_url}/api/v1/users/testadmin/tokens"))
-        .basic_auth("testadmin", Some("testadmin"))
-        .json(&serde_json::json!({"name": "test", "scopes": ["all"]}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let token = token_resp["sha1"].as_str().unwrap().to_string();
+    let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
+    let token = creds.admin_token;
 
     // Get runner registration token
-    let reg_resp: serde_json::Value = http
-        .get(format!(
-            "{forgejo_url}/api/v1/admin/runners/registration-token"
-        ))
-        .header("Authorization", format!("token {token}"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let runner_reg_token = reg_resp["token"].as_str().unwrap().to_string();
+    let runner_reg_token = test_utils::get_runner_registration_token(forgejo_port, &token).await;
 
     // Create org + repo
     let org = "testorg";
-    http.post(format!("{forgejo_url}/api/v1/orgs"))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({"username": org, "visibility": "public"}))
-        .send()
-        .await
-        .unwrap();
+    test_utils::create_test_repo(forgejo_port, &token, org, "repo").await;
 
-    http.post(format!("{forgejo_url}/api/v1/orgs/{org}/repos"))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({"name": "repo", "default_branch": "main", "auto_init": true}))
-        .send()
-        .await
-        .unwrap();
-
-    // Push a simple workflow — first just echo to verify the runner works
+    // Push a simple workflow
     let workflow = format!(
         r#"name: test-action
 on:
@@ -1135,29 +1008,16 @@ jobs:
 "#
     );
 
-    http.post(format!(
-            "{forgejo_url}/api/v1/repos/{org}/repo/contents/.forgejo/workflows/work.yml"
-        ))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({
-            "message": "add workflow",
-            "content": base64_encode(&workflow)
-        }))
-        .send()
-        .await
-        .unwrap();
+    test_utils::push_file(
+        forgejo_port, &token, org, "repo",
+        ".forgejo/workflows/work.yml", &workflow, "add workflow",
+    ).await;
 
     // Set secret
-    let secret_resp = http
-        .put(format!(
-            "{forgejo_url}/api/v1/repos/{org}/repo/actions/secrets/CHUGGERNAUT_FORGEJO_TOKEN"
-        ))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({"data": &token}))
-        .send()
-        .await
-        .unwrap();
-    eprintln!("Secret set: status={}", secret_resp.status());
+    test_utils::set_repo_secret(
+        forgejo_port, &token, org, "repo",
+        "CHUGGERNAUT_FORGEJO_TOKEN", &token,
+    ).await;
 
     // Start runner
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1170,26 +1030,11 @@ jobs:
         .canonicalize()
         .unwrap();
 
-    let labels = "ubuntu-latest:docker://chuggernaut-runner-env:latest";
-    let register_and_run = format!(
-        "cd /data && forgejo-runner register --no-interactive --instance '{forgejo_internal_url}' --token '{runner_reg_token}' --name runner --labels '{labels}' && forgejo-runner daemon"
-    );
-
-    let _runner = GenericImage::new("data.forgejo.org/forgejo/runner", "11")
-        .with_user("root")
-        .with_mount(Mount::bind_mount(
-            "/var/run/docker.sock",
-            "/var/run/docker.sock",
-        ))
-        .with_mount(Mount::bind_mount(
-            runner_config_path.to_str().unwrap(),
-            "/data/config.yaml",
-        ))
-        .with_cmd(["sh", "-c", &register_and_run])
-        .with_startup_timeout(Duration::from_secs(60))
-        .start()
-        .await
-        .unwrap();
+    let _runner = test_utils::start_runner(
+        forgejo_port,
+        &runner_reg_token,
+        runner_config_path.to_str().unwrap(),
+    ).await;
 
     tokio::time::sleep(Duration::from_secs(15)).await;
 
@@ -1339,95 +1184,22 @@ async fn e2e_full_action_pipeline() {
     let nats_url = format!("nats://127.0.0.1:{port}");
     let prefix = uuid::Uuid::new_v4().simple().to_string();
 
-    // Start Forgejo
-    let forgejo = GenericImage::new("codeberg.org/forgejo/forgejo", "14")
-        .with_exposed_port(3000.tcp())
-        .with_wait_for(WaitFor::seconds(5))
-        .with_env_var("FORGEJO__database__DB_TYPE", "sqlite3")
-        .with_env_var("FORGEJO__security__INSTALL_LOCK", "true")
-        .with_env_var("FORGEJO__service__DISABLE_REGISTRATION", "true")
-        .with_env_var("FORGEJO__actions__ENABLED", "true")
-        .with_env_var("FORGEJO__actions__DEFAULT_ACTIONS_URL", "https://code.forgejo.org")
-        .with_env_var("FORGEJO__log__LEVEL", "Warn")
-        .with_startup_timeout(Duration::from_secs(120))
-        .start()
-        .await
-        .unwrap();
-
-    let forgejo_port = forgejo.get_host_port_ipv4(3000.tcp()).await.unwrap();
-    let forgejo_url = format!("http://127.0.0.1:{forgejo_port}");
-    // Internal URL the runner uses (container-to-container via host network)
-    let forgejo_internal_url = format!("http://host.docker.internal:{forgejo_port}");
-
-    // Wait for API
-    let http = reqwest::Client::new();
-    for _ in 0..60 {
-        if http
-            .get(format!("{forgejo_url}/api/v1/version"))
-            .send()
-            .await
-            .map(|r| r.status().is_success())
-            .unwrap_or(false)
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Start Forgejo via test-utils
+    let forgejo = test_utils::start_forgejo().await;
+    let forgejo_port = test_utils::forgejo_port(&forgejo).await;
+    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+    let forgejo_internal_url = test_utils::forgejo_internal_url(forgejo_port);
 
     // Create admin + token
-    forgejo
-        .exec(
-            ExecCommand::new([
-                "su-exec", "git", "forgejo", "admin", "user", "create",
-                "--admin", "--username", "testadmin", "--password", "testadmin",
-                "--email", "testadmin@test.local", "--must-change-password=false",
-            ])
-            .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
-        )
-        .await
-        .expect("admin user creation failed");
-
-    let token_resp = http
-        .post(format!("{forgejo_url}/api/v1/users/testadmin/tokens"))
-        .basic_auth("testadmin", Some("testadmin"))
-        .json(&serde_json::json!({"name": "e2e", "scopes": ["all"]}))
-        .send()
-        .await
-        .unwrap();
-    let status = token_resp.status();
-    let body = token_resp.text().await.unwrap();
-    eprintln!("E2E token create: status={status} body={body}");
-    let token_json: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let token = token_json["sha1"].as_str().unwrap().to_string();
+    let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
+    let token = creds.admin_token;
 
     // Get runner registration token
-    let reg_token_resp: serde_json::Value = http
-        .get(format!("{forgejo_url}/api/v1/admin/runners/registration-token"))
-        .header("Authorization", format!("token {token}"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let runner_reg_token = reg_token_resp["token"].as_str().unwrap().to_string();
+    let runner_reg_token = test_utils::get_runner_registration_token(forgejo_port, &token).await;
 
     // Create org + repo
     let org = format!("org{}", &prefix[..8]);
-    http.post(format!("{forgejo_url}/api/v1/orgs"))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({"username": &org, "visibility": "public"}))
-        .send()
-        .await
-        .unwrap();
-
-    http.post(format!("{forgejo_url}/api/v1/orgs/{org}/repos"))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({"name": "repo", "default_branch": "main", "auto_init": true}))
-        .send()
-        .await
-        .unwrap();
+    test_utils::create_test_repo(forgejo_port, &token, &org, "repo").await;
 
     // Push workflow file
     let workflow = format!(
@@ -1454,55 +1226,28 @@ jobs:
           git push origin HEAD
 "#
     );
-    http.post(format!(
-            "{forgejo_url}/api/v1/repos/{org}/repo/contents/.forgejo/workflows/work.yml"
-        ))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({
-            "message": "add workflow",
-            "content": base64_encode(&workflow)
-        }))
-        .send()
-        .await
-        .unwrap();
+    test_utils::push_file(
+        forgejo_port, &token, &org, "repo",
+        ".forgejo/workflows/work.yml", &workflow, "add workflow",
+    ).await;
 
-    // Start runner with Docker socket passthrough
-    // Get absolute path to runner config
+    // Start runner via test-utils
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
     let runner_config_path = workspace_root.join("infra/runner/config.yaml")
         .canonicalize()
         .expect("infra/runner/config.yaml not found");
 
-    let e2e_labels = "ubuntu-latest:docker://chuggernaut-runner-env:latest";
-    let e2e_register_and_run = format!(
-        "forgejo-runner register --no-interactive --instance \"$INSTANCE\" --token \"$TOKEN\" --name e2e-runner --labels '{e2e_labels}' -c /data/config.yaml && forgejo-runner daemon -c /data/config.yaml -c /config.yaml"
-    );
-
-    let e2e_labels = "ubuntu-latest:docker://chuggernaut-runner-env:latest";
-    let e2e_register_and_run = format!(
-        "cd /data && forgejo-runner register --no-interactive --instance '{forgejo_internal_url}' --token '{runner_reg_token}' --name e2e-runner --labels '{e2e_labels}' && forgejo-runner daemon"
-    );
-
-    let _runner = GenericImage::new("data.forgejo.org/forgejo/runner", "11")
-        .with_user("root")
-        .with_mount(Mount::bind_mount(
-            "/var/run/docker.sock",
-            "/var/run/docker.sock",
-        ))
-        .with_mount(Mount::bind_mount(
-            runner_config_path.to_str().unwrap(),
-            "/data/config.yaml",
-        ))
-        .with_cmd(["sh", "-c", &e2e_register_and_run])
-        .with_startup_timeout(Duration::from_secs(60))
-        .start()
-        .await
-        .unwrap();
+    let _runner = test_utils::start_runner(
+        forgejo_port,
+        &runner_reg_token,
+        runner_config_path.to_str().unwrap(),
+    ).await;
 
     // Give runner time to register with Forgejo
     tokio::time::sleep(Duration::from_secs(15)).await;
 
     // Check if runner registered
+    let http = reqwest::Client::new();
     let runners_resp = http
         .get(format!("{forgejo_url}/api/v1/admin/runners"))
         .header("Authorization", format!("token {token}"))
@@ -1542,27 +1287,16 @@ jobs:
             --heartbeat-interval-secs 5
 "#
     );
-    http.post(format!(
-            "{forgejo_url}/api/v1/repos/{org}/repo/contents/.forgejo/workflows/work.yml"
-        ))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({
-            "message": "add workflow",
-            "content": base64_encode(&workflow)
-        }))
-        .send()
-        .await
-        .unwrap();
+    test_utils::push_file(
+        forgejo_port, &token, &org, "repo",
+        ".forgejo/workflows/work.yml", &workflow, "update workflow",
+    ).await;
 
     // Set repo secret for Forgejo token
-    http.put(format!(
-            "{forgejo_url}/api/v1/repos/{org}/repo/actions/secrets/CHUGGERNAUT_FORGEJO_TOKEN"
-        ))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({"data": &token}))
-        .send()
-        .await
-        .unwrap();
+    test_utils::set_repo_secret(
+        forgejo_port, &token, &org, "repo",
+        "CHUGGERNAUT_FORGEJO_TOKEN", &token,
+    ).await;
 
     // Set up dispatcher — NO prefix, so the worker binary's unprefixed NATS
     // messages reach the dispatcher directly
@@ -1706,34 +1440,4 @@ jobs:
         assert!(pr_url.is_some(), "job should have a PR URL");
         eprintln!("E2E: PR URL = {}", pr_url.unwrap());
     }
-}
-
-fn base64_encode(s: &str) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = s.as_bytes();
-    let mut result = String::new();
-    let mut i = 0;
-    while i + 2 < bytes.len() {
-        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | bytes[i + 2] as u32;
-        result.push(CHARS[(n >> 18 & 63) as usize] as char);
-        result.push(CHARS[(n >> 12 & 63) as usize] as char);
-        result.push(CHARS[(n >> 6 & 63) as usize] as char);
-        result.push(CHARS[(n & 63) as usize] as char);
-        i += 3;
-    }
-    let rem = bytes.len() - i;
-    if rem == 2 {
-        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
-        result.push(CHARS[(n >> 18 & 63) as usize] as char);
-        result.push(CHARS[(n >> 12 & 63) as usize] as char);
-        result.push(CHARS[(n >> 6 & 63) as usize] as char);
-        result.push('=');
-    } else if rem == 1 {
-        let n = (bytes[i] as u32) << 16;
-        result.push(CHARS[(n >> 18 & 63) as usize] as char);
-        result.push(CHARS[(n >> 12 & 63) as usize] as char);
-        result.push('=');
-        result.push('=');
-    }
-    result
 }

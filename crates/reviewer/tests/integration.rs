@@ -1,10 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{GenericImage, ImageExt};
-use testcontainers_modules::nats::{Nats, NatsServerCmd};
+use chuggernaut_test_utils as test_utils;
 
 use chuggernaut_dispatcher::{
     config::Config as DispatcherConfig, handlers, http, jobs, nats_init,
@@ -21,10 +18,8 @@ use chuggernaut_types::*;
 struct TestInfra {
     nats_port: u16,
     forgejo_port: u16,
-    forgejo_admin_user: String,
-    forgejo_admin_pass: String,
-    forgejo_reviewer_user: String,
-    forgejo_reviewer_pass: String,
+    admin_token: String,
+    reviewer_token: String,
 }
 
 static TEST_INFRA: std::sync::OnceLock<TestInfra> = std::sync::OnceLock::new();
@@ -34,77 +29,24 @@ fn test_infra() -> &'static TestInfra {
         std::thread::spawn(|| {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
                 // Start NATS with JetStream
-                let nats_cmd = NatsServerCmd::default().with_jetstream();
-                let nats = Nats::default()
-                    .with_cmd(&nats_cmd)
-                    .start()
-                    .await
-                    .unwrap();
-                let nats_port = nats.get_host_port_ipv4(4222).await.unwrap();
+                let nats = test_utils::start_nats().await;
+                let nats_port = test_utils::nats_port(&nats).await;
                 Box::leak(Box::new(nats));
 
-                // Start Forgejo — chain GenericImage methods first (wait_for, exposed_port),
-                // then ImageExt methods (env_var) which convert to ContainerRequest.
-                let forgejo = GenericImage::new("codeberg.org/forgejo/forgejo", "14")
-                    .with_exposed_port(3000.tcp())
-                    .with_wait_for(WaitFor::seconds(5))
-                    .with_env_var("FORGEJO__database__DB_TYPE", "sqlite3")
-                    .with_env_var("FORGEJO__security__INSTALL_LOCK", "true")
-                    .with_env_var("FORGEJO__service__DISABLE_REGISTRATION", "true")
-                    .with_env_var("FORGEJO__log__LEVEL", "Warn")
-                    .with_startup_timeout(Duration::from_secs(120))
-                    .start()
-                    .await
-                    .unwrap();
+                // Start Forgejo
+                let forgejo = test_utils::start_forgejo().await;
+                let forgejo_port = test_utils::forgejo_port(&forgejo).await;
 
-                let forgejo_port = forgejo.get_host_port_ipv4(3000.tcp()).await.unwrap();
-
-                // Wait for Forgejo API to be ready
-                let client = reqwest::Client::new();
-                let api_url = format!("http://127.0.0.1:{forgejo_port}/api/v1/version");
-                for _ in 0..60 {
-                    if client.get(&api_url).send().await.map(|r| r.status().is_success()).unwrap_or(false) {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                }
-
-                // Create admin + reviewer users via exec (must run as git user via su-exec)
-                let admin_user = "chuggernaut-admin";
-                let admin_pass = "chuggernaut-admin";
-                let reviewer_user = "chuggernaut-reviewer";
-                let reviewer_pass = "chuggernaut-reviewer";
-
-                for (user, pass, email) in [
-                    (admin_user, admin_pass, "admin@chuggernaut.test"),
-                    (reviewer_user, reviewer_pass, "reviewer@chuggernaut.test"),
-                ] {
-                    forgejo
-                        .exec(
-                            ExecCommand::new([
-                                "su-exec", "git",
-                                "forgejo", "admin", "user", "create",
-                                "--admin",
-                                "--username", user,
-                                "--password", pass,
-                                "--email", email,
-                                "--must-change-password=false",
-                            ])
-                            .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
-                        )
-                        .await
-                        .unwrap();
-                }
+                // Create admin + reviewer users
+                let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, true).await;
 
                 Box::leak(Box::new(forgejo));
 
                 TestInfra {
                     nats_port,
                     forgejo_port,
-                    forgejo_admin_user: admin_user.to_string(),
-                    forgejo_admin_pass: admin_pass.to_string(),
-                    forgejo_reviewer_user: reviewer_user.to_string(),
-                    forgejo_reviewer_pass: reviewer_pass.to_string(),
+                    admin_token: creds.admin_token,
+                    reviewer_token: creds.reviewer_token.unwrap(),
                 }
             })
         })
@@ -135,92 +77,33 @@ async fn setup() -> TestEnv {
     let infra = test_infra();
     let prefix = uuid::Uuid::new_v4().simple().to_string();
     let nats_url = format!("nats://127.0.0.1:{}", infra.nats_port);
-    let forgejo_url = format!("http://127.0.0.1:{}", infra.forgejo_port);
+    let forgejo_url = test_utils::forgejo_host_url(infra.forgejo_port);
 
-    // Create API token via basic auth
-    let http = reqwest::Client::new();
-    let token_name = format!("test-{}", &prefix[..8]);
-    let token_resp: serde_json::Value = http
-        .post(format!(
-            "{forgejo_url}/api/v1/users/{}/tokens",
-            infra.forgejo_admin_user
-        ))
-        .basic_auth(&infra.forgejo_admin_user, Some(&infra.forgejo_admin_pass))
-        .json(&serde_json::json!({
-            "name": token_name,
-            "scopes": ["all"]
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let token = token_resp["sha1"].as_str().unwrap().to_string();
+    // Reuse the shared tokens from test_infra
+    let token = infra.admin_token.clone();
+    let reviewer_token = infra.reviewer_token.clone();
 
     let forgejo = ForgejoClient::new(&forgejo_url, &token);
-
-    // Create reviewer API token (separate user to avoid "approve own PR" restriction)
-    let reviewer_token_name = format!("rev-{}", &prefix[..8]);
-    let reviewer_token_resp: serde_json::Value = http
-        .post(format!(
-            "{forgejo_url}/api/v1/users/{}/tokens",
-            infra.forgejo_reviewer_user
-        ))
-        .basic_auth(&infra.forgejo_reviewer_user, Some(&infra.forgejo_reviewer_pass))
-        .json(&serde_json::json!({
-            "name": reviewer_token_name,
-            "scopes": ["all"]
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let reviewer_token = reviewer_token_resp["sha1"].as_str().unwrap().to_string();
     let reviewer_forgejo = ForgejoClient::new(&forgejo_url, &reviewer_token);
 
     // Create namespaced org + repo
     let org = format!("org{}", &prefix[..8]);
     let repo_name = "repo";
 
-    http.post(format!("{forgejo_url}/api/v1/orgs"))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({
-            "username": org,
-            "visibility": "public"
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    http.post(format!("{forgejo_url}/api/v1/orgs/{org}/repos"))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({
-            "name": repo_name,
-            "default_branch": "main",
-            "auto_init": true
-        }))
-        .send()
-        .await
-        .unwrap();
+    test_utils::create_test_repo(infra.forgejo_port, &token, &org, repo_name).await;
 
     // Create a noop review workflow so dispatch_workflow succeeds.
-    // In production, this would be a real review action; in tests we submit
-    // the review out-of-band to simulate the action's output.
     let workflow_content = "name: review-work\non:\n  workflow_dispatch:\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
-    http.post(format!(
-            "{forgejo_url}/api/v1/repos/{org}/{repo_name}/contents/.forgejo/workflows/review-work.yml"
-        ))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({
-            "message": "add noop review workflow",
-            "content": base64_encode(workflow_content)
-        }))
-        .send()
-        .await
-        .unwrap();
+    test_utils::push_file(
+        infra.forgejo_port,
+        &token,
+        &org,
+        repo_name,
+        ".forgejo/workflows/review-work.yml",
+        workflow_content,
+        "add noop review workflow",
+    )
+    .await;
 
     // Set up dispatcher
     let dispatcher_config = DispatcherConfig {
@@ -278,7 +161,7 @@ async fn setup() -> TestEnv {
         forgejo_url: forgejo_url.clone(),
         forgejo_token: token,
         dispatcher_url: dispatcher_url.clone(),
-        human_login: infra.forgejo_admin_user.clone(),
+        human_login: test_utils::ADMIN_USER.to_string(),
         delay_secs: 0, // no delay in tests
         workflow: "review-work.yml".to_string(),
         runner: "ubuntu-latest".to_string(),
@@ -424,7 +307,7 @@ async fn create_job_and_yield_pr_with_worker(env: &TestEnv, worker_id: &str) -> 
         )
         .json(&serde_json::json!({
             "message": format!("work for {key}"),
-            "content": base64_encode("hello world"),
+            "content": test_utils::base64_encode("hello world"),
             "branch": branch_name
         }))
         .send()
@@ -470,78 +353,6 @@ async fn create_job_and_yield_pr_with_worker(env: &TestEnv, worker_id: &str) -> 
     (key, pr.html_url)
 }
 
-fn base64_encode(s: &str) -> String {
-    use std::io::Write;
-    let mut buf = Vec::new();
-    {
-        let mut encoder =
-            base64_writer(std::io::Cursor::new(&mut buf));
-        encoder.write_all(s.as_bytes()).unwrap();
-        encoder.finish().unwrap();
-    }
-    String::from_utf8(buf).unwrap()
-}
-
-// Minimal base64 encoder (no external dep needed)
-struct Base64Writer<W: std::io::Write> {
-    inner: W,
-    buf: Vec<u8>,
-}
-
-fn base64_writer<W: std::io::Write>(inner: W) -> Base64Writer<W> {
-    Base64Writer {
-        inner,
-        buf: Vec::new(),
-    }
-}
-
-impl<W: std::io::Write> std::io::Write for Base64Writer<W> {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        self.buf.extend_from_slice(data);
-        Ok(data.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<W: std::io::Write> Base64Writer<W> {
-    fn finish(mut self) -> std::io::Result<()> {
-        const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut i = 0;
-        while i + 2 < self.buf.len() {
-            let n = ((self.buf[i] as u32) << 16)
-                | ((self.buf[i + 1] as u32) << 8)
-                | self.buf[i + 2] as u32;
-            self.inner.write_all(&[
-                CHARS[(n >> 18 & 63) as usize],
-                CHARS[(n >> 12 & 63) as usize],
-                CHARS[(n >> 6 & 63) as usize],
-                CHARS[(n & 63) as usize],
-            ])?;
-            i += 3;
-        }
-        let rem = self.buf.len() - i;
-        if rem == 2 {
-            let n = ((self.buf[i] as u32) << 16) | ((self.buf[i + 1] as u32) << 8);
-            self.inner.write_all(&[
-                CHARS[(n >> 18 & 63) as usize],
-                CHARS[(n >> 12 & 63) as usize],
-                CHARS[(n >> 6 & 63) as usize],
-                b'=',
-            ])?;
-        } else if rem == 1 {
-            let n = (self.buf[i] as u32) << 16;
-            self.inner.write_all(&[
-                CHARS[(n >> 18 & 63) as usize],
-                CHARS[(n >> 12 & 63) as usize],
-                b'=',
-                b'=',
-            ])?;
-        }
-        Ok(())
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -697,7 +508,7 @@ async fn human_review_level_escalates_then_human_approves() {
         )
         .json(&serde_json::json!({
             "message": format!("work for {key}"),
-            "content": base64_encode("human review test"),
+            "content": test_utils::base64_encode("human review test"),
             "branch": branch_name
         }))
         .send()

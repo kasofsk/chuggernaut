@@ -468,6 +468,7 @@ dependencies = [
  "chrono",
  "chuggernaut-forgejo-api",
  "chuggernaut-nats",
+ "chuggernaut-test-utils",
  "chuggernaut-types",
  "dashmap",
  "futures",
@@ -520,6 +521,7 @@ dependencies = [
  "chuggernaut-dispatcher",
  "chuggernaut-forgejo-api",
  "chuggernaut-nats",
+ "chuggernaut-test-utils",
  "chuggernaut-types",
  "dashmap",
  "futures",
@@ -534,6 +536,20 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "chuggernaut-test-utils"
+version = "0.1.0"
+dependencies = [
+ "async-nats",
+ "chuggernaut-forgejo-api",
+ "reqwest",
+ "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

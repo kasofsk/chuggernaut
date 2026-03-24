@@ -1,0 +1,14 @@
+[package]
+name = "chuggernaut-test-utils"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chuggernaut-forgejo-api = { workspace = true }
+async-nats = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+testcontainers = { version = "0.27.2", features = ["http_wait_plain"] }
+testcontainers-modules = { version = "0.15.0", features = ["nats"] }
+tokio = { workspace = true }
+tracing = { workspace = true }

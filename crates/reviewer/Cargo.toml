@@ -28,6 +28,7 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 axum = { workspace = true }
 chuggernaut-dispatcher = { path = "../dispatcher" }
+chuggernaut-test-utils = { path = "../test-utils" }
 testcontainers = { version = "0.27.2", features = ["http_wait_plain"] }
 testcontainers-modules = { version = "0.15.0", features = ["nats"] }
 tokio-test = "0.4.5"
