@@ -23,12 +23,48 @@ NATS-first workflow orchestration for AI agents. Jobs live in NATS KV. Workers r
 
 ## Scripts
 
-| Script | Purpose |
-|--------|---------|
-| `dev-up.sh` | Bootstrap the full dev environment (docker compose + Terraform + runners) |
-| `dev-down.sh` | Tear down dev environment; data volumes preserved by default |
-| `coverage.sh` | Generate code coverage report via `cargo-llvm-cov` |
-| `init.sh` | *(deprecated)* — use `dev-up.sh` instead |
+### `dev-up.sh`
+
+Bootstrap the full dev environment (docker compose + Terraform + runners).
+
+```
+./scripts/dev-up.sh                                    # 1 runner, no repos
+./scripts/dev-up.sh --runners 3                        # 3 runners
+./scripts/dev-up.sh --repo acme/payments               # bootstrap a repo (repeatable)
+./scripts/dev-up.sh --clean --repo test/repo           # wipe everything first
+```
+
+| Flag | Description |
+|------|-------------|
+| `--runners N` | Number of action runners to provision (default: 1) |
+| `--repo org/name` | Repo to create and configure (repeatable) |
+| `--clean` | Destroy all state (containers, Terraform, volumes) before starting |
+
+Requires: docker, terraform >= 1.4, nats CLI, curl, jq. Set `CHUGGERNAUT_CLAUDE_CODE_OAUTH_TOKEN` or `CHUGGERNAUT_ANTHROPIC_API_KEY` for worker credentials.
+
+### `dev-down.sh`
+
+Tear down the dev environment. Stops compose services and removes Terraform-managed runners. Data volumes are preserved — use `docker compose down -v` to also wipe data.
+
+```
+./scripts/dev-down.sh
+```
+
+### `coverage.sh`
+
+Generate code coverage via `cargo-llvm-cov`.
+
+```
+./scripts/coverage.sh              # HTML report (non-ignored tests)
+./scripts/coverage.sh --full       # include E2E tests
+./scripts/coverage.sh --lcov       # LCOV output for CI
+./scripts/coverage.sh --full --lcov
+```
+
+| Flag | Description |
+|------|-------------|
+| `--full` | Include ignored (E2E) tests (requires Docker + runner-env image) |
+| `--lcov` | Output LCOV format to `target/coverage/lcov.info` instead of HTML |
 
 ## Running
 
