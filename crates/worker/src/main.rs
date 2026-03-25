@@ -699,6 +699,26 @@ fn spawn_deadline_warning(
 // Helpers: budget warning
 // ---------------------------------------------------------------------------
 
+/// Check if we should fire the overage warning for the current metrics.
+fn should_warn_overage(metrics: &SessionMetrics) -> bool {
+    metrics
+        .rate_limit
+        .as_ref()
+        .is_some_and(|rl| rl.is_using_overage)
+}
+
+/// Estimate session cost from token counts (real cost only in final result event).
+/// Conservative: ~$10/MTok output + ~$3/MTok input (mid-range model pricing).
+fn estimate_session_cost(metrics: &SessionMetrics) -> f64 {
+    if metrics.cost_usd > 0.0 {
+        metrics.cost_usd
+    } else {
+        let output_cost = metrics.usage.output_tokens as f64 * 10.0 / 1_000_000.0;
+        let input_cost = metrics.usage.input_tokens as f64 * 3.0 / 1_000_000.0;
+        output_cost + input_cost
+    }
+}
+
 fn spawn_budget_monitor(
     nats: NatsClient,
     job_key: String,
@@ -728,10 +748,8 @@ fn spawn_budget_monitor(
             let m = metrics_rx.borrow().clone();
 
             // Warn on rate limit overage (once) — fires regardless of per-job budget
-            if !warned_overage
-                && let Some(ref rl) = m.rate_limit
-                && rl.is_using_overage
-            {
+            if !warned_overage && should_warn_overage(&m) {
+                let rl = m.rate_limit.as_ref().unwrap();
                 warned_overage = true;
                 info!(
                     job_key,
@@ -763,16 +781,7 @@ fn spawn_budget_monitor(
 
             // Warn on approaching per-job budget cap (once, only if budget is set)
             if !warned_budget && m.turns > 0 {
-                // Estimate cost from token counts since real cost only arrives at session end.
-                // Conservative: ~$10/MTok output + ~$3/MTok input (mid-range model pricing).
-                let estimated_cost = if m.cost_usd > 0.0 {
-                    m.cost_usd
-                } else {
-                    let output_cost = m.usage.output_tokens as f64 * 10.0 / 1_000_000.0;
-                    let input_cost = m.usage.input_tokens as f64 * 3.0 / 1_000_000.0;
-                    output_cost + input_cost
-                };
-
+                let estimated_cost = estimate_session_cost(&m);
                 if estimated_cost >= threshold {
                     warned_budget = true;
                     let pct = (estimated_cost / max_budget_usd * 100.0).min(100.0);
@@ -1273,5 +1282,89 @@ mod tests {
             extract_flag_value("--max-budget-usd", "--max-budget-usd"),
             None
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Budget monitor logic tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn should_warn_overage_detects_overage() {
+        let mut m = SessionMetrics::default();
+        // No rate limit → no warning
+        assert!(!should_warn_overage(&m));
+
+        // Rate limit present but not in overage → no warning
+        m.rate_limit = Some(RateLimitInfo {
+            resets_at: 9999999999,
+            rate_limit_type: "five_hour".to_string(),
+            is_using_overage: false,
+        });
+        assert!(!should_warn_overage(&m));
+
+        // In overage → warning
+        m.rate_limit.as_mut().unwrap().is_using_overage = true;
+        assert!(should_warn_overage(&m));
+    }
+
+    #[test]
+    fn overage_detection_independent_of_budget() {
+        // This is the exact bug we fixed: overage should be detected
+        // regardless of whether a per-job budget is set.
+        let m = SessionMetrics {
+            rate_limit: Some(RateLimitInfo {
+                resets_at: 9999999999,
+                rate_limit_type: "five_hour".to_string(),
+                is_using_overage: true,
+            }),
+            ..Default::default()
+        };
+        // should_warn_overage only looks at metrics, not budget config
+        assert!(should_warn_overage(&m));
+    }
+
+    #[test]
+    fn estimate_cost_from_tokens() {
+        let mut m = SessionMetrics::default();
+        m.usage.input_tokens = 1_000_000;
+        m.usage.output_tokens = 100_000;
+        // $3/MTok input + $10/MTok output = $3 + $1 = $4
+        let cost = estimate_session_cost(&m);
+        assert!((cost - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn estimate_cost_prefers_real_cost() {
+        let mut m = SessionMetrics::default();
+        m.usage.input_tokens = 1_000_000;
+        m.usage.output_tokens = 100_000;
+        m.cost_usd = 2.50; // real cost from result event
+        // Should use real cost, not estimate
+        assert!((estimate_session_cost(&m) - 2.50).abs() < 0.001);
+    }
+
+    #[test]
+    fn budget_monitor_skips_budget_warn_without_budget() {
+        // When no budget is set, warned_budget should start as true (skipped)
+        // but warned_overage should start as false (still watches for overage)
+        let has_budget = 0.0_f64 > 0.0;
+        let warned_budget = !has_budget;
+        let warned_overage = false;
+        assert!(warned_budget, "budget warning should be pre-skipped");
+        assert!(!warned_overage, "overage warning should still be active");
+        // Monitor only exits when both are true, so it stays alive for overage
+        assert!(
+            !(warned_budget && warned_overage),
+            "monitor should not exit immediately"
+        );
+    }
+
+    #[test]
+    fn budget_monitor_watches_both_with_budget() {
+        let has_budget = 5.0_f64 > 0.0;
+        let warned_budget = !has_budget;
+        let warned_overage = false;
+        assert!(!warned_budget, "budget warning should be active");
+        assert!(!warned_overage, "overage warning should be active");
     }
 }

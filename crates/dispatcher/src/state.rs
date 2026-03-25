@@ -198,3 +198,97 @@ impl DispatcherState {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chuggernaut_types::HeartbeatRateLimit;
+
+    #[test]
+    fn tracker_update_and_remove() {
+        let mut tracker = TokenTracker::new();
+        let usage = TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 50,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        };
+        tracker.update_usage("job.1", &usage, 0.05);
+        assert_eq!(tracker.snapshots.len(), 1);
+        assert_eq!(tracker.snapshots["job.1"].usage.output_tokens, 50);
+
+        tracker.remove_worker("job.1");
+        assert!(tracker.snapshots.is_empty());
+    }
+
+    #[test]
+    fn tracker_rate_limit_from_heartbeat() {
+        let mut tracker = TokenTracker::new();
+        assert!(tracker.rate_limit.is_none());
+
+        let rl = HeartbeatRateLimit {
+            resets_at: 9999999999,
+            rate_limit_type: "five_hour".to_string(),
+            is_using_overage: true,
+        };
+        tracker.update_rate_limit("job.1", &rl);
+
+        let gl = tracker.rate_limit.as_ref().unwrap();
+        assert!(gl.is_using_overage);
+        assert_eq!(gl.rate_limit_type, "five_hour");
+        assert_eq!(gl.reported_by, "job.1");
+    }
+
+    #[test]
+    fn tracker_clears_stale_rate_limit() {
+        let mut tracker = TokenTracker::new();
+        let rl = HeartbeatRateLimit {
+            resets_at: 0, // epoch = long past
+            rate_limit_type: "five_hour".to_string(),
+            is_using_overage: true,
+        };
+        tracker.update_rate_limit("job.1", &rl);
+        assert!(tracker.rate_limit.is_some());
+
+        tracker.clear_stale_rate_limit();
+        assert!(
+            tracker.rate_limit.is_none(),
+            "stale rate limit should be cleared"
+        );
+    }
+
+    #[test]
+    fn tracker_keeps_active_rate_limit() {
+        let mut tracker = TokenTracker::new();
+        let rl = HeartbeatRateLimit {
+            resets_at: 9999999999,
+            rate_limit_type: "five_hour".to_string(),
+            is_using_overage: true,
+        };
+        tracker.update_rate_limit("job.1", &rl);
+
+        tracker.clear_stale_rate_limit();
+        assert!(
+            tracker.rate_limit.is_some(),
+            "active rate limit should be kept"
+        );
+    }
+
+    #[test]
+    fn tracker_overage_blocks_regardless_of_snapshots() {
+        // The rate limit should block even if no token snapshots exist
+        // (i.e., the overage signal works independently of per-job tracking)
+        let mut tracker = TokenTracker::new();
+        assert!(tracker.snapshots.is_empty());
+
+        let rl = HeartbeatRateLimit {
+            resets_at: 9999999999,
+            rate_limit_type: "five_hour".to_string(),
+            is_using_overage: true,
+        };
+        tracker.update_rate_limit("job.1", &rl);
+
+        let gl = tracker.rate_limit.as_ref().unwrap();
+        assert!(gl.is_using_overage && gl.resets_at > Utc::now());
+    }
+}
