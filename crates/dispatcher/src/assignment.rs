@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use chrono::Utc;
 use tracing::debug;
 
 use chuggernaut_types::*;
@@ -17,8 +18,30 @@ fn active_action_count(state: &DispatcherState) -> usize {
 }
 
 /// Check if we have capacity to dispatch another action.
-fn has_capacity(state: &DispatcherState) -> bool {
-    active_action_count(state) < state.config.max_concurrent_actions
+/// Respects both the concurrent action limit and rate limit state.
+async fn has_capacity(state: &DispatcherState) -> bool {
+    if active_action_count(state) >= state.config.max_concurrent_actions {
+        return false;
+    }
+
+    // Check rate limit: if paused on overage and in overage, block
+    if state.config.pause_on_overage {
+        let tracker = state.token_tracker.read().await;
+        if let Some(ref rl) = tracker.rate_limit
+            && rl.is_using_overage
+            && rl.resets_at > Utc::now()
+        {
+            debug!(
+                resets_at = %rl.resets_at,
+                rate_limit_type = %rl.rate_limit_type,
+                reported_by = %rl.reported_by,
+                "pausing dispatch: API in overage"
+            );
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Try to assign a specific OnDeck job by dispatching a Forgejo Action.
@@ -33,7 +56,7 @@ pub async fn try_assign_job(state: &Arc<DispatcherState>, job_key: &str) -> Disp
         return Ok(false);
     }
 
-    if !has_capacity(state) {
+    if !has_capacity(state).await {
         debug!(
             job_key,
             active = active_action_count(state),
@@ -59,7 +82,7 @@ pub async fn try_assign_rework(
     job_key: &str,
     review_feedback: &str,
 ) -> DispatcherResult<bool> {
-    if !has_capacity(state) {
+    if !has_capacity(state).await {
         debug!(
             job_key,
             active = active_action_count(state),
@@ -82,7 +105,7 @@ pub async fn try_assign_rework(
 /// Scan OnDeck jobs by priority and dispatch up to available capacity.
 /// Called when a slot frees up (outcome received, lease expired, admin close).
 pub async fn try_dispatch_next(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
-    while has_capacity(state) {
+    while has_capacity(state).await {
         // Collect OnDeck and ChangesRequested jobs, sorted by priority (highest first)
         let mut candidates: Vec<(String, u8)> = state
             .jobs
