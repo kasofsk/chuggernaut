@@ -9,19 +9,20 @@ use crate::error::{DispatcherError, DispatcherResult};
 use crate::state::DispatcherState;
 
 /// Extract (owner, repo) from a job's repo field and get Forgejo credentials.
-fn forgejo_context(state: &DispatcherState, job: &Job) -> DispatcherResult<(String, String, String, String)> {
-    let (forgejo_url, forgejo_token) = match (
-        &state.config.forgejo_url,
-        &state.config.forgejo_token,
-    ) {
-        (Some(url), Some(token)) => (url.clone(), token.clone()),
-        _ => {
-            return Err(DispatcherError::Validation(
+fn forgejo_context(
+    state: &DispatcherState,
+    job: &Job,
+) -> DispatcherResult<(String, String, String, String)> {
+    let (forgejo_url, forgejo_token) =
+        match (&state.config.forgejo_url, &state.config.forgejo_token) {
+            (Some(url), Some(token)) => (url.clone(), token.clone()),
+            _ => {
+                return Err(DispatcherError::Validation(
                 "CHUGGERNAUT_FORGEJO_URL and CHUGGERNAUT_FORGEJO_TOKEN required for action dispatch"
                     .to_string(),
             ));
-        }
-    };
+            }
+        };
 
     let parts: Vec<&str> = job.repo.splitn(2, '/').collect();
     if parts.len() != 2 {
@@ -31,7 +32,12 @@ fn forgejo_context(state: &DispatcherState, job: &Job) -> DispatcherResult<(Stri
         )));
     }
 
-    Ok((parts[0].to_string(), parts[1].to_string(), forgejo_url, forgejo_token))
+    Ok((
+        parts[0].to_string(),
+        parts[1].to_string(),
+        forgejo_url,
+        forgejo_token,
+    ))
 }
 
 /// Dispatch a Forgejo Action for a job.
@@ -56,9 +62,19 @@ pub async fn dispatch_action(
     crate::claims::acquire_claim(state, job_key, &worker_id, job.timeout_secs).await?;
 
     // Transition to OnTheStack
-    let trigger = if is_rework { "rework_dispatched" } else { "action_dispatched" };
-    crate::jobs::transition_job(state, job_key, JobState::OnTheStack, trigger, Some(&worker_id))
-        .await?;
+    let trigger = if is_rework {
+        "rework_dispatched"
+    } else {
+        "action_dispatched"
+    };
+    crate::jobs::transition_job(
+        state,
+        job_key,
+        JobState::OnTheStack,
+        trigger,
+        Some(&worker_id),
+    )
+    .await?;
 
     // Dispatch the Forgejo Action
     let forgejo = ForgejoClient::new(&forgejo_url, &forgejo_token);
@@ -90,14 +106,26 @@ pub async fn dispatch_action(
         // Dispatch failed — release claim and fail the job
         warn!(job_key, error = %e, "action dispatch failed");
         crate::claims::release_claim(state, job_key).await?;
-        crate::jobs::transition_job(state, job_key, JobState::Failed, "action_dispatch_failed", None)
-            .await?;
+        crate::jobs::transition_job(
+            state,
+            job_key,
+            JobState::Failed,
+            "action_dispatch_failed",
+            None,
+        )
+        .await?;
         return Err(DispatcherError::Validation(format!(
             "failed to dispatch action: {e}"
         )));
     }
 
-    info!(job_key, workflow, repo = format!("{owner}/{repo}"), is_rework, "action dispatched");
+    info!(
+        job_key,
+        workflow,
+        repo = format!("{owner}/{repo}"),
+        is_rework,
+        "action dispatched"
+    );
     crate::jobs::journal_append(
         state,
         "action_dispatched",
@@ -156,7 +184,12 @@ pub async fn dispatch_review_action(
         )));
     }
 
-    info!(job_key, workflow, repo = format!("{owner}/{repo}"), "review action dispatched");
+    info!(
+        job_key,
+        workflow,
+        repo = format!("{owner}/{repo}"),
+        "review action dispatched"
+    );
     crate::jobs::journal_append(
         state,
         "review_dispatched",

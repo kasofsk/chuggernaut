@@ -134,7 +134,7 @@ pub async fn create_job(
             _ => {
                 return Err(DispatcherError::Validation(
                     "initial_state must be on-ice if set".to_string(),
-                ))
+                ));
             }
         }
     } else if req.depends_on.is_empty() {
@@ -200,7 +200,10 @@ pub async fn create_job(
         "created",
         Some(&key),
         None,
-        Some(&format!("priority {}, state {:?}", req.priority, initial_state)),
+        Some(&format!(
+            "priority {}, state {:?}",
+            req.priority, initial_state
+        )),
     )
     .await;
 
@@ -213,9 +216,7 @@ async fn increment_counter(store: &kv::Store, counter_key: &str) -> DispatcherRe
     // Try to read current value
     match store.entry(counter_key).await {
         Ok(Some(entry)) => {
-            let current: u64 = String::from_utf8_lossy(&entry.value)
-                .parse()
-                .unwrap_or(0);
+            let current: u64 = String::from_utf8_lossy(&entry.value).parse().unwrap_or(0);
             let next = current + 1;
             let data = Bytes::from(next.to_string());
             store

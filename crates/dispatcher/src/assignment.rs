@@ -23,10 +23,7 @@ fn has_capacity(state: &DispatcherState) -> bool {
 
 /// Try to assign a specific OnDeck job by dispatching a Forgejo Action.
 /// Respects the max_concurrent_actions limit — returns Ok(false) if at capacity.
-pub async fn try_assign_job(
-    state: &Arc<DispatcherState>,
-    job_key: &str,
-) -> DispatcherResult<bool> {
+pub async fn try_assign_job(state: &Arc<DispatcherState>, job_key: &str) -> DispatcherResult<bool> {
     let job = match state.jobs.get(job_key) {
         Some(j) => j.clone(),
         None => return Ok(false),

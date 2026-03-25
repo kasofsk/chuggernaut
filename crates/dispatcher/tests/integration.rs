@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use chuggernaut_test_utils as test_utils;
 use futures::StreamExt;
-use testcontainers::runners::AsyncRunner;
 use testcontainers::ImageExt;
+use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::nats::{Nats, NatsServerCmd};
 
 use chuggernaut_dispatcher::{
@@ -25,11 +25,7 @@ fn test_nats_port() -> u16 {
         std::thread::spawn(|| {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
                 let nats_cmd = NatsServerCmd::default().with_jetstream();
-                let container = Nats::default()
-                    .with_cmd(&nats_cmd)
-                    .start()
-                    .await
-                    .unwrap();
+                let container = Nats::default().with_cmd(&nats_cmd).start().await.unwrap();
                 let port = container.get_host_port_ipv4(4222).await.unwrap();
                 test_utils::register_container_cleanup(container.id());
                 Box::leak(Box::new(container));
@@ -194,8 +190,12 @@ async fn deps_blocked_then_unblocked() {
     assert_eq!(state.jobs.get(&key_b).unwrap().state, JobState::Blocked);
 
     // Complete A → B unblocks
-    jobs::transition_job(&state, &key_a, JobState::Done, "test", None).await.unwrap();
-    let unblocked = chuggernaut_dispatcher::deps::propagate_unblock(&state, &key_a).await.unwrap();
+    jobs::transition_job(&state, &key_a, JobState::Done, "test", None)
+        .await
+        .unwrap();
+    let unblocked = chuggernaut_dispatcher::deps::propagate_unblock(&state, &key_a)
+        .await
+        .unwrap();
     assert_eq!(unblocked, vec![key_b.clone()]);
     assert_eq!(state.jobs.get(&key_b).unwrap().state, JobState::OnDeck);
 }
@@ -219,18 +219,28 @@ async fn diamond_deps_partial_unblock() {
 
     let key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
     let key_b = jobs::create_job(&state, make("B", vec![])).await.unwrap();
-    let key_c = jobs::create_job(&state, make("C", vec![1, 2])).await.unwrap();
+    let key_c = jobs::create_job(&state, make("C", vec![1, 2]))
+        .await
+        .unwrap();
     assert_eq!(state.jobs.get(&key_c).unwrap().state, JobState::Blocked);
 
     // Complete A — C stays blocked (B not done)
-    jobs::transition_job(&state, &key_a, JobState::Done, "test", None).await.unwrap();
-    let unblocked = chuggernaut_dispatcher::deps::propagate_unblock(&state, &key_a).await.unwrap();
+    jobs::transition_job(&state, &key_a, JobState::Done, "test", None)
+        .await
+        .unwrap();
+    let unblocked = chuggernaut_dispatcher::deps::propagate_unblock(&state, &key_a)
+        .await
+        .unwrap();
     assert!(unblocked.is_empty());
     assert_eq!(state.jobs.get(&key_c).unwrap().state, JobState::Blocked);
 
     // Complete B — C unblocks
-    jobs::transition_job(&state, &key_b, JobState::Done, "test", None).await.unwrap();
-    let unblocked = chuggernaut_dispatcher::deps::propagate_unblock(&state, &key_b).await.unwrap();
+    jobs::transition_job(&state, &key_b, JobState::Done, "test", None)
+        .await
+        .unwrap();
+    let unblocked = chuggernaut_dispatcher::deps::propagate_unblock(&state, &key_b)
+        .await
+        .unwrap();
     assert_eq!(unblocked, vec![key_c.clone()]);
     assert_eq!(state.jobs.get(&key_c).unwrap().state, JobState::OnDeck);
 }
@@ -261,22 +271,41 @@ async fn worker_yield_to_in_review() {
 
     // Simulate job being on-the-stack with a claim (as action_dispatch would do)
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key,
+        JobState::OnTheStack,
+        "action_dispatched",
+        Some(&worker_id),
+    )
+    .await
+    .unwrap();
 
     // Worker yields
     let outcome = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key.clone(),
-        outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        outcome: OutcomeType::Yield {
+            pr_url: "http://forgejo/test/repo/pulls/1".to_string(),
+        },
         token_usage: None,
     };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     let job = state.jobs.get(&key).unwrap();
     assert_eq!(job.state, JobState::InReview);
-    assert_eq!(job.pr_url.as_deref(), Some("http://forgejo/test/repo/pulls/1"));
+    assert_eq!(
+        job.pr_url.as_deref(),
+        Some("http://forgejo/test/repo/pulls/1")
+    );
 }
 
 #[tokio::test]
@@ -301,16 +330,33 @@ async fn worker_fail_schedules_retry() {
 
     // Simulate on-the-stack with claim
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key,
+        JobState::OnTheStack,
+        "action_dispatched",
+        Some(&worker_id),
+    )
+    .await
+    .unwrap();
 
     let outcome = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key.clone(),
-        outcome: OutcomeType::Fail { reason: "compile error".to_string(), logs: None },
+        outcome: OutcomeType::Fail {
+            reason: "compile error".to_string(),
+            logs: None,
+        },
         token_usage: None,
     };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     let job = state.jobs.get(&key).unwrap();
@@ -346,11 +392,17 @@ async fn admin_close_unblocks_dependents() {
     let key_b = jobs::create_job(&state, make("B", vec![1])).await.unwrap();
     assert_eq!(state.jobs.get(&key_b).unwrap().state, JobState::Blocked);
 
-    let close = CloseJobRequest { job_key: key_a.clone(), revoke: false };
+    let close = CloseJobRequest {
+        job_key: key_a.clone(),
+        revoke: false,
+    };
     let _reply = tokio::time::timeout(
         Duration::from_secs(5),
         state.nats.request_msg(&subjects::ADMIN_CLOSE_JOB, &close),
-    ).await.unwrap().unwrap();
+    )
+    .await
+    .unwrap()
+    .unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key_a).unwrap().state, JobState::Done);
@@ -379,8 +431,15 @@ async fn admin_revoke_keeps_dependents_blocked() {
     let key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
     let key_b = jobs::create_job(&state, make("B", vec![1])).await.unwrap();
 
-    let close = CloseJobRequest { job_key: key_a.clone(), revoke: true };
-    state.nats.request_msg(&subjects::ADMIN_CLOSE_JOB, &close).await.unwrap();
+    let close = CloseJobRequest {
+        job_key: key_a.clone(),
+        revoke: true,
+    };
+    state
+        .nats
+        .request_msg(&subjects::ADMIN_CLOSE_JOB, &close)
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key_a).unwrap().state, JobState::Revoked);
@@ -413,17 +472,40 @@ async fn heartbeat_renews_lease() {
 
     // Simulate on-the-stack with claim
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key,
+        JobState::OnTheStack,
+        "action_dispatched",
+        Some(&worker_id),
+    )
+    .await
+    .unwrap();
 
-    let (before, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key).await.unwrap().unwrap();
+    let (before, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key)
+        .await
+        .unwrap()
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let hb = WorkerHeartbeat { worker_id: worker_id.clone(), job_key: key.clone() };
-    state.nats.publish_msg(&subjects::WORKER_HEARTBEAT, &hb).await.unwrap();
+    let hb = WorkerHeartbeat {
+        worker_id: worker_id.clone(),
+        job_key: key.clone(),
+    };
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_HEARTBEAT, &hb)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let (after, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key).await.unwrap().unwrap();
+    let (after, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(after.lease_deadline > before.lease_deadline);
 }
 
@@ -453,7 +535,10 @@ async fn recovery_rebuilds_state() {
 
     // Simulate restart: clear in-memory state
     state.jobs.clear();
-    { let mut g = state.graph.write().await; *g = chuggernaut_dispatcher::state::DepGraph::new(); }
+    {
+        let mut g = state.graph.write().await;
+        *g = chuggernaut_dispatcher::state::DepGraph::new();
+    }
 
     recovery::recover(&state).await.unwrap();
 
@@ -495,16 +580,32 @@ async fn review_approved_completes_job_and_unblocks_deps() {
 
     // Simulate on-the-stack + yield → InReview
     let worker_id = format!("action-{key_a}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key_a, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key_a, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key_a, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key_a,
+        JobState::OnTheStack,
+        "action_dispatched",
+        Some(&worker_id),
+    )
+    .await
+    .unwrap();
 
     let outcome = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key_a.clone(),
-        outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        outcome: OutcomeType::Yield {
+            pr_url: "http://forgejo/test/repo/pulls/1".to_string(),
+        },
         token_usage: None,
     };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key_a).unwrap().state, JobState::InReview);
 
@@ -515,7 +616,11 @@ async fn review_approved_completes_job_and_unblocks_deps() {
         pr_url: Some("http://forgejo/test/repo/pulls/1".to_string()),
         token_usage: None,
     };
-    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::REVIEW_DECISION, &decision)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // A → Done, B → OnDeck (unblocked)
@@ -545,30 +650,55 @@ async fn review_changes_requested_transitions_job() {
 
     // Simulate on-the-stack + yield → InReview
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key,
+        JobState::OnTheStack,
+        "action_dispatched",
+        Some(&worker_id),
+    )
+    .await
+    .unwrap();
 
     let outcome = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key.clone(),
-        outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        outcome: OutcomeType::Yield {
+            pr_url: "http://forgejo/test/repo/pulls/1".to_string(),
+        },
         token_usage: None,
     };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::InReview);
 
     // Publish ChangesRequested
     let decision = ReviewDecision {
         job_key: key.clone(),
-        decision: DecisionType::ChangesRequested { feedback: "fix the tests".to_string() },
+        decision: DecisionType::ChangesRequested {
+            feedback: "fix the tests".to_string(),
+        },
         pr_url: Some("http://forgejo/test/repo/pulls/1".to_string()),
         token_usage: None,
     };
-    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::REVIEW_DECISION, &decision)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::ChangesRequested);
+    assert_eq!(
+        state.jobs.get(&key).unwrap().state,
+        JobState::ChangesRequested
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -606,7 +736,8 @@ async fn monitor_lease_expiry_fails_job() {
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
     let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
-        .await.unwrap();
+        .await
+        .unwrap();
     let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
 
     handlers::start_handlers(state.clone()).await.unwrap();
@@ -629,8 +760,18 @@ async fn monitor_lease_expiry_fails_job() {
 
     // Simulate on-the-stack with claim
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key,
+        JobState::OnTheStack,
+        "action_dispatched",
+        Some(&worker_id),
+    )
+    .await
+    .unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
 
     // Don't send heartbeats — wait for lease to expire (1s lease + 1s scan interval)
@@ -665,25 +806,48 @@ async fn admin_requeue_from_failed() {
 
     // Simulate on-the-stack with claim + fail
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key,
+        JobState::OnTheStack,
+        "action_dispatched",
+        Some(&worker_id),
+    )
+    .await
+    .unwrap();
 
     let outcome = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key.clone(),
-        outcome: OutcomeType::Fail { reason: "compile error".to_string(), logs: None },
+        outcome: OutcomeType::Fail {
+            reason: "compile error".to_string(),
+            logs: None,
+        },
         token_usage: None,
     };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Failed);
 
     // Admin requeue to OnDeck
-    let requeue = RequeueRequest { job_key: key.clone(), target: RequeueTarget::OnDeck };
+    let requeue = RequeueRequest {
+        job_key: key.clone(),
+        target: RequeueTarget::OnDeck,
+    };
     let _reply = tokio::time::timeout(
         Duration::from_secs(5),
         state.nats.request_msg(&subjects::ADMIN_REQUEUE, &requeue),
-    ).await.unwrap().unwrap();
+    )
+    .await
+    .unwrap()
+    .unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnDeck);
@@ -723,15 +887,27 @@ async fn action_dispatch_creates_claim_and_transitions() {
     // Push a noop workflow so dispatch_workflow succeeds
     let workflow = "name: work\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      review_feedback:\n        type: string\n        default: \"\"\n      is_rework:\n        type: string\n        default: \"false\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
     test_utils::push_file(
-        forgejo_port, &token, &org, "repo",
-        ".forgejo/workflows/work.yml", workflow, "add workflow",
-    ).await;
+        forgejo_port,
+        &token,
+        &org,
+        "repo",
+        ".forgejo/workflows/work.yml",
+        workflow,
+        "add workflow",
+    )
+    .await;
 
     let review_workflow = "name: review\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      pr_url:\n        type: string\n      review_level:\n        type: string\n        default: \"high\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
     test_utils::push_file(
-        forgejo_port, &token, &org, "repo",
-        ".forgejo/workflows/review.yml", review_workflow, "add review workflow",
-    ).await;
+        forgejo_port,
+        &token,
+        &org,
+        "repo",
+        ".forgejo/workflows/review.yml",
+        review_workflow,
+        "add review workflow",
+    )
+    .await;
 
     // Set up dispatcher with Forgejo config
     let config = Config {
@@ -758,7 +934,8 @@ async fn action_dispatch_creates_claim_and_transitions() {
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
     let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
-        .await.unwrap();
+        .await
+        .unwrap();
     let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
     handlers::start_handlers(state.clone()).await.unwrap();
 
@@ -779,14 +956,21 @@ async fn action_dispatch_creates_claim_and_transitions() {
     let key = jobs::create_job(&state, req).await.unwrap();
 
     // Trigger assignment — should dispatch action directly
-    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key).await.unwrap();
+    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key)
+        .await
+        .unwrap();
 
     // Verify: job is OnTheStack, claim exists with action- prefix
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
 
     let (claim, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key)
-        .await.unwrap().unwrap();
-    assert!(claim.worker_id.starts_with("action-"), "worker_id should be action-{key}");
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        claim.worker_id.starts_with("action-"),
+        "worker_id should be action-{key}"
+    );
 }
 
 /// Rework dispatch: ChangesRequested → new action dispatched with review_feedback
@@ -810,15 +994,27 @@ async fn rework_dispatches_new_action_with_feedback() {
     // Push workflow with review_feedback + is_rework inputs
     let workflow = "name: work\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      review_feedback:\n        type: string\n        default: \"\"\n      is_rework:\n        type: string\n        default: \"false\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
     test_utils::push_file(
-        forgejo_port, &token, &org, "repo",
-        ".forgejo/workflows/work.yml", workflow, "add workflow",
-    ).await;
+        forgejo_port,
+        &token,
+        &org,
+        "repo",
+        ".forgejo/workflows/work.yml",
+        workflow,
+        "add workflow",
+    )
+    .await;
 
     let review_workflow = "name: review\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      pr_url:\n        type: string\n      review_level:\n        type: string\n        default: \"high\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
     test_utils::push_file(
-        forgejo_port, &token, &org, "repo",
-        ".forgejo/workflows/review.yml", review_workflow, "add review workflow",
-    ).await;
+        forgejo_port,
+        &token,
+        &org,
+        "repo",
+        ".forgejo/workflows/review.yml",
+        review_workflow,
+        "add review workflow",
+    )
+    .await;
 
     let config = Config {
         nats_url: nats_url.clone(),
@@ -844,7 +1040,8 @@ async fn rework_dispatches_new_action_with_feedback() {
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
     let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
-        .await.unwrap();
+        .await
+        .unwrap();
     let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
     handlers::start_handlers(state.clone()).await.unwrap();
 
@@ -865,7 +1062,9 @@ async fn rework_dispatches_new_action_with_feedback() {
     let key = jobs::create_job(&state, req).await.unwrap();
 
     // Dispatch initial action → OnTheStack
-    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key).await.unwrap();
+    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key)
+        .await
+        .unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
 
     // Simulate yield → InReview
@@ -873,21 +1072,33 @@ async fn rework_dispatches_new_action_with_feedback() {
     let outcome = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key.clone(),
-        outcome: OutcomeType::Yield { pr_url: format!("http://forgejo/{org}/repo/pulls/1") },
+        outcome: OutcomeType::Yield {
+            pr_url: format!("http://forgejo/{org}/repo/pulls/1"),
+        },
         token_usage: None,
     };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::InReview);
 
     // Publish ChangesRequested with feedback
     let decision = ReviewDecision {
         job_key: key.clone(),
-        decision: DecisionType::ChangesRequested { feedback: "fix the tests please".to_string() },
+        decision: DecisionType::ChangesRequested {
+            feedback: "fix the tests please".to_string(),
+        },
         pr_url: Some(format!("http://forgejo/{org}/repo/pulls/1")),
         token_usage: None,
     };
-    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::REVIEW_DECISION, &decision)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // The handler transitions to ChangesRequested, then dispatches a rework action.
@@ -900,8 +1111,13 @@ async fn rework_dispatches_new_action_with_feedback() {
 
     // Verify claim exists for the rework
     let (claim, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key)
-        .await.unwrap().unwrap();
-    assert!(claim.worker_id.starts_with("action-"), "rework claim should have action- prefix");
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        claim.worker_id.starts_with("action-"),
+        "rework claim should have action- prefix"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -929,15 +1145,27 @@ async fn yield_dispatches_review_action() {
     // Push both work and review workflows
     let work_wf = "name: work\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      review_feedback:\n        type: string\n        default: \"\"\n      is_rework:\n        type: string\n        default: \"false\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
     test_utils::push_file(
-        forgejo_port, &token, &org, "repo",
-        ".forgejo/workflows/work.yml", work_wf, "add work workflow",
-    ).await;
+        forgejo_port,
+        &token,
+        &org,
+        "repo",
+        ".forgejo/workflows/work.yml",
+        work_wf,
+        "add work workflow",
+    )
+    .await;
 
     let review_wf = "name: review\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      pr_url:\n        type: string\n      review_level:\n        type: string\n        default: \"high\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
     test_utils::push_file(
-        forgejo_port, &token, &org, "repo",
-        ".forgejo/workflows/review.yml", review_wf, "add review workflow",
-    ).await;
+        forgejo_port,
+        &token,
+        &org,
+        "repo",
+        ".forgejo/workflows/review.yml",
+        review_wf,
+        "add review workflow",
+    )
+    .await;
 
     let config = Config {
         nats_url: nats_url.clone(),
@@ -963,7 +1191,8 @@ async fn yield_dispatches_review_action() {
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
     let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
-        .await.unwrap();
+        .await
+        .unwrap();
     let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
     handlers::start_handlers(state.clone()).await.unwrap();
 
@@ -983,7 +1212,9 @@ async fn yield_dispatches_review_action() {
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
-    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key).await.unwrap();
+    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key)
+        .await
+        .unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
 
     // Worker yields with PR URL
@@ -991,10 +1222,16 @@ async fn yield_dispatches_review_action() {
     let outcome = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key.clone(),
-        outcome: OutcomeType::Yield { pr_url: format!("http://forgejo/{org}/repo/pulls/1") },
+        outcome: OutcomeType::Yield {
+            pr_url: format!("http://forgejo/{org}/repo/pulls/1"),
+        },
         token_usage: None,
     };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     // Job should be InReview
@@ -1005,19 +1242,26 @@ async fn yield_dispatches_review_action() {
     if let Ok(keys) = state.kv.journal.keys().await {
         tokio::pin!(keys);
         while let Some(Ok(jk)) = keys.next().await {
-            if let Ok(Some((entry, _))) = jobs::kv_get::<JournalEntry>(&state.kv.journal, &jk).await {
+            if let Ok(Some((entry, _))) = jobs::kv_get::<JournalEntry>(&state.kv.journal, &jk).await
+            {
                 if entry.action == "review_dispatched" && entry.job_key.as_deref() == Some(&key) {
                     found_review_dispatch = true;
                     // Verify details contain the workflow and pr_url
                     let details = entry.details.unwrap_or_default();
-                    assert!(details.contains("review.yml"), "journal should mention review workflow");
+                    assert!(
+                        details.contains("review.yml"),
+                        "journal should mention review workflow"
+                    );
                     assert!(details.contains("pr_url"), "journal should mention pr_url");
                     break;
                 }
             }
         }
     }
-    assert!(found_review_dispatch, "expected review_dispatched journal entry");
+    assert!(
+        found_review_dispatch,
+        "expected review_dispatched journal entry"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,8 +1290,18 @@ async fn token_usage_accumulated_from_work_and_review() {
 
     // Simulate work: claim → OnTheStack → yield with token usage
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key,
+        JobState::OnTheStack,
+        "action_dispatched",
+        Some(&worker_id),
+    )
+    .await
+    .unwrap();
 
     let work_tokens = TokenUsage {
         input_tokens: 25000,
@@ -1058,10 +1312,16 @@ async fn token_usage_accumulated_from_work_and_review() {
     let outcome = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key.clone(),
-        outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        outcome: OutcomeType::Yield {
+            pr_url: "http://forgejo/test/repo/pulls/1".to_string(),
+        },
         token_usage: Some(work_tokens.clone()),
     };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Verify work token record was stored
@@ -1085,13 +1345,21 @@ async fn token_usage_accumulated_from_work_and_review() {
         pr_url: Some("http://forgejo/test/repo/pulls/1".to_string()),
         token_usage: Some(review_tokens.clone()),
     };
-    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::REVIEW_DECISION, &decision)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Verify both records exist on the job
     let job = state.jobs.get(&key).unwrap().clone();
     assert_eq!(job.state, JobState::Done);
-    assert_eq!(job.token_usage.len(), 2, "expected 2 token records (work + review)");
+    assert_eq!(
+        job.token_usage.len(),
+        2,
+        "expected 2 token records (work + review)"
+    );
 
     assert_eq!(job.token_usage[0].action_type, "work");
     assert_eq!(job.token_usage[0].token_usage.input_tokens, 25000);
@@ -1101,7 +1369,10 @@ async fn token_usage_accumulated_from_work_and_review() {
     assert_eq!(job.token_usage[1].token_usage.output_tokens, 3500);
 
     // Also verify via KV (persistence)
-    let (kv_job, _) = jobs::kv_get::<Job>(&state.kv.jobs, &key).await.unwrap().unwrap();
+    let (kv_job, _) = jobs::kv_get::<Job>(&state.kv.jobs, &key)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(kv_job.token_usage.len(), 2);
 }
 
@@ -1128,46 +1399,103 @@ async fn token_usage_across_rework_cycle() {
 
     // First work cycle
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key,
+        JobState::OnTheStack,
+        "action_dispatched",
+        Some(&worker_id),
+    )
+    .await
+    .unwrap();
 
     let outcome = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key.clone(),
-        outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
-        token_usage: Some(TokenUsage { input_tokens: 20000, output_tokens: 5000, cache_read_tokens: 0, cache_write_tokens: 0 }),
+        outcome: OutcomeType::Yield {
+            pr_url: "http://forgejo/test/repo/pulls/1".to_string(),
+        },
+        token_usage: Some(TokenUsage {
+            input_tokens: 20000,
+            output_tokens: 5000,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        }),
     };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // First review: changes requested
     let decision = ReviewDecision {
         job_key: key.clone(),
-        decision: DecisionType::ChangesRequested { feedback: "fix tests".to_string() },
+        decision: DecisionType::ChangesRequested {
+            feedback: "fix tests".to_string(),
+        },
         pr_url: Some("http://forgejo/test/repo/pulls/1".to_string()),
-        token_usage: Some(TokenUsage { input_tokens: 10000, output_tokens: 2000, cache_read_tokens: 0, cache_write_tokens: 0 }),
+        token_usage: Some(TokenUsage {
+            input_tokens: 10000,
+            output_tokens: 2000,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        }),
     };
-    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::REVIEW_DECISION, &decision)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Job should be in ChangesRequested (no Forgejo to dispatch rework, so it stays there)
     let job = state.jobs.get(&key).unwrap().clone();
     assert_eq!(job.state, JobState::ChangesRequested);
-    assert_eq!(job.token_usage.len(), 2, "expected work + review records after first cycle");
+    assert_eq!(
+        job.token_usage.len(),
+        2,
+        "expected work + review records after first cycle"
+    );
     assert_eq!(job.token_usage[0].action_type, "work");
     assert_eq!(job.token_usage[1].action_type, "review");
 
     // Simulate rework: manually claim + transition + yield again
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "rework_dispatched", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key,
+        JobState::OnTheStack,
+        "rework_dispatched",
+        Some(&worker_id),
+    )
+    .await
+    .unwrap();
 
     let outcome2 = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key.clone(),
-        outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
-        token_usage: Some(TokenUsage { input_tokens: 8000, output_tokens: 3000, cache_read_tokens: 0, cache_write_tokens: 0 }),
+        outcome: OutcomeType::Yield {
+            pr_url: "http://forgejo/test/repo/pulls/1".to_string(),
+        },
+        token_usage: Some(TokenUsage {
+            input_tokens: 8000,
+            output_tokens: 3000,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        }),
     };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome2).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome2)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Second review: approved
@@ -1175,14 +1503,27 @@ async fn token_usage_across_rework_cycle() {
         job_key: key.clone(),
         decision: DecisionType::Approved,
         pr_url: Some("http://forgejo/test/repo/pulls/1".to_string()),
-        token_usage: Some(TokenUsage { input_tokens: 9000, output_tokens: 1500, cache_read_tokens: 0, cache_write_tokens: 0 }),
+        token_usage: Some(TokenUsage {
+            input_tokens: 9000,
+            output_tokens: 1500,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        }),
     };
-    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision2).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::REVIEW_DECISION, &decision2)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let job = state.jobs.get(&key).unwrap().clone();
     assert_eq!(job.state, JobState::Done);
-    assert_eq!(job.token_usage.len(), 4, "expected 4 records: work, review, work(rework), review");
+    assert_eq!(
+        job.token_usage.len(),
+        4,
+        "expected 4 records: work, review, work(rework), review"
+    );
 
     assert_eq!(job.token_usage[0].action_type, "work");
     assert_eq!(job.token_usage[0].token_usage.input_tokens, 20000);
@@ -1274,15 +1615,26 @@ jobs:
     );
 
     test_utils::push_file(
-        forgejo_port, &token, org, "repo",
-        ".forgejo/workflows/work.yml", &workflow, "add workflow",
-    ).await;
+        forgejo_port,
+        &token,
+        org,
+        "repo",
+        ".forgejo/workflows/work.yml",
+        &workflow,
+        "add workflow",
+    )
+    .await;
 
     // Set secret
     test_utils::set_repo_secret(
-        forgejo_port, &token, org, "repo",
-        "CHUGGERNAUT_WORKER_TOKEN", &token,
-    ).await;
+        forgejo_port,
+        &token,
+        org,
+        "repo",
+        "CHUGGERNAUT_WORKER_TOKEN",
+        &token,
+    )
+    .await;
 
     // Start runner
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1299,7 +1651,8 @@ jobs:
         forgejo_port,
         &runner_reg_token,
         runner_config_path.to_str().unwrap(),
-    ).await;
+    )
+    .await;
 
     tokio::time::sleep(Duration::from_secs(15)).await;
 
@@ -1375,9 +1728,7 @@ jobs:
         }
 
         // Check for heartbeats
-        if let Ok(msg) =
-            tokio::time::timeout(Duration::from_millis(500), hb_sub.next()).await
-        {
+        if let Ok(msg) = tokio::time::timeout(Duration::from_millis(500), hb_sub.next()).await {
             if msg.is_some() && !got_heartbeat {
                 eprintln!("Got heartbeat from worker!");
                 got_heartbeat = true;
@@ -1385,24 +1736,26 @@ jobs:
         }
 
         // Check for outcome
-        if let Ok(msg) =
-            tokio::time::timeout(Duration::from_millis(100), outcome_sub.next()).await
+        if let Ok(msg) = tokio::time::timeout(Duration::from_millis(100), outcome_sub.next()).await
         {
             if let Some(msg) = msg {
-                let outcome: WorkerOutcome =
-                    serde_json::from_slice(&msg.payload).unwrap();
+                let outcome: WorkerOutcome = serde_json::from_slice(&msg.payload).unwrap();
                 eprintln!("Got outcome: {:?}", outcome.outcome);
                 got_outcome = true;
             }
         }
 
         // Check for channel messages
-        if let Ok(msg) =
-            tokio::time::timeout(Duration::from_millis(100), channel_sub.next()).await
+        if let Ok(msg) = tokio::time::timeout(Duration::from_millis(100), channel_sub.next()).await
         {
             if let Some(msg) = msg {
-                if let Ok(channel_msg) = serde_json::from_slice::<chuggernaut_types::ChannelMessage>(&msg.payload) {
-                    eprintln!("Got channel message: sender={} body={}", channel_msg.sender, channel_msg.body);
+                if let Ok(channel_msg) =
+                    serde_json::from_slice::<chuggernaut_types::ChannelMessage>(&msg.payload)
+                {
+                    eprintln!(
+                        "Got channel message: sender={} body={}",
+                        channel_msg.sender, channel_msg.body
+                    );
                     got_channel_msg = true;
                 }
             }
@@ -1420,28 +1773,47 @@ jobs:
         if let Ok(Some(msg)) =
             tokio::time::timeout(Duration::from_secs(2), channel_sub.next()).await
         {
-            if let Ok(channel_msg) = serde_json::from_slice::<chuggernaut_types::ChannelMessage>(&msg.payload) {
-                eprintln!("Got channel message (post-loop): sender={} body={}", channel_msg.sender, channel_msg.body);
+            if let Ok(channel_msg) =
+                serde_json::from_slice::<chuggernaut_types::ChannelMessage>(&msg.payload)
+            {
+                eprintln!(
+                    "Got channel message (post-loop): sender={} body={}",
+                    channel_msg.sender, channel_msg.body
+                );
                 got_channel_msg = true;
             }
         }
     }
 
-    eprintln!("Results: heartbeat={got_heartbeat} outcome={got_outcome} channel={got_channel_msg} action_status={action_status}");
+    eprintln!(
+        "Results: heartbeat={got_heartbeat} outcome={got_outcome} channel={got_channel_msg} action_status={action_status}"
+    );
 
     assert!(got_heartbeat, "should have received heartbeat from worker");
-    assert!(got_outcome, "should have received WorkerOutcome from worker");
-    assert!(got_channel_msg, "should have received channel_send message on NATS outbox");
+    assert!(
+        got_outcome,
+        "should have received WorkerOutcome from worker"
+    );
+    assert!(
+        got_channel_msg,
+        "should have received channel_send message on NATS outbox"
+    );
 
     // Check status KV
     let js = async_nats::jetstream::new(nats_client.clone());
     if let Ok(kv) = js.get_key_value("chuggernaut_channels").await {
         if let Ok(Some(entry)) = kv.entry(job_key).await {
-            let status: chuggernaut_types::ChannelStatus = serde_json::from_slice(&entry.value).unwrap();
-            eprintln!("Channel status: {} progress={:?}", status.status, status.progress);
+            let status: chuggernaut_types::ChannelStatus =
+                serde_json::from_slice(&entry.value).unwrap();
+            eprintln!(
+                "Channel status: {} progress={:?}",
+                status.status, status.progress
+            );
             assert_eq!(status.status, "done");
         } else {
-            eprintln!("No status KV entry found (channel KV bucket may not have been created by worker)");
+            eprintln!(
+                "No status KV entry found (channel KV bucket may not have been created by worker)"
+            );
         }
     }
 }
@@ -1515,19 +1887,35 @@ jobs:
 "#
     );
     test_utils::push_file(
-        forgejo_port, &token, &org, "repo",
-        ".forgejo/workflows/work.yml", &workflow, "add workflow",
-    ).await;
+        forgejo_port,
+        &token,
+        &org,
+        "repo",
+        ".forgejo/workflows/work.yml",
+        &workflow,
+        "add workflow",
+    )
+    .await;
 
     // Set repo secret for Forgejo token
     test_utils::set_repo_secret(
-        forgejo_port, &token, &org, "repo",
-        "CHUGGERNAUT_WORKER_TOKEN", &token,
-    ).await;
+        forgejo_port,
+        &token,
+        &org,
+        "repo",
+        "CHUGGERNAUT_WORKER_TOKEN",
+        &token,
+    )
+    .await;
 
     // Start runner via test-utils
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
-    let runner_config_path = workspace_root.join("infra/runner/config.yaml")
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let runner_config_path = workspace_root
+        .join("infra/runner/config.yaml")
         .canonicalize()
         .expect("infra/runner/config.yaml not found");
 
@@ -1535,7 +1923,8 @@ jobs:
         forgejo_port,
         &runner_reg_token,
         runner_config_path.to_str().unwrap(),
-    ).await;
+    )
+    .await;
 
     // Give runner time to register with Forgejo
     tokio::time::sleep(Duration::from_secs(15)).await;
@@ -1579,9 +1968,7 @@ jobs:
 
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
-    let kv = nats_init::initialize(&js, config.lease_secs)
-        .await
-        .unwrap();
+    let kv = nats_init::initialize(&js, config.lease_secs).await.unwrap();
     let state = DispatcherState::new(config, client, js, kv);
     handlers::start_handlers(state.clone()).await.unwrap();
 
@@ -1609,7 +1996,9 @@ jobs:
     eprintln!("E2E: created job {key}");
 
     // Dispatcher auto-dispatches via try_assign_job (nats_worker_url = Docker-internal)
-    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key).await.unwrap();
+    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key)
+        .await
+        .unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
 
     eprintln!("E2E: action dispatched via dispatcher, waiting for worker outcome...");
@@ -1617,7 +2006,9 @@ jobs:
     // Check action runs after a short delay
     tokio::time::sleep(Duration::from_secs(5)).await;
     let runs_resp = http
-        .get(format!("{forgejo_url}/api/v1/repos/{org}/repo/actions/runs"))
+        .get(format!(
+            "{forgejo_url}/api/v1/repos/{org}/repo/actions/runs"
+        ))
         .header("Authorization", format!("token {token}"))
         .send()
         .await
@@ -1634,9 +2025,13 @@ jobs:
             let job_state = state.jobs.get(&key).unwrap().state;
             // Check action run status before panicking
             let runs_resp = http
-                .get(format!("{forgejo_url}/api/v1/repos/{org}/repo/actions/runs"))
+                .get(format!(
+                    "{forgejo_url}/api/v1/repos/{org}/repo/actions/runs"
+                ))
                 .header("Authorization", format!("token {token}"))
-                .send().await.unwrap();
+                .send()
+                .await
+                .unwrap();
             let runs = runs_resp.text().await.unwrap();
             panic!("E2E timeout: job in {job_state:?} after 60s. Action runs: {runs}");
         }
@@ -1744,19 +2139,42 @@ jobs:
 "#
     );
     test_utils::push_file(
-        forgejo_port, &token, &org, "repo",
-        ".forgejo/workflows/work.yml", &work_wf, "add work workflow",
-    ).await;
+        forgejo_port,
+        &token,
+        &org,
+        "repo",
+        ".forgejo/workflows/work.yml",
+        &work_wf,
+        "add work workflow",
+    )
+    .await;
 
     test_utils::set_repo_secret(
-        forgejo_port, &token, &org, "repo",
-        "CHUGGERNAUT_WORKER_TOKEN", &token,
-    ).await;
+        forgejo_port,
+        &token,
+        &org,
+        "repo",
+        "CHUGGERNAUT_WORKER_TOKEN",
+        &token,
+    )
+    .await;
 
     // Start runner
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
-    let runner_config_path = workspace_root.join("infra/runner/config.yaml").canonicalize().unwrap();
-    let _runner = test_utils::start_runner(forgejo_port, &runner_reg_token, runner_config_path.to_str().unwrap()).await;
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let runner_config_path = workspace_root
+        .join("infra/runner/config.yaml")
+        .canonicalize()
+        .unwrap();
+    let _runner = test_utils::start_runner(
+        forgejo_port,
+        &runner_reg_token,
+        runner_config_path.to_str().unwrap(),
+    )
+    .await;
     tokio::time::sleep(Duration::from_secs(15)).await;
 
     // Set up dispatcher (unprefixed so worker NATS messages reach it)
@@ -1805,23 +2223,42 @@ jobs:
     eprintln!("E2E-review: created job {key}");
 
     // Dispatcher auto-dispatches via try_assign_job (nats_worker_url = Docker-internal)
-    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key).await.unwrap();
+    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key)
+        .await
+        .unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
     eprintln!("E2E-review: first work action dispatched via dispatcher");
 
     // Wait for InReview
     wait_for_state(&state, &key, JobState::InReview, 90).await;
-    let pr_url = state.jobs.get(&key).unwrap().pr_url.clone().expect("should have PR URL");
+    let pr_url = state
+        .jobs
+        .get(&key)
+        .unwrap()
+        .pr_url
+        .clone()
+        .expect("should have PR URL");
     eprintln!("E2E-review: reached InReview, PR = {pr_url}");
 
     // --- Phase 2: Inject ChangesRequested review decision ---
     let decision = ReviewDecision {
         job_key: key.clone(),
-        decision: DecisionType::ChangesRequested { feedback: "please add tests".to_string() },
+        decision: DecisionType::ChangesRequested {
+            feedback: "please add tests".to_string(),
+        },
         pr_url: Some(pr_url.clone()),
-        token_usage: Some(TokenUsage { input_tokens: 15000, output_tokens: 3000, cache_read_tokens: 0, cache_write_tokens: 0 }),
+        token_usage: Some(TokenUsage {
+            input_tokens: 15000,
+            output_tokens: 3000,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        }),
     };
-    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::REVIEW_DECISION, &decision)
+        .await
+        .unwrap();
     eprintln!("E2E-review: injected ChangesRequested");
 
     // Wait for job to leave InReview (handler transitions to ChangesRequested → OnTheStack)
@@ -1847,25 +2284,48 @@ jobs:
         job_key: key.clone(),
         decision: DecisionType::Approved,
         pr_url: Some(pr_url.clone()),
-        token_usage: Some(TokenUsage { input_tokens: 12000, output_tokens: 2000, cache_read_tokens: 0, cache_write_tokens: 0 }),
+        token_usage: Some(TokenUsage {
+            input_tokens: 12000,
+            output_tokens: 2000,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        }),
     };
-    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision2).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::REVIEW_DECISION, &decision2)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let final_state = state.jobs.get(&key).unwrap().state;
     eprintln!("E2E-review: final state = {final_state:?}");
-    assert_eq!(final_state, JobState::Done, "job should be Done after approval");
+    assert_eq!(
+        final_state,
+        JobState::Done,
+        "job should be Done after approval"
+    );
 
     // --- Verify token usage records ---
     let job = state.jobs.get(&key).unwrap().clone();
-    eprintln!("E2E-review: token_usage records = {}", job.token_usage.len());
+    eprintln!(
+        "E2E-review: token_usage records = {}",
+        job.token_usage.len()
+    );
     for (i, record) in job.token_usage.iter().enumerate() {
-        eprintln!("  [{i}] type={} input={} output={}", record.action_type, record.token_usage.input_tokens, record.token_usage.output_tokens);
+        eprintln!(
+            "  [{i}] type={} input={} output={}",
+            record.action_type, record.token_usage.input_tokens, record.token_usage.output_tokens
+        );
     }
 
     // We expect at least the 2 review records we injected (work outcomes from the real
     // action don't have token_usage since mock-claude doesn't report it)
-    let review_records: Vec<_> = job.token_usage.iter().filter(|r| r.action_type == "review").collect();
+    let review_records: Vec<_> = job
+        .token_usage
+        .iter()
+        .filter(|r| r.action_type == "review")
+        .collect();
     assert_eq!(review_records.len(), 2, "expected 2 review token records");
     assert_eq!(review_records[0].token_usage.input_tokens, 15000);
     assert_eq!(review_records[1].token_usage.input_tokens, 12000);
@@ -1923,7 +2383,12 @@ async fn start_http(state: Arc<DispatcherState>) -> String {
 }
 
 /// Helper: wait for a job to reach the given state, with timeout.
-async fn wait_for_state(state: &Arc<DispatcherState>, key: &str, target: JobState, timeout_secs: u64) {
+async fn wait_for_state(
+    state: &Arc<DispatcherState>,
+    key: &str,
+    target: JobState,
+    timeout_secs: u64,
+) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     loop {
         if tokio::time::Instant::now() > deadline {
@@ -1971,27 +2436,43 @@ async fn escalated_review_transitions_job() {
 
     // Simulate on-the-stack → yield → InReview
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id))
+        .await
+        .unwrap();
 
     let outcome = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key.clone(),
-        outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        outcome: OutcomeType::Yield {
+            pr_url: "http://forgejo/test/repo/pulls/1".to_string(),
+        },
         token_usage: None,
     };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::InReview);
 
     // Publish Escalated decision
     let decision = ReviewDecision {
         job_key: key.clone(),
-        decision: DecisionType::Escalated { reviewer_login: "human".to_string() },
+        decision: DecisionType::Escalated {
+            reviewer_login: "human".to_string(),
+        },
         pr_url: Some("http://forgejo/test/repo/pulls/1".to_string()),
         token_usage: None,
     };
-    state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::REVIEW_DECISION, &decision)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Escalated);
@@ -2019,17 +2500,31 @@ async fn escalated_then_approved_via_close() {
 
     // Get to Escalated
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::InReview, "test", None).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::Escalated, "test", None).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id))
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::InReview, "test", None)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::Escalated, "test", None)
+        .await
+        .unwrap();
 
     // Admin close → Done
-    let close = CloseJobRequest { job_key: key.clone(), revoke: false };
+    let close = CloseJobRequest {
+        job_key: key.clone(),
+        revoke: false,
+    };
     let _reply = tokio::time::timeout(
         Duration::from_secs(5),
         state.nats.request_msg(&subjects::ADMIN_CLOSE_JOB, &close),
-    ).await.unwrap().unwrap();
+    )
+    .await
+    .unwrap()
+    .unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Done);
@@ -2056,15 +2551,33 @@ async fn escalated_then_changes_requested() {
 
     // Direct transitions to Escalated
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::InReview, "test", None).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::Escalated, "test", None).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id))
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::InReview, "test", None)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::Escalated, "test", None)
+        .await
+        .unwrap();
 
     // Escalated → ChangesRequested
-    let result = jobs::transition_job(&state, &key, JobState::ChangesRequested, "human_review", None).await;
+    let result = jobs::transition_job(
+        &state,
+        &key,
+        JobState::ChangesRequested,
+        "human_review",
+        None,
+    )
+    .await;
     assert!(result.is_ok());
-    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::ChangesRequested);
+    assert_eq!(
+        state.jobs.get(&key).unwrap().state,
+        JobState::ChangesRequested
+    );
 }
 
 #[tokio::test]
@@ -2089,25 +2602,42 @@ async fn requeue_from_failed_to_on_ice() {
 
     // Get to Failed
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id))
+        .await
+        .unwrap();
 
     let outcome = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key.clone(),
-        outcome: OutcomeType::Fail { reason: "error".to_string(), logs: None },
+        outcome: OutcomeType::Fail {
+            reason: "error".to_string(),
+            logs: None,
+        },
         token_usage: None,
     };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Failed);
 
     // Requeue to OnIce
-    let requeue = RequeueRequest { job_key: key.clone(), target: RequeueTarget::OnIce };
+    let requeue = RequeueRequest {
+        job_key: key.clone(),
+        target: RequeueTarget::OnIce,
+    };
     let _reply = tokio::time::timeout(
         Duration::from_secs(5),
         state.nats.request_msg(&subjects::ADMIN_REQUEUE, &requeue),
-    ).await.unwrap().unwrap();
+    )
+    .await
+    .unwrap()
+    .unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnIce);
@@ -2134,11 +2664,17 @@ async fn thaw_from_on_ice_via_requeue() {
     let key = jobs::create_job(&state, req).await.unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnIce);
 
-    let requeue = RequeueRequest { job_key: key.clone(), target: RequeueTarget::OnDeck };
+    let requeue = RequeueRequest {
+        job_key: key.clone(),
+        target: RequeueTarget::OnDeck,
+    };
     let _reply = tokio::time::timeout(
         Duration::from_secs(5),
         state.nats.request_msg(&subjects::ADMIN_REQUEUE, &requeue),
-    ).await.unwrap().unwrap();
+    )
+    .await
+    .unwrap()
+    .unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnDeck);
@@ -2165,8 +2701,15 @@ async fn invalid_transition_rejected() {
     let key = jobs::create_job(&state, req).await.unwrap();
 
     // Close job → Done
-    let close = CloseJobRequest { job_key: key.clone(), revoke: false };
-    state.nats.request_msg(&subjects::ADMIN_CLOSE_JOB, &close).await.unwrap();
+    let close = CloseJobRequest {
+        job_key: key.clone(),
+        revoke: false,
+    };
+    state
+        .nats
+        .request_msg(&subjects::ADMIN_CLOSE_JOB, &close)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Done);
 
@@ -2185,7 +2728,8 @@ async fn action_dispatch_failure_releases_claim() {
     let state = setup_with_config(|c| {
         c.forgejo_url = Some("http://127.0.0.1:1".to_string());
         c.forgejo_token = Some("fake-token".to_string());
-    }).await;
+    })
+    .await;
 
     let req = CreateJobRequest {
         repo: "test/repo".to_string(),
@@ -2203,15 +2747,22 @@ async fn action_dispatch_failure_releases_claim() {
     let key = jobs::create_job(&state, req).await.unwrap();
 
     // try_assign_job should fail internally but return Ok(false)
-    let assigned = chuggernaut_dispatcher::assignment::try_assign_job(&state, &key).await.unwrap();
+    let assigned = chuggernaut_dispatcher::assignment::try_assign_job(&state, &key)
+        .await
+        .unwrap();
     assert!(!assigned, "assignment should fail with bad forgejo URL");
 
     // Job should be Failed (action_dispatch releases claim and transitions to Failed)
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Failed);
 
     // Claim should be released (may be tombstoned — kv_get fails on tombstone, which is fine)
-    let claim = jobs::kv_get::<ClaimState>(&state.kv.claims, &key).await.unwrap_or(None);
-    assert!(claim.is_none(), "claim should be released after dispatch failure");
+    let claim = jobs::kv_get::<ClaimState>(&state.kv.claims, &key)
+        .await
+        .unwrap_or(None);
+    assert!(
+        claim.is_none(),
+        "claim should be released after dispatch failure"
+    );
 }
 
 #[tokio::test]
@@ -2237,11 +2788,7 @@ async fn dependency_cycle_rejected() {
     let key_b = jobs::create_job(&state, make("B", vec![1])).await.unwrap();
 
     // Try to add A → B dep (would create cycle: A→B and B→A)
-    let result = chuggernaut_dispatcher::deps::create_deps(
-        &state,
-        &_key_a,
-        &[key_b.clone()],
-    ).await;
+    let result = chuggernaut_dispatcher::deps::create_deps(&state, &_key_a, &[key_b.clone()]).await;
     assert!(result.is_err(), "adding cycle should fail");
 }
 
@@ -2266,20 +2813,40 @@ async fn heartbeat_from_wrong_worker_ignored() {
     let key = jobs::create_job(&state, req).await.unwrap();
 
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id))
+        .await
+        .unwrap();
 
-    let (before, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key).await.unwrap().unwrap();
+    let (before, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key)
+        .await
+        .unwrap()
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Send heartbeat from a different worker
-    let hb = WorkerHeartbeat { worker_id: "wrong-worker".to_string(), job_key: key.clone() };
-    state.nats.publish_msg(&subjects::WORKER_HEARTBEAT, &hb).await.unwrap();
+    let hb = WorkerHeartbeat {
+        worker_id: "wrong-worker".to_string(),
+        job_key: key.clone(),
+    };
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_HEARTBEAT, &hb)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let (after, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key).await.unwrap().unwrap();
-    assert_eq!(before.lease_deadline, after.lease_deadline, "lease should not be renewed by wrong worker");
+    let (after, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        before.lease_deadline, after.lease_deadline,
+        "lease should not be renewed by wrong worker"
+    );
     assert_eq!(after.worker_id, worker_id, "claim owner should not change");
 }
 
@@ -2308,27 +2875,43 @@ async fn rework_limit_not_enforced_yet() {
     // Do 3 rework cycles (exceeding rework_limit=1)
     for i in 0..3 {
         let worker_id = format!("action-{key}");
-        chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-        jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+        chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+            .await
+            .unwrap();
+        jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id))
+            .await
+            .unwrap();
 
         let outcome = WorkerOutcome {
             worker_id: worker_id.clone(),
             job_key: key.clone(),
-            outcome: OutcomeType::Yield { pr_url: format!("http://forgejo/test/repo/pulls/{}", i + 1) },
+            outcome: OutcomeType::Yield {
+                pr_url: format!("http://forgejo/test/repo/pulls/{}", i + 1),
+            },
             token_usage: None,
         };
-        state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+        state
+            .nats
+            .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(state.jobs.get(&key).unwrap().state, JobState::InReview);
 
         // Changes requested
         let decision = ReviewDecision {
             job_key: key.clone(),
-            decision: DecisionType::ChangesRequested { feedback: format!("fix #{}", i + 1) },
+            decision: DecisionType::ChangesRequested {
+                feedback: format!("fix #{}", i + 1),
+            },
             pr_url: Some(format!("http://forgejo/test/repo/pulls/{}", i + 1)),
             token_usage: None,
         };
-        state.nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await.unwrap();
+        state
+            .nats
+            .publish_msg(&subjects::REVIEW_DECISION, &decision)
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Should be ChangesRequested (rework_limit not enforced, no Forgejo to auto-dispatch)
@@ -2365,21 +2948,34 @@ async fn nil_token_usage_not_appended() {
     let key = jobs::create_job(&state, req).await.unwrap();
 
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id))
+        .await
+        .unwrap();
 
     let outcome = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key.clone(),
-        outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        outcome: OutcomeType::Yield {
+            pr_url: "http://forgejo/test/repo/pulls/1".to_string(),
+        },
         token_usage: None, // no token usage
     };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let job = state.jobs.get(&key).unwrap().clone();
     assert_eq!(job.state, JobState::InReview);
-    assert!(job.token_usage.is_empty(), "nil token_usage should not create a record");
+    assert!(
+        job.token_usage.is_empty(),
+        "nil token_usage should not create a record"
+    );
 }
 
 #[tokio::test]
@@ -2403,8 +2999,12 @@ async fn concurrent_heartbeats_benign() {
     let key = jobs::create_job(&state, req).await.unwrap();
 
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id))
+        .await
+        .unwrap();
 
     // Send 10 heartbeats concurrently
     let mut handles = Vec::new();
@@ -2413,8 +3013,14 @@ async fn concurrent_heartbeats_benign() {
         let w = worker_id.clone();
         let k = key.clone();
         handles.push(tokio::spawn(async move {
-            let hb = WorkerHeartbeat { worker_id: w, job_key: k };
-            s.nats.publish_msg(&subjects::WORKER_HEARTBEAT, &hb).await.unwrap();
+            let hb = WorkerHeartbeat {
+                worker_id: w,
+                job_key: k,
+            };
+            s.nats
+                .publish_msg(&subjects::WORKER_HEARTBEAT, &hb)
+                .await
+                .unwrap();
         }));
     }
     for h in handles {
@@ -2424,7 +3030,10 @@ async fn concurrent_heartbeats_benign() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Claim should still be valid
-    let (claim, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key).await.unwrap().unwrap();
+    let (claim, _) = jobs::kv_get::<ClaimState>(&state.kv.claims, &key)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(claim.worker_id, worker_id);
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
 }
@@ -2450,19 +3059,33 @@ async fn duplicate_outcome_handled() {
     let key = jobs::create_job(&state, req).await.unwrap();
 
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id))
+        .await
+        .unwrap();
 
     let outcome = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key.clone(),
-        outcome: OutcomeType::Yield { pr_url: "http://forgejo/test/repo/pulls/1".to_string() },
+        outcome: OutcomeType::Yield {
+            pr_url: "http://forgejo/test/repo/pulls/1".to_string(),
+        },
         token_usage: None,
     };
 
     // Send same outcome twice
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
@@ -2504,17 +3127,29 @@ async fn recovery_cleans_stale_claims() {
         timeout_secs: 3600,
         lease_secs: 5,
     };
-    jobs::kv_put(&state.kv.claims, &key, &stale_claim).await.unwrap();
+    jobs::kv_put(&state.kv.claims, &key, &stale_claim)
+        .await
+        .unwrap();
 
     // Verify claim exists
-    assert!(jobs::kv_get::<ClaimState>(&state.kv.claims, &key).await.unwrap().is_some());
+    assert!(
+        jobs::kv_get::<ClaimState>(&state.kv.claims, &key)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // Run recovery
     recovery::recover(&state).await.unwrap();
 
     // Stale claim should be deleted (tombstoned — kv_get may fail on tombstone)
-    let claim_after = jobs::kv_get::<ClaimState>(&state.kv.claims, &key).await.unwrap_or(None);
-    assert!(claim_after.is_none(), "stale claim should be cleaned up by recovery");
+    let claim_after = jobs::kv_get::<ClaimState>(&state.kv.claims, &key)
+        .await
+        .unwrap_or(None);
+    assert!(
+        claim_after.is_none(),
+        "stale claim should be cleaned up by recovery"
+    );
 }
 
 #[tokio::test]
@@ -2538,13 +3173,19 @@ async fn recovery_fails_claimless_on_the_stack() {
     let key = jobs::create_job(&state, req).await.unwrap();
 
     // Directly update the job to OnTheStack in KV (bypassing claim requirement)
-    let (mut job, _rev) = jobs::kv_get::<Job>(&state.kv.jobs, &key).await.unwrap().unwrap();
+    let (mut job, _rev) = jobs::kv_get::<Job>(&state.kv.jobs, &key)
+        .await
+        .unwrap()
+        .unwrap();
     job.state = JobState::OnTheStack;
     jobs::kv_put(&state.kv.jobs, &key, &job).await.unwrap();
 
     // Clear in-memory state to simulate restart
     state.jobs.clear();
-    { let mut g = state.graph.write().await; *g = chuggernaut_dispatcher::state::DepGraph::new(); }
+    {
+        let mut g = state.graph.write().await;
+        *g = chuggernaut_dispatcher::state::DepGraph::new();
+    }
 
     // Recover — should detect OnTheStack job with no claim and fail it
     recovery::recover(&state).await.unwrap();
@@ -2575,19 +3216,28 @@ async fn recovery_repairs_reverse_deps() {
     let key_b = jobs::create_job(&state, make("B", vec![1])).await.unwrap();
 
     // Corrupt: remove the reverse dep on A (A should have depended_on_by=[B])
-    let (mut dep_a, _rev) = jobs::kv_get::<DepRecord>(&state.kv.deps, &key_a).await.unwrap().unwrap();
+    let (mut dep_a, _rev) = jobs::kv_get::<DepRecord>(&state.kv.deps, &key_a)
+        .await
+        .unwrap()
+        .unwrap();
     dep_a.depended_on_by.clear();
     jobs::kv_put(&state.kv.deps, &key_a, &dep_a).await.unwrap();
 
     // Clear in-memory state
     state.jobs.clear();
-    { let mut g = state.graph.write().await; *g = chuggernaut_dispatcher::state::DepGraph::new(); }
+    {
+        let mut g = state.graph.write().await;
+        *g = chuggernaut_dispatcher::state::DepGraph::new();
+    }
 
     // Recover
     recovery::recover(&state).await.unwrap();
 
     // Verify reverse dep was repaired
-    let (dep_a_after, _) = jobs::kv_get::<DepRecord>(&state.kv.deps, &key_a).await.unwrap().unwrap();
+    let (dep_a_after, _) = jobs::kv_get::<DepRecord>(&state.kv.deps, &key_a)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         dep_a_after.depended_on_by.contains(&key_b),
         "recovery should repair reverse dep: A.depended_on_by should contain B"
@@ -2608,7 +3258,7 @@ async fn monitor_job_timeout() {
         nats_url: nats_url.clone(),
         nats_worker_url: nats_url.clone(),
         http_listen: "127.0.0.1:0".to_string(),
-        lease_secs: 120, // long lease so it doesn't expire
+        lease_secs: 120,         // long lease so it doesn't expire
         default_timeout_secs: 1, // very short timeout
         cas_max_retries: 3,
         monitor_scan_interval_secs: 1,
@@ -2628,7 +3278,8 @@ async fn monitor_job_timeout() {
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
     let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
-        .await.unwrap();
+        .await
+        .unwrap();
     let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
 
     handlers::start_handlers(state.clone()).await.unwrap();
@@ -2651,8 +3302,12 @@ async fn monitor_job_timeout() {
 
     // Acquire claim with 1s timeout
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 1).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 1)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id))
+        .await
+        .unwrap();
 
     // Wait for monitor to detect timeout
     tokio::time::sleep(Duration::from_secs(4)).await;
@@ -2690,11 +3345,16 @@ async fn monitor_orphan_detection() {
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
     let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
-        .await.unwrap();
+        .await
+        .unwrap();
     let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
 
     // Subscribe to orphan events before starting monitor
-    let mut orphan_sub = state.nats.subscribe("chuggernaut.monitor.orphan").await.unwrap();
+    let mut orphan_sub = state
+        .nats
+        .subscribe("chuggernaut.monitor.orphan")
+        .await
+        .unwrap();
 
     handlers::start_handlers(state.clone()).await.unwrap();
 
@@ -2758,7 +3418,8 @@ async fn monitor_retry_eligible_transitions_to_on_deck() {
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
     let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
-        .await.unwrap();
+        .await
+        .unwrap();
     let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
 
     handlers::start_handlers(state.clone()).await.unwrap();
@@ -2780,16 +3441,27 @@ async fn monitor_retry_eligible_transitions_to_on_deck() {
 
     // Simulate failure via outcome
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id))
+        .await
+        .unwrap();
 
     let outcome = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key.clone(),
-        outcome: OutcomeType::Fail { reason: "error".to_string(), logs: None },
+        outcome: OutcomeType::Fail {
+            reason: "error".to_string(),
+            logs: None,
+        },
         token_usage: None,
     };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Failed);
 
@@ -2845,7 +3517,8 @@ async fn monitor_archival_removes_done_job() {
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
     let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
-        .await.unwrap();
+        .await
+        .unwrap();
     let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
 
     let req = CreateJobRequest {
@@ -2864,7 +3537,9 @@ async fn monitor_archival_removes_done_job() {
     let key = jobs::create_job(&state, req).await.unwrap();
 
     // Close job → Done, backdate updated_at so retention window has passed
-    jobs::transition_job(&state, &key, JobState::Done, "test", None).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::Done, "test", None)
+        .await
+        .unwrap();
     {
         let mut job = state.jobs.get(&key).unwrap().clone();
         job.updated_at = chrono::Utc::now() - chrono::Duration::seconds(10);
@@ -2911,8 +3586,14 @@ async fn http_list_jobs() {
 
     let base = start_http(state).await;
     let client = reqwest::Client::new();
-    let resp: JobListResponse = client.get(format!("{base}/jobs"))
-        .send().await.unwrap().json().await.unwrap();
+    let resp: JobListResponse = client
+        .get(format!("{base}/jobs"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(resp.jobs.len(), 2);
 }
 
@@ -2932,24 +3613,42 @@ async fn http_list_jobs_filter_by_state() {
         max_retries: 3,
         initial_state: initial,
     };
-    jobs::create_job(&state, make("OnDeck1", None)).await.unwrap();
-    jobs::create_job(&state, make("OnDeck2", None)).await.unwrap();
-    jobs::create_job(&state, make("OnIce1", Some(JobState::OnIce))).await.unwrap();
+    jobs::create_job(&state, make("OnDeck1", None))
+        .await
+        .unwrap();
+    jobs::create_job(&state, make("OnDeck2", None))
+        .await
+        .unwrap();
+    jobs::create_job(&state, make("OnIce1", Some(JobState::OnIce)))
+        .await
+        .unwrap();
 
     let base = start_http(state).await;
     let client = reqwest::Client::new();
 
     // Filter by on-deck (kebab-case)
-    let resp: JobListResponse = client.get(format!("{base}/jobs?state=on-deck"))
-        .send().await.unwrap().json().await.unwrap();
+    let resp: JobListResponse = client
+        .get(format!("{base}/jobs?state=on-deck"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(resp.jobs.len(), 2);
     for job in &resp.jobs {
         assert_eq!(job.state, JobState::OnDeck);
     }
 
     // Filter by on-ice
-    let resp: JobListResponse = client.get(format!("{base}/jobs?state=on-ice"))
-        .send().await.unwrap().json().await.unwrap();
+    let resp: JobListResponse = client
+        .get(format!("{base}/jobs?state=on-ice"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(resp.jobs.len(), 1);
     assert_eq!(resp.jobs[0].state, JobState::OnIce);
 }
@@ -2974,8 +3673,14 @@ async fn http_get_job_detail() {
 
     let base = start_http(state).await;
     let client = reqwest::Client::new();
-    let resp: JobDetailResponse = client.get(format!("{base}/jobs/{key}"))
-        .send().await.unwrap().json().await.unwrap();
+    let resp: JobDetailResponse = client
+        .get(format!("{base}/jobs/{key}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(resp.job.key, key);
     assert_eq!(resp.job.title, "Detail test");
     assert_eq!(resp.job.body, "some body");
@@ -2987,8 +3692,11 @@ async fn http_get_job_not_found() {
     let state = setup().await;
     let base = start_http(state).await;
     let client = reqwest::Client::new();
-    let resp = client.get(format!("{base}/jobs/nonexistent"))
-        .send().await.unwrap();
+    let resp = client
+        .get(format!("{base}/jobs/nonexistent"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 404);
 }
 
@@ -3011,9 +3719,12 @@ async fn http_create_job() {
         max_retries: 3,
         initial_state: None,
     };
-    let resp = client.post(format!("{base}/jobs"))
+    let resp = client
+        .post(format!("{base}/jobs"))
         .json(&req)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 201);
 
     let body: CreateJobResponse = resp.json().await.unwrap();
@@ -3043,9 +3754,12 @@ async fn http_requeue_job() {
     let base = start_http(state.clone()).await;
     let client = reqwest::Client::new();
 
-    let resp = client.post(format!("{base}/jobs/{key}/requeue"))
+    let resp = client
+        .post(format!("{base}/jobs/{key}/requeue"))
         .json(&serde_json::json!({"target": "on-deck"}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnDeck);
 }
@@ -3072,9 +3786,12 @@ async fn http_close_job() {
     let base = start_http(state.clone()).await;
     let client = reqwest::Client::new();
 
-    let resp = client.post(format!("{base}/jobs/{key}/close"))
+    let resp = client
+        .post(format!("{base}/jobs/{key}/close"))
         .json(&serde_json::json!({"revoke": false}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Done);
 }
@@ -3101,12 +3818,14 @@ async fn http_get_journal() {
 
     let base = start_http(state).await;
     let client = reqwest::Client::new();
-    let resp = client.get(format!("{base}/journal"))
-        .send().await.unwrap();
+    let resp = client.get(format!("{base}/journal")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
     let body: JournalListResponse = resp.json().await.unwrap();
     // create_job writes a journal entry
-    assert!(!body.entries.is_empty(), "journal should have entries after job creation");
+    assert!(
+        !body.entries.is_empty(),
+        "journal should have entries after job creation"
+    );
 }
 
 #[tokio::test]
@@ -3131,8 +3850,14 @@ async fn http_get_job_deps() {
 
     let base = start_http(state).await;
     let client = reqwest::Client::new();
-    let resp: JobDepsResponse = client.get(format!("{base}/jobs/{key_b}/deps"))
-        .send().await.unwrap().json().await.unwrap();
+    let resp: JobDepsResponse = client
+        .get(format!("{base}/jobs/{key_b}/deps"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(resp.dependencies.len(), 1);
     assert_eq!(resp.dependencies[0].key, _key_a);
     assert!(!resp.all_done);
@@ -3160,9 +3885,12 @@ async fn http_channel_send() {
 
     let base = start_http(state).await;
     let client = reqwest::Client::new();
-    let resp = client.post(format!("{base}/jobs/{key}/channel/send"))
+    let resp = client
+        .post(format!("{base}/jobs/{key}/channel/send"))
         .json(&serde_json::json!({"message": "hello"}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
 }
 
@@ -3171,9 +3899,12 @@ async fn http_channel_send_missing_job() {
     let state = setup().await;
     let base = start_http(state).await;
     let client = reqwest::Client::new();
-    let resp = client.post(format!("{base}/jobs/nonexistent/channel/send"))
+    let resp = client
+        .post(format!("{base}/jobs/nonexistent/channel/send"))
         .json(&serde_json::json!({"message": "hello"}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 404);
 }
 
@@ -3200,16 +3931,25 @@ async fn http_sse_snapshot() {
     let client = reqwest::Client::new();
 
     // SSE endpoint returns a stream; read the first chunk
-    let mut resp = client.get(format!("{base}/events"))
+    let mut resp = client
+        .get(format!("{base}/events"))
         .header("Accept", "text/event-stream")
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
 
     // Read first chunk (should contain snapshot event)
     let chunk = tokio::time::timeout(Duration::from_secs(5), resp.chunk())
-        .await.unwrap().unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     let text = String::from_utf8_lossy(&chunk);
-    assert!(text.contains("event: snapshot"), "first SSE event should be snapshot, got: {text}");
+    assert!(
+        text.contains("event: snapshot"),
+        "first SSE event should be snapshot, got: {text}"
+    );
     assert!(text.contains("jobs"), "snapshot should contain jobs array");
 }
 
@@ -3239,11 +3979,23 @@ async fn capacity_limit_prevents_assignment() {
 
     // Manually put job1 on-the-stack to fill the single slot
     let worker_id = format!("action-{key1}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key1, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key1, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key1, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key1,
+        JobState::OnTheStack,
+        "test",
+        Some(&worker_id),
+    )
+    .await
+    .unwrap();
 
     // Try to assign job2 — should fail due to capacity
-    let assigned = chuggernaut_dispatcher::assignment::try_assign_job(&state, &key2).await.unwrap();
+    let assigned = chuggernaut_dispatcher::assignment::try_assign_job(&state, &key2)
+        .await
+        .unwrap();
     assert!(!assigned, "should be at capacity");
     assert_eq!(state.jobs.get(&key2).unwrap().state, JobState::OnDeck);
 }
@@ -3266,9 +4018,15 @@ async fn dispatch_next_respects_priority() {
 
     let workflow = "name: work\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      review_feedback:\n        type: string\n        default: \"\"\n      is_rework:\n        type: string\n        default: \"false\"\n      runner_label:\n        type: string\n        default: \"ubuntu-latest\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
     test_utils::push_file(
-        forgejo_port, &token, &org, "repo",
-        ".forgejo/workflows/work.yml", workflow, "add workflow",
-    ).await;
+        forgejo_port,
+        &token,
+        &org,
+        "repo",
+        ".forgejo/workflows/work.yml",
+        workflow,
+        "add workflow",
+    )
+    .await;
 
     let config = Config {
         nats_url: nats_url.clone(),
@@ -3294,7 +4052,8 @@ async fn dispatch_next_respects_priority() {
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
     let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
-        .await.unwrap();
+        .await
+        .unwrap();
     let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
 
     // Create 3 jobs with different priorities
@@ -3317,11 +4076,25 @@ async fn dispatch_next_respects_priority() {
     let key_mid = jobs::create_job(&state, make("Mid", 50)).await.unwrap();
 
     // Dispatch next — should pick highest priority
-    chuggernaut_dispatcher::assignment::try_dispatch_next(&state).await.unwrap();
+    chuggernaut_dispatcher::assignment::try_dispatch_next(&state)
+        .await
+        .unwrap();
 
-    assert_eq!(state.jobs.get(&key_high).unwrap().state, JobState::OnTheStack, "highest priority job should be dispatched");
-    assert_eq!(state.jobs.get(&key_mid).unwrap().state, JobState::OnDeck, "mid priority should stay on-deck");
-    assert_eq!(state.jobs.get(&key_low).unwrap().state, JobState::OnDeck, "low priority should stay on-deck");
+    assert_eq!(
+        state.jobs.get(&key_high).unwrap().state,
+        JobState::OnTheStack,
+        "highest priority job should be dispatched"
+    );
+    assert_eq!(
+        state.jobs.get(&key_mid).unwrap().state,
+        JobState::OnDeck,
+        "mid priority should stay on-deck"
+    );
+    assert_eq!(
+        state.jobs.get(&key_low).unwrap().state,
+        JobState::OnDeck,
+        "low priority should stay on-deck"
+    );
 }
 
 #[tokio::test]
@@ -3342,15 +4115,27 @@ async fn dispatch_next_after_yield() {
 
     let workflow = "name: work\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      review_feedback:\n        type: string\n        default: \"\"\n      is_rework:\n        type: string\n        default: \"false\"\n      runner_label:\n        type: string\n        default: \"ubuntu-latest\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
     test_utils::push_file(
-        forgejo_port, &token, &org, "repo",
-        ".forgejo/workflows/work.yml", workflow, "add workflow",
-    ).await;
+        forgejo_port,
+        &token,
+        &org,
+        "repo",
+        ".forgejo/workflows/work.yml",
+        workflow,
+        "add workflow",
+    )
+    .await;
 
     let review_workflow = "name: review\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      pr_url:\n        type: string\n      review_level:\n        type: string\n        default: \"high\"\n      runner_label:\n        type: string\n        default: \"ubuntu-latest\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
     test_utils::push_file(
-        forgejo_port, &token, &org, "repo",
-        ".forgejo/workflows/review.yml", review_workflow, "add review workflow",
-    ).await;
+        forgejo_port,
+        &token,
+        &org,
+        "repo",
+        ".forgejo/workflows/review.yml",
+        review_workflow,
+        "add review workflow",
+    )
+    .await;
 
     let config = Config {
         nats_url: nats_url.clone(),
@@ -3376,7 +4161,8 @@ async fn dispatch_next_after_yield() {
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
     let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
-        .await.unwrap();
+        .await
+        .unwrap();
     let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
     handlers::start_handlers(state.clone()).await.unwrap();
 
@@ -3398,7 +4184,9 @@ async fn dispatch_next_after_yield() {
     let key2 = jobs::create_job(&state, make("Second")).await.unwrap();
 
     // Dispatch first job
-    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key1).await.unwrap();
+    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key1)
+        .await
+        .unwrap();
     assert_eq!(state.jobs.get(&key1).unwrap().state, JobState::OnTheStack);
     assert_eq!(state.jobs.get(&key2).unwrap().state, JobState::OnDeck);
 
@@ -3407,10 +4195,16 @@ async fn dispatch_next_after_yield() {
     let outcome = WorkerOutcome {
         worker_id: worker_id.clone(),
         job_key: key1.clone(),
-        outcome: OutcomeType::Yield { pr_url: format!("http://forgejo/{org}/repo/pulls/1") },
+        outcome: OutcomeType::Yield {
+            pr_url: format!("http://forgejo/{org}/repo/pulls/1"),
+        },
         token_usage: None,
     };
-    state.nats.publish_msg(&subjects::WORKER_OUTCOME, &outcome).await.unwrap();
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     assert_eq!(state.jobs.get(&key1).unwrap().state, JobState::InReview);
@@ -3439,9 +4233,15 @@ async fn changes_requested_in_dispatch_queue() {
 
     let workflow = "name: work\non:\n  workflow_dispatch:\n    inputs:\n      job_key:\n        type: string\n      nats_url:\n        type: string\n      review_feedback:\n        type: string\n        default: \"\"\n      is_rework:\n        type: string\n        default: \"false\"\n      runner_label:\n        type: string\n        default: \"ubuntu-latest\"\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n";
     test_utils::push_file(
-        forgejo_port, &token, &org, "repo",
-        ".forgejo/workflows/work.yml", workflow, "add workflow",
-    ).await;
+        forgejo_port,
+        &token,
+        &org,
+        "repo",
+        ".forgejo/workflows/work.yml",
+        workflow,
+        "add workflow",
+    )
+    .await;
 
     let config = Config {
         nats_url: nats_url.clone(),
@@ -3467,7 +4267,8 @@ async fn changes_requested_in_dispatch_queue() {
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
     let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
-        .await.unwrap();
+        .await
+        .unwrap();
     let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
 
     // Create a ChangesRequested job (high priority) and an OnDeck job (low priority)
@@ -3488,11 +4289,27 @@ async fn changes_requested_in_dispatch_queue() {
 
     // Simulate work cycle → ChangesRequested (release claim so dispatch_action can re-acquire)
     let worker_id = format!("action-{key_cr}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key_cr, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key_cr, JobState::OnTheStack, "test", Some(&worker_id)).await.unwrap();
-    chuggernaut_dispatcher::claims::release_claim(&state, &key_cr).await.unwrap();
-    jobs::transition_job(&state, &key_cr, JobState::InReview, "test", None).await.unwrap();
-    jobs::transition_job(&state, &key_cr, JobState::ChangesRequested, "test", None).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key_cr, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key_cr,
+        JobState::OnTheStack,
+        "test",
+        Some(&worker_id),
+    )
+    .await
+    .unwrap();
+    chuggernaut_dispatcher::claims::release_claim(&state, &key_cr)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key_cr, JobState::InReview, "test", None)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key_cr, JobState::ChangesRequested, "test", None)
+        .await
+        .unwrap();
 
     let req_od = CreateJobRequest {
         repo: format!("{org}/repo"),
@@ -3510,7 +4327,9 @@ async fn changes_requested_in_dispatch_queue() {
     let key_od = jobs::create_job(&state, req_od).await.unwrap();
 
     // Dispatch next — ChangesRequested job has higher priority
-    chuggernaut_dispatcher::assignment::try_dispatch_next(&state).await.unwrap();
+    chuggernaut_dispatcher::assignment::try_dispatch_next(&state)
+        .await
+        .unwrap();
 
     assert_eq!(
         state.jobs.get(&key_cr).unwrap().state,
@@ -3552,7 +4371,8 @@ async fn monitor_lease_expiry_schedules_retry() {
     let client = async_nats::connect(&nats_url).await.unwrap();
     let js = async_nats::jetstream::new(client.clone());
     let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
-        .await.unwrap();
+        .await
+        .unwrap();
     let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
 
     handlers::start_handlers(state.clone()).await.unwrap();
@@ -3574,14 +4394,30 @@ async fn monitor_lease_expiry_schedules_retry() {
     let key = jobs::create_job(&state, req).await.unwrap();
 
     let worker_id = format!("action-{key}");
-    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
-    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key,
+        JobState::OnTheStack,
+        "action_dispatched",
+        Some(&worker_id),
+    )
+    .await
+    .unwrap();
 
     // Wait for lease to expire and monitor to process it
     tokio::time::sleep(Duration::from_secs(4)).await;
 
     let job = state.jobs.get(&key).unwrap();
     assert_eq!(job.state, JobState::Failed);
-    assert_eq!(job.retry_count, 1, "lease expiry should increment retry_count");
-    assert!(job.retry_after.is_some(), "lease expiry should set retry_after for auto-retry");
+    assert_eq!(
+        job.retry_count, 1,
+        "lease expiry should increment retry_count"
+    );
+    assert!(
+        job.retry_after.is_some(),
+        "lease expiry should set retry_after for auto-retry"
+    );
 }

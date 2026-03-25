@@ -11,11 +11,19 @@ use chuggernaut_types::*;
 #[command(name = "chuggernaut", about = "chuggernaut workflow orchestration CLI")]
 struct Cli {
     /// NATS server URL
-    #[arg(long, env = "CHUGGERNAUT_NATS_URL", default_value = "nats://localhost:4222")]
+    #[arg(
+        long,
+        env = "CHUGGERNAUT_NATS_URL",
+        default_value = "nats://localhost:4222"
+    )]
     nats_url: String,
 
     /// Dispatcher HTTP API URL
-    #[arg(long, env = "CHUGGERNAUT_DISPATCHER_URL", default_value = "http://localhost:8080")]
+    #[arg(
+        long,
+        env = "CHUGGERNAUT_DISPATCHER_URL",
+        default_value = "http://localhost:8080"
+    )]
     dispatcher_url: String,
 
     #[command(subcommand)]
@@ -188,10 +196,7 @@ async fn main() -> Result<()> {
             if resp.jobs.is_empty() {
                 println!("No jobs found.");
             } else {
-                println!(
-                    "{:<25} {:<16} {:<4} {}",
-                    "KEY", "STATE", "PRI", "TITLE"
-                );
+                println!("{:<25} {:<16} {:<4} {}", "KEY", "STATE", "PRI", "TITLE");
                 for job in &resp.jobs {
                     let state_str = serde_json::to_string(&job.state)?;
                     println!(
@@ -279,22 +284,22 @@ async fn main() -> Result<()> {
                     in_reply_to: None,
                 };
                 let nats = NatsClient::new(async_nats::connect(&cli.nats_url).await?);
-                nats.publish_to(&subjects::CHANNEL_INBOX, &key, &msg).await?;
+                nats.publish_to(&subjects::CHANNEL_INBOX, &key, &msg)
+                    .await?;
                 nats.raw().flush().await?;
                 println!("Sent to {key}");
             }
 
             ChannelAction::Watch { key } => {
                 let nats = NatsClient::new(async_nats::connect(&cli.nats_url).await?);
-                let mut sub = nats.subscribe_dynamic(&subjects::CHANNEL_OUTBOX, &key).await?;
+                let mut sub = nats
+                    .subscribe_dynamic(&subjects::CHANNEL_OUTBOX, &key)
+                    .await?;
                 println!("Watching channel outbox for {key} (Ctrl-C to stop)");
-                while let Some(msg) = tokio::time::timeout(
-                    Duration::from_secs(3600),
-                    sub.next(),
-                )
-                .await
-                .ok()
-                .flatten()
+                while let Some(msg) = tokio::time::timeout(Duration::from_secs(3600), sub.next())
+                    .await
+                    .ok()
+                    .flatten()
                 {
                     if let Ok(channel_msg) =
                         serde_json::from_slice::<chuggernaut_types::ChannelMessage>(&msg.payload)
@@ -335,7 +340,12 @@ async fn main() -> Result<()> {
             }
         },
 
-        Commands::Seed { repo, fixture, vars, initial_state } => {
+        Commands::Seed {
+            repo,
+            fixture,
+            vars,
+            initial_state,
+        } => {
             let initial: Option<JobState> = initial_state
                 .map(|s| serde_json::from_str::<JobState>(&format!("\"{s}\"")))
                 .transpose()?;

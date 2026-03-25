@@ -68,10 +68,7 @@ impl ForgejoClient {
         self.handle_response(resp).await
     }
 
-    async fn handle_response<T: DeserializeOwned>(
-        &self,
-        resp: reqwest::Response,
-    ) -> Result<T> {
+    async fn handle_response<T: DeserializeOwned>(&self, resp: reqwest::Response) -> Result<T> {
         let status = resp.status().as_u16();
         if status >= 400 {
             let body = resp.text().await.unwrap_or_default();
@@ -217,9 +214,7 @@ impl ForgejoClient {
         workflow_file: &str,
         opts: &DispatchWorkflowOption,
     ) -> Result<DispatchWorkflowRun> {
-        let path = format!(
-            "/repos/{owner}/{repo}/actions/workflows/{workflow_file}/dispatches"
-        );
+        let path = format!("/repos/{owner}/{repo}/actions/workflows/{workflow_file}/dispatches");
         debug!(path, "POST dispatch workflow");
         let resp = self
             .client
@@ -246,21 +241,12 @@ impl ForgejoClient {
         }
     }
 
-    pub async fn get_action_run(
-        &self,
-        owner: &str,
-        repo: &str,
-        run_id: u64,
-    ) -> Result<ActionRun> {
+    pub async fn get_action_run(&self, owner: &str, repo: &str, run_id: u64) -> Result<ActionRun> {
         self.get(&format!("/repos/{owner}/{repo}/actions/runs/{run_id}"))
             .await
     }
 
-    pub async fn list_action_runs(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Result<ActionRunList> {
+    pub async fn list_action_runs(&self, owner: &str, repo: &str) -> Result<ActionRunList> {
         self.get(&format!("/repos/{owner}/{repo}/actions/runs"))
             .await
     }

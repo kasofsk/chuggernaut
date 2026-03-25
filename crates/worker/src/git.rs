@@ -47,12 +47,9 @@ pub fn clone_repo(forgejo_url: &str, repo: &str, token: &str, workdir: &Path) ->
 
     // Configure a credential helper that returns our token, overriding any
     // global helper (e.g. one set by actions/checkout) that might interfere.
-    let helper_script = format!(
-        "!f() {{ echo \"username=chuggernaut-worker\"; echo \"password={token}\"; }}; f"
-    );
-    run_git(&repo_dir, &[
-        "config", "credential.helper", &helper_script,
-    ])?;
+    let helper_script =
+        format!("!f() {{ echo \"username=chuggernaut-worker\"; echo \"password={token}\"; }}; f");
+    run_git(&repo_dir, &["config", "credential.helper", &helper_script])?;
 
     Ok(repo_dir)
 }
@@ -73,7 +70,10 @@ pub fn checkout_branch(repo_dir: &Path, branch: &str) -> Result<()> {
     if exists_remote {
         debug!(branch, "checking out existing remote branch");
         // Checkout and track the remote branch
-        let result = run_git(repo_dir, &["checkout", "-B", branch, &format!("origin/{branch}")]);
+        let result = run_git(
+            repo_dir,
+            &["checkout", "-B", branch, &format!("origin/{branch}")],
+        );
         if result.is_err() {
             // Might already be on this branch
             run_git(repo_dir, &["checkout", branch])?;
@@ -122,11 +122,7 @@ pub fn default_branch(repo_dir: &Path) -> Result<String> {
     if output.status.success() {
         let full_ref = String::from_utf8_lossy(&output.stdout).trim().to_string();
         // refs/remotes/origin/main -> main
-        Ok(full_ref
-            .rsplit('/')
-            .next()
-            .unwrap_or("main")
-            .to_string())
+        Ok(full_ref.rsplit('/').next().unwrap_or("main").to_string())
     } else {
         Ok("main".to_string())
     }

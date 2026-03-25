@@ -7,9 +7,7 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use chuggernaut_forgejo_api::{
-    CreatePullReviewOptions, ForgejoClient, MergePullRequestOption,
-};
+use chuggernaut_forgejo_api::{CreatePullReviewOptions, ForgejoClient, MergePullRequestOption};
 use chuggernaut_nats::NatsClient;
 use chuggernaut_types::*;
 
@@ -24,7 +22,10 @@ enum PostAction {
 }
 
 #[derive(Parser)]
-#[command(name = "chuggernaut-worker", about = "Worker binary that runs inside Forgejo Actions")]
+#[command(
+    name = "chuggernaut-worker",
+    about = "Worker binary that runs inside Forgejo Actions"
+)]
 struct Args {
     /// What to do after the subprocess exits
     #[arg(long, env = "CHUGGERNAUT_POST_ACTION", default_value = "yield")]
@@ -35,7 +36,11 @@ struct Args {
     job_key: String,
 
     /// NATS server URL
-    #[arg(long, env = "CHUGGERNAUT_NATS_URL", default_value = "nats://localhost:4222")]
+    #[arg(
+        long,
+        env = "CHUGGERNAUT_NATS_URL",
+        default_value = "nats://localhost:4222"
+    )]
     nats_url: String,
 
     /// Forgejo base URL
@@ -55,7 +60,11 @@ struct Args {
     command_args: String,
 
     /// Heartbeat interval in seconds
-    #[arg(long, env = "CHUGGERNAUT_HEARTBEAT_INTERVAL_SECS", default_value = "10")]
+    #[arg(
+        long,
+        env = "CHUGGERNAUT_HEARTBEAT_INTERVAL_SECS",
+        default_value = "10"
+    )]
     heartbeat_interval_secs: u64,
 
     /// Total timeout for this action run in minutes
@@ -67,7 +76,11 @@ struct Args {
     wrap_up_minutes: u64,
 
     /// Working directory for git operations
-    #[arg(long, env = "CHUGGERNAUT_WORKDIR", default_value = "/tmp/chuggernaut-work")]
+    #[arg(
+        long,
+        env = "CHUGGERNAUT_WORKDIR",
+        default_value = "/tmp/chuggernaut-work"
+    )]
     workdir: String,
 
     /// Review feedback from a previous run (yield post-action, rework cycles)
@@ -148,9 +161,12 @@ async fn run(args: Args) -> anyhow::Result<()> {
             chuggernaut_worker::git::checkout_branch(&repo_dir, &b)?;
             info!(branch = b.as_str(), "checked out work branch");
             // Validate push auth early
-            chuggernaut_worker::git::push(&repo_dir, &b)
-                .map_err(|e| anyhow::anyhow!("git push auth check failed: {e}\n  \
-                    The CHUGGERNAUT_FORGEJO_TOKEN may be invalid for git HTTP auth"))?;
+            chuggernaut_worker::git::push(&repo_dir, &b).map_err(|e| {
+                anyhow::anyhow!(
+                    "git push auth check failed: {e}\n  \
+                    The CHUGGERNAUT_FORGEJO_TOKEN may be invalid for git HTTP auth"
+                )
+            })?;
             info!("git push auth validated");
             b
         }
@@ -160,19 +176,37 @@ async fn run(args: Args) -> anyhow::Result<()> {
             let pr = forgejo.get_pull_request(&owner, &repo, pr_index).await?;
             let b = pr.head.ref_field.clone();
             chuggernaut_worker::git::checkout_branch(&repo_dir, &b)?;
-            info!(branch = b.as_str(), pr_index, "checked out PR branch for review");
+            info!(
+                branch = b.as_str(),
+                pr_index, "checked out PR branch for review"
+            );
             b
         }
     };
 
     // Common infrastructure
-    spawn_heartbeat(nats.clone(), args.job_key.clone(), cancel.clone(), args.heartbeat_interval_secs);
-    spawn_deadline_warning(nats.clone(), args.job_key.clone(), cancel.clone(), args.timeout_minutes, args.wrap_up_minutes);
+    spawn_heartbeat(
+        nats.clone(),
+        args.job_key.clone(),
+        cancel.clone(),
+        args.heartbeat_interval_secs,
+    );
+    spawn_deadline_warning(
+        nats.clone(),
+        args.job_key.clone(),
+        cancel.clone(),
+        args.timeout_minutes,
+        args.wrap_up_minutes,
+    );
 
-    let hard_deadline = Duration::from_secs(args.timeout_minutes * 60).saturating_sub(Duration::from_secs(60));
+    let hard_deadline =
+        Duration::from_secs(args.timeout_minutes * 60).saturating_sub(Duration::from_secs(60));
 
     let mcp_config = write_mcp_config(&args.job_key, &args.nats_url, &workdir)?;
-    info!(config = mcp_config.display().to_string(), "wrote MCP config");
+    info!(
+        config = mcp_config.display().to_string(),
+        "wrote MCP config"
+    );
 
     // Build subprocess command
     info!(command = args.command, "launching subprocess");
@@ -281,14 +315,17 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 outcome,
                 token_usage: None,
             };
-            nats.publish_msg(&subjects::WORKER_OUTCOME, &worker_outcome).await?;
+            nats.publish_msg(&subjects::WORKER_OUTCOME, &worker_outcome)
+                .await?;
             info!(job_key = args.job_key, "outcome reported, exiting");
         }
         PostAction::Review => {
             let pr_index = parse_pr_index(&args.pr_url).unwrap_or(0);
             let decision = if exit_ok {
                 match parse_review_output(&output) {
-                    Ok(result) => post_action_review(result, &forgejo, &owner, &repo, pr_index, &args).await,
+                    Ok(result) => {
+                        post_action_review(result, &forgejo, &owner, &repo, pr_index, &args).await
+                    }
                     Err(e) => {
                         error!(job_key = args.job_key, error = %e, "failed to parse review output");
                         escalate_decision(&args)
@@ -298,7 +335,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 error!(job_key = args.job_key, "review subprocess failed");
                 escalate_decision(&args)
             };
-            nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await?;
+            nats.publish_msg(&subjects::REVIEW_DECISION, &decision)
+                .await?;
             info!(job_key = args.job_key, "review decision reported, exiting");
         }
     }
@@ -381,12 +419,26 @@ async fn post_action_review(
 ) -> ReviewDecision {
     match result {
         ReviewResult::Approved { feedback } => {
-            match forgejo.submit_review(owner, repo, pr_index, &CreatePullReviewOptions {
-                body: feedback.clone().unwrap_or_else(|| "LGTM".to_string()),
-                event: "APPROVED".to_string(),
-            }).await {
-                Ok(review) => info!(job_key = args.job_key, review_id = review.id, "approval review submitted"),
-                Err(e) => error!(job_key = args.job_key, error = %e, "failed to submit approval review"),
+            match forgejo
+                .submit_review(
+                    owner,
+                    repo,
+                    pr_index,
+                    &CreatePullReviewOptions {
+                        body: feedback.clone().unwrap_or_else(|| "LGTM".to_string()),
+                        event: "APPROVED".to_string(),
+                    },
+                )
+                .await
+            {
+                Ok(review) => info!(
+                    job_key = args.job_key,
+                    review_id = review.id,
+                    "approval review submitted"
+                ),
+                Err(e) => {
+                    error!(job_key = args.job_key, error = %e, "failed to submit approval review")
+                }
             }
 
             match try_merge(forgejo, owner, repo, pr_index).await {
@@ -413,10 +465,18 @@ async fn post_action_review(
             }
         }
         ReviewResult::ChangesRequested { feedback } => {
-            if let Err(e) = forgejo.submit_review(owner, repo, pr_index, &CreatePullReviewOptions {
-                body: feedback.clone(),
-                event: "REQUEST_CHANGES".to_string(),
-            }).await {
+            if let Err(e) = forgejo
+                .submit_review(
+                    owner,
+                    repo,
+                    pr_index,
+                    &CreatePullReviewOptions {
+                        body: feedback.clone(),
+                        event: "REQUEST_CHANGES".to_string(),
+                    },
+                )
+                .await
+            {
                 error!(job_key = args.job_key, error = %e, "failed to submit changes-requested review");
             }
 
@@ -496,7 +556,10 @@ fn spawn_deadline_warning(
     wrap_up_minutes: u64,
 ) {
     if wrap_up_minutes >= timeout_minutes {
-        warn!(timeout_minutes, wrap_up_minutes, "wrap-up window >= timeout, skipping deadline warning");
+        warn!(
+            timeout_minutes,
+            wrap_up_minutes, "wrap-up window >= timeout, skipping deadline warning"
+        );
         return;
     }
 
@@ -509,7 +572,11 @@ fn spawn_deadline_warning(
             _ = cancel.cancelled() => { return; }
         }
 
-        info!(job_key, remaining_minutes = remaining, "sending deadline wrap-up warning");
+        info!(
+            job_key,
+            remaining_minutes = remaining,
+            "sending deadline wrap-up warning"
+        );
 
         let msg = ChannelMessage {
             sender: "system".to_string(),
@@ -558,10 +625,16 @@ fn write_mcp_config(job_key: &str, nats_url: &str, workdir: &Path) -> anyhow::Re
     Ok(path)
 }
 
-async fn validate_forgejo_token(forgejo: &ForgejoClient, owner: &str, repo: &str) -> anyhow::Result<()> {
+async fn validate_forgejo_token(
+    forgejo: &ForgejoClient,
+    owner: &str,
+    repo: &str,
+) -> anyhow::Result<()> {
     let r = forgejo.get_repo(owner, repo).await.map_err(|e| {
-        anyhow::anyhow!("Forgejo token validation failed for {owner}/{repo}: {e}\n  \
-            Check that CHUGGERNAUT_FORGEJO_TOKEN is set and the token has read:repository scope")
+        anyhow::anyhow!(
+            "Forgejo token validation failed for {owner}/{repo}: {e}\n  \
+            Check that CHUGGERNAUT_FORGEJO_TOKEN is set and the token has read:repository scope"
+        )
     })?;
 
     if !r.permissions.pull {
@@ -575,10 +648,15 @@ async fn validate_forgejo_token(forgejo: &ForgejoClient, owner: &str, repo: &str
         ));
     }
 
-    forgejo.list_pull_requests(owner, repo, Some("open")).await.map_err(|e| {
-        anyhow::anyhow!("Forgejo token cannot list PRs on {owner}/{repo}: {e}\n  \
-            Check that the token has read:issue and write:issue scopes")
-    })?;
+    forgejo
+        .list_pull_requests(owner, repo, Some("open"))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Forgejo token cannot list PRs on {owner}/{repo}: {e}\n  \
+            Check that the token has read:issue and write:issue scopes"
+            )
+        })?;
 
     info!(
         repo = r.full_name,
@@ -590,7 +668,9 @@ async fn validate_forgejo_token(forgejo: &ForgejoClient, owner: &str, repo: &str
     Ok(())
 }
 
-async fn connect_nats(nats_url: &str) -> anyhow::Result<(NatsClient, async_nats::jetstream::Context)> {
+async fn connect_nats(
+    nats_url: &str,
+) -> anyhow::Result<(NatsClient, async_nats::jetstream::Context)> {
     let nats = NatsClient::new(async_nats::connect(nats_url).await?);
     let js = async_nats::jetstream::new(nats.raw().clone());
     info!(url = nats_url, "connected to NATS");
@@ -624,7 +704,10 @@ fn parse_review_output(output: &str) -> anyhow::Result<ReviewResult> {
         }
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
             let decision = v.get("decision").and_then(|d| d.as_str()).unwrap_or("");
-            let feedback = v.get("feedback").and_then(|f| f.as_str()).map(|s| s.to_string());
+            let feedback = v
+                .get("feedback")
+                .and_then(|f| f.as_str())
+                .map(|s| s.to_string());
 
             return match decision {
                 "approved" | "approve" => Ok(ReviewResult::Approved { feedback }),
@@ -706,7 +789,10 @@ async fn try_merge(
             tokio::time::sleep(Duration::from_secs(5 * attempt as u64)).await;
         }
 
-        match forgejo.merge_pull_request(owner, repo, pr_index, &opts).await {
+        match forgejo
+            .merge_pull_request(owner, repo, pr_index, &opts)
+            .await
+        {
             Ok(()) => return Ok(()),
             Err(e) => {
                 warn!(attempt, error = %e, "merge attempt failed");
@@ -732,8 +818,14 @@ mod tests {
 
     #[test]
     fn parse_pr_index_valid() {
-        assert_eq!(parse_pr_index("http://forgejo/acme/repo/pulls/42"), Some(42));
-        assert_eq!(parse_pr_index("http://forgejo:3000/org/project/pulls/1"), Some(1));
+        assert_eq!(
+            parse_pr_index("http://forgejo/acme/repo/pulls/42"),
+            Some(42)
+        );
+        assert_eq!(
+            parse_pr_index("http://forgejo:3000/org/project/pulls/1"),
+            Some(1)
+        );
     }
 
     #[test]
@@ -748,14 +840,18 @@ mod tests {
 {"decision": "approved", "feedback": "Looks good"}
 "#;
         let result = parse_review_output(output).unwrap();
-        assert!(matches!(result, ReviewResult::Approved { feedback } if feedback == Some("Looks good".to_string())));
+        assert!(
+            matches!(result, ReviewResult::Approved { feedback } if feedback == Some("Looks good".to_string()))
+        );
     }
 
     #[test]
     fn parse_review_output_changes_requested() {
         let output = r#"{"decision": "changes_requested", "feedback": "Fix the tests"}"#;
         let result = parse_review_output(output).unwrap();
-        assert!(matches!(result, ReviewResult::ChangesRequested { feedback } if feedback == "Fix the tests"));
+        assert!(
+            matches!(result, ReviewResult::ChangesRequested { feedback } if feedback == "Fix the tests")
+        );
     }
 
     #[test]

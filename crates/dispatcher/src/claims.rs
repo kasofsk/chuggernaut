@@ -46,9 +46,10 @@ pub async fn renew_lease(
         state.config.cas_max_retries,
         |claim| {
             if claim.worker_id != wid {
-                return Err(DispatcherError::Validation(
-                    format!("heartbeat from wrong worker {wid}, claim held by {}", claim.worker_id),
-                ));
+                return Err(DispatcherError::Validation(format!(
+                    "heartbeat from wrong worker {wid}, claim held by {}",
+                    claim.worker_id
+                )));
             }
             let now = Utc::now();
             claim.last_heartbeat = now;
@@ -76,10 +77,7 @@ pub async fn renew_lease(
 }
 
 /// Release a claim by deleting it from KV (tombstone).
-pub async fn release_claim(
-    state: &Arc<DispatcherState>,
-    job_key: &str,
-) -> DispatcherResult<()> {
+pub async fn release_claim(state: &Arc<DispatcherState>, job_key: &str) -> DispatcherResult<()> {
     match state.kv.claims.delete(job_key).await {
         Ok(_) => {
             debug!(job_key, "claim released");

@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::{get, post};
-use axum::Router;
 use futures::stream::Stream;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -523,8 +523,7 @@ async fn requeue_job(
         }
     };
 
-    crate::jobs::transition_job(&state, &req.job_key, target_state, "admin_requeue", None)
-        .await?;
+    crate::jobs::transition_job(&state, &req.job_key, target_state, "admin_requeue", None).await?;
 
     if target_state == JobState::OnDeck {
         let _ = crate::assignment::try_assign_job(&state, &req.job_key).await;
@@ -571,7 +570,12 @@ async fn channel_send(
     Path(key): Path<String>,
     Json(body): Json<ChannelSendBody>,
 ) -> Result<impl IntoResponse, AppError> {
-    info!(job_key = key, sender = body.sender, message = body.message, "channel_send: received request");
+    info!(
+        job_key = key,
+        sender = body.sender,
+        message = body.message,
+        "channel_send: received request"
+    );
 
     // Verify job exists
     if !state.jobs.contains_key(&key) {
@@ -587,7 +591,11 @@ async fn channel_send(
         in_reply_to: None,
     };
 
-    info!(job_key = key, message_id = msg.message_id, "channel_send: publishing to NATS inbox");
+    info!(
+        job_key = key,
+        message_id = msg.message_id,
+        "channel_send: publishing to NATS inbox"
+    );
 
     state
         .nats
@@ -853,11 +861,9 @@ impl From<DispatcherError> for AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         match self {
-            AppError::NotFound(msg) => (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse { error: msg }),
-            )
-                .into_response(),
+            AppError::NotFound(msg) => {
+                (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg })).into_response()
+            }
             AppError::Internal(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {

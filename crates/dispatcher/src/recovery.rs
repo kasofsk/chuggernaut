@@ -28,10 +28,7 @@ pub async fn recover(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
     // 5. Reconcile jobs against claims
     reconcile_jobs_against_claims(state).await?;
 
-    info!(
-        jobs = state.jobs.len(),
-        "recovery complete"
-    );
+    info!(jobs = state.jobs.len(), "recovery complete");
 
     Ok(())
 }

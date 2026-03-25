@@ -67,10 +67,7 @@ pub fn register_container_cleanup(container_id: &str) {
     ATEXIT_REGISTERED.call_once(|| unsafe {
         libc::atexit(cleanup_containers);
     });
-    CONTAINER_IDS
-        .lock()
-        .unwrap()
-        .push(container_id.to_string());
+    CONTAINER_IDS.lock().unwrap().push(container_id.to_string());
 }
 
 // ---------------------------------------------------------------------------
@@ -80,11 +77,7 @@ pub fn register_container_cleanup(container_id: &str) {
 /// Start a shared NATS container with JetStream. Call once per process via OnceLock.
 pub async fn start_nats() -> ContainerAsync<Nats> {
     let nats_cmd = NatsServerCmd::default().with_jetstream();
-    Nats::default()
-        .with_cmd(&nats_cmd)
-        .start()
-        .await
-        .unwrap()
+    Nats::default().with_cmd(&nats_cmd).start().await.unwrap()
 }
 
 /// Get the host port for a NATS container.
@@ -164,11 +157,19 @@ pub async fn setup_forgejo_users(
     container
         .exec(
             ExecCommand::new([
-                "su-exec", "git", "forgejo", "admin", "user", "create",
+                "su-exec",
+                "git",
+                "forgejo",
+                "admin",
+                "user",
+                "create",
                 "--admin",
-                "--username", ADMIN_USER,
-                "--password", ADMIN_PASS,
-                "--email", "admin@chuggernaut.test",
+                "--username",
+                ADMIN_USER,
+                "--password",
+                ADMIN_PASS,
+                "--email",
+                "admin@chuggernaut.test",
                 "--must-change-password=false",
             ])
             .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
@@ -198,11 +199,19 @@ pub async fn setup_forgejo_users(
         container
             .exec(
                 ExecCommand::new([
-                    "su-exec", "git", "forgejo", "admin", "user", "create",
+                    "su-exec",
+                    "git",
+                    "forgejo",
+                    "admin",
+                    "user",
+                    "create",
                     "--admin",
-                    "--username", REVIEWER_USER,
-                    "--password", REVIEWER_PASS,
-                    "--email", "reviewer@chuggernaut.test",
+                    "--username",
+                    REVIEWER_USER,
+                    "--password",
+                    REVIEWER_PASS,
+                    "--email",
+                    "reviewer@chuggernaut.test",
                     "--must-change-password=false",
                 ])
                 .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
@@ -278,10 +287,7 @@ pub async fn start_runner(
             "/var/run/docker.sock",
             "/var/run/docker.sock",
         ))
-        .with_mount(Mount::bind_mount(
-            runner_config_path,
-            "/data/config.yaml",
-        ))
+        .with_mount(Mount::bind_mount(runner_config_path, "/data/config.yaml"))
         .with_cmd(["sh", "-c", &register_and_run])
         .with_startup_timeout(Duration::from_secs(60))
         .start()
@@ -294,12 +300,7 @@ pub async fn start_runner(
 // ---------------------------------------------------------------------------
 
 /// Create an org and repo in Forgejo. Returns (org_name, repo_name).
-pub async fn create_test_repo(
-    port: u16,
-    token: &str,
-    org: &str,
-    repo: &str,
-) {
+pub async fn create_test_repo(port: u16, token: &str, org: &str, repo: &str) {
     let url = forgejo_host_url(port);
     let http = reqwest::Client::new();
 
@@ -356,12 +357,14 @@ pub async fn set_repo_secret(
 ) {
     let url = forgejo_host_url(port);
     let http = reqwest::Client::new();
-    http.put(format!("{url}/api/v1/repos/{org}/{repo}/actions/secrets/{name}"))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({"data": value}))
-        .send()
-        .await
-        .unwrap();
+    http.put(format!(
+        "{url}/api/v1/repos/{org}/{repo}/actions/secrets/{name}"
+    ))
+    .header("Authorization", format!("token {token}"))
+    .json(&serde_json::json!({"data": value}))
+    .send()
+    .await
+    .unwrap();
 }
 
 // ---------------------------------------------------------------------------

@@ -103,11 +103,7 @@ fn has_path(
 
 /// Check if adding edge from -> to would create a cycle.
 /// (Check if `to` can reach `from` in the current graph.)
-pub async fn would_create_cycle(
-    state: &Arc<DispatcherState>,
-    from: &str,
-    to: &str,
-) -> bool {
+pub async fn would_create_cycle(state: &Arc<DispatcherState>, from: &str, to: &str) -> bool {
     let graph = state.graph.read().await;
     let from_node = match graph.index.get(from) {
         Some(&idx) => idx,
@@ -264,7 +260,9 @@ pub async fn repair_reverse_indexes(state: &Arc<DispatcherState>) -> DispatcherR
                         )
                         .await
                         {
-                            Ok(_) => { repairs += 1; }
+                            Ok(_) => {
+                                repairs += 1;
+                            }
                             Err(DispatcherError::Kv(msg)) if msg.contains("not found") => {}
                             Err(e) => return Err(e),
                         }

@@ -21,10 +21,7 @@ pub struct KvStores {
 /// Create or verify all KV buckets and JetStream streams.
 /// If `prefix` is Some, all bucket and stream names are suffixed with `_{prefix}`
 /// and stream subjects are prefixed with `{prefix}_`. Used for test isolation.
-pub async fn initialize(
-    js: &jetstream::Context,
-    _lease_secs: u64,
-) -> DispatcherResult<KvStores> {
+pub async fn initialize(js: &jetstream::Context, _lease_secs: u64) -> DispatcherResult<KvStores> {
     initialize_with_prefix(js, _lease_secs, None).await
 }
 

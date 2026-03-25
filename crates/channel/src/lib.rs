@@ -6,7 +6,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use futures::StreamExt;
 use serde_json::Value;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 
 use chuggernaut_types::{ChannelMessage, ChannelStatus};
@@ -73,10 +73,18 @@ pub async fn nats_inbox_listener(
             }
         };
 
-        info!(sender = channel_msg.sender, body = channel_msg.body, "received channel message from NATS inbox");
+        info!(
+            sender = channel_msg.sender,
+            body = channel_msg.body,
+            "received channel message from NATS inbox"
+        );
 
         if push_notifications {
-            info!(sender = channel_msg.sender, message_id = channel_msg.message_id, "pushing channel notification to MCP client");
+            info!(
+                sender = channel_msg.sender,
+                message_id = channel_msg.message_id,
+                "pushing channel notification to MCP client"
+            );
             let notification = mcp::JsonRpcNotification {
                 jsonrpc: "2.0",
                 method: mcp::NOTIFY_CHANNEL,
@@ -112,7 +120,11 @@ pub async fn handle_tool_call(
     match name {
         "channel_check" => {
             let messages = state.lock().await.drain_messages();
-            info!(job_key, count = messages.len(), "channel_check: draining inbox messages");
+            info!(
+                job_key,
+                count = messages.len(),
+                "channel_check: draining inbox messages"
+            );
             let texts: Vec<Value> = messages
                 .iter()
                 .map(|m| {
@@ -236,7 +248,11 @@ pub async fn handle_message(
         }
 
         mcp::METHOD_TOOLS_CALL => {
-            let tool_name = req.params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let tool_name = req
+                .params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let arguments = req
                 .params
                 .get("arguments")
@@ -252,7 +268,12 @@ pub async fn handle_message(
                     mcp::JsonRpcResponse::success(req.id.unwrap_or(Value::Null), result.unwrap())
                 }
                 Err(msg) => {
-                    warn!(tool = tool_name, job_key, error = msg.as_str(), "tool call failed");
+                    warn!(
+                        tool = tool_name,
+                        job_key,
+                        error = msg.as_str(),
+                        "tool call failed"
+                    );
                     mcp::JsonRpcResponse::error(req.id, -32000, msg.clone())
                 }
             };
@@ -335,10 +356,7 @@ mod tests {
     fn tool_definitions_push_notifications() {
         let tools = mcp::tool_definitions(true);
         let tools = tools.as_array().unwrap();
-        let names: Vec<&str> = tools
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"reply"));
         assert!(names.contains(&"update_status"));
         assert!(!names.contains(&"channel_check"));
@@ -349,10 +367,7 @@ mod tests {
     fn tool_definitions_mcp_mode() {
         let tools = mcp::tool_definitions(false);
         let tools = tools.as_array().unwrap();
-        let names: Vec<&str> = tools
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"channel_check"));
         assert!(names.contains(&"channel_send"));
         assert!(names.contains(&"update_status"));
@@ -375,10 +390,8 @@ mod tests {
 
     #[test]
     fn jsonrpc_response_success() {
-        let resp = mcp::JsonRpcResponse::success(
-            Value::Number(1.into()),
-            serde_json::json!({"ok": true}),
-        );
+        let resp =
+            mcp::JsonRpcResponse::success(Value::Number(1.into()), serde_json::json!({"ok": true}));
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["jsonrpc"], "2.0");
@@ -389,7 +402,8 @@ mod tests {
 
     #[test]
     fn jsonrpc_response_error() {
-        let resp = mcp::JsonRpcResponse::error(Some(Value::Number(2.into())), -32601, "not found".into());
+        let resp =
+            mcp::JsonRpcResponse::error(Some(Value::Number(2.into())), -32601, "not found".into());
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["error"]["code"], -32601);

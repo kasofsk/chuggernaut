@@ -51,8 +51,13 @@ impl Default for ReviewLevel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum OutcomeType {
-    Yield { pr_url: String },
-    Fail { reason: String, logs: Option<String> },
+    Yield {
+        pr_url: String,
+    },
+    Fail {
+        reason: String,
+        logs: Option<String>,
+    },
 }
 
 /// Token usage from a single Claude invocation.
@@ -387,7 +392,10 @@ pub struct Subject<T> {
 
 impl<T> Subject<T> {
     pub const fn new(name: &'static str) -> Self {
-        Self { name, _t: PhantomData }
+        Self {
+            name,
+            _t: PhantomData,
+        }
     }
 }
 
@@ -399,7 +407,10 @@ pub struct RequestSubject<Req, Resp> {
 
 impl<Req, Resp> RequestSubject<Req, Resp> {
     pub const fn new(name: &'static str) -> Self {
-        Self { name, _r: PhantomData }
+        Self {
+            name,
+            _r: PhantomData,
+        }
     }
 }
 
@@ -411,7 +422,10 @@ pub struct SubjectFn<T> {
 
 impl<T> SubjectFn<T> {
     pub const fn new(pattern: &'static str) -> Self {
-        Self { pattern, _t: PhantomData }
+        Self {
+            pattern,
+            _t: PhantomData,
+        }
     }
 
     pub fn format(&self, param: &str) -> String {

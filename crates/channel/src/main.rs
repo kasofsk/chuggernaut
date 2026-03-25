@@ -2,24 +2,31 @@ use std::sync::Arc;
 
 use clap::Parser;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 
-use chuggernaut_channel::{mcp, ChannelState};
+use chuggernaut_channel::{ChannelState, mcp};
 
 // ---------------------------------------------------------------------------
 // CLI args
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(name = "chuggernaut-channel", about = "MCP channel server bridging NATS ↔ Claude Code")]
+#[command(
+    name = "chuggernaut-channel",
+    about = "MCP channel server bridging NATS ↔ Claude Code"
+)]
 struct Args {
     /// Job key (e.g. acme.payments.57)
     #[arg(long, env = "CHUGGERNAUT_JOB_KEY")]
     job_key: String,
 
     /// NATS server URL
-    #[arg(long, env = "CHUGGERNAUT_NATS_URL", default_value = "nats://localhost:4222")]
+    #[arg(
+        long,
+        env = "CHUGGERNAUT_NATS_URL",
+        default_value = "nats://localhost:4222"
+    )]
     nats_url: String,
 
     /// Push incoming messages to Claude as MCP notifications (default: true).
@@ -65,7 +72,12 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    info!(job_key = args.job_key, nats_url = args.nats_url, channel_mode = args.push_notifications, "starting chuggernaut-channel MCP server");
+    info!(
+        job_key = args.job_key,
+        nats_url = args.nats_url,
+        channel_mode = args.push_notifications,
+        "starting chuggernaut-channel MCP server"
+    );
 
     let nats = async_nats::connect(&args.nats_url).await?;
     let js = async_nats::jetstream::new(nats.clone());

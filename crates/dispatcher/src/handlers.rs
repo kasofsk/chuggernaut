@@ -77,7 +77,10 @@ pub async fn start_handlers(state: Arc<DispatcherState>) -> DispatcherResult<()>
 // Worker events
 // ---------------------------------------------------------------------------
 
-async fn handle_worker_heartbeat(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
+async fn handle_worker_heartbeat(
+    state: Arc<DispatcherState>,
+    ready: Arc<Barrier>,
+) -> DispatcherResult<()> {
     let mut sub = state
         .nats
         .subscribe_subject(&subjects::WORKER_HEARTBEAT)
@@ -90,8 +93,7 @@ async fn handle_worker_heartbeat(state: Arc<DispatcherState>, ready: Arc<Barrier
         tokio::spawn(async move {
             match serde_json::from_slice::<WorkerHeartbeat>(&msg.payload) {
                 Ok(hb) => {
-                    if let Err(e) =
-                        crate::claims::renew_lease(&s, &hb.job_key, &hb.worker_id).await
+                    if let Err(e) = crate::claims::renew_lease(&s, &hb.job_key, &hb.worker_id).await
                     {
                         debug!(
                             job_key = hb.job_key,
@@ -107,7 +109,10 @@ async fn handle_worker_heartbeat(state: Arc<DispatcherState>, ready: Arc<Barrier
     Ok(())
 }
 
-async fn handle_worker_outcome(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
+async fn handle_worker_outcome(
+    state: Arc<DispatcherState>,
+    ready: Arc<Barrier>,
+) -> DispatcherResult<()> {
     let mut sub = state
         .nats
         .subscribe_subject(&subjects::WORKER_OUTCOME)
@@ -162,16 +167,38 @@ async fn process_outcome(
             .await?;
             state.jobs.insert(job_key.to_string(), job);
 
-            jobs::transition_job(state, job_key, JobState::InReview, "worker_yield", Some(worker_id))
-                .await?;
+            jobs::transition_job(
+                state,
+                job_key,
+                JobState::InReview,
+                "worker_yield",
+                Some(worker_id),
+            )
+            .await?;
 
-            jobs::journal_append(state, "yield", Some(job_key), Some(worker_id), Some(&format!("pr_url: {pr_url}"))).await;
+            jobs::journal_append(
+                state,
+                "yield",
+                Some(job_key),
+                Some(worker_id),
+                Some(&format!("pr_url: {pr_url}")),
+            )
+            .await;
 
             // Dispatch review action
-            let review_level = state.jobs.get(job_key)
+            let review_level = state
+                .jobs
+                .get(job_key)
                 .map(|j| format!("{:?}", j.review).to_lowercase())
                 .unwrap_or_else(|| "high".to_string());
-            if let Err(e) = crate::action_dispatch::dispatch_review_action(state, job_key, &pr_url, &review_level).await {
+            if let Err(e) = crate::action_dispatch::dispatch_review_action(
+                state,
+                job_key,
+                &pr_url,
+                &review_level,
+            )
+            .await
+            {
                 warn!(job_key, error = %e, "review action dispatch failed");
             }
 
@@ -179,8 +206,14 @@ async fn process_outcome(
             crate::assignment::try_dispatch_next(state).await?;
         }
         OutcomeType::Fail { reason, logs: _ } => {
-            jobs::transition_job(state, job_key, JobState::Failed, "worker_fail", Some(worker_id))
-                .await?;
+            jobs::transition_job(
+                state,
+                job_key,
+                JobState::Failed,
+                "worker_fail",
+                Some(worker_id),
+            )
+            .await?;
 
             let entry = ActivityEntry {
                 timestamp: Utc::now(),
@@ -191,7 +224,14 @@ async fn process_outcome(
 
             schedule_auto_retry(state, job_key).await;
 
-            jobs::journal_append(state, "failed", Some(job_key), Some(worker_id), Some(&reason)).await;
+            jobs::journal_append(
+                state,
+                "failed",
+                Some(job_key),
+                Some(worker_id),
+                Some(&reason),
+            )
+            .await;
 
             // Slot freed — try to dispatch next queued job
             crate::assignment::try_dispatch_next(state).await?;
@@ -204,7 +244,10 @@ async fn process_outcome(
 // Admin commands
 // ---------------------------------------------------------------------------
 
-async fn handle_admin_create_job(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
+async fn handle_admin_create_job(
+    state: Arc<DispatcherState>,
+    ready: Arc<Barrier>,
+) -> DispatcherResult<()> {
     let mut sub = state
         .nats
         .subscribe_request(&subjects::ADMIN_CREATE_JOB)
@@ -219,9 +262,14 @@ async fn handle_admin_create_job(state: Arc<DispatcherState>, ready: Arc<Barrier
                 Ok(req) => match jobs::create_job(&s, req).await {
                     Ok(key) => {
                         // Reply immediately so the client isn't blocked by action dispatch
-                        let resp = serde_json::to_vec(&CreateJobResponse { key: key.clone() }).unwrap_or_default();
+                        let resp = serde_json::to_vec(&CreateJobResponse { key: key.clone() })
+                            .unwrap_or_default();
                         if let Some(reply) = msg.reply {
-                            if let Err(e) = s.nats.publish_raw(reply.to_string(), bytes::Bytes::from(resp)).await {
+                            if let Err(e) = s
+                                .nats
+                                .publish_raw(reply.to_string(), bytes::Bytes::from(resp))
+                                .await
+                            {
                                 warn!("failed to reply to create-job: {e}");
                             }
                             let _ = s.nats.raw().flush().await;
@@ -234,12 +282,22 @@ async fn handle_admin_create_job(state: Arc<DispatcherState>, ready: Arc<Barrier
                         }
                         return;
                     }
-                    Err(e) => serde_json::to_vec(&ErrorResponse { error: e.to_string() }).unwrap_or_default(),
+                    Err(e) => serde_json::to_vec(&ErrorResponse {
+                        error: e.to_string(),
+                    })
+                    .unwrap_or_default(),
                 },
-                Err(e) => serde_json::to_vec(&ErrorResponse { error: format!("invalid payload: {e}") }).unwrap_or_default(),
+                Err(e) => serde_json::to_vec(&ErrorResponse {
+                    error: format!("invalid payload: {e}"),
+                })
+                .unwrap_or_default(),
             };
             if let Some(reply) = msg.reply {
-                if let Err(e) = s.nats.publish_raw(reply.to_string(), bytes::Bytes::from(reply_payload)).await {
+                if let Err(e) = s
+                    .nats
+                    .publish_raw(reply.to_string(), bytes::Bytes::from(reply_payload))
+                    .await
+                {
                     warn!("failed to reply to create-job: {e}");
                 }
             }
@@ -248,7 +306,10 @@ async fn handle_admin_create_job(state: Arc<DispatcherState>, ready: Arc<Barrier
     Ok(())
 }
 
-async fn handle_admin_requeue(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
+async fn handle_admin_requeue(
+    state: Arc<DispatcherState>,
+    ready: Arc<Barrier>,
+) -> DispatcherResult<()> {
     let mut sub = state
         .nats
         .subscribe_request(&subjects::ADMIN_REQUEUE)
@@ -262,12 +323,22 @@ async fn handle_admin_requeue(state: Arc<DispatcherState>, ready: Arc<Barrier>) 
             let reply_payload = match serde_json::from_slice::<RequeueRequest>(&msg.payload) {
                 Ok(req) => match process_requeue(&s, &req).await {
                     Ok(_) => b"{}".to_vec(),
-                    Err(e) => serde_json::to_vec(&ErrorResponse { error: e.to_string() }).unwrap_or_default(),
+                    Err(e) => serde_json::to_vec(&ErrorResponse {
+                        error: e.to_string(),
+                    })
+                    .unwrap_or_default(),
                 },
-                Err(e) => serde_json::to_vec(&ErrorResponse { error: format!("invalid payload: {e}") }).unwrap_or_default(),
+                Err(e) => serde_json::to_vec(&ErrorResponse {
+                    error: format!("invalid payload: {e}"),
+                })
+                .unwrap_or_default(),
             };
             if let Some(reply) = msg.reply {
-                if let Err(e) = s.nats.publish_raw(reply.to_string(), bytes::Bytes::from(reply_payload)).await {
+                if let Err(e) = s
+                    .nats
+                    .publish_raw(reply.to_string(), bytes::Bytes::from(reply_payload))
+                    .await
+                {
                     warn!("failed to reply to requeue: {e}");
                 }
             }
@@ -276,7 +347,10 @@ async fn handle_admin_requeue(state: Arc<DispatcherState>, ready: Arc<Barrier>) 
     Ok(())
 }
 
-async fn process_requeue(state: &Arc<DispatcherState>, req: &RequeueRequest) -> DispatcherResult<()> {
+async fn process_requeue(
+    state: &Arc<DispatcherState>,
+    req: &RequeueRequest,
+) -> DispatcherResult<()> {
     let target_state = match req.target {
         RequeueTarget::OnIce => JobState::OnIce,
         RequeueTarget::OnDeck => {
@@ -285,9 +359,17 @@ async fn process_requeue(state: &Arc<DispatcherState>, req: &RequeueRequest) -> 
             }
             if let Some((deps, _)) = kv_get::<DepRecord>(&state.kv.deps, &req.job_key).await? {
                 let all_done = deps.depends_on.iter().all(|dep_key| {
-                    state.jobs.get(dep_key).map(|j| j.state == JobState::Done).unwrap_or(false)
+                    state
+                        .jobs
+                        .get(dep_key)
+                        .map(|j| j.state == JobState::Done)
+                        .unwrap_or(false)
                 });
-                if all_done { JobState::OnDeck } else { JobState::Blocked }
+                if all_done {
+                    JobState::OnDeck
+                } else {
+                    JobState::Blocked
+                }
             } else {
                 JobState::OnDeck
             }
@@ -309,11 +391,21 @@ async fn process_requeue(state: &Arc<DispatcherState>, req: &RequeueRequest) -> 
     if target_state == JobState::OnDeck {
         crate::assignment::try_assign_job(state, &req.job_key).await?;
     }
-    jobs::journal_append(state, "requeued", Some(&req.job_key), None, Some(&format!("target: {target_state:?}"))).await;
+    jobs::journal_append(
+        state,
+        "requeued",
+        Some(&req.job_key),
+        None,
+        Some(&format!("target: {target_state:?}")),
+    )
+    .await;
     Ok(())
 }
 
-async fn handle_admin_close_job(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
+async fn handle_admin_close_job(
+    state: Arc<DispatcherState>,
+    ready: Arc<Barrier>,
+) -> DispatcherResult<()> {
     let mut sub = state
         .nats
         .subscribe_request(&subjects::ADMIN_CLOSE_JOB)
@@ -327,12 +419,22 @@ async fn handle_admin_close_job(state: Arc<DispatcherState>, ready: Arc<Barrier>
             let reply_payload = match serde_json::from_slice::<CloseJobRequest>(&msg.payload) {
                 Ok(req) => match process_close_job(&s, &req).await {
                     Ok(_) => b"{}".to_vec(),
-                    Err(e) => serde_json::to_vec(&ErrorResponse { error: e.to_string() }).unwrap_or_default(),
+                    Err(e) => serde_json::to_vec(&ErrorResponse {
+                        error: e.to_string(),
+                    })
+                    .unwrap_or_default(),
                 },
-                Err(e) => serde_json::to_vec(&ErrorResponse { error: format!("invalid payload: {e}") }).unwrap_or_default(),
+                Err(e) => serde_json::to_vec(&ErrorResponse {
+                    error: format!("invalid payload: {e}"),
+                })
+                .unwrap_or_default(),
             };
             if let Some(reply) = msg.reply {
-                if let Err(e) = s.nats.publish_raw(reply.to_string(), bytes::Bytes::from(reply_payload)).await {
+                if let Err(e) = s
+                    .nats
+                    .publish_raw(reply.to_string(), bytes::Bytes::from(reply_payload))
+                    .await
+                {
                     warn!("failed to reply to close-job: {e}");
                 }
             }
@@ -341,9 +443,20 @@ async fn handle_admin_close_job(state: Arc<DispatcherState>, ready: Arc<Barrier>
     Ok(())
 }
 
-async fn process_close_job(state: &Arc<DispatcherState>, req: &CloseJobRequest) -> DispatcherResult<()> {
-    let target = if req.revoke { JobState::Revoked } else { JobState::Done };
-    let trigger = if req.revoke { "admin_revoke" } else { "admin_close" };
+async fn process_close_job(
+    state: &Arc<DispatcherState>,
+    req: &CloseJobRequest,
+) -> DispatcherResult<()> {
+    let target = if req.revoke {
+        JobState::Revoked
+    } else {
+        JobState::Done
+    };
+    let trigger = if req.revoke {
+        "admin_revoke"
+    } else {
+        "admin_close"
+    };
 
     // Release claim if held.
     let needs_release = state
@@ -371,7 +484,10 @@ async fn process_close_job(state: &Arc<DispatcherState>, req: &CloseJobRequest) 
 // Review decisions
 // ---------------------------------------------------------------------------
 
-async fn handle_review_decision(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
+async fn handle_review_decision(
+    state: Arc<DispatcherState>,
+    ready: Arc<Barrier>,
+) -> DispatcherResult<()> {
     let mut sub = state
         .nats
         .subscribe_subject(&subjects::REVIEW_DECISION)
@@ -395,7 +511,10 @@ async fn handle_review_decision(state: Arc<DispatcherState>, ready: Arc<Barrier>
     Ok(())
 }
 
-async fn process_review_decision(state: &Arc<DispatcherState>, decision: ReviewDecision) -> DispatcherResult<()> {
+async fn process_review_decision(
+    state: &Arc<DispatcherState>,
+    decision: ReviewDecision,
+) -> DispatcherResult<()> {
     let job_key = &decision.job_key;
 
     // Record token usage for this review action
@@ -413,14 +532,42 @@ async fn process_review_decision(state: &Arc<DispatcherState>, decision: ReviewD
             jobs::journal_append(state, "review_approved", Some(job_key), None, None).await;
         }
         DecisionType::ChangesRequested { feedback } => {
-            jobs::transition_job(state, job_key, JobState::ChangesRequested, "review_changes_requested", None).await?;
+            jobs::transition_job(
+                state,
+                job_key,
+                JobState::ChangesRequested,
+                "review_changes_requested",
+                None,
+            )
+            .await?;
             // Dispatch a new action with review feedback
             crate::assignment::try_assign_rework(state, job_key, &feedback).await?;
-            jobs::journal_append(state, "review_changes_requested", Some(job_key), None, Some(&feedback)).await;
+            jobs::journal_append(
+                state,
+                "review_changes_requested",
+                Some(job_key),
+                None,
+                Some(&feedback),
+            )
+            .await;
         }
         DecisionType::Escalated { reviewer_login } => {
-            jobs::transition_job(state, job_key, JobState::Escalated, "review_escalated", None).await?;
-            jobs::journal_append(state, "review_escalated", Some(job_key), None, Some(&format!("human reviewer: {reviewer_login}"))).await;
+            jobs::transition_job(
+                state,
+                job_key,
+                JobState::Escalated,
+                "review_escalated",
+                None,
+            )
+            .await?;
+            jobs::journal_append(
+                state,
+                "review_escalated",
+                Some(job_key),
+                None,
+                Some(&format!("human reviewer: {reviewer_login}")),
+            )
+            .await;
         }
     }
     Ok(())
@@ -430,7 +577,10 @@ async fn process_review_decision(state: &Arc<DispatcherState>, decision: ReviewD
 // Activity / Journal append
 // ---------------------------------------------------------------------------
 
-async fn handle_activity_append(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
+async fn handle_activity_append(
+    state: Arc<DispatcherState>,
+    ready: Arc<Barrier>,
+) -> DispatcherResult<()> {
     let mut sub = state
         .nats
         .subscribe_subject(&subjects::ACTIVITY_APPEND)
@@ -450,7 +600,10 @@ async fn handle_activity_append(state: Arc<DispatcherState>, ready: Arc<Barrier>
     Ok(())
 }
 
-async fn handle_journal_append(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
+async fn handle_journal_append(
+    state: Arc<DispatcherState>,
+    ready: Arc<Barrier>,
+) -> DispatcherResult<()> {
     let mut sub = state
         .nats
         .subscribe_subject(&subjects::JOURNAL_APPEND)
@@ -464,8 +617,11 @@ async fn handle_journal_append(state: Arc<DispatcherState>, ready: Arc<Barrier>)
             match serde_json::from_slice::<JournalAppend>(&msg.payload) {
                 Ok(append) => {
                     let entry = JournalEntry {
-                        timestamp: append.timestamp, action: append.action,
-                        job_key: append.job_key, worker_id: append.worker_id, details: append.details,
+                        timestamp: append.timestamp,
+                        action: append.action,
+                        job_key: append.job_key,
+                        worker_id: append.worker_id,
+                        details: append.details,
                     };
                     let key = format!("{}.0", append.timestamp.timestamp_nanos_opt().unwrap_or(0));
                     if let Err(e) = jobs::kv_put(&s.kv.journal, &key, &entry).await {
@@ -483,7 +639,10 @@ async fn handle_journal_append(state: Arc<DispatcherState>, ready: Arc<Barrier>)
 // Monitor advisories
 // ---------------------------------------------------------------------------
 
-async fn handle_monitor_events(state: Arc<DispatcherState>, ready: Arc<Barrier>) -> DispatcherResult<()> {
+async fn handle_monitor_events(
+    state: Arc<DispatcherState>,
+    ready: Arc<Barrier>,
+) -> DispatcherResult<()> {
     let mut sub = state
         .nats
         .subscribe("chuggernaut.monitor.>")
@@ -503,7 +662,11 @@ async fn handle_monitor_events(state: Arc<DispatcherState>, ready: Arc<Barrier>)
     Ok(())
 }
 
-async fn dispatch_monitor_event(state: &Arc<DispatcherState>, subject: &str, payload: &[u8]) -> DispatcherResult<()> {
+async fn dispatch_monitor_event(
+    state: &Arc<DispatcherState>,
+    subject: &str,
+    payload: &[u8],
+) -> DispatcherResult<()> {
     // Strip namespace prefix from the incoming subject to compare against constants
     let base = state.nats.strip_prefix(subject);
 
@@ -561,13 +724,31 @@ async fn schedule_auto_retry(state: &Arc<DispatcherState>, job_key: &str) {
     }
 }
 
-async fn handle_lease_expired(state: &Arc<DispatcherState>, event: LeaseExpiredEvent) -> DispatcherResult<()> {
+async fn handle_lease_expired(
+    state: &Arc<DispatcherState>,
+    event: LeaseExpiredEvent,
+) -> DispatcherResult<()> {
     if let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &event.job_key).await? {
         if claim.lease_deadline < Utc::now() {
-            info!(job_key = event.job_key, worker_id = event.worker_id, "lease expired, releasing claim");
+            info!(
+                job_key = event.job_key,
+                worker_id = event.worker_id,
+                "lease expired, releasing claim"
+            );
             crate::claims::release_claim(state, &event.job_key).await?;
-            jobs::transition_job(state, &event.job_key, JobState::Failed, "lease_expired", Some(&event.worker_id)).await?;
-            let entry = ActivityEntry { timestamp: Utc::now(), kind: "lease_expired".to_string(), message: format!("Worker {} lease expired", event.worker_id) };
+            jobs::transition_job(
+                state,
+                &event.job_key,
+                JobState::Failed,
+                "lease_expired",
+                Some(&event.worker_id),
+            )
+            .await?;
+            let entry = ActivityEntry {
+                timestamp: Utc::now(),
+                kind: "lease_expired".to_string(),
+                message: format!("Worker {} lease expired", event.worker_id),
+            };
             jobs::append_activity(state, &event.job_key, entry).await;
 
             schedule_auto_retry(state, &event.job_key).await;
@@ -579,14 +760,35 @@ async fn handle_lease_expired(state: &Arc<DispatcherState>, event: LeaseExpiredE
     Ok(())
 }
 
-async fn handle_job_timeout(state: &Arc<DispatcherState>, event: JobTimeoutEvent) -> DispatcherResult<()> {
+async fn handle_job_timeout(
+    state: &Arc<DispatcherState>,
+    event: JobTimeoutEvent,
+) -> DispatcherResult<()> {
     if let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &event.job_key).await? {
         let elapsed = (Utc::now() - claim.claimed_at).num_seconds() as u64;
         if elapsed > claim.timeout_secs {
-            info!(job_key = event.job_key, worker_id = event.worker_id, "job timeout, releasing claim");
+            info!(
+                job_key = event.job_key,
+                worker_id = event.worker_id,
+                "job timeout, releasing claim"
+            );
             crate::claims::release_claim(state, &event.job_key).await?;
-            jobs::transition_job(state, &event.job_key, JobState::Failed, "job_timeout", Some(&event.worker_id)).await?;
-            let entry = ActivityEntry { timestamp: Utc::now(), kind: "job_timeout".to_string(), message: format!("Job timed out after {}s (limit: {}s)", elapsed, claim.timeout_secs) };
+            jobs::transition_job(
+                state,
+                &event.job_key,
+                JobState::Failed,
+                "job_timeout",
+                Some(&event.worker_id),
+            )
+            .await?;
+            let entry = ActivityEntry {
+                timestamp: Utc::now(),
+                kind: "job_timeout".to_string(),
+                message: format!(
+                    "Job timed out after {}s (limit: {}s)",
+                    elapsed, claim.timeout_secs
+                ),
+            };
             jobs::append_activity(state, &event.job_key, entry).await;
 
             schedule_auto_retry(state, &event.job_key).await;
@@ -598,7 +800,10 @@ async fn handle_job_timeout(state: &Arc<DispatcherState>, event: JobTimeoutEvent
     Ok(())
 }
 
-async fn handle_orphan(_state: &Arc<DispatcherState>, event: OrphanDetectedEvent) -> DispatcherResult<()> {
+async fn handle_orphan(
+    _state: &Arc<DispatcherState>,
+    event: OrphanDetectedEvent,
+) -> DispatcherResult<()> {
     match event.kind {
         OrphanKind::ClaimlessOnTheStack => {
             warn!(job_key = event.job_key, kind = ?event.kind, "orphan detected (bug indicator)");
@@ -607,15 +812,23 @@ async fn handle_orphan(_state: &Arc<DispatcherState>, event: OrphanDetectedEvent
     Ok(())
 }
 
-async fn handle_retry(state: &Arc<DispatcherState>, event: RetryEligibleEvent) -> DispatcherResult<()> {
+async fn handle_retry(
+    state: &Arc<DispatcherState>,
+    event: RetryEligibleEvent,
+) -> DispatcherResult<()> {
     if let Some(job) = state.jobs.get(&event.job_key) {
         if job.state == JobState::Failed
             && job.retry_count <= job.max_retries
             && job.retry_after.is_some_and(|ra| ra <= Utc::now())
         {
-            info!(job_key = event.job_key, retry_count = job.retry_count, "retry eligible, requeueing");
+            info!(
+                job_key = event.job_key,
+                retry_count = job.retry_count,
+                "retry eligible, requeueing"
+            );
             drop(job);
-            jobs::transition_job(state, &event.job_key, JobState::OnDeck, "auto_retry", None).await?;
+            jobs::transition_job(state, &event.job_key, JobState::OnDeck, "auto_retry", None)
+                .await?;
             crate::assignment::try_assign_job(state, &event.job_key).await?;
         }
     }

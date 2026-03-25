@@ -2,13 +2,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use testcontainers::runners::AsyncRunner;
 use testcontainers::ImageExt;
+use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::nats::{Nats, NatsServerCmd};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
-use chuggernaut_channel::{handle_message, handle_tool_call, mcp, nats_inbox_listener, ChannelState};
+use chuggernaut_channel::{
+    ChannelState, handle_message, handle_tool_call, mcp, nats_inbox_listener,
+};
 use chuggernaut_test_utils as test_utils;
 use chuggernaut_types::{ChannelMessage, ChannelStatus};
 
@@ -23,11 +25,7 @@ fn test_nats_port() -> u16 {
         std::thread::spawn(|| {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
                 let nats_cmd = NatsServerCmd::default().with_jetstream();
-                let container = Nats::default()
-                    .with_cmd(&nats_cmd)
-                    .start()
-                    .await
-                    .unwrap();
+                let container = Nats::default().with_cmd(&nats_cmd).start().await.unwrap();
                 let port = container.get_host_port_ipv4(4222).await.unwrap();
                 test_utils::register_container_cleanup(container.id());
                 Box::leak(Box::new(container));
@@ -97,7 +95,10 @@ async fn mcp_initialize_channel_mode() {
 
     assert_eq!(parsed["result"]["protocolVersion"], mcp::PROTOCOL_VERSION);
     assert!(parsed["result"]["capabilities"]["experimental"]["claude/channel"].is_object());
-    assert_eq!(parsed["result"]["serverInfo"]["name"], "chuggernaut-channel");
+    assert_eq!(
+        parsed["result"]["serverInfo"]["name"],
+        "chuggernaut-channel"
+    );
 }
 
 #[tokio::test]
@@ -118,7 +119,11 @@ async fn mcp_initialize_mcp_mode() {
         .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&resp).unwrap();
 
-    assert!(parsed["result"]["capabilities"].get("experimental").is_none());
+    assert!(
+        parsed["result"]["capabilities"]
+            .get("experimental")
+            .is_none()
+    );
     assert!(parsed["result"]["capabilities"]["tools"].is_object());
 }
 
@@ -391,10 +396,12 @@ async fn update_status_writes_kv() {
     .await
     .unwrap();
 
-    assert!(result["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("running tests"));
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("running tests")
+    );
 
     // Verify KV entry
     let kv = js
@@ -426,10 +433,12 @@ async fn update_status_without_progress() {
     .await
     .unwrap();
 
-    assert!(result["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("exploring codebase"));
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("exploring codebase")
+    );
 
     let kv = js
         .get_key_value(chuggernaut_types::buckets::CHANNELS)
@@ -715,15 +724,8 @@ async fn mcp_bridge_subprocess_to_nats() {
                 }
             };
 
-            if let Some(response) = handle_message(
-                req,
-                &state,
-                &nats,
-                &js,
-                &job_key,
-                channel_mode,
-            )
-            .await
+            if let Some(response) =
+                handle_message(req, &state, &nats, &js, &job_key, channel_mode).await
             {
                 eprintln!("bridge: writing response: {response}");
                 stdin_writer.write_all(response.as_bytes()).await?;
@@ -875,9 +877,9 @@ exit 0
                 Err(_) => continue,
             };
 
-            if let Some(response) = handle_message(
-                req, &state, &nats, &js, &job_key, channel_mode,
-            ).await {
+            if let Some(response) =
+                handle_message(req, &state, &nats, &js, &job_key, channel_mode).await
+            {
                 // Capture channel_check response for assertion
                 if response.contains("channel_check") || response.contains("what is your status") {
                     channel_check_text = response.clone();
@@ -888,7 +890,8 @@ exit 0
             }
         }
         Ok::<_, anyhow::Error>(())
-    }).await;
+    })
+    .await;
 
     assert!(bridge_result.is_ok(), "bridge timed out");
     let status = child.wait().await.unwrap();

@@ -35,11 +35,7 @@ impl NatsClient {
     }
 
     /// Create a prefixed client with JetStream (dispatcher tests).
-    pub fn with_prefix(
-        client: async_nats::Client,
-        js: jetstream::Context,
-        prefix: String,
-    ) -> Self {
+    pub fn with_prefix(client: async_nats::Client, js: jetstream::Context, prefix: String) -> Self {
         Self {
             client,
             js: Some(js),
@@ -59,7 +55,9 @@ impl NatsClient {
 
     /// Access the JetStream context. Panics if not configured.
     pub fn jetstream(&self) -> &jetstream::Context {
-        self.js.as_ref().expect("JetStream not configured on this NatsClient")
+        self.js
+            .as_ref()
+            .expect("JetStream not configured on this NatsClient")
     }
 
     /// Apply the prefix to a subject string.
@@ -186,8 +184,10 @@ impl NatsClient {
         &self,
         subject: &str,
         payload: Bytes,
-    ) -> Result<async_nats::jetstream::context::PublishAckFuture, async_nats::jetstream::context::PublishError>
-    {
+    ) -> Result<
+        async_nats::jetstream::context::PublishAckFuture,
+        async_nats::jetstream::context::PublishError,
+    > {
         let s = self.prefixed(subject);
         self.jetstream().publish(s, payload).await
     }

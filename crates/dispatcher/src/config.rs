@@ -30,9 +30,10 @@ impl Config {
         Self {
             nats_url: env::var("CHUGGERNAUT_NATS_URL")
                 .unwrap_or_else(|_| "nats://localhost:4222".to_string()),
-            nats_worker_url: env::var("CHUGGERNAUT_NATS_WORKER_URL")
-                .unwrap_or_else(|_| env::var("CHUGGERNAUT_NATS_URL")
-                    .unwrap_or_else(|_| "nats://localhost:4222".to_string())),
+            nats_worker_url: env::var("CHUGGERNAUT_NATS_WORKER_URL").unwrap_or_else(|_| {
+                env::var("CHUGGERNAUT_NATS_URL")
+                    .unwrap_or_else(|_| "nats://localhost:4222".to_string())
+            }),
             http_listen: env::var("CHUGGERNAUT_HTTP_LISTEN")
                 .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
             lease_secs: parse_env("CHUGGERNAUT_LEASE_SECS", 60),
@@ -53,8 +54,7 @@ impl Config {
             review_runner_label: env::var("CHUGGERNAUT_REVIEW_RUNNER_LABEL")
                 .unwrap_or_else(|_| "ubuntu-latest".to_string()),
             rework_limit: parse_env("CHUGGERNAUT_REWORK_LIMIT", 3),
-            human_login: env::var("CHUGGERNAUT_HUMAN_LOGIN")
-                .unwrap_or_else(|_| "you".to_string()),
+            human_login: env::var("CHUGGERNAUT_HUMAN_LOGIN").unwrap_or_else(|_| "you".to_string()),
         }
     }
 }
