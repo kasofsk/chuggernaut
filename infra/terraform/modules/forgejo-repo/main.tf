@@ -6,11 +6,10 @@ locals {
   api = "${var.forgejo_url}/api/v1"
   auth = "Authorization: token ${var.admin_token}"
 
-  # Files to push into the repo (workflows + actions)
-  repo_files = {
-    ".forgejo/workflows/work.yml"          = var.work_workflow
-    ".forgejo/workflows/review.yml"        = var.review_workflow
-    ".forgejo/actions/chug/action.yml"     = var.chug_action
+  # Workflow files to push into the repo (with {{ACTIONS_URL}} replaced)
+  workflows = {
+    "work.yml"   = replace(var.work_workflow, "{{ACTIONS_URL}}", var.actions_url)
+    "review.yml" = replace(var.review_workflow, "{{ACTIONS_URL}}", var.actions_url)
   }
 
   # Action variables (service URLs)
@@ -176,13 +175,12 @@ resource "terraform_data" "reviewers_team" {
 # cause the second to fail with a conflict).
 # ---------------------------------------------------------------------------
 
-resource "terraform_data" "repo_files" {
+resource "terraform_data" "workflows" {
   depends_on = [terraform_data.repo]
 
   triggers_replace = {
-    work_content   = var.work_workflow
-    review_content = var.review_workflow
-    chug_content   = var.chug_action
+    work_content   = local.workflows["work.yml"]
+    review_content = local.workflows["review.yml"]
   }
 
   provisioner "local-exec" {
@@ -190,8 +188,9 @@ resource "terraform_data" "repo_files" {
       set -euo pipefail
 
       push_file() {
-        local FILE_PATH="$1"
+        local FILENAME="$1"
         local CONTENT_B64="$2"
+        local FILE_PATH=".forgejo/workflows/$FILENAME"
 
         # Check if file already exists to get its SHA
         EXISTING=$(curl -s \
@@ -200,7 +199,7 @@ resource "terraform_data" "repo_files" {
         SHA=$(echo "$EXISTING" | jq -r '.sha // empty')
 
         if [ -n "$SHA" ]; then
-          PAYLOAD=$(jq -n --arg msg "chore: update $FILE_PATH" \
+          PAYLOAD=$(jq -n --arg msg "chore: update $FILENAME workflow" \
                           --arg content "$CONTENT_B64" \
                           --arg sha "$SHA" \
                           '{message: $msg, content: $content, sha: $sha}')
@@ -210,7 +209,7 @@ resource "terraform_data" "repo_files" {
             -H "Content-Type: application/json" \
             -d "$PAYLOAD"
         else
-          PAYLOAD=$(jq -n --arg msg "chore: add $FILE_PATH" \
+          PAYLOAD=$(jq -n --arg msg "chore: add $FILENAME workflow" \
                           --arg content "$CONTENT_B64" \
                           '{message: $msg, content: $content}')
           curl -sf -X POST \
@@ -220,13 +219,12 @@ resource "terraform_data" "repo_files" {
             -d "$PAYLOAD"
         fi
 
-        echo "$FILE_PATH: pushed"
+        echo "Workflow $FILENAME: pushed"
       }
 
       # Push sequentially — each creates a git commit
-      push_file ".forgejo/actions/chug/action.yml" "${base64encode(var.chug_action)}"
-      push_file ".forgejo/workflows/work.yml" "${base64encode(var.work_workflow)}"
-      push_file ".forgejo/workflows/review.yml" "${base64encode(var.review_workflow)}"
+      push_file "work.yml" "${base64encode(local.workflows["work.yml"])}"
+      push_file "review.yml" "${base64encode(local.workflows["review.yml"])}"
     EOT
   }
 }

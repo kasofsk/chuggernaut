@@ -23,7 +23,7 @@ struct Args {
     nats_url: String,
 
     /// Enable channel mode (push notifications). When false, uses MCP-only poll mode.
-    #[arg(long, env = "CHUGGERNAUT_CHANNEL_MODE", default_value = "true")]
+    #[arg(long, env = "CHUGGERNAUT_CHANNEL_MODE", default_value_t = true, num_args = 0..=1, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
     channel_mode: bool,
 }
 

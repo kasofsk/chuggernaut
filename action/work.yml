@@ -39,8 +39,11 @@ jobs:
       - name: Fetch job details from NATS
         id: job
         run: |
+          echo "Fetching job ${{ inputs.job_key }} from NATS at $NATS_URL"
           JOB_JSON=$(nats kv get chuggernaut_jobs "${{ inputs.job_key }}" --raw)
-          echo "title=$(echo "$JOB_JSON" | jq -r .title)" >> "$GITHUB_OUTPUT"
+          TITLE=$(echo "$JOB_JSON" | jq -r .title)
+          echo "Job title: $TITLE"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
           {
             echo 'body<<CHUGGERNAUT_EOF'
             echo "$JOB_JSON" | jq -r .body
@@ -49,12 +52,15 @@ jobs:
 
       - name: Build prompt
         id: prompt
+        env:
+          JOB_TITLE: ${{ steps.job.outputs.title }}
+          JOB_BODY: ${{ steps.job.outputs.body }}
+          JOB_KEY: ${{ inputs.job_key }}
+          IS_REWORK: ${{ inputs.is_rework }}
+          REVIEW_FEEDBACK: ${{ inputs.review_feedback }}
         run: |
-          PROMPT="You are working on job ${{ inputs.job_key }} in this repository.
-
-          ## ${{ steps.job.outputs.title }}
-
-          ${{ steps.job.outputs.body }}
+          cat > /tmp/prompt.md <<'PROMPT_EOF'
+          You are working on a job in this repository.
 
           ## Instructions
 
@@ -69,27 +75,40 @@ jobs:
           You have access to a chuggernaut MCP server with these tools:
           - **channel_check**: Call this periodically (every few major steps) to check for messages from the orchestrator. If someone requests a status update, respond via channel_send.
           - **channel_send**: Send a message back to the orchestrator (e.g. to reply to a status request).
-          - **update_status**: Report your current progress. Call this after completing each major step (e.g. \"exploring codebase\", \"implementing feature\", \"running tests\"). Include a progress percentage if you can estimate one.
+          - **update_status**: Report your current progress. Call this after completing each major step (e.g. "exploring codebase", "implementing feature", "running tests"). Include a progress percentage if you can estimate one.
 
-          If you receive a DEADLINE WARNING, wrap up immediately: commit and push your progress."
+          If you receive a DEADLINE WARNING, wrap up immediately: commit and push your progress.
+          PROMPT_EOF
 
-          if [ "${{ inputs.is_rework }}" = "true" ] && [ -n "${{ inputs.review_feedback }}" ]; then
-            PROMPT="${PROMPT}
+          # Prepend dynamic content (safe from shell expansion)
+          {
+            echo "You are working on job ${JOB_KEY} in this repository."
+            echo ""
+            echo "## ${JOB_TITLE}"
+            echo ""
+            echo "${JOB_BODY}"
+            echo ""
+            cat /tmp/prompt.md
+          } > /tmp/full-prompt.md
 
-          ## Rework
-
-          A reviewer has requested changes. Address the following feedback:
-
-          ${{ inputs.review_feedback }}"
+          if [ "$IS_REWORK" = "true" ] && [ -n "$REVIEW_FEEDBACK" ]; then
+            {
+              echo ""
+              echo "## Rework"
+              echo ""
+              echo "A reviewer has requested changes. Address the following feedback:"
+              echo ""
+              echo "$REVIEW_FEEDBACK"
+            } >> /tmp/full-prompt.md
           fi
 
           {
             echo 'value<<CHUGGERNAUT_EOF'
-            echo "$PROMPT"
+            cat /tmp/full-prompt.md
             echo 'CHUGGERNAUT_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - uses: .forgejo/actions/chug
+      - uses: {{ACTIONS_URL}}/chuggernaut/actions/chug@main
         with:
           job_key: ${{ inputs.job_key }}
           nats_url: ${{ env.NATS_URL }}
@@ -97,7 +116,7 @@ jobs:
           forgejo_token: ${{ secrets.CHUGGERNAUT_WORKER_TOKEN }}
           post_action: yield
           prompt: ${{ steps.prompt.outputs.value }}
-          command_args: "--verbose --output-format stream-json --include-partial-messages --allowedTools Bash Read Write Edit Glob Grep Agent"
+          command_args: "--verbose --output-format stream-json --include-partial-messages --allowedTools Bash Read Write Edit Glob Grep Agent mcp__chuggernaut__channel_check mcp__chuggernaut__channel_send mcp__chuggernaut__update_status"
           timeout_minutes: "60"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

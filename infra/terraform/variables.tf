@@ -16,6 +16,12 @@ variable "forgejo_admin_token" {
   sensitive   = true
 }
 
+variable "forgejo_actions_url" {
+  description = "Forgejo URL reachable from action runners (for uses: directives in workflows)"
+  type        = string
+  default     = "http://host.docker.internal:3000"
+}
+
 variable "nats_url" {
   description = "NATS URL for Terraform provisioning (host-accessible)"
   type        = string

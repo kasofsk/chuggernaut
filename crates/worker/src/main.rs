@@ -194,17 +194,39 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .stderr(std::process::Stdio::inherit())
         .spawn()?;
 
-    // Capture stdout — both stream events to stderr and collect for review parsing
+    // Pipe stdout through jq for formatted action log output on stderr,
+    // while also collecting the raw output for review parsing.
     let stdout = child.stdout.take().expect("stdout piped");
     let (output_tx, output_rx) = tokio::sync::oneshot::channel::<String>();
+
+    // Spawn jq as a formatter: reads Claude's stream-json, writes human-readable to stderr
+    let mut jq_child = Command::new("jq")
+        .args(["-rj", "--unbuffered", PEEK_JQ_FILTER])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(std::io::stderr()))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok();
+
     tokio::spawn(async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
         let mut collected = String::new();
+        let mut jq_stdin = jq_child.as_mut().and_then(|c| c.stdin.take());
         while let Ok(Some(line)) = lines.next_line().await {
-            print_stream_event(&line);
+            // Feed to jq formatter
+            if let Some(ref mut stdin) = jq_stdin {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(line.as_bytes()).await;
+                let _ = stdin.write_all(b"\n").await;
+            }
             collected.push_str(&line);
             collected.push('\n');
+        }
+        // Close jq stdin so it exits
+        drop(jq_stdin);
+        if let Some(ref mut c) = jq_child {
+            let _ = c.wait().await;
         }
         let _ = output_tx.send(collected);
     });
@@ -526,7 +548,7 @@ fn write_mcp_config(job_key: &str, nats_url: &str, workdir: &Path) -> anyhow::Re
                 "args": [
                     "--job-key", job_key,
                     "--nats-url", nats_url,
-                    "--channel-mode", "false",
+                    "--channel-mode=false",
                 ],
             }
         }
@@ -622,76 +644,45 @@ fn parse_review_output(output: &str) -> anyhow::Result<ReviewResult> {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers: git, subprocess output, PR merge
+// Helpers: jq peek filter, PR merge
 // ---------------------------------------------------------------------------
 
-fn print_stream_event(line: &str) {
-    let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(line) else {
-        eprintln!("{line}");
-        return;
-    };
-
-    match wrapper.get("type").and_then(|t| t.as_str()) {
-        Some("system") => {
-            let sub = wrapper.get("subtype").and_then(|s| s.as_str()).unwrap_or("unknown");
-            eprintln!("[system] {sub}");
-            return;
-        }
-        Some("error") => {
-            let msg = wrapper
-                .pointer("/error/message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("unknown error");
-            eprintln!("[error] {msg}");
-            return;
-        }
-        _ => {}
-    }
-
-    let Some(event) = wrapper.get("event") else { return };
-    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-    match event_type {
-        "content_block_start" => {
-            let block = &event["content_block"];
-            match block.get("type").and_then(|t| t.as_str()) {
-                Some("tool_use") => {
-                    let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                    eprintln!("\n--- tool: {name} ---");
-                }
-                Some("text") => eprint!("\n"),
-                _ => {}
-            }
-        }
-        "content_block_delta" => {
-            let delta = &event["delta"];
-            match delta.get("type").and_then(|t| t.as_str()) {
-                Some("text_delta") => {
-                    if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
-                        eprint!("{text}");
-                    }
-                }
-                Some("input_json_delta") => {
-                    if let Some(json) = delta.get("partial_json").and_then(|t| t.as_str()) {
-                        eprint!("{json}");
-                    }
-                }
-                _ => {}
-            }
-        }
-        "content_block_stop" => {
-            eprintln!();
-        }
-        "message_delta" => {
-            if let Some(reason) = event.pointer("/delta/stop_reason").and_then(|r| r.as_str()) {
-                if let Some(tokens) = event.pointer("/usage/output_tokens").and_then(|t| t.as_u64()) {
-                    eprintln!("[{reason}] ({tokens} output tokens)");
-                }
-            }
-        }
-        _ => {}
-    }
-}
+/// jq filter that renders Claude's stream-json output as a human-readable log.
+/// Adapted from forge's peek-stream.sh.
+const PEEK_JQ_FILTER: &str = r#"
+if .type == "assistant" then
+  (.message.content // [])[] |
+  if .type == "thinking" then
+    "\u001b[2m\u001b[3m" + (.thinking | split("\n")[0:3] | join("\n   ")) + "\u001b[0m\n"
+  elif .type == "text" then
+    "\u001b[37m" + .text + "\u001b[0m\n"
+  elif .type == "tool_use" then
+    "\u001b[36m[" + .name + "]\u001b[0m"
+    + if .name == "Bash" then " $ " + (.input.command // "" | split("\n")[0][:120])
+      elif .name == "Read" then " " + (.input.file_path // "")
+      elif .name == "Write" then " " + (.input.file_path // "") + " (" + ((.input.content // "") | length | tostring) + " chars)"
+      elif .name == "Edit" then
+        " " + (.input.file_path // "") + "\n"
+        + "\u001b[31m- " + ((.input.old_string // "") | split("\n")[0:5] | join("\n- ") | .[:300]) + "\u001b[0m\n"
+        + "\u001b[32m+ " + ((.input.new_string // "") | split("\n")[0:5] | join("\n+ ") | .[:300]) + "\u001b[0m"
+      elif .name == "Grep" then " " + (.input.pattern // "")
+      elif .name == "Glob" then " " + (.input.pattern // "")
+      elif .name == "Agent" then " " + (.input.description // (.input.prompt // "" | .[:80]))
+      else " " + (.input | tostring | .[:100])
+      end + "\n"
+  else empty
+  end
+elif .type == "tool_result" then
+  "\u001b[2m   done\u001b[0m\n"
+elif .type == "result" then
+  "\n\u001b[32msession complete\u001b[0m\n"
+elif .type == "error" then
+  "\u001b[31m[error] " + (.error.message // "unknown") + "\u001b[0m\n"
+elif .type == "system" then
+  "\u001b[2m[system] " + (.subtype // "unknown") + "\u001b[0m\n"
+else empty
+end
+"#;
 
 fn parse_pr_index(url: &str) -> Option<u64> {
     url.rsplit('/').next()?.parse().ok()

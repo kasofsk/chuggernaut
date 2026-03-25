@@ -76,6 +76,11 @@ variable "anthropic_api_key" {
   default     = ""
 }
 
+variable "actions_url" {
+  description = "Forgejo URL reachable from action runners (for uses: directives)"
+  type        = string
+}
+
 variable "work_workflow" {
   description = "Content of work.yml workflow file"
   type        = string
@@ -86,7 +91,3 @@ variable "review_workflow" {
   type        = string
 }
 
-variable "chug_action" {
-  description = "Content of chug composite action (action.yml)"
-  type        = string
-}

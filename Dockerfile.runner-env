@@ -19,14 +19,15 @@ RUN cargo build --release -p chuggernaut-worker -p chuggernaut-channel
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git ca-certificates jq curl nodejs bash \
+    git ca-certificates jq curl nodejs bash unzip \
   && rm -rf /var/lib/apt/lists/*
 
 # Install NATS CLI (used by workflow steps to fetch job data from KV)
 RUN NATS_VER=$(curl -fsSL https://api.github.com/repos/nats-io/natscli/releases/latest | jq -r .tag_name) \
-  && curl -fsSL "https://github.com/nats-io/natscli/releases/download/${NATS_VER}/nats-${NATS_VER}-linux-amd64.deb" -o /tmp/nats.deb \
-  && dpkg -i /tmp/nats.deb \
-  && rm /tmp/nats.deb
+  && curl -fsSL "https://github.com/nats-io/natscli/releases/download/${NATS_VER}/nats-${NATS_VER#v}-linux-amd64.zip" -o /tmp/nats.zip \
+  && unzip -j /tmp/nats.zip '*/nats' -d /usr/local/bin/ \
+  && rm /tmp/nats.zip \
+  && chmod +x /usr/local/bin/nats
 
 # Claude Code installer requires bash; installs to ~/.local/bin/
 RUN curl -fsSL https://claude.ai/install.sh | bash \

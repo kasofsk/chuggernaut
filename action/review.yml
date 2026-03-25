@@ -38,8 +38,11 @@ jobs:
       - name: Fetch job details from NATS
         id: job
         run: |
+          echo "Fetching job ${{ inputs.job_key }} from NATS at $NATS_URL"
           JOB_JSON=$(nats kv get chuggernaut_jobs "${{ inputs.job_key }}" --raw)
-          echo "title=$(echo "$JOB_JSON" | jq -r .title)" >> "$GITHUB_OUTPUT"
+          TITLE=$(echo "$JOB_JSON" | jq -r .title)
+          echo "Job title: $TITLE"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
           {
             echo 'body<<CHUGGERNAUT_EOF'
             echo "$JOB_JSON" | jq -r .body
@@ -48,18 +51,21 @@ jobs:
 
       - name: Build prompt
         id: prompt
+        env:
+          JOB_TITLE: ${{ steps.job.outputs.title }}
+          JOB_BODY: ${{ steps.job.outputs.body }}
+          REVIEW_LEVEL: ${{ inputs.review_level }}
         run: |
           {
-            echo 'value<<CHUGGERNAUT_EOF'
+            echo "You are a code reviewer. Review the following pull request."
+            echo ""
+            echo "## Job: ${JOB_TITLE}"
+            echo ""
+            echo "${JOB_BODY}"
+            echo ""
+            echo "## Review Level: ${REVIEW_LEVEL}"
+            echo ""
             cat <<'PROMPT_EOF'
-          You are a code reviewer. Review the following pull request.
-
-          ## Job: ${{ steps.job.outputs.title }}
-
-          ${{ steps.job.outputs.body }}
-
-          ## Review Level: ${{ inputs.review_level }}
-
           - **low**: Approve if the changes are roughly correct and don't introduce obvious bugs.
           - **medium**: Approve if the changes correctly implement the requirements with reasonable code quality.
           - **high**: Approve only if the changes are correct, complete, well-tested, and follow project conventions.
@@ -77,10 +83,15 @@ jobs:
 
           After the JSON line, write nothing else.
           PROMPT_EOF
+          } > /tmp/prompt.md
+
+          {
+            echo 'value<<CHUGGERNAUT_EOF'
+            cat /tmp/prompt.md
             echo 'CHUGGERNAUT_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - uses: .forgejo/actions/chug
+      - uses: {{ACTIONS_URL}}/chuggernaut/actions/chug@main
         with:
           job_key: ${{ inputs.job_key }}
           nats_url: ${{ env.NATS_URL }}
@@ -88,7 +99,7 @@ jobs:
           forgejo_token: ${{ secrets.CHUGGERNAUT_REVIEWER_TOKEN }}
           post_action: review
           prompt: ${{ steps.prompt.outputs.value }}
-          command_args: "--allowedTools Bash Read Glob Grep"
+          command_args: "--allowedTools Bash Read Glob Grep mcp__chuggernaut__channel_check mcp__chuggernaut__channel_send mcp__chuggernaut__update_status"
           timeout_minutes: "30"
           pr_url: ${{ inputs.pr_url }}
           review_level: ${{ inputs.review_level }}

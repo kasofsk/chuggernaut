@@ -71,6 +71,16 @@ ADMIN_USER="chuggernaut-admin"
 ADMIN_PASS="chuggernaut-admin"
 ADMIN_EMAIL="admin@chuggernaut.local"
 
+# Resolve Claude credentials (check prefixed and unprefixed env vars)
+CLAUDE_TOKEN="${CHUGGERNAUT_CLAUDE_CODE_OAUTH_TOKEN:-${CLAUDE_CODE_OAUTH_TOKEN:-}}"
+API_KEY="${CHUGGERNAUT_ANTHROPIC_API_KEY:-${ANTHROPIC_API_KEY:-}}"
+
+if [ -z "$CLAUDE_TOKEN" ] && [ -z "$API_KEY" ]; then
+  echo "ERROR: No Claude credentials found." >&2
+  echo "Set CHUGGERNAUT_CLAUDE_CODE_OAUTH_TOKEN or CHUGGERNAUT_ANTHROPIC_API_KEY" >&2
+  exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # Step 0: Clean (if requested)
 # ---------------------------------------------------------------------------
@@ -191,8 +201,8 @@ worker_password     = "chuggernaut-worker-pass"
 reviewer_password   = "chuggernaut-reviewer-pass"
 runner_count        = ${RUNNER_COUNT}
 managed_repos       = ${REPOS_JSON}
-claude_oauth_token  = "${CLAUDE_CODE_OAUTH_TOKEN:-}"
-anthropic_api_key   = "${ANTHROPIC_API_KEY:-}"
+claude_oauth_token  = "${CLAUDE_TOKEN}"
+anthropic_api_key   = "${API_KEY}"
 EOF
 
 echo "==> Running terraform init..."
