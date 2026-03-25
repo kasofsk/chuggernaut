@@ -46,6 +46,8 @@ async fn run_scans(state: &Arc<DispatcherState>) {
     if let Err(e) = scan_archival(state).await {
         warn!("archival scan failed: {e}");
     }
+    // Clear stale rate limit state so it doesn't permanently block dispatching
+    scan_rate_limit_staleness(state).await;
 }
 
 async fn scan_lease_expiry(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
@@ -193,6 +195,18 @@ async fn scan_archival(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
     }
 
     Ok(())
+}
+
+/// Clear stale rate limit state so it doesn't permanently block dispatching.
+/// If the rate limit's `resets_at` is in the past, the overage window has ended.
+async fn scan_rate_limit_staleness(state: &Arc<DispatcherState>) {
+    let mut tracker = state.token_tracker.write().await;
+    if tracker.rate_limit.is_some() {
+        tracker.clear_stale_rate_limit();
+        if tracker.rate_limit.is_none() {
+            info!("rate limit overage window expired, dispatch unblocked");
+        }
+    }
 }
 
 async fn publish_monitor_event<T: serde::Serialize>(

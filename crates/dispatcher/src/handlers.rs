@@ -101,6 +101,17 @@ async fn handle_worker_heartbeat(
                             "heartbeat lease renewal failed: {e}"
                         );
                     }
+                    // Record token usage and rate limit info from heartbeat
+                    let has_token_data = hb.token_usage.is_some() || hb.rate_limit.is_some();
+                    if has_token_data {
+                        let mut tracker = s.token_tracker.write().await;
+                        if let Some(ref usage) = hb.token_usage {
+                            tracker.update_usage(&hb.job_key, usage, hb.cost_usd.unwrap_or(0.0));
+                        }
+                        if let Some(ref rl) = hb.rate_limit {
+                            tracker.update_rate_limit(&hb.job_key, rl);
+                        }
+                    }
                 }
                 Err(e) => warn!("invalid heartbeat payload: {e}"),
             }
@@ -145,6 +156,9 @@ async fn process_outcome(
 
     // Release claim
     crate::claims::release_claim(state, job_key).await?;
+
+    // Clean up token tracker for this worker
+    state.token_tracker.write().await.remove_worker(job_key);
 
     // Record token usage for this action
     if let Some(usage) = outcome.token_usage {

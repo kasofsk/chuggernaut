@@ -28,6 +28,9 @@ pub struct Config {
     /// Which Claude CLI flags jobs are allowed to set via `claude_args`.
     /// Override with CHUGGERNAUT_ALLOWED_CLAUDE_FLAGS as a JSON array.
     pub allowed_claude_flags: Vec<AllowedClaudeFlag>,
+    /// When true, pause dispatching new jobs when workers report API rate
+    /// limit overage (isUsingOverage from Claude CLI's rate_limit_event).
+    pub pause_on_overage: bool,
 }
 
 impl Config {
@@ -64,6 +67,7 @@ impl Config {
                 .ok()
                 .and_then(|v| serde_json::from_str(&v).ok())
                 .unwrap_or_else(default_allowed_claude_flags),
+            pause_on_overage: parse_env("CHUGGERNAUT_PAUSE_ON_OVERAGE", true),
         }
     }
 }

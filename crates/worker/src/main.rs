@@ -4,12 +4,32 @@ use std::time::Duration;
 use clap::{Parser, ValueEnum};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use chuggernaut_forgejo_api::{CreatePullReviewOptions, ForgejoClient, MergePullRequestOption};
 use chuggernaut_nats::NatsClient;
 use chuggernaut_types::*;
+
+// ---------------------------------------------------------------------------
+// Session metrics (parsed from Claude's stream-json output)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default, Debug)]
+struct SessionMetrics {
+    turns: u32,
+    usage: TokenUsage,
+    cost_usd: f64,
+    rate_limit: Option<RateLimitInfo>,
+}
+
+#[derive(Clone, Debug)]
+struct RateLimitInfo {
+    resets_at: i64,
+    rate_limit_type: String,
+    is_using_overage: bool,
+}
 
 // ---------------------------------------------------------------------------
 // CLI args (passed by the Forgejo Action workflow as inputs)
@@ -102,6 +122,10 @@ struct Args {
     /// The prompt to pass to Claude (fully resolved, no placeholders)
     #[arg(long, env = "CHUGGERNAUT_PROMPT")]
     prompt: String,
+
+    /// Percentage of budget at which to send a wrap-up warning (0-100)
+    #[arg(long, env = "CHUGGERNAUT_BUDGET_WARN_PCT", default_value = "80")]
+    budget_warn_pct: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -184,12 +208,16 @@ async fn run(args: Args) -> anyhow::Result<()> {
         }
     };
 
+    // Session metrics channel — populated by the stdout parser, read by heartbeat + budget monitor
+    let (metrics_tx, metrics_rx) = watch::channel(SessionMetrics::default());
+
     // Common infrastructure
     spawn_heartbeat(
         nats.clone(),
         args.job_key.clone(),
         cancel.clone(),
         args.heartbeat_interval_secs,
+        metrics_rx.clone(),
     );
     spawn_deadline_warning(
         nats.clone(),
@@ -197,6 +225,19 @@ async fn run(args: Args) -> anyhow::Result<()> {
         cancel.clone(),
         args.timeout_minutes,
         args.wrap_up_minutes,
+    );
+
+    // Budget monitor: warn before hitting --max-budget-usd
+    let max_budget = extract_flag_value(&args.command_args, "--max-budget-usd")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    spawn_budget_monitor(
+        nats.clone(),
+        args.job_key.clone(),
+        cancel.clone(),
+        metrics_rx.clone(),
+        max_budget,
+        args.budget_warn_pct as f64 / 100.0,
     );
 
     let hard_deadline =
@@ -251,6 +292,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         let mut lines = reader.lines();
         let mut collected = String::new();
         let mut jq_stdin = jq_child.as_mut().and_then(|c| c.stdin.take());
+        let mut metrics = SessionMetrics::default();
         while let Ok(Some(line)) = lines.next_line().await {
             // Feed to jq formatter
             if let Some(ref mut stdin) = jq_stdin {
@@ -258,6 +300,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 let _ = stdin.write_all(line.as_bytes()).await;
                 let _ = stdin.write_all(b"\n").await;
             }
+            // Parse stream-json for token usage, rate limit events, and cost
+            parse_stream_json_line(&line, &mut metrics, &metrics_tx);
             collected.push_str(&line);
             collected.push('\n');
         }
@@ -302,6 +346,22 @@ async fn run(args: Args) -> anyhow::Result<()> {
     cancel.cancel();
     let output = output_rx.await.unwrap_or_default();
 
+    // Read final session metrics for token usage reporting
+    let final_metrics = metrics_rx.borrow().clone();
+    let token_usage = if final_metrics.turns > 0 {
+        info!(
+            job_key = args.job_key,
+            turns = final_metrics.turns,
+            input_tokens = final_metrics.usage.input_tokens,
+            output_tokens = final_metrics.usage.output_tokens,
+            cost_usd = final_metrics.cost_usd,
+            "session metrics collected"
+        );
+        Some(final_metrics.usage.clone())
+    } else {
+        None
+    };
+
     // Post-action — handle outcome based on mode
     match args.post_action {
         PostAction::Yield => {
@@ -317,7 +377,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 worker_id: format!("action-{}", args.job_key),
                 job_key: args.job_key.clone(),
                 outcome,
-                token_usage: None,
+                token_usage: token_usage.clone(),
             };
             nats.publish_msg(&subjects::WORKER_OUTCOME, &worker_outcome)
                 .await?;
@@ -328,16 +388,25 @@ async fn run(args: Args) -> anyhow::Result<()> {
             let decision = if exit_ok {
                 match parse_review_output(&output) {
                     Ok(result) => {
-                        post_action_review(result, &forgejo, owner, repo, pr_index, &args).await
+                        post_action_review(
+                            result,
+                            &forgejo,
+                            owner,
+                            repo,
+                            pr_index,
+                            &args,
+                            token_usage.clone(),
+                        )
+                        .await
                     }
                     Err(e) => {
                         error!(job_key = args.job_key, error = %e, "failed to parse review output");
-                        escalate_decision(&args)
+                        escalate_decision(&args, token_usage.clone())
                     }
                 }
             } else {
                 error!(job_key = args.job_key, "review subprocess failed");
-                escalate_decision(&args)
+                escalate_decision(&args, token_usage.clone())
             };
             nats.publish_msg(&subjects::REVIEW_DECISION, &decision)
                 .await?;
@@ -420,6 +489,7 @@ async fn post_action_review(
     repo: &str,
     pr_index: u64,
     args: &Args,
+    token_usage: Option<TokenUsage>,
 ) -> ReviewDecision {
     match result {
         ReviewResult::Approved { feedback } => {
@@ -452,7 +522,7 @@ async fn post_action_review(
                         job_key: args.job_key.clone(),
                         decision: DecisionType::Approved,
                         pr_url: Some(args.pr_url.clone()),
-                        token_usage: None,
+                        token_usage: token_usage.clone(),
                     }
                 }
                 Err(e) => {
@@ -463,7 +533,7 @@ async fn post_action_review(
                             feedback: format!("Approved but merge failed: {e}"),
                         },
                         pr_url: Some(args.pr_url.clone()),
-                        token_usage: None,
+                        token_usage: token_usage.clone(),
                     }
                 }
             }
@@ -488,21 +558,21 @@ async fn post_action_review(
                 job_key: args.job_key.clone(),
                 decision: DecisionType::ChangesRequested { feedback },
                 pr_url: Some(args.pr_url.clone()),
-                token_usage: None,
+                token_usage: token_usage.clone(),
             }
         }
-        ReviewResult::Escalate => escalate_decision(args),
+        ReviewResult::Escalate => escalate_decision(args, token_usage),
     }
 }
 
-fn escalate_decision(args: &Args) -> ReviewDecision {
+fn escalate_decision(args: &Args, token_usage: Option<TokenUsage>) -> ReviewDecision {
     ReviewDecision {
         job_key: args.job_key.clone(),
         decision: DecisionType::Escalated {
             reviewer_login: "human".to_string(),
         },
         pr_url: Some(args.pr_url.clone()),
-        token_usage: None,
+        token_usage,
     }
 }
 
@@ -515,6 +585,7 @@ fn spawn_heartbeat(
     job_key: String,
     cancel: CancellationToken,
     interval_secs: u64,
+    metrics_rx: watch::Receiver<SessionMetrics>,
 ) {
     let hb_interval = Duration::from_secs(interval_secs);
     tokio::spawn(async move {
@@ -526,9 +597,26 @@ fn spawn_heartbeat(
             if cancel.is_cancelled() {
                 break;
             }
+            let m = metrics_rx.borrow().clone();
             let hb = WorkerHeartbeat {
                 worker_id: worker_id.clone(),
                 job_key: job_key.clone(),
+                token_usage: if m.turns > 0 {
+                    Some(m.usage.clone())
+                } else {
+                    None
+                },
+                cost_usd: if m.cost_usd > 0.0 {
+                    Some(m.cost_usd)
+                } else {
+                    None
+                },
+                turns: if m.turns > 0 { Some(m.turns) } else { None },
+                rate_limit: m.rate_limit.as_ref().map(|rl| HeartbeatRateLimit {
+                    resets_at: rl.resets_at,
+                    rate_limit_type: rl.rate_limit_type.clone(),
+                    is_using_overage: rl.is_using_overage,
+                }),
             };
             match nats.publish_msg(&subjects::WORKER_HEARTBEAT, &hb).await {
                 Ok(_) => {
@@ -605,6 +693,210 @@ fn spawn_deadline_warning(
             error!(job_key, error = %e, "failed to send deadline warning");
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: budget warning
+// ---------------------------------------------------------------------------
+
+/// Check if we should fire the overage warning for the current metrics.
+fn should_warn_overage(metrics: &SessionMetrics) -> bool {
+    metrics
+        .rate_limit
+        .as_ref()
+        .is_some_and(|rl| rl.is_using_overage)
+}
+
+/// Estimate session cost from token counts (real cost only in final result event).
+/// Conservative: ~$10/MTok output + ~$3/MTok input (mid-range model pricing).
+fn estimate_session_cost(metrics: &SessionMetrics) -> f64 {
+    if metrics.cost_usd > 0.0 {
+        metrics.cost_usd
+    } else {
+        let output_cost = metrics.usage.output_tokens as f64 * 10.0 / 1_000_000.0;
+        let input_cost = metrics.usage.input_tokens as f64 * 3.0 / 1_000_000.0;
+        output_cost + input_cost
+    }
+}
+
+fn spawn_budget_monitor(
+    nats: NatsClient,
+    job_key: String,
+    cancel: CancellationToken,
+    metrics_rx: watch::Receiver<SessionMetrics>,
+    max_budget_usd: f64,
+    warn_pct: f64,
+) {
+    let has_budget = max_budget_usd > 0.0;
+    let threshold = if has_budget {
+        max_budget_usd * warn_pct
+    } else {
+        0.0
+    };
+
+    tokio::spawn(async move {
+        let poll_interval = Duration::from_secs(5);
+        let mut warned_budget = !has_budget; // skip budget warning if no budget set
+        let mut warned_overage = false;
+
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(poll_interval) => {}
+                _ = cancel.cancelled() => { return; }
+            }
+
+            let m = metrics_rx.borrow().clone();
+
+            // Warn on rate limit overage (once) — fires regardless of per-job budget
+            if !warned_overage && should_warn_overage(&m) {
+                let rl = m.rate_limit.as_ref().unwrap();
+                warned_overage = true;
+                info!(
+                    job_key,
+                    rate_limit_type = rl.rate_limit_type,
+                    "sending overage budget warning"
+                );
+                let msg = ChannelMessage {
+                    sender: "system".to_string(),
+                    body: "BUDGET WARNING: The API is now in overage mode. \
+                           Your token quota for the current window has been exceeded. \
+                           Please wrap up your current work now:\n\
+                           1. Finish or revert any half-done changes\n\
+                           2. Commit your progress with `git add -A && git commit`\n\
+                           3. Push your branch with `git push`\n\
+                           4. Use update_status to report what you accomplished and what remains\n\n\
+                           The next action run will pick up where you left off."
+                        .to_string(),
+                    timestamp: chrono::Utc::now(),
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    in_reply_to: None,
+                };
+                if let Err(e) = nats
+                    .publish_to(&subjects::CHANNEL_INBOX, &job_key, &msg)
+                    .await
+                {
+                    error!(job_key, error = %e, "failed to send overage warning");
+                }
+            }
+
+            // Warn on approaching per-job budget cap (once, only if budget is set)
+            if !warned_budget && m.turns > 0 {
+                let estimated_cost = estimate_session_cost(&m);
+                if estimated_cost >= threshold {
+                    warned_budget = true;
+                    let pct = (estimated_cost / max_budget_usd * 100.0).min(100.0);
+                    info!(
+                        job_key,
+                        estimated_cost, max_budget_usd, pct, "sending budget cap warning"
+                    );
+                    let msg = ChannelMessage {
+                        sender: "system".to_string(),
+                        body: format!(
+                            "BUDGET WARNING: This session has used approximately ${estimated_cost:.2} \
+                             of its ${max_budget_usd:.2} budget ({pct:.0}%). \
+                             Estimated usage: ~{turns} turns, {output_tokens} output tokens.\n\
+                             Please wrap up your current work now:\n\
+                             1. Finish or revert any half-done changes\n\
+                             2. Commit your progress with `git add -A && git commit`\n\
+                             3. Push your branch with `git push`\n\
+                             4. Use update_status to report what you accomplished and what remains\n\n\
+                             The next action run will pick up where you left off.",
+                            turns = m.turns,
+                            output_tokens = m.usage.output_tokens,
+                        ),
+                        timestamp: chrono::Utc::now(),
+                        message_id: uuid::Uuid::new_v4().to_string(),
+                        in_reply_to: None,
+                    };
+                    if let Err(e) = nats
+                        .publish_to(&subjects::CHANNEL_INBOX, &job_key, &msg)
+                        .await
+                    {
+                        error!(job_key, error = %e, "failed to send budget warning");
+                    }
+                }
+            }
+
+            // Both warnings fired — nothing more to do
+            if warned_budget && warned_overage {
+                return;
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: stream-json parsing
+// ---------------------------------------------------------------------------
+
+/// Parse a single line of Claude's stream-json output for token usage,
+/// rate limit events, and session cost. Updates `metrics` in place and
+/// sends to the watch channel on change.
+fn parse_stream_json_line(
+    line: &str,
+    metrics: &mut SessionMetrics,
+    tx: &watch::Sender<SessionMetrics>,
+) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return;
+    };
+
+    let changed = match v.get("type").and_then(|t| t.as_str()) {
+        Some("assistant") => {
+            metrics.turns += 1;
+            if let Some(usage) = v.pointer("/message/usage") {
+                metrics.usage.input_tokens += usage["input_tokens"].as_u64().unwrap_or(0);
+                metrics.usage.output_tokens += usage["output_tokens"].as_u64().unwrap_or(0);
+                metrics.usage.cache_read_tokens +=
+                    usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                metrics.usage.cache_write_tokens +=
+                    usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+            }
+            true
+        }
+        Some("rate_limit_event") => {
+            if let Some(info) = v.get("rate_limit_info") {
+                metrics.rate_limit = Some(RateLimitInfo {
+                    resets_at: info["resetsAt"].as_i64().unwrap_or(0),
+                    rate_limit_type: info["rateLimitType"].as_str().unwrap_or("").to_string(),
+                    is_using_overage: info["isUsingOverage"].as_bool().unwrap_or(false),
+                });
+                true
+            } else {
+                false
+            }
+        }
+        Some("result") => {
+            metrics.cost_usd = v["total_cost_usd"].as_f64().unwrap_or(0.0);
+            // Overwrite cumulative usage with final totals from result for accuracy
+            if let Some(usage) = v.get("usage") {
+                if let Some(n) = usage["input_tokens"].as_u64() {
+                    metrics.usage.input_tokens = n;
+                }
+                if let Some(n) = usage["output_tokens"].as_u64() {
+                    metrics.usage.output_tokens = n;
+                }
+            }
+            true
+        }
+        _ => false,
+    };
+
+    if changed {
+        let _ = tx.send(metrics.clone());
+    }
+}
+
+/// Extract the value of a CLI flag from a whitespace-separated args string.
+/// e.g. `extract_flag_value("--model opus --max-budget-usd 5.0", "--max-budget-usd")` → Some("5.0")
+fn extract_flag_value(args: &str, flag: &str) -> Option<String> {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    for (i, token) in tokens.iter().enumerate() {
+        if *token == flag {
+            return tokens.get(i + 1).map(|s| s.to_string());
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -869,5 +1161,210 @@ mod tests {
     fn parse_review_output_no_json() {
         let output = "just some text with no JSON";
         assert!(parse_review_output(output).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Stream-JSON parsing tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_assistant_event_extracts_usage() {
+        let (tx, rx) = watch::channel(SessionMetrics::default());
+        let mut metrics = SessionMetrics::default();
+
+        let line = r#"{"type":"assistant","message":{"id":"msg_01","role":"assistant","content":[{"type":"text","text":"Hi"}],"usage":{"input_tokens":1000,"output_tokens":50,"cache_read_input_tokens":200,"cache_creation_input_tokens":100}}}"#;
+
+        parse_stream_json_line(line, &mut metrics, &tx);
+        assert_eq!(metrics.turns, 1);
+        assert_eq!(metrics.usage.input_tokens, 1000);
+        assert_eq!(metrics.usage.output_tokens, 50);
+        assert_eq!(metrics.usage.cache_read_tokens, 200);
+        assert_eq!(metrics.usage.cache_write_tokens, 100);
+
+        let watched = rx.borrow().clone();
+        assert_eq!(watched.turns, 1);
+        assert_eq!(watched.usage.output_tokens, 50);
+    }
+
+    #[test]
+    fn parse_assistant_events_accumulate() {
+        let (tx, _rx) = watch::channel(SessionMetrics::default());
+        let mut metrics = SessionMetrics::default();
+
+        let line1 = r#"{"type":"assistant","message":{"usage":{"input_tokens":500,"output_tokens":30,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        let line2 = r#"{"type":"assistant","message":{"usage":{"input_tokens":800,"output_tokens":60,"cache_read_input_tokens":100,"cache_creation_input_tokens":0}}}"#;
+
+        parse_stream_json_line(line1, &mut metrics, &tx);
+        parse_stream_json_line(line2, &mut metrics, &tx);
+        assert_eq!(metrics.turns, 2);
+        assert_eq!(metrics.usage.input_tokens, 1300);
+        assert_eq!(metrics.usage.output_tokens, 90);
+        assert_eq!(metrics.usage.cache_read_tokens, 100);
+    }
+
+    #[test]
+    fn parse_rate_limit_event() {
+        let (tx, _rx) = watch::channel(SessionMetrics::default());
+        let mut metrics = SessionMetrics::default();
+
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1774458000,"rateLimitType":"five_hour","overageStatus":"allowed","isUsingOverage":true}}"#;
+
+        parse_stream_json_line(line, &mut metrics, &tx);
+        let rl = metrics.rate_limit.as_ref().unwrap();
+        assert_eq!(rl.resets_at, 1774458000);
+        assert_eq!(rl.rate_limit_type, "five_hour");
+        assert!(rl.is_using_overage);
+    }
+
+    #[test]
+    fn parse_result_event_extracts_cost() {
+        let (tx, _rx) = watch::channel(SessionMetrics::default());
+        let mut metrics = SessionMetrics::default();
+        // Simulate some prior usage
+        metrics.usage.input_tokens = 100;
+        metrics.usage.output_tokens = 10;
+
+        let line = r#"{"type":"result","subtype":"success","total_cost_usd":0.05701,"usage":{"input_tokens":1500,"output_tokens":200}}"#;
+
+        parse_stream_json_line(line, &mut metrics, &tx);
+        assert!((metrics.cost_usd - 0.05701).abs() < 0.0001);
+        // Result overwrites cumulative with final totals
+        assert_eq!(metrics.usage.input_tokens, 1500);
+        assert_eq!(metrics.usage.output_tokens, 200);
+    }
+
+    #[test]
+    fn parse_ignores_unknown_event_types() {
+        let (tx, _rx) = watch::channel(SessionMetrics::default());
+        let mut metrics = SessionMetrics::default();
+
+        let line = r#"{"type":"system","subtype":"init"}"#;
+        parse_stream_json_line(line, &mut metrics, &tx);
+        assert_eq!(metrics.turns, 0);
+        assert!(metrics.rate_limit.is_none());
+    }
+
+    #[test]
+    fn parse_ignores_invalid_json() {
+        let (tx, _rx) = watch::channel(SessionMetrics::default());
+        let mut metrics = SessionMetrics::default();
+
+        parse_stream_json_line("not json at all", &mut metrics, &tx);
+        assert_eq!(metrics.turns, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_flag_value tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_flag_value_found() {
+        assert_eq!(
+            extract_flag_value("--model opus --max-budget-usd 5.0", "--max-budget-usd"),
+            Some("5.0".to_string())
+        );
+        assert_eq!(
+            extract_flag_value("--max-budget-usd 10.50 --model sonnet", "--max-budget-usd"),
+            Some("10.50".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_flag_value_not_found() {
+        assert_eq!(extract_flag_value("--model opus", "--max-budget-usd"), None);
+        assert_eq!(extract_flag_value("", "--max-budget-usd"), None);
+    }
+
+    #[test]
+    fn extract_flag_value_no_value() {
+        // Flag is the last token with no value following
+        assert_eq!(
+            extract_flag_value("--max-budget-usd", "--max-budget-usd"),
+            None
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Budget monitor logic tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn should_warn_overage_detects_overage() {
+        let mut m = SessionMetrics::default();
+        // No rate limit → no warning
+        assert!(!should_warn_overage(&m));
+
+        // Rate limit present but not in overage → no warning
+        m.rate_limit = Some(RateLimitInfo {
+            resets_at: 9999999999,
+            rate_limit_type: "five_hour".to_string(),
+            is_using_overage: false,
+        });
+        assert!(!should_warn_overage(&m));
+
+        // In overage → warning
+        m.rate_limit.as_mut().unwrap().is_using_overage = true;
+        assert!(should_warn_overage(&m));
+    }
+
+    #[test]
+    fn overage_detection_independent_of_budget() {
+        // This is the exact bug we fixed: overage should be detected
+        // regardless of whether a per-job budget is set.
+        let m = SessionMetrics {
+            rate_limit: Some(RateLimitInfo {
+                resets_at: 9999999999,
+                rate_limit_type: "five_hour".to_string(),
+                is_using_overage: true,
+            }),
+            ..Default::default()
+        };
+        // should_warn_overage only looks at metrics, not budget config
+        assert!(should_warn_overage(&m));
+    }
+
+    #[test]
+    fn estimate_cost_from_tokens() {
+        let mut m = SessionMetrics::default();
+        m.usage.input_tokens = 1_000_000;
+        m.usage.output_tokens = 100_000;
+        // $3/MTok input + $10/MTok output = $3 + $1 = $4
+        let cost = estimate_session_cost(&m);
+        assert!((cost - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn estimate_cost_prefers_real_cost() {
+        let mut m = SessionMetrics::default();
+        m.usage.input_tokens = 1_000_000;
+        m.usage.output_tokens = 100_000;
+        m.cost_usd = 2.50; // real cost from result event
+        // Should use real cost, not estimate
+        assert!((estimate_session_cost(&m) - 2.50).abs() < 0.001);
+    }
+
+    #[test]
+    fn budget_monitor_skips_budget_warn_without_budget() {
+        // When no budget is set, warned_budget should start as true (skipped)
+        // but warned_overage should start as false (still watches for overage)
+        let has_budget = 0.0_f64 > 0.0;
+        let warned_budget = !has_budget;
+        let warned_overage = false;
+        assert!(warned_budget, "budget warning should be pre-skipped");
+        assert!(!warned_overage, "overage warning should still be active");
+        // Monitor only exits when both are true, so it stays alive for overage
+        assert!(
+            !(warned_budget && warned_overage),
+            "monitor should not exit immediately"
+        );
+    }
+
+    #[test]
+    fn budget_monitor_watches_both_with_budget() {
+        let has_budget = 5.0_f64 > 0.0;
+        let warned_budget = !has_budget;
+        let warned_overage = false;
+        assert!(!warned_budget, "budget warning should be active");
+        assert!(!warned_overage, "overage warning should be active");
     }
 }

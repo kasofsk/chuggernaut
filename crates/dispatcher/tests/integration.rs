@@ -65,6 +65,7 @@ async fn setup() -> Arc<DispatcherState> {
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -506,6 +507,10 @@ async fn heartbeat_renews_lease() {
     let hb = WorkerHeartbeat {
         worker_id: worker_id.clone(),
         job_key: key.clone(),
+        token_usage: None,
+        cost_usd: None,
+        turns: None,
+        rate_limit: None,
     };
     state
         .nats
@@ -747,6 +752,7 @@ async fn monitor_lease_expiry_fails_job() {
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -948,6 +954,7 @@ async fn action_dispatch_creates_claim_and_transitions() {
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -1056,6 +1063,7 @@ async fn rework_dispatches_new_action_with_feedback() {
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -1209,6 +1217,7 @@ async fn yield_dispatches_review_action() {
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -1985,6 +1994,7 @@ jobs:
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -2220,6 +2230,7 @@ jobs:
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -2387,6 +2398,7 @@ async fn setup_with_config(overrides: impl FnOnce(&mut Config)) -> Arc<Dispatche
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
     overrides(&mut config);
 
@@ -2867,6 +2879,10 @@ async fn heartbeat_from_wrong_worker_ignored() {
     let hb = WorkerHeartbeat {
         worker_id: "wrong-worker".to_string(),
         job_key: key.clone(),
+        token_usage: None,
+        cost_usd: None,
+        turns: None,
+        rate_limit: None,
     };
     state
         .nats
@@ -3055,6 +3071,10 @@ async fn concurrent_heartbeats_benign() {
             let hb = WorkerHeartbeat {
                 worker_id: w,
                 job_key: k,
+                token_usage: None,
+                cost_usd: None,
+                turns: None,
+                rate_limit: None,
             };
             s.nats
                 .publish_msg(&subjects::WORKER_HEARTBEAT, &hb)
@@ -3317,6 +3337,7 @@ async fn monitor_job_timeout() {
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -3386,6 +3407,7 @@ async fn monitor_orphan_detection() {
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -3461,6 +3483,7 @@ async fn monitor_retry_eligible_transitions_to_on_deck() {
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -3562,6 +3585,7 @@ async fn monitor_archival_removes_done_job() {
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -4110,6 +4134,7 @@ async fn dispatch_next_respects_priority() {
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -4221,6 +4246,7 @@ async fn dispatch_next_after_yield() {
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -4329,6 +4355,7 @@ async fn changes_requested_in_dispatch_queue() {
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -4436,6 +4463,7 @@ async fn monitor_lease_expiry_schedules_retry() {
         rework_limit: 3,
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();

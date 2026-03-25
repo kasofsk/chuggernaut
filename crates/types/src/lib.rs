@@ -289,6 +289,29 @@ pub struct CloseJobRequest {
 pub struct WorkerHeartbeat {
     pub worker_id: String,
     pub job_key: String,
+    /// Cumulative token usage for this session (from stream-json parsing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<TokenUsage>,
+    /// Cumulative cost in USD for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Number of assistant turns completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<u32>,
+    /// Rate limit info from the most recent rate_limit_event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<HeartbeatRateLimit>,
+}
+
+/// Rate limit info forwarded from Claude CLI's `rate_limit_event`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct HeartbeatRateLimit {
+    /// Unix timestamp when the rate limit window resets.
+    pub resets_at: i64,
+    /// Type of rate limit window (e.g. "five_hour").
+    pub rate_limit_type: String,
+    /// Whether the session is consuming overage tokens.
+    pub is_using_overage: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -852,6 +875,7 @@ pub fn generate_schema() -> schemars::Schema {
     generator.subschema_for::<RequeueRequest>();
     generator.subschema_for::<CloseJobRequest>();
     generator.subschema_for::<WorkerHeartbeat>();
+    generator.subschema_for::<HeartbeatRateLimit>();
 
     // Channel
     generator.subschema_for::<ChannelMessage>();
@@ -1155,5 +1179,64 @@ mod tests {
         assert_eq!(back.key, job.key);
         assert_eq!(back.state, JobState::OnDeck);
         assert_eq!(back.priority, 80);
+    }
+
+    #[test]
+    fn heartbeat_serde_backward_compat() {
+        // Old-style heartbeat without new fields should deserialize fine
+        let json = r#"{"worker_id":"action-acme.payments.57","job_key":"acme.payments.57"}"#;
+        let hb: WorkerHeartbeat = serde_json::from_str(json).unwrap();
+        assert_eq!(hb.worker_id, "action-acme.payments.57");
+        assert!(hb.token_usage.is_none());
+        assert!(hb.cost_usd.is_none());
+        assert!(hb.turns.is_none());
+        assert!(hb.rate_limit.is_none());
+    }
+
+    #[test]
+    fn heartbeat_serde_with_token_data() {
+        let hb = WorkerHeartbeat {
+            worker_id: "action-acme.payments.57".to_string(),
+            job_key: "acme.payments.57".to_string(),
+            token_usage: Some(TokenUsage {
+                input_tokens: 5000,
+                output_tokens: 200,
+                cache_read_tokens: 1000,
+                cache_write_tokens: 500,
+            }),
+            cost_usd: Some(0.05),
+            turns: Some(3),
+            rate_limit: Some(HeartbeatRateLimit {
+                resets_at: 1774458000,
+                rate_limit_type: "five_hour".to_string(),
+                is_using_overage: true,
+            }),
+        };
+        let json = serde_json::to_string(&hb).unwrap();
+        let back: WorkerHeartbeat = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.token_usage.unwrap().output_tokens, 200);
+        assert!((back.cost_usd.unwrap() - 0.05).abs() < 0.001);
+        assert_eq!(back.turns, Some(3));
+        let rl = back.rate_limit.unwrap();
+        assert_eq!(rl.resets_at, 1774458000);
+        assert!(rl.is_using_overage);
+    }
+
+    #[test]
+    fn heartbeat_skip_serializing_none_fields() {
+        let hb = WorkerHeartbeat {
+            worker_id: "w".to_string(),
+            job_key: "k".to_string(),
+            token_usage: None,
+            cost_usd: None,
+            turns: None,
+            rate_limit: None,
+        };
+        let json = serde_json::to_string(&hb).unwrap();
+        // None fields should not appear in serialized output
+        assert!(!json.contains("token_usage"));
+        assert!(!json.contains("cost_usd"));
+        assert!(!json.contains("turns"));
+        assert!(!json.contains("rate_limit"));
     }
 }
