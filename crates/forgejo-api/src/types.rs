@@ -97,6 +97,29 @@ pub struct PullReviewRequestOptions {
 }
 
 // ---------------------------------------------------------------------------
+// Commit Status
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CombinedStatus {
+    pub state: String, // "pending", "success", "failure", "error", ""
+    pub statuses: Vec<CommitStatus>,
+    pub total_count: u64,
+    pub sha: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitStatus {
+    pub id: u64,
+    pub status: String,
+    pub context: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub target_url: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
 

@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
@@ -211,6 +213,11 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // Session metrics channel — populated by the stdout parser, read by heartbeat + budget monitor
     let (metrics_tx, metrics_rx) = watch::channel(SessionMetrics::default());
 
+    // Warning flags — set by background tasks, read after subprocess exits to determine partial yield
+    let deadline_warned = Arc::new(AtomicBool::new(false));
+    let budget_warned = Arc::new(AtomicBool::new(false));
+    let overage_warned = Arc::new(AtomicBool::new(false));
+
     // Common infrastructure
     spawn_heartbeat(
         nats.clone(),
@@ -225,6 +232,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         cancel.clone(),
         args.timeout_minutes,
         args.wrap_up_minutes,
+        deadline_warned.clone(),
     );
 
     // Budget monitor: warn before hitting --max-budget-usd
@@ -238,6 +246,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
         metrics_rx.clone(),
         max_budget,
         args.budget_warn_pct as f64 / 100.0,
+        budget_warned.clone(),
+        overage_warned.clone(),
     );
 
     let hard_deadline =
@@ -362,16 +372,27 @@ async fn run(args: Args) -> anyhow::Result<()> {
         None
     };
 
+    // Determine if this was a partial yield (worker wrapped up early)
+    let partial = was_deadline
+        || deadline_warned.load(Ordering::Relaxed)
+        || budget_warned.load(Ordering::Relaxed)
+        || overage_warned.load(Ordering::Relaxed);
+
     // Post-action — handle outcome based on mode
     match args.post_action {
         PostAction::Yield => {
-            let outcome = if exit_ok || was_deadline {
+            let base_outcome = if exit_ok || was_deadline {
                 post_action_yield(&forgejo, owner, repo, &branch, &args.job_key).await
             } else {
                 OutcomeType::Fail {
                     reason: "subprocess failed".to_string(),
                     logs: None,
                 }
+            };
+            // Inject partial flag into Yield outcomes
+            let outcome = match base_outcome {
+                OutcomeType::Yield { pr_url, .. } => OutcomeType::Yield { pr_url, partial },
+                other => other,
             };
             let worker_outcome = WorkerOutcome {
                 worker_id: format!("action-{}", args.job_key),
@@ -447,6 +468,7 @@ async fn post_action_yield(
     match forgejo.find_pr_by_head(owner, repo, branch).await {
         Ok(Some(pr)) => OutcomeType::Yield {
             pr_url: pr.html_url,
+            partial: false,
         },
         Ok(None) => {
             match forgejo
@@ -464,6 +486,7 @@ async fn post_action_yield(
             {
                 Ok(pr) => OutcomeType::Yield {
                     pr_url: pr.html_url,
+                    partial: false,
                 },
                 Err(e) => OutcomeType::Fail {
                     reason: format!("failed to create PR: {e}"),
@@ -646,6 +669,7 @@ fn spawn_deadline_warning(
     cancel: CancellationToken,
     timeout_minutes: u64,
     wrap_up_minutes: u64,
+    warned_flag: Arc<AtomicBool>,
 ) {
     if wrap_up_minutes >= timeout_minutes {
         warn!(
@@ -664,6 +688,7 @@ fn spawn_deadline_warning(
             _ = cancel.cancelled() => { return; }
         }
 
+        warned_flag.store(true, Ordering::Relaxed);
         info!(
             job_key,
             remaining_minutes = remaining,
@@ -719,6 +744,7 @@ fn estimate_session_cost(metrics: &SessionMetrics) -> f64 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_budget_monitor(
     nats: NatsClient,
     job_key: String,
@@ -726,6 +752,8 @@ fn spawn_budget_monitor(
     metrics_rx: watch::Receiver<SessionMetrics>,
     max_budget_usd: f64,
     warn_pct: f64,
+    budget_warned_flag: Arc<AtomicBool>,
+    overage_warned_flag: Arc<AtomicBool>,
 ) {
     let has_budget = max_budget_usd > 0.0;
     let threshold = if has_budget {
@@ -751,6 +779,7 @@ fn spawn_budget_monitor(
             if !warned_overage && should_warn_overage(&m) {
                 let rl = m.rate_limit.as_ref().unwrap();
                 warned_overage = true;
+                overage_warned_flag.store(true, Ordering::Relaxed);
                 info!(
                     job_key,
                     rate_limit_type = rl.rate_limit_type,
@@ -784,6 +813,7 @@ fn spawn_budget_monitor(
                 let estimated_cost = estimate_session_cost(&m);
                 if estimated_cost >= threshold {
                     warned_budget = true;
+                    budget_warned_flag.store(true, Ordering::Relaxed);
                     let pct = (estimated_cost / max_budget_usd * 100.0).min(100.0);
                     info!(
                         job_key,

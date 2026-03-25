@@ -204,6 +204,22 @@ impl ForgejoClient {
     }
 
     // -----------------------------------------------------------------------
+    // Commit Status
+    // -----------------------------------------------------------------------
+
+    /// Get the combined commit status for a ref (branch, tag, or SHA).
+    /// Forgejo API: GET /repos/{owner}/{repo}/commits/{ref}/status
+    pub async fn get_combined_status(
+        &self,
+        owner: &str,
+        repo: &str,
+        ref_name: &str,
+    ) -> Result<CombinedStatus> {
+        self.get(&format!("/repos/{owner}/{repo}/commits/{ref_name}/status"))
+            .await
+    }
+
+    // -----------------------------------------------------------------------
     // Actions
     // -----------------------------------------------------------------------
 
