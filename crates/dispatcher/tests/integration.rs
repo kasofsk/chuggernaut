@@ -4421,3 +4421,183 @@ async fn monitor_lease_expiry_schedules_retry() {
         "lease expiry should set retry_after for auto-retry"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Rapid seeding — create handler must not block on action dispatch
+// ---------------------------------------------------------------------------
+
+/// Simulates the CLI seed command: rapidly creates 11 jobs (1 root + 10 with deps)
+/// via NATS request-reply. All replies must arrive within 2 seconds total.
+/// This catches regressions where the create handler blocks on Forgejo dispatch.
+#[tokio::test]
+async fn rapid_seed_does_not_block() {
+    let state = setup().await;
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let nats = &state.nats;
+
+    // Job 1: root (no deps) → OnDeck
+    let req1 = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Root job".to_string(),
+        body: "Scaffold".to_string(),
+        depends_on: vec![],
+        priority: 90,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+
+    let start = tokio::time::Instant::now();
+
+    let reply = tokio::time::timeout(
+        Duration::from_secs(2),
+        nats.request_msg(&subjects::ADMIN_CREATE_JOB, &req1),
+    )
+    .await
+    .expect("root job reply timed out")
+    .unwrap();
+
+    let resp: serde_json::Value = serde_json::from_slice(&reply.payload).unwrap();
+    let root_key = resp["key"].as_str().unwrap().to_string();
+    assert!(!root_key.is_empty(), "root job should return a key");
+
+    // Extract root job's sequence number for deps
+    let (_, _, root_seq) = parse_job_key(&root_key).unwrap();
+
+    // Jobs 2-11: all depend on root → should be Blocked
+    let mut dep_keys = Vec::new();
+    for i in 2..=11 {
+        let req = CreateJobRequest {
+            repo: "test/repo".to_string(),
+            title: format!("Dep job {i}"),
+            body: format!("Depends on root"),
+            depends_on: vec![root_seq],
+            priority: 50,
+            capabilities: vec![],
+            platform: None,
+            timeout_secs: 3600,
+            review: ReviewLevel::High,
+            max_retries: 3,
+            initial_state: None,
+        };
+
+        let reply = tokio::time::timeout(
+            Duration::from_secs(2),
+            nats.request_msg(&subjects::ADMIN_CREATE_JOB, &req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("job {i} reply timed out"))
+        .unwrap();
+
+        let resp: serde_json::Value = serde_json::from_slice(&reply.payload).unwrap();
+        let key = resp["key"].as_str().unwrap().to_string();
+        assert!(!key.is_empty(), "job {i} should return a key");
+        dep_keys.push(key);
+    }
+
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "all 11 jobs should be created in under 2 seconds, took {:?}",
+        elapsed
+    );
+
+    // Verify states
+    let root_state = state.jobs.get(&root_key).unwrap().state;
+    assert_eq!(
+        root_state,
+        JobState::OnDeck,
+        "root job (no deps) should be OnDeck"
+    );
+
+    for key in &dep_keys {
+        let job_state = state.jobs.get(key).unwrap().state;
+        assert_eq!(
+            job_state,
+            JobState::Blocked,
+            "dep job {key} should be Blocked, not {job_state:?}"
+        );
+    }
+
+    // Verify total count
+    assert_eq!(state.jobs.len(), 11);
+}
+
+/// Same as above but with initial_state=OnIce for root — no dispatch at all.
+#[tokio::test]
+async fn rapid_seed_on_ice_no_dispatch() {
+    let state = setup().await;
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let nats = &state.nats;
+    let start = tokio::time::Instant::now();
+
+    // Root on-ice
+    let req1 = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Root on-ice".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 90,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: Some(JobState::OnIce),
+    };
+
+    let reply = tokio::time::timeout(
+        Duration::from_secs(2),
+        nats.request_msg(&subjects::ADMIN_CREATE_JOB, &req1),
+    )
+    .await
+    .expect("on-ice root timed out")
+    .unwrap();
+
+    let resp: serde_json::Value = serde_json::from_slice(&reply.payload).unwrap();
+    let root_key = resp["key"].as_str().unwrap().to_string();
+    let (_, _, root_seq) = parse_job_key(&root_key).unwrap();
+
+    // 10 dep jobs
+    for i in 2..=11 {
+        let req = CreateJobRequest {
+            repo: "test/repo".to_string(),
+            title: format!("Dep job {i}"),
+            body: String::new(),
+            depends_on: vec![root_seq],
+            priority: 50,
+            capabilities: vec![],
+            platform: None,
+            timeout_secs: 3600,
+            review: ReviewLevel::High,
+            max_retries: 3,
+            initial_state: None,
+        };
+
+        let reply = tokio::time::timeout(
+            Duration::from_secs(2),
+            nats.request_msg(&subjects::ADMIN_CREATE_JOB, &req),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("job {i} timed out"))
+        .unwrap();
+
+        let resp: serde_json::Value = serde_json::from_slice(&reply.payload).unwrap();
+        assert!(resp.get("key").is_some(), "job {i} should return a key");
+    }
+
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "on-ice seed of 11 jobs should be near-instant, took {:?}",
+        elapsed
+    );
+
+    assert_eq!(state.jobs.get(&root_key).unwrap().state, JobState::OnIce);
+    assert_eq!(state.jobs.len(), 11);
+}

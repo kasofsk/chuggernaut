@@ -274,12 +274,8 @@ async fn handle_admin_create_job(
                             }
                             let _ = s.nats.raw().flush().await;
                         }
-                        // Try to assign after replying (action dispatch may be slow)
-                        if let Some(job) = s.jobs.get(&key) {
-                            if job.state == JobState::OnDeck {
-                                let _ = crate::assignment::try_assign_job(&s, &key).await;
-                            }
-                        }
+                        // Assignment is handled by the monitor scan loop, not here.
+                        // This keeps the create handler fast and non-blocking.
                         return;
                     }
                     Err(e) => serde_json::to_vec(&ErrorResponse {
@@ -389,7 +385,12 @@ async fn process_requeue(
 
     jobs::transition_job(state, &req.job_key, target_state, "admin_requeue", None).await?;
     if target_state == JobState::OnDeck {
-        crate::assignment::try_assign_job(state, &req.job_key).await?;
+        // Spawn assignment in background so the reply isn't blocked by dispatch
+        let s = state.clone();
+        let key = req.job_key.clone();
+        tokio::spawn(async move {
+            let _ = crate::assignment::try_assign_job(&s, &key).await;
+        });
     }
     jobs::journal_append(
         state,
@@ -472,8 +473,13 @@ async fn process_close_job(
     jobs::transition_job(state, &req.job_key, target, trigger, None).await?;
     if target == JobState::Done {
         let unblocked = crate::deps::propagate_unblock(state, &req.job_key).await?;
-        for key in &unblocked {
-            crate::assignment::try_assign_job(state, key).await?;
+        if !unblocked.is_empty() {
+            let s = state.clone();
+            tokio::spawn(async move {
+                for key in &unblocked {
+                    let _ = crate::assignment::try_assign_job(&s, key).await;
+                }
+            });
         }
     }
     jobs::journal_append(state, trigger, Some(&req.job_key), None, None).await;
