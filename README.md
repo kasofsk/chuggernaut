@@ -66,14 +66,6 @@ Generate code coverage via `cargo-llvm-cov`.
 | `--full` | Include ignored (E2E) tests (requires Docker + runner-env image) |
 | `--lcov` | Output LCOV format to `target/coverage/lcov.info` instead of HTML |
 
-## Running
-
-```
-./scripts/dev-up.sh      # full dev environment
-cargo run -p dispatcher
-cargo run -p cli -- <command>
-```
-
 ## License
 
 MIT
