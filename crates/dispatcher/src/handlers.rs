@@ -20,17 +20,23 @@ async fn append_token_record(
     action_type: &str,
     usage: TokenUsage,
 ) -> DispatcherResult<()> {
-    if let Some((mut job, revision)) = kv_get::<Job>(&state.kv.jobs, job_key).await? {
-        job.token_usage.push(ActionTokenRecord {
-            action_type: action_type.to_string(),
-            token_usage: usage,
-            completed_at: Utc::now(),
-        });
-        job.updated_at = Utc::now();
-        jobs::kv_cas_update(&state.kv.jobs, job_key, &job, revision, state.config.cas_max_retries)
-            .await?;
-        state.jobs.insert(job_key.to_string(), job);
-    }
+    let at = action_type.to_string();
+    let (job, _) = jobs::kv_cas_rmw::<Job, _>(
+        &state.kv.jobs,
+        job_key,
+        state.config.cas_max_retries,
+        |job| {
+            job.token_usage.push(ActionTokenRecord {
+                action_type: at.clone(),
+                token_usage: usage.clone(),
+                completed_at: Utc::now(),
+            });
+            job.updated_at = Utc::now();
+            Ok(())
+        },
+    )
+    .await?;
+    state.jobs.insert(job_key.to_string(), job);
     Ok(())
 }
 
@@ -142,19 +148,19 @@ async fn process_outcome(
 
     match outcome.outcome {
         OutcomeType::Yield { pr_url } => {
-            if let Some((mut job, revision)) = kv_get::<Job>(&state.kv.jobs, job_key).await? {
-                job.pr_url = Some(pr_url.clone());
-                job.updated_at = Utc::now();
-                jobs::kv_cas_update(
-                    &state.kv.jobs,
-                    job_key,
-                    &job,
-                    revision,
-                    state.config.cas_max_retries,
-                )
-                .await?;
-                state.jobs.insert(job_key.to_string(), job);
-            }
+            let url = pr_url.clone();
+            let (job, _) = jobs::kv_cas_rmw::<Job, _>(
+                &state.kv.jobs,
+                job_key,
+                state.config.cas_max_retries,
+                |job| {
+                    job.pr_url = Some(url.clone());
+                    job.updated_at = Utc::now();
+                    Ok(())
+                },
+            )
+            .await?;
+            state.jobs.insert(job_key.to_string(), job);
 
             jobs::transition_job(state, job_key, JobState::InReview, "worker_yield", Some(worker_id))
                 .await?;
@@ -191,18 +197,22 @@ async fn process_outcome(
                 .unwrap_or((false, 0));
 
             if should_retry.0 {
-                let retry_count = should_retry.1;
-                let backoff_secs = std::cmp::min(30 * (1u64 << retry_count), 600);
-                let retry_after = Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
-
-                if let Some((mut j, rev)) = kv_get::<Job>(&state.kv.jobs, job_key).await? {
-                    j.retry_count += 1;
-                    j.retry_after = Some(retry_after);
-                    j.updated_at = Utc::now();
-                    jobs::kv_cas_update(&state.kv.jobs, job_key, &j, rev, state.config.cas_max_retries).await?;
-                    state.jobs.insert(job_key.to_string(), j);
-                }
-                debug!(job_key, retry_after = %retry_after, "auto-retry scheduled");
+                let (j, _) = jobs::kv_cas_rmw::<Job, _>(
+                    &state.kv.jobs,
+                    job_key,
+                    state.config.cas_max_retries,
+                    |j| {
+                        let backoff_secs = std::cmp::min(30 * (1u64 << j.retry_count), 600);
+                        let retry_after = Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+                        j.retry_count += 1;
+                        j.retry_after = Some(retry_after);
+                        j.updated_at = Utc::now();
+                        Ok(())
+                    },
+                )
+                .await?;
+                state.jobs.insert(job_key.to_string(), j.clone());
+                debug!(job_key, retry_after = ?j.retry_after, "auto-retry scheduled");
             }
 
             jobs::journal_append(state, "failed", Some(job_key), Some(worker_id), Some(&reason)).await;
@@ -232,12 +242,21 @@ async fn handle_admin_create_job(state: Arc<DispatcherState>, ready: Arc<Barrier
             let reply_payload = match serde_json::from_slice::<CreateJobRequest>(&msg.payload) {
                 Ok(req) => match jobs::create_job(&s, req).await {
                     Ok(key) => {
+                        // Reply immediately so the client isn't blocked by action dispatch
+                        let resp = serde_json::to_vec(&CreateJobResponse { key: key.clone() }).unwrap_or_default();
+                        if let Some(reply) = msg.reply {
+                            if let Err(e) = s.nats.publish_raw(reply.to_string(), bytes::Bytes::from(resp)).await {
+                                warn!("failed to reply to create-job: {e}");
+                            }
+                            let _ = s.nats.raw().flush().await;
+                        }
+                        // Try to assign after replying (action dispatch may be slow)
                         if let Some(job) = s.jobs.get(&key) {
                             if job.state == JobState::OnDeck {
                                 let _ = crate::assignment::try_assign_job(&s, &key).await;
                             }
                         }
-                        serde_json::to_vec(&CreateJobResponse { key }).unwrap_or_default()
+                        return;
                     }
                     Err(e) => serde_json::to_vec(&ErrorResponse { error: e.to_string() }).unwrap_or_default(),
                 },

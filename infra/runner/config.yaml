@@ -3,7 +3,7 @@ log:
 
 runner:
   capacity: 1
-  timeout: 10m
+  timeout: 120m
 
 container:
   force_pull: false

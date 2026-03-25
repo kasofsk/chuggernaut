@@ -1,9 +1,33 @@
 #!/usr/bin/env bash
-# Mock Claude: MCP client that exercises the channel tools, does git work, exits.
-# Speaks JSON-RPC 2.0 on stdout (requests) and reads responses on stdin.
+# Mock Claude: simulates Claude Code for testing.
+#
+# Two modes:
+#   --print <prompt>  Non-interactive mode (like `claude --print`).
+#                     Does git work and exits. No MCP.
+#   (no args)         MCP mode. Speaks JSON-RPC 2.0 on stdin/stdout,
+#                     exercises channel tools, does git work.
 set -euo pipefail
 
 log() { echo "mock-claude: $*" >&2; }
+
+# ---------------------------------------------------------------------------
+# --print mode: just do git work and exit
+# ---------------------------------------------------------------------------
+
+if [ "${1:-}" = "--print" ]; then
+    log "print mode — prompt received (${#2} chars)"
+    log "doing git work in $(pwd)"
+    echo "Hello from mock Claude" > mock-work.txt
+    git add -A
+    git commit -m "mock: automated work" 2>&1 || log "nothing to commit"
+    git push -u origin HEAD 2>&1 || log "push failed (may be ok)"
+    log "done"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# MCP mode: JSON-RPC 2.0 on stdin/stdout
+# ---------------------------------------------------------------------------
 
 # Global request ID counter
 REQ_ID=0

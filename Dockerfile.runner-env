@@ -10,19 +10,30 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 COPY --from=planner /build/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json -p chuggernaut-worker
+RUN cargo chef cook --release --recipe-path recipe.json -p chuggernaut-worker -p chuggernaut-channel
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
-RUN cargo build --release -p chuggernaut-worker
+RUN cargo build --release -p chuggernaut-worker -p chuggernaut-channel
 
 # Runner environment image — used by Forgejo Actions runner for job containers
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git ca-certificates jq curl \
+    git ca-certificates jq curl nodejs bash \
   && rm -rf /var/lib/apt/lists/*
 
+# Install NATS CLI (used by workflow steps to fetch job data from KV)
+RUN NATS_VER=$(curl -fsSL https://api.github.com/repos/nats-io/natscli/releases/latest | jq -r .tag_name) \
+  && curl -fsSL "https://github.com/nats-io/natscli/releases/download/${NATS_VER}/nats-${NATS_VER}-linux-amd64.deb" -o /tmp/nats.deb \
+  && dpkg -i /tmp/nats.deb \
+  && rm /tmp/nats.deb
+
+# Claude Code installer requires bash; installs to ~/.local/bin/
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+  && ln -sf /root/.local/bin/claude /usr/local/bin/claude
+
 COPY --from=builder /build/target/release/chuggernaut-worker /usr/local/bin/chuggernaut-worker
+COPY --from=builder /build/target/release/chuggernaut-channel /usr/local/bin/chuggernaut-channel
 COPY action/mock-claude/mock-claude.sh /usr/local/bin/mock-claude
 COPY action/mock-claude/mock-review.sh /usr/local/bin/mock-review
 RUN chmod +x /usr/local/bin/mock-claude /usr/local/bin/mock-review

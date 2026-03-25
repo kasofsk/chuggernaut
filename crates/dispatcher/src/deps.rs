@@ -5,7 +5,7 @@ use tracing::{debug, warn};
 use chuggernaut_types::*;
 
 use crate::error::{DispatcherError, DispatcherResult};
-use crate::jobs::{kv_cas_update, kv_get, kv_put};
+use crate::jobs::{kv_cas_rmw, kv_get, kv_put};
 use crate::state::DispatcherState;
 
 /// Create dependency records for a new job.
@@ -56,21 +56,22 @@ async fn add_reverse_dep(
     dep_key: &str,
     job_key: &str,
 ) -> DispatcherResult<()> {
-    match kv_get::<DepRecord>(&state.kv.deps, dep_key).await? {
-        Some((mut record, revision)) => {
-            if !record.depended_on_by.contains(&job_key.to_string()) {
-                record.depended_on_by.push(job_key.to_string());
-                kv_cas_update(
-                    &state.kv.deps,
-                    dep_key,
-                    &record,
-                    revision,
-                    state.config.cas_max_retries,
-                )
-                .await?;
+    let jk = job_key.to_string();
+    match kv_cas_rmw::<DepRecord, _>(
+        &state.kv.deps,
+        dep_key,
+        state.config.cas_max_retries,
+        |record| {
+            if !record.depended_on_by.contains(&jk) {
+                record.depended_on_by.push(jk.clone());
             }
-        }
-        None => {
+            Ok(())
+        },
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(DispatcherError::Kv(msg)) if msg.contains("not found") => {
             // Dep has no dep record yet — create one with just the reverse ref
             let record = DepRecord {
                 depends_on: Vec::new(),
@@ -78,9 +79,10 @@ async fn add_reverse_dep(
             };
             // Use put instead of create in case there's a race
             kv_put(&state.kv.deps, dep_key, &record).await?;
+            Ok(())
         }
+        Err(e) => Err(e),
     }
-    Ok(())
 }
 
 /// Check if there's a path from `from` to `to` in the DAG using DFS.
@@ -248,21 +250,23 @@ pub async fn repair_reverse_indexes(state: &Arc<DispatcherState>) -> DispatcherR
                 if let Some((record, _)) = kv_get::<DepRecord>(&state.kv.deps, &key_str).await? {
                     for dep_key in &record.depends_on {
                         // Ensure dep_key.depended_on_by contains key_str
-                        if let Some((mut dep_record, revision)) =
-                            kv_get::<DepRecord>(&state.kv.deps, dep_key).await?
+                        let ks = key_str.clone();
+                        match kv_cas_rmw::<DepRecord, _>(
+                            &state.kv.deps,
+                            dep_key,
+                            state.config.cas_max_retries,
+                            |dep_record| {
+                                if !dep_record.depended_on_by.contains(&ks) {
+                                    dep_record.depended_on_by.push(ks.clone());
+                                }
+                                Ok(())
+                            },
+                        )
+                        .await
                         {
-                            if !dep_record.depended_on_by.contains(&key_str) {
-                                dep_record.depended_on_by.push(key_str.clone());
-                                kv_cas_update(
-                                    &state.kv.deps,
-                                    dep_key,
-                                    &dep_record,
-                                    revision,
-                                    state.config.cas_max_retries,
-                                )
-                                .await?;
-                                repairs += 1;
-                            }
+                            Ok(_) => { repairs += 1; }
+                            Err(DispatcherError::Kv(msg)) if msg.contains("not found") => {}
+                            Err(e) => return Err(e),
                         }
                     }
                 }

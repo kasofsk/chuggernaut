@@ -6,7 +6,7 @@ use tracing::{debug, warn};
 use chuggernaut_types::*;
 
 use crate::error::{DispatcherError, DispatcherResult};
-use crate::jobs::{kv_cas_create, kv_cas_update, kv_get};
+use crate::jobs::{kv_cas_create, kv_cas_rmw};
 use crate::state::DispatcherState;
 
 /// Acquire a claim for a job by a worker. CAS-create ensures exclusivity.
@@ -38,39 +38,35 @@ pub async fn renew_lease(
     job_key: &str,
     worker_id: &str,
 ) -> DispatcherResult<()> {
-    let (mut claim, revision) = match kv_get::<ClaimState>(&state.kv.claims, job_key).await? {
-        Some(r) => r,
-        None => {
-            debug!(job_key, worker_id, "heartbeat for missing claim — ignoring");
-            return Ok(());
-        }
-    };
-
-    if claim.worker_id != worker_id {
-        debug!(
-            job_key,
-            worker_id,
-            claim_worker = claim.worker_id,
-            "heartbeat from wrong worker — ignoring"
-        );
-        return Ok(());
-    }
-
-    let now = Utc::now();
-    claim.last_heartbeat = now;
-    claim.lease_deadline = now + chrono::Duration::seconds(claim.lease_secs as i64);
-
+    let wid = worker_id.to_string();
     // CAS collision on heartbeat is benign — another heartbeat won the race
-    match kv_cas_update(
+    match kv_cas_rmw::<ClaimState, _>(
         &state.kv.claims,
         job_key,
-        &claim,
-        revision,
         state.config.cas_max_retries,
+        |claim| {
+            if claim.worker_id != wid {
+                return Err(DispatcherError::Validation(
+                    format!("heartbeat from wrong worker {wid}, claim held by {}", claim.worker_id),
+                ));
+            }
+            let now = Utc::now();
+            claim.last_heartbeat = now;
+            claim.lease_deadline = now + chrono::Duration::seconds(claim.lease_secs as i64);
+            Ok(())
+        },
     )
     .await
     {
         Ok(_) => Ok(()),
+        Err(DispatcherError::Kv(msg)) if msg.contains("not found") => {
+            debug!(job_key, worker_id, "heartbeat for missing claim — ignoring");
+            Ok(())
+        }
+        Err(DispatcherError::Validation(msg)) if msg.contains("wrong worker") => {
+            debug!(job_key, worker_id, "{msg}");
+            Ok(())
+        }
         Err(DispatcherError::CasExhausted { .. }) => {
             debug!(job_key, "heartbeat CAS exhausted — benign");
             Ok(())

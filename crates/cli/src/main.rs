@@ -92,6 +92,9 @@ enum Commands {
         /// Variable substitutions for {{KEY}} placeholders in job bodies (e.g. --var DISPATCHER_URL=https://example.com)
         #[arg(long = "var", value_delimiter = ',')]
         vars: Vec<String>,
+        /// Initial state for all seeded jobs (e.g. on-ice to pause them)
+        #[arg(long)]
+        initial_state: Option<String>,
     },
 }
 
@@ -332,7 +335,10 @@ async fn main() -> Result<()> {
             }
         },
 
-        Commands::Seed { repo, fixture, vars } => {
+        Commands::Seed { repo, fixture, vars, initial_state } => {
+            let initial: Option<JobState> = initial_state
+                .map(|s| serde_json::from_str::<JobState>(&format!("\"{s}\"")))
+                .transpose()?;
             // Parse --var KEY=VALUE pairs into a map
             let var_map: std::collections::HashMap<String, String> = vars
                 .iter()
@@ -369,6 +375,10 @@ async fn main() -> Result<()> {
                     })
                     .collect();
 
+                // Jobs with deps will be blocked by the dispatcher automatically.
+                // Only apply --initial-state to root jobs (no deps).
+                let job_initial = if deps.is_empty() { initial } else { None };
+
                 let req = CreateJobRequest {
                     repo: repo.clone(),
                     title: job_def.title.clone(),
@@ -380,7 +390,7 @@ async fn main() -> Result<()> {
                     timeout_secs: 3600,
                     review: ReviewLevel::High,
                     max_retries: 3,
-                    initial_state: None,
+                    initial_state: job_initial,
                 };
 
                 let reply = tokio::time::timeout(

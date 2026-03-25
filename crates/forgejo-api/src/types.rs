@@ -12,6 +12,18 @@ pub struct Repository {
     pub default_branch: String,
     pub clone_url: String,
     pub html_url: String,
+    #[serde(default)]
+    pub permissions: RepoPermissions,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RepoPermissions {
+    #[serde(default)]
+    pub admin: bool,
+    #[serde(default)]
+    pub push: bool,
+    #[serde(default)]
+    pub pull: bool,
 }
 
 // ---------------------------------------------------------------------------

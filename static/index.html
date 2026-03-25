@@ -6,9 +6,10 @@
 <title>chuggernaut</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #0d1117; color: #c9d1d9; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #0d1117; color: #c9d1d9; overflow: hidden; height: 100vh; display: flex; flex-direction: column; position: relative; }
+body::before { content: ''; position: fixed; inset: 0; background: url('chuggernaut.png') center center / contain no-repeat; opacity: 0.2; pointer-events: none; z-index: 0; }
 
-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; background: #161b22; border-bottom: 1px solid #30363d; flex-shrink: 0; }
+header { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; background: #161b22; border-bottom: 1px solid #30363d; flex-shrink: 0; position: relative; z-index: 1; }
 header h1 { font-size: 16px; font-weight: 600; color: #58a6ff; }
 header .controls { display: flex; gap: 8px; align-items: center; }
 header button { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
@@ -16,11 +17,11 @@ header button:hover { background: #30363d; }
 .connection-dot { width: 8px; height: 8px; border-radius: 50%; background: #f85149; }
 .connection-dot.connected { background: #3fb950; }
 
-#graph-container { flex: 1; overflow: hidden; position: relative; cursor: grab; }
+#graph-container { flex: 1; overflow: hidden; position: relative; cursor: grab; z-index: 1; }
 #graph-container.dragging { cursor: grabbing; }
 #graph-svg { width: 100%; height: 100%; }
 
-footer { display: flex; align-items: center; gap: 16px; padding: 6px 16px; background: #161b22; border-top: 1px solid #30363d; font-size: 12px; flex-shrink: 0; }
+footer { display: flex; align-items: center; gap: 16px; padding: 6px 16px; background: #161b22; border-top: 1px solid #30363d; font-size: 12px; flex-shrink: 0; position: relative; z-index: 1; }
 footer .stat { display: flex; align-items: center; gap: 4px; }
 footer .stat .dot { width: 8px; height: 8px; border-radius: 50%; }
 
@@ -35,10 +36,16 @@ footer .stat .dot { width: 8px; height: 8px; border-radius: 50%; }
 .node-elapsed { font-size: 9px; fill: #8b949e; }
 .node-progress-bg { fill: #21262d; }
 .node-progress-fill { fill: #58a6ff; }
+.node-message { font-size: 9px; fill: #8b949e; }
 .node-btn { cursor: pointer; }
-.node-btn rect { fill: #21262d; stroke: #30363d; stroke-width: 1; rx: 3; ry: 3; }
-.node-btn:hover rect { fill: #30363d; }
-.node-btn text { font-size: 9px; fill: #8b949e; }
+.node-btn rect { fill: #21262d; stroke: #58a6ff; stroke-width: 1; rx: 3; ry: 3; transition: fill 0.15s, stroke 0.15s; }
+.node-btn:hover rect { fill: #1f3a5f; stroke: #79b8ff; }
+.node-btn text { font-size: 9px; fill: #58a6ff; font-weight: 500; transition: fill 0.15s; }
+.node-btn:hover text { fill: #79b8ff; }
+.node-btn.sending rect { fill: #0c2d6b; stroke: #58a6ff; }
+.node-btn.sending text { fill: #c9d1d9; }
+.node-btn.sent rect { fill: #0a3d1f; stroke: #3fb950; }
+.node-btn.sent text { fill: #3fb950; }
 
 .edge-line { stroke: #30363d; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
 
@@ -120,6 +127,7 @@ const state = {
   claims: new Map(),     // key -> ClaimState
   deps: new Map(),       // key -> DepRecord
   channels: new Map(),   // key -> ChannelStatus
+  messages: new Map(),   // key -> ChannelMessage (latest reply from Claude)
   journal: [],
   connected: false,
 };
@@ -145,10 +153,12 @@ async function computeLayout() {
 
   for (const [key, job] of state.jobs) {
     const hasStatus = state.channels.has(key);
+    const hasMessage = state.messages.has(key);
     const isRunning = job.state === 'on-the-stack';
     let h = NODE_H;
     if (hasStatus) h = NODE_H_WITH_STATUS;
     if (isRunning) h = NODE_H_WITH_BTN;
+    if (hasMessage) h += 16;
 
     nodes.push({ id: key, width: NODE_W, height: h });
   }
@@ -279,14 +289,39 @@ function renderNode(node, job) {
 
   // Request Update button (only when on-the-stack)
   if (isRunning) {
-    const btnG = svgEl('g', { class: 'node-btn', transform: `translate(${node.width / 2 - 50}, ${yOffset + 2})` });
-    btnG.appendChild(svgEl('rect', { width: 100, height: 18 }));
-    btnG.appendChild(svgText(50, 13, '\u21BB Request Update', '', 'middle'));
+    const btnG = svgEl('g', { class: 'node-btn', transform: `translate(${node.width / 2 - 55}, ${yOffset + 2})` });
+    btnG.appendChild(svgEl('rect', { width: 110, height: 20, rx: 4, ry: 4 }));
+    const btnLabel = svgText(55, 14, '\u21BB Request Update', '', 'middle');
+    btnG.appendChild(btnLabel);
     btnG.addEventListener('click', (e) => {
       e.stopPropagation();
-      requestUpdate(job.key);
+      if (btnG.classList.contains('sending') || btnG.classList.contains('sent')) return;
+      btnG.classList.add('sending');
+      btnLabel.textContent = 'Sending\u2026';
+      requestUpdate(job.key).then(() => {
+        btnG.classList.remove('sending');
+        btnG.classList.add('sent');
+        btnLabel.textContent = '\u2713 Sent';
+        setTimeout(() => {
+          btnG.classList.remove('sent');
+          btnLabel.textContent = '\u21BB Request Update';
+        }, 2000);
+      }).catch(() => {
+        btnG.classList.remove('sending');
+        btnLabel.textContent = '\u21BB Request Update';
+      });
     });
     g.appendChild(btnG);
+    yOffset += 24;
+  }
+
+  // Latest channel message from Claude
+  const lastMsg = state.messages.get(job.key);
+  if (lastMsg) {
+    const msgText = lastMsg.body.length > 38 ? lastMsg.body.slice(0, 36) + '...' : lastMsg.body;
+    const msgEl = svgText(8, yOffset + 12, `\u{1F4AC} ${msgText}`, 'node-message');
+    msgEl.setAttribute('title', lastMsg.body);
+    g.appendChild(msgEl);
   }
 
   return g;
@@ -357,6 +392,7 @@ function connect() {
     state.claims.clear();
     state.deps.clear();
     state.channels.clear();
+    state.messages.clear();
 
     for (const job of (data.jobs || [])) {
       state.jobs.set(job.key, job);
@@ -408,12 +444,19 @@ function connect() {
     render();
   });
 
+  eventSource.addEventListener('channel_message', (e) => {
+    const data = JSON.parse(e.data);
+    state.messages.set(data.key, data.message);
+    render();
+  });
+
   eventSource.addEventListener('job_removed', (e) => {
     const data = JSON.parse(e.data);
     state.jobs.delete(data.key);
     state.claims.delete(data.key);
     state.deps.delete(data.key);
     state.channels.delete(data.key);
+    state.messages.delete(data.key);
     needsRelayout = true;
   });
 

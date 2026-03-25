@@ -1,0 +1,72 @@
+name: chug
+description: "Generic chuggernaut worker — runs Claude on a job with configurable prompt and post-action"
+
+inputs:
+  job_key:
+    description: "Job key (e.g. acme.payments.57)"
+    required: true
+  nats_url:
+    description: "NATS server URL"
+    required: true
+  forgejo_url:
+    description: "Forgejo base URL"
+    required: true
+  forgejo_token:
+    description: "Forgejo API token"
+    required: true
+  post_action:
+    description: "What to do after Claude exits: yield (commit/push/PR) or review (parse decision/merge)"
+    required: true
+  prompt:
+    description: "The fully-resolved prompt to pass to Claude"
+    required: true
+  command:
+    description: "Command to run"
+    required: false
+    default: "claude"
+  command_args:
+    description: "Extra arguments for the command"
+    required: false
+    default: ""
+  timeout_minutes:
+    description: "Action timeout in minutes"
+    required: false
+    default: "60"
+  pr_url:
+    description: "PR URL (review post-action)"
+    required: false
+    default: ""
+  review_level:
+    description: "Review level (review post-action)"
+    required: false
+    default: "high"
+  claude_code_oauth_token:
+    description: "Claude Code OAuth token"
+    required: false
+    default: ""
+  anthropic_api_key:
+    description: "Anthropic API key"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Execute chuggernaut worker
+      shell: bash
+      run: |
+        chuggernaut-worker \
+          --post-action "${{ inputs.post_action }}" \
+          --job-key "${{ inputs.job_key }}" \
+          --nats-url "${{ inputs.nats_url }}" \
+          --forgejo-url "${{ inputs.forgejo_url }}" \
+          --pr-url "${{ inputs.pr_url }}" \
+          --review-level "${{ inputs.review_level }}"
+      env:
+        CHUGGERNAUT_FORGEJO_TOKEN: ${{ inputs.forgejo_token }}
+        CHUGGERNAUT_COMMAND: ${{ inputs.command }}
+        CHUGGERNAUT_COMMAND_ARGS: ${{ inputs.command_args }}
+        CHUGGERNAUT_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        CHUGGERNAUT_PROMPT: ${{ inputs.prompt }}
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}

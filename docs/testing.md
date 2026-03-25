@@ -71,7 +71,7 @@ Real NATS server via testcontainers. Each test gets a UUID-namespaced `Dispatche
 - `review_approved_completes_job_and_unblocks_deps` — Approved → Done, dependent unblocks
 - `review_changes_requested_transitions_job` — ChangesRequested → ChangesRequested state
 
-### Monitor (4 tests)
+### Monitor (5 tests)
 
 - `monitor_lease_expiry_fails_job` — 1s lease, no heartbeats → monitor detects → Failed
 - `monitor_job_timeout` — 1s timeout_secs, long lease → monitor detects elapsed time → Failed

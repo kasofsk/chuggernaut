@@ -31,50 +31,50 @@ pub async fn kv_get<T: serde::de::DeserializeOwned>(
 }
 
 /// CAS-update a KV key with retry.
-pub async fn kv_cas_update<T: serde::Serialize>(
+/// Read-modify-write with CAS retry. On each attempt (including the first),
+/// reads the current value, passes it to `mutate`, then CAS-writes the result.
+/// If CAS fails, the entire cycle restarts with a fresh read so the closure
+/// always sees the latest state.
+pub async fn kv_cas_rmw<T, F>(
     store: &kv::Store,
     key: &str,
-    value: &T,
-    revision: u64,
     max_retries: u32,
-) -> DispatcherResult<u64> {
-    let data = Bytes::from(serde_json::to_vec(value)?);
-    match store.update(key, data, revision).await {
-        Ok(rev) => Ok(rev),
-        Err(_) => {
-            // Retry with backoff
-            for attempt in 0..max_retries {
-                let backoff = Duration::from_millis(10 * (1 << attempt));
-                tokio::time::sleep(backoff).await;
+    mutate: F,
+) -> DispatcherResult<(T, u64)>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + Clone,
+    F: Fn(&mut T) -> DispatcherResult<()>,
+{
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            let backoff = Duration::from_millis(10 * (1 << (attempt - 1)));
+            tokio::time::sleep(backoff).await;
+        }
 
-                // Re-read to get fresh revision
-                let entry = store.entry(key).await;
-                match entry {
-                    Ok(Some(e)) => {
-                        let data = Bytes::from(serde_json::to_vec(value)?);
-                        match store.update(key, data, e.revision).await {
-                            Ok(rev) => return Ok(rev),
-                            Err(e) => {
-                                debug!(key, attempt, "CAS retry failed: {e}");
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        return Err(DispatcherError::Kv(format!(
-                            "key {key} disappeared during CAS retry"
-                        )));
-                    }
-                    Err(e) => {
-                        debug!(key, attempt, "CAS retry read failed: {e}");
-                    }
-                }
+        let (mut value, revision) = match kv_get::<T>(store, key).await? {
+            Some(r) => r,
+            None => {
+                return Err(DispatcherError::Kv(format!(
+                    "key {key} not found during CAS rmw"
+                )));
             }
-            Err(DispatcherError::CasExhausted {
-                key: key.to_string(),
-                retries: max_retries,
-            })
+        };
+
+        mutate(&mut value)?;
+
+        let data = Bytes::from(serde_json::to_vec(&value)?);
+        match store.update(key, data, revision).await {
+            Ok(rev) => return Ok((value, rev)),
+            Err(e) => {
+                debug!(key, attempt, "CAS rmw retry: {e}");
+            }
         }
     }
+
+    Err(DispatcherError::CasExhausted {
+        key: key.to_string(),
+        retries: max_retries,
+    })
 }
 
 /// CAS-create a KV key (must not exist or be a tombstone).
@@ -277,25 +277,32 @@ pub async fn transition_job(
     trigger: &str,
     worker_id: Option<&str>,
 ) -> DispatcherResult<Job> {
-    let (mut job, revision) = match kv_get::<Job>(&state.kv.jobs, job_key).await? {
-        Some(r) => r,
-        None => return Err(DispatcherError::JobNotFound(job_key.to_string())),
-    };
+    use std::sync::Mutex;
 
-    let from = job.state;
-    validate_transition(from, to)?;
+    let from_cell: Mutex<Option<JobState>> = Mutex::new(None);
 
-    job.state = to;
-    job.updated_at = Utc::now();
-
-    kv_cas_update(
+    let (job, _rev) = kv_cas_rmw::<Job, _>(
         &state.kv.jobs,
         job_key,
-        &job,
-        revision,
         state.config.cas_max_retries,
+        |job| {
+            let from = job.state;
+            validate_transition(from, to)?;
+            *from_cell.lock().unwrap() = Some(from);
+            job.state = to;
+            job.updated_at = Utc::now();
+            Ok(())
+        },
     )
-    .await?;
+    .await
+    .map_err(|e| match e {
+        DispatcherError::Kv(msg) if msg.contains("not found") => {
+            DispatcherError::JobNotFound(job_key.to_string())
+        }
+        other => other,
+    })?;
+
+    let from = from_cell.into_inner().unwrap().unwrap();
 
     // Update in-memory index
     state.jobs.insert(job_key.to_string(), job.clone());

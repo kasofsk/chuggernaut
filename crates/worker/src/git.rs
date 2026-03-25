@@ -45,6 +45,15 @@ pub fn clone_repo(forgejo_url: &str, repo: &str, token: &str, workdir: &Path) ->
         return Err(GitError::CommandFailed(format!("git clone: {stderr}")));
     }
 
+    // Configure a credential helper that returns our token, overriding any
+    // global helper (e.g. one set by actions/checkout) that might interfere.
+    let helper_script = format!(
+        "!f() {{ echo \"username=chuggernaut-worker\"; echo \"password={token}\"; }}; f"
+    );
+    run_git(&repo_dir, &[
+        "config", "credential.helper", &helper_script,
+    ])?;
+
     Ok(repo_dir)
 }
 

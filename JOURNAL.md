@@ -268,9 +268,63 @@ Major architectural simplification: eliminated the standalone reviewer process. 
 - Task 2 fetches `{{DISPATCHER_URL}}/api.json` in `build.rs` and generates typed Rust structs + API client from the schema — no compile-time dependency on chuggernaut crates
 - Graph: scaffold → codegen → SSE client → store → 3 parallel UI components → detail view → routing → styling → integration test
 
+### 14. Comprehensive test coverage + cargo-llvm-cov ✅ Done
+
+Added 36 new integration tests covering all previously-untested dispatcher code paths, plus code coverage tooling.
+
+**Coverage tooling:**
+- `scripts/coverage.sh` — wraps `cargo-llvm-cov` with multi-run support
+  - `bash scripts/coverage.sh` — fast: non-ignored tests only
+  - `bash scripts/coverage.sh --full` — all tests including E2E (sequential)
+  - `bash scripts/coverage.sh --lcov` — LCOV output for CI
+- Uses `--no-report` + `report` pattern to merge coverage from parallel + sequential runs
+
+**New integration tests (36 tests, 7 groups):**
+
+*State machine edges (6):* escalation flow (3 tests), Failed→OnIce requeue, OnIce→OnDeck thaw, invalid transition rejection.
+
+*Error paths (4):* dispatch failure releases claim + fails job, dependency cycle detection, wrong-worker heartbeat ignored, rework_limit not enforced (documents current behavior).
+
+*Token usage + concurrency (3):* nil token_usage not appended, 10 concurrent heartbeats benign, duplicate outcome idempotent.
+
+*Recovery (3):* stale claim cleanup, claimless OnTheStack→Failed, reverse dep index repair.
+
+*Monitor (4):* job timeout (distinct from lease expiry), orphan detection event, retry-eligible→OnDeck, archival removes Done job from memory.
+
+*HTTP API (12):* list jobs, filter by state, job detail, 404, create, requeue, close, journal, deps, channel send, channel 404, SSE snapshot.
+
+*Assignment & capacity (4):* capacity limit blocks assignment, priority ordering, dispatch-next-after-yield, ChangesRequested competes in dispatch queue. (All 4 use real Forgejo containers.)
+
+**Test helpers added:**
+- `setup_with_config(|c| ...)` — setup with Config overrides
+- `start_http(state)` — binds axum router on random port for HTTP tests
+
+**Code change:** Added `(Failed, OnIce)` to `validate_transition` in `jobs.rs` so admins can put failed jobs on ice.
+
+**E2E fix:** `e2e_full_review_cycle` had a brittle 1.5s sleep that raced with the review decision handler. Replaced with proper polling that waits for the job to leave InReview before checking rework dispatch.
+
+**Coverage results (full run, 60 tests):**
+
+| File | Line Coverage |
+|------|-------------|
+| nats_init.rs | 100% |
+| action_dispatch.rs | 95% |
+| recovery.rs | 93% |
+| claims.rs | 90% |
+| jobs.rs | 90% |
+| assignment.rs | 88% |
+| monitor.rs | 84% |
+| state.rs | 79% |
+| handlers.rs | 77% |
+| deps.rs | 75% |
+| http.rs | 44% |
+
+**8 crates**, **60 dispatcher tests** (57 parallel + 3 E2E sequential) — all green.
+
 ### Remaining Phase 2 work
 - **Token capture from Claude** — worker currently reports `token_usage: None`; need to parse Claude Code's output for actual usage
 - **Human escalation polling** — currently just transitions to Escalated; needs a monitor task to poll Forgejo for human action
 - **Dispatcher trait abstraction** — dispatch strategy behind traits for swappability
 - **Graph viewer SPA** — frontend (fixture ready at `fixtures/frontend-wasm.json`)
 - **Terraform** — Forgejo provisioning for test (`terraform/test/`) and deploy (`terraform/deploy/`)
+- **Coverage gaps** — `http.rs` SSE streaming logic (44%), `deps.rs` edge cases (75%), `handlers.rs` error branches (77%)

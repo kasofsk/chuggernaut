@@ -73,9 +73,10 @@ pub async fn nats_inbox_listener(
             }
         };
 
-        debug!(sender = channel_msg.sender, body = channel_msg.body, "received channel message");
+        info!(sender = channel_msg.sender, body = channel_msg.body, "received channel message from NATS inbox");
 
         if channel_mode {
+            info!(sender = channel_msg.sender, message_id = channel_msg.message_id, "pushing channel notification to MCP client");
             let notification = mcp::JsonRpcNotification {
                 jsonrpc: "2.0",
                 method: mcp::NOTIFY_CHANNEL,
@@ -111,6 +112,7 @@ pub async fn handle_tool_call(
     match name {
         "channel_check" => {
             let messages = state.lock().await.drain_messages();
+            info!(job_key, count = messages.len(), "channel_check: draining inbox messages");
             let texts: Vec<Value> = messages
                 .iter()
                 .map(|m| {
@@ -138,6 +140,8 @@ pub async fn handle_tool_call(
                 .and_then(|v| v.as_str())
                 .map(String::from);
 
+            info!(job_key, tool = name, body = text, in_reply_to = ?in_reply_to, "channel_send/reply: publishing message to NATS outbox");
+
             let msg = ChannelMessage {
                 sender: format!("claude:{job_key}"),
                 body: text.to_string(),
@@ -164,6 +168,8 @@ pub async fn handle_tool_call(
                 .get("progress")
                 .and_then(|v| v.as_f64())
                 .map(|p| (p / 100.0) as f32);
+
+            info!(job_key, status = status_text, progress = ?progress, "update_status: writing to KV");
 
             let status = ChannelStatus {
                 job_key: job_key.to_string(),
@@ -237,11 +243,18 @@ pub async fn handle_message(
                 .cloned()
                 .unwrap_or(Value::Object(Default::default()));
 
+            info!(tool = tool_name, job_key, "MCP tools/call invoked");
             let result = handle_tool_call(tool_name, &arguments, state, nats, js, job_key).await;
 
-            let resp = match result {
-                Ok(value) => mcp::JsonRpcResponse::success(req.id.unwrap_or(Value::Null), value),
-                Err(msg) => mcp::JsonRpcResponse::error(req.id, -32000, msg),
+            let resp = match &result {
+                Ok(_) => {
+                    info!(tool = tool_name, job_key, "tool call succeeded");
+                    mcp::JsonRpcResponse::success(req.id.unwrap_or(Value::Null), result.unwrap())
+                }
+                Err(msg) => {
+                    warn!(tool = tool_name, job_key, error = msg.as_str(), "tool call failed");
+                    mcp::JsonRpcResponse::error(req.id, -32000, msg.clone())
+                }
             };
             Some(serde_json::to_string(&resp).unwrap())
         }

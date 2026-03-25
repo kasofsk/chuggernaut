@@ -1264,7 +1264,7 @@ jobs:
             --job-key "${{{{ inputs.job_key }}}}" \
             --nats-url "${{{{ inputs.nats_url }}}}" \
             --forgejo-url "{forgejo_internal_url}" \
-            --forgejo-token "${{{{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}}}" \
+            --forgejo-token "${{{{ secrets.CHUGGERNAUT_WORKER_TOKEN }}}}" \
             --command mock-claude \
             --heartbeat-interval-secs 5
         env:
@@ -1281,7 +1281,7 @@ jobs:
     // Set secret
     test_utils::set_repo_secret(
         forgejo_port, &token, org, "repo",
-        "CHUGGERNAUT_FORGEJO_TOKEN", &token,
+        "CHUGGERNAUT_WORKER_TOKEN", &token,
     ).await;
 
     // Start runner
@@ -1506,7 +1506,7 @@ jobs:
             --job-key "${{{{ inputs.job_key }}}}" \
             --nats-url "${{{{ inputs.nats_url }}}}" \
             --forgejo-url "{forgejo_internal_url}" \
-            --forgejo-token "${{{{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}}}" \
+            --forgejo-token "${{{{ secrets.CHUGGERNAUT_WORKER_TOKEN }}}}" \
             --command mock-claude \
             --heartbeat-interval-secs 5
         env:
@@ -1522,7 +1522,7 @@ jobs:
     // Set repo secret for Forgejo token
     test_utils::set_repo_secret(
         forgejo_port, &token, &org, "repo",
-        "CHUGGERNAUT_FORGEJO_TOKEN", &token,
+        "CHUGGERNAUT_WORKER_TOKEN", &token,
     ).await;
 
     // Start runner via test-utils
@@ -1735,7 +1735,7 @@ jobs:
             --job-key "${{{{ inputs.job_key }}}}" \
             --nats-url "${{{{ inputs.nats_url }}}}" \
             --forgejo-url "{forgejo_internal_url}" \
-            --forgejo-token "${{{{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}}}" \
+            --forgejo-token "${{{{ secrets.CHUGGERNAUT_WORKER_TOKEN }}}}" \
             --command mock-claude \
             --heartbeat-interval-secs 5
         env:
@@ -1750,7 +1750,7 @@ jobs:
 
     test_utils::set_repo_secret(
         forgejo_port, &token, &org, "repo",
-        "CHUGGERNAUT_FORGEJO_TOKEN", &token,
+        "CHUGGERNAUT_WORKER_TOKEN", &token,
     ).await;
 
     // Start runner
@@ -2538,9 +2538,9 @@ async fn recovery_fails_claimless_on_the_stack() {
     let key = jobs::create_job(&state, req).await.unwrap();
 
     // Directly update the job to OnTheStack in KV (bypassing claim requirement)
-    let (mut job, rev) = jobs::kv_get::<Job>(&state.kv.jobs, &key).await.unwrap().unwrap();
+    let (mut job, _rev) = jobs::kv_get::<Job>(&state.kv.jobs, &key).await.unwrap().unwrap();
     job.state = JobState::OnTheStack;
-    jobs::kv_cas_update(&state.kv.jobs, &key, &job, rev, 3).await.unwrap();
+    jobs::kv_put(&state.kv.jobs, &key, &job).await.unwrap();
 
     // Clear in-memory state to simulate restart
     state.jobs.clear();
@@ -2575,9 +2575,9 @@ async fn recovery_repairs_reverse_deps() {
     let key_b = jobs::create_job(&state, make("B", vec![1])).await.unwrap();
 
     // Corrupt: remove the reverse dep on A (A should have depended_on_by=[B])
-    let (mut dep_a, rev) = jobs::kv_get::<DepRecord>(&state.kv.deps, &key_a).await.unwrap().unwrap();
+    let (mut dep_a, _rev) = jobs::kv_get::<DepRecord>(&state.kv.deps, &key_a).await.unwrap().unwrap();
     dep_a.depended_on_by.clear();
-    jobs::kv_cas_update(&state.kv.deps, &key_a, &dep_a, rev, 3).await.unwrap();
+    jobs::kv_put(&state.kv.deps, &key_a, &dep_a).await.unwrap();
 
     // Clear in-memory state
     state.jobs.clear();

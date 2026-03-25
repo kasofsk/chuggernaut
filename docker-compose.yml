@@ -1,7 +1,7 @@
 services:
   nats:
     image: nats:latest
-    command: ["--jetstream", "--store_dir", "/data", "--config", "/etc/nats/nats-server.conf"]
+    command: ["--jetstream", "--config", "/etc/nats/nats-server.conf"]
     ports:
       - "4222:4222"
       - "8222:8222"
@@ -20,7 +20,11 @@ services:
     environment:
       - USER_UID=1000
       - USER_GID=1000
-      - FORGEJO__server__ROOT_URL=http://forgejo:3000
+      - FORGEJO__database__DB_TYPE=sqlite3
+      - FORGEJO__security__INSTALL_LOCK=true
+      - FORGEJO__service__DISABLE_REGISTRATION=true
+      - FORGEJO__actions__ENABLED=true
+      - FORGEJO__server__ROOT_URL=http://localhost:3000
       - FORGEJO__server__SSH_PORT=2222
     restart: unless-stopped
 
@@ -33,11 +37,15 @@ services:
       - "8080:8080"
     environment:
       CHUGGERNAUT_NATS_URL: nats://nats:4222
+      CHUGGERNAUT_NATS_WORKER_URL: nats://host.docker.internal:4222
       CHUGGERNAUT_HTTP_LISTEN: "0.0.0.0:8080"
       CHUGGERNAUT_FORGEJO_URL: http://forgejo:3000
       CHUGGERNAUT_FORGEJO_TOKEN: ${CHUGGERNAUT_FORGEJO_TOKEN:-}
       CHUGGERNAUT_ACTION_WORKFLOW: work.yml
+      CHUGGERNAUT_REVIEW_WORKFLOW: review.yml
       CHUGGERNAUT_STATIC_DIR: /static
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./static:/static:ro
     depends_on:
@@ -45,34 +53,8 @@ services:
       - forgejo
     restart: unless-stopped
 
-
-  runner:
-    image: data.forgejo.org/forgejo/runner:11
-    command: >
-      sh -c '
-        while ! curl -sf http://forgejo:3000/api/v1/version > /dev/null 2>&1; do sleep 1; done;
-        if [ ! -f /data/.runner ]; then
-          forgejo-runner register --no-interactive
-            --instance http://forgejo:3000
-            --token $${RUNNER_TOKEN}
-            --name chuggernaut-runner
-            --labels "ubuntu-latest:docker://chuggernaut-runner-env"
-            -c /etc/runner/config.yaml;
-        fi;
-        forgejo-runner daemon -c /etc/runner/config.yaml
-      '
-    environment:
-      RUNNER_TOKEN: ${RUNNER_TOKEN:-}
-    volumes:
-      - runner-data:/data
-      - ./infra/runner/config.yaml:/etc/runner/config.yaml:ro
-      - /var/run/docker.sock:/var/run/docker.sock
-    depends_on:
-      - forgejo
-    restart: unless-stopped
-
-  # Build the runner environment image (worker binary + mock-claude)
-  # Run: docker compose build runner-env
+  # Build runner environment images
+  # Run: docker compose --profile build build
   runner-env:
     build:
       context: .
@@ -84,4 +66,3 @@ services:
 volumes:
   nats-data:
   forgejo-data:
-  runner-data:

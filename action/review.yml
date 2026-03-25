@@ -7,9 +7,10 @@ on:
         required: true
         type: string
       nats_url:
-        description: "NATS server URL"
-        required: true
+        description: "NATS server URL (overrides repo variable)"
+        required: false
         type: string
+        default: ""
       pr_url:
         description: "PR URL to review"
         required: true
@@ -28,11 +29,68 @@ on:
 jobs:
   review:
     runs-on: ${{ inputs.runner_label }}
+    timeout-minutes: 30
+    env:
+      NATS_URL: ${{ inputs.nats_url || vars.CHUGGERNAUT_NATS_URL }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Execute chuggernaut review
-        run: chuggernaut-worker --mode review --job-key "${{ inputs.job_key }}" --nats-url "${{ inputs.nats_url }}" --forgejo-url "${{ github.server_url }}" --pr-url "${{ inputs.pr_url }}" --review-level "${{ inputs.review_level }}"
-        env:
-          CHUGGERNAUT_FORGEJO_TOKEN: ${{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}
-          CHUGGERNAUT_COMMAND: claude
+      - name: Fetch job details from NATS
+        id: job
+        run: |
+          JOB_JSON=$(nats kv get chuggernaut_jobs "${{ inputs.job_key }}" --raw)
+          echo "title=$(echo "$JOB_JSON" | jq -r .title)" >> "$GITHUB_OUTPUT"
+          {
+            echo 'body<<CHUGGERNAUT_EOF'
+            echo "$JOB_JSON" | jq -r .body
+            echo 'CHUGGERNAUT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build prompt
+        id: prompt
+        run: |
+          {
+            echo 'value<<CHUGGERNAUT_EOF'
+            cat <<'PROMPT_EOF'
+          You are a code reviewer. Review the following pull request.
+
+          ## Job: ${{ steps.job.outputs.title }}
+
+          ${{ steps.job.outputs.body }}
+
+          ## Review Level: ${{ inputs.review_level }}
+
+          - **low**: Approve if the changes are roughly correct and don't introduce obvious bugs.
+          - **medium**: Approve if the changes correctly implement the requirements with reasonable code quality.
+          - **high**: Approve only if the changes are correct, complete, well-tested, and follow project conventions.
+
+          ## Instructions
+
+          1. Run `git diff origin/main...HEAD` to see what changed in this PR.
+          2. Read the changed files and surrounding code to understand context.
+          3. Consider: Does the implementation match the job? Are there bugs, edge cases, or security issues? Is code quality acceptable for the review level?
+
+          You have access to a chuggernaut MCP server. Use **update_status** to report your review progress. Use **channel_check** periodically to check for messages from the orchestrator.
+
+          You MUST end your response with a JSON object on its own line:
+          {"decision": "approved"} or {"decision": "changes_requested", "feedback": "..."} or {"decision": "escalate"}
+
+          After the JSON line, write nothing else.
+          PROMPT_EOF
+            echo 'CHUGGERNAUT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: .forgejo/actions/chug
+        with:
+          job_key: ${{ inputs.job_key }}
+          nats_url: ${{ env.NATS_URL }}
+          forgejo_url: ${{ github.server_url }}
+          forgejo_token: ${{ secrets.CHUGGERNAUT_REVIEWER_TOKEN }}
+          post_action: review
+          prompt: ${{ steps.prompt.outputs.value }}
+          command_args: "--allowedTools Bash Read Glob Grep"
+          timeout_minutes: "30"
+          pr_url: ${{ inputs.pr_url }}
+          review_level: ${{ inputs.review_level }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

@@ -1,0 +1,24 @@
+# Copy to terraform.tfvars and fill in values.
+#
+# Prerequisites:
+# 1. Forgejo + NATS running (docker-compose up)
+# 2. Admin user created (first-run setup or `forgejo admin user create --admin`)
+# 3. Admin token created via Forgejo UI or API
+# 4. `nats` CLI installed (https://github.com/nats-io/natscli)
+
+forgejo_url         = "http://localhost:3000"
+forgejo_admin_token = "your-admin-token-here"
+
+nats_url        = "nats://localhost:4222"
+nats_worker_url = "nats://host.docker.internal:4222"
+
+# dispatcher_url = "http://host.docker.internal:8080"
+
+worker_password   = "chuggernaut-worker-pass"
+reviewer_password = "chuggernaut-reviewer-pass"
+
+managed_repos = [
+  # { org = "acme", repo = "payments" },
+]
+
+runner_count = 1

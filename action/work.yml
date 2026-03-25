@@ -7,9 +7,10 @@ on:
         required: true
         type: string
       nats_url:
-        description: "NATS server URL"
-        required: true
+        description: "NATS server URL (overrides repo variable)"
+        required: false
         type: string
+        default: ""
       runner_label:
         description: "Runner label (maps to container image via runner config)"
         required: false
@@ -29,13 +30,74 @@ on:
 jobs:
   work:
     runs-on: ${{ inputs.runner_label }}
+    timeout-minutes: 60
+    env:
+      NATS_URL: ${{ inputs.nats_url || vars.CHUGGERNAUT_NATS_URL }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Execute chuggernaut worker
-        run: chuggernaut-worker --job-key "${{ inputs.job_key }}" --nats-url "${{ inputs.nats_url }}" --forgejo-url "${{ github.server_url }}"
-        env:
-          CHUGGERNAUT_FORGEJO_TOKEN: ${{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}
-          CHUGGERNAUT_COMMAND: claude
-          CHUGGERNAUT_REVIEW_FEEDBACK: ${{ inputs.review_feedback }}
-          CHUGGERNAUT_IS_REWORK: ${{ inputs.is_rework }}
+      - name: Fetch job details from NATS
+        id: job
+        run: |
+          JOB_JSON=$(nats kv get chuggernaut_jobs "${{ inputs.job_key }}" --raw)
+          echo "title=$(echo "$JOB_JSON" | jq -r .title)" >> "$GITHUB_OUTPUT"
+          {
+            echo 'body<<CHUGGERNAUT_EOF'
+            echo "$JOB_JSON" | jq -r .body
+            echo 'CHUGGERNAUT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build prompt
+        id: prompt
+        run: |
+          PROMPT="You are working on job ${{ inputs.job_key }} in this repository.
+
+          ## ${{ steps.job.outputs.title }}
+
+          ${{ steps.job.outputs.body }}
+
+          ## Instructions
+
+          1. Read the task carefully and understand what needs to be done.
+          2. Explore the codebase to understand the relevant code.
+          3. Implement the requested changes.
+          4. Make sure your changes are correct and complete.
+          5. Do NOT create a PR or commit — just make the changes to the working tree.
+
+          ## Communication
+
+          You have access to a chuggernaut MCP server with these tools:
+          - **channel_check**: Call this periodically (every few major steps) to check for messages from the orchestrator. If someone requests a status update, respond via channel_send.
+          - **channel_send**: Send a message back to the orchestrator (e.g. to reply to a status request).
+          - **update_status**: Report your current progress. Call this after completing each major step (e.g. \"exploring codebase\", \"implementing feature\", \"running tests\"). Include a progress percentage if you can estimate one.
+
+          If you receive a DEADLINE WARNING, wrap up immediately: commit and push your progress."
+
+          if [ "${{ inputs.is_rework }}" = "true" ] && [ -n "${{ inputs.review_feedback }}" ]; then
+            PROMPT="${PROMPT}
+
+          ## Rework
+
+          A reviewer has requested changes. Address the following feedback:
+
+          ${{ inputs.review_feedback }}"
+          fi
+
+          {
+            echo 'value<<CHUGGERNAUT_EOF'
+            echo "$PROMPT"
+            echo 'CHUGGERNAUT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: .forgejo/actions/chug
+        with:
+          job_key: ${{ inputs.job_key }}
+          nats_url: ${{ env.NATS_URL }}
+          forgejo_url: ${{ github.server_url }}
+          forgejo_token: ${{ secrets.CHUGGERNAUT_WORKER_TOKEN }}
+          post_action: yield
+          prompt: ${{ steps.prompt.outputs.value }}
+          command_args: "--verbose --output-format stream-json --include-partial-messages --allowedTools Bash Read Write Edit Glob Grep Agent"
+          timeout_minutes: "60"
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

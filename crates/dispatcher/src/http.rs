@@ -9,7 +9,7 @@ use axum::Router;
 use futures::stream::Stream;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{error, info, warn};
 
 use chuggernaut_types::*;
 
@@ -311,7 +311,7 @@ pub fn check_static_dir() {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/", get(serve_spa))
         .route("/jobs", get(list_jobs).post(create_job))
         .route("/jobs/{key}", get(get_job))
@@ -322,8 +322,13 @@ pub fn router(state: AppState) -> Router {
         .route("/journal", get(list_journal))
         .route("/events", get(sse_events))
         .route("/schema", get(get_schema))
-        .route("/api.json", get(get_api_manifest))
-        .with_state(state)
+        .route("/api.json", get(get_api_manifest));
+
+    if let Some(dir) = resolve_static_dir() {
+        router = router.fallback_service(tower_http::services::ServeDir::new(dir));
+    }
+
+    router.with_state(state)
 }
 
 // ---------------------------------------------------------------------------
@@ -566,8 +571,11 @@ async fn channel_send(
     Path(key): Path<String>,
     Json(body): Json<ChannelSendBody>,
 ) -> Result<impl IntoResponse, AppError> {
+    info!(job_key = key, sender = body.sender, message = body.message, "channel_send: received request");
+
     // Verify job exists
     if !state.jobs.contains_key(&key) {
+        warn!(job_key = key, "channel_send: job not found");
         return Err(AppError::NotFound(format!("job not found: {key}")));
     }
 
@@ -579,12 +587,18 @@ async fn channel_send(
         in_reply_to: None,
     };
 
+    info!(job_key = key, message_id = msg.message_id, "channel_send: publishing to NATS inbox");
+
     state
         .nats
         .publish_to(&subjects::CHANNEL_INBOX, &key, &msg)
         .await
-        .map_err(|e| AppError::Internal(DispatcherError::Nats(e.to_string())))?;
+        .map_err(|e| {
+            error!(job_key = key, error = %e, "channel_send: NATS publish failed");
+            AppError::Internal(DispatcherError::Nats(e.to_string()))
+        })?;
 
+    info!(job_key = key, "channel_send: published successfully");
     Ok(StatusCode::OK)
 }
 
@@ -703,6 +717,15 @@ async fn sse_events(
             }
         };
 
+        // Subscribe to channel outbox messages (replies from Claude)
+        let mut channel_sub = match state.nats.subscribe("chuggernaut.channel.*.outbox").await {
+            Ok(sub) => sub,
+            Err(e) => {
+                warn!("failed to subscribe to channel outbox: {e}");
+                return;
+            }
+        };
+
         // Poll channel statuses periodically (KV watch is complex; polling is simpler for v1)
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
         let mut last_channels: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -745,6 +768,24 @@ async fn sse_events(
                         if let Ok(Some((claim, _))) = kv_get::<ClaimState>(&state.kv.claims, &hb.job_key).await {
                             let claim_event = serde_json::json!({ "key": hb.job_key, "claim": claim });
                             yield Ok(Event::default().event("claim_update").json_data(claim_event).unwrap());
+                        }
+                    }
+                }
+
+                Some(msg) = futures::StreamExt::next(&mut channel_sub) => {
+                    // Channel outbox message from Claude — extract job key from subject
+                    // Subject format: chuggernaut.channel.{job_key}.outbox
+                    let subject = msg.subject.as_str();
+                    let parts: Vec<&str> = subject.split('.').collect();
+                    if parts.len() >= 4 {
+                        let job_key = parts[2];
+                        if let Ok(channel_msg) = serde_json::from_slice::<ChannelMessage>(&msg.payload) {
+                            info!(job_key, sender = channel_msg.sender.as_str(), "channel outbox message received");
+                            let event = serde_json::json!({
+                                "key": job_key,
+                                "message": channel_msg,
+                            });
+                            yield Ok(Event::default().event("channel_message").json_data(event).unwrap());
                         }
                     }
                 }

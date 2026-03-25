@@ -1,14 +1,12 @@
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use chuggernaut_channel::{mcp, ChannelState};
 use chuggernaut_forgejo_api::{
     CreatePullReviewOptions, ForgejoClient, MergePullRequestOption,
 };
@@ -20,17 +18,17 @@ use chuggernaut_types::*;
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, ValueEnum)]
-enum Mode {
-    Work,
+enum PostAction {
+    Yield,
     Review,
 }
 
 #[derive(Parser)]
 #[command(name = "chuggernaut-worker", about = "Worker binary that runs inside Forgejo Actions")]
 struct Args {
-    /// Operating mode
-    #[arg(long, env = "CHUGGERNAUT_MODE", default_value = "work")]
-    mode: Mode,
+    /// What to do after the subprocess exits
+    #[arg(long, env = "CHUGGERNAUT_POST_ACTION", default_value = "yield")]
+    post_action: PostAction,
 
     /// Job key (e.g. acme.payments.57)
     #[arg(long, env = "CHUGGERNAUT_JOB_KEY")]
@@ -60,15 +58,19 @@ struct Args {
     #[arg(long, env = "CHUGGERNAUT_HEARTBEAT_INTERVAL_SECS", default_value = "10")]
     heartbeat_interval_secs: u64,
 
-    /// Enable channel mode (push notifications to Claude)
-    #[arg(long, env = "CHUGGERNAUT_CHANNEL_MODE", default_value = "false")]
-    channel_mode: bool,
+    /// Total timeout for this action run in minutes
+    #[arg(long, env = "CHUGGERNAUT_TIMEOUT_MINUTES", default_value = "60")]
+    timeout_minutes: u64,
+
+    /// How many minutes before the deadline to send a wrap-up warning
+    #[arg(long, env = "CHUGGERNAUT_WRAP_UP_MINUTES", default_value = "5")]
+    wrap_up_minutes: u64,
 
     /// Working directory for git operations
     #[arg(long, env = "CHUGGERNAUT_WORKDIR", default_value = "/tmp/chuggernaut-work")]
     workdir: String,
 
-    /// Review feedback from a previous run (JSON or plain text)
+    /// Review feedback from a previous run (yield post-action, rework cycles)
     #[arg(long, env = "CHUGGERNAUT_REVIEW_FEEDBACK", default_value = "")]
     review_feedback: String,
 
@@ -76,15 +78,17 @@ struct Args {
     #[arg(long, env = "CHUGGERNAUT_IS_REWORK", default_value = "false")]
     is_rework: bool,
 
-    // -- Review mode args --
-
-    /// PR URL to review (review mode only)
+    /// PR URL (review post-action)
     #[arg(long, env = "CHUGGERNAUT_PR_URL", default_value = "")]
     pr_url: String,
 
-    /// Review level: low, medium, high (review mode only)
+    /// Review level: low, medium, high (review post-action)
     #[arg(long, env = "CHUGGERNAUT_REVIEW_LEVEL", default_value = "high")]
     review_level: String,
+
+    /// The prompt to pass to Claude (fully resolved, no placeholders)
+    #[arg(long, env = "CHUGGERNAUT_PROMPT")]
+    prompt: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -105,94 +109,30 @@ async fn main() -> anyhow::Result<()> {
     info!(
         job_key = args.job_key,
         command = args.command,
-        mode = ?args.mode,
+        post_action = ?args.post_action,
         "starting chuggernaut-worker"
     );
 
-    match args.mode {
-        Mode::Work => run_work(args).await,
-        Mode::Review => run_review(args).await,
-    }
+    run(args).await
 }
 
 // ---------------------------------------------------------------------------
-// Shared: heartbeat
+// Unified run
 // ---------------------------------------------------------------------------
 
-fn spawn_heartbeat(
-    nats: NatsClient,
-    job_key: String,
-    cancel: CancellationToken,
-    interval_secs: u64,
-) {
-    let hb_interval = Duration::from_secs(interval_secs);
-    tokio::spawn(async move {
-        let worker_id = format!("action-{}", job_key);
-        let mut interval = tokio::time::interval(hb_interval);
-        let mut consecutive_failures = 0u32;
-        loop {
-            interval.tick().await;
-            if cancel.is_cancelled() {
-                break;
-            }
-            let hb = WorkerHeartbeat {
-                worker_id: worker_id.clone(),
-                job_key: job_key.clone(),
-            };
-            match nats.publish_msg(&subjects::WORKER_HEARTBEAT, &hb).await {
-                Ok(_) => {
-                    consecutive_failures = 0;
-                }
-                Err(e) => {
-                    consecutive_failures += 1;
-                    warn!(consecutive_failures, "heartbeat failed: {e}");
-                    if consecutive_failures >= 3 {
-                        error!("3 consecutive heartbeat failures, cancelling");
-                        cancel.cancel();
-                        break;
-                    }
-                }
-            }
-        }
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Shared: connect to NATS
-// ---------------------------------------------------------------------------
-
-async fn connect_nats(nats_url: &str) -> anyhow::Result<(NatsClient, async_nats::jetstream::Context)> {
-    let nats = NatsClient::new(async_nats::connect(nats_url).await?);
-    let js = async_nats::jetstream::new(nats.raw().clone());
-    info!(url = nats_url, "connected to NATS");
-
-    // Ensure channels KV bucket exists
-    js.create_key_value(async_nats::jetstream::kv::Config {
-        bucket: buckets::CHANNELS.to_string(),
-        history: 1,
-        storage: async_nats::jetstream::stream::StorageType::File,
-        ..Default::default()
-    })
-    .await?;
-
-    Ok((nats, js))
-}
-
-// ---------------------------------------------------------------------------
-// Work mode
-// ---------------------------------------------------------------------------
-
-async fn run_work(args: Args) -> anyhow::Result<()> {
+async fn run(args: Args) -> anyhow::Result<()> {
     let (owner, repo, _seq) = parse_job_key(&args.job_key)
         .ok_or_else(|| anyhow::anyhow!("invalid job key: {}", args.job_key))?;
     let repo_full = format!("{owner}/{repo}");
 
-    let (nats, _js) = connect_nats(&args.nats_url).await?;
     let forgejo = ForgejoClient::new(&args.forgejo_url, &args.forgejo_token);
+    validate_forgejo_token(&forgejo, &owner, &repo).await?;
+
+    let (nats, _js) = connect_nats(&args.nats_url).await?;
     let cancel = CancellationToken::new();
 
-    // Clone repo and checkout work branch
-    let workdir = std::path::PathBuf::from(&args.workdir);
+    // Clone repo
+    let workdir = PathBuf::from(&args.workdir);
     std::fs::create_dir_all(&workdir)?;
     let repo_dir = chuggernaut_worker::git::clone_repo(
         &args.forgejo_url,
@@ -200,152 +140,162 @@ async fn run_work(args: Args) -> anyhow::Result<()> {
         &args.forgejo_token,
         &workdir,
     )?;
-    let branch = format!("work/{}", args.job_key);
-    chuggernaut_worker::git::checkout_branch(&repo_dir, &branch)?;
-    info!(branch, "checked out work branch");
 
-    // Heartbeat
+    // Branch checkout — differs by post-action
+    let branch = match args.post_action {
+        PostAction::Yield => {
+            let b = format!("work/{}", args.job_key);
+            chuggernaut_worker::git::checkout_branch(&repo_dir, &b)?;
+            info!(branch = b.as_str(), "checked out work branch");
+            // Validate push auth early
+            chuggernaut_worker::git::push(&repo_dir, &b)
+                .map_err(|e| anyhow::anyhow!("git push auth check failed: {e}\n  \
+                    The CHUGGERNAUT_FORGEJO_TOKEN may be invalid for git HTTP auth"))?;
+            info!("git push auth validated");
+            b
+        }
+        PostAction::Review => {
+            let pr_index = parse_pr_index(&args.pr_url)
+                .ok_or_else(|| anyhow::anyhow!("cannot parse PR index from: {}", args.pr_url))?;
+            let pr = forgejo.get_pull_request(&owner, &repo, pr_index).await?;
+            let b = pr.head.ref_field.clone();
+            chuggernaut_worker::git::checkout_branch(&repo_dir, &b)?;
+            info!(branch = b.as_str(), pr_index, "checked out PR branch for review");
+            b
+        }
+    };
+
+    // Common infrastructure
     spawn_heartbeat(nats.clone(), args.job_key.clone(), cancel.clone(), args.heartbeat_interval_secs);
+    spawn_deadline_warning(nats.clone(), args.job_key.clone(), cancel.clone(), args.timeout_minutes, args.wrap_up_minutes);
 
-    // Channel MCP state + inbox listener
-    let channel_state = Arc::new(Mutex::new(ChannelState::new()));
-    let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
+    let hard_deadline = Duration::from_secs(args.timeout_minutes * 60).saturating_sub(Duration::from_secs(60));
 
-    tokio::spawn(chuggernaut_channel::nats_inbox_listener(
-        nats.raw().clone(),
-        args.job_key.clone(),
-        Arc::clone(&channel_state),
-        out_tx.clone(),
-        args.channel_mode,
-    ));
+    let mcp_config = write_mcp_config(&args.job_key, &args.nats_url, &workdir)?;
+    info!(config = mcp_config.display().to_string(), "wrote MCP config");
 
-    // Launch subprocess
+    // Build subprocess command
     info!(command = args.command, "launching subprocess");
-    let cmd_args: Vec<&str> = args
+    let mut cmd_args: Vec<String> = args
         .command_args
         .split_whitespace()
         .filter(|s| !s.is_empty())
+        .map(String::from)
         .collect();
+    cmd_args.push("--print".into());
+    cmd_args.push(args.prompt.clone());
+    cmd_args.push("--mcp-config".into());
+    cmd_args.push(mcp_config.display().to_string());
 
     let mut child = Command::new(&args.command)
         .args(&cmd_args)
         .current_dir(&repo_dir)
-        .env("CHUGGERNAUT_REVIEW_FEEDBACK", &args.review_feedback)
-        .env("CHUGGERNAUT_IS_REWORK", args.is_rework.to_string())
-        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
         .spawn()?;
 
-    let child_stdin = child.stdin.take().expect("stdin piped");
-    let child_stdout = child.stdout.take().expect("stdout piped");
+    // Capture stdout — both stream events to stderr and collect for review parsing
+    let stdout = child.stdout.take().expect("stdout piped");
+    let (output_tx, output_rx) = tokio::sync::oneshot::channel::<String>();
+    tokio::spawn(async move {
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+        let mut collected = String::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            print_stream_event(&line);
+            collected.push_str(&line);
+            collected.push('\n');
+        }
+        let _ = output_tx.send(collected);
+    });
 
-    let mut stdin_writer = tokio::io::BufWriter::new(child_stdin);
-    let mut stdout_reader = BufReader::new(child_stdout);
-
-    let mcp_nats = nats.raw().clone();
-    let mcp_state = Arc::clone(&channel_state);
-    let mcp_job_key = args.job_key.clone();
-    let mcp_channel_mode = args.channel_mode;
-
-    let outcome = tokio::select! {
-        result = async {
-            let mut line_buf = String::new();
-            loop {
-                line_buf.clear();
-                let n = stdout_reader.read_line(&mut line_buf).await?;
-                if n == 0 {
-                    break;
+    // Wait for subprocess with cancel + deadline
+    let (exit_ok, was_deadline) = tokio::select! {
+        status = child.wait() => {
+            match status {
+                Ok(s) if s.success() => {
+                    info!("subprocess exited successfully");
+                    (true, false)
                 }
-                let line = line_buf.trim();
-                if line.is_empty() {
-                    continue;
+                Ok(s) => {
+                    warn!("subprocess exited with {s}");
+                    (false, false)
                 }
-
-                let req: mcp::JsonRpcRequest = match serde_json::from_str(line) {
-                    Ok(r) => r,
-                    Err(_e) => {
-                        debug!("non-JSON line from child: {line}");
-                        continue;
-                    }
-                };
-
-                let mcp_js = async_nats::jetstream::new(mcp_nats.clone());
-                if let Some(response) = chuggernaut_channel::handle_message(
-                    req,
-                    &mcp_state,
-                    &mcp_nats,
-                    &mcp_js,
-                    &mcp_job_key,
-                    mcp_channel_mode,
-                ).await {
-                    stdin_writer.write_all(response.as_bytes()).await?;
-                    stdin_writer.write_all(b"\n").await?;
-                    stdin_writer.flush().await?;
+                Err(e) => {
+                    error!("subprocess error: {e}");
+                    (false, false)
                 }
-
-                while let Ok(notification) = out_rx.try_recv() {
-                    stdin_writer.write_all(notification.as_bytes()).await?;
-                    stdin_writer.write_all(b"\n").await?;
-                    stdin_writer.flush().await?;
-                }
-            }
-            Ok::<_, anyhow::Error>(())
-        } => {
-            match result {
-                Ok(()) => {
-                    info!("subprocess exited");
-                    let status = child.wait().await?;
-                    if status.success() {
-                        make_outcome_yield(&forgejo, owner, repo, &branch, &args.job_key).await
-                    } else {
-                        OutcomeType::Fail {
-                            reason: format!("subprocess exited with {status}"),
-                            logs: None,
-                        }
-                    }
-                }
-                Err(e) => OutcomeType::Fail {
-                    reason: format!("MCP loop error: {e}"),
-                    logs: None,
-                },
             }
         }
-
         _ = cancel.cancelled() => {
             let _ = child.kill().await;
-            OutcomeType::Fail {
-                reason: "heartbeat failure".to_string(),
-                logs: None,
-            }
+            warn!("cancelled by heartbeat failure");
+            (false, false)
+        }
+        _ = tokio::time::sleep(hard_deadline) => {
+            warn!(job_key = args.job_key, "hard deadline reached, killing subprocess");
+            let _ = child.kill().await;
+            (false, true)
         }
     };
 
     cancel.cancel();
+    let output = output_rx.await.unwrap_or_default();
 
-    let worker_outcome = WorkerOutcome {
-        worker_id: format!("action-{}", args.job_key),
-        job_key: args.job_key.clone(),
-        outcome,
-        token_usage: None, // TODO: capture from Claude subprocess
-    };
-    nats.publish_msg(&subjects::WORKER_OUTCOME, &worker_outcome)
-        .await?;
+    // Post-action — handle outcome based on mode
+    match args.post_action {
+        PostAction::Yield => {
+            let outcome = if exit_ok || was_deadline {
+                post_action_yield(&forgejo, &owner, &repo, &branch, &args.job_key).await
+            } else {
+                OutcomeType::Fail {
+                    reason: "subprocess failed".to_string(),
+                    logs: None,
+                }
+            };
+            let worker_outcome = WorkerOutcome {
+                worker_id: format!("action-{}", args.job_key),
+                job_key: args.job_key.clone(),
+                outcome,
+                token_usage: None,
+            };
+            nats.publish_msg(&subjects::WORKER_OUTCOME, &worker_outcome).await?;
+            info!(job_key = args.job_key, "outcome reported, exiting");
+        }
+        PostAction::Review => {
+            let pr_index = parse_pr_index(&args.pr_url).unwrap_or(0);
+            let decision = if exit_ok {
+                match parse_review_output(&output) {
+                    Ok(result) => post_action_review(result, &forgejo, &owner, &repo, pr_index, &args).await,
+                    Err(e) => {
+                        error!(job_key = args.job_key, error = %e, "failed to parse review output");
+                        escalate_decision(&args)
+                    }
+                }
+            } else {
+                error!(job_key = args.job_key, "review subprocess failed");
+                escalate_decision(&args)
+            };
+            nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await?;
+            info!(job_key = args.job_key, "review decision reported, exiting");
+        }
+    }
 
-    info!(job_key = args.job_key, "outcome reported, exiting");
     Ok(())
 }
 
-/// After the subprocess exits successfully, check if there's work to commit
-/// and find/create the PR.
-async fn make_outcome_yield(
+// ---------------------------------------------------------------------------
+// Post-action: yield (commit, push, find/create PR)
+// ---------------------------------------------------------------------------
+
+async fn post_action_yield(
     forgejo: &ForgejoClient,
     owner: &str,
     repo: &str,
     branch: &str,
     job_key: &str,
 ) -> OutcomeType {
-    let repo_dir = std::path::PathBuf::from(format!(
+    let repo_dir = PathBuf::from(format!(
         "/tmp/chuggernaut-work/{}",
         format!("{owner}/{repo}").replace('/', "_")
     ));
@@ -396,67 +346,35 @@ async fn make_outcome_yield(
 }
 
 // ---------------------------------------------------------------------------
-// Review mode
+// Post-action: review (parse output, post review, merge)
 // ---------------------------------------------------------------------------
 
-async fn run_review(args: Args) -> anyhow::Result<()> {
-    let (owner, repo, _seq) = parse_job_key(&args.job_key)
-        .ok_or_else(|| anyhow::anyhow!("invalid job key: {}", args.job_key))?;
-    let repo_full = format!("{owner}/{repo}");
-
-    let (nats, _js) = connect_nats(&args.nats_url).await?;
-    let forgejo = ForgejoClient::new(&args.forgejo_url, &args.forgejo_token);
-    let cancel = CancellationToken::new();
-
-    // Parse PR index from URL
-    let pr_index = parse_pr_index(&args.pr_url)
-        .ok_or_else(|| anyhow::anyhow!("cannot parse PR index from: {}", args.pr_url))?;
-
-    // Clone repo and checkout the PR branch so Claude can read the code
-    let workdir = std::path::PathBuf::from(&args.workdir);
-    std::fs::create_dir_all(&workdir)?;
-    let repo_dir = chuggernaut_worker::git::clone_repo(
-        &args.forgejo_url,
-        &repo_full,
-        &args.forgejo_token,
-        &workdir,
-    )?;
-
-    // Checkout the PR's head branch
-    let pr = forgejo.get_pull_request(&owner, &repo, pr_index).await?;
-    let pr_branch = &pr.head.ref_field;
-    chuggernaut_worker::git::checkout_branch(&repo_dir, pr_branch)?;
-    info!(pr_branch = pr_branch.as_str(), pr_index, "checked out PR branch for review");
-
-    // Heartbeat
-    spawn_heartbeat(nats.clone(), args.job_key.clone(), cancel.clone(), args.heartbeat_interval_secs);
-
-    // Get the diff for the review prompt
-    let diff = get_pr_diff(&repo_dir)?;
-
-    // Run Claude to review the diff
-    let decision = run_review_subprocess(&args, &repo_dir, &diff, &cancel).await;
-
-    cancel.cancel();
-
-    // Act on the decision
-    let review_decision = match decision {
-        Ok(ReviewResult::Approved { feedback }) => {
-            // Post approval review
-            let _ = forgejo.submit_review(&owner, &repo, pr_index, &CreatePullReviewOptions {
+async fn post_action_review(
+    result: ReviewResult,
+    forgejo: &ForgejoClient,
+    owner: &str,
+    repo: &str,
+    pr_index: u64,
+    args: &Args,
+) -> ReviewDecision {
+    match result {
+        ReviewResult::Approved { feedback } => {
+            match forgejo.submit_review(owner, repo, pr_index, &CreatePullReviewOptions {
                 body: feedback.clone().unwrap_or_else(|| "LGTM".to_string()),
                 event: "APPROVED".to_string(),
-            }).await;
+            }).await {
+                Ok(review) => info!(job_key = args.job_key, review_id = review.id, "approval review submitted"),
+                Err(e) => error!(job_key = args.job_key, error = %e, "failed to submit approval review"),
+            }
 
-            // Attempt merge (with retries for lock contention)
-            match try_merge(&forgejo, &owner, &repo, pr_index).await {
+            match try_merge(forgejo, owner, repo, pr_index).await {
                 Ok(()) => {
                     info!(job_key = args.job_key, "PR merged successfully");
                     ReviewDecision {
                         job_key: args.job_key.clone(),
                         decision: DecisionType::Approved,
                         pr_url: Some(args.pr_url.clone()),
-                        token_usage: None, // TODO: capture from Claude
+                        token_usage: None,
                     }
                 }
                 Err(e) => {
@@ -472,12 +390,13 @@ async fn run_review(args: Args) -> anyhow::Result<()> {
                 }
             }
         }
-        Ok(ReviewResult::ChangesRequested { feedback }) => {
-            // Post changes-requested review
-            let _ = forgejo.submit_review(&owner, &repo, pr_index, &CreatePullReviewOptions {
+        ReviewResult::ChangesRequested { feedback } => {
+            if let Err(e) = forgejo.submit_review(owner, repo, pr_index, &CreatePullReviewOptions {
                 body: feedback.clone(),
                 event: "REQUEST_CHANGES".to_string(),
-            }).await;
+            }).await {
+                error!(job_key = args.job_key, error = %e, "failed to submit changes-requested review");
+            }
 
             ReviewDecision {
                 job_key: args.job_key.clone(),
@@ -486,101 +405,197 @@ async fn run_review(args: Args) -> anyhow::Result<()> {
                 token_usage: None,
             }
         }
-        Ok(ReviewResult::Escalate) => {
-            ReviewDecision {
-                job_key: args.job_key.clone(),
-                decision: DecisionType::Escalated {
-                    reviewer_login: "human".to_string(),
-                },
-                pr_url: Some(args.pr_url.clone()),
-                token_usage: None,
+        ReviewResult::Escalate => escalate_decision(args),
+    }
+}
+
+fn escalate_decision(args: &Args) -> ReviewDecision {
+    ReviewDecision {
+        job_key: args.job_key.clone(),
+        decision: DecisionType::Escalated {
+            reviewer_login: "human".to_string(),
+        },
+        pr_url: Some(args.pr_url.clone()),
+        token_usage: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: heartbeat
+// ---------------------------------------------------------------------------
+
+fn spawn_heartbeat(
+    nats: NatsClient,
+    job_key: String,
+    cancel: CancellationToken,
+    interval_secs: u64,
+) {
+    let hb_interval = Duration::from_secs(interval_secs);
+    tokio::spawn(async move {
+        let worker_id = format!("action-{}", job_key);
+        let mut interval = tokio::time::interval(hb_interval);
+        let mut consecutive_failures = 0u32;
+        loop {
+            interval.tick().await;
+            if cancel.is_cancelled() {
+                break;
+            }
+            let hb = WorkerHeartbeat {
+                worker_id: worker_id.clone(),
+                job_key: job_key.clone(),
+            };
+            match nats.publish_msg(&subjects::WORKER_HEARTBEAT, &hb).await {
+                Ok(_) => {
+                    consecutive_failures = 0;
+                }
+                Err(e) => {
+                    consecutive_failures += 1;
+                    warn!(consecutive_failures, "heartbeat failed: {e}");
+                    if consecutive_failures >= 3 {
+                        error!("3 consecutive heartbeat failures, cancelling");
+                        cancel.cancel();
+                        break;
+                    }
+                }
             }
         }
-        Err(e) => {
-            error!(job_key = args.job_key, error = %e, "review subprocess failed");
-            // Escalate on failure — don't block the pipeline
-            ReviewDecision {
-                job_key: args.job_key.clone(),
-                decision: DecisionType::Escalated {
-                    reviewer_login: "human".to_string(),
-                },
-                pr_url: Some(args.pr_url.clone()),
-                token_usage: None,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: deadline warning
+// ---------------------------------------------------------------------------
+
+fn spawn_deadline_warning(
+    nats: NatsClient,
+    job_key: String,
+    cancel: CancellationToken,
+    timeout_minutes: u64,
+    wrap_up_minutes: u64,
+) {
+    if wrap_up_minutes >= timeout_minutes {
+        warn!(timeout_minutes, wrap_up_minutes, "wrap-up window >= timeout, skipping deadline warning");
+        return;
+    }
+
+    let warn_after = Duration::from_secs((timeout_minutes - wrap_up_minutes) * 60);
+    let remaining = wrap_up_minutes;
+
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::time::sleep(warn_after) => {}
+            _ = cancel.cancelled() => { return; }
+        }
+
+        info!(job_key, remaining_minutes = remaining, "sending deadline wrap-up warning");
+
+        let msg = ChannelMessage {
+            sender: "system".to_string(),
+            body: format!(
+                "DEADLINE WARNING: You have approximately {remaining} minutes remaining before this action run is terminated. \
+                 Please wrap up your current work now:\n\
+                 1. Finish or revert any half-done changes\n\
+                 2. Commit your progress with `git add -A && git commit`\n\
+                 3. Push your branch with `git push`\n\
+                 4. Use update_status to report what you accomplished and what remains\n\n\
+                 The next action run will pick up where you left off."
+            ),
+            timestamp: chrono::Utc::now(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            in_reply_to: None,
+        };
+
+        if let Err(e) = nats
+            .publish_to(&subjects::CHANNEL_INBOX, &job_key, &msg)
+            .await
+        {
+            error!(job_key, error = %e, "failed to send deadline warning");
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: MCP config, Forgejo validation, NATS
+// ---------------------------------------------------------------------------
+
+fn write_mcp_config(job_key: &str, nats_url: &str, workdir: &Path) -> anyhow::Result<PathBuf> {
+    let config = serde_json::json!({
+        "mcpServers": {
+            "chuggernaut": {
+                "command": "chuggernaut-channel",
+                "args": [
+                    "--job-key", job_key,
+                    "--nats-url", nats_url,
+                    "--channel-mode", "false",
+                ],
             }
         }
-    };
+    });
 
-    nats.publish_msg(&subjects::REVIEW_DECISION, &review_decision)
-        .await?;
+    let path = workdir.join("mcp-config.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&config)?)?;
+    Ok(path)
+}
 
-    info!(job_key = args.job_key, "review decision reported, exiting");
+async fn validate_forgejo_token(forgejo: &ForgejoClient, owner: &str, repo: &str) -> anyhow::Result<()> {
+    let r = forgejo.get_repo(owner, repo).await.map_err(|e| {
+        anyhow::anyhow!("Forgejo token validation failed for {owner}/{repo}: {e}\n  \
+            Check that CHUGGERNAUT_FORGEJO_TOKEN is set and the token has read:repository scope")
+    })?;
+
+    if !r.permissions.pull {
+        return Err(anyhow::anyhow!(
+            "Forgejo token cannot read {owner}/{repo} — needs read:repository scope"
+        ));
+    }
+    if !r.permissions.push {
+        return Err(anyhow::anyhow!(
+            "Forgejo token cannot push to {owner}/{repo} — needs write:repository scope"
+        ));
+    }
+
+    forgejo.list_pull_requests(owner, repo, Some("open")).await.map_err(|e| {
+        anyhow::anyhow!("Forgejo token cannot list PRs on {owner}/{repo}: {e}\n  \
+            Check that the token has read:issue and write:issue scopes")
+    })?;
+
+    info!(
+        repo = r.full_name,
+        pull = r.permissions.pull,
+        push = r.permissions.push,
+        admin = r.permissions.admin,
+        "Forgejo token validated (repo access + push + PR access)"
+    );
     Ok(())
 }
 
-/// The structured result from a review subprocess.
+async fn connect_nats(nats_url: &str) -> anyhow::Result<(NatsClient, async_nats::jetstream::Context)> {
+    let nats = NatsClient::new(async_nats::connect(nats_url).await?);
+    let js = async_nats::jetstream::new(nats.raw().clone());
+    info!(url = nats_url, "connected to NATS");
+
+    js.create_key_value(async_nats::jetstream::kv::Config {
+        bucket: buckets::CHANNELS.to_string(),
+        history: 1,
+        storage: async_nats::jetstream::stream::StorageType::File,
+        ..Default::default()
+    })
+    .await?;
+
+    Ok((nats, js))
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: review output parsing
+// ---------------------------------------------------------------------------
+
 enum ReviewResult {
     Approved { feedback: Option<String> },
     ChangesRequested { feedback: String },
     Escalate,
 }
 
-/// Run the review subprocess (Claude) and parse its decision.
-async fn run_review_subprocess(
-    args: &Args,
-    repo_dir: &std::path::Path,
-    diff: &str,
-    cancel: &CancellationToken,
-) -> anyhow::Result<ReviewResult> {
-    let cmd_args: Vec<&str> = args
-        .command_args
-        .split_whitespace()
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    let mut child = Command::new(&args.command)
-        .args(&cmd_args)
-        .current_dir(repo_dir)
-        .env("CHUGGERNAUT_MODE", "review")
-        .env("CHUGGERNAUT_REVIEW_LEVEL", &args.review_level)
-        .env("CHUGGERNAUT_PR_DIFF", diff)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()?;
-
-    let stdout = child.stdout.take().expect("stdout piped");
-    let mut reader = BufReader::new(stdout);
-    let mut output = String::new();
-
-    tokio::select! {
-        result = async {
-            let mut line_buf = String::new();
-            loop {
-                line_buf.clear();
-                let n = reader.read_line(&mut line_buf).await?;
-                if n == 0 { break; }
-                output.push_str(&line_buf);
-            }
-            child.wait().await
-        } => {
-            let status = result?;
-            if !status.success() {
-                return Err(anyhow::anyhow!("review subprocess exited with {status}"));
-            }
-            parse_review_output(&output)
-        }
-
-        _ = cancel.cancelled() => {
-            let _ = child.kill().await;
-            Err(anyhow::anyhow!("cancelled by heartbeat failure"))
-        }
-    }
-}
-
-/// Parse the review subprocess output.
-/// Expected JSON: {"decision": "approved"|"changes_requested", "feedback": "..."}
 fn parse_review_output(output: &str) -> anyhow::Result<ReviewResult> {
-    // Try to find a JSON object in the output (Claude may output other text)
     for line in output.lines().rev() {
         let line = line.trim();
         if !line.starts_with('{') {
@@ -606,27 +621,82 @@ fn parse_review_output(output: &str) -> anyhow::Result<ReviewResult> {
     ))
 }
 
-/// Get the diff between main and HEAD.
-fn get_pr_diff(repo_dir: &std::path::Path) -> anyhow::Result<String> {
-    let output = std::process::Command::new("git")
-        .current_dir(repo_dir)
-        .args(["diff", "origin/main...HEAD"])
-        .output()?;
+// ---------------------------------------------------------------------------
+// Helpers: git, subprocess output, PR merge
+// ---------------------------------------------------------------------------
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!("git diff failed: {stderr}"));
+fn print_stream_event(line: &str) {
+    let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(line) else {
+        eprintln!("{line}");
+        return;
+    };
+
+    match wrapper.get("type").and_then(|t| t.as_str()) {
+        Some("system") => {
+            let sub = wrapper.get("subtype").and_then(|s| s.as_str()).unwrap_or("unknown");
+            eprintln!("[system] {sub}");
+            return;
+        }
+        Some("error") => {
+            let msg = wrapper
+                .pointer("/error/message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error");
+            eprintln!("[error] {msg}");
+            return;
+        }
+        _ => {}
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    let Some(event) = wrapper.get("event") else { return };
+    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+    match event_type {
+        "content_block_start" => {
+            let block = &event["content_block"];
+            match block.get("type").and_then(|t| t.as_str()) {
+                Some("tool_use") => {
+                    let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                    eprintln!("\n--- tool: {name} ---");
+                }
+                Some("text") => eprint!("\n"),
+                _ => {}
+            }
+        }
+        "content_block_delta" => {
+            let delta = &event["delta"];
+            match delta.get("type").and_then(|t| t.as_str()) {
+                Some("text_delta") => {
+                    if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                        eprint!("{text}");
+                    }
+                }
+                Some("input_json_delta") => {
+                    if let Some(json) = delta.get("partial_json").and_then(|t| t.as_str()) {
+                        eprint!("{json}");
+                    }
+                }
+                _ => {}
+            }
+        }
+        "content_block_stop" => {
+            eprintln!();
+        }
+        "message_delta" => {
+            if let Some(reason) = event.pointer("/delta/stop_reason").and_then(|r| r.as_str()) {
+                if let Some(tokens) = event.pointer("/usage/output_tokens").and_then(|t| t.as_u64()) {
+                    eprintln!("[{reason}] ({tokens} output tokens)");
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
-/// Parse PR index from a URL like "http://forgejo/owner/repo/pulls/123".
 fn parse_pr_index(url: &str) -> Option<u64> {
     url.rsplit('/').next()?.parse().ok()
 }
 
-/// Attempt to merge a PR, retrying a few times if locked.
 async fn try_merge(
     forgejo: &ForgejoClient,
     owner: &str,

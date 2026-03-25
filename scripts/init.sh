@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# DEPRECATED: Use ./scripts/dev-up.sh instead, which handles the full lifecycle
+# (docker compose + terraform + runners).
+#
 # Initialize Forgejo with admin user, reviewer user, test org/repo, and API tokens.
 # Run after `docker compose up -d` and waiting for Forgejo to start.
 
@@ -53,7 +56,7 @@ if [ -z "$REVIEWER_TOKEN" ] || [ "$REVIEWER_TOKEN" = "null" ]; then
 fi
 
 # Get runner registration token
-RUNNER_REG_TOKEN=$(curl -sf -X POST "${FORGEJO_URL}/api/v1/user/actions/runners/registration-token" \
+RUNNER_REG_TOKEN=$(curl -sf "${FORGEJO_URL}/api/v1/admin/runners/registration-token" \
     -H "Authorization: token ${ADMIN_TOKEN}" | jq -r '.token // empty')
 
 echo "Admin token:    ${ADMIN_TOKEN}"
