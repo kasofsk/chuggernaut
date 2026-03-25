@@ -208,6 +208,10 @@ async fn run(args: Args) -> anyhow::Result<()> {
         "wrote MCP config"
     );
 
+    // Validate command args before spawning — defense in depth against tampered NATS records
+    validate_worker_command_args(&args.command_args)
+        .map_err(|e| anyhow::anyhow!("command_args validation failed: {e}"))?;
+
     // Build subprocess command
     info!(command = args.command, "launching subprocess");
     let mut cmd_args: Vec<String> = args

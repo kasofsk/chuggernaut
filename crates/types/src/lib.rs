@@ -782,6 +782,45 @@ pub fn validate_claude_args(args: &str, allowed: &[AllowedClaudeFlag]) -> Result
     Ok(())
 }
 
+/// All Claude CLI flags that are safe to appear in a worker's command string.
+/// This includes both job-level flags (--model, etc.) and action-level flags
+/// (--verbose, --output-format, etc.) that the action YAML hardcodes.
+///
+/// Used by the worker as a final safety check before spawning Claude.
+const WORKER_SAFE_FLAGS: &[&str] = &[
+    // Job-level (customizable per job)
+    "--model",
+    "--max-turns",
+    "--max-budget-usd",
+    "--effort",
+    "--permission-mode",
+    // Action-level (hardcoded in work.yml / review.yml)
+    "--verbose",
+    "--output-format",
+    "--include-partial-messages",
+    "--allowedTools",
+];
+
+/// Validate the full command_args string that will be passed to Claude.
+///
+/// This is a worker-side safety check: it scans every flag-like token and
+/// rejects the string if any flag is not in the known-safe set. This guards
+/// against tampered NATS records injecting dangerous flags like
+/// `--dangerously-skip-permissions`.
+///
+/// Values are not type-checked here (the dispatcher already did that).
+pub fn validate_worker_command_args(args: &str) -> Result<(), String> {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    for token in &tokens {
+        if token.starts_with("--") && !WORKER_SAFE_FLAGS.contains(token) {
+            return Err(format!(
+                "command contains disallowed flag {token:?} (not in worker safe list)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // JSON Schema generation
 // ---------------------------------------------------------------------------
@@ -1007,6 +1046,31 @@ mod tests {
         assert!(validate_claude_args("--model sonnet", &flags).is_ok());
         // haiku not in allowed_values
         assert!(validate_claude_args("--model haiku", &flags).is_err());
+    }
+
+    #[test]
+    fn validate_worker_command_args_safe() {
+        // Typical work.yml command_args
+        assert!(validate_worker_command_args(
+            "--model opus --verbose --output-format stream-json --include-partial-messages --allowedTools Bash Read Write"
+        ).is_ok());
+        // Typical review.yml command_args
+        assert!(validate_worker_command_args("--allowedTools Bash Read Glob Grep").is_ok());
+        // Empty is fine
+        assert!(validate_worker_command_args("").is_ok());
+    }
+
+    #[test]
+    fn validate_worker_command_args_rejects_dangerous() {
+        assert!(validate_worker_command_args("--dangerously-skip-permissions").is_err());
+        assert!(
+            validate_worker_command_args(
+                "--verbose --output-format stream-json --dangerously-skip-permissions"
+            )
+            .is_err()
+        );
+        assert!(validate_worker_command_args("--print foo").is_err());
+        assert!(validate_worker_command_args("--mcp-config /tmp/evil.json").is_err());
     }
 
     #[test]
