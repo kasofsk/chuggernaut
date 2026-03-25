@@ -88,8 +88,11 @@ fi
 if [ "$CLEAN" = true ]; then
   echo "==> Cleaning up previous environment..."
 
-  # Remove Terraform-managed runner containers
+  # Remove Terraform-managed runner containers and orphaned action containers
   docker ps -a --filter "name=chuggernaut-runner-" --format "{{.Names}}" | while read -r name; do
+    docker rm -f "$name" 2>/dev/null || true
+  done
+  docker ps -a --filter "name=FORGEJO-ACTIONS" --format "{{.Names}}" | while read -r name; do
     docker rm -f "$name" 2>/dev/null || true
   done
 

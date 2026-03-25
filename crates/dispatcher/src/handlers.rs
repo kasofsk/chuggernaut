@@ -274,8 +274,11 @@ async fn handle_admin_create_job(
                             }
                             let _ = s.nats.raw().flush().await;
                         }
-                        // Assignment is handled by the monitor scan loop, not here.
-                        // This keeps the create handler fast and non-blocking.
+                        // Spawn assignment in background — reply is already sent
+                        let s2 = s.clone();
+                        tokio::spawn(async move {
+                            let _ = crate::assignment::try_assign_job(&s2, &key).await;
+                        });
                         return;
                     }
                     Err(e) => serde_json::to_vec(&ErrorResponse {

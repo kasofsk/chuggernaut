@@ -28,6 +28,9 @@ pub async fn recover(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
     // 5. Reconcile jobs against claims
     reconcile_jobs_against_claims(state).await?;
 
+    // 6. Try to assign any OnDeck jobs that weren't dispatched before shutdown
+    assign_on_deck_jobs(state).await;
+
     info!(jobs = state.jobs.len(), "recovery complete");
 
     Ok(())
@@ -84,6 +87,29 @@ async fn reconcile_claims_against_jobs(state: &Arc<DispatcherState>) -> Dispatch
         info!(stale, "stale claims cleaned up");
     }
     Ok(())
+}
+
+/// Try to assign OnDeck jobs that were waiting when the dispatcher last stopped.
+async fn assign_on_deck_jobs(state: &Arc<DispatcherState>) {
+    let on_deck: Vec<String> = state
+        .jobs
+        .iter()
+        .filter(|entry| entry.value().state == JobState::OnDeck)
+        .map(|entry| entry.key().clone())
+        .collect();
+
+    if on_deck.is_empty() {
+        return;
+    }
+
+    info!(count = on_deck.len(), "attempting to assign on-deck jobs from recovery");
+    for key in on_deck {
+        match crate::assignment::try_assign_job(state, &key).await {
+            Ok(true) => info!(job_key = key, "assigned on-deck job from recovery"),
+            Ok(false) => {} // at capacity or not assignable — normal
+            Err(e) => warn!(job_key = key, error = %e, "failed to assign on-deck job"),
+        }
+    }
 }
 
 /// For each job in on-the-stack, verify a matching claim exists.
