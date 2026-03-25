@@ -21,10 +21,19 @@ NATS-first workflow orchestration for AI agents. Jobs live in NATS KV. Workers r
 | `channel` | MCP channel over NATS |
 | `test-utils` | Test harness utilities |
 
+## Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `dev-up.sh` | Bootstrap the full dev environment (docker compose + Terraform + runners) |
+| `dev-down.sh` | Tear down dev environment; data volumes preserved by default |
+| `coverage.sh` | Generate code coverage report via `cargo-llvm-cov` |
+| `init.sh` | *(deprecated)* — use `dev-up.sh` instead |
+
 ## Running
 
 ```
-docker compose up        # NATS + Forgejo
+./scripts/dev-up.sh      # full dev environment
 cargo run -p dispatcher
 cargo run -p cli -- <command>
 ```
