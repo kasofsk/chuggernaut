@@ -48,6 +48,9 @@ pub enum ReviewLevel {
 pub enum OutcomeType {
     Yield {
         pr_url: String,
+        /// True when the worker wrapped up early (deadline/budget/overage warning).
+        #[serde(default)]
+        partial: bool,
     },
     Fail {
         reason: String,
@@ -92,6 +95,15 @@ pub enum DecisionType {
     Escalated { reviewer_login: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum CiStatus {
+    Pending,
+    Success,
+    Failure,
+    Error,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OrphanKind {
@@ -125,6 +137,15 @@ pub struct Job {
     /// Extra CLI args forwarded to Claude (e.g. "--model claude-sonnet-4-5-20250514 --max-turns 10").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_args: Option<String>,
+    /// Number of continuation dispatches for partial yields.
+    #[serde(default)]
+    pub continuation_count: u32,
+    /// CI status for the PR. None = not yet checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_status: Option<CiStatus>,
+    /// When CI polling started (set on transition to InReview).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_check_since: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -351,6 +372,14 @@ pub struct RetryEligibleEvent {
     pub detected_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CiCheckEvent {
+    pub job_key: String,
+    pub pr_url: String,
+    pub ci_status: CiStatus,
+    pub detected_at: DateTime<Utc>,
+}
+
 // ---------------------------------------------------------------------------
 // HTTP API response types
 // ---------------------------------------------------------------------------
@@ -557,6 +586,7 @@ subject_registry! {
     pub MONITOR_TIMEOUT: Subject<JobTimeoutEvent> = "chuggernaut.monitor.timeout";
     pub MONITOR_ORPHAN: Subject<OrphanDetectedEvent> = "chuggernaut.monitor.orphan";
     pub MONITOR_RETRY: Subject<RetryEligibleEvent> = "chuggernaut.monitor.retry";
+    pub MONITOR_CI_CHECK: Subject<CiCheckEvent> = "chuggernaut.monitor.ci-check";
 
     ---request---
 
@@ -619,6 +649,12 @@ pub fn parse_job_key(key: &str) -> Option<(&str, &str, u64)> {
 /// Build a job key from components.
 pub fn job_key(owner: &str, repo: &str, seq: u64) -> String {
     format!("{owner}.{repo}.{seq}")
+}
+
+/// Parse PR index from a Forgejo/Gitea PR URL.
+/// e.g. "https://forgejo.example.com/owner/repo/pulls/42" -> Some(42)
+pub fn parse_pr_url_index(url: &str) -> Option<u64> {
+    url.rsplit('/').next()?.parse().ok()
 }
 
 /// Validate that owner and repo names contain no dots.
@@ -876,6 +912,8 @@ pub fn generate_schema() -> schemars::Schema {
     generator.subschema_for::<CloseJobRequest>();
     generator.subschema_for::<WorkerHeartbeat>();
     generator.subschema_for::<HeartbeatRateLimit>();
+    generator.subschema_for::<CiStatus>();
+    generator.subschema_for::<CiCheckEvent>();
 
     // Channel
     generator.subschema_for::<ChannelMessage>();
@@ -935,6 +973,7 @@ mod tests {
     fn outcome_type_serde() {
         let yield_outcome = OutcomeType::Yield {
             pr_url: "http://forgejo/acme/payments/pulls/3".to_string(),
+            partial: false,
         };
         let json = serde_json::to_string(&yield_outcome).unwrap();
         assert!(json.contains("\"type\":\"yield\""));
@@ -1171,6 +1210,9 @@ mod tests {
             pr_url: None,
             token_usage: vec![],
             claude_args: Some("--model claude-sonnet-4-5-20250514".to_string()),
+            continuation_count: 0,
+            ci_status: None,
+            ci_check_since: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -1238,5 +1280,83 @@ mod tests {
         assert!(!json.contains("cost_usd"));
         assert!(!json.contains("turns"));
         assert!(!json.contains("rate_limit"));
+    }
+
+    #[test]
+    fn yield_partial_backward_compat() {
+        // Old-style yield without partial field should deserialize with partial=false
+        let json = r#"{"type":"yield","pr_url":"http://forgejo/acme/repo/pulls/1"}"#;
+        let outcome: OutcomeType = serde_json::from_str(json).unwrap();
+        match outcome {
+            OutcomeType::Yield { pr_url, partial } => {
+                assert_eq!(pr_url, "http://forgejo/acme/repo/pulls/1");
+                assert!(!partial);
+            }
+            _ => panic!("expected Yield"),
+        }
+    }
+
+    #[test]
+    fn yield_partial_roundtrip() {
+        let outcome = OutcomeType::Yield {
+            pr_url: "http://forgejo/acme/repo/pulls/1".to_string(),
+            partial: true,
+        };
+        let json = serde_json::to_string(&outcome).unwrap();
+        assert!(json.contains("\"partial\":true"));
+        let back: OutcomeType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, outcome);
+    }
+
+    #[test]
+    fn ci_status_serde() {
+        assert_eq!(
+            serde_json::to_string(&CiStatus::Pending).unwrap(),
+            "\"pending\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CiStatus::Success).unwrap(),
+            "\"success\""
+        );
+        assert_eq!(
+            serde_json::from_str::<CiStatus>("\"failure\"").unwrap(),
+            CiStatus::Failure
+        );
+    }
+
+    #[test]
+    fn parse_pr_url_index_valid() {
+        assert_eq!(
+            parse_pr_url_index("http://forgejo/acme/repo/pulls/42"),
+            Some(42)
+        );
+        assert_eq!(
+            parse_pr_url_index("http://forgejo:3000/org/project/pulls/1"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn parse_pr_url_index_invalid() {
+        assert_eq!(parse_pr_url_index("http://forgejo/acme/repo/pulls/"), None);
+        assert_eq!(parse_pr_url_index(""), None);
+    }
+
+    #[test]
+    fn job_new_fields_default() {
+        // Job JSON without new fields should deserialize with defaults
+        let json = r#"{
+            "key": "a.b.1", "repo": "a/b", "state": "on-deck",
+            "title": "t", "body": "b", "priority": 50,
+            "timeout_secs": 3600, "review": "high",
+            "max_retries": 3, "retry_count": 0,
+            "token_usage": [],
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:00:00Z"
+        }"#;
+        let job: Job = serde_json::from_str(json).unwrap();
+        assert_eq!(job.continuation_count, 0);
+        assert!(job.ci_status.is_none());
+        assert!(job.ci_check_since.is_none());
     }
 }

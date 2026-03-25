@@ -173,6 +173,9 @@ pub async fn create_job(
         pr_url: None,
         token_usage: vec![],
         claude_args: req.claude_args,
+        continuation_count: 0,
+        ci_status: None,
+        ci_check_since: None,
         created_at: now,
         updated_at: now,
     };

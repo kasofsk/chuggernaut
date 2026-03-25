@@ -23,6 +23,8 @@ pub struct Config {
     pub max_concurrent_actions: usize,
     pub review_workflow: String,
     pub review_runner_label: String,
+    pub max_continuations: u32,
+    pub ci_poll_timeout_secs: u64,
     pub rework_limit: u32,
     pub human_login: String,
     /// Which Claude CLI flags jobs are allowed to set via `claude_args`.
@@ -61,6 +63,8 @@ impl Config {
                 .unwrap_or_else(|_| "review.yml".to_string()),
             review_runner_label: env::var("CHUGGERNAUT_REVIEW_RUNNER_LABEL")
                 .unwrap_or_else(|_| "ubuntu-latest".to_string()),
+            max_continuations: parse_env("CHUGGERNAUT_MAX_CONTINUATIONS", 3),
+            ci_poll_timeout_secs: parse_env("CHUGGERNAUT_CI_POLL_TIMEOUT_SECS", 120),
             rework_limit: parse_env("CHUGGERNAUT_REWORK_LIMIT", 3),
             human_login: env::var("CHUGGERNAUT_HUMAN_LOGIN").unwrap_or_else(|_| "you".to_string()),
             allowed_claude_flags: env::var("CHUGGERNAUT_ALLOWED_CLAUDE_FLAGS")

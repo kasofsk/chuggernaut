@@ -166,7 +166,7 @@ async fn process_outcome(
     }
 
     match outcome.outcome {
-        OutcomeType::Yield { pr_url } => {
+        OutcomeType::Yield { pr_url, partial } => {
             let url = pr_url.clone();
             let (job, _) = jobs::kv_cas_rmw::<Job, _>(
                 &state.kv.jobs,
@@ -179,41 +179,109 @@ async fn process_outcome(
                 },
             )
             .await?;
-            state.jobs.insert(job_key.to_string(), job);
+            state.jobs.insert(job_key.to_string(), job.clone());
 
-            jobs::transition_job(
-                state,
-                job_key,
-                JobState::InReview,
-                "worker_yield",
-                Some(worker_id),
-            )
-            .await?;
+            if partial && job.continuation_count < state.config.max_continuations {
+                // --- Partial yield: dispatch continuation worker ---
+                let cont_num = job.continuation_count + 1;
+                let (updated, _) = jobs::kv_cas_rmw::<Job, _>(
+                    &state.kv.jobs,
+                    job_key,
+                    state.config.cas_max_retries,
+                    |job| {
+                        job.continuation_count += 1;
+                        job.updated_at = Utc::now();
+                        Ok(())
+                    },
+                )
+                .await?;
+                state.jobs.insert(job_key.to_string(), updated);
 
-            jobs::journal_append(
-                state,
-                "yield",
-                Some(job_key),
-                Some(worker_id),
-                Some(&format!("pr_url: {pr_url}")),
-            )
-            .await;
+                // Transition OnTheStack -> OnDeck for re-dispatch
+                jobs::transition_job(
+                    state,
+                    job_key,
+                    JobState::OnDeck,
+                    "partial_yield_continuation",
+                    Some(worker_id),
+                )
+                .await?;
 
-            // Dispatch review action
-            let review_level = state
-                .jobs
-                .get(job_key)
-                .map(|j| format!("{:?}", j.review).to_lowercase())
-                .unwrap_or_else(|| "high".to_string());
-            if let Err(e) = crate::action_dispatch::dispatch_review_action(
-                state,
-                job_key,
-                &pr_url,
-                &review_level,
-            )
-            .await
-            {
-                warn!(job_key, error = %e, "review action dispatch failed");
+                let entry = ActivityEntry {
+                    timestamp: Utc::now(),
+                    kind: "continuation".to_string(),
+                    message: format!("Partial yield #{cont_num}, re-dispatching continuation"),
+                };
+                jobs::append_activity(state, job_key, entry).await;
+
+                jobs::journal_append(
+                    state,
+                    "partial_yield",
+                    Some(job_key),
+                    Some(worker_id),
+                    Some(&format!("pr_url: {pr_url}, continuation #{cont_num}")),
+                )
+                .await;
+
+                // Dispatch continuation using rework path (checks out existing branch)
+                let continuation_context = format!(
+                    "CONTINUATION: A previous worker ran out of time/budget and yielded partial work. \
+                     A PR exists at {pr_url}. You are on the same branch with the previous commits. \
+                     Review what was accomplished, then complete the remaining work."
+                );
+                if let Err(e) = crate::action_dispatch::dispatch_action(
+                    state,
+                    job_key,
+                    Some(&continuation_context),
+                    true,
+                )
+                .await
+                {
+                    warn!(job_key, error = %e, "continuation dispatch failed");
+                }
+            } else {
+                // --- Complete yield (or max continuations reached): await CI ---
+                if partial {
+                    info!(job_key, "max continuations reached, proceeding to CI check");
+                }
+
+                // Set CI polling state
+                let (updated, _) = jobs::kv_cas_rmw::<Job, _>(
+                    &state.kv.jobs,
+                    job_key,
+                    state.config.cas_max_retries,
+                    |job| {
+                        job.ci_status = Some(CiStatus::Pending);
+                        job.ci_check_since = Some(Utc::now());
+                        job.updated_at = Utc::now();
+                        Ok(())
+                    },
+                )
+                .await?;
+                state.jobs.insert(job_key.to_string(), updated);
+
+                // Transition to InReview — review dispatch deferred until CI passes
+                jobs::transition_job(
+                    state,
+                    job_key,
+                    JobState::InReview,
+                    "worker_yield",
+                    Some(worker_id),
+                )
+                .await?;
+
+                jobs::journal_append(
+                    state,
+                    "yield",
+                    Some(job_key),
+                    Some(worker_id),
+                    Some(&format!("pr_url: {pr_url}, awaiting CI")),
+                )
+                .await;
+
+                // NOTE: Review action is NOT dispatched here.
+                // The monitor's scan_ci_status will detect CI completion
+                // and dispatch the review action (or trigger a CI fix rework).
             }
 
             // Slot freed — try to dispatch next queued job
@@ -702,6 +770,9 @@ async fn dispatch_monitor_event(
     } else if base == subjects::MONITOR_RETRY.name {
         let event: RetryEligibleEvent = serde_json::from_slice(payload)?;
         handle_retry(state, event).await
+    } else if base == subjects::MONITOR_CI_CHECK.name {
+        let event: CiCheckEvent = serde_json::from_slice(payload)?;
+        handle_ci_check(state, event).await
     } else {
         debug!(subject, "unknown monitor event subject");
         Ok(())
@@ -827,6 +898,115 @@ async fn handle_orphan(
     match event.kind {
         OrphanKind::ClaimlessOnTheStack => {
             warn!(job_key = event.job_key, kind = ?event.kind, "orphan detected (bug indicator)");
+        }
+    }
+    Ok(())
+}
+
+async fn handle_ci_check(
+    state: &Arc<DispatcherState>,
+    event: CiCheckEvent,
+) -> DispatcherResult<()> {
+    let job = match state.jobs.get(&event.job_key) {
+        Some(j) => j.clone(),
+        None => return Ok(()),
+    };
+    if job.state != JobState::InReview {
+        return Ok(());
+    }
+
+    // Update CI status on job
+    let (updated, _) = jobs::kv_cas_rmw::<Job, _>(
+        &state.kv.jobs,
+        &event.job_key,
+        state.config.cas_max_retries,
+        |job| {
+            job.ci_status = Some(event.ci_status);
+            job.updated_at = Utc::now();
+            Ok(())
+        },
+    )
+    .await?;
+    state.jobs.insert(event.job_key.clone(), updated);
+
+    match event.ci_status {
+        CiStatus::Success => {
+            // CI passed — dispatch review action
+            let review_level = state
+                .jobs
+                .get(&event.job_key)
+                .map(|j| format!("{:?}", j.review).to_lowercase())
+                .unwrap_or_else(|| "high".to_string());
+
+            if let Err(e) = crate::action_dispatch::dispatch_review_action(
+                state,
+                &event.job_key,
+                &event.pr_url,
+                &review_level,
+            )
+            .await
+            {
+                warn!(job_key = event.job_key, error = %e, "review action dispatch failed");
+            }
+
+            let entry = ActivityEntry {
+                timestamp: Utc::now(),
+                kind: "ci_passed".to_string(),
+                message: "CI checks passed, dispatching review".to_string(),
+            };
+            jobs::append_activity(state, &event.job_key, entry).await;
+
+            jobs::journal_append(
+                state,
+                "ci_passed",
+                Some(&event.job_key),
+                None,
+                Some("CI passed, review dispatched"),
+            )
+            .await;
+        }
+        CiStatus::Failure | CiStatus::Error => {
+            // CI failed — transition to ChangesRequested and dispatch fix-up worker
+            jobs::transition_job(
+                state,
+                &event.job_key,
+                JobState::ChangesRequested,
+                "ci_failed",
+                None,
+            )
+            .await?;
+
+            let ci_feedback = format!(
+                "CI checks have failed on the PR at {}. \
+                 Please investigate the CI failure, fix the issues, and push the fixes. \
+                 Check the CI status and logs for details.",
+                event.pr_url
+            );
+
+            if let Err(e) =
+                crate::assignment::try_assign_rework(state, &event.job_key, &ci_feedback).await
+            {
+                warn!(job_key = event.job_key, error = %e, "CI fix-up rework dispatch failed");
+            }
+
+            let entry = ActivityEntry {
+                timestamp: Utc::now(),
+                kind: "ci_failed".to_string(),
+                message: "CI checks failed, dispatching fix-up worker".to_string(),
+            };
+            jobs::append_activity(state, &event.job_key, entry).await;
+
+            jobs::journal_append(
+                state,
+                "ci_failed",
+                Some(&event.job_key),
+                None,
+                Some(&format!("pr_url: {}, dispatching fix", event.pr_url)),
+            )
+            .await;
+        }
+        CiStatus::Pending => {
+            // Should not happen — monitor only emits non-pending events
         }
     }
     Ok(())

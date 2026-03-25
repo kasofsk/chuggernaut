@@ -1,0 +1,527 @@
+mod common;
+use common::*;
+
+// ---------------------------------------------------------------------------
+// Monitor: lease expiry
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn monitor_lease_expiry_fails_job() {
+    // Use very short lease + scan interval so the test completes quickly
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 1,
+        default_timeout_secs: 3600,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 1,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: None,
+        forgejo_token: None,
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
+        max_continuations: 3,
+        ci_poll_timeout_secs: 120,
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await
+        .unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+
+    handlers::start_handlers(state.clone()).await.unwrap();
+    chuggernaut_dispatcher::monitor::start(state.clone());
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Lease test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+        claude_args: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Simulate on-the-stack with claim
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key,
+        JobState::OnTheStack,
+        "action_dispatched",
+        Some(&worker_id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
+
+    // Don't send heartbeats — wait for lease to expire (1s lease + 1s scan interval)
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Failed);
+}
+
+// ---------------------------------------------------------------------------
+// Monitor: job timeout
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn monitor_job_timeout() {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 120,         // long lease so it doesn't expire
+        default_timeout_secs: 1, // very short timeout
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 1,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: None,
+        forgejo_token: None,
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
+        max_continuations: 3,
+        ci_poll_timeout_secs: 120,
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await
+        .unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+
+    handlers::start_handlers(state.clone()).await.unwrap();
+    chuggernaut_dispatcher::monitor::start(state.clone());
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Timeout test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 1, // 1 second timeout
+        review: ReviewLevel::High,
+        max_retries: 0,
+        initial_state: None,
+        claude_args: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Acquire claim with 1s timeout
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 1)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id))
+        .await
+        .unwrap();
+
+    // Wait for monitor to detect timeout
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Failed);
+}
+
+// ---------------------------------------------------------------------------
+// Monitor: orphan detection
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn monitor_orphan_detection() {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 120,
+        default_timeout_secs: 3600,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 1,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: None,
+        forgejo_token: None,
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
+        max_continuations: 3,
+        ci_poll_timeout_secs: 120,
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await
+        .unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+
+    // Subscribe to orphan events before starting monitor
+    let mut orphan_sub = state
+        .nats
+        .subscribe("chuggernaut.monitor.orphan")
+        .await
+        .unwrap();
+
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Orphan test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+        claude_args: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Set job to OnTheStack directly in memory (no claim created — this is the orphan condition)
+    {
+        let mut job = state.jobs.get(&key).unwrap().clone();
+        job.state = JobState::OnTheStack;
+        state.jobs.insert(key.clone(), job);
+    }
+
+    // Start monitor
+    chuggernaut_dispatcher::monitor::start(state.clone());
+
+    // Wait for orphan event
+    let got_orphan = tokio::time::timeout(Duration::from_secs(5), orphan_sub.next()).await;
+    assert!(got_orphan.is_ok(), "should receive orphan detection event");
+}
+
+// ---------------------------------------------------------------------------
+// Monitor: retry eligible transitions to OnDeck
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn monitor_retry_eligible_transitions_to_on_deck() {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 5,
+        default_timeout_secs: 3600,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 1,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: None,
+        forgejo_token: None,
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
+        max_continuations: 3,
+        ci_poll_timeout_secs: 120,
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await
+        .unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+
+    handlers::start_handlers(state.clone()).await.unwrap();
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Retry eligible".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+        claude_args: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Simulate failure via outcome
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id))
+        .await
+        .unwrap();
+
+    let outcome = WorkerOutcome {
+        worker_id: worker_id.clone(),
+        job_key: key.clone(),
+        outcome: OutcomeType::Fail {
+            reason: "error".to_string(),
+            logs: None,
+        },
+        token_usage: None,
+    };
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Failed);
+
+    // Manually set retry_after to the past so the monitor picks it up
+    {
+        let mut job = state.jobs.get(&key).unwrap().clone();
+        job.retry_after = Some(chrono::Utc::now() - chrono::Duration::seconds(10));
+        // Update both in-memory and KV
+        state.jobs.insert(key.clone(), job.clone());
+        jobs::kv_put(&state.kv.jobs, &key, &job).await.unwrap();
+    }
+
+    // Start monitor
+    chuggernaut_dispatcher::monitor::start(state.clone());
+
+    // Wait for retry scan to transition to OnDeck
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    assert_eq!(
+        state.jobs.get(&key).unwrap().state,
+        JobState::OnDeck,
+        "monitor should transition retry-eligible job to OnDeck"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Monitor: archival removes done job
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn monitor_archival_removes_done_job() {
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 5,
+        default_timeout_secs: 3600,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 1,
+        job_retention_secs: 1, // 1 second retention for quick archival
+        activity_limit: 50,
+        forgejo_url: None,
+        forgejo_token: None,
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
+        max_continuations: 3,
+        ci_poll_timeout_secs: 120,
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await
+        .unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Archival test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 0,
+        initial_state: None,
+        claude_args: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Close job → Done, backdate updated_at so retention window has passed
+    jobs::transition_job(&state, &key, JobState::Done, "test", None)
+        .await
+        .unwrap();
+    {
+        let mut job = state.jobs.get(&key).unwrap().clone();
+        job.updated_at = chrono::Utc::now() - chrono::Duration::seconds(10);
+        state.jobs.insert(key.clone(), job.clone());
+        jobs::kv_put(&state.kv.jobs, &key, &job).await.unwrap();
+    }
+
+    assert!(state.jobs.contains_key(&key));
+
+    // Start monitor
+    chuggernaut_dispatcher::monitor::start(state.clone());
+
+    // Wait for archival scan
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    assert!(
+        !state.jobs.contains_key(&key),
+        "archived job should be removed from in-memory index"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Monitor: lease expiry schedules retry
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn monitor_lease_expiry_schedules_retry() {
+    // Lease expiry should set retry_count and retry_after so the monitor
+    // can later pick the job up for auto-retry (same as worker-reported failures).
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 1,
+        default_timeout_secs: 3600,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 1,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: None,
+        forgejo_token: None,
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+        pause_on_overage: true,
+        max_continuations: 3,
+        ci_poll_timeout_secs: 120,
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await
+        .unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+
+    handlers::start_handlers(state.clone()).await.unwrap();
+    chuggernaut_dispatcher::monitor::start(state.clone());
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Lease retry test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+        claude_args: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key,
+        JobState::OnTheStack,
+        "action_dispatched",
+        Some(&worker_id),
+    )
+    .await
+    .unwrap();
+
+    // Wait for lease to expire and monitor to process it
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    let job = state.jobs.get(&key).unwrap();
+    assert_eq!(job.state, JobState::Failed);
+    assert_eq!(
+        job.retry_count, 1,
+        "lease expiry should increment retry_count"
+    );
+    assert!(
+        job.retry_after.is_some(),
+        "lease expiry should set retry_after for auto-retry"
+    );
+}
