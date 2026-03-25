@@ -707,16 +707,16 @@ fn spawn_budget_monitor(
     max_budget_usd: f64,
     warn_pct: f64,
 ) {
-    if max_budget_usd <= 0.0 {
-        debug!("no budget cap set, skipping budget monitor");
-        return;
-    }
-
-    let threshold = max_budget_usd * warn_pct;
+    let has_budget = max_budget_usd > 0.0;
+    let threshold = if has_budget {
+        max_budget_usd * warn_pct
+    } else {
+        0.0
+    };
 
     tokio::spawn(async move {
         let poll_interval = Duration::from_secs(5);
-        let mut warned_budget = false;
+        let mut warned_budget = !has_budget; // skip budget warning if no budget set
         let mut warned_overage = false;
 
         loop {
@@ -727,7 +727,7 @@ fn spawn_budget_monitor(
 
             let m = metrics_rx.borrow().clone();
 
-            // Warn on rate limit overage (once)
+            // Warn on rate limit overage (once) — fires regardless of per-job budget
             if !warned_overage
                 && let Some(ref rl) = m.rate_limit
                 && rl.is_using_overage
@@ -761,19 +761,13 @@ fn spawn_budget_monitor(
                 }
             }
 
-            // Warn on approaching budget cap (once)
-            // Use output tokens as a cost proxy: output tokens dominate cost.
-            // Estimate cost from token counts using a conservative rate.
-            // The actual cost_usd is only available at session end (result event),
-            // so we estimate: ~$15/MTok output for Opus, ~$3/MTok for Sonnet.
-            // Use a middle-ground rate of $10/MTok output as a conservative estimate.
+            // Warn on approaching per-job budget cap (once, only if budget is set)
             if !warned_budget && m.turns > 0 {
+                // Estimate cost from token counts since real cost only arrives at session end.
+                // Conservative: ~$10/MTok output + ~$3/MTok input (mid-range model pricing).
                 let estimated_cost = if m.cost_usd > 0.0 {
-                    // If we have real cost (from a result event), use it
                     m.cost_usd
                 } else {
-                    // Estimate from output tokens (dominant cost component)
-                    // Conservative: assume $10/MTok output + $3/MTok input
                     let output_cost = m.usage.output_tokens as f64 * 10.0 / 1_000_000.0;
                     let input_cost = m.usage.input_tokens as f64 * 3.0 / 1_000_000.0;
                     output_cost + input_cost
