@@ -169,18 +169,18 @@ module "repos" {
   # Explicit dependency: all users must exist before repo provisioning
   depends_on = [module.worker_user, module.reviewer_user, module.human_user]
 
-  forgejo_url       = var.forgejo_url
-  admin_token       = var.forgejo_admin_token
-  org_name          = each.value.org
-  repo_name         = each.value.repo
-  admin_username    = var.forgejo_admin_username
-  worker_username   = module.worker_user.username
-  reviewer_username = module.reviewer_user.username
-  human_username    = module.human_user.username
-  worker_token      = module.worker_user.token
-  reviewer_token    = module.reviewer_user.token
-  nats_url          = var.nats_worker_url
-  dispatcher_url    = var.dispatcher_url
+  forgejo_url        = var.forgejo_url
+  admin_token        = var.forgejo_admin_token
+  org_name           = each.value.org
+  repo_name          = each.value.repo
+  admin_username     = var.forgejo_admin_username
+  worker_username    = module.worker_user.username
+  reviewer_username  = module.reviewer_user.username
+  human_username     = module.human_user.username
+  worker_token       = module.worker_user.token
+  reviewer_token     = module.reviewer_user.token
+  nats_url           = var.nats_worker_url
+  dispatcher_url     = var.dispatcher_url
   claude_oauth_token = var.claude_oauth_token
   anthropic_api_key  = var.anthropic_api_key
   actions_url        = var.forgejo_actions_url

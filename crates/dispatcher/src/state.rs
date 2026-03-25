@@ -32,12 +32,18 @@ pub struct DepGraph {
     pub index: std::collections::HashMap<String, NodeIndex>,
 }
 
-impl DepGraph {
-    pub fn new() -> Self {
+impl Default for DepGraph {
+    fn default() -> Self {
         Self {
             dag: DiGraph::new(),
             index: std::collections::HashMap::new(),
         }
+    }
+}
+
+impl DepGraph {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Get or create a node for the given job key.

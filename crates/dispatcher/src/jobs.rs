@@ -122,6 +122,12 @@ pub async fn create_job(
     let (owner, repo) = (parts[0], parts[1]);
     validate_repo_name(owner, repo).map_err(DispatcherError::Validation)?;
 
+    // Validate claude args if provided
+    if let Some(ref args) = req.claude_args {
+        validate_claude_args(args, &state.config.allowed_claude_flags)
+            .map_err(DispatcherError::Validation)?;
+    }
+
     // Increment counter
     let counter_key = format!("{owner}.{repo}");
     let seq = increment_counter(&state.kv.counters, &counter_key).await?;
@@ -166,6 +172,7 @@ pub async fn create_job(
         retry_after: None,
         pr_url: None,
         token_usage: vec![],
+        claude_args: req.claude_args,
         created_at: now,
         updated_at: now,
     };

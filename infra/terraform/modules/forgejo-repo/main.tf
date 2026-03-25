@@ -3,7 +3,7 @@ terraform {
 }
 
 locals {
-  api = "${var.forgejo_url}/api/v1"
+  api  = "${var.forgejo_url}/api/v1"
   auth = "Authorization: token ${var.admin_token}"
 
   # Workflow files to push into the repo (with {{ACTIONS_URL}} replaced)

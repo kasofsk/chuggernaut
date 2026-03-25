@@ -43,6 +43,8 @@ jobs:
           TITLE=$(echo "$JOB_JSON" | jq -r .title)
           echo "Job title: $TITLE"
           echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          CLAUDE_ARGS=$(echo "$JOB_JSON" | jq -r '.claude_args // ""')
+          echo "claude_args=$CLAUDE_ARGS" >> "$GITHUB_OUTPUT"
           {
             echo 'body<<CHUGGERNAUT_EOF'
             echo "$JOB_JSON" | jq -r .body
@@ -99,7 +101,7 @@ jobs:
           forgejo_token: ${{ secrets.CHUGGERNAUT_REVIEWER_TOKEN }}
           post_action: review
           prompt: ${{ steps.prompt.outputs.value }}
-          command_args: "--allowedTools Bash Read Glob Grep mcp__chuggernaut__channel_check mcp__chuggernaut__channel_send mcp__chuggernaut__update_status"
+          command_args: "${{ steps.job.outputs.claude_args }} --allowedTools Bash Read Glob Grep mcp__chuggernaut__channel_check mcp__chuggernaut__channel_send mcp__chuggernaut__update_status"
           timeout_minutes: "30"
           pr_url: ${{ inputs.pr_url }}
           review_level: ${{ inputs.review_level }}

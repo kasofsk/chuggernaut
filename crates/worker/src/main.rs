@@ -139,7 +139,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let repo_full = format!("{owner}/{repo}");
 
     let forgejo = ForgejoClient::new(&args.forgejo_url, &args.forgejo_token);
-    validate_forgejo_token(&forgejo, &owner, &repo).await?;
+    validate_forgejo_token(&forgejo, owner, repo).await?;
 
     let (nats, _js) = connect_nats(&args.nats_url).await?;
     let cancel = CancellationToken::new();
@@ -173,7 +173,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         PostAction::Review => {
             let pr_index = parse_pr_index(&args.pr_url)
                 .ok_or_else(|| anyhow::anyhow!("cannot parse PR index from: {}", args.pr_url))?;
-            let pr = forgejo.get_pull_request(&owner, &repo, pr_index).await?;
+            let pr = forgejo.get_pull_request(owner, repo, pr_index).await?;
             let b = pr.head.ref_field.clone();
             chuggernaut_worker::git::checkout_branch(&repo_dir, &b)?;
             info!(
@@ -302,7 +302,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     match args.post_action {
         PostAction::Yield => {
             let outcome = if exit_ok || was_deadline {
-                post_action_yield(&forgejo, &owner, &repo, &branch, &args.job_key).await
+                post_action_yield(&forgejo, owner, repo, &branch, &args.job_key).await
             } else {
                 OutcomeType::Fail {
                     reason: "subprocess failed".to_string(),
@@ -324,7 +324,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             let decision = if exit_ok {
                 match parse_review_output(&output) {
                     Ok(result) => {
-                        post_action_review(result, &forgejo, &owner, &repo, pr_index, &args).await
+                        post_action_review(result, &forgejo, owner, repo, pr_index, &args).await
                     }
                     Err(e) => {
                         error!(job_key = args.job_key, error = %e, "failed to parse review output");

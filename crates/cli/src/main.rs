@@ -58,6 +58,9 @@ enum Commands {
         /// Initial state: on-ice (omit for auto-compute)
         #[arg(long)]
         initial_state: Option<String>,
+        /// Extra CLI args to forward to Claude (e.g. "--model claude-sonnet-4-5-20250514")
+        #[arg(long)]
+        claude_args: Option<String>,
     },
     /// List jobs
     Jobs {
@@ -151,6 +154,7 @@ async fn main() -> Result<()> {
             capabilities,
             review,
             initial_state,
+            claude_args,
         } => {
             let review_level: ReviewLevel = serde_json::from_str(&format!("\"{review}\""))?;
             let initial = initial_state
@@ -169,6 +173,7 @@ async fn main() -> Result<()> {
                 review: review_level,
                 max_retries: 3,
                 initial_state: initial,
+                claude_args,
             };
 
             let nats = NatsClient::new(async_nats::connect(&cli.nats_url).await?);
@@ -196,7 +201,7 @@ async fn main() -> Result<()> {
             if resp.jobs.is_empty() {
                 println!("No jobs found.");
             } else {
-                println!("{:<25} {:<16} {:<4} {}", "KEY", "STATE", "PRI", "TITLE");
+                println!("{:<25} {:<16} {:<4} TITLE", "KEY", "STATE", "PRI");
                 for job in &resp.jobs {
                     let state_str = serde_json::to_string(&job.state)?;
                     println!(
@@ -401,6 +406,7 @@ async fn main() -> Result<()> {
                     review: ReviewLevel::High,
                     max_retries: 3,
                     initial_state: job_initial,
+                    claude_args: job_def.claude_args.clone(),
                 };
 
                 let reply = tokio::time::timeout(
@@ -447,4 +453,5 @@ struct SeedJobDef {
     deps: Vec<usize>,
     priority: Option<u8>,
     capabilities: Option<Vec<String>>,
+    claude_args: Option<String>,
 }

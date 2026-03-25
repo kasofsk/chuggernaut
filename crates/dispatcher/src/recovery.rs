@@ -42,11 +42,11 @@ async fn rebuild_job_index(state: &Arc<DispatcherState>) -> DispatcherResult<()>
 
     let mut count = 0u32;
     while let Some(key) = keys.next().await {
-        if let Ok(key_str) = key {
-            if let Some((job, _)) = kv_get::<Job>(&state.kv.jobs, &key_str).await? {
-                state.jobs.insert(key_str, job);
-                count += 1;
-            }
+        if let Ok(key_str) = key
+            && let Some((job, _)) = kv_get::<Job>(&state.kv.jobs, &key_str).await?
+        {
+            state.jobs.insert(key_str, job);
+            count += 1;
         }
     }
 
@@ -62,23 +62,23 @@ async fn reconcile_claims_against_jobs(state: &Arc<DispatcherState>) -> Dispatch
 
     let mut stale = 0u32;
     while let Some(key) = keys.next().await {
-        if let Ok(key_str) = key {
-            if let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &key_str).await? {
-                let valid = state
-                    .jobs
-                    .get(&key_str)
-                    .map(|j| j.state == JobState::OnTheStack)
-                    .unwrap_or(false);
+        if let Ok(key_str) = key
+            && let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &key_str).await?
+        {
+            let valid = state
+                .jobs
+                .get(&key_str)
+                .map(|j| j.state == JobState::OnTheStack)
+                .unwrap_or(false);
 
-                if !valid {
-                    warn!(
-                        job_key = key_str,
-                        worker_id = claim.worker_id,
-                        "stale claim detected — deleting"
-                    );
-                    let _ = state.kv.claims.delete(&key_str).await;
-                    stale += 1;
-                }
+            if !valid {
+                warn!(
+                    job_key = key_str,
+                    worker_id = claim.worker_id,
+                    "stale claim detected — deleting"
+                );
+                let _ = state.kv.claims.delete(&key_str).await;
+                stale += 1;
             }
         }
     }
@@ -102,7 +102,10 @@ async fn assign_on_deck_jobs(state: &Arc<DispatcherState>) {
         return;
     }
 
-    info!(count = on_deck.len(), "attempting to assign on-deck jobs from recovery");
+    info!(
+        count = on_deck.len(),
+        "attempting to assign on-deck jobs from recovery"
+    );
     for key in on_deck {
         match crate::assignment::try_assign_job(state, &key).await {
             Ok(true) => info!(job_key = key, "assigned on-deck job from recovery"),

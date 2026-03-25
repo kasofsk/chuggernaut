@@ -44,6 +44,8 @@ jobs:
           TITLE=$(echo "$JOB_JSON" | jq -r .title)
           echo "Job title: $TITLE"
           echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          CLAUDE_ARGS=$(echo "$JOB_JSON" | jq -r '.claude_args // ""')
+          echo "claude_args=$CLAUDE_ARGS" >> "$GITHUB_OUTPUT"
           {
             echo 'body<<CHUGGERNAUT_EOF'
             echo "$JOB_JSON" | jq -r .body
@@ -118,7 +120,7 @@ jobs:
           forgejo_token: ${{ secrets.CHUGGERNAUT_WORKER_TOKEN }}
           post_action: yield
           prompt: ${{ steps.prompt.outputs.value }}
-          command_args: "--verbose --output-format stream-json --include-partial-messages --allowedTools Bash Read Write Edit Glob Grep Agent mcp__chuggernaut__channel_check mcp__chuggernaut__channel_send mcp__chuggernaut__update_status"
+          command_args: "${{ steps.job.outputs.claude_args }} --verbose --output-format stream-json --include-partial-messages --allowedTools Bash Read Write Edit Glob Grep Agent mcp__chuggernaut__channel_check mcp__chuggernaut__channel_send mcp__chuggernaut__update_status"
           timeout_minutes: "60"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

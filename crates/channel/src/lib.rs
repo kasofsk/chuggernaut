@@ -40,6 +40,16 @@ impl ChannelState {
     pub fn len(&self) -> usize {
         self.inbox.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.inbox.is_empty()
+    }
+}
+
+impl Default for ChannelState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
