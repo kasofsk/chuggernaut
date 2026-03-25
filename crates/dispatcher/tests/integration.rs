@@ -64,6 +64,7 @@ async fn setup() -> Arc<DispatcherState> {
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -95,6 +96,7 @@ async fn create_job_on_deck() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
     assert_eq!(key, "test.repo.1");
@@ -116,6 +118,7 @@ async fn create_job_on_ice() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: Some(JobState::OnIce),
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnIce);
@@ -136,6 +139,7 @@ async fn create_job_sequential_keys() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let k1 = jobs::create_job(&state, make()).await.unwrap();
     let k2 = jobs::create_job(&state, make()).await.unwrap();
@@ -160,6 +164,7 @@ async fn create_job_rejects_dots_in_name() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     assert!(jobs::create_job(&state, req).await.is_err());
 }
@@ -183,6 +188,7 @@ async fn deps_blocked_then_unblocked() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
 
     let key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
@@ -215,6 +221,7 @@ async fn diamond_deps_partial_unblock() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
 
     let key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
@@ -266,6 +273,7 @@ async fn worker_yield_to_in_review() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -325,6 +333,7 @@ async fn worker_fail_schedules_retry() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -386,6 +395,7 @@ async fn admin_close_unblocks_dependents() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
 
     let key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
@@ -426,6 +436,7 @@ async fn admin_revoke_keeps_dependents_blocked() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
 
     let key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
@@ -467,6 +478,7 @@ async fn heartbeat_renews_lease() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -529,6 +541,7 @@ async fn recovery_rebuilds_state() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key1 = jobs::create_job(&state, make("A", vec![])).await.unwrap();
     let key2 = jobs::create_job(&state, make("B", vec![1])).await.unwrap();
@@ -571,6 +584,7 @@ async fn review_approved_completes_job_and_unblocks_deps() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
 
     // A (no deps) → B depends on A
@@ -645,6 +659,7 @@ async fn review_changes_requested_transitions_job() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -731,6 +746,7 @@ async fn monitor_lease_expiry_fails_job() {
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -755,6 +771,7 @@ async fn monitor_lease_expiry_fails_job() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -801,6 +818,7 @@ async fn admin_requeue_from_failed() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -929,6 +947,7 @@ async fn action_dispatch_creates_claim_and_transitions() {
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -952,6 +971,7 @@ async fn action_dispatch_creates_claim_and_transitions() {
         review: ReviewLevel::Low,
         max_retries: 0,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -1035,6 +1055,7 @@ async fn rework_dispatches_new_action_with_feedback() {
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -1058,6 +1079,7 @@ async fn rework_dispatches_new_action_with_feedback() {
         review: ReviewLevel::High,
         max_retries: 0,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -1186,6 +1208,7 @@ async fn yield_dispatches_review_action() {
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -1209,6 +1232,7 @@ async fn yield_dispatches_review_action() {
         review: ReviewLevel::High,
         max_retries: 0,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -1243,18 +1267,18 @@ async fn yield_dispatches_review_action() {
         tokio::pin!(keys);
         while let Some(Ok(jk)) = keys.next().await {
             if let Ok(Some((entry, _))) = jobs::kv_get::<JournalEntry>(&state.kv.journal, &jk).await
+                && entry.action == "review_dispatched"
+                && entry.job_key.as_deref() == Some(&key)
             {
-                if entry.action == "review_dispatched" && entry.job_key.as_deref() == Some(&key) {
-                    found_review_dispatch = true;
-                    // Verify details contain the workflow and pr_url
-                    let details = entry.details.unwrap_or_default();
-                    assert!(
-                        details.contains("review.yml"),
-                        "journal should mention review workflow"
-                    );
-                    assert!(details.contains("pr_url"), "journal should mention pr_url");
-                    break;
-                }
+                found_review_dispatch = true;
+                // Verify details contain the workflow and pr_url
+                let details = entry.details.unwrap_or_default();
+                assert!(
+                    details.contains("review.yml"),
+                    "journal should mention review workflow"
+                );
+                assert!(details.contains("pr_url"), "journal should mention pr_url");
+                break;
             }
         }
     }
@@ -1285,6 +1309,7 @@ async fn token_usage_accumulated_from_work_and_review() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -1394,6 +1419,7 @@ async fn token_usage_across_rework_cycle() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -1728,37 +1754,34 @@ jobs:
         }
 
         // Check for heartbeats
-        if let Ok(msg) = tokio::time::timeout(Duration::from_millis(500), hb_sub.next()).await {
-            if msg.is_some() && !got_heartbeat {
-                eprintln!("Got heartbeat from worker!");
-                got_heartbeat = true;
-            }
+        if let Ok(msg) = tokio::time::timeout(Duration::from_millis(500), hb_sub.next()).await
+            && msg.is_some()
+            && !got_heartbeat
+        {
+            eprintln!("Got heartbeat from worker!");
+            got_heartbeat = true;
         }
 
         // Check for outcome
-        if let Ok(msg) = tokio::time::timeout(Duration::from_millis(100), outcome_sub.next()).await
+        if let Ok(Some(msg)) =
+            tokio::time::timeout(Duration::from_millis(100), outcome_sub.next()).await
         {
-            if let Some(msg) = msg {
-                let outcome: WorkerOutcome = serde_json::from_slice(&msg.payload).unwrap();
-                eprintln!("Got outcome: {:?}", outcome.outcome);
-                got_outcome = true;
-            }
+            let outcome: WorkerOutcome = serde_json::from_slice(&msg.payload).unwrap();
+            eprintln!("Got outcome: {:?}", outcome.outcome);
+            got_outcome = true;
         }
 
         // Check for channel messages
-        if let Ok(msg) = tokio::time::timeout(Duration::from_millis(100), channel_sub.next()).await
+        if let Ok(Some(msg)) =
+            tokio::time::timeout(Duration::from_millis(100), channel_sub.next()).await
+            && let Ok(channel_msg) =
+                serde_json::from_slice::<chuggernaut_types::ChannelMessage>(&msg.payload)
         {
-            if let Some(msg) = msg {
-                if let Ok(channel_msg) =
-                    serde_json::from_slice::<chuggernaut_types::ChannelMessage>(&msg.payload)
-                {
-                    eprintln!(
-                        "Got channel message: sender={} body={}",
-                        channel_msg.sender, channel_msg.body
-                    );
-                    got_channel_msg = true;
-                }
-            }
+            eprintln!(
+                "Got channel message: sender={} body={}",
+                channel_msg.sender, channel_msg.body
+            );
+            got_channel_msg = true;
         }
 
         if got_outcome {
@@ -1769,20 +1792,17 @@ jobs:
     }
 
     // Drain any remaining channel messages that arrived around the same time as the outcome
-    if !got_channel_msg {
-        if let Ok(Some(msg)) =
+    if !got_channel_msg
+        && let Ok(Some(msg)) =
             tokio::time::timeout(Duration::from_secs(2), channel_sub.next()).await
-        {
-            if let Ok(channel_msg) =
-                serde_json::from_slice::<chuggernaut_types::ChannelMessage>(&msg.payload)
-            {
-                eprintln!(
-                    "Got channel message (post-loop): sender={} body={}",
-                    channel_msg.sender, channel_msg.body
-                );
-                got_channel_msg = true;
-            }
-        }
+        && let Ok(channel_msg) =
+            serde_json::from_slice::<chuggernaut_types::ChannelMessage>(&msg.payload)
+    {
+        eprintln!(
+            "Got channel message (post-loop): sender={} body={}",
+            channel_msg.sender, channel_msg.body
+        );
+        got_channel_msg = true;
     }
 
     eprintln!(
@@ -1964,6 +1984,7 @@ jobs:
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -1991,6 +2012,7 @@ jobs:
         review: ReviewLevel::Low,
         max_retries: 0,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
     eprintln!("E2E: created job {key}");
@@ -2197,6 +2219,7 @@ jobs:
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -2218,6 +2241,7 @@ jobs:
         review: ReviewLevel::High,
         max_retries: 0,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
     eprintln!("E2E-review: created job {key}");
@@ -2362,6 +2386,7 @@ async fn setup_with_config(overrides: impl FnOnce(&mut Config)) -> Arc<Dispatche
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
     overrides(&mut config);
 
@@ -2431,6 +2456,7 @@ async fn escalated_review_transitions_job() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -2495,6 +2521,7 @@ async fn escalated_then_approved_via_close() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -2546,6 +2573,7 @@ async fn escalated_then_changes_requested() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -2597,6 +2625,7 @@ async fn requeue_from_failed_to_on_ice() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -2660,6 +2689,7 @@ async fn thaw_from_on_ice_via_requeue() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: Some(JobState::OnIce),
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnIce);
@@ -2697,6 +2727,7 @@ async fn invalid_transition_rejected() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -2743,6 +2774,7 @@ async fn action_dispatch_failure_releases_claim() {
         review: ReviewLevel::Low,
         max_retries: 0,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -2781,6 +2813,7 @@ async fn dependency_cycle_rejected() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
 
     // Create A (no deps), B (deps on A)
@@ -2788,7 +2821,9 @@ async fn dependency_cycle_rejected() {
     let key_b = jobs::create_job(&state, make("B", vec![1])).await.unwrap();
 
     // Try to add A → B dep (would create cycle: A→B and B→A)
-    let result = chuggernaut_dispatcher::deps::create_deps(&state, &_key_a, &[key_b.clone()]).await;
+    let result =
+        chuggernaut_dispatcher::deps::create_deps(&state, &_key_a, std::slice::from_ref(&key_b))
+            .await;
     assert!(result.is_err(), "adding cycle should fail");
 }
 
@@ -2809,6 +2844,7 @@ async fn heartbeat_from_wrong_worker_ignored() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -2869,6 +2905,7 @@ async fn rework_limit_not_enforced_yet() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -2944,6 +2981,7 @@ async fn nil_token_usage_not_appended() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -2995,6 +3033,7 @@ async fn concurrent_heartbeats_benign() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -3055,6 +3094,7 @@ async fn duplicate_outcome_handled() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -3114,6 +3154,7 @@ async fn recovery_cleans_stale_claims() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnDeck);
@@ -3169,6 +3210,7 @@ async fn recovery_fails_claimless_on_the_stack() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -3211,6 +3253,7 @@ async fn recovery_repairs_reverse_deps() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
     let key_b = jobs::create_job(&state, make("B", vec![1])).await.unwrap();
@@ -3273,6 +3316,7 @@ async fn monitor_job_timeout() {
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -3297,6 +3341,7 @@ async fn monitor_job_timeout() {
         review: ReviewLevel::High,
         max_retries: 0,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -3340,6 +3385,7 @@ async fn monitor_orphan_detection() {
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -3370,6 +3416,7 @@ async fn monitor_orphan_detection() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -3413,6 +3460,7 @@ async fn monitor_retry_eligible_transitions_to_on_deck() {
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -3436,6 +3484,7 @@ async fn monitor_retry_eligible_transitions_to_on_deck() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -3512,6 +3561,7 @@ async fn monitor_archival_removes_done_job() {
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -3533,6 +3583,7 @@ async fn monitor_archival_removes_done_job() {
         review: ReviewLevel::High,
         max_retries: 0,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -3580,6 +3631,7 @@ async fn http_list_jobs() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     jobs::create_job(&state, make("A")).await.unwrap();
     jobs::create_job(&state, make("B")).await.unwrap();
@@ -3612,6 +3664,7 @@ async fn http_list_jobs_filter_by_state() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: initial,
+        claude_args: None,
     };
     jobs::create_job(&state, make("OnDeck1", None))
         .await
@@ -3668,6 +3721,7 @@ async fn http_get_job_detail() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -3718,6 +3772,7 @@ async fn http_create_job() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let resp = client
         .post(format!("{base}/jobs"))
@@ -3748,6 +3803,7 @@ async fn http_requeue_job() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: Some(JobState::OnIce),
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -3780,6 +3836,7 @@ async fn http_close_job() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -3813,6 +3870,7 @@ async fn http_get_journal() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     jobs::create_job(&state, req).await.unwrap();
 
@@ -3844,6 +3902,7 @@ async fn http_get_job_deps() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let _key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
     let key_b = jobs::create_job(&state, make("B", vec![1])).await.unwrap();
@@ -3880,6 +3939,7 @@ async fn http_channel_send() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -3924,6 +3984,7 @@ async fn http_sse_snapshot() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     jobs::create_job(&state, req).await.unwrap();
 
@@ -3973,6 +4034,7 @@ async fn capacity_limit_prevents_assignment() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key1 = jobs::create_job(&state, make("Job1")).await.unwrap();
     let key2 = jobs::create_job(&state, make("Job2")).await.unwrap();
@@ -4047,6 +4109,7 @@ async fn dispatch_next_respects_priority() {
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -4069,6 +4132,7 @@ async fn dispatch_next_respects_priority() {
         review: ReviewLevel::Low,
         max_retries: 0,
         initial_state: None,
+        claude_args: None,
     };
 
     let key_low = jobs::create_job(&state, make("Low", 10)).await.unwrap();
@@ -4156,6 +4220,7 @@ async fn dispatch_next_after_yield() {
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -4178,6 +4243,7 @@ async fn dispatch_next_after_yield() {
         review: ReviewLevel::Low,
         max_retries: 0,
         initial_state: None,
+        claude_args: None,
     };
 
     let key1 = jobs::create_job(&state, make("First")).await.unwrap();
@@ -4262,6 +4328,7 @@ async fn changes_requested_in_dispatch_queue() {
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -4284,6 +4351,7 @@ async fn changes_requested_in_dispatch_queue() {
         review: ReviewLevel::Low,
         max_retries: 0,
         initial_state: None,
+        claude_args: None,
     };
     let key_cr = jobs::create_job(&state, req_cr).await.unwrap();
 
@@ -4323,6 +4391,7 @@ async fn changes_requested_in_dispatch_queue() {
         review: ReviewLevel::Low,
         max_retries: 0,
         initial_state: None,
+        claude_args: None,
     };
     let key_od = jobs::create_job(&state, req_od).await.unwrap();
 
@@ -4366,6 +4435,7 @@ async fn monitor_lease_expiry_schedules_retry() {
         review_runner_label: "ubuntu-latest".to_string(),
         rework_limit: 3,
         human_login: "you".to_string(),
+        allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -4390,6 +4460,7 @@ async fn monitor_lease_expiry_schedules_retry() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -4449,6 +4520,7 @@ async fn rapid_seed_does_not_block() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: None,
+        claude_args: None,
     };
 
     let start = tokio::time::Instant::now();
@@ -4474,7 +4546,7 @@ async fn rapid_seed_does_not_block() {
         let req = CreateJobRequest {
             repo: "test/repo".to_string(),
             title: format!("Dep job {i}"),
-            body: format!("Depends on root"),
+            body: "Depends on root".to_string(),
             depends_on: vec![root_seq],
             priority: 50,
             capabilities: vec![],
@@ -4483,6 +4555,7 @@ async fn rapid_seed_does_not_block() {
             review: ReviewLevel::High,
             max_retries: 3,
             initial_state: None,
+            claude_args: None,
         };
 
         let reply = tokio::time::timeout(
@@ -4549,6 +4622,7 @@ async fn rapid_seed_on_ice_no_dispatch() {
         review: ReviewLevel::High,
         max_retries: 3,
         initial_state: Some(JobState::OnIce),
+        claude_args: None,
     };
 
     let reply = tokio::time::timeout(
@@ -4577,6 +4651,7 @@ async fn rapid_seed_on_ice_no_dispatch() {
             review: ReviewLevel::High,
             max_retries: 3,
             initial_state: None,
+            claude_args: None,
         };
 
         let reply = tokio::time::timeout(

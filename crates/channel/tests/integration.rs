@@ -806,33 +806,32 @@ async fn mcp_bridge_bidirectional_nats() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Mock client script: channel_check → sees the message → replies via channel_send
-    let script = format!(
-        r#"#!/usr/bin/env bash
+    let script = r#"#!/usr/bin/env bash
 set -euo pipefail
 REQ_ID=0
-send_request() {{
+send_request() {
     REQ_ID=$((REQ_ID + 1))
-    echo "{{\"jsonrpc\":\"2.0\",\"id\":${{REQ_ID}},\"method\":\"$1\",\"params\":$2}}"
+    echo "{\"jsonrpc\":\"2.0\",\"id\":${REQ_ID},\"method\":\"$1\",\"params\":$2}"
     read -r RESP
     echo "RESP=$RESP" >&2
-}}
-call_tool() {{
-    send_request "tools/call" "{{\"name\":\"$1\",\"arguments\":$2}}"
-}}
+}
+call_tool() {
+    send_request "tools/call" "{\"name\":\"$1\",\"arguments\":$2}"
+}
 
 # Initialize
-send_request "initialize" '{{"protocolVersion":"2024-11-05","capabilities":{{}},"clientInfo":{{"name":"mock","version":"0.1.0"}}}}'
-echo '{{"jsonrpc":"2.0","method":"notifications/initialized","params":{{}}}}'
+send_request "initialize" '{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"mock","version":"0.1.0"}}'
+echo '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
 
 # Check inbox — should have the external message
-call_tool "channel_check" '{{}}'
+call_tool "channel_check" '{}'
 
 # Reply via channel_send
-call_tool "channel_send" '{{"message":"I am working on the task"}}'
+call_tool "channel_send" '{"message":"I am working on the task"}'
 
 exit 0
 "#
-    );
+    .to_string();
 
     let tmp_dir = std::env::temp_dir().join(format!("mcp-bidir-{}", &job_key));
     std::fs::create_dir_all(&tmp_dir).unwrap();

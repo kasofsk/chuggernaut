@@ -33,19 +33,14 @@ impl JobState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReviewLevel {
     Human,
     Low,
     Medium,
+    #[default]
     High,
-}
-
-impl Default for ReviewLevel {
-    fn default() -> Self {
-        Self::High
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -127,6 +122,9 @@ pub struct Job {
     pub pr_url: Option<String>,
     #[serde(default)]
     pub token_usage: Vec<ActionTokenRecord>,
+    /// Extra CLI args forwarded to Claude (e.g. "--model claude-sonnet-4-5-20250514 --max-turns 10").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_args: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -202,6 +200,9 @@ pub struct CreateJobRequest {
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
     pub initial_state: Option<JobState>,
+    /// Extra CLI args forwarded to Claude (e.g. "--model claude-sonnet-4-5-20250514 --max-turns 10").
+    #[serde(default)]
+    pub claude_args: Option<String>,
 }
 
 fn default_priority() -> u8 {
@@ -584,9 +585,7 @@ pub mod streams {
 /// Parse a job key into (owner, repo, seq).
 /// Key format: `{owner}.{repo}.{seq}`
 pub fn parse_job_key(key: &str) -> Option<(&str, &str, u64)> {
-    let mut parts = key.rsplitn(2, '.');
-    let seq_str = parts.next()?;
-    let rest = parts.next()?;
+    let (rest, seq_str) = key.rsplit_once('.')?;
     let seq: u64 = seq_str.parse().ok()?;
     let dot = rest.rfind('.')?;
     let owner = &rest[..dot];
@@ -609,6 +608,215 @@ pub fn validate_repo_name(owner: &str, repo: &str) -> Result<(), String> {
     }
     if owner.is_empty() || repo.is_empty() {
         return Err("owner and repo must not be empty".to_string());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Claude args validation
+// ---------------------------------------------------------------------------
+
+/// How to validate a Claude CLI flag's value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ClaudeFlagValueType {
+    /// Alphanumeric, hyphens, underscores, dots, colons, slashes (model names, etc.)
+    Alphanumeric,
+    /// Positive integer
+    PositiveInt,
+    /// Positive float
+    PositiveFloat,
+    /// Must be one of the listed values
+    OneOf { choices: Vec<String> },
+}
+
+/// One allowed Claude CLI flag and its value type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllowedClaudeFlag {
+    pub flag: String,
+    pub value_type: ClaudeFlagValueType,
+    /// When set, the value must be one of these (checked after the type validation).
+    /// For example, restrict `--model` to `["opus", "sonnet"]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_values: Option<Vec<String>>,
+}
+
+/// Sane defaults: the flags that are safe for jobs to customize.
+/// No `allowed_values` restrictions — any value that passes the type check is accepted.
+/// Override via dispatcher config to restrict further.
+pub fn default_allowed_claude_flags() -> Vec<AllowedClaudeFlag> {
+    vec![
+        AllowedClaudeFlag {
+            flag: "--model".into(),
+            value_type: ClaudeFlagValueType::Alphanumeric,
+            allowed_values: None,
+        },
+        AllowedClaudeFlag {
+            flag: "--max-turns".into(),
+            value_type: ClaudeFlagValueType::PositiveInt,
+            allowed_values: None,
+        },
+        AllowedClaudeFlag {
+            flag: "--max-budget-usd".into(),
+            value_type: ClaudeFlagValueType::PositiveFloat,
+            allowed_values: None,
+        },
+        AllowedClaudeFlag {
+            flag: "--effort".into(),
+            value_type: ClaudeFlagValueType::OneOf {
+                choices: vec!["low".into(), "medium".into(), "high".into(), "max".into()],
+            },
+            allowed_values: None,
+        },
+        AllowedClaudeFlag {
+            flag: "--permission-mode".into(),
+            value_type: ClaudeFlagValueType::OneOf {
+                choices: vec!["acceptEdits".into(), "default".into(), "plan".into()],
+            },
+            allowed_values: None,
+        },
+    ]
+}
+
+impl ClaudeFlagValueType {
+    fn validate(&self, flag: &str, value: &str) -> Result<(), String> {
+        match self {
+            ClaudeFlagValueType::Alphanumeric => {
+                if value.is_empty() {
+                    return Err(format!("{flag} requires a value"));
+                }
+                if !value
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || "-_.:/@".contains(c))
+                {
+                    return Err(format!(
+                        "{flag} value {value:?} contains invalid characters \
+                         (only alphanumeric, hyphens, underscores, dots, colons, slashes)"
+                    ));
+                }
+                Ok(())
+            }
+            ClaudeFlagValueType::PositiveInt => {
+                let n: u64 = value
+                    .parse()
+                    .map_err(|_| format!("{flag} value {value:?} is not a valid integer"))?;
+                if n == 0 {
+                    return Err(format!("{flag} value must be > 0"));
+                }
+                Ok(())
+            }
+            ClaudeFlagValueType::PositiveFloat => {
+                let n: f64 = value
+                    .parse()
+                    .map_err(|_| format!("{flag} value {value:?} is not a valid number"))?;
+                if n <= 0.0 {
+                    return Err(format!("{flag} value must be > 0"));
+                }
+                Ok(())
+            }
+            ClaudeFlagValueType::OneOf { choices } => {
+                if choices.iter().any(|c| c == value) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{flag} value {value:?} is not valid (expected one of: {})",
+                        choices.join(", ")
+                    ))
+                }
+            }
+        }
+    }
+}
+
+/// Validate user-supplied Claude CLI args against an allowlist.
+///
+/// Only flags present in `allowed` are accepted, and each value is
+/// type-checked. This catches typos and invalid flags at job creation time
+/// rather than at runtime in the action.
+pub fn validate_claude_args(args: &str, allowed: &[AllowedClaudeFlag]) -> Result<(), String> {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    if tokens.is_empty() {
+        return Ok(());
+    }
+
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = tokens[i];
+
+        // Every token in flag position must be a known flag
+        let Some(entry) = allowed.iter().find(|a| a.flag == token) else {
+            let known: Vec<&str> = allowed.iter().map(|a| a.flag.as_str()).collect();
+            return Err(format!(
+                "unknown claude arg {token:?} (allowed flags: {})",
+                known.join(", ")
+            ));
+        };
+
+        // Consume the value token
+        i += 1;
+        if i >= tokens.len() {
+            return Err(format!("{token} requires a value"));
+        }
+        let value = tokens[i];
+
+        // Must not look like another flag (missing value)
+        if value.starts_with('-') {
+            return Err(format!("{token} requires a value, got flag {value:?}"));
+        }
+
+        entry.value_type.validate(token, value)?;
+
+        // Check allowed_values restriction if configured
+        if let Some(ref allowed) = entry.allowed_values
+            && !allowed.iter().any(|v| v == value)
+        {
+            return Err(format!(
+                "{token} value {value:?} is not permitted (allowed: {})",
+                allowed.join(", ")
+            ));
+        }
+
+        i += 1;
+    }
+
+    Ok(())
+}
+
+/// All Claude CLI flags that are safe to appear in a worker's command string.
+/// This includes both job-level flags (--model, etc.) and action-level flags
+/// (--verbose, --output-format, etc.) that the action YAML hardcodes.
+///
+/// Used by the worker as a final safety check before spawning Claude.
+const WORKER_SAFE_FLAGS: &[&str] = &[
+    // Job-level (customizable per job)
+    "--model",
+    "--max-turns",
+    "--max-budget-usd",
+    "--effort",
+    "--permission-mode",
+    // Action-level (hardcoded in work.yml / review.yml)
+    "--verbose",
+    "--output-format",
+    "--include-partial-messages",
+    "--allowedTools",
+];
+
+/// Validate the full command_args string that will be passed to Claude.
+///
+/// This is a worker-side safety check: it scans every flag-like token and
+/// rejects the string if any flag is not in the known-safe set. This guards
+/// against tampered NATS records injecting dangerous flags like
+/// `--dangerously-skip-permissions`.
+///
+/// Values are not type-checked here (the dispatcher already did that).
+pub fn validate_worker_command_args(args: &str) -> Result<(), String> {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    for token in &tokens {
+        if token.starts_with("--") && !WORKER_SAFE_FLAGS.contains(token) {
+            return Err(format!(
+                "command contains disallowed flag {token:?} (not in worker safe list)"
+            ));
+        }
     }
     Ok(())
 }
@@ -758,6 +966,114 @@ mod tests {
     }
 
     #[test]
+    fn validate_claude_args_allowed() {
+        let flags = default_allowed_claude_flags();
+        assert!(validate_claude_args("", &flags).is_ok());
+        assert!(validate_claude_args("--model claude-sonnet-4-5-20250514", &flags).is_ok());
+        assert!(validate_claude_args("--model opus", &flags).is_ok());
+        assert!(validate_claude_args("--max-turns 10", &flags).is_ok());
+        assert!(validate_claude_args("--max-budget-usd 5.50", &flags).is_ok());
+        assert!(validate_claude_args("--effort high", &flags).is_ok());
+        assert!(validate_claude_args("--permission-mode plan", &flags).is_ok());
+        // Multiple flags combined
+        assert!(
+            validate_claude_args(
+                "--model claude-sonnet-4-5-20250514 --max-turns 5 --effort low",
+                &flags,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_claude_args_unknown_flags() {
+        let flags = default_allowed_claude_flags();
+        assert!(validate_claude_args("--dangerously-skip-permissions", &flags).is_err());
+        assert!(validate_claude_args("--print something", &flags).is_err());
+        assert!(validate_claude_args("-p something", &flags).is_err());
+        assert!(validate_claude_args("--mcp-config /tmp/evil.json", &flags).is_err());
+        assert!(validate_claude_args("--output-format json", &flags).is_err());
+        assert!(validate_claude_args("--allowedTools Bash", &flags).is_err());
+        assert!(validate_claude_args("--verbose", &flags).is_err());
+        assert!(validate_claude_args("--model opus --print sneaky", &flags).is_err());
+    }
+
+    #[test]
+    fn validate_claude_args_bad_values() {
+        let flags = default_allowed_claude_flags();
+        // Missing value
+        assert!(validate_claude_args("--model", &flags).is_err());
+        // Flag as value (missing value)
+        assert!(validate_claude_args("--model --max-turns", &flags).is_err());
+        // Invalid integer
+        assert!(validate_claude_args("--max-turns abc", &flags).is_err());
+        assert!(validate_claude_args("--max-turns 0", &flags).is_err());
+        assert!(validate_claude_args("--max-turns -5", &flags).is_err());
+        // Invalid float
+        assert!(validate_claude_args("--max-budget-usd abc", &flags).is_err());
+        assert!(validate_claude_args("--max-budget-usd 0", &flags).is_err());
+        // Invalid enum
+        assert!(validate_claude_args("--effort mega", &flags).is_err());
+        assert!(validate_claude_args("--permission-mode bypassPermissions", &flags).is_err());
+        // Shell injection in value (rejected by alphanumeric check)
+        assert!(validate_claude_args("--model $(whoami)", &flags).is_err());
+        assert!(validate_claude_args("--model foo;rm", &flags).is_err());
+        // Bare value without a flag
+        assert!(validate_claude_args("opus", &flags).is_err());
+    }
+
+    #[test]
+    fn validate_claude_args_custom_allowlist() {
+        // Custom config that only allows --model
+        let flags = vec![AllowedClaudeFlag {
+            flag: "--model".into(),
+            value_type: ClaudeFlagValueType::Alphanumeric,
+            allowed_values: None,
+        }];
+        assert!(validate_claude_args("--model opus", &flags).is_ok());
+        // --max-turns not in custom list
+        assert!(validate_claude_args("--max-turns 10", &flags).is_err());
+    }
+
+    #[test]
+    fn validate_claude_args_allowed_values() {
+        let flags = vec![AllowedClaudeFlag {
+            flag: "--model".into(),
+            value_type: ClaudeFlagValueType::Alphanumeric,
+            allowed_values: Some(vec!["opus".into(), "sonnet".into()]),
+        }];
+        assert!(validate_claude_args("--model opus", &flags).is_ok());
+        assert!(validate_claude_args("--model sonnet", &flags).is_ok());
+        // haiku not in allowed_values
+        assert!(validate_claude_args("--model haiku", &flags).is_err());
+    }
+
+    #[test]
+    fn validate_worker_command_args_safe() {
+        // Typical work.yml command_args
+        assert!(validate_worker_command_args(
+            "--model opus --verbose --output-format stream-json --include-partial-messages --allowedTools Bash Read Write"
+        ).is_ok());
+        // Typical review.yml command_args
+        assert!(validate_worker_command_args("--allowedTools Bash Read Glob Grep").is_ok());
+        // Empty is fine
+        assert!(validate_worker_command_args("").is_ok());
+    }
+
+    #[test]
+    fn validate_worker_command_args_rejects_dangerous() {
+        assert!(validate_worker_command_args("--dangerously-skip-permissions").is_err());
+        assert!(
+            validate_worker_command_args(
+                "--verbose --output-format stream-json --dangerously-skip-permissions"
+            )
+            .is_err()
+        );
+        assert!(validate_worker_command_args("--print foo").is_err());
+        assert!(validate_worker_command_args("--mcp-config /tmp/evil.json").is_err());
+    }
+
+    #[test]
     fn job_state_helpers() {
         assert!(JobState::Done.is_terminal());
         assert!(JobState::Revoked.is_terminal());
@@ -782,6 +1098,22 @@ mod tests {
         assert_eq!(req.review, ReviewLevel::High);
         assert!(req.depends_on.is_empty());
         assert!(req.initial_state.is_none());
+        assert!(req.claude_args.is_none());
+    }
+
+    #[test]
+    fn create_job_request_with_claude_args() {
+        let json = r#"{
+            "repo": "acme/payments",
+            "title": "Test",
+            "body": "Test body",
+            "claude_args": "--model claude-sonnet-4-5-20250514"
+        }"#;
+        let req: CreateJobRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.claude_args.as_deref(),
+            Some("--model claude-sonnet-4-5-20250514")
+        );
     }
 
     #[test]
@@ -814,6 +1146,7 @@ mod tests {
             retry_after: None,
             pr_url: None,
             token_usage: vec![],
+            claude_args: Some("--model claude-sonnet-4-5-20250514".to_string()),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

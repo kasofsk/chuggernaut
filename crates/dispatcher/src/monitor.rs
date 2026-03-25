@@ -54,18 +54,17 @@ async fn scan_lease_expiry(state: &Arc<DispatcherState>) -> DispatcherResult<()>
     tokio::pin!(keys);
 
     while let Some(key) = keys.next().await {
-        if let Ok(key_str) = key {
-            if let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &key_str).await? {
-                if claim.lease_deadline < now {
-                    let event = LeaseExpiredEvent {
-                        job_key: key_str.clone(),
-                        worker_id: claim.worker_id.clone(),
-                        lease_deadline: claim.lease_deadline,
-                        detected_at: now,
-                    };
-                    publish_monitor_event(state, &subjects::MONITOR_LEASE_EXPIRED, &event).await;
-                }
-            }
+        if let Ok(key_str) = key
+            && let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &key_str).await?
+            && claim.lease_deadline < now
+        {
+            let event = LeaseExpiredEvent {
+                job_key: key_str.clone(),
+                worker_id: claim.worker_id.clone(),
+                lease_deadline: claim.lease_deadline,
+                detected_at: now,
+            };
+            publish_monitor_event(state, &subjects::MONITOR_LEASE_EXPIRED, &event).await;
         }
     }
     Ok(())
@@ -77,19 +76,19 @@ async fn scan_job_timeout(state: &Arc<DispatcherState>) -> DispatcherResult<()> 
     tokio::pin!(keys);
 
     while let Some(key) = keys.next().await {
-        if let Ok(key_str) = key {
-            if let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &key_str).await? {
-                let elapsed = (now - claim.claimed_at).num_seconds() as u64;
-                if elapsed > claim.timeout_secs {
-                    let event = JobTimeoutEvent {
-                        job_key: key_str.clone(),
-                        worker_id: claim.worker_id.clone(),
-                        claimed_at: claim.claimed_at,
-                        timeout_secs: claim.timeout_secs,
-                        detected_at: now,
-                    };
-                    publish_monitor_event(state, &subjects::MONITOR_TIMEOUT, &event).await;
-                }
+        if let Ok(key_str) = key
+            && let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &key_str).await?
+        {
+            let elapsed = (now - claim.claimed_at).num_seconds() as u64;
+            if elapsed > claim.timeout_secs {
+                let event = JobTimeoutEvent {
+                    job_key: key_str.clone(),
+                    worker_id: claim.worker_id.clone(),
+                    claimed_at: claim.claimed_at,
+                    timeout_secs: claim.timeout_secs,
+                    detected_at: now,
+                };
+                publish_monitor_event(state, &subjects::MONITOR_TIMEOUT, &event).await;
             }
         }
     }
@@ -102,16 +101,16 @@ async fn scan_orphans(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
     // Claimless on-the-stack jobs
     for entry in state.jobs.iter() {
         let job = entry.value();
-        if job.state == JobState::OnTheStack {
-            if let Ok(None) = kv_get::<ClaimState>(&state.kv.claims, &job.key).await {
-                let event = OrphanDetectedEvent {
-                    job_key: job.key.clone(),
-                    worker_id: None,
-                    kind: OrphanKind::ClaimlessOnTheStack,
-                    detected_at: now,
-                };
-                publish_monitor_event(state, &subjects::MONITOR_ORPHAN, &event).await;
-            }
+        if job.state == JobState::OnTheStack
+            && let Ok(None) = kv_get::<ClaimState>(&state.kv.claims, &job.key).await
+        {
+            let event = OrphanDetectedEvent {
+                job_key: job.key.clone(),
+                worker_id: None,
+                kind: OrphanKind::ClaimlessOnTheStack,
+                detected_at: now,
+            };
+            publish_monitor_event(state, &subjects::MONITOR_ORPHAN, &event).await;
         }
     }
 

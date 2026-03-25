@@ -291,14 +291,13 @@ async fn handle_admin_create_job(
                 })
                 .unwrap_or_default(),
             };
-            if let Some(reply) = msg.reply {
-                if let Err(e) = s
+            if let Some(reply) = msg.reply
+                && let Err(e) = s
                     .nats
                     .publish_raw(reply.to_string(), bytes::Bytes::from(reply_payload))
                     .await
-                {
-                    warn!("failed to reply to create-job: {e}");
-                }
+            {
+                warn!("failed to reply to create-job: {e}");
             }
         });
     }
@@ -332,14 +331,13 @@ async fn handle_admin_requeue(
                 })
                 .unwrap_or_default(),
             };
-            if let Some(reply) = msg.reply {
-                if let Err(e) = s
+            if let Some(reply) = msg.reply
+                && let Err(e) = s
                     .nats
                     .publish_raw(reply.to_string(), bytes::Bytes::from(reply_payload))
                     .await
-                {
-                    warn!("failed to reply to requeue: {e}");
-                }
+            {
+                warn!("failed to reply to requeue: {e}");
             }
         });
     }
@@ -433,14 +431,13 @@ async fn handle_admin_close_job(
                 })
                 .unwrap_or_default(),
             };
-            if let Some(reply) = msg.reply {
-                if let Err(e) = s
+            if let Some(reply) = msg.reply
+                && let Err(e) = s
                     .nats
                     .publish_raw(reply.to_string(), bytes::Bytes::from(reply_payload))
                     .await
-                {
-                    warn!("failed to reply to close-job: {e}");
-                }
+            {
+                warn!("failed to reply to close-job: {e}");
             }
         });
     }
@@ -737,34 +734,34 @@ async fn handle_lease_expired(
     state: &Arc<DispatcherState>,
     event: LeaseExpiredEvent,
 ) -> DispatcherResult<()> {
-    if let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &event.job_key).await? {
-        if claim.lease_deadline < Utc::now() {
-            info!(
-                job_key = event.job_key,
-                worker_id = event.worker_id,
-                "lease expired, releasing claim"
-            );
-            crate::claims::release_claim(state, &event.job_key).await?;
-            jobs::transition_job(
-                state,
-                &event.job_key,
-                JobState::Failed,
-                "lease_expired",
-                Some(&event.worker_id),
-            )
-            .await?;
-            let entry = ActivityEntry {
-                timestamp: Utc::now(),
-                kind: "lease_expired".to_string(),
-                message: format!("Worker {} lease expired", event.worker_id),
-            };
-            jobs::append_activity(state, &event.job_key, entry).await;
+    if let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &event.job_key).await?
+        && claim.lease_deadline < Utc::now()
+    {
+        info!(
+            job_key = event.job_key,
+            worker_id = event.worker_id,
+            "lease expired, releasing claim"
+        );
+        crate::claims::release_claim(state, &event.job_key).await?;
+        jobs::transition_job(
+            state,
+            &event.job_key,
+            JobState::Failed,
+            "lease_expired",
+            Some(&event.worker_id),
+        )
+        .await?;
+        let entry = ActivityEntry {
+            timestamp: Utc::now(),
+            kind: "lease_expired".to_string(),
+            message: format!("Worker {} lease expired", event.worker_id),
+        };
+        jobs::append_activity(state, &event.job_key, entry).await;
 
-            schedule_auto_retry(state, &event.job_key).await;
+        schedule_auto_retry(state, &event.job_key).await;
 
-            // Slot freed — try to dispatch next queued job
-            crate::assignment::try_dispatch_next(state).await?;
-        }
+        // Slot freed — try to dispatch next queued job
+        crate::assignment::try_dispatch_next(state).await?;
     }
     Ok(())
 }
@@ -825,21 +822,19 @@ async fn handle_retry(
     state: &Arc<DispatcherState>,
     event: RetryEligibleEvent,
 ) -> DispatcherResult<()> {
-    if let Some(job) = state.jobs.get(&event.job_key) {
-        if job.state == JobState::Failed
-            && job.retry_count <= job.max_retries
-            && job.retry_after.is_some_and(|ra| ra <= Utc::now())
-        {
-            info!(
-                job_key = event.job_key,
-                retry_count = job.retry_count,
-                "retry eligible, requeueing"
-            );
-            drop(job);
-            jobs::transition_job(state, &event.job_key, JobState::OnDeck, "auto_retry", None)
-                .await?;
-            crate::assignment::try_assign_job(state, &event.job_key).await?;
-        }
+    if let Some(job) = state.jobs.get(&event.job_key)
+        && job.state == JobState::Failed
+        && job.retry_count <= job.max_retries
+        && job.retry_after.is_some_and(|ra| ra <= Utc::now())
+    {
+        info!(
+            job_key = event.job_key,
+            retry_count = job.retry_count,
+            "retry eligible, requeueing"
+        );
+        drop(job);
+        jobs::transition_job(state, &event.job_key, JobState::OnDeck, "auto_retry", None).await?;
+        crate::assignment::try_assign_job(state, &event.job_key).await?;
     }
     Ok(())
 }

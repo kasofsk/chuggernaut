@@ -1,5 +1,7 @@
 use std::env;
 
+use chuggernaut_types::{AllowedClaudeFlag, default_allowed_claude_flags};
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub nats_url: String,
@@ -23,6 +25,9 @@ pub struct Config {
     pub review_runner_label: String,
     pub rework_limit: u32,
     pub human_login: String,
+    /// Which Claude CLI flags jobs are allowed to set via `claude_args`.
+    /// Override with CHUGGERNAUT_ALLOWED_CLAUDE_FLAGS as a JSON array.
+    pub allowed_claude_flags: Vec<AllowedClaudeFlag>,
 }
 
 impl Config {
@@ -55,6 +60,10 @@ impl Config {
                 .unwrap_or_else(|_| "ubuntu-latest".to_string()),
             rework_limit: parse_env("CHUGGERNAUT_REWORK_LIMIT", 3),
             human_login: env::var("CHUGGERNAUT_HUMAN_LOGIN").unwrap_or_else(|_| "you".to_string()),
+            allowed_claude_flags: env::var("CHUGGERNAUT_ALLOWED_CLAUDE_FLAGS")
+                .ok()
+                .and_then(|v| serde_json::from_str(&v).ok())
+                .unwrap_or_else(default_allowed_claude_flags),
         }
     }
 }

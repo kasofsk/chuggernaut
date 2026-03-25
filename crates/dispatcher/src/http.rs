@@ -291,12 +291,10 @@ fn resolve_static_dir() -> Option<std::path::PathBuf> {
                 .join("static"),
         ),
     ];
-    for candidate in candidates.into_iter().flatten() {
-        if candidate.join("index.html").exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate.join("index.html").exists())
 }
 
 /// Call at startup to verify static files are available.
@@ -482,10 +480,10 @@ async fn create_job(
     let key = crate::jobs::create_job(&state, req).await?;
 
     // Try to assign if OnDeck
-    if let Some(job) = state.jobs.get(&key) {
-        if job.state == JobState::OnDeck {
-            let _ = crate::assignment::try_assign_job(&state, &key).await;
-        }
+    if let Some(job) = state.jobs.get(&key)
+        && job.state == JobState::OnDeck
+    {
+        let _ = crate::assignment::try_assign_job(&state, &key).await;
     }
 
     Ok((StatusCode::CREATED, Json(CreateJobResponse { key })))
@@ -627,12 +625,11 @@ async fn list_journal(
         Ok(keys) => {
             tokio::pin!(keys);
             while let Some(key) = keys.next().await {
-                if let Ok(key_str) = key {
-                    if let Ok(Some((entry, _))) =
+                if let Ok(key_str) = key
+                    && let Ok(Some((entry, _))) =
                         kv_get::<JournalEntry>(&state.kv.journal, &key_str).await
-                    {
-                        entries.push(entry);
-                    }
+                {
+                    entries.push(entry);
                 }
                 if entries.len() >= limit {
                     break;
@@ -742,19 +739,19 @@ async fn sse_events(
             tokio::select! {
                 Some(msg) = futures::StreamExt::next(&mut trans_sub) => {
                     // A job transitioned — send the updated job
-                    if let Ok(transition) = serde_json::from_slice::<JobTransition>(&msg.payload) {
-                        if let Some(job) = state.jobs.get(&transition.job_key) {
-                            let event = Event::default()
-                                .event("job_update")
-                                .json_data(job.value().clone())
-                                .unwrap();
-                            yield Ok(event);
+                    if let Ok(transition) = serde_json::from_slice::<JobTransition>(&msg.payload)
+                        && let Some(job) = state.jobs.get(&transition.job_key)
+                    {
+                        let event = Event::default()
+                            .event("job_update")
+                            .json_data(job.value().clone())
+                            .unwrap();
+                        yield Ok(event);
 
-                            // Also send claim update
-                            let claim = kv_get::<ClaimState>(&state.kv.claims, &transition.job_key).await.ok().flatten().map(|(c,_)| c);
-                            let claim_event = serde_json::json!({ "key": transition.job_key, "claim": claim });
-                            yield Ok(Event::default().event("claim_update").json_data(claim_event).unwrap());
-                        }
+                        // Also send claim update
+                        let claim = kv_get::<ClaimState>(&state.kv.claims, &transition.job_key).await.ok().flatten().map(|(c,_)| c);
+                        let claim_event = serde_json::json!({ "key": transition.job_key, "claim": claim });
+                        yield Ok(Event::default().event("claim_update").json_data(claim_event).unwrap());
                     }
                 }
 
@@ -772,11 +769,11 @@ async fn sse_events(
                 }
 
                 Some(msg) = futures::StreamExt::next(&mut hb_sub) => {
-                    if let Ok(hb) = serde_json::from_slice::<WorkerHeartbeat>(&msg.payload) {
-                        if let Ok(Some((claim, _))) = kv_get::<ClaimState>(&state.kv.claims, &hb.job_key).await {
-                            let claim_event = serde_json::json!({ "key": hb.job_key, "claim": claim });
-                            yield Ok(Event::default().event("claim_update").json_data(claim_event).unwrap());
-                        }
+                    if let Ok(hb) = serde_json::from_slice::<WorkerHeartbeat>(&msg.payload)
+                        && let Ok(Some((claim, _))) = kv_get::<ClaimState>(&state.kv.claims, &hb.job_key).await
+                    {
+                        let claim_event = serde_json::json!({ "key": hb.job_key, "claim": claim });
+                        yield Ok(Event::default().event("claim_update").json_data(claim_event).unwrap());
                     }
                 }
 
