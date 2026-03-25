@@ -73,9 +73,11 @@ jobs:
           ## Communication
 
           You have access to a chuggernaut MCP server with these tools:
-          - **channel_check**: Call this periodically (every few major steps) to check for messages from the orchestrator. If someone requests a status update, respond via channel_send.
-          - **channel_send**: Send a message back to the orchestrator (e.g. to reply to a status request).
           - **update_status**: Report your current progress. Call this after completing each major step (e.g. "exploring codebase", "implementing feature", "running tests"). Include a progress percentage if you can estimate one.
+          - **channel_send**: Send a message back to the orchestrator (e.g. to reply to a status request).
+          - **channel_check**: Call this periodically (every few major steps) to check for messages from the orchestrator. If someone requests a status update, respond via channel_send.
+
+          IMPORTANT: Your very first action must be to call update_status with status "starting" and progress 0. This confirms the communication channel is working. Then proceed with the task.
 
           If you receive a DEADLINE WARNING, wrap up immediately: commit and push your progress.
           PROMPT_EOF
