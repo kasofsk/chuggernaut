@@ -548,7 +548,6 @@ fn write_mcp_config(job_key: &str, nats_url: &str, workdir: &Path) -> anyhow::Re
                 "args": [
                     "--job-key", job_key,
                     "--nats-url", nats_url,
-                    "--channel-mode=false",
                 ],
             }
         }

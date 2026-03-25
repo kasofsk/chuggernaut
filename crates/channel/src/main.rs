@@ -22,9 +22,10 @@ struct Args {
     #[arg(long, env = "CHUGGERNAUT_NATS_URL", default_value = "nats://localhost:4222")]
     nats_url: String,
 
-    /// Enable channel mode (push notifications). When false, uses MCP-only poll mode.
-    #[arg(long, env = "CHUGGERNAUT_CHANNEL_MODE", default_value_t = true, num_args = 0..=1, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
-    channel_mode: bool,
+    /// Push incoming messages to Claude as MCP notifications (default: true).
+    /// When false, Claude must poll with channel_check instead.
+    #[arg(long, env = "CHUGGERNAUT_PUSH_NOTIFICATIONS", default_value = "true")]
+    push_notifications: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -64,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    info!(job_key = args.job_key, nats_url = args.nats_url, channel_mode = args.channel_mode, "starting chuggernaut-channel MCP server");
+    info!(job_key = args.job_key, nats_url = args.nats_url, channel_mode = args.push_notifications, "starting chuggernaut-channel MCP server");
 
     let nats = async_nats::connect(&args.nats_url).await?;
     let js = async_nats::jetstream::new(nats.clone());
@@ -87,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
         args.job_key.clone(),
         Arc::clone(&state),
         out_tx.clone(),
-        args.channel_mode,
+        args.push_notifications,
     ));
 
     let stdin = BufReader::new(io::stdin());
@@ -117,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
             &nats,
             &js,
             &args.job_key,
-            args.channel_mode,
+            args.push_notifications,
         )
         .await
         {

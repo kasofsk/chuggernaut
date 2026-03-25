@@ -51,7 +51,7 @@ pub async fn nats_inbox_listener(
     job_key: String,
     state: Arc<Mutex<ChannelState>>,
     out_tx: mpsc::Sender<String>,
-    channel_mode: bool,
+    push_notifications: bool,
 ) {
     let subject = chuggernaut_types::subjects::CHANNEL_INBOX.format(&job_key);
     info!(subject, "subscribing to channel inbox");
@@ -75,7 +75,7 @@ pub async fn nats_inbox_listener(
 
         info!(sender = channel_msg.sender, body = channel_msg.body, "received channel message from NATS inbox");
 
-        if channel_mode {
+        if push_notifications {
             info!(sender = channel_msg.sender, message_id = channel_msg.message_id, "pushing channel notification to MCP client");
             let notification = mcp::JsonRpcNotification {
                 jsonrpc: "2.0",
@@ -211,15 +211,15 @@ pub async fn handle_message(
     nats: &async_nats::Client,
     js: &async_nats::jetstream::Context,
     job_key: &str,
-    channel_mode: bool,
+    push_notifications: bool,
 ) -> Option<String> {
     match req.method.as_str() {
         mcp::METHOD_INITIALIZE => {
             let result = serde_json::json!({
                 "protocolVersion": mcp::PROTOCOL_VERSION,
-                "capabilities": mcp::server_capabilities(channel_mode),
+                "capabilities": mcp::server_capabilities(push_notifications),
                 "serverInfo": mcp::server_info(),
-                "instructions": mcp::server_instructions(channel_mode),
+                "instructions": mcp::server_instructions(push_notifications),
             });
             let resp = mcp::JsonRpcResponse::success(req.id.unwrap_or(Value::Null), result);
             Some(serde_json::to_string(&resp).unwrap())
@@ -229,7 +229,7 @@ pub async fn handle_message(
 
         mcp::METHOD_TOOLS_LIST => {
             let result = serde_json::json!({
-                "tools": mcp::tool_definitions(channel_mode)
+                "tools": mcp::tool_definitions(push_notifications)
             });
             let resp = mcp::JsonRpcResponse::success(req.id.unwrap_or(Value::Null), result);
             Some(serde_json::to_string(&resp).unwrap())
@@ -332,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_channel_mode() {
+    fn tool_definitions_push_notifications() {
         let tools = mcp::tool_definitions(true);
         let tools = tools.as_array().unwrap();
         let names: Vec<&str> = tools
@@ -360,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_channel_mode() {
+    fn capabilities_push_notifications() {
         let caps = mcp::server_capabilities(true);
         assert!(caps.get("experimental").is_some());
         assert!(caps["experimental"].get("claude/channel").is_some());

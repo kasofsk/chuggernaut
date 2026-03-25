@@ -3519,3 +3519,69 @@ async fn changes_requested_in_dispatch_queue() {
     );
     assert_eq!(state.jobs.get(&key_od).unwrap().state, JobState::OnDeck);
 }
+
+#[tokio::test]
+async fn monitor_lease_expiry_schedules_retry() {
+    // Lease expiry should set retry_count and retry_after so the monitor
+    // can later pick the job up for auto-retry (same as worker-reported failures).
+    let port = test_nats_port();
+    let nats_url = format!("nats://127.0.0.1:{port}");
+    let prefix = uuid::Uuid::new_v4().simple().to_string();
+
+    let config = Config {
+        nats_url: nats_url.clone(),
+        nats_worker_url: nats_url.clone(),
+        http_listen: "127.0.0.1:0".to_string(),
+        lease_secs: 1,
+        default_timeout_secs: 3600,
+        cas_max_retries: 3,
+        monitor_scan_interval_secs: 1,
+        job_retention_secs: 86400,
+        activity_limit: 50,
+        forgejo_url: None,
+        forgejo_token: None,
+        action_workflow: "work.yml".to_string(),
+        action_runner_label: "ubuntu-latest".to_string(),
+        max_concurrent_actions: 10,
+        review_workflow: "review.yml".to_string(),
+        review_runner_label: "ubuntu-latest".to_string(),
+        rework_limit: 3,
+        human_login: "you".to_string(),
+    };
+
+    let client = async_nats::connect(&nats_url).await.unwrap();
+    let js = async_nats::jetstream::new(client.clone());
+    let kv = nats_init::initialize_with_prefix(&js, config.lease_secs, Some(&prefix))
+        .await.unwrap();
+    let state = DispatcherState::new_namespaced(config, client, js, kv, prefix);
+
+    handlers::start_handlers(state.clone()).await.unwrap();
+    chuggernaut_dispatcher::monitor::start(state.clone());
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Lease retry test".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600).await.unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "action_dispatched", Some(&worker_id)).await.unwrap();
+
+    // Wait for lease to expire and monitor to process it
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    let job = state.jobs.get(&key).unwrap();
+    assert_eq!(job.state, JobState::Failed);
+    assert_eq!(job.retry_count, 1, "lease expiry should increment retry_count");
+    assert!(job.retry_after.is_some(), "lease expiry should set retry_after for auto-retry");
+}

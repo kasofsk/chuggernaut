@@ -189,31 +189,7 @@ async fn process_outcome(
             };
             jobs::append_activity(state, job_key, entry).await;
 
-            // Check auto-retry.
-            let should_retry = state
-                .jobs
-                .get(job_key)
-                .map(|job| (job.retry_count < job.max_retries, job.retry_count))
-                .unwrap_or((false, 0));
-
-            if should_retry.0 {
-                let (j, _) = jobs::kv_cas_rmw::<Job, _>(
-                    &state.kv.jobs,
-                    job_key,
-                    state.config.cas_max_retries,
-                    |j| {
-                        let backoff_secs = std::cmp::min(30 * (1u64 << j.retry_count), 600);
-                        let retry_after = Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
-                        j.retry_count += 1;
-                        j.retry_after = Some(retry_after);
-                        j.updated_at = Utc::now();
-                        Ok(())
-                    },
-                )
-                .await?;
-                state.jobs.insert(job_key.to_string(), j.clone());
-                debug!(job_key, retry_after = ?j.retry_after, "auto-retry scheduled");
-            }
+            schedule_auto_retry(state, job_key).await;
 
             jobs::journal_append(state, "failed", Some(job_key), Some(worker_id), Some(&reason)).await;
 
@@ -549,6 +525,42 @@ async fn dispatch_monitor_event(state: &Arc<DispatcherState>, subject: &str, pay
     }
 }
 
+/// Schedule auto-retry for a failed job (sets retry_count and retry_after).
+/// Used by both worker-reported failures and monitor-detected failures (lease expiry, timeout).
+async fn schedule_auto_retry(state: &Arc<DispatcherState>, job_key: &str) {
+    let should_retry = state
+        .jobs
+        .get(job_key)
+        .map(|job| job.retry_count < job.max_retries)
+        .unwrap_or(false);
+
+    if should_retry {
+        match jobs::kv_cas_rmw::<Job, _>(
+            &state.kv.jobs,
+            job_key,
+            state.config.cas_max_retries,
+            |j| {
+                let backoff_secs = std::cmp::min(30 * (1u64 << j.retry_count), 600);
+                let retry_after = Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+                j.retry_count += 1;
+                j.retry_after = Some(retry_after);
+                j.updated_at = Utc::now();
+                Ok(())
+            },
+        )
+        .await
+        {
+            Ok((j, _)) => {
+                state.jobs.insert(job_key.to_string(), j.clone());
+                debug!(job_key, retry_after = ?j.retry_after, "auto-retry scheduled");
+            }
+            Err(e) => {
+                warn!(job_key, "failed to schedule auto-retry: {e}");
+            }
+        }
+    }
+}
+
 async fn handle_lease_expired(state: &Arc<DispatcherState>, event: LeaseExpiredEvent) -> DispatcherResult<()> {
     if let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &event.job_key).await? {
         if claim.lease_deadline < Utc::now() {
@@ -557,6 +569,8 @@ async fn handle_lease_expired(state: &Arc<DispatcherState>, event: LeaseExpiredE
             jobs::transition_job(state, &event.job_key, JobState::Failed, "lease_expired", Some(&event.worker_id)).await?;
             let entry = ActivityEntry { timestamp: Utc::now(), kind: "lease_expired".to_string(), message: format!("Worker {} lease expired", event.worker_id) };
             jobs::append_activity(state, &event.job_key, entry).await;
+
+            schedule_auto_retry(state, &event.job_key).await;
 
             // Slot freed — try to dispatch next queued job
             crate::assignment::try_dispatch_next(state).await?;
@@ -574,6 +588,8 @@ async fn handle_job_timeout(state: &Arc<DispatcherState>, event: JobTimeoutEvent
             jobs::transition_job(state, &event.job_key, JobState::Failed, "job_timeout", Some(&event.worker_id)).await?;
             let entry = ActivityEntry { timestamp: Utc::now(), kind: "job_timeout".to_string(), message: format!("Job timed out after {}s (limit: {}s)", elapsed, claim.timeout_secs) };
             jobs::append_activity(state, &event.job_key, entry).await;
+
+            schedule_auto_retry(state, &event.job_key).await;
 
             // Slot freed — try to dispatch next queued job
             crate::assignment::try_dispatch_next(state).await?;

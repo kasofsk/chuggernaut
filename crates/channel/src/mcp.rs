@@ -74,11 +74,11 @@ pub const NOTIFY_CHANNEL: &str = "notifications/claude/channel";
 // Tool definitions
 // ---------------------------------------------------------------------------
 
-pub fn server_capabilities(channel_mode: bool) -> Value {
+pub fn server_capabilities(push_notifications: bool) -> Value {
     let mut caps = serde_json::json!({
         "tools": {}
     });
-    if channel_mode {
+    if push_notifications {
         caps.as_object_mut().unwrap().insert(
             "experimental".to_string(),
             serde_json::json!({ "claude/channel": {} }),
@@ -94,8 +94,8 @@ pub fn server_info() -> Value {
     })
 }
 
-pub fn server_instructions(channel_mode: bool) -> String {
-    if channel_mode {
+pub fn server_instructions(push_notifications: bool) -> String {
+    if push_notifications {
         "Messages from the chuggernaut orchestrator arrive as <channel source=\"chuggernaut-channel\"> tags. \
          Each message has a sender and message_id attribute. \
          When you receive a message asking for status, reply using the reply tool with your current progress. \
@@ -110,10 +110,10 @@ pub fn server_instructions(channel_mode: bool) -> String {
     }
 }
 
-pub fn tool_definitions(channel_mode: bool) -> Value {
+pub fn tool_definitions(push_notifications: bool) -> Value {
     let mut tools = Vec::new();
 
-    if channel_mode {
+    if push_notifications {
         // In channel mode, expose a reply tool + status tool
         tools.push(serde_json::json!({
             "name": "reply",
