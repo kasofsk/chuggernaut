@@ -44,8 +44,8 @@ cd "$(dirname "$0")/.."
 RUNNER_COUNT=1
 REPOS=()
 FLAVORS=()
-# Associative array: "org/repo" -> list of "repo_path=local_path" entries
-declare -A INITIAL_FILES
+# Initial files stored as "org/repo:repo_path=local_file" entries
+INITIAL_FILE_ENTRIES=()
 CLEAN=false
 
 while [[ $# -gt 0 ]]; do
@@ -67,14 +67,13 @@ while [[ $# -gt 0 ]]; do
     --initial-file)
       # Format: org/repo:repo_path=local_file
       # e.g. sb/studybuddy:CLAUDE.md=../studybuddy/CLAUDE.md
-      IFS=':' read -r IF_REPO IF_SPEC <<< "$2"
-      IFS='=' read -r IF_PATH IF_LOCAL <<< "$IF_SPEC"
-      if [ ! -f "$IF_LOCAL" ]; then
-        echo "Error: file not found: $IF_LOCAL" >&2
+      local_file="${2#*:}"
+      local_file="${local_file#*=}"
+      if [ ! -f "$local_file" ]; then
+        echo "Error: file not found: $local_file" >&2
         exit 1
       fi
-      # Append to existing entries for this repo (newline-separated)
-      INITIAL_FILES["$IF_REPO"]="${INITIAL_FILES[$IF_REPO]:-}${INITIAL_FILES[$IF_REPO]:+$'\n'}${IF_PATH}=${IF_LOCAL}"
+      INITIAL_FILE_ENTRIES+=("$2")
       shift 2
       ;;
     --clean)
@@ -237,21 +236,22 @@ for repo in "${REPOS[@]+"${REPOS[@]}"}"; do
     REPOS_JSON+=","
   fi
 
-  # Check for initial_files for this repo
-  FILES_HCL="{}"
-  if [ -n "${INITIAL_FILES[$repo]:-}" ]; then
-    FILES_HCL="{"
-    FIRST=true
-    while IFS='=' read -r FPATH FLOCAL; do
-      [ -z "$FPATH" ] && continue
+  # Collect initial_files entries matching this repo
+  FILES_HCL="{"
+  FILES_FIRST=true
+  for entry in "${INITIAL_FILE_ENTRIES[@]+"${INITIAL_FILE_ENTRIES[@]}"}"; do
+    ENTRY_REPO="${entry%%:*}"
+    if [ "$ENTRY_REPO" = "$repo" ]; then
+      SPEC="${entry#*:}"
+      FPATH="${SPEC%%=*}"
+      FLOCAL="${SPEC#*=}"
       CONTENT=$(cat "$FLOCAL")
-      # Escape for HCL heredoc — use jsonencode to handle special chars
       ESCAPED=$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" <<< "$CONTENT")
-      if [ "$FIRST" = true ]; then FIRST=false; else FILES_HCL+=","; fi
+      if [ "$FILES_FIRST" = true ]; then FILES_FIRST=false; else FILES_HCL+=","; fi
       FILES_HCL+="\"${FPATH}\"=${ESCAPED}"
-    done <<< "${INITIAL_FILES[$repo]}"
-    FILES_HCL+="}"
-  fi
+    fi
+  done
+  FILES_HCL+="}"
 
   REPOS_JSON+="{org=\"${ORG}\",repo=\"${REPO_NAME}\",initial_files=${FILES_HCL}}"
 done
@@ -294,9 +294,19 @@ REVIEWER_TOKEN=$(cd infra/terraform && terraform output -raw reviewer_token 2>/d
 # Step 5: Write .env and restart dispatcher
 # ---------------------------------------------------------------------------
 
+# Build runner label map JSON from flavors
+LABEL_MAP_JSON="{"
+FIRST=true
+for flavor in "${FLAVORS[@]}"; do
+  if [ "$FIRST" = true ]; then FIRST=false; else LABEL_MAP_JSON+=","; fi
+  LABEL_MAP_JSON+="\"${flavor}\":\"${flavor}\""
+done
+LABEL_MAP_JSON+="}"
+
 echo "==> Writing .env for docker compose..."
 cat > .env <<EOF
 CHUGGERNAUT_FORGEJO_TOKEN=${ADMIN_TOKEN}
+CHUGGERNAUT_RUNNER_LABEL_MAP=${LABEL_MAP_JSON}
 EOF
 
 echo "==> Starting dispatcher..."
