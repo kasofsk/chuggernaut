@@ -17,7 +17,7 @@ header button:hover { background: #30363d; }
 .connection-dot { width: 8px; height: 8px; border-radius: 50%; background: #f85149; }
 .connection-dot.connected { background: #3fb950; }
 
-#graph-container { flex: 1; overflow: hidden; position: relative; cursor: grab; z-index: 1; }
+#graph-container { flex: 1; overflow: hidden; position: relative; cursor: grab; }
 #graph-container.dragging { cursor: grabbing; }
 #graph-svg { width: 100%; height: 100%; }
 
@@ -55,6 +55,7 @@ footer .stat .dot { width: 8px; height: 8px; border-radius: 50%; }
 .state-on-deck { fill: #1f2328; stroke: #6e7681; }
 .state-on-the-stack { fill: #0c2d6b; stroke: #58a6ff; }
 .state-in-review { fill: #2a1f00; stroke: #d29922; }
+.state-reviewing { fill: #1a0a3d; stroke: #a371f7; }
 .state-escalated { fill: #2a1f00; stroke: #d29922; }
 .state-changes-requested { fill: #2a1f00; stroke: #d29922; }
 .state-done { fill: #0a3d1f; stroke: #3fb950; }
@@ -66,6 +67,7 @@ footer .stat .dot { width: 8px; height: 8px; border-radius: 50%; }
 .state-dot-on-deck { fill: #6e7681; }
 .state-dot-on-the-stack { fill: #58a6ff; }
 .state-dot-in-review { fill: #d29922; }
+.state-dot-reviewing { fill: #a371f7; }
 .state-dot-escalated { fill: #d29922; }
 .state-dot-changes-requested { fill: #d29922; }
 .state-dot-done { fill: #3fb950; }
@@ -352,7 +354,7 @@ function updateStats() {
   }
   const total = state.jobs.size;
   const parts = [`${total} jobs`];
-  const order = ['on-the-stack', 'on-deck', 'in-review', 'escalated', 'changes-requested', 'blocked', 'failed', 'done', 'revoked', 'on-ice'];
+  const order = ['on-the-stack', 'on-deck', 'in-review', 'reviewing', 'escalated', 'changes-requested', 'blocked', 'failed', 'done', 'revoked', 'on-ice'];
   for (const s of order) {
     if (counts[s]) {
       parts.push(`<span class="stat"><span class="dot state-dot-${s}"></span>${counts[s]} ${s.replace(/-/g, ' ')}</span>`);
@@ -565,7 +567,7 @@ window.addEventListener('mouseup', () => {
 
 container.addEventListener('wheel', (e) => {
   e.preventDefault();
-  const delta = e.deltaY > 0 ? 0.9 : 1.1;
+  const delta = e.deltaY > 0 ? 0.97 : 1.03;
   const newZoom = Math.max(0.2, Math.min(3, zoom * delta));
 
   // Zoom toward mouse position

@@ -318,6 +318,16 @@ pub async fn transition_job(
     // Update in-memory index
     state.jobs.insert(job_key.to_string(), job.clone());
 
+    // Auto-release claim when leaving an active state (OnTheStack or InReview).
+    // This prevents claim leaks — callers don't need to remember to release.
+    if (from == JobState::OnTheStack || from == JobState::Reviewing)
+        && to != JobState::OnTheStack
+        && to != JobState::Reviewing
+        && let Err(e) = crate::claims::release_claim(state, job_key).await
+    {
+        tracing::debug!(job_key, error = %e, "auto claim release (may already be released)");
+    }
+
     // Publish transition event
     publish_transition(state, job_key, from, to, trigger, worker_id).await;
 
@@ -337,7 +347,8 @@ fn validate_transition(from: JobState, to: JobState) -> DispatcherResult<()> {
             | (Blocked, OnDeck)
             | (OnDeck, OnTheStack)
             | (OnTheStack, InReview | Failed | OnDeck)
-            | (InReview, Done | Escalated | ChangesRequested)
+            | (InReview, Reviewing | ChangesRequested)
+            | (Reviewing, Done | Escalated | ChangesRequested | InReview)
             | (Escalated, Done | ChangesRequested)
             | (ChangesRequested, OnTheStack)
             | (Failed, OnDeck | Blocked | OnIce)
@@ -452,24 +463,33 @@ mod tests {
     #[test]
     fn valid_transitions() {
         use JobState::*;
+        // Normal flow
         assert!(validate_transition(OnIce, OnDeck).is_ok());
         assert!(validate_transition(OnIce, Blocked).is_ok());
         assert!(validate_transition(Blocked, OnDeck).is_ok());
         assert!(validate_transition(OnDeck, OnTheStack).is_ok());
         assert!(validate_transition(OnTheStack, InReview).is_ok());
         assert!(validate_transition(OnTheStack, Failed).is_ok());
-        assert!(validate_transition(OnTheStack, OnDeck).is_ok()); // requeue
-        assert!(validate_transition(InReview, Done).is_ok());
-        assert!(validate_transition(InReview, Escalated).is_ok());
-        assert!(validate_transition(InReview, ChangesRequested).is_ok());
+        assert!(validate_transition(OnTheStack, OnDeck).is_ok()); // requeue / partial yield
+        // Review flow
+        assert!(validate_transition(InReview, Reviewing).is_ok());
+        assert!(validate_transition(InReview, ChangesRequested).is_ok()); // CI failure rework
+        assert!(validate_transition(Reviewing, Done).is_ok());
+        assert!(validate_transition(Reviewing, Escalated).is_ok());
+        assert!(validate_transition(Reviewing, ChangesRequested).is_ok());
+        assert!(validate_transition(Reviewing, InReview).is_ok()); // review dispatch failed, revert
+        // Escalation
         assert!(validate_transition(Escalated, Done).is_ok());
         assert!(validate_transition(Escalated, ChangesRequested).is_ok());
+        // Rework
         assert!(validate_transition(ChangesRequested, OnTheStack).is_ok());
+        // Retry
         assert!(validate_transition(Failed, OnDeck).is_ok());
         assert!(validate_transition(Failed, Blocked).is_ok());
         // Admin close from any
         assert!(validate_transition(OnTheStack, Done).is_ok());
         assert!(validate_transition(Blocked, Revoked).is_ok());
+        assert!(validate_transition(Reviewing, Done).is_ok());
     }
 
     #[test]
@@ -479,5 +499,10 @@ mod tests {
         assert!(validate_transition(OnDeck, InReview).is_err());
         assert!(validate_transition(OnIce, OnTheStack).is_err());
         assert!(validate_transition(InReview, OnDeck).is_err());
+        // InReview can't go to Escalated (must go through Reviewing first)
+        assert!(validate_transition(InReview, Escalated).is_err());
+        // Note: InReview → Done is valid via admin close (_, Done | Revoked)
+        // Can't skip Reviewing
+        assert!(validate_transition(OnTheStack, Reviewing).is_err());
     }
 }

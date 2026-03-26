@@ -16,6 +16,7 @@ pub enum JobState {
     OnDeck,
     OnTheStack,
     InReview,
+    Reviewing,
     Escalated,
     ChangesRequested,
     Done,

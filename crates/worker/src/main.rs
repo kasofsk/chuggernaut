@@ -405,10 +405,25 @@ async fn run(args: Args) -> anyhow::Result<()> {
             info!(job_key = args.job_key, "outcome reported, exiting");
         }
         PostAction::Review => {
+            info!(
+                job_key = args.job_key,
+                exit_ok,
+                pr_url = args.pr_url,
+                "review post-action: starting"
+            );
             let pr_index = parse_pr_index(&args.pr_url).unwrap_or(0);
+            info!(
+                job_key = args.job_key,
+                pr_index, "review post-action: parsed PR index"
+            );
             let decision = if exit_ok {
                 match parse_review_output(&output) {
                     Ok(result) => {
+                        info!(
+                            job_key = args.job_key,
+                            ?result,
+                            "review post-action: parsed review output"
+                        );
                         post_action_review(
                             result,
                             &forgejo,
@@ -421,7 +436,12 @@ async fn run(args: Args) -> anyhow::Result<()> {
                         .await
                     }
                     Err(e) => {
-                        error!(job_key = args.job_key, error = %e, "failed to parse review output");
+                        error!(job_key = args.job_key, error = %e, output_len = output.len(), "failed to parse review output");
+                        error!(
+                            job_key = args.job_key,
+                            output_tail = &output[output.len().saturating_sub(500)..],
+                            "review output tail"
+                        );
                         escalate_decision(&args, token_usage.clone())
                     }
                 }
@@ -429,9 +449,19 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 error!(job_key = args.job_key, "review subprocess failed");
                 escalate_decision(&args, token_usage.clone())
             };
-            nats.publish_msg(&subjects::REVIEW_DECISION, &decision)
-                .await?;
-            info!(job_key = args.job_key, "review decision reported, exiting");
+            info!(job_key = args.job_key, decision_type = ?decision.decision, "review post-action: publishing decision to NATS");
+            match nats
+                .publish_msg(&subjects::REVIEW_DECISION, &decision)
+                .await
+            {
+                Ok(()) => info!(
+                    job_key = args.job_key,
+                    "review decision published successfully"
+                ),
+                Err(e) => {
+                    error!(job_key = args.job_key, error = %e, "FAILED to publish review decision to NATS")
+                }
+            }
         }
     }
 
@@ -1016,6 +1046,7 @@ async fn connect_nats(
 // Helpers: review output parsing
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 enum ReviewResult {
     Approved { feedback: Option<String> },
     ChangesRequested { feedback: String },

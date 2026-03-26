@@ -462,7 +462,7 @@ jobs:
     eprintln!("E2E: created job {key}");
 
     // Dispatcher auto-dispatches via try_assign_job (nats_worker_url = Docker-internal)
-    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key)
+    chuggernaut_dispatcher::assignment::assign_job(&state, &key)
         .await
         .unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
@@ -695,7 +695,7 @@ jobs:
     eprintln!("E2E-review: created job {key}");
 
     // Dispatcher auto-dispatches via try_assign_job (nats_worker_url = Docker-internal)
-    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key)
+    chuggernaut_dispatcher::assignment::assign_job(&state, &key)
         .await
         .unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);

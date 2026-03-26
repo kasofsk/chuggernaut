@@ -68,6 +68,9 @@ pub async fn start_handlers(state: Arc<DispatcherState>) -> DispatcherResult<()>
     spawn_handler!("journal_append", handle_journal_append);
     spawn_handler!("monitor_events", handle_monitor_events);
 
+    // Start the single-threaded assignment task that processes all dispatch requests
+    crate::assignment::start_assignment_task(state.clone()).await;
+
     barrier.wait().await;
     info!("all NATS handlers subscribed");
     Ok(())
@@ -229,16 +232,13 @@ async fn process_outcome(
                      A PR exists at {pr_url}. You are on the same branch with the previous commits. \
                      Review what was accomplished, then complete the remaining work."
                 );
-                if let Err(e) = crate::action_dispatch::dispatch_action(
+                crate::assignment::request_dispatch(
                     state,
-                    job_key,
-                    Some(&continuation_context),
-                    true,
-                )
-                .await
-                {
-                    warn!(job_key, error = %e, "continuation dispatch failed");
-                }
+                    crate::state::DispatchRequest::AssignRework {
+                        job_key: job_key.to_string(),
+                        feedback: continuation_context,
+                    },
+                );
             } else {
                 // --- Complete yield (or max continuations reached): await CI ---
                 if partial {
@@ -285,7 +285,10 @@ async fn process_outcome(
             }
 
             // Slot freed — try to dispatch next queued job
-            crate::assignment::try_dispatch_next(state).await?;
+            crate::assignment::request_dispatch(
+                state,
+                crate::state::DispatchRequest::TryDispatchNext,
+            );
         }
         OutcomeType::Fail { reason, logs: _ } => {
             jobs::transition_job(
@@ -316,7 +319,10 @@ async fn process_outcome(
             .await;
 
             // Slot freed — try to dispatch next queued job
-            crate::assignment::try_dispatch_next(state).await?;
+            crate::assignment::request_dispatch(
+                state,
+                crate::state::DispatchRequest::TryDispatchNext,
+            );
         }
     }
     Ok(())
@@ -358,9 +364,10 @@ async fn handle_admin_create_job(
                         }
                         // Spawn assignment in background — reply is already sent
                         let s2 = s.clone();
-                        tokio::spawn(async move {
-                            let _ = crate::assignment::try_assign_job(&s2, &key).await;
-                        });
+                        crate::assignment::request_dispatch(
+                            &s2,
+                            crate::state::DispatchRequest::AssignJob { job_key: key },
+                        );
                         return;
                     }
                     Err(e) => serde_json::to_vec(&ErrorResponse {
@@ -470,10 +477,12 @@ async fn process_requeue(
     if target_state == JobState::OnDeck {
         // Spawn assignment in background so the reply isn't blocked by dispatch
         let s = state.clone();
-        let key = req.job_key.clone();
-        tokio::spawn(async move {
-            let _ = crate::assignment::try_assign_job(&s, &key).await;
-        });
+        crate::assignment::request_dispatch(
+            &s,
+            crate::state::DispatchRequest::AssignJob {
+                job_key: req.job_key.clone(),
+            },
+        );
     }
     jobs::journal_append(
         state,
@@ -559,7 +568,12 @@ async fn process_close_job(
             let s = state.clone();
             tokio::spawn(async move {
                 for key in &unblocked {
-                    let _ = crate::assignment::try_assign_job(&s, key).await;
+                    crate::assignment::request_dispatch(
+                        &s,
+                        crate::state::DispatchRequest::AssignJob {
+                            job_key: key.clone(),
+                        },
+                    );
                 }
             });
         }
@@ -586,8 +600,13 @@ async fn handle_review_decision(
     while let Some(msg) = sub.next().await {
         let s = state.clone();
         tokio::spawn(async move {
+            info!(
+                payload_len = msg.payload.len(),
+                "received review decision message"
+            );
             match serde_json::from_slice::<ReviewDecision>(&msg.payload) {
                 Ok(decision) => {
+                    info!(job_key = decision.job_key, decision_type = ?decision.decision, "processing review decision");
                     if let Err(e) = process_review_decision(&s, decision).await {
                         error!("review decision processing failed: {e}");
                     }
@@ -605,6 +624,12 @@ async fn process_review_decision(
 ) -> DispatcherResult<()> {
     let job_key = &decision.job_key;
 
+    // Release the review claim — frees capacity for the next action
+    crate::claims::release_claim(state, job_key).await.ok();
+
+    // Clean up token tracker for this worker
+    state.token_tracker.write().await.remove_worker(job_key);
+
     // Record token usage for this review action
     if let Some(usage) = decision.token_usage {
         append_token_record(state, job_key, "review", usage).await?;
@@ -615,7 +640,12 @@ async fn process_review_decision(
             jobs::transition_job(state, job_key, JobState::Done, "review_approved", None).await?;
             let unblocked = crate::deps::propagate_unblock(state, job_key).await?;
             for key in &unblocked {
-                crate::assignment::try_assign_job(state, key).await?;
+                crate::assignment::request_dispatch(
+                    state,
+                    crate::state::DispatchRequest::AssignJob {
+                        job_key: key.to_string(),
+                    },
+                );
             }
             jobs::journal_append(state, "review_approved", Some(job_key), None, None).await;
         }
@@ -629,7 +659,13 @@ async fn process_review_decision(
             )
             .await?;
             // Dispatch a new action with review feedback
-            crate::assignment::try_assign_rework(state, job_key, &feedback).await?;
+            crate::assignment::request_dispatch(
+                state,
+                crate::state::DispatchRequest::AssignRework {
+                    job_key: job_key.to_string(),
+                    feedback: feedback.clone(),
+                },
+            );
             jobs::journal_append(
                 state,
                 "review_changes_requested",
@@ -658,6 +694,10 @@ async fn process_review_decision(
             .await;
         }
     }
+
+    // Slot freed — try to dispatch next queued job
+    crate::assignment::request_dispatch(state, crate::state::DispatchRequest::TryDispatchNext);
+
     Ok(())
 }
 
@@ -846,7 +886,7 @@ async fn handle_lease_expired(
         schedule_auto_retry(state, &event.job_key).await;
 
         // Slot freed — try to dispatch next queued job
-        crate::assignment::try_dispatch_next(state).await?;
+        crate::assignment::request_dispatch(state, crate::state::DispatchRequest::TryDispatchNext);
     }
     Ok(())
 }
@@ -885,7 +925,10 @@ async fn handle_job_timeout(
             schedule_auto_retry(state, &event.job_key).await;
 
             // Slot freed — try to dispatch next queued job
-            crate::assignment::try_dispatch_next(state).await?;
+            crate::assignment::request_dispatch(
+                state,
+                crate::state::DispatchRequest::TryDispatchNext,
+            );
         }
     }
     Ok(())
@@ -931,23 +974,21 @@ async fn handle_ci_check(
 
     match event.ci_status {
         CiStatus::Success => {
-            // CI passed — dispatch review action
+            // CI passed — request review dispatch via the assignment task
             let review_level = state
                 .jobs
                 .get(&event.job_key)
                 .map(|j| format!("{:?}", j.review).to_lowercase())
                 .unwrap_or_else(|| "high".to_string());
 
-            if let Err(e) = crate::action_dispatch::dispatch_review_action(
+            crate::assignment::request_dispatch(
                 state,
-                &event.job_key,
-                &event.pr_url,
-                &review_level,
-            )
-            .await
-            {
-                warn!(job_key = event.job_key, error = %e, "review action dispatch failed");
-            }
+                crate::state::DispatchRequest::DispatchReview {
+                    job_key: event.job_key.clone(),
+                    pr_url: event.pr_url.clone(),
+                    review_level,
+                },
+            );
 
             let entry = ActivityEntry {
                 timestamp: Utc::now(),
@@ -983,11 +1024,13 @@ async fn handle_ci_check(
                 event.pr_url
             );
 
-            if let Err(e) =
-                crate::assignment::try_assign_rework(state, &event.job_key, &ci_feedback).await
-            {
-                warn!(job_key = event.job_key, error = %e, "CI fix-up rework dispatch failed");
-            }
+            crate::assignment::request_dispatch(
+                state,
+                crate::state::DispatchRequest::AssignRework {
+                    job_key: event.job_key.clone(),
+                    feedback: ci_feedback,
+                },
+            );
 
             let entry = ActivityEntry {
                 timestamp: Utc::now(),
@@ -1028,7 +1071,12 @@ async fn handle_retry(
         );
         drop(job);
         jobs::transition_job(state, &event.job_key, JobState::OnDeck, "auto_retry", None).await?;
-        crate::assignment::try_assign_job(state, &event.job_key).await?;
+        crate::assignment::request_dispatch(
+            state,
+            crate::state::DispatchRequest::AssignJob {
+                job_key: event.job_key.clone(),
+            },
+        );
     }
     Ok(())
 }

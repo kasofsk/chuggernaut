@@ -110,7 +110,7 @@ async fn action_dispatch_creates_claim_and_transitions() {
     let key = jobs::create_job(&state, req).await.unwrap();
 
     // Trigger assignment — should dispatch action directly
-    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key)
+    chuggernaut_dispatcher::assignment::assign_job(&state, &key)
         .await
         .unwrap();
 
@@ -222,7 +222,7 @@ async fn rework_dispatches_new_action_with_feedback() {
     let key = jobs::create_job(&state, req).await.unwrap();
 
     // Dispatch initial action → OnTheStack
-    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key)
+    chuggernaut_dispatcher::assignment::assign_job(&state, &key)
         .await
         .unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
@@ -322,7 +322,7 @@ async fn capacity_limit_prevents_assignment() {
     .unwrap();
 
     // Try to assign job2 — should fail due to capacity
-    let assigned = chuggernaut_dispatcher::assignment::try_assign_job(&state, &key2)
+    let assigned = chuggernaut_dispatcher::assignment::assign_job(&state, &key2)
         .await
         .unwrap();
     assert!(!assigned, "should be at capacity");
@@ -411,7 +411,7 @@ async fn dispatch_next_respects_priority() {
     let key_mid = jobs::create_job(&state, make("Mid", 50)).await.unwrap();
 
     // Dispatch next — should pick highest priority
-    chuggernaut_dispatcher::assignment::try_dispatch_next(&state)
+    chuggernaut_dispatcher::assignment::dispatch_next(&state)
         .await
         .unwrap();
 
@@ -525,7 +525,7 @@ async fn dispatch_next_after_yield() {
     let key2 = jobs::create_job(&state, make("Second")).await.unwrap();
 
     // Dispatch first job
-    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key1)
+    chuggernaut_dispatcher::assignment::assign_job(&state, &key1)
         .await
         .unwrap();
     assert_eq!(state.jobs.get(&key1).unwrap().state, JobState::OnTheStack);
@@ -676,7 +676,7 @@ async fn changes_requested_in_dispatch_queue() {
     let key_od = jobs::create_job(&state, req_od).await.unwrap();
 
     // Dispatch next — ChangesRequested job has higher priority
-    chuggernaut_dispatcher::assignment::try_dispatch_next(&state)
+    chuggernaut_dispatcher::assignment::dispatch_next(&state)
         .await
         .unwrap();
 

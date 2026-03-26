@@ -207,6 +207,11 @@ async fn escalated_review_transitions_job() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::InReview);
 
+    // InReview → Reviewing (required before escalation)
+    jobs::transition_job(&state, &key, JobState::Reviewing, "test", None)
+        .await
+        .unwrap();
+
     // Publish Escalated decision
     let decision = ReviewDecision {
         job_key: key.clone(),
@@ -256,6 +261,9 @@ async fn escalated_then_approved_via_close() {
         .await
         .unwrap();
     jobs::transition_job(&state, &key, JobState::InReview, "test", None)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::Reviewing, "test", None)
         .await
         .unwrap();
     jobs::transition_job(&state, &key, JobState::Escalated, "test", None)
@@ -308,6 +316,9 @@ async fn escalated_then_changes_requested() {
         .await
         .unwrap();
     jobs::transition_job(&state, &key, JobState::InReview, "test", None)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::Reviewing, "test", None)
         .await
         .unwrap();
     jobs::transition_job(&state, &key, JobState::Escalated, "test", None)
@@ -428,7 +439,7 @@ async fn yield_dispatches_review_action() {
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
-    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key)
+    chuggernaut_dispatcher::assignment::assign_job(&state, &key)
         .await
         .unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);

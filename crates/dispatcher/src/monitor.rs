@@ -49,6 +49,9 @@ async fn run_scans(state: &Arc<DispatcherState>) {
     if let Err(e) = scan_ci_status(state).await {
         warn!("CI status scan failed: {e}");
     }
+    if let Err(e) = scan_pending_reviews(state).await {
+        warn!("pending review scan failed: {e}");
+    }
     // Clear stale rate limit state so it doesn't permanently block dispatching
     scan_rate_limit_staleness(state).await;
 }
@@ -323,6 +326,150 @@ async fn scan_ci_status(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
                 debug!(job_key, error = %e, "CI status check failed, will retry next scan");
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Find InReview jobs where CI passed but no review action was dispatched.
+/// This handles deferred reviews (capacity was full when CI passed) and
+/// dispatcher restarts that missed the ci_check event.
+/// Sends directly to the assignment task channel — no NATS indirection.
+///
+/// Also detects already-merged PRs and transitions those jobs to Done
+/// (repairs state corruption from missed review decisions).
+async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
+    let candidates: Vec<(String, String, String, String)> = state
+        .jobs
+        .iter()
+        .filter(|e| {
+            let job = e.value();
+            job.state == JobState::InReview
+                && job.ci_status == Some(CiStatus::Success)
+                && job.pr_url.is_some()
+        })
+        .map(|e| {
+            let job = e.value();
+            (
+                e.key().clone(),
+                job.pr_url.clone().unwrap(),
+                job.repo.clone(),
+                format!("{:?}", job.review).to_lowercase(),
+            )
+        })
+        .collect();
+
+    let (forgejo_url, forgejo_token) =
+        match (&state.config.forgejo_url, &state.config.forgejo_token) {
+            (Some(url), Some(token)) => (url.clone(), token.clone()),
+            _ => {
+                // No Forgejo config — can't check PR state, just dispatch
+                for (job_key, pr_url, _repo, review_level) in candidates {
+                    if let Ok(Some(_)) = kv_get::<ClaimState>(&state.kv.claims, &job_key).await {
+                        continue;
+                    }
+                    crate::assignment::request_dispatch(
+                        state,
+                        crate::state::DispatchRequest::DispatchReview {
+                            job_key,
+                            pr_url,
+                            review_level,
+                        },
+                    );
+                }
+                return Ok(());
+            }
+        };
+
+    let forgejo = chuggernaut_forgejo_api::ForgejoClient::new(&forgejo_url, &forgejo_token);
+
+    for (job_key, pr_url, repo, review_level) in candidates {
+        // Only re-trigger if no active claim (review not already in-flight)
+        if let Ok(Some(_)) = kv_get::<ClaimState>(&state.kv.claims, &job_key).await {
+            continue;
+        }
+
+        // Check if PR is already merged — fast-path to Done (repairs missed decisions)
+        let parts: Vec<&str> = repo.splitn(2, '/').collect();
+        if parts.len() == 2
+            && let Some(pr_index) = parse_pr_url_index(&pr_url)
+            && let Ok(pr) = forgejo.get_pull_request(parts[0], parts[1], pr_index).await
+        {
+            if pr.merged {
+                info!(
+                    job_key,
+                    pr_url, "PR already merged — transitioning to Done (state repair)"
+                );
+                if let Err(e) = crate::jobs::transition_job(
+                    state,
+                    &job_key,
+                    JobState::Done,
+                    "pr_already_merged",
+                    None,
+                )
+                .await
+                {
+                    warn!(job_key, error = %e, "failed to transition merged job to Done");
+                }
+                let _ = crate::claims::release_claim(state, &job_key).await;
+                crate::assignment::request_dispatch(
+                    state,
+                    crate::state::DispatchRequest::TryDispatchNext,
+                );
+                continue;
+            }
+
+            // Check if PR has REQUEST_CHANGES reviews (missed review decision)
+            if let Ok(reviews) = forgejo.list_reviews(parts[0], parts[1], pr_index).await
+                && let Some(latest) = reviews.iter().rev().find(|r| {
+                    r.user
+                        .as_ref()
+                        .is_some_and(|u| u.login.contains("reviewer"))
+                })
+                && latest.state == "REQUEST_CHANGES"
+            {
+                info!(
+                    job_key,
+                    pr_url,
+                    "PR has REQUEST_CHANGES review — transitioning to ChangesRequested (state repair)"
+                );
+                let feedback = latest.body.clone();
+                if let Err(e) = crate::jobs::transition_job(
+                    state,
+                    &job_key,
+                    JobState::ChangesRequested,
+                    "review_state_repair",
+                    None,
+                )
+                .await
+                {
+                    warn!(job_key, error = %e, "failed to transition to ChangesRequested");
+                } else {
+                    let _ = crate::claims::release_claim(state, &job_key).await;
+                    crate::assignment::request_dispatch(
+                        state,
+                        crate::state::DispatchRequest::AssignRework {
+                            job_key: job_key.clone(),
+                            feedback,
+                        },
+                    );
+                }
+                continue;
+            }
+        }
+
+        info!(
+            job_key,
+            "scan_pending_reviews: InReview + ci=success + no claim → requesting review dispatch"
+        );
+        crate::assignment::request_dispatch(
+            state,
+            crate::state::DispatchRequest::DispatchReview {
+                job_key,
+                pr_url,
+                review_level,
+            },
+        );
     }
 
     Ok(())
