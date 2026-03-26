@@ -209,40 +209,39 @@ async fn repair_in_review_jobs(state: &Arc<DispatcherState>) {
         }
 
         // Check for REQUEST_CHANGES reviews
-        if let Ok(reviews) = forgejo.list_reviews(owner, repo_name, pr_index).await {
-            if let Some(latest) = reviews.iter().rev().find(|r| {
+        if let Ok(reviews) = forgejo.list_reviews(owner, repo_name, pr_index).await
+            && let Some(latest) = reviews.iter().rev().find(|r| {
                 r.user
                     .as_ref()
-                    .map_or(false, |u| u.login.contains("reviewer"))
-            }) {
-                if latest.state == "REQUEST_CHANGES" {
-                    info!(
-                        job_key,
-                        pr_url, "PR has REQUEST_CHANGES — repairing to ChangesRequested"
-                    );
-                    let feedback = latest.body.clone();
-                    if let Err(e) = crate::jobs::transition_job(
-                        state,
-                        &job_key,
-                        JobState::ChangesRequested,
-                        "recovery_changes_requested",
-                        None,
-                    )
-                    .await
-                    {
-                        warn!(job_key, error = %e, "failed to repair changes-requested job");
-                    } else {
-                        crate::assignment::request_dispatch(
-                            state,
-                            crate::state::DispatchRequest::AssignRework {
-                                job_key: job_key.clone(),
-                                feedback,
-                            },
-                        );
-                    }
-                    continue;
-                }
+                    .is_some_and(|u| u.login.contains("reviewer"))
+            })
+            && latest.state == "REQUEST_CHANGES"
+        {
+            info!(
+                job_key,
+                pr_url, "PR has REQUEST_CHANGES — repairing to ChangesRequested"
+            );
+            let feedback = latest.body.clone();
+            if let Err(e) = crate::jobs::transition_job(
+                state,
+                &job_key,
+                JobState::ChangesRequested,
+                "recovery_changes_requested",
+                None,
+            )
+            .await
+            {
+                warn!(job_key, error = %e, "failed to repair changes-requested job");
+            } else {
+                crate::assignment::request_dispatch(
+                    state,
+                    crate::state::DispatchRequest::AssignRework {
+                        job_key: job_key.clone(),
+                        feedback,
+                    },
+                );
             }
+            continue;
         }
 
         // Job is InReview and PR is open with no changes-requested — needs review dispatch

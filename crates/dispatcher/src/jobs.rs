@@ -323,10 +323,9 @@ pub async fn transition_job(
     if (from == JobState::OnTheStack || from == JobState::Reviewing)
         && to != JobState::OnTheStack
         && to != JobState::Reviewing
+        && let Err(e) = crate::claims::release_claim(state, job_key).await
     {
-        if let Err(e) = crate::claims::release_claim(state, job_key).await {
-            tracing::debug!(job_key, error = %e, "auto claim release (may already be released)");
-        }
+        tracing::debug!(job_key, error = %e, "auto claim release (may already be released)");
     }
 
     // Publish transition event

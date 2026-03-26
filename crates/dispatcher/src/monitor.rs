@@ -391,73 +391,70 @@ async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<
 
         // Check if PR is already merged — fast-path to Done (repairs missed decisions)
         let parts: Vec<&str> = repo.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            if let Some(pr_index) = parse_pr_url_index(&pr_url) {
-                if let Ok(pr) = forgejo.get_pull_request(parts[0], parts[1], pr_index).await {
-                    if pr.merged {
-                        info!(
-                            job_key,
-                            pr_url, "PR already merged — transitioning to Done (state repair)"
-                        );
-                        if let Err(e) = crate::jobs::transition_job(
-                            state,
-                            &job_key,
-                            JobState::Done,
-                            "pr_already_merged",
-                            None,
-                        )
-                        .await
-                        {
-                            warn!(job_key, error = %e, "failed to transition merged job to Done");
-                        }
-                        let _ = crate::claims::release_claim(state, &job_key).await;
-                        crate::assignment::request_dispatch(
-                            state,
-                            crate::state::DispatchRequest::TryDispatchNext,
-                        );
-                        continue;
-                    }
-
-                    // Check if PR has REQUEST_CHANGES reviews (missed review decision)
-                    if let Ok(reviews) = forgejo.list_reviews(parts[0], parts[1], pr_index).await {
-                        // Look at the most recent review from the reviewer bot
-                        if let Some(latest) = reviews.iter().rev().find(|r| {
-                            r.user
-                                .as_ref()
-                                .map_or(false, |u| u.login.contains("reviewer"))
-                        }) {
-                            if latest.state == "REQUEST_CHANGES" {
-                                info!(
-                                    job_key,
-                                    pr_url,
-                                    "PR has REQUEST_CHANGES review — transitioning to ChangesRequested (state repair)"
-                                );
-                                let feedback = latest.body.clone();
-                                if let Err(e) = crate::jobs::transition_job(
-                                    state,
-                                    &job_key,
-                                    JobState::ChangesRequested,
-                                    "review_state_repair",
-                                    None,
-                                )
-                                .await
-                                {
-                                    warn!(job_key, error = %e, "failed to transition to ChangesRequested");
-                                } else {
-                                    let _ = crate::claims::release_claim(state, &job_key).await;
-                                    crate::assignment::request_dispatch(
-                                        state,
-                                        crate::state::DispatchRequest::AssignRework {
-                                            job_key: job_key.clone(),
-                                            feedback,
-                                        },
-                                    );
-                                }
-                                continue;
-                            }
-                        }
-                    }
+        if parts.len() == 2
+            && let Some(pr_index) = parse_pr_url_index(&pr_url)
+            && let Ok(pr) = forgejo.get_pull_request(parts[0], parts[1], pr_index).await
+        {
+            if pr.merged {
+                info!(
+                    job_key,
+                    pr_url, "PR already merged — transitioning to Done (state repair)"
+                );
+                if let Err(e) = crate::jobs::transition_job(
+                    state,
+                    &job_key,
+                    JobState::Done,
+                    "pr_already_merged",
+                    None,
+                )
+                .await
+                {
+                    warn!(job_key, error = %e, "failed to transition merged job to Done");
                 }
+                let _ = crate::claims::release_claim(state, &job_key).await;
+                crate::assignment::request_dispatch(
+                    state,
+                    crate::state::DispatchRequest::TryDispatchNext,
+                );
+                continue;
+            }
+
+            // Check if PR has REQUEST_CHANGES reviews (missed review decision)
+            if let Ok(reviews) = forgejo.list_reviews(parts[0], parts[1], pr_index).await
+                && let Some(latest) = reviews.iter().rev().find(|r| {
+                    r.user
+                        .as_ref()
+                        .is_some_and(|u| u.login.contains("reviewer"))
+                })
+                && latest.state == "REQUEST_CHANGES"
+            {
+                info!(
+                    job_key,
+                    pr_url,
+                    "PR has REQUEST_CHANGES review — transitioning to ChangesRequested (state repair)"
+                );
+                let feedback = latest.body.clone();
+                if let Err(e) = crate::jobs::transition_job(
+                    state,
+                    &job_key,
+                    JobState::ChangesRequested,
+                    "review_state_repair",
+                    None,
+                )
+                .await
+                {
+                    warn!(job_key, error = %e, "failed to transition to ChangesRequested");
+                } else {
+                    let _ = crate::claims::release_claim(state, &job_key).await;
+                    crate::assignment::request_dispatch(
+                        state,
+                        crate::state::DispatchRequest::AssignRework {
+                            job_key: job_key.clone(),
+                            feedback,
+                        },
+                    );
+                }
+                continue;
             }
         }
 
