@@ -1,6 +1,6 @@
 # Dispatcher
 
-The dispatcher is the single coordinator in chuggernaut. It owns all job state transitions, dependency management, claim lifecycle, and action dispatch.
+The dispatcher is the single coordinator in chuggernaut. It owns all job state transitions, dependency management, claim lifecycle, and action dispatch. All state mutations flow through a single sequential assignment task (see [Sequential Processing](#sequential-processing)).
 
 **Invariants:**
 - All KV writes use CAS (compare-and-swap) with bounded retry on conflict: up to 5 retries with exponential backoff (10ms/20ms/40ms/80ms/160ms). On exhaustion, heartbeat CAS failures are logged and dropped (benign); state transition CAS failures are logged as errors for investigation.
@@ -65,9 +65,10 @@ The dispatcher is the single coordinator in chuggernaut. It owns all job state t
                        │ Done │
                        └──────┘
 
-  Terminal states (reachable from Any via admin commands):
+  Terminal states (reachable from non-terminal states via admin commands):
     Done     — admin close (walks reverse deps)
     Revoked  — admin close --revoke (dependents stay blocked)
+    Transitions FROM terminal states (Done, Revoked) are rejected.
     admin requeue → dispatcher checks deps → Blocked or OnDeck
     admin requeue --target on-ice → OnIce (from Failed)
 ```
@@ -82,20 +83,21 @@ The dispatcher is the single coordinator in chuggernaut. It owns all job state t
 | OnIce | OnDeck or Blocked | Admin requeue | Check deps; if all Done → OnDeck, else → Blocked |
 | Blocked | OnDeck | All deps Done | Update job KV (CAS), publish transition, dispatch action |
 | OnDeck | OnTheStack | Dispatcher dispatches action | CAS claim (worker_id: action-{key}), dispatch Forgejo workflow |
-| OnTheStack | InReview | Worker outcome: yield | Release claim, store pr_url, update job KV (CAS), dispatch review action |
+| OnTheStack | InReview | Worker outcome: yield | Auto-release claim (via transition_job), store pr_url, update job KV (CAS), dispatch review action |
 | InReview | Done | Review decision: approved (PR already merged) | Update job KV (CAS), walk reverse deps |
 | InReview | Escalated | Review decision: escalated | Update job KV (CAS) |
+| InReview | Escalated | Review decision: changes_requested but rework_count >= rework_limit | Escalate instead of rework; assign human reviewer |
 | InReview | ChangesRequested | Review decision: changes_requested | Update job KV (CAS) |
 | Escalated | Done | Admin close or manual resolution | Update job KV (CAS), walk reverse deps |
 | Escalated | ChangesRequested | Admin requeue | Update job KV (CAS) |
 | ChangesRequested | OnTheStack | Dispatcher dispatches rework action | CAS claim, dispatch Forgejo workflow with review_feedback |
-| OnTheStack | Failed | Lease expiry / job timeout / worker fail | Release claim, store reason in `chuggernaut.activities` |
+| OnTheStack | Failed | Lease expiry / job timeout / worker fail | Auto-release claim (via transition_job), store reason in `chuggernaut.activities`. If CI failure and rework_count >= rework_limit, escalate to human reviewer instead of retry. |
 | Failed | OnDeck | Auto-retry (retry_count < max_retries) | Increment retry_count, set `retry_after` = now + min(30s × 2^retry_count, 10min). Monitor detects eligible jobs and publishes advisory; dispatcher transitions to OnDeck and dispatches new action. |
 | Failed | Failed | Retry exhausted | Stay; manual requeue required |
 | Failed | OnDeck or Blocked | Admin requeue | Check deps; route accordingly |
 | Failed | OnIce | Admin requeue --target on-ice | Put failed job on hold for later |
-| Any | Done | Admin close | If claimed: release claim. Update job KV (CAS), walk reverse deps |
-| Any | Revoked | Admin close --revoke | If claimed: release claim. Update job KV (CAS) (dependents stay blocked) |
+| Any (non-terminal) | Done | Admin close | Auto-release claim if held (via transition_job). Update job KV (CAS), walk reverse deps |
+| Any (non-terminal) | Revoked | Admin close --revoke | Auto-release claim if held (via transition_job). Update job KV (CAS) (dependents stay blocked) |
 
 ### Terminal and Hold States
 
@@ -173,6 +175,7 @@ Job reaches OnDeck → dispatcher dispatches action:
     - If tombstone: CAS overwrites
     - If active entry: fail (already claimed)
   → On success:
+    - Increment active_claims counter
     - CAS update chuggernaut.jobs KV: state → OnTheStack
     - Dispatch Forgejo Action workflow (job_key, nats_url, review_feedback)
     - Publish JobTransition{OnDeck → OnTheStack}
@@ -190,9 +193,19 @@ The action worker publishes `WorkerHeartbeat` every 10 seconds. The dispatcher:
 
 ### Release
 
-On worker outcome (yield/fail):
+Claims are released automatically by `transition_job` when a job leaves a claimed state (OnTheStack or Reviewing). There are no manual `release_claim` calls in handlers — all claim cleanup flows through state transitions.
+
+On release:
 1. Delete claim from `chuggernaut.claims` KV (tombstone)
-2. Process outcome-specific logic (state transition, retry, etc.)
+2. Decrement `active_claims` counter (saturating)
+3. Process outcome-specific logic (state transition, retry, etc.)
+
+### Active Claims Counter
+
+`DispatcherState` maintains an `active_claims: AtomicUsize` counter:
+- Incremented on claim acquisition
+- Decremented (saturating) on claim release
+- Provides O(1) capacity checks without streaming KV keys
 
 ### Lease Expiry
 
@@ -227,13 +240,18 @@ There is no worker registration, capability matching, or idle worker selection. 
 
 When a job transitions to ChangesRequested:
 
-1. Dispatcher dispatches a **new** Forgejo Action with the same `job_key`
-2. Passes `review_feedback` and `is_rework=true` as additional workflow inputs
-3. Creates a new claim (same `worker_id = "action-{job_key}"`)
-4. The worker checks out the existing `work/{job_key}` branch and addresses the feedback
-5. The existing PR auto-updates when new commits are pushed
+1. Check `rework_count` against `CHUGGERNAUT_REWORK_LIMIT` (default 3)
+   - If `rework_count >= rework_limit`: escalate to human reviewer instead of dispatching another rework
+2. Dispatcher dispatches a **new** Forgejo Action with the same `job_key`
+3. Passes `review_feedback` and `is_rework=true` as additional workflow inputs
+4. Creates a new claim (same `worker_id = "action-{job_key}"`)
+5. Increments `rework_count` on the job
+6. The worker checks out the existing `work/{job_key}` branch and addresses the feedback
+7. The existing PR auto-updates when new commits are pushed
 
 No attempt is made to route rework to a "previous worker" — each action run is independent and ephemeral.
+
+The rework limit is also enforced when handling CI failures on rework runs — if the rework count is at the limit, the job escalates rather than retrying.
 
 ### Review Dispatch
 
@@ -261,6 +279,35 @@ Both work and review actions report `TokenUsage` in their outcomes. The dispatch
 ```
 
 This allows the UI to show per-action usage broken down by type, including across rework cycles.
+
+---
+
+## Sequential Processing
+
+All job state mutations flow through a single mpsc channel processed by one assignment task. Previously, NATS handlers spawned concurrent tasks that could race on the same job. Now handlers are thin message routers — they deserialize NATS messages and forward typed `DispatchRequest` variants to the channel. The assignment task processes them sequentially, eliminating races.
+
+### DispatchRequest Variants
+
+The channel carries these variant types:
+
+- **Worker outcomes** — yield, fail, heartbeat from action containers
+- **Review decisions** — approved, changes_requested, escalated from review actions
+- **Monitor events** — lease expiry, job timeout, orphan detection, retry eligibility (routed directly via `publish_and_dispatch`, not through NATS round-trip)
+- **Admin commands** — requeue, close, create (include a oneshot reply channel so the HTTP/CLI caller blocks until the mutation completes and receives the result)
+
+### Handler Architecture
+
+NATS subscription handlers do minimal work:
+1. Deserialize the incoming NATS message
+2. Construct the appropriate `DispatchRequest` variant
+3. Send it to the mpsc channel
+4. Return immediately (no KV reads, no state mutations)
+
+Admin commands (from HTTP endpoints or CLI) include a `tokio::sync::oneshot` sender in the request. The assignment task processes the command and sends the result back through the oneshot channel, allowing the caller to await a response.
+
+### Monitor Direct Routing
+
+Monitor scans route events directly to the assignment task channel via `publish_and_dispatch`. This function both publishes the event to NATS (for JetStream observability and external consumers) and sends a `DispatchRequest` to the channel. The previous `handle_monitor_events` NATS subscription handler has been removed — monitor events no longer round-trip through NATS.
 
 ---
 

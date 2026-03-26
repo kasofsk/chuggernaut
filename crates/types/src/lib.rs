@@ -141,6 +141,9 @@ pub struct Job {
     /// Number of continuation dispatches for partial yields.
     #[serde(default)]
     pub continuation_count: u32,
+    /// Number of rework cycles (review → changes_requested → rework).
+    #[serde(default)]
+    pub rework_count: u32,
     /// CI status for the PR. None = not yet checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci_status: Option<CiStatus>,
@@ -1212,6 +1215,7 @@ mod tests {
             token_usage: vec![],
             claude_args: Some("--model claude-sonnet-4-5-20250514".to_string()),
             continuation_count: 0,
+            rework_count: 0,
             ci_status: None,
             ci_check_since: None,
             created_at: Utc::now(),

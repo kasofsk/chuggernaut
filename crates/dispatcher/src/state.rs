@@ -9,21 +9,29 @@ use tokio::sync::RwLock;
 
 use tokio::sync::mpsc;
 
-use chuggernaut_types::{HeartbeatRateLimit, Job, TokenUsage};
+use tokio::sync::oneshot;
+
+use chuggernaut_types::{
+    CiCheckEvent, CloseJobRequest, HeartbeatRateLimit, Job, JobTimeoutEvent, LeaseExpiredEvent,
+    OrphanDetectedEvent, RequeueRequest, RetryEligibleEvent, ReviewDecision, TokenUsage,
+    WorkerOutcome,
+};
 
 // ---------------------------------------------------------------------------
 // Dispatch requests — sent to the single assignment task
 // ---------------------------------------------------------------------------
 
 /// A request to the centralized assignment task.
-/// All dispatch decisions flow through a single mpsc channel so they are
-/// processed sequentially — no concurrent capacity races.
-#[derive(Debug)]
+/// **All** job state mutations flow through this single mpsc channel so they
+/// are processed sequentially — no concurrent races on job state.
 pub enum DispatchRequest {
+    // -- Dispatch commands --------------------------------------------------
     /// Try to dispatch the next highest-priority OnDeck job.
     TryDispatchNext,
     /// Try to assign a specific job (e.g. after unblock or requeue).
-    AssignJob { job_key: String },
+    AssignJob {
+        job_key: String,
+    },
     /// Dispatch a review action for a job that passed CI.
     DispatchReview {
         job_key: String,
@@ -31,7 +39,52 @@ pub enum DispatchRequest {
         review_level: String,
     },
     /// Try to assign a rework with reviewer feedback.
-    AssignRework { job_key: String, feedback: String },
+    AssignRework {
+        job_key: String,
+        feedback: String,
+    },
+
+    // -- Worker events (fire-and-forget) ------------------------------------
+    WorkerOutcome(WorkerOutcome),
+    ReviewDecision(ReviewDecision),
+
+    // -- Monitor events (fire-and-forget) -----------------------------------
+    LeaseExpired(LeaseExpiredEvent),
+    JobTimeout(JobTimeoutEvent),
+    OrphanDetected(OrphanDetectedEvent),
+    RetryEligible(RetryEligibleEvent),
+    CiCheck(CiCheckEvent),
+
+    // -- Admin commands (request-reply via oneshot) --------------------------
+    AdminRequeue {
+        req: RequeueRequest,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    AdminClose {
+        req: CloseJobRequest,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+}
+
+// Manual Debug impl because oneshot::Sender doesn't derive Debug.
+impl std::fmt::Debug for DispatchRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TryDispatchNext => write!(f, "TryDispatchNext"),
+            Self::AssignJob { job_key } => write!(f, "AssignJob({job_key})"),
+            Self::DispatchReview { job_key, .. } => write!(f, "DispatchReview({job_key})"),
+            Self::AssignRework { job_key, .. } => write!(f, "AssignRework({job_key})"),
+            Self::WorkerOutcome(o) => write!(f, "WorkerOutcome({})", o.job_key),
+            Self::ReviewDecision(d) => write!(f, "ReviewDecision({})", d.job_key),
+            Self::LeaseExpired(e) => write!(f, "LeaseExpired({})", e.job_key),
+            Self::JobTimeout(e) => write!(f, "JobTimeout({})", e.job_key),
+            Self::OrphanDetected(e) => write!(f, "OrphanDetected({})", e.job_key),
+            Self::RetryEligible(e) => write!(f, "RetryEligible({})", e.job_key),
+            Self::CiCheck(e) => write!(f, "CiCheck({})", e.job_key),
+            Self::AdminRequeue { req, .. } => write!(f, "AdminRequeue({})", req.job_key),
+            Self::AdminClose { req, .. } => write!(f, "AdminClose({})", req.job_key),
+        }
+    }
 }
 
 use chuggernaut_nats::NatsClient;
@@ -126,6 +179,10 @@ pub struct DispatcherState {
     /// Hot-reloadable max concurrent actions. Overrides config.max_concurrent_actions
     /// when set. Use atomic for lock-free reads from the assignment task.
     pub max_concurrent_actions: std::sync::atomic::AtomicUsize,
+    /// Current number of active claims. Incremented on acquire, decremented
+    /// on release. Used for capacity checks instead of streaming KV keys
+    /// (which can hang on tombstone-only buckets).
+    pub active_claims: std::sync::atomic::AtomicUsize,
     pub nats: NatsClient,
     pub kv: KvStores,
 
@@ -211,6 +268,7 @@ impl DispatcherState {
         Arc::new(Self {
             config,
             max_concurrent_actions: std::sync::atomic::AtomicUsize::new(max_actions),
+            active_claims: std::sync::atomic::AtomicUsize::new(0),
             nats: NatsClient::with_jetstream(client, js),
             kv,
             jobs: DashMap::new(),
@@ -233,6 +291,7 @@ impl DispatcherState {
         Arc::new(Self {
             config,
             max_concurrent_actions: std::sync::atomic::AtomicUsize::new(max_actions),
+            active_claims: std::sync::atomic::AtomicUsize::new(0),
             nats: NatsClient::with_prefix(client, js, prefix),
             kv,
             jobs: DashMap::new(),

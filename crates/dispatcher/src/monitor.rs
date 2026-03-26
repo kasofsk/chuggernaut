@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use futures::StreamExt;
 use tracing::{debug, info, warn};
 
 use chuggernaut_types::*;
@@ -57,46 +56,77 @@ async fn run_scans(state: &Arc<DispatcherState>) {
 }
 
 async fn scan_lease_expiry(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
+    if state
+        .active_claims
+        .load(std::sync::atomic::Ordering::Relaxed)
+        == 0
+    {
+        return Ok(());
+    }
     let now = Utc::now();
-    let keys = state.kv.claims.keys().await?;
-    tokio::pin!(keys);
 
-    while let Some(key) = keys.next().await {
-        if let Ok(key_str) = key
-            && let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &key_str).await?
+    // Iterate in-memory jobs in active states, then check their claims.
+    // Avoids streaming KV keys() which can hang on tombstone-only buckets.
+    let active_keys: Vec<String> = state
+        .jobs
+        .iter()
+        .filter(|e| {
+            let s = e.value().state;
+            s == JobState::OnTheStack || s == JobState::Reviewing
+        })
+        .map(|e| e.key().clone())
+        .collect();
+
+    for key in active_keys {
+        if let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &key).await?
             && claim.lease_deadline < now
         {
             let event = LeaseExpiredEvent {
-                job_key: key_str.clone(),
+                job_key: key.clone(),
                 worker_id: claim.worker_id.clone(),
                 lease_deadline: claim.lease_deadline,
                 detected_at: now,
             };
-            publish_monitor_event(state, &subjects::MONITOR_LEASE_EXPIRED, &event).await;
+            let dispatch = crate::state::DispatchRequest::LeaseExpired(event.clone());
+            publish_and_dispatch(state, &subjects::MONITOR_LEASE_EXPIRED, &event, dispatch).await;
         }
     }
     Ok(())
 }
 
 async fn scan_job_timeout(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
+    if state
+        .active_claims
+        .load(std::sync::atomic::Ordering::Relaxed)
+        == 0
+    {
+        return Ok(());
+    }
     let now = Utc::now();
-    let keys = state.kv.claims.keys().await?;
-    tokio::pin!(keys);
 
-    while let Some(key) = keys.next().await {
-        if let Ok(key_str) = key
-            && let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &key_str).await?
-        {
+    let active_keys: Vec<String> = state
+        .jobs
+        .iter()
+        .filter(|e| {
+            let s = e.value().state;
+            s == JobState::OnTheStack || s == JobState::Reviewing
+        })
+        .map(|e| e.key().clone())
+        .collect();
+
+    for key in active_keys {
+        if let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &key).await? {
             let elapsed = (now - claim.claimed_at).num_seconds() as u64;
             if elapsed > claim.timeout_secs {
                 let event = JobTimeoutEvent {
-                    job_key: key_str.clone(),
+                    job_key: key.clone(),
                     worker_id: claim.worker_id.clone(),
                     claimed_at: claim.claimed_at,
                     timeout_secs: claim.timeout_secs,
                     detected_at: now,
                 };
-                publish_monitor_event(state, &subjects::MONITOR_TIMEOUT, &event).await;
+                let dispatch = crate::state::DispatchRequest::JobTimeout(event.clone());
+                publish_and_dispatch(state, &subjects::MONITOR_TIMEOUT, &event, dispatch).await;
             }
         }
     }
@@ -118,7 +148,8 @@ async fn scan_orphans(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
                 kind: OrphanKind::ClaimlessOnTheStack,
                 detected_at: now,
             };
-            publish_monitor_event(state, &subjects::MONITOR_ORPHAN, &event).await;
+            let dispatch = crate::state::DispatchRequest::OrphanDetected(event.clone());
+            publish_and_dispatch(state, &subjects::MONITOR_ORPHAN, &event, dispatch).await;
         }
     }
 
@@ -140,7 +171,8 @@ async fn scan_retry(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
                 retry_after: job.retry_after.unwrap(),
                 detected_at: now,
             };
-            publish_monitor_event(state, &subjects::MONITOR_RETRY, &event).await;
+            let dispatch = crate::state::DispatchRequest::RetryEligible(event.clone());
+            publish_and_dispatch(state, &subjects::MONITOR_RETRY, &event, dispatch).await;
         }
     }
 
@@ -195,8 +227,6 @@ async fn scan_archival(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
         let _ = state.kv.deps.delete(&key).await;
         let _ = state.kv.activities.delete(&key).await;
 
-        // Set TTL on jobs KV entry (NATS KV doesn't support per-key TTL post-creation,
-        // so we just leave it — the job will be queryable via API until the bucket ages it out)
         debug!(key, "job archived");
     }
 
@@ -258,7 +288,8 @@ async fn scan_ci_status(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
                     ci_status: CiStatus::Success,
                     detected_at: now,
                 };
-                publish_monitor_event(state, &subjects::MONITOR_CI_CHECK, &event).await;
+                let dispatch = crate::state::DispatchRequest::CiCheck(event.clone());
+                publish_and_dispatch(state, &subjects::MONITOR_CI_CHECK, &event, dispatch).await;
                 continue;
             }
         }
@@ -300,7 +331,9 @@ async fn scan_ci_status(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
                         ci_status: CiStatus::Success,
                         detected_at: now,
                     };
-                    publish_monitor_event(state, &subjects::MONITOR_CI_CHECK, &event).await;
+                    let dispatch = crate::state::DispatchRequest::CiCheck(event.clone());
+                    publish_and_dispatch(state, &subjects::MONITOR_CI_CHECK, &event, dispatch)
+                        .await;
                     continue;
                 }
 
@@ -318,7 +351,9 @@ async fn scan_ci_status(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
                         ci_status,
                         detected_at: now,
                     };
-                    publish_monitor_event(state, &subjects::MONITOR_CI_CHECK, &event).await;
+                    let dispatch = crate::state::DispatchRequest::CiCheck(event.clone());
+                    publish_and_dispatch(state, &subjects::MONITOR_CI_CHECK, &event, dispatch)
+                        .await;
                 }
                 // else: still pending, will check again next scan
             }
@@ -332,9 +367,7 @@ async fn scan_ci_status(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
 }
 
 /// Find InReview jobs where CI passed but no review action was dispatched.
-/// This handles deferred reviews (capacity was full when CI passed) and
-/// dispatcher restarts that missed the ci_check event.
-/// Sends directly to the assignment task channel — no NATS indirection.
+/// Routes all decisions through the assignment task channel — no direct mutations.
 ///
 /// Also detects already-merged PRs and transitions those jobs to Done
 /// (repairs state corruption from missed review decisions).
@@ -363,7 +396,7 @@ async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<
         match (&state.config.forgejo_url, &state.config.forgejo_token) {
             (Some(url), Some(token)) => (url.clone(), token.clone()),
             _ => {
-                // No Forgejo config — can't check PR state, just dispatch
+                // No Forgejo config — can't check PR state, just dispatch reviews
                 for (job_key, pr_url, _repo, review_level) in candidates {
                     if let Ok(Some(_)) = kv_get::<ClaimState>(&state.kv.claims, &job_key).await {
                         continue;
@@ -389,7 +422,7 @@ async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<
             continue;
         }
 
-        // Check if PR is already merged — fast-path to Done (repairs missed decisions)
+        // Check if PR is already merged — send admin close through the channel
         let parts: Vec<&str> = repo.splitn(2, '/').collect();
         if parts.len() == 2
             && let Some(pr_index) = parse_pr_url_index(&pr_url)
@@ -398,23 +431,18 @@ async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<
             if pr.merged {
                 info!(
                     job_key,
-                    pr_url, "PR already merged — transitioning to Done (state repair)"
+                    pr_url, "PR already merged — routing close to assignment task"
                 );
-                if let Err(e) = crate::jobs::transition_job(
-                    state,
-                    &job_key,
-                    JobState::Done,
-                    "pr_already_merged",
-                    None,
-                )
-                .await
-                {
-                    warn!(job_key, error = %e, "failed to transition merged job to Done");
-                }
-                let _ = crate::claims::release_claim(state, &job_key).await;
+                let (tx, _rx) = tokio::sync::oneshot::channel();
                 crate::assignment::request_dispatch(
                     state,
-                    crate::state::DispatchRequest::TryDispatchNext,
+                    crate::state::DispatchRequest::AdminClose {
+                        req: CloseJobRequest {
+                            job_key: job_key.clone(),
+                            revoke: false,
+                        },
+                        reply: tx,
+                    },
                 );
                 continue;
             }
@@ -430,30 +458,18 @@ async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<
             {
                 info!(
                     job_key,
-                    pr_url,
-                    "PR has REQUEST_CHANGES review — transitioning to ChangesRequested (state repair)"
+                    pr_url, "PR has REQUEST_CHANGES review — routing rework to assignment task"
                 );
-                let feedback = latest.body.clone();
-                if let Err(e) = crate::jobs::transition_job(
+                // The job is InReview, not Reviewing — the assignment task's
+                // process_review_decision checks for Reviewing state. Route as
+                // a rework request so the assignment task transitions and dispatches.
+                crate::assignment::request_dispatch(
                     state,
-                    &job_key,
-                    JobState::ChangesRequested,
-                    "review_state_repair",
-                    None,
-                )
-                .await
-                {
-                    warn!(job_key, error = %e, "failed to transition to ChangesRequested");
-                } else {
-                    let _ = crate::claims::release_claim(state, &job_key).await;
-                    crate::assignment::request_dispatch(
-                        state,
-                        crate::state::DispatchRequest::AssignRework {
-                            job_key: job_key.clone(),
-                            feedback,
-                        },
-                    );
-                }
+                    crate::state::DispatchRequest::AssignRework {
+                        job_key: job_key.clone(),
+                        feedback: latest.body.clone(),
+                    },
+                );
                 continue;
             }
         }
@@ -487,12 +503,20 @@ async fn scan_rate_limit_staleness(state: &Arc<DispatcherState>) {
     }
 }
 
-async fn publish_monitor_event<T: serde::Serialize>(
+/// Publish a monitor event to NATS (for JetStream observability) and
+/// route the dispatch request directly to the assignment task channel.
+/// Direct routing avoids a NATS round-trip through the handler, which
+/// can stall on single-threaded tokio runtimes under load.
+async fn publish_and_dispatch<T: serde::Serialize>(
     state: &Arc<DispatcherState>,
     subject: &Subject<T>,
     event: &T,
+    dispatch: crate::state::DispatchRequest,
 ) {
+    // Publish to NATS for JetStream capture (fire-and-forget).
     if let Err(e) = state.nats.publish_msg(subject, event).await {
         warn!(subject.name, "failed to publish monitor event: {e}");
     }
+    // Route directly to the assignment task — no NATS round-trip.
+    crate::assignment::request_dispatch(state, dispatch);
 }

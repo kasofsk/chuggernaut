@@ -415,11 +415,11 @@ async fn ci_failure_triggers_changes_requested() {
         ci_status: CiStatus::Failure,
         detected_at: chrono::Utc::now(),
     };
-    state
-        .nats
-        .publish_msg(&subjects::MONITOR_CI_CHECK, &ci_event)
-        .await
-        .unwrap();
+    // Route directly to assignment task (monitor events skip NATS handlers).
+    chuggernaut_dispatcher::assignment::request_dispatch(
+        &state,
+        chuggernaut_dispatcher::state::DispatchRequest::CiCheck(ci_event),
+    );
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     // Job should transition to ChangesRequested
@@ -511,11 +511,11 @@ async fn ci_error_triggers_changes_requested() {
         ci_status: CiStatus::Error,
         detected_at: chrono::Utc::now(),
     };
-    state
-        .nats
-        .publish_msg(&subjects::MONITOR_CI_CHECK, &ci_event)
-        .await
-        .unwrap();
+    // Route directly to assignment task (monitor events skip NATS handlers).
+    chuggernaut_dispatcher::assignment::request_dispatch(
+        &state,
+        chuggernaut_dispatcher::state::DispatchRequest::CiCheck(ci_event),
+    );
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     let job = state.jobs.get(&key).unwrap().clone();
@@ -680,9 +680,9 @@ async fn heartbeat_from_wrong_worker_ignored() {
 }
 
 #[tokio::test]
-async fn rework_limit_not_enforced_yet() {
-    // Documents current behavior: rework_limit config exists but is not checked.
-    // Multiple rework cycles succeed without limit.
+async fn rework_limit_escalates_when_exceeded() {
+    // rework_limit=1 means the first ChangesRequested dispatches rework,
+    // but the second ChangesRequested escalates to a human reviewer.
     let state = setup_with_config(|c| c.rework_limit = 1).await;
     handlers::start_handlers(state.clone()).await.unwrap();
 
@@ -702,56 +702,108 @@ async fn rework_limit_not_enforced_yet() {
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
-    // Do 3 rework cycles (exceeding rework_limit=1)
-    for i in 0..3 {
-        let worker_id = format!("action-{key}");
-        chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
-            .await
-            .unwrap();
-        jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id))
-            .await
-            .unwrap();
+    // --- Cycle 0: should succeed (rework_count=0 < limit=1) ---
+    let worker_id = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(&state, &key, JobState::OnTheStack, "test", Some(&worker_id))
+        .await
+        .unwrap();
 
-        let outcome = WorkerOutcome {
-            worker_id: worker_id.clone(),
-            job_key: key.clone(),
-            outcome: OutcomeType::Yield {
-                pr_url: format!("http://forgejo/test/repo/pulls/{}", i + 1),
-                partial: false,
-            },
-            token_usage: None,
-        };
-        state
-            .nats
-            .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert_eq!(state.jobs.get(&key).unwrap().state, JobState::InReview);
+    let outcome = WorkerOutcome {
+        worker_id: worker_id.clone(),
+        job_key: key.clone(),
+        outcome: OutcomeType::Yield {
+            pr_url: "http://forgejo/test/repo/pulls/1".to_string(),
+            partial: false,
+        },
+        token_usage: None,
+    };
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::InReview);
 
-        // Changes requested
-        let decision = ReviewDecision {
-            job_key: key.clone(),
-            decision: DecisionType::ChangesRequested {
-                feedback: format!("fix #{}", i + 1),
-            },
-            pr_url: Some(format!("http://forgejo/test/repo/pulls/{}", i + 1)),
-            token_usage: None,
-        };
-        state
-            .nats
-            .publish_msg(&subjects::REVIEW_DECISION, &decision)
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(500)).await;
+    let decision = ReviewDecision {
+        job_key: key.clone(),
+        decision: DecisionType::ChangesRequested {
+            feedback: "fix #1".to_string(),
+        },
+        pr_url: Some("http://forgejo/test/repo/pulls/1".to_string()),
+        token_usage: None,
+    };
+    state
+        .nats
+        .publish_msg(&subjects::REVIEW_DECISION, &decision)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // Should be ChangesRequested (rework_limit not enforced, no Forgejo to auto-dispatch)
-        assert_eq!(
-            state.jobs.get(&key).unwrap().state,
-            JobState::ChangesRequested,
-            "cycle {i}: rework_limit should not block transitions"
-        );
-    }
+    // First cycle: ChangesRequested (rework dispatched, no Forgejo to actually run it)
+    assert_eq!(
+        state.jobs.get(&key).unwrap().state,
+        JobState::ChangesRequested,
+        "cycle 0: should transition to ChangesRequested"
+    );
+    assert_eq!(state.jobs.get(&key).unwrap().rework_count, 1);
+
+    // --- Cycle 1: should escalate (rework_count=1 >= limit=1) ---
+    let worker_id2 = format!("action-{key}");
+    chuggernaut_dispatcher::claims::acquire_claim(&state, &key, &worker_id2, 3600)
+        .await
+        .unwrap();
+    jobs::transition_job(
+        &state,
+        &key,
+        JobState::OnTheStack,
+        "test",
+        Some(&worker_id2),
+    )
+    .await
+    .unwrap();
+
+    let outcome2 = WorkerOutcome {
+        worker_id: worker_id2.clone(),
+        job_key: key.clone(),
+        outcome: OutcomeType::Yield {
+            pr_url: "http://forgejo/test/repo/pulls/1".to_string(),
+            partial: false,
+        },
+        token_usage: None,
+    };
+    state
+        .nats
+        .publish_msg(&subjects::WORKER_OUTCOME, &outcome2)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::InReview);
+
+    let decision2 = ReviewDecision {
+        job_key: key.clone(),
+        decision: DecisionType::ChangesRequested {
+            feedback: "fix #2".to_string(),
+        },
+        pr_url: Some("http://forgejo/test/repo/pulls/1".to_string()),
+        token_usage: None,
+    };
+    state
+        .nats
+        .publish_msg(&subjects::REVIEW_DECISION, &decision2)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Second cycle: Escalated (rework_count >= rework_limit)
+    assert_eq!(
+        state.jobs.get(&key).unwrap().state,
+        JobState::Escalated,
+        "cycle 1: should escalate when rework_limit exceeded"
+    );
 }
 
 // ---------------------------------------------------------------------------

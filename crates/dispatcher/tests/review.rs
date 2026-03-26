@@ -487,18 +487,18 @@ async fn yield_dispatches_review_action() {
         "review should NOT be dispatched before CI passes"
     );
 
-    // Simulate CI passing via CiCheckEvent
+    // Simulate CI passing via CiCheckEvent — route directly to assignment task
+    // (monitor events no longer round-trip through NATS handlers).
     let ci_event = CiCheckEvent {
         job_key: key.clone(),
         pr_url: format!("http://forgejo/{org}/repo/pulls/1"),
         ci_status: CiStatus::Success,
         detected_at: chrono::Utc::now(),
     };
-    state
-        .nats
-        .publish_msg(&subjects::MONITOR_CI_CHECK, &ci_event)
-        .await
-        .unwrap();
+    chuggernaut_dispatcher::assignment::request_dispatch(
+        &state,
+        chuggernaut_dispatcher::state::DispatchRequest::CiCheck(ci_event),
+    );
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     // Now verify review was dispatched and CI status updated

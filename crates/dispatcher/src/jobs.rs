@@ -174,6 +174,7 @@ pub async fn create_job(
         token_usage: vec![],
         claude_args: req.claude_args,
         continuation_count: 0,
+        rework_count: 0,
         ci_status: None,
         ci_check_since: None,
         created_at: now,
@@ -340,6 +341,11 @@ pub async fn transition_job(
 fn validate_transition(from: JobState, to: JobState) -> DispatcherResult<()> {
     use JobState::*;
 
+    // Terminal states reject all further transitions.
+    if from.is_terminal() {
+        return Err(DispatcherError::InvalidTransition { from, to });
+    }
+
     let valid = matches!(
         (from, to),
         // Normal flow
@@ -347,12 +353,12 @@ fn validate_transition(from: JobState, to: JobState) -> DispatcherResult<()> {
             | (Blocked, OnDeck)
             | (OnDeck, OnTheStack)
             | (OnTheStack, InReview | Failed | OnDeck)
-            | (InReview, Reviewing | ChangesRequested)
+            | (InReview, Reviewing | ChangesRequested | Escalated)
             | (Reviewing, Done | Escalated | ChangesRequested | InReview)
             | (Escalated, Done | ChangesRequested)
             | (ChangesRequested, OnTheStack)
             | (Failed, OnDeck | Blocked | OnIce)
-            // Admin close from any state
+            // Admin close from any non-terminal state (guarded above)
             | (_, Done | Revoked)
     );
 
@@ -499,10 +505,16 @@ mod tests {
         assert!(validate_transition(OnDeck, InReview).is_err());
         assert!(validate_transition(OnIce, OnTheStack).is_err());
         assert!(validate_transition(InReview, OnDeck).is_err());
-        // InReview can't go to Escalated (must go through Reviewing first)
-        assert!(validate_transition(InReview, Escalated).is_err());
+        // InReview → Escalated is valid (rework limit exceeded while InReview)
+        assert!(validate_transition(InReview, Escalated).is_ok());
         // Note: InReview → Done is valid via admin close (_, Done | Revoked)
         // Can't skip Reviewing
         assert!(validate_transition(OnTheStack, Reviewing).is_err());
+        // Terminal states reject all further transitions
+        assert!(validate_transition(Done, Done).is_err());
+        assert!(validate_transition(Done, Revoked).is_err());
+        assert!(validate_transition(Revoked, Done).is_err());
+        assert!(validate_transition(Revoked, Revoked).is_err());
+        assert!(validate_transition(Done, OnDeck).is_err());
     }
 }

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use chrono::Utc;
 use futures::StreamExt;
 use tokio::sync::Barrier;
 use tracing::{debug, error, info, warn};
@@ -8,37 +7,10 @@ use tracing::{debug, error, info, warn};
 use chuggernaut_types::*;
 
 use crate::error::{DispatcherError, DispatcherResult};
-use crate::jobs::{self, kv_get};
+use crate::jobs;
 use crate::state::DispatcherState;
 
-const HANDLER_COUNT: usize = 9;
-
-/// Append a token usage record for one action invocation onto the job.
-async fn append_token_record(
-    state: &Arc<DispatcherState>,
-    job_key: &str,
-    action_type: &str,
-    usage: TokenUsage,
-) -> DispatcherResult<()> {
-    let at = action_type.to_string();
-    let (job, _) = jobs::kv_cas_rmw::<Job, _>(
-        &state.kv.jobs,
-        job_key,
-        state.config.cas_max_retries,
-        |job| {
-            job.token_usage.push(ActionTokenRecord {
-                action_type: at.clone(),
-                token_usage: usage.clone(),
-                completed_at: Utc::now(),
-            });
-            job.updated_at = Utc::now();
-            Ok(())
-        },
-    )
-    .await?;
-    state.jobs.insert(job_key.to_string(), job);
-    Ok(())
-}
+const HANDLER_COUNT: usize = 8;
 
 /// Start all NATS subscription handlers.
 /// Returns only after every handler has established its NATS subscription,
@@ -66,9 +38,10 @@ pub async fn start_handlers(state: Arc<DispatcherState>) -> DispatcherResult<()>
     spawn_handler!("review_decision", handle_review_decision);
     spawn_handler!("activity_append", handle_activity_append);
     spawn_handler!("journal_append", handle_journal_append);
-    spawn_handler!("monitor_events", handle_monitor_events);
+    // Monitor events are routed directly to the channel by monitor.rs
+    // (no NATS round-trip needed since monitor runs in the same process).
 
-    // Start the single-threaded assignment task that processes all dispatch requests
+    // Start the single-threaded assignment task that processes all events
     crate::assignment::start_assignment_task(state.clone()).await;
 
     barrier.wait().await;
@@ -80,6 +53,8 @@ pub async fn start_handlers(state: Arc<DispatcherState>) -> DispatcherResult<()>
 // Worker events
 // ---------------------------------------------------------------------------
 
+/// Heartbeat handler — stays concurrent (only touches claims KV + token tracker,
+/// never mutates job state).
 async fn handle_worker_heartbeat(
     state: Arc<DispatcherState>,
     ready: Arc<Barrier>,
@@ -123,6 +98,7 @@ async fn handle_worker_heartbeat(
     Ok(())
 }
 
+/// Worker outcome — thin: deserialize and send to assignment task.
 async fn handle_worker_outcome(
     state: Arc<DispatcherState>,
     ready: Arc<Barrier>,
@@ -135,194 +111,14 @@ async fn handle_worker_outcome(
     ready.wait().await;
 
     while let Some(msg) = sub.next().await {
-        let s = state.clone();
-        tokio::spawn(async move {
-            match serde_json::from_slice::<WorkerOutcome>(&msg.payload) {
-                Ok(outcome) => {
-                    if let Err(e) = process_outcome(&s, outcome).await {
-                        error!("outcome processing failed: {e}");
-                    }
-                }
-                Err(e) => warn!("invalid outcome payload: {e}"),
-            }
-        });
-    }
-    Ok(())
-}
-
-async fn process_outcome(
-    state: &Arc<DispatcherState>,
-    outcome: WorkerOutcome,
-) -> DispatcherResult<()> {
-    let job_key = &outcome.job_key;
-    let worker_id = &outcome.worker_id;
-
-    // Release claim
-    crate::claims::release_claim(state, job_key).await?;
-
-    // Clean up token tracker for this worker
-    state.token_tracker.write().await.remove_worker(job_key);
-
-    // Record token usage for this action
-    if let Some(usage) = outcome.token_usage {
-        append_token_record(state, job_key, "work", usage).await?;
-    }
-
-    match outcome.outcome {
-        OutcomeType::Yield { pr_url, partial } => {
-            let url = pr_url.clone();
-            let (job, _) = jobs::kv_cas_rmw::<Job, _>(
-                &state.kv.jobs,
-                job_key,
-                state.config.cas_max_retries,
-                |job| {
-                    job.pr_url = Some(url.clone());
-                    job.updated_at = Utc::now();
-                    Ok(())
-                },
-            )
-            .await?;
-            state.jobs.insert(job_key.to_string(), job.clone());
-
-            if partial && job.continuation_count < state.config.max_continuations {
-                // --- Partial yield: dispatch continuation worker ---
-                let cont_num = job.continuation_count + 1;
-                let (updated, _) = jobs::kv_cas_rmw::<Job, _>(
-                    &state.kv.jobs,
-                    job_key,
-                    state.config.cas_max_retries,
-                    |job| {
-                        job.continuation_count += 1;
-                        job.updated_at = Utc::now();
-                        Ok(())
-                    },
-                )
-                .await?;
-                state.jobs.insert(job_key.to_string(), updated);
-
-                // Transition OnTheStack -> OnDeck for re-dispatch
-                jobs::transition_job(
-                    state,
-                    job_key,
-                    JobState::OnDeck,
-                    "partial_yield_continuation",
-                    Some(worker_id),
-                )
-                .await?;
-
-                let entry = ActivityEntry {
-                    timestamp: Utc::now(),
-                    kind: "continuation".to_string(),
-                    message: format!("Partial yield #{cont_num}, re-dispatching continuation"),
-                };
-                jobs::append_activity(state, job_key, entry).await;
-
-                jobs::journal_append(
-                    state,
-                    "partial_yield",
-                    Some(job_key),
-                    Some(worker_id),
-                    Some(&format!("pr_url: {pr_url}, continuation #{cont_num}")),
-                )
-                .await;
-
-                // Dispatch continuation using rework path (checks out existing branch)
-                let continuation_context = format!(
-                    "CONTINUATION: A previous worker ran out of time/budget and yielded partial work. \
-                     A PR exists at {pr_url}. You are on the same branch with the previous commits. \
-                     Review what was accomplished, then complete the remaining work."
-                );
+        match serde_json::from_slice::<WorkerOutcome>(&msg.payload) {
+            Ok(outcome) => {
                 crate::assignment::request_dispatch(
-                    state,
-                    crate::state::DispatchRequest::AssignRework {
-                        job_key: job_key.to_string(),
-                        feedback: continuation_context,
-                    },
+                    &state,
+                    crate::state::DispatchRequest::WorkerOutcome(outcome),
                 );
-            } else {
-                // --- Complete yield (or max continuations reached): await CI ---
-                if partial {
-                    info!(job_key, "max continuations reached, proceeding to CI check");
-                }
-
-                // Set CI polling state
-                let (updated, _) = jobs::kv_cas_rmw::<Job, _>(
-                    &state.kv.jobs,
-                    job_key,
-                    state.config.cas_max_retries,
-                    |job| {
-                        job.ci_status = Some(CiStatus::Pending);
-                        job.ci_check_since = Some(Utc::now());
-                        job.updated_at = Utc::now();
-                        Ok(())
-                    },
-                )
-                .await?;
-                state.jobs.insert(job_key.to_string(), updated);
-
-                // Transition to InReview — review dispatch deferred until CI passes
-                jobs::transition_job(
-                    state,
-                    job_key,
-                    JobState::InReview,
-                    "worker_yield",
-                    Some(worker_id),
-                )
-                .await?;
-
-                jobs::journal_append(
-                    state,
-                    "yield",
-                    Some(job_key),
-                    Some(worker_id),
-                    Some(&format!("pr_url: {pr_url}, awaiting CI")),
-                )
-                .await;
-
-                // NOTE: Review action is NOT dispatched here.
-                // The monitor's scan_ci_status will detect CI completion
-                // and dispatch the review action (or trigger a CI fix rework).
             }
-
-            // Slot freed — try to dispatch next queued job
-            crate::assignment::request_dispatch(
-                state,
-                crate::state::DispatchRequest::TryDispatchNext,
-            );
-        }
-        OutcomeType::Fail { reason, logs: _ } => {
-            jobs::transition_job(
-                state,
-                job_key,
-                JobState::Failed,
-                "worker_fail",
-                Some(worker_id),
-            )
-            .await?;
-
-            let entry = ActivityEntry {
-                timestamp: Utc::now(),
-                kind: "failed".to_string(),
-                message: format!("Worker failed: {reason}"),
-            };
-            jobs::append_activity(state, job_key, entry).await;
-
-            schedule_auto_retry(state, job_key).await;
-
-            jobs::journal_append(
-                state,
-                "failed",
-                Some(job_key),
-                Some(worker_id),
-                Some(&reason),
-            )
-            .await;
-
-            // Slot freed — try to dispatch next queued job
-            crate::assignment::request_dispatch(
-                state,
-                crate::state::DispatchRequest::TryDispatchNext,
-            );
+            Err(e) => warn!("invalid outcome payload: {e}"),
         }
     }
     Ok(())
@@ -332,6 +128,8 @@ async fn process_outcome(
 // Admin commands
 // ---------------------------------------------------------------------------
 
+/// Create job — stays concurrent (creates new KV keys, no conflict with
+/// existing job state). The subsequent AssignJob goes through the channel.
 async fn handle_admin_create_job(
     state: Arc<DispatcherState>,
     ready: Arc<Barrier>,
@@ -363,9 +161,8 @@ async fn handle_admin_create_job(
                             let _ = s.nats.raw().flush().await;
                         }
                         // Spawn assignment in background — reply is already sent
-                        let s2 = s.clone();
                         crate::assignment::request_dispatch(
-                            &s2,
+                            &s,
                             crate::state::DispatchRequest::AssignJob { job_key: key },
                         );
                         return;
@@ -393,6 +190,7 @@ async fn handle_admin_create_job(
     Ok(())
 }
 
+/// Admin requeue — thin: deserialize, send to channel, await reply, respond.
 async fn handle_admin_requeue(
     state: Arc<DispatcherState>,
     ready: Arc<Barrier>,
@@ -408,13 +206,23 @@ async fn handle_admin_requeue(
         let s = state.clone();
         tokio::spawn(async move {
             let reply_payload = match serde_json::from_slice::<RequeueRequest>(&msg.payload) {
-                Ok(req) => match process_requeue(&s, &req).await {
-                    Ok(_) => b"{}".to_vec(),
-                    Err(e) => serde_json::to_vec(&ErrorResponse {
-                        error: e.to_string(),
-                    })
-                    .unwrap_or_default(),
-                },
+                Ok(req) => {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    crate::assignment::request_dispatch(
+                        &s,
+                        crate::state::DispatchRequest::AdminRequeue { req, reply: tx },
+                    );
+                    match rx.await {
+                        Ok(Ok(())) => b"{}".to_vec(),
+                        Ok(Err(e)) => {
+                            serde_json::to_vec(&ErrorResponse { error: e }).unwrap_or_default()
+                        }
+                        Err(_) => serde_json::to_vec(&ErrorResponse {
+                            error: "assignment task dropped reply".to_string(),
+                        })
+                        .unwrap_or_default(),
+                    }
+                }
                 Err(e) => serde_json::to_vec(&ErrorResponse {
                     error: format!("invalid payload: {e}"),
                 })
@@ -433,68 +241,7 @@ async fn handle_admin_requeue(
     Ok(())
 }
 
-async fn process_requeue(
-    state: &Arc<DispatcherState>,
-    req: &RequeueRequest,
-) -> DispatcherResult<()> {
-    let target_state = match req.target {
-        RequeueTarget::OnIce => JobState::OnIce,
-        RequeueTarget::OnDeck => {
-            if !state.jobs.contains_key(&req.job_key) {
-                return Err(DispatcherError::JobNotFound(req.job_key.clone()));
-            }
-            if let Some((deps, _)) = kv_get::<DepRecord>(&state.kv.deps, &req.job_key).await? {
-                let all_done = deps.depends_on.iter().all(|dep_key| {
-                    state
-                        .jobs
-                        .get(dep_key)
-                        .map(|j| j.state == JobState::Done)
-                        .unwrap_or(false)
-                });
-                if all_done {
-                    JobState::OnDeck
-                } else {
-                    JobState::Blocked
-                }
-            } else {
-                JobState::OnDeck
-            }
-        }
-    };
-
-    // If job is currently claimed, release the claim.
-    let needs_release = state
-        .jobs
-        .get(&req.job_key)
-        .map(|job| job.state == JobState::OnTheStack)
-        .unwrap_or(false);
-
-    if needs_release {
-        crate::claims::release_claim(state, &req.job_key).await?;
-    }
-
-    jobs::transition_job(state, &req.job_key, target_state, "admin_requeue", None).await?;
-    if target_state == JobState::OnDeck {
-        // Spawn assignment in background so the reply isn't blocked by dispatch
-        let s = state.clone();
-        crate::assignment::request_dispatch(
-            &s,
-            crate::state::DispatchRequest::AssignJob {
-                job_key: req.job_key.clone(),
-            },
-        );
-    }
-    jobs::journal_append(
-        state,
-        "requeued",
-        Some(&req.job_key),
-        None,
-        Some(&format!("target: {target_state:?}")),
-    )
-    .await;
-    Ok(())
-}
-
+/// Admin close — thin: deserialize, send to channel, await reply, respond.
 async fn handle_admin_close_job(
     state: Arc<DispatcherState>,
     ready: Arc<Barrier>,
@@ -510,13 +257,23 @@ async fn handle_admin_close_job(
         let s = state.clone();
         tokio::spawn(async move {
             let reply_payload = match serde_json::from_slice::<CloseJobRequest>(&msg.payload) {
-                Ok(req) => match process_close_job(&s, &req).await {
-                    Ok(_) => b"{}".to_vec(),
-                    Err(e) => serde_json::to_vec(&ErrorResponse {
-                        error: e.to_string(),
-                    })
-                    .unwrap_or_default(),
-                },
+                Ok(req) => {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    crate::assignment::request_dispatch(
+                        &s,
+                        crate::state::DispatchRequest::AdminClose { req, reply: tx },
+                    );
+                    match rx.await {
+                        Ok(Ok(())) => b"{}".to_vec(),
+                        Ok(Err(e)) => {
+                            serde_json::to_vec(&ErrorResponse { error: e }).unwrap_or_default()
+                        }
+                        Err(_) => serde_json::to_vec(&ErrorResponse {
+                            error: "assignment task dropped reply".to_string(),
+                        })
+                        .unwrap_or_default(),
+                    }
+                }
                 Err(e) => serde_json::to_vec(&ErrorResponse {
                     error: format!("invalid payload: {e}"),
                 })
@@ -535,57 +292,11 @@ async fn handle_admin_close_job(
     Ok(())
 }
 
-async fn process_close_job(
-    state: &Arc<DispatcherState>,
-    req: &CloseJobRequest,
-) -> DispatcherResult<()> {
-    let target = if req.revoke {
-        JobState::Revoked
-    } else {
-        JobState::Done
-    };
-    let trigger = if req.revoke {
-        "admin_revoke"
-    } else {
-        "admin_close"
-    };
-
-    // Release claim if held.
-    let needs_release = state
-        .jobs
-        .get(&req.job_key)
-        .map(|job| job.state == JobState::OnTheStack)
-        .unwrap_or(false);
-
-    if needs_release {
-        crate::claims::release_claim(state, &req.job_key).await?;
-    }
-
-    jobs::transition_job(state, &req.job_key, target, trigger, None).await?;
-    if target == JobState::Done {
-        let unblocked = crate::deps::propagate_unblock(state, &req.job_key).await?;
-        if !unblocked.is_empty() {
-            let s = state.clone();
-            tokio::spawn(async move {
-                for key in &unblocked {
-                    crate::assignment::request_dispatch(
-                        &s,
-                        crate::state::DispatchRequest::AssignJob {
-                            job_key: key.clone(),
-                        },
-                    );
-                }
-            });
-        }
-    }
-    jobs::journal_append(state, trigger, Some(&req.job_key), None, None).await;
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Review decisions
 // ---------------------------------------------------------------------------
 
+/// Review decision — thin: deserialize and send to assignment task.
 async fn handle_review_decision(
     state: Arc<DispatcherState>,
     ready: Arc<Barrier>,
@@ -598,111 +309,26 @@ async fn handle_review_decision(
     ready.wait().await;
 
     while let Some(msg) = sub.next().await {
-        let s = state.clone();
-        tokio::spawn(async move {
-            info!(
-                payload_len = msg.payload.len(),
-                "received review decision message"
-            );
-            match serde_json::from_slice::<ReviewDecision>(&msg.payload) {
-                Ok(decision) => {
-                    info!(job_key = decision.job_key, decision_type = ?decision.decision, "processing review decision");
-                    if let Err(e) = process_review_decision(&s, decision).await {
-                        error!("review decision processing failed: {e}");
-                    }
-                }
-                Err(e) => warn!("invalid review decision payload: {e}"),
-            }
-        });
-    }
-    Ok(())
-}
-
-async fn process_review_decision(
-    state: &Arc<DispatcherState>,
-    decision: ReviewDecision,
-) -> DispatcherResult<()> {
-    let job_key = &decision.job_key;
-
-    // Release the review claim — frees capacity for the next action
-    crate::claims::release_claim(state, job_key).await.ok();
-
-    // Clean up token tracker for this worker
-    state.token_tracker.write().await.remove_worker(job_key);
-
-    // Record token usage for this review action
-    if let Some(usage) = decision.token_usage {
-        append_token_record(state, job_key, "review", usage).await?;
-    }
-
-    match decision.decision {
-        DecisionType::Approved => {
-            jobs::transition_job(state, job_key, JobState::Done, "review_approved", None).await?;
-            let unblocked = crate::deps::propagate_unblock(state, job_key).await?;
-            for key in &unblocked {
+        match serde_json::from_slice::<ReviewDecision>(&msg.payload) {
+            Ok(decision) => {
+                info!(
+                    job_key = decision.job_key,
+                    decision_type = ?decision.decision,
+                    "routing review decision to assignment task"
+                );
                 crate::assignment::request_dispatch(
-                    state,
-                    crate::state::DispatchRequest::AssignJob {
-                        job_key: key.to_string(),
-                    },
+                    &state,
+                    crate::state::DispatchRequest::ReviewDecision(decision),
                 );
             }
-            jobs::journal_append(state, "review_approved", Some(job_key), None, None).await;
-        }
-        DecisionType::ChangesRequested { feedback } => {
-            jobs::transition_job(
-                state,
-                job_key,
-                JobState::ChangesRequested,
-                "review_changes_requested",
-                None,
-            )
-            .await?;
-            // Dispatch a new action with review feedback
-            crate::assignment::request_dispatch(
-                state,
-                crate::state::DispatchRequest::AssignRework {
-                    job_key: job_key.to_string(),
-                    feedback: feedback.clone(),
-                },
-            );
-            jobs::journal_append(
-                state,
-                "review_changes_requested",
-                Some(job_key),
-                None,
-                Some(&feedback),
-            )
-            .await;
-        }
-        DecisionType::Escalated { reviewer_login } => {
-            jobs::transition_job(
-                state,
-                job_key,
-                JobState::Escalated,
-                "review_escalated",
-                None,
-            )
-            .await?;
-            jobs::journal_append(
-                state,
-                "review_escalated",
-                Some(job_key),
-                None,
-                Some(&format!("human reviewer: {reviewer_login}")),
-            )
-            .await;
+            Err(e) => warn!("invalid review decision payload: {e}"),
         }
     }
-
-    // Slot freed — try to dispatch next queued job
-    crate::assignment::request_dispatch(state, crate::state::DispatchRequest::TryDispatchNext);
-
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// Activity / Journal append
+// Activity / Journal append — stay concurrent (logging only)
 // ---------------------------------------------------------------------------
 
 async fn handle_activity_append(
@@ -763,320 +389,5 @@ async fn handle_journal_append(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Monitor advisories
-// ---------------------------------------------------------------------------
-
-async fn handle_monitor_events(
-    state: Arc<DispatcherState>,
-    ready: Arc<Barrier>,
-) -> DispatcherResult<()> {
-    let mut sub = state
-        .nats
-        .subscribe("chuggernaut.monitor.>")
-        .await
-        .map_err(|e| DispatcherError::Nats(e.to_string()))?;
-    ready.wait().await;
-
-    while let Some(msg) = sub.next().await {
-        let s = state.clone();
-        let subject = msg.subject.to_string();
-        tokio::spawn(async move {
-            if let Err(e) = dispatch_monitor_event(&s, &subject, &msg.payload).await {
-                warn!(subject, "monitor event handling failed: {e}");
-            }
-        });
-    }
-    Ok(())
-}
-
-async fn dispatch_monitor_event(
-    state: &Arc<DispatcherState>,
-    subject: &str,
-    payload: &[u8],
-) -> DispatcherResult<()> {
-    // Strip namespace prefix from the incoming subject to compare against constants
-    let base = state.nats.strip_prefix(subject);
-
-    if base == subjects::MONITOR_LEASE_EXPIRED.name {
-        let event: LeaseExpiredEvent = serde_json::from_slice(payload)?;
-        handle_lease_expired(state, event).await
-    } else if base == subjects::MONITOR_TIMEOUT.name {
-        let event: JobTimeoutEvent = serde_json::from_slice(payload)?;
-        handle_job_timeout(state, event).await
-    } else if base == subjects::MONITOR_ORPHAN.name {
-        let event: OrphanDetectedEvent = serde_json::from_slice(payload)?;
-        handle_orphan(state, event).await
-    } else if base == subjects::MONITOR_RETRY.name {
-        let event: RetryEligibleEvent = serde_json::from_slice(payload)?;
-        handle_retry(state, event).await
-    } else if base == subjects::MONITOR_CI_CHECK.name {
-        let event: CiCheckEvent = serde_json::from_slice(payload)?;
-        handle_ci_check(state, event).await
-    } else {
-        debug!(subject, "unknown monitor event subject");
-        Ok(())
-    }
-}
-
-/// Schedule auto-retry for a failed job (sets retry_count and retry_after).
-/// Used by both worker-reported failures and monitor-detected failures (lease expiry, timeout).
-async fn schedule_auto_retry(state: &Arc<DispatcherState>, job_key: &str) {
-    let should_retry = state
-        .jobs
-        .get(job_key)
-        .map(|job| job.retry_count < job.max_retries)
-        .unwrap_or(false);
-
-    if should_retry {
-        match jobs::kv_cas_rmw::<Job, _>(
-            &state.kv.jobs,
-            job_key,
-            state.config.cas_max_retries,
-            |j| {
-                let backoff_secs = std::cmp::min(30 * (1u64 << j.retry_count), 600);
-                let retry_after = Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
-                j.retry_count += 1;
-                j.retry_after = Some(retry_after);
-                j.updated_at = Utc::now();
-                Ok(())
-            },
-        )
-        .await
-        {
-            Ok((j, _)) => {
-                state.jobs.insert(job_key.to_string(), j.clone());
-                debug!(job_key, retry_after = ?j.retry_after, "auto-retry scheduled");
-            }
-            Err(e) => {
-                warn!(job_key, "failed to schedule auto-retry: {e}");
-            }
-        }
-    }
-}
-
-async fn handle_lease_expired(
-    state: &Arc<DispatcherState>,
-    event: LeaseExpiredEvent,
-) -> DispatcherResult<()> {
-    if let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &event.job_key).await?
-        && claim.lease_deadline < Utc::now()
-    {
-        info!(
-            job_key = event.job_key,
-            worker_id = event.worker_id,
-            "lease expired, releasing claim"
-        );
-        crate::claims::release_claim(state, &event.job_key).await?;
-        jobs::transition_job(
-            state,
-            &event.job_key,
-            JobState::Failed,
-            "lease_expired",
-            Some(&event.worker_id),
-        )
-        .await?;
-        let entry = ActivityEntry {
-            timestamp: Utc::now(),
-            kind: "lease_expired".to_string(),
-            message: format!("Worker {} lease expired", event.worker_id),
-        };
-        jobs::append_activity(state, &event.job_key, entry).await;
-
-        schedule_auto_retry(state, &event.job_key).await;
-
-        // Slot freed — try to dispatch next queued job
-        crate::assignment::request_dispatch(state, crate::state::DispatchRequest::TryDispatchNext);
-    }
-    Ok(())
-}
-
-async fn handle_job_timeout(
-    state: &Arc<DispatcherState>,
-    event: JobTimeoutEvent,
-) -> DispatcherResult<()> {
-    if let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &event.job_key).await? {
-        let elapsed = (Utc::now() - claim.claimed_at).num_seconds() as u64;
-        if elapsed > claim.timeout_secs {
-            info!(
-                job_key = event.job_key,
-                worker_id = event.worker_id,
-                "job timeout, releasing claim"
-            );
-            crate::claims::release_claim(state, &event.job_key).await?;
-            jobs::transition_job(
-                state,
-                &event.job_key,
-                JobState::Failed,
-                "job_timeout",
-                Some(&event.worker_id),
-            )
-            .await?;
-            let entry = ActivityEntry {
-                timestamp: Utc::now(),
-                kind: "job_timeout".to_string(),
-                message: format!(
-                    "Job timed out after {}s (limit: {}s)",
-                    elapsed, claim.timeout_secs
-                ),
-            };
-            jobs::append_activity(state, &event.job_key, entry).await;
-
-            schedule_auto_retry(state, &event.job_key).await;
-
-            // Slot freed — try to dispatch next queued job
-            crate::assignment::request_dispatch(
-                state,
-                crate::state::DispatchRequest::TryDispatchNext,
-            );
-        }
-    }
-    Ok(())
-}
-
-async fn handle_orphan(
-    _state: &Arc<DispatcherState>,
-    event: OrphanDetectedEvent,
-) -> DispatcherResult<()> {
-    match event.kind {
-        OrphanKind::ClaimlessOnTheStack => {
-            warn!(job_key = event.job_key, kind = ?event.kind, "orphan detected (bug indicator)");
-        }
-    }
-    Ok(())
-}
-
-async fn handle_ci_check(
-    state: &Arc<DispatcherState>,
-    event: CiCheckEvent,
-) -> DispatcherResult<()> {
-    let job = match state.jobs.get(&event.job_key) {
-        Some(j) => j.clone(),
-        None => return Ok(()),
-    };
-    if job.state != JobState::InReview {
-        return Ok(());
-    }
-
-    // Update CI status on job
-    let (updated, _) = jobs::kv_cas_rmw::<Job, _>(
-        &state.kv.jobs,
-        &event.job_key,
-        state.config.cas_max_retries,
-        |job| {
-            job.ci_status = Some(event.ci_status);
-            job.updated_at = Utc::now();
-            Ok(())
-        },
-    )
-    .await?;
-    state.jobs.insert(event.job_key.clone(), updated);
-
-    match event.ci_status {
-        CiStatus::Success => {
-            // CI passed — request review dispatch via the assignment task
-            let review_level = state
-                .jobs
-                .get(&event.job_key)
-                .map(|j| format!("{:?}", j.review).to_lowercase())
-                .unwrap_or_else(|| "high".to_string());
-
-            crate::assignment::request_dispatch(
-                state,
-                crate::state::DispatchRequest::DispatchReview {
-                    job_key: event.job_key.clone(),
-                    pr_url: event.pr_url.clone(),
-                    review_level,
-                },
-            );
-
-            let entry = ActivityEntry {
-                timestamp: Utc::now(),
-                kind: "ci_passed".to_string(),
-                message: "CI checks passed, dispatching review".to_string(),
-            };
-            jobs::append_activity(state, &event.job_key, entry).await;
-
-            jobs::journal_append(
-                state,
-                "ci_passed",
-                Some(&event.job_key),
-                None,
-                Some("CI passed, review dispatched"),
-            )
-            .await;
-        }
-        CiStatus::Failure | CiStatus::Error => {
-            // CI failed — transition to ChangesRequested and dispatch fix-up worker
-            jobs::transition_job(
-                state,
-                &event.job_key,
-                JobState::ChangesRequested,
-                "ci_failed",
-                None,
-            )
-            .await?;
-
-            let ci_feedback = format!(
-                "CI checks have failed on the PR at {}. \
-                 Please investigate the CI failure, fix the issues, and push the fixes. \
-                 Check the CI status and logs for details.",
-                event.pr_url
-            );
-
-            crate::assignment::request_dispatch(
-                state,
-                crate::state::DispatchRequest::AssignRework {
-                    job_key: event.job_key.clone(),
-                    feedback: ci_feedback,
-                },
-            );
-
-            let entry = ActivityEntry {
-                timestamp: Utc::now(),
-                kind: "ci_failed".to_string(),
-                message: "CI checks failed, dispatching fix-up worker".to_string(),
-            };
-            jobs::append_activity(state, &event.job_key, entry).await;
-
-            jobs::journal_append(
-                state,
-                "ci_failed",
-                Some(&event.job_key),
-                None,
-                Some(&format!("pr_url: {}, dispatching fix", event.pr_url)),
-            )
-            .await;
-        }
-        CiStatus::Pending => {
-            // Should not happen — monitor only emits non-pending events
-        }
-    }
-    Ok(())
-}
-
-async fn handle_retry(
-    state: &Arc<DispatcherState>,
-    event: RetryEligibleEvent,
-) -> DispatcherResult<()> {
-    if let Some(job) = state.jobs.get(&event.job_key)
-        && job.state == JobState::Failed
-        && job.retry_count <= job.max_retries
-        && job.retry_after.is_some_and(|ra| ra <= Utc::now())
-    {
-        info!(
-            job_key = event.job_key,
-            retry_count = job.retry_count,
-            "retry eligible, requeueing"
-        );
-        drop(job);
-        jobs::transition_job(state, &event.job_key, JobState::OnDeck, "auto_retry", None).await?;
-        crate::assignment::request_dispatch(
-            state,
-            crate::state::DispatchRequest::AssignJob {
-                job_key: event.job_key.clone(),
-            },
-        );
-    }
-    Ok(())
-}
+// Monitor events are no longer routed through NATS handlers — monitor.rs
+// dispatches directly to the assignment task channel via publish_and_dispatch.

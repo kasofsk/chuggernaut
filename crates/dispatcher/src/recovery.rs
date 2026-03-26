@@ -22,7 +22,7 @@ pub async fn recover(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
     // 3. Repair dep indexes
     crate::deps::repair_reverse_indexes(state).await?;
 
-    // 4. Reconcile claims against jobs
+    // 4. Reconcile claims against jobs (also initializes active_claims counter)
     reconcile_claims_against_jobs(state).await?;
 
     // 5. Reconcile jobs against claims
@@ -68,6 +68,7 @@ async fn reconcile_claims_against_jobs(state: &Arc<DispatcherState>) -> Dispatch
     tokio::pin!(keys);
 
     let mut stale = 0u32;
+    let mut valid_count = 0u32;
     while let Some(key) = keys.next().await {
         if let Ok(key_str) = key
             && let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &key_str).await?
@@ -86,13 +87,21 @@ async fn reconcile_claims_against_jobs(state: &Arc<DispatcherState>) -> Dispatch
                 );
                 let _ = state.kv.claims.delete(&key_str).await;
                 stale += 1;
+            } else {
+                valid_count += 1;
             }
         }
     }
 
+    // Initialize the active_claims counter from surviving valid claims.
+    state
+        .active_claims
+        .store(valid_count as usize, std::sync::atomic::Ordering::Relaxed);
+
     if stale > 0 {
         info!(stale, "stale claims cleaned up");
     }
+    info!(valid_count, "active claims counter initialized");
     Ok(())
 }
 

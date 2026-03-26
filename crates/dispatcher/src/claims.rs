@@ -28,6 +28,9 @@ pub async fn acquire_claim(
     };
 
     kv_cas_create(&state.kv.claims, job_key, &claim).await?;
+    state
+        .active_claims
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     debug!(job_key, worker_id, "claim acquired");
     Ok(claim)
 }
@@ -87,6 +90,13 @@ pub async fn renew_lease(
 pub async fn release_claim(state: &Arc<DispatcherState>, job_key: &str) -> DispatcherResult<()> {
     match state.kv.claims.delete(job_key).await {
         Ok(_) => {
+            // Saturating decrement: only subtract if counter > 0 to avoid
+            // wrapping underflow (e.g. double-release after manual + auto).
+            let _ = state.active_claims.fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |n| n.checked_sub(1),
+            );
             debug!(job_key, "claim released");
             Ok(())
         }

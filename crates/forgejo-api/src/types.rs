@@ -1,4 +1,13 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Deserialize null or missing as Default::default() (e.g. null → vec![]).
+fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::deserialize(deserializer)?.unwrap_or_default())
+}
 
 // ---------------------------------------------------------------------------
 // Repository
@@ -103,6 +112,7 @@ pub struct PullReviewRequestOptions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CombinedStatus {
     pub state: String, // "pending", "success", "failure", "error", ""
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub statuses: Vec<CommitStatus>,
     pub total_count: u64,
     pub sha: String,
@@ -150,4 +160,39 @@ pub struct DispatchWorkflowRun {
     pub id: Option<u64>,
     pub jobs: Option<Vec<String>>,
     pub run_number: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combined_status_null_statuses() {
+        // Forgejo returns null instead of [] when no CI checks exist.
+        let json = r#"{"state":"","statuses":null,"total_count":0,"sha":"abc123"}"#;
+        let status: CombinedStatus = serde_json::from_str(json).unwrap();
+        assert!(status.statuses.is_empty());
+        assert_eq!(status.total_count, 0);
+    }
+
+    #[test]
+    fn combined_status_missing_statuses() {
+        // Field entirely absent.
+        let json = r#"{"state":"","total_count":0,"sha":"abc123"}"#;
+        let status: CombinedStatus = serde_json::from_str(json).unwrap();
+        assert!(status.statuses.is_empty());
+    }
+
+    #[test]
+    fn combined_status_with_statuses() {
+        let json = r#"{
+            "state": "success",
+            "statuses": [{"id":1,"status":"success","context":"ci/build"}],
+            "total_count": 1,
+            "sha": "abc123"
+        }"#;
+        let status: CombinedStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(status.statuses.len(), 1);
+        assert_eq!(status.statuses[0].status, "success");
+    }
 }
