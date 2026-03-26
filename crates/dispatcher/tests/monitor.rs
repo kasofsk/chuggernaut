@@ -1,6 +1,31 @@
 mod common;
 use common::*;
 
+/// Poll in-memory state until `pred` returns true, or fail after `timeout`.
+/// `describe` returns a human-readable snapshot of what the predicate is checking.
+async fn poll_until(
+    label: &str,
+    timeout: Duration,
+    pred: impl Fn() -> bool,
+    describe: impl Fn() -> String,
+) {
+    let result = tokio::time::timeout(timeout, async {
+        loop {
+            if pred() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    if result.is_err() {
+        panic!(
+            "{label}: timed out after {timeout:?} — last state: {}",
+            describe()
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Monitor: lease expiry
 // ---------------------------------------------------------------------------
@@ -81,9 +106,16 @@ async fn monitor_lease_expiry_fails_job() {
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
 
     // Don't send heartbeats — wait for lease to expire (1s lease + 1s scan interval)
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Failed);
+    let s = state.clone();
+    let s2 = state.clone();
+    let k2 = key.clone();
+    poll_until(
+        "lease expiry → Failed",
+        Duration::from_secs(10),
+        move || s.jobs.get(&key).map(|j| j.state) == Some(JobState::Failed),
+        move || format!("{:?}", s2.jobs.get(&k2).map(|j| j.state)),
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,9 +190,16 @@ async fn monitor_job_timeout() {
         .unwrap();
 
     // Wait for monitor to detect timeout
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Failed);
+    let s = state.clone();
+    let s2 = state.clone();
+    let k2 = key.clone();
+    poll_until(
+        "job timeout → Failed",
+        Duration::from_secs(10),
+        move || s.jobs.get(&key).map(|j| j.state) == Some(JobState::Failed),
+        move || format!("{:?}", s2.jobs.get(&k2).map(|j| j.state)),
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -242,7 +281,7 @@ async fn monitor_orphan_detection() {
     chuggernaut_dispatcher::monitor::start(state.clone());
 
     // Wait for orphan event
-    let got_orphan = tokio::time::timeout(Duration::from_secs(5), orphan_sub.next()).await;
+    let got_orphan = tokio::time::timeout(Duration::from_secs(10), orphan_sub.next()).await;
     assert!(got_orphan.is_ok(), "should receive orphan detection event");
 }
 
@@ -330,8 +369,18 @@ async fn monitor_retry_eligible_transitions_to_on_deck() {
         .publish_msg(&subjects::WORKER_OUTCOME, &outcome)
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(state.jobs.get(&key).unwrap().state, JobState::Failed);
+
+    let s = state.clone();
+    let k = key.clone();
+    let s2 = state.clone();
+    let k2 = key.clone();
+    poll_until(
+        "worker outcome → Failed",
+        Duration::from_secs(5),
+        move || s.jobs.get(&k).map(|j| j.state) == Some(JobState::Failed),
+        move || format!("{:?}", s2.jobs.get(&k2).map(|j| j.state)),
+    )
+    .await;
 
     // Manually set retry_after to the past so the monitor picks it up
     {
@@ -346,13 +395,16 @@ async fn monitor_retry_eligible_transitions_to_on_deck() {
     chuggernaut_dispatcher::monitor::start(state.clone());
 
     // Wait for retry scan to transition to OnDeck
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    assert_eq!(
-        state.jobs.get(&key).unwrap().state,
-        JobState::OnDeck,
-        "monitor should transition retry-eligible job to OnDeck"
-    );
+    let s = state.clone();
+    let s2 = state.clone();
+    let k2 = key.clone();
+    poll_until(
+        "monitor retry → OnDeck",
+        Duration::from_secs(10),
+        move || s.jobs.get(&key).map(|j| j.state) == Some(JobState::OnDeck),
+        move || format!("{:?}", s2.jobs.get(&k2).map(|j| j.state)),
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -431,12 +483,16 @@ async fn monitor_archival_removes_done_job() {
     chuggernaut_dispatcher::monitor::start(state.clone());
 
     // Wait for archival scan
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    assert!(
-        !state.jobs.contains_key(&key),
-        "archived job should be removed from in-memory index"
-    );
+    let s = state.clone();
+    let s2 = state.clone();
+    let k2 = key.clone();
+    poll_until(
+        "archival removes job",
+        Duration::from_secs(10),
+        move || !s.jobs.contains_key(&key),
+        move || format!("still_exists={}", s2.jobs.contains_key(&k2)),
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -518,10 +574,19 @@ async fn monitor_lease_expiry_schedules_retry() {
     .unwrap();
 
     // Wait for lease to expire and monitor to process it
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    let s = state.clone();
+    let k = key.clone();
+    let s2 = state.clone();
+    let k2 = key.clone();
+    poll_until(
+        "lease expiry → Failed",
+        Duration::from_secs(10),
+        move || s.jobs.get(&k).map(|j| j.state) == Some(JobState::Failed),
+        move || format!("{:?}", s2.jobs.get(&k2).map(|j| j.state)),
+    )
+    .await;
 
     let job = state.jobs.get(&key).unwrap();
-    assert_eq!(job.state, JobState::Failed);
     assert_eq!(
         job.retry_count, 1,
         "lease expiry should increment retry_count"

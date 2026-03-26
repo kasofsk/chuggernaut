@@ -1,6 +1,6 @@
 # Monitor
 
-The monitor scans for stale claims, timed-out jobs, and orphaned resources. It publishes advisory events — it never mutates state directly. The dispatcher re-verifies every advisory before acting.
+The monitor scans for stale claims, timed-out jobs, and orphaned resources. It routes events directly to the dispatcher's assignment task channel via `publish_and_dispatch`, which both publishes to NATS (for JetStream observability) and sends a `DispatchRequest` to the sequential processing channel. Events no longer round-trip through a NATS handler subscription. The dispatcher re-verifies every event before acting.
 
 ---
 
@@ -18,7 +18,9 @@ The monitor runs on a fixed tick, configurable via `CHUGGERNAUT_MONITOR_SCAN_INT
 2. Job timeout scan
 3. Orphan detection scan
 4. Retry scan
-5. Job archival scan
+5. CI status scan
+6. Pending reviews scan
+7. Job archival scan
 
 On dispatcher startup, the first scan runs immediately to catch stale claims that accumulated during downtime. This may produce a burst of advisories — the dispatcher processes them sequentially and the volume is bounded by the number of active action jobs.
 
@@ -28,17 +30,17 @@ On dispatcher startup, the first scan runs immediately to catch stale claims tha
 
 ### Lease Expiry
 
-Scans `chuggernaut.claims` KV for entries where `now > lease_deadline`.
+Iterates in-memory jobs in active states (OnTheStack, Reviewing) and checks each job's individual claim from `chuggernaut.claims` KV. Detects entries where `now > lease_deadline`. This avoids streaming `kv.claims.keys()`, which could hang on tombstone-only KV buckets.
 
-Publishes `LeaseExpiredEvent` to `chuggernaut.monitor.lease-expired`.
+Dispatches `LeaseExpiredEvent` via `publish_and_dispatch` (publishes to `chuggernaut.monitor.lease-expired` and sends directly to the assignment task channel).
 
-The dispatcher receives the event, re-reads the claim from KV (the heartbeat may have renewed it since the scan), and acts only if still expired.
+The dispatcher re-reads the claim from KV (the heartbeat may have renewed it since the scan), and acts only if still expired.
 
 ### Job Timeout
 
-Scans `chuggernaut.claims` KV for entries where `now - claimed_at > timeout_secs`.
+Iterates in-memory jobs in active states (OnTheStack, Reviewing) and checks each job's individual claim from `chuggernaut.claims` KV. Detects entries where `now - claimed_at > timeout_secs`. Like lease expiry, this avoids streaming KV keys.
 
-Publishes `JobTimeoutEvent` to `chuggernaut.monitor.timeout`.
+Dispatches `JobTimeoutEvent` via `publish_and_dispatch` (publishes to `chuggernaut.monitor.timeout` and sends directly to the assignment task channel).
 
 The dispatcher transitions the job to Failed with reason "job timeout".
 
@@ -48,21 +50,33 @@ One orphan condition is detected:
 
 **Claimless on-the-stack job:** A job in OnTheStack state with no corresponding entry in `chuggernaut.claims`. This indicates a dispatcher bug (claim was released but job state wasn't updated).
 
-Publishes `OrphanDetectedEvent` to `chuggernaut.monitor.orphan`. The dispatcher logs a warning — this indicates a bug rather than a normal failure mode.
+Dispatches `OrphanDetectedEvent` via `publish_and_dispatch` (publishes to `chuggernaut.monitor.orphan` and sends directly to the assignment task channel). The dispatcher transitions the orphaned job to Failed and schedules auto-retry (if retry_count < max_retries). Previously this only logged a warning.
 
 ### Retry
 
-Scans `chuggernaut.jobs` KV for entries where `state == "failed"` and `retry_count < max_retries` and `now > retry_after`.
+Scans in-memory jobs for entries where `state == "failed"` and `retry_count < max_retries` and `now > retry_after`.
 
-Publishes `RetryEligibleEvent` to `chuggernaut.monitor.retry`.
+Dispatches `RetryEligibleEvent` via `publish_and_dispatch` (publishes to `chuggernaut.monitor.retry` and sends directly to the assignment task channel).
 
-The dispatcher receives the event, re-reads the job from KV (state may have changed since the scan), and if still eligible transitions to OnDeck. This survives restarts — `retry_after` is persisted in the job record, so pending retries are picked up on the next scan.
+The dispatcher re-reads the job from KV (state may have changed since the scan), and if still eligible transitions to OnDeck. This survives restarts — `retry_after` is persisted in the job record, so pending retries are picked up on the next scan.
+
+### CI Status
+
+Scans in-memory jobs in OnTheStack state and checks the CI status of their associated Forgejo Action runs. Detects runs that have completed (success or failure) but whose outcome has not yet been processed by the dispatcher (e.g., because the NATS message was lost).
+
+Dispatches events via `publish_and_dispatch`. On CI failure, if `rework_count >= rework_limit`, the dispatcher escalates to a human reviewer instead of retrying.
+
+### Pending Reviews
+
+Scans in-memory jobs in InReview state and checks whether a review action is still running. Detects cases where the review action completed or failed without the dispatcher receiving the review decision (e.g., lost NATS message, action crash).
+
+Dispatches events via `publish_and_dispatch` so the dispatcher can re-dispatch the review action or handle the stale review state.
 
 ---
 
 ## Job Archival
 
-A fifth scan runs after the detection and retry scans. It reclaims resources from completed jobs that are no longer needed.
+The final scan runs after the detection and retry scans. It reclaims resources from completed jobs that are no longer needed.
 
 ### Candidates
 

@@ -289,6 +289,7 @@ mod tests {
             token_usage: vec![],
             claude_args: None,
             continuation_count: 0,
+            rework_count: 0,
             ci_status: None,
             ci_check_since: None,
             created_at: chrono::Utc::now(),
