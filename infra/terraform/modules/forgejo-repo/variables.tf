@@ -91,3 +91,9 @@ variable "review_workflow" {
   type        = string
 }
 
+variable "initial_files" {
+  description = "Map of file paths to content to push into the repo during bootstrap (e.g. CLAUDE.md, .gitignore)"
+  type        = map(string)
+  default     = {}
+}
+

@@ -69,6 +69,7 @@ pub async fn setup() -> Arc<DispatcherState> {
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
         pause_on_overage: true,
+        runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
     };
@@ -110,6 +111,7 @@ pub async fn setup_with_config(overrides: impl FnOnce(&mut Config)) -> Arc<Dispa
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
         pause_on_overage: true,
+        runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
     };

@@ -5,8 +5,21 @@ use tracing::{info, warn};
 use chuggernaut_forgejo_api::{DispatchWorkflowOption, ForgejoClient};
 use chuggernaut_types::*;
 
+use crate::config::Config;
 use crate::error::{DispatcherError, DispatcherResult};
 use crate::state::DispatcherState;
+
+/// Resolve the runner label for a job based on its capabilities.
+/// Checks the job's capabilities against the configured label map;
+/// falls back to the given default label if no capability matches.
+fn resolve_runner_label(config: &Config, job: &Job, default_label: &str) -> String {
+    for cap in &job.capabilities {
+        if let Some(label) = config.runner_label_map.get(cap) {
+            return label.clone();
+        }
+    }
+    default_label.to_string()
+}
 
 /// Extract (owner, repo) from a job's repo field and get Forgejo credentials.
 fn forgejo_context(
@@ -84,7 +97,7 @@ pub async fn dispatch_action(
         "job_key": job_key,
         "nats_url": state.config.nats_worker_url,
         "is_rework": is_rework.to_string(),
-        "runner_label": state.config.action_runner_label,
+        "runner_label": resolve_runner_label(&state.config, &job, &state.config.action_runner_label),
     });
 
     if let Some(feedback) = review_feedback {
@@ -163,7 +176,7 @@ pub async fn dispatch_review_action(
         "nats_url": state.config.nats_worker_url,
         "pr_url": pr_url,
         "review_level": review_level,
-        "runner_label": state.config.review_runner_label,
+        "runner_label": resolve_runner_label(&state.config, &job, &state.config.review_runner_label),
     });
 
     if let Err(e) = forgejo
@@ -200,4 +213,110 @@ pub async fn dispatch_review_action(
     .await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn test_config(label_map: HashMap<String, String>) -> Config {
+        Config {
+            nats_url: String::new(),
+            nats_worker_url: String::new(),
+            http_listen: String::new(),
+            lease_secs: 60,
+            default_timeout_secs: 3600,
+            cas_max_retries: 3,
+            monitor_scan_interval_secs: 10,
+            job_retention_secs: 86400,
+            activity_limit: 50,
+            forgejo_url: None,
+            forgejo_token: None,
+            action_workflow: "work.yml".to_string(),
+            action_runner_label: "ubuntu-latest".to_string(),
+            max_concurrent_actions: 2,
+            review_workflow: "review.yml".to_string(),
+            review_runner_label: "ubuntu-latest".to_string(),
+            max_continuations: 3,
+            ci_poll_timeout_secs: 120,
+            rework_limit: 3,
+            human_login: "you".to_string(),
+            allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
+            pause_on_overage: true,
+            runner_label_map: label_map,
+        }
+    }
+
+    fn test_job(capabilities: Vec<String>) -> Job {
+        Job {
+            key: "test.repo.1".to_string(),
+            repo: "test/repo".to_string(),
+            title: "test".to_string(),
+            body: String::new(),
+            state: JobState::OnDeck,
+            priority: 50,
+            capabilities,
+            platform: None,
+            timeout_secs: 3600,
+            review: ReviewLevel::High,
+            max_retries: 3,
+            retry_count: 0,
+            retry_after: None,
+            pr_url: None,
+            token_usage: vec![],
+            claude_args: None,
+            continuation_count: 0,
+            ci_status: None,
+            ci_check_since: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn resolve_label_uses_default_when_no_capabilities() {
+        let config = test_config(HashMap::new());
+        let job = test_job(vec![]);
+        assert_eq!(
+            resolve_runner_label(&config, &job, &config.action_runner_label),
+            "ubuntu-latest"
+        );
+    }
+
+    #[test]
+    fn resolve_label_uses_default_when_no_match() {
+        let config = test_config(HashMap::from([("rust".to_string(), "rust".to_string())]));
+        let job = test_job(vec!["flutter".to_string()]);
+        assert_eq!(
+            resolve_runner_label(&config, &job, &config.action_runner_label),
+            "ubuntu-latest"
+        );
+    }
+
+    #[test]
+    fn resolve_label_matches_capability() {
+        let config = test_config(HashMap::from([
+            ("flutter".to_string(), "flutter".to_string()),
+            ("rust".to_string(), "rust".to_string()),
+        ]));
+        let job = test_job(vec!["flutter".to_string()]);
+        assert_eq!(
+            resolve_runner_label(&config, &job, &config.action_runner_label),
+            "flutter"
+        );
+    }
+
+    #[test]
+    fn resolve_label_first_matching_capability_wins() {
+        let config = test_config(HashMap::from([
+            ("flutter".to_string(), "flutter".to_string()),
+            ("python".to_string(), "python".to_string()),
+        ]));
+        let job = test_job(vec!["flutter".to_string(), "python".to_string()]);
+        assert_eq!(
+            resolve_runner_label(&config, &job, &config.action_runner_label),
+            "flutter"
+        );
+    }
 }

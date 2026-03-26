@@ -68,10 +68,11 @@ variable "human_password" {
 }
 
 variable "managed_repos" {
-  description = "List of org/repo pairs to bootstrap"
+  description = "List of repos to bootstrap. initial_files is an optional map of file paths to content pushed during repo creation."
   type = list(object({
-    org  = string
-    repo = string
+    org           = string
+    repo          = string
+    initial_files = optional(map(string), {})
   }))
   default = []
 }
@@ -80,6 +81,12 @@ variable "runner_count" {
   description = "Number of Forgejo Action runners to register"
   type        = number
   default     = 1
+}
+
+variable "runner_labels" {
+  description = "Runner labels mapping (e.g. 'ubuntu-latest:docker://img:latest,flutter:docker://img:flutter')"
+  type        = string
+  default     = ""
 }
 
 variable "claude_oauth_token" {

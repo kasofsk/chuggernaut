@@ -230,6 +230,65 @@ resource "terraform_data" "workflows" {
 }
 
 # ---------------------------------------------------------------------------
+# Step 4b: Push initial bootstrap files (CLAUDE.md, .gitignore, etc.)
+#
+# Pushed sequentially after workflows to avoid git race conditions.
+# Uses the same create-or-update pattern as workflow pushes.
+# ---------------------------------------------------------------------------
+
+resource "terraform_data" "initial_files" {
+  count      = length(var.initial_files) > 0 ? 1 : 0
+  depends_on = [terraform_data.workflows]
+
+  triggers_replace = {
+    files = jsonencode(var.initial_files)
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -euo pipefail
+
+      push_file() {
+        local FILE_PATH="$1"
+        local CONTENT_B64="$2"
+
+        EXISTING=$(curl -s \
+          "${local.api}/repos/${var.org_name}/${var.repo_name}/contents/$FILE_PATH" \
+          -H "${local.auth}")
+        SHA=$(echo "$EXISTING" | jq -r '.sha // empty')
+
+        if [ -n "$SHA" ]; then
+          PAYLOAD=$(jq -n --arg msg "chore: update $FILE_PATH" \
+                          --arg content "$CONTENT_B64" \
+                          --arg sha "$SHA" \
+                          '{message: $msg, content: $content, sha: $sha}')
+          curl -sf -X PUT \
+            "${local.api}/repos/${var.org_name}/${var.repo_name}/contents/$FILE_PATH" \
+            -H "${local.auth}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
+        else
+          PAYLOAD=$(jq -n --arg msg "chore: add $FILE_PATH" \
+                          --arg content "$CONTENT_B64" \
+                          '{message: $msg, content: $content}')
+          curl -sf -X POST \
+            "${local.api}/repos/${var.org_name}/${var.repo_name}/contents/$FILE_PATH" \
+            -H "${local.auth}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
+        fi
+
+        echo "Bootstrap file $FILE_PATH: pushed"
+      }
+
+      %{for path, content in var.initial_files~}
+      push_file "${path}" "${base64encode(content)}"
+      %{endfor~}
+    EOT
+  }
+}
+
+# ---------------------------------------------------------------------------
 # Step 5: Set action secrets
 # ---------------------------------------------------------------------------
 

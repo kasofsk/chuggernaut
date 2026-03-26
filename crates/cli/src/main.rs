@@ -403,7 +403,7 @@ async fn main() -> Result<()> {
                     capabilities: job_def.capabilities.clone().unwrap_or_default(),
                     platform: None,
                     timeout_secs: 3600,
-                    review: ReviewLevel::High,
+                    review: job_def.review.unwrap_or(ReviewLevel::High),
                     max_retries: 3,
                     initial_state: job_initial,
                     claude_args: job_def.claude_args.clone(),
@@ -454,4 +454,5 @@ struct SeedJobDef {
     priority: Option<u8>,
     capabilities: Option<Vec<String>>,
     claude_args: Option<String>,
+    review: Option<ReviewLevel>,
 }

@@ -186,6 +186,7 @@ module "repos" {
   actions_url        = var.forgejo_actions_url
   work_workflow      = file("${path.root}/../../action/work.yml")
   review_workflow    = file("${path.root}/../../action/review.yml")
+  initial_files      = each.value.initial_files
 }
 
 # ---------------------------------------------------------------------------
@@ -199,4 +200,5 @@ module "runners" {
   admin_token          = var.forgejo_admin_token
   runner_count         = var.runner_count
   runner_config_path   = abspath("${path.root}/../runner/config.yaml")
+  runner_labels        = var.runner_labels
 }

@@ -53,13 +53,30 @@ services:
       - forgejo
     restart: unless-stopped
 
-  # Build runner environment images
-  # Run: docker compose --profile build build
+  # Build runner environment images.
+  # Via compose:  docker compose --profile build build
+  # Via dev-up:   ./scripts/dev-up.sh --flavor flutter
   runner-env:
     build:
       context: .
       dockerfile: Dockerfile.runner-env
-    image: chuggernaut-runner-env
+    image: chuggernaut-runner-env:latest
+    profiles:
+      - build
+
+  runner-env-rust:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner-env.rust
+    image: chuggernaut-runner-env:rust
+    profiles:
+      - build
+
+  runner-env-flutter:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner-env.flutter
+    image: chuggernaut-runner-env:flutter
     profiles:
       - build
 

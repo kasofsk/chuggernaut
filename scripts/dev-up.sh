@@ -7,6 +7,8 @@
 #   ./scripts/dev-up.sh --repo acme/payments     # bootstrap a repo (repeatable)
 #   ./scripts/dev-up.sh --runners 2 --repo test/repo --repo acme/payments
 #   ./scripts/dev-up.sh --clean --repo test/repo   # wipe everything and start fresh
+#   ./scripts/dev-up.sh --repo sb/studybuddy --initial-file sb/studybuddy:CLAUDE.md=../studybuddy/CLAUDE.md
+#   ./scripts/dev-up.sh --flavor flutter --repo sb/studybuddy  # build base + flutter runner images
 #
 # Prerequisites:
 #   - docker, docker compose
@@ -41,6 +43,9 @@ cd "$(dirname "$0")/.."
 
 RUNNER_COUNT=1
 REPOS=()
+FLAVORS=()
+# Associative array: "org/repo" -> list of "repo_path=local_path" entries
+declare -A INITIAL_FILES
 CLEAN=false
 
 while [[ $# -gt 0 ]]; do
@@ -53,17 +58,41 @@ while [[ $# -gt 0 ]]; do
       REPOS+=("$2")
       shift 2
       ;;
+    --flavor)
+      # Runner flavor to build (e.g. rust, flutter). Repeatable.
+      # Base image is always built. Each flavor needs a Dockerfile.runner-env.<flavor>.
+      FLAVORS+=("$2")
+      shift 2
+      ;;
+    --initial-file)
+      # Format: org/repo:repo_path=local_file
+      # e.g. sb/studybuddy:CLAUDE.md=../studybuddy/CLAUDE.md
+      IFS=':' read -r IF_REPO IF_SPEC <<< "$2"
+      IFS='=' read -r IF_PATH IF_LOCAL <<< "$IF_SPEC"
+      if [ ! -f "$IF_LOCAL" ]; then
+        echo "Error: file not found: $IF_LOCAL" >&2
+        exit 1
+      fi
+      # Append to existing entries for this repo (newline-separated)
+      INITIAL_FILES["$IF_REPO"]="${INITIAL_FILES[$IF_REPO]:-}${INITIAL_FILES[$IF_REPO]:+$'\n'}${IF_PATH}=${IF_LOCAL}"
+      shift 2
+      ;;
     --clean)
       CLEAN=true
       shift
       ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: $0 [--clean] [--runners N] [--repo org/repo ...]" >&2
+      echo "Usage: $0 [--clean] [--runners N] [--flavor name ...] [--repo org/repo ...] [--initial-file org/repo:path=file ...]" >&2
       exit 1
       ;;
   esac
 done
+
+# Default to rust flavor if none specified (backwards compat)
+if [ ${#FLAVORS[@]} -eq 0 ]; then
+  FLAVORS=("rust")
+fi
 
 FORGEJO_URL="${CHUGGERNAUT_FORGEJO_URL:-http://localhost:3000}"
 NATS_URL="${CHUGGERNAUT_NATS_URL:-nats://localhost:4222}"
@@ -115,16 +144,33 @@ if [ "$CLEAN" = true ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 1: Build runner-env images (base + rust)
+# Step 1: Build runner-env images (base + requested flavors)
 # ---------------------------------------------------------------------------
 
 echo "==> Building runner-env images..."
-if ! docker image inspect chuggernaut-runner-env:rust >/dev/null 2>&1; then
+echo "    Flavors: ${FLAVORS[*]}"
+
+# Always build base image first (all flavors extend it)
+if ! docker image inspect chuggernaut-runner-env:latest >/dev/null 2>&1; then
   docker compose --profile build build runner-env
-  docker build -t chuggernaut-runner-env:rust -f Dockerfile.runner-env.rust .
 else
-  echo "    (already built, skipping — run 'docker compose --profile build build && docker build -t chuggernaut-runner-env:rust -f Dockerfile.runner-env.rust .' to rebuild)"
+  echo "    Base image already built (use --clean to rebuild)"
 fi
+
+# Build each requested flavor
+for flavor in "${FLAVORS[@]}"; do
+  DOCKERFILE="Dockerfile.runner-env.${flavor}"
+  if [ ! -f "$DOCKERFILE" ]; then
+    echo "    ERROR: $DOCKERFILE not found" >&2
+    exit 1
+  fi
+  if ! docker image inspect "chuggernaut-runner-env:${flavor}" >/dev/null 2>&1; then
+    echo "    Building ${flavor} flavor..."
+    docker build -t "chuggernaut-runner-env:${flavor}" -f "$DOCKERFILE" .
+  else
+    echo "    ${flavor} flavor already built (use --clean to rebuild)"
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # Step 2: Start core services
@@ -182,7 +228,7 @@ echo "    Admin token: ${ADMIN_TOKEN:0:8}..."
 
 echo "==> Generating terraform.tfvars..."
 
-# Build managed_repos JSON array
+# Build managed_repos JSON array (with optional initial_files)
 REPOS_JSON="["
 for repo in "${REPOS[@]+"${REPOS[@]}"}"; do
   ORG="${repo%%/*}"
@@ -190,9 +236,34 @@ for repo in "${REPOS[@]+"${REPOS[@]}"}"; do
   if [ "$REPOS_JSON" != "[" ]; then
     REPOS_JSON+=","
   fi
-  REPOS_JSON+="{org=\"${ORG}\",repo=\"${REPO_NAME}\"}"
+
+  # Check for initial_files for this repo
+  FILES_HCL="{}"
+  if [ -n "${INITIAL_FILES[$repo]:-}" ]; then
+    FILES_HCL="{"
+    FIRST=true
+    while IFS='=' read -r FPATH FLOCAL; do
+      [ -z "$FPATH" ] && continue
+      CONTENT=$(cat "$FLOCAL")
+      # Escape for HCL heredoc — use jsonencode to handle special chars
+      ESCAPED=$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" <<< "$CONTENT")
+      if [ "$FIRST" = true ]; then FIRST=false; else FILES_HCL+=","; fi
+      FILES_HCL+="\"${FPATH}\"=${ESCAPED}"
+    done <<< "${INITIAL_FILES[$repo]}"
+    FILES_HCL+="}"
+  fi
+
+  REPOS_JSON+="{org=\"${ORG}\",repo=\"${REPO_NAME}\",initial_files=${FILES_HCL}}"
 done
 REPOS_JSON+="]"
+
+# Build runner labels from flavors
+# Always include the default ubuntu-latest label pointing to the base image.
+# Each flavor adds its own label → image mapping.
+RUNNER_LABELS="ubuntu-latest:docker://chuggernaut-runner-env:latest"
+for flavor in "${FLAVORS[@]}"; do
+  RUNNER_LABELS+=",${flavor}:docker://chuggernaut-runner-env:${flavor}"
+done
 
 cat > infra/terraform/terraform.tfvars <<EOF
 forgejo_url         = "${FORGEJO_URL}"
@@ -203,6 +274,7 @@ dispatcher_url      = "http://host.docker.internal:8080"
 worker_password     = "chuggernaut-worker-pass"
 reviewer_password   = "chuggernaut-reviewer-pass"
 runner_count        = ${RUNNER_COUNT}
+runner_labels       = "${RUNNER_LABELS}"
 managed_repos       = ${REPOS_JSON}
 claude_oauth_token  = "${CLAUDE_TOKEN}"
 anthropic_api_key   = "${API_KEY}"
@@ -243,7 +315,7 @@ echo "Services:"
 echo "  Forgejo:    ${FORGEJO_URL}"
 echo "  NATS:       ${NATS_URL}"
 echo "  Dispatcher: http://localhost:8080"
-echo "  Runners:    ${RUNNER_COUNT}"
+echo "  Runners:    ${RUNNER_COUNT} (flavors: ${FLAVORS[*]})"
 echo ""
 echo "Users:"
 echo "  Admin:    ${ADMIN_USER} (dispatcher token)"

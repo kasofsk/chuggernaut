@@ -366,5 +366,6 @@ These HTTP endpoints call dispatcher logic directly (not via NATS round-trip). P
 | `CHUGGERNAUT_ACTIVITY_LIMIT` | `50` | Max activity entries per job |
 | `CHUGGERNAUT_REVIEW_WORKFLOW` | `review.yml` | Review action workflow file |
 | `CHUGGERNAUT_REVIEW_RUNNER_LABEL` | `ubuntu-latest` | Runner label for review actions |
+| `CHUGGERNAUT_RUNNER_LABEL_MAP` | `{}` | JSON object mapping job capabilities to runner labels (e.g. `{"flutter":"flutter","rust":"rust"}`). When a job has a matching capability, that label overrides the default. |
 | `CHUGGERNAUT_REWORK_LIMIT` | `3` | Max rework cycles before escalation |
 | `CHUGGERNAUT_HUMAN_LOGIN` | `you` | Human reviewer login for escalation |

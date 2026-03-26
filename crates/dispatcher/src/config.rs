@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 
 use chuggernaut_types::{AllowedClaudeFlag, default_allowed_claude_flags};
@@ -33,6 +34,10 @@ pub struct Config {
     /// When true, pause dispatching new jobs when workers report API rate
     /// limit overage (isUsingOverage from Claude CLI's rate_limit_event).
     pub pause_on_overage: bool,
+    /// Maps job capabilities to runner labels for routing jobs to specialized
+    /// runners. E.g. `{"flutter": "flutter", "rust": "rust"}`. If a job has
+    /// a capability matching a key, that label is used instead of the default.
+    pub runner_label_map: HashMap<String, String>,
 }
 
 impl Config {
@@ -72,6 +77,10 @@ impl Config {
                 .and_then(|v| serde_json::from_str(&v).ok())
                 .unwrap_or_else(default_allowed_claude_flags),
             pause_on_overage: parse_env("CHUGGERNAUT_PAUSE_ON_OVERAGE", true),
+            runner_label_map: env::var("CHUGGERNAUT_RUNNER_LABEL_MAP")
+                .ok()
+                .and_then(|v| serde_json::from_str(&v).ok())
+                .unwrap_or_default(),
         }
     }
 }

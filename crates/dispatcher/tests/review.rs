@@ -398,6 +398,7 @@ async fn yield_dispatches_review_action() {
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
         pause_on_overage: true,
+        runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
     };

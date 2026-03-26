@@ -79,6 +79,7 @@ async fn action_dispatch_creates_claim_and_transitions() {
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
         pause_on_overage: true,
+        runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
     };
@@ -190,6 +191,7 @@ async fn rework_dispatches_new_action_with_feedback() {
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
         pause_on_overage: true,
+        runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
     };
@@ -376,6 +378,7 @@ async fn dispatch_next_respects_priority() {
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
         pause_on_overage: true,
+        runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
     };
@@ -490,6 +493,7 @@ async fn dispatch_next_after_yield() {
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
         pause_on_overage: true,
+        runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
     };
@@ -602,6 +606,7 @@ async fn changes_requested_in_dispatch_queue() {
         human_login: "you".to_string(),
         allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
         pause_on_overage: true,
+        runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
     };

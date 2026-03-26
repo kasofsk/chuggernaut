@@ -1,0 +1,34 @@
+# Flutter + Android development flavor of the runner environment image.
+# Extends the base runner-env with Flutter SDK and Android command-line tools.
+#
+# Build: docker build -t chuggernaut-runner-env:flutter -f Dockerfile.runner-env.flutter .
+# Register runner with label: "flutter:docker://chuggernaut-runner-env:flutter"
+# Configure dispatcher: CHUGGERNAUT_RUNNER_LABEL_MAP='{"flutter":"flutter"}'
+
+FROM chuggernaut-runner-env:latest
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang cmake ninja-build pkg-config \
+    openjdk-17-jdk-headless \
+    libgtk-3-dev \
+  && rm -rf /var/lib/apt/lists/*
+
+# Flutter SDK
+ENV FLUTTER_ROOT=/opt/flutter
+ENV PATH="${FLUTTER_ROOT}/bin:${PATH}"
+RUN git clone --depth 1 --branch stable https://github.com/flutter/flutter.git ${FLUTTER_ROOT} \
+ && flutter precache --android \
+ && flutter config --no-analytics
+
+# Android SDK command-line tools
+ENV ANDROID_HOME=/opt/android-sdk
+ENV PATH="${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}"
+RUN mkdir -p ${ANDROID_HOME}/cmdline-tools \
+ && curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/cmdline.zip \
+ && unzip -q /tmp/cmdline.zip -d ${ANDROID_HOME}/cmdline-tools \
+ && mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest \
+ && rm /tmp/cmdline.zip \
+ && yes | sdkmanager --licenses > /dev/null 2>&1 \
+ && sdkmanager "build-tools;34.0.0" "platforms;android-34" "platform-tools"
+
+RUN flutter doctor
