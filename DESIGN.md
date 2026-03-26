@@ -179,7 +179,7 @@ The `seed` command supports `--var` for template interpolation — `{{KEY}}` pla
 ## Known Limitations (v1)
 
 - **No authentication or authorization.** The HTTP API, NATS subjects, and CLI have no auth. NATS supports account-based auth and subject-level permissions natively; the HTTP API can add bearer tokens. Out of scope for v1.
-- **Basic token usage metrics.** Each action (work and review) reports `TokenUsage` (input, output, cache read/write tokens) in its outcome. The dispatcher stores per-action `ActionTokenRecord` entries on the Job, so you can see token usage per action invocation and broken down by work vs review. No Prometheus endpoint or OpenTelemetry yet — out of scope for v1.
+- **Token usage metrics.** Each action (work and review) reports `TokenUsage` (input, output, cache read/write tokens) in its outcome. The dispatcher stores per-action `ActionTokenRecord` entries on the Job. Per-graph budget warnings and per-job overage detection are implemented. Rate-limit-aware scheduling defers dispatch when the token rate is elevated. No Prometheus endpoint or OpenTelemetry yet — out of scope for v1.
 - **No cross-repo dependencies.** `depends_on` uses sequence numbers within the same repo. Cross-repo workflows can be coordinated externally but are not modeled in the dep graph.
 - **Single-node NATS.** No clustering or replication. NATS supports clustered JetStream natively; out of scope for v1.
 
@@ -225,7 +225,7 @@ chuggernaut/
     test-utils/                   # chuggernaut-test-utils: testcontainers + cleanup
   static/                         # graph viewer SPA
   docs/                           # component specs
-  scripts/                        # init.sh
+  scripts/                        # dev-up.sh, dev-down.sh, coverage.sh
   docker-compose.yml
 ```
 

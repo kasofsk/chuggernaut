@@ -28,7 +28,7 @@ cargo install cargo-llvm-cov
 
 ---
 
-## Integration Tests (57 tests)
+## Integration Tests
 
 Real NATS server via testcontainers. Each test gets a UUID-namespaced `DispatcherState` so tests run in parallel without interference. Tests that need Forgejo spin up real Forgejo containers via `chuggernaut-test-utils`.
 

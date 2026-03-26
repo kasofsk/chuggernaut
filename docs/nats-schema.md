@@ -149,7 +149,7 @@ Per-repo merge serialization. Prevents concurrent merges that could cause rebase
 
 | Field | Value |
 |-------|-------|
-| **Owner** | Review action (via worker binary) |
+| **Owner** | Dispatcher (initialized on startup; used by review actions) |
 | **Key** | `{owner}.{repo}.lock` or `{owner}.{repo}.queue` |
 | **History** | 1 |
 | **TTL** | 5 minutes (lock keys); none (queue keys) |
@@ -217,8 +217,8 @@ Dispatcher action log. Every significant action is recorded for observability.
   "timestamp": "2026-03-23T10:05:00Z",
   "action": "assigned",
   "job_key": "acme.payments.57",
-  "worker_id": "agent-rust-1",
-  "details": "priority 80, capability match: rust"
+  "worker_id": "action-acme.payments.57",
+  "details": "priority 80, dispatched action"
 }
 ```
 
@@ -247,7 +247,7 @@ Derived event stream. Published by the dispatcher whenever a job changes state.
   "to_state": "on-the-stack",
   "timestamp": "2026-03-23T10:05:00Z",
   "trigger": "dispatcher_assigned",
-  "worker_id": "agent-rust-1"
+  "worker_id": "action-acme.payments.57"
 }
 ```
 

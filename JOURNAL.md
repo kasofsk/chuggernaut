@@ -319,7 +319,20 @@ Added 36 new integration tests covering all previously-untested dispatcher code 
 | deps.rs | 75% |
 | http.rs | 44% |
 
-**8 crates**, **60 dispatcher tests** (57 parallel + 3 E2E sequential) — all green.
+### 15. Model/flag passthrough for workers (PR #4) ✅ Done
+
+Worker command args are now configurable per job. `CHUGGERNAUT_COMMAND_ARGS` supports passing additional flags to the Claude subprocess (e.g., model selection, think mode). Validation rejects dangerous flags before spawning.
+
+### 16. Token governance: budget warnings + rate-limit scheduling (PR #5) ✅ Done
+
+- **Per-graph token budget** (`CHUGGERNAUT_TOKEN_BUDGET`): optional cap. When total usage across all jobs exceeds budget, dispatcher logs overage warnings on every outcome.
+- **Per-job overage detection**: fires regardless of whether a per-graph budget is set.
+- **Rate-limit-aware scheduling**: `TokenTracker` tracks token consumption rate. When the rate exceeds a configurable threshold, dispatch is deferred to avoid hitting API rate limits.
+- `TokenTracker` struct with sliding-window rate calculation.
+
+### 17. Handle partial work + CI failures (PR #7) ✅ Done
+
+Workers now yield partial work as PRs even when they can't fully complete the task. The review action evaluates the partial PR and either approves, requests changes, or escalates. CI failure detection added — if the Forgejo Action fails (container crash, OOM, etc.), the dispatcher detects it via the action status API and transitions the job to Failed with the CI failure reason.
 
 ### Remaining Phase 2 work
 - **Token capture from Claude** — worker currently reports `token_usage: None`; need to parse Claude Code's output for actual usage
@@ -327,4 +340,5 @@ Added 36 new integration tests covering all previously-untested dispatcher code 
 - **Dispatcher trait abstraction** — dispatch strategy behind traits for swappability
 - **Graph viewer SPA** — frontend (fixture ready at `fixtures/frontend-wasm.json`)
 - **Terraform** — Forgejo provisioning for test (`terraform/test/`) and deploy (`terraform/deploy/`)
+- **GitHub compatibility** (issue #8) — support GitHub as an alternative git provider to Forgejo
 - **Coverage gaps** — `http.rs` SSE streaming logic (44%), `deps.rs` edge cases (75%), `handlers.rs` error branches (77%)
