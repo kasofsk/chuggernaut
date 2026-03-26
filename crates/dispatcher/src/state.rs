@@ -7,7 +7,35 @@ use dashmap::DashMap;
 use petgraph::graph::{DiGraph, NodeIndex};
 use tokio::sync::RwLock;
 
+use tokio::sync::mpsc;
+
 use chuggernaut_types::{HeartbeatRateLimit, Job, TokenUsage};
+
+// ---------------------------------------------------------------------------
+// Dispatch requests — sent to the single assignment task
+// ---------------------------------------------------------------------------
+
+/// A request to the centralized assignment task.
+/// All dispatch decisions flow through a single mpsc channel so they are
+/// processed sequentially — no concurrent capacity races.
+#[derive(Debug)]
+pub enum DispatchRequest {
+    /// Try to dispatch the next highest-priority OnDeck job.
+    TryDispatchNext,
+    /// Try to assign a specific job (e.g. after unblock or requeue).
+    AssignJob { job_key: String },
+    /// Dispatch a review action for a job that passed CI.
+    DispatchReview {
+        job_key: String,
+        pr_url: String,
+        review_level: String,
+    },
+    /// Try to assign a rework with reviewer feedback.
+    AssignRework {
+        job_key: String,
+        feedback: String,
+    },
+}
 
 use chuggernaut_nats::NatsClient;
 
@@ -98,6 +126,9 @@ impl Default for TokenTracker {
 /// Shared dispatcher state, wrapped in Arc for use across tasks.
 pub struct DispatcherState {
     pub config: Config,
+    /// Hot-reloadable max concurrent actions. Overrides config.max_concurrent_actions
+    /// when set. Use atomic for lock-free reads from the assignment task.
+    pub max_concurrent_actions: std::sync::atomic::AtomicUsize,
     pub nats: NatsClient,
     pub kv: KvStores,
 
@@ -111,6 +142,13 @@ pub struct DispatcherState {
 
     /// Token usage and rate limit tracking across workers.
     pub token_tracker: RwLock<TokenTracker>,
+
+    /// Channel for dispatch requests. All dispatch decisions are sent here
+    /// and processed sequentially by a single task — no capacity races.
+    pub dispatch_tx: mpsc::UnboundedSender<DispatchRequest>,
+    /// Receiver side — consumed by the assignment task started in handlers.
+    /// Wrapped in Mutex so it can be taken once at startup.
+    pub dispatch_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<DispatchRequest>>>,
 }
 
 pub struct DepGraph {
@@ -171,13 +209,18 @@ impl DispatcherState {
         js: jetstream::Context,
         kv: KvStores,
     ) -> Arc<Self> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let max_actions = config.max_concurrent_actions;
         Arc::new(Self {
             config,
+            max_concurrent_actions: std::sync::atomic::AtomicUsize::new(max_actions),
             nats: NatsClient::with_jetstream(client, js),
             kv,
             jobs: DashMap::new(),
             graph: RwLock::new(DepGraph::new()),
             token_tracker: RwLock::new(TokenTracker::new()),
+            dispatch_tx: tx.clone(),
+            dispatch_rx: tokio::sync::Mutex::new(Some(rx)),
         })
     }
 
@@ -188,13 +231,18 @@ impl DispatcherState {
         kv: KvStores,
         prefix: String,
     ) -> Arc<Self> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let max_actions = config.max_concurrent_actions;
         Arc::new(Self {
             config,
+            max_concurrent_actions: std::sync::atomic::AtomicUsize::new(max_actions),
             nats: NatsClient::with_prefix(client, js, prefix),
             kv,
             jobs: DashMap::new(),
             graph: RwLock::new(DepGraph::new()),
             token_tracker: RwLock::new(TokenTracker::new()),
+            dispatch_tx: tx.clone(),
+            dispatch_rx: tokio::sync::Mutex::new(Some(rx)),
         })
     }
 }

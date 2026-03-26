@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use chuggernaut_types::*;
 
@@ -64,6 +64,10 @@ pub async fn renew_lease(
             debug!(job_key, worker_id, "heartbeat for missing claim — ignoring");
             Ok(())
         }
+        Err(DispatcherError::Serde(_)) => {
+            debug!(job_key, worker_id, "heartbeat for stale/empty claim — ignoring");
+            Ok(())
+        }
         Err(DispatcherError::Validation(msg)) if msg.contains("wrong worker") => {
             debug!(job_key, worker_id, "{msg}");
             Ok(())
@@ -83,9 +87,8 @@ pub async fn release_claim(state: &Arc<DispatcherState>, job_key: &str) -> Dispa
             debug!(job_key, "claim released");
             Ok(())
         }
-        Err(e) => {
-            warn!(job_key, "failed to release claim: {e}");
-            // Not fatal — monitor will catch stale claims
+        Err(_) => {
+            // Claim already released or never existed — benign
             Ok(())
         }
     }

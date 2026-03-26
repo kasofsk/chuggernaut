@@ -29,14 +29,21 @@ async fn main() -> anyhow::Result<()> {
     // Build shared state
     let state = state::DispatcherState::new(config.clone(), nats, js, kv);
 
-    // Recover state from KV
+    // Phase 1: Recover state from KV (single-threaded, blocking).
+    // This runs all repair logic (stale claims, merged PRs, orphaned jobs)
+    // before any handlers or monitors start.
     recovery::recover(&state).await?;
 
-    // Start monitor background task
-    monitor::start(state.clone());
-
-    // Start NATS subscription handlers
+    // Phase 2: Start NATS subscription handlers + assignment task.
+    // Handlers subscribe to NATS subjects and the assignment task starts
+    // consuming the dispatch channel. No dispatches happen yet because
+    // the monitor hasn't sent any requests.
     handlers::start_handlers(state.clone()).await?;
+
+    // Phase 3: Start monitor background task.
+    // First scan fires after the handlers are ready, so dispatch requests
+    // from scan_pending_reviews reach an active assignment task.
+    monitor::start(state.clone());
 
     // Start HTTP server
     let listen_addr: SocketAddr = config.http_listen.parse()?;

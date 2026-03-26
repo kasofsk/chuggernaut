@@ -598,7 +598,7 @@ async fn action_dispatch_failure_releases_claim() {
     let key = jobs::create_job(&state, req).await.unwrap();
 
     // try_assign_job should fail internally but return Ok(false)
-    let assigned = chuggernaut_dispatcher::assignment::try_assign_job(&state, &key)
+    let assigned = chuggernaut_dispatcher::assignment::assign_job(&state, &key)
         .await
         .unwrap();
     assert!(!assigned, "assignment should fail with bad forgejo URL");

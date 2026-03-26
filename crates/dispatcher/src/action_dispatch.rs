@@ -168,6 +168,12 @@ pub async fn dispatch_review_action(
 
     let (owner, repo, forgejo_url, forgejo_token) = forgejo_context(state, &job)?;
 
+    // Transition InReview → Reviewing before dispatching.
+    // This makes the state machine explicit: Reviewing = review action in-flight.
+    let worker_id = format!("action-{job_key}");
+    crate::claims::acquire_claim(state, job_key, &worker_id, job.timeout_secs).await?;
+    crate::jobs::transition_job(state, job_key, JobState::Reviewing, "review_dispatched", Some(&worker_id)).await?;
+
     let forgejo = ForgejoClient::new(&forgejo_url, &forgejo_token);
     let workflow = &state.config.review_workflow;
 
@@ -192,6 +198,8 @@ pub async fn dispatch_review_action(
         .await
     {
         warn!(job_key, error = %e, "review action dispatch failed");
+        // Revert to InReview so it can be retried
+        let _ = crate::jobs::transition_job(state, job_key, JobState::InReview, "review_dispatch_failed", None).await;
         return Err(DispatcherError::Validation(format!(
             "failed to dispatch review action: {e}"
         )));

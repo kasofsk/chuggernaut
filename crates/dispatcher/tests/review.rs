@@ -428,7 +428,7 @@ async fn yield_dispatches_review_action() {
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
-    chuggernaut_dispatcher::assignment::try_assign_job(&state, &key)
+    chuggernaut_dispatcher::assignment::assign_job(&state, &key)
         .await
         .unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnTheStack);
