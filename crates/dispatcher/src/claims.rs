@@ -65,7 +65,10 @@ pub async fn renew_lease(
             Ok(())
         }
         Err(DispatcherError::Serde(_)) => {
-            debug!(job_key, worker_id, "heartbeat for stale/empty claim — ignoring");
+            debug!(
+                job_key,
+                worker_id, "heartbeat for stale/empty claim — ignoring"
+            );
             Ok(())
         }
         Err(DispatcherError::Validation(msg)) if msg.contains("wrong worker") => {

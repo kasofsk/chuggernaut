@@ -370,7 +370,11 @@ async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<
                     }
                     crate::assignment::request_dispatch(
                         state,
-                        crate::state::DispatchRequest::DispatchReview { job_key, pr_url, review_level },
+                        crate::state::DispatchRequest::DispatchReview {
+                            job_key,
+                            pr_url,
+                            review_level,
+                        },
                     );
                 }
                 return Ok(());
@@ -391,10 +395,19 @@ async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<
             if let Some(pr_index) = parse_pr_url_index(&pr_url) {
                 if let Ok(pr) = forgejo.get_pull_request(parts[0], parts[1], pr_index).await {
                     if pr.merged {
-                        info!(job_key, pr_url, "PR already merged — transitioning to Done (state repair)");
+                        info!(
+                            job_key,
+                            pr_url, "PR already merged — transitioning to Done (state repair)"
+                        );
                         if let Err(e) = crate::jobs::transition_job(
-                            state, &job_key, JobState::Done, "pr_already_merged", None,
-                        ).await {
+                            state,
+                            &job_key,
+                            JobState::Done,
+                            "pr_already_merged",
+                            None,
+                        )
+                        .await
+                        {
                             warn!(job_key, error = %e, "failed to transition merged job to Done");
                         }
                         let _ = crate::claims::release_claim(state, &job_key).await;
@@ -409,14 +422,26 @@ async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<
                     if let Ok(reviews) = forgejo.list_reviews(parts[0], parts[1], pr_index).await {
                         // Look at the most recent review from the reviewer bot
                         if let Some(latest) = reviews.iter().rev().find(|r| {
-                            r.user.as_ref().map_or(false, |u| u.login.contains("reviewer"))
+                            r.user
+                                .as_ref()
+                                .map_or(false, |u| u.login.contains("reviewer"))
                         }) {
                             if latest.state == "REQUEST_CHANGES" {
-                                info!(job_key, pr_url, "PR has REQUEST_CHANGES review — transitioning to ChangesRequested (state repair)");
+                                info!(
+                                    job_key,
+                                    pr_url,
+                                    "PR has REQUEST_CHANGES review — transitioning to ChangesRequested (state repair)"
+                                );
                                 let feedback = latest.body.clone();
                                 if let Err(e) = crate::jobs::transition_job(
-                                    state, &job_key, JobState::ChangesRequested, "review_state_repair", None,
-                                ).await {
+                                    state,
+                                    &job_key,
+                                    JobState::ChangesRequested,
+                                    "review_state_repair",
+                                    None,
+                                )
+                                .await
+                                {
                                     warn!(job_key, error = %e, "failed to transition to ChangesRequested");
                                 } else {
                                     let _ = crate::claims::release_claim(state, &job_key).await;
@@ -436,7 +461,10 @@ async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<
             }
         }
 
-        info!(job_key, "scan_pending_reviews: InReview + ci=success + no claim → requesting review dispatch");
+        info!(
+            job_key,
+            "scan_pending_reviews: InReview + ci=success + no claim → requesting review dispatch"
+        );
         crate::assignment::request_dispatch(
             state,
             crate::state::DispatchRequest::DispatchReview {

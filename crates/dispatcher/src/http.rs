@@ -319,7 +319,10 @@ pub fn router(state: AppState) -> Router {
         .route("/jobs/{key}/channel/send", post(channel_send))
         .route("/journal", get(list_journal))
         .route("/events", get(sse_events))
-        .route("/config/max_concurrent_actions", put(set_max_concurrent_actions).get(get_max_concurrent_actions))
+        .route(
+            "/config/max_concurrent_actions",
+            put(set_max_concurrent_actions).get(get_max_concurrent_actions),
+        )
         .route("/schema", get(get_schema))
         .route("/api.json", get(get_api_manifest));
 
@@ -484,7 +487,12 @@ async fn create_job(
     if let Some(job) = state.jobs.get(&key)
         && job.state == JobState::OnDeck
     {
-        crate::assignment::request_dispatch(&state, crate::state::DispatchRequest::AssignJob { job_key: key.clone() });
+        crate::assignment::request_dispatch(
+            &state,
+            crate::state::DispatchRequest::AssignJob {
+                job_key: key.clone(),
+            },
+        );
     }
 
     Ok((StatusCode::CREATED, Json(CreateJobResponse { key })))
@@ -525,7 +533,12 @@ async fn requeue_job(
     crate::jobs::transition_job(&state, &req.job_key, target_state, "admin_requeue", None).await?;
 
     if target_state == JobState::OnDeck {
-        crate::assignment::request_dispatch(&state, crate::state::DispatchRequest::AssignJob { job_key: req.job_key.clone() });
+        crate::assignment::request_dispatch(
+            &state,
+            crate::state::DispatchRequest::AssignJob {
+                job_key: req.job_key.clone(),
+            },
+        );
     }
 
     Ok(StatusCode::OK)
@@ -553,7 +566,10 @@ async fn close_job(
     if target == JobState::Done {
         let unblocked = crate::deps::propagate_unblock(&state, &key).await?;
         for k in &unblocked {
-            crate::assignment::request_dispatch(&state, crate::state::DispatchRequest::AssignJob { job_key: k.clone() });
+            crate::assignment::request_dispatch(
+                &state,
+                crate::state::DispatchRequest::AssignJob { job_key: k.clone() },
+            );
         }
     }
 
@@ -614,7 +630,9 @@ async fn channel_send(
 // ---------------------------------------------------------------------------
 
 async fn get_max_concurrent_actions(State(state): State<AppState>) -> impl IntoResponse {
-    let value = state.max_concurrent_actions.load(std::sync::atomic::Ordering::Relaxed);
+    let value = state
+        .max_concurrent_actions
+        .load(std::sync::atomic::Ordering::Relaxed);
     Json(serde_json::json!({ "max_concurrent_actions": value }))
 }
 
@@ -640,10 +658,7 @@ async fn set_max_concurrent_actions(
 
     // Poke the assignment task to dispatch if we just increased capacity
     if value > old {
-        crate::assignment::request_dispatch(
-            &state,
-            crate::state::DispatchRequest::TryDispatchNext,
-        );
+        crate::assignment::request_dispatch(&state, crate::state::DispatchRequest::TryDispatchNext);
     }
 
     Json(serde_json::json!({ "max_concurrent_actions": value, "previous": old })).into_response()

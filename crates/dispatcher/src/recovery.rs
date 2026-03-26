@@ -114,7 +114,10 @@ async fn assign_on_deck_jobs(state: &Arc<DispatcherState>) {
         "attempting to assign on-deck jobs from recovery"
     );
     for key in on_deck {
-        crate::assignment::request_dispatch(state, crate::state::DispatchRequest::AssignJob { job_key: key });
+        crate::assignment::request_dispatch(
+            state,
+            crate::state::DispatchRequest::AssignJob { job_key: key },
+        );
     }
 }
 
@@ -150,7 +153,10 @@ async fn repair_in_review_jobs(state: &Arc<DispatcherState>) {
         return;
     }
 
-    info!(count = candidates.len(), "checking InReview jobs against Forgejo PR state");
+    info!(
+        count = candidates.len(),
+        "checking InReview jobs against Forgejo PR state"
+    );
     let forgejo = chuggernaut_forgejo_api::ForgejoClient::new(&forgejo_url, &forgejo_token);
 
     for (job_key, pr_url, repo) in candidates {
@@ -177,7 +183,11 @@ async fn repair_in_review_jobs(state: &Arc<DispatcherState>) {
         if pr.merged {
             info!(job_key, pr_url, "PR already merged — repairing to Done");
             if let Err(e) = crate::jobs::transition_job(
-                state, &job_key, JobState::Done, "recovery_pr_merged", None,
+                state,
+                &job_key,
+                JobState::Done,
+                "recovery_pr_merged",
+                None,
             )
             .await
             {
@@ -200,13 +210,16 @@ async fn repair_in_review_jobs(state: &Arc<DispatcherState>) {
 
         // Check for REQUEST_CHANGES reviews
         if let Ok(reviews) = forgejo.list_reviews(owner, repo_name, pr_index).await {
-            if let Some(latest) = reviews
-                .iter()
-                .rev()
-                .find(|r| r.user.as_ref().map_or(false, |u| u.login.contains("reviewer")))
-            {
+            if let Some(latest) = reviews.iter().rev().find(|r| {
+                r.user
+                    .as_ref()
+                    .map_or(false, |u| u.login.contains("reviewer"))
+            }) {
                 if latest.state == "REQUEST_CHANGES" {
-                    info!(job_key, pr_url, "PR has REQUEST_CHANGES — repairing to ChangesRequested");
+                    info!(
+                        job_key,
+                        pr_url, "PR has REQUEST_CHANGES — repairing to ChangesRequested"
+                    );
                     let feedback = latest.body.clone();
                     if let Err(e) = crate::jobs::transition_job(
                         state,
@@ -233,7 +246,10 @@ async fn repair_in_review_jobs(state: &Arc<DispatcherState>) {
         }
 
         // Job is InReview and PR is open with no changes-requested — needs review dispatch
-        info!(job_key, "InReview job needs review dispatch (queued for after startup)");
+        info!(
+            job_key,
+            "InReview job needs review dispatch (queued for after startup)"
+        );
         let review_level = state
             .jobs
             .get(&job_key)
@@ -264,7 +280,10 @@ async fn repair_reviewing_without_claims(state: &Arc<DispatcherState>) {
         match kv_get::<ClaimState>(&state.kv.claims, &key).await {
             Ok(Some(_)) => {} // claim exists, review is running
             _ => {
-                warn!(job_key = key, "Reviewing job with no claim — reverting to InReview");
+                warn!(
+                    job_key = key,
+                    "Reviewing job with no claim — reverting to InReview"
+                );
                 if let Err(e) = crate::jobs::transition_job(
                     state,
                     &key,

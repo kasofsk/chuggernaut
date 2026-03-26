@@ -405,13 +405,25 @@ async fn run(args: Args) -> anyhow::Result<()> {
             info!(job_key = args.job_key, "outcome reported, exiting");
         }
         PostAction::Review => {
-            info!(job_key = args.job_key, exit_ok, pr_url = args.pr_url, "review post-action: starting");
+            info!(
+                job_key = args.job_key,
+                exit_ok,
+                pr_url = args.pr_url,
+                "review post-action: starting"
+            );
             let pr_index = parse_pr_index(&args.pr_url).unwrap_or(0);
-            info!(job_key = args.job_key, pr_index, "review post-action: parsed PR index");
+            info!(
+                job_key = args.job_key,
+                pr_index, "review post-action: parsed PR index"
+            );
             let decision = if exit_ok {
                 match parse_review_output(&output) {
                     Ok(result) => {
-                        info!(job_key = args.job_key, ?result, "review post-action: parsed review output");
+                        info!(
+                            job_key = args.job_key,
+                            ?result,
+                            "review post-action: parsed review output"
+                        );
                         post_action_review(
                             result,
                             &forgejo,
@@ -425,7 +437,11 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     }
                     Err(e) => {
                         error!(job_key = args.job_key, error = %e, output_len = output.len(), "failed to parse review output");
-                        error!(job_key = args.job_key, output_tail = &output[output.len().saturating_sub(500)..], "review output tail");
+                        error!(
+                            job_key = args.job_key,
+                            output_tail = &output[output.len().saturating_sub(500)..],
+                            "review output tail"
+                        );
                         escalate_decision(&args, token_usage.clone())
                     }
                 }
@@ -434,9 +450,17 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 escalate_decision(&args, token_usage.clone())
             };
             info!(job_key = args.job_key, decision_type = ?decision.decision, "review post-action: publishing decision to NATS");
-            match nats.publish_msg(&subjects::REVIEW_DECISION, &decision).await {
-                Ok(()) => info!(job_key = args.job_key, "review decision published successfully"),
-                Err(e) => error!(job_key = args.job_key, error = %e, "FAILED to publish review decision to NATS"),
+            match nats
+                .publish_msg(&subjects::REVIEW_DECISION, &decision)
+                .await
+            {
+                Ok(()) => info!(
+                    job_key = args.job_key,
+                    "review decision published successfully"
+                ),
+                Err(e) => {
+                    error!(job_key = args.job_key, error = %e, "FAILED to publish review decision to NATS")
+                }
             }
         }
     }

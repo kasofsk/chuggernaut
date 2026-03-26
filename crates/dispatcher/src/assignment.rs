@@ -21,7 +21,9 @@ async fn active_action_count(state: &DispatcherState) -> usize {
 
 /// Check if we have capacity to dispatch another action.
 pub async fn has_capacity(state: &DispatcherState) -> bool {
-    let max = state.max_concurrent_actions.load(std::sync::atomic::Ordering::Relaxed);
+    let max = state
+        .max_concurrent_actions
+        .load(std::sync::atomic::Ordering::Relaxed);
     if active_action_count(state).await >= max {
         return false;
     }
@@ -63,7 +65,12 @@ pub async fn assign_job(state: &Arc<DispatcherState>, job_key: &str) -> Dispatch
 
     if !has_capacity(state).await {
         let active = active_action_count(state).await;
-        debug!(job_key, active, max = state.config.max_concurrent_actions, "at capacity, job stays on-deck");
+        debug!(
+            job_key,
+            active,
+            max = state.config.max_concurrent_actions,
+            "at capacity, job stays on-deck"
+        );
         return Ok(false);
     }
 
@@ -83,11 +90,17 @@ async fn assign_rework(
 ) -> DispatcherResult<bool> {
     if !has_capacity(state).await {
         let active = active_action_count(state).await;
-        debug!(job_key, active, max = state.config.max_concurrent_actions, "at capacity, rework stays queued");
+        debug!(
+            job_key,
+            active,
+            max = state.config.max_concurrent_actions,
+            "at capacity, rework stays queued"
+        );
         return Ok(false);
     }
 
-    match crate::action_dispatch::dispatch_action(state, job_key, Some(review_feedback), true).await {
+    match crate::action_dispatch::dispatch_action(state, job_key, Some(review_feedback), true).await
+    {
         Ok(()) => Ok(true),
         Err(e) => {
             debug!(job_key, "rework action dispatch failed: {e}");

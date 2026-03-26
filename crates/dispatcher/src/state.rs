@@ -31,10 +31,7 @@ pub enum DispatchRequest {
         review_level: String,
     },
     /// Try to assign a rework with reviewer feedback.
-    AssignRework {
-        job_key: String,
-        feedback: String,
-    },
+    AssignRework { job_key: String, feedback: String },
 }
 
 use chuggernaut_nats::NatsClient;
