@@ -21,6 +21,7 @@ pub async fn kv_get<T: serde::de::DeserializeOwned>(
     key: &str,
 ) -> DispatcherResult<Option<(T, u64)>> {
     match store.entry(key).await {
+        Ok(Some(entry)) if entry.value.is_empty() => Ok(None),
         Ok(Some(entry)) => {
             let val: T = serde_json::from_slice(&entry.value)?;
             Ok(Some((val, entry.revision)))
