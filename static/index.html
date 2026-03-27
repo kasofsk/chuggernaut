@@ -154,8 +154,9 @@ async function computeLayout() {
   const edges = [];
 
   for (const [key, job] of state.jobs) {
-    const hasStatus = state.channels.has(key);
-    const hasMessage = state.messages.has(key);
+    const isActive = job.state === 'on-the-stack' || job.state === 'reviewing';
+    const hasStatus = isActive && state.channels.has(key);
+    const hasMessage = isActive && state.messages.has(key);
     const isRunning = job.state === 'on-the-stack';
     let h = NODE_H;
     if (hasStatus) h = NODE_H_WITH_STATUS;
@@ -274,8 +275,9 @@ function renderNode(node, job) {
 
   let yOffset = 58;
 
-  // Channel status + progress
-  if (channel) {
+  // Channel status + progress (only for active jobs)
+  const isActive = job.state === 'on-the-stack' || job.state === 'reviewing';
+  if (channel && isActive) {
     const statusText = channel.status.length > 34 ? channel.status.slice(0, 32) + '...' : channel.status;
     g.appendChild(svgText(8, yOffset + 10, `"${statusText}"`, 'node-status'));
 
@@ -320,7 +322,7 @@ function renderNode(node, job) {
   }
 
   // Latest channel message from Claude
-  const lastMsg = state.messages.get(job.key);
+  const lastMsg = isActive ? state.messages.get(job.key) : null;
   if (lastMsg) {
     const msgText = lastMsg.body.length > 38 ? lastMsg.body.slice(0, 36) + '...' : lastMsg.body;
     const msgEl = svgText(8, yOffset + 12, `\u{1F4AC} ${msgText}`, 'node-message');
