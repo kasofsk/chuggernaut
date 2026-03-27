@@ -1192,6 +1192,11 @@ mod tests {
             parse_pr_index("http://forgejo:3000/org/project/pulls/1"),
             Some(1)
         );
+        // GitHub uses /pull/ (singular) instead of /pulls/
+        assert_eq!(
+            parse_pr_index("https://github.com/owner/repo/pull/99"),
+            Some(99)
+        );
     }
 
     #[test]
