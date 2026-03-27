@@ -323,6 +323,7 @@ pub fn router(state: AppState) -> Router {
             "/config/max_concurrent_actions",
             put(set_max_concurrent_actions).get(get_max_concurrent_actions),
         )
+        .route("/config/paused", put(set_paused).get(get_paused))
         .route("/schema", get(get_schema))
         .route("/api.json", get(get_api_manifest));
 
@@ -662,6 +663,41 @@ async fn set_max_concurrent_actions(
     }
 
     Json(serde_json::json!({ "max_concurrent_actions": value, "previous": old })).into_response()
+}
+
+async fn get_paused(State(state): State<AppState>) -> impl IntoResponse {
+    let paused = state
+        .paused
+        .load(std::sync::atomic::Ordering::Relaxed);
+    Json(serde_json::json!({ "paused": paused }))
+}
+
+async fn set_paused(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let paused = match body.get("paused").and_then(|v| v.as_bool()) {
+        Some(v) => v,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "paused must be a boolean" })),
+            )
+                .into_response();
+        }
+    };
+
+    let was = state
+        .paused
+        .swap(paused, std::sync::atomic::Ordering::Relaxed);
+    info!(was, now = paused, "dispatch paused state updated");
+
+    // If unpausing, poke the assignment task to dispatch queued work
+    if was && !paused {
+        crate::assignment::request_dispatch(&state, crate::state::DispatchRequest::TryDispatchNext);
+    }
+
+    Json(serde_json::json!({ "paused": paused, "previous": was })).into_response()
 }
 
 // ---------------------------------------------------------------------------

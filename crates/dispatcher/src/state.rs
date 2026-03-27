@@ -183,6 +183,8 @@ pub struct DispatcherState {
     /// on release. Used for capacity checks instead of streaming KV keys
     /// (which can hang on tombstone-only buckets).
     pub active_claims: std::sync::atomic::AtomicUsize,
+    /// When true, no new jobs are dispatched. Running jobs continue.
+    pub paused: std::sync::atomic::AtomicBool,
     pub nats: NatsClient,
     pub kv: KvStores,
 
@@ -269,6 +271,7 @@ impl DispatcherState {
             config,
             max_concurrent_actions: std::sync::atomic::AtomicUsize::new(max_actions),
             active_claims: std::sync::atomic::AtomicUsize::new(0),
+            paused: std::sync::atomic::AtomicBool::new(false),
             nats: NatsClient::with_jetstream(client, js),
             kv,
             jobs: DashMap::new(),
@@ -292,6 +295,7 @@ impl DispatcherState {
             config,
             max_concurrent_actions: std::sync::atomic::AtomicUsize::new(max_actions),
             active_claims: std::sync::atomic::AtomicUsize::new(0),
+            paused: std::sync::atomic::AtomicBool::new(false),
             nats: NatsClient::with_prefix(client, js, prefix),
             kv,
             jobs: DashMap::new(),

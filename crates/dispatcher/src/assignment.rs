@@ -23,6 +23,10 @@ fn active_action_count(state: &DispatcherState) -> usize {
 
 /// Check if we have capacity to dispatch another action.
 pub async fn has_capacity(state: &DispatcherState) -> bool {
+    if state.paused.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+
     let max = state
         .max_concurrent_actions
         .load(std::sync::atomic::Ordering::Relaxed);
