@@ -86,6 +86,7 @@ async fn monitor_lease_expiry_fails_job() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -177,6 +178,7 @@ async fn monitor_job_timeout() {
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -267,6 +269,7 @@ async fn monitor_orphan_detection() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -343,6 +346,7 @@ async fn monitor_retry_eligible_transitions_to_on_deck() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -463,6 +467,7 @@ async fn monitor_archival_removes_done_job() {
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -556,6 +561,7 @@ async fn monitor_lease_expiry_schedules_retry() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 

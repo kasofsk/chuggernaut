@@ -76,6 +76,38 @@ pub trait GitProvider: Send + Sync {
         reviewers: Vec<String>,
     ) -> Result<Vec<PullReview>>;
 
+    // Issues
+    async fn create_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        opts: CreateIssue,
+    ) -> Result<Issue>;
+
+    async fn update_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        opts: UpdateIssue,
+    ) -> Result<Issue>;
+
+    // Comments
+    async fn list_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+    ) -> Result<Vec<Comment>>;
+
+    async fn create_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+        body: &str,
+    ) -> Result<Comment>;
+
     // Commit Status
     async fn get_combined_status(
         &self,

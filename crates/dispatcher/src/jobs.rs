@@ -175,6 +175,7 @@ pub async fn create_job(
         claude_args: req.claude_args,
         continuation_count: 0,
         rework_count: 0,
+        rework_limit: req.rework_limit,
         ci_status: None,
         ci_check_since: None,
         created_at: now,
@@ -217,6 +218,10 @@ pub async fn create_job(
         )),
     )
     .await;
+
+    // Publish a "created" transition so stream consumers (e.g. issue sync)
+    // can react to new jobs without coupling to the creation code.
+    publish_transition(state, &key, initial_state, initial_state, "created", None).await;
 
     debug!(key, ?initial_state, "job created");
 

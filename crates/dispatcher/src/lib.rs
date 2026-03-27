@@ -6,6 +6,7 @@ pub mod deps;
 pub mod error;
 pub mod handlers;
 pub mod http;
+pub mod issue_sync;
 pub mod jobs;
 pub mod monitor;
 pub use chuggernaut_nats::NatsClient;

@@ -457,6 +457,7 @@ jobs:
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
     eprintln!("E2E: created job {key}");
@@ -686,6 +687,7 @@ jobs:
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
     eprintln!("E2E-review: created job {key}");
@@ -829,6 +831,7 @@ async fn rapid_seed_does_not_block() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
 
     let start = tokio::time::Instant::now();
@@ -864,6 +867,7 @@ async fn rapid_seed_does_not_block() {
             max_retries: 3,
             initial_state: None,
             claude_args: None,
+            rework_limit: None,
         };
 
         let reply = tokio::time::timeout(
@@ -931,6 +935,7 @@ async fn rapid_seed_on_ice_no_dispatch() {
         max_retries: 3,
         initial_state: Some(JobState::OnIce),
         claude_args: None,
+        rework_limit: None,
     };
 
     let reply = tokio::time::timeout(
@@ -960,6 +965,7 @@ async fn rapid_seed_on_ice_no_dispatch() {
             max_retries: 3,
             initial_state: None,
             claude_args: None,
+            rework_limit: None,
         };
 
         let reply = tokio::time::timeout(

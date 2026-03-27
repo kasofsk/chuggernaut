@@ -99,6 +99,12 @@ pub async fn dispatch_action(
         inputs["review_feedback"] = serde_json::Value::String(feedback.to_string());
     }
 
+    if is_rework {
+        if let Some(ref url) = job.pr_url {
+            inputs["pr_url"] = serde_json::Value::String(url.clone());
+        }
+    }
+
     if let Err(e) = provider
         .dispatch_workflow(
             &owner,
@@ -284,6 +290,7 @@ mod tests {
             claude_args: None,
             continuation_count: 0,
             rework_count: 0,
+            rework_limit: None,
             ci_status: None,
             ci_check_since: None,
             created_at: chrono::Utc::now(),

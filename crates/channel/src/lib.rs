@@ -9,7 +9,7 @@ use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 
-use chuggernaut_types::{ChannelMessage, ChannelStatus};
+use chuggernaut_types::{ActionResult, ChannelMessage, ChannelStatus};
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -213,8 +213,88 @@ pub async fn handle_tool_call(
             Ok(tool_result(&format!("status updated: {status_text}")))
         }
 
+        "submit_pr" => {
+            let title = arguments
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let body = arguments
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            info!(
+                job_key,
+                title = title.as_str(),
+                "submit_pr: writing PR result to KV"
+            );
+
+            let result = ActionResult::Pr { title, body };
+            write_action_result(js, job_key, &result).await?;
+
+            Ok(tool_result("PR title and body submitted"))
+        }
+
+        "submit_changes" => {
+            let summary = arguments
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            info!(job_key, "submit_changes: writing changes result to KV");
+
+            let result = ActionResult::Changes { summary };
+            write_action_result(js, job_key, &result).await?;
+
+            Ok(tool_result("Changes summary submitted"))
+        }
+
+        "submit_review" => {
+            let decision = arguments
+                .get("decision")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let feedback = arguments
+                .get("feedback")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            info!(
+                job_key,
+                decision = decision.as_str(),
+                "submit_review: writing review result to KV"
+            );
+
+            let result = ActionResult::Review { decision, feedback };
+            write_action_result(js, job_key, &result).await?;
+
+            Ok(tool_result("Review decision submitted"))
+        }
+
         _ => Err(format!("unknown tool: {name}")),
     }
+}
+
+async fn write_action_result(
+    js: &async_nats::jetstream::Context,
+    job_key: &str,
+    result: &ActionResult,
+) -> Result<(), String> {
+    let kv = js
+        .get_key_value(chuggernaut_types::buckets::ACTION_RESULTS)
+        .await
+        .map_err(|e| format!("KV lookup failed: {e}"))?;
+
+    let payload = serde_json::to_vec(result).map_err(|e| e.to_string())?;
+    kv.put(job_key, payload.into())
+        .await
+        .map_err(|e| format!("KV put failed: {e}"))?;
+
+    Ok(())
 }
 
 pub fn tool_result(text: &str) -> Value {
@@ -369,6 +449,9 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"reply"));
         assert!(names.contains(&"update_status"));
+        assert!(names.contains(&"submit_pr"));
+        assert!(names.contains(&"submit_changes"));
+        assert!(names.contains(&"submit_review"));
         assert!(!names.contains(&"channel_check"));
         assert!(!names.contains(&"channel_send"));
     }
@@ -381,6 +464,9 @@ mod tests {
         assert!(names.contains(&"channel_check"));
         assert!(names.contains(&"channel_send"));
         assert!(names.contains(&"update_status"));
+        assert!(names.contains(&"submit_pr"));
+        assert!(names.contains(&"submit_changes"));
+        assert!(names.contains(&"submit_review"));
         assert!(!names.contains(&"reply"));
     }
 
@@ -453,5 +539,54 @@ mod tests {
         assert_eq!(parsed.job_key, "acme.payments.57");
         assert_eq!(parsed.status, "implementing feature");
         assert!((parsed.progress.unwrap() - 0.45).abs() < 0.001);
+    }
+
+    #[test]
+    fn action_result_pr_serde_roundtrip() {
+        let result = ActionResult::Pr {
+            title: "Add auth middleware".to_string(),
+            body: "## Changes\n- Added JWT validation".to_string(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: ActionResult = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ActionResult::Pr { title, body } => {
+                assert_eq!(title, "Add auth middleware");
+                assert_eq!(body, "## Changes\n- Added JWT validation");
+            }
+            _ => panic!("expected Pr variant"),
+        }
+    }
+
+    #[test]
+    fn action_result_changes_serde_roundtrip() {
+        let result = ActionResult::Changes {
+            summary: "Fixed error handling per reviewer feedback".to_string(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: ActionResult = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ActionResult::Changes { summary } => {
+                assert_eq!(summary, "Fixed error handling per reviewer feedback");
+            }
+            _ => panic!("expected Changes variant"),
+        }
+    }
+
+    #[test]
+    fn action_result_review_serde_roundtrip() {
+        let result = ActionResult::Review {
+            decision: "changes_requested".to_string(),
+            feedback: Some("Missing error handling".to_string()),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: ActionResult = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ActionResult::Review { decision, feedback } => {
+                assert_eq!(decision, "changes_requested");
+                assert_eq!(feedback.unwrap(), "Missing error handling");
+            }
+            _ => panic!("expected Review variant"),
+        }
     }
 }

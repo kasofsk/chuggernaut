@@ -106,6 +106,7 @@ async fn action_dispatch_creates_claim_and_transitions() {
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -218,6 +219,7 @@ async fn rework_dispatches_new_action_with_feedback() {
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -302,6 +304,7 @@ async fn capacity_limit_prevents_assignment() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key1 = jobs::create_job(&state, make("Job1")).await.unwrap();
     let key2 = jobs::create_job(&state, make("Job2")).await.unwrap();
@@ -404,6 +407,7 @@ async fn dispatch_next_respects_priority() {
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
 
     let key_low = jobs::create_job(&state, make("Low", 10)).await.unwrap();
@@ -519,6 +523,7 @@ async fn dispatch_next_after_yield() {
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
 
     let key1 = jobs::create_job(&state, make("First")).await.unwrap();
@@ -632,6 +637,7 @@ async fn changes_requested_in_dispatch_queue() {
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key_cr = jobs::create_job(&state, req_cr).await.unwrap();
 
@@ -672,6 +678,7 @@ async fn changes_requested_in_dispatch_queue() {
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key_od = jobs::create_job(&state, req_od).await.unwrap();
 

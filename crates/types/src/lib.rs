@@ -144,6 +144,9 @@ pub struct Job {
     /// Number of rework cycles (review → changes_requested → rework).
     #[serde(default)]
     pub rework_count: u32,
+    /// Per-job rework limit override. None = use global config default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rework_limit: Option<u32>,
     /// CI status for the PR. None = not yet checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci_status: Option<CiStatus>,
@@ -228,6 +231,9 @@ pub struct CreateJobRequest {
     /// Extra CLI args forwarded to Claude (e.g. "--model claude-sonnet-4-5-20250514 --max-turns 10").
     #[serde(default)]
     pub claude_args: Option<String>,
+    /// Per-job rework limit override. None = use global config default.
+    #[serde(default)]
+    pub rework_limit: Option<u32>,
 }
 
 fn default_priority() -> u8 {
@@ -437,6 +443,24 @@ pub struct ChannelStatus {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Structured result submitted by Claude via MCP tool at end of work/review.
+/// Written to KV bucket `chuggernaut_results`, read by worker binary post-action.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ActionResult {
+    Pr {
+        title: String,
+        body: String,
+    },
+    Changes {
+        summary: String,
+    },
+    Review {
+        decision: String,
+        feedback: Option<String>,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // Typed NATS subjects
 // ---------------------------------------------------------------------------
@@ -624,6 +648,8 @@ pub mod buckets {
     pub const REWORK_COUNTS: &str = "chuggernaut_rework_counts";
     pub const JOURNAL: &str = "chuggernaut_journal";
     pub const CHANNELS: &str = "chuggernaut_channels";
+    pub const ACTION_RESULTS: &str = "chuggernaut_action_results";
+    pub const ISSUE_MAP: &str = "chuggernaut_issue_map";
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,6 +1242,7 @@ mod tests {
             claude_args: Some("--model claude-sonnet-4-5-20250514".to_string()),
             continuation_count: 0,
             rework_count: 0,
+            rework_limit: None,
             ci_status: None,
             ci_check_since: None,
             created_at: Utc::now(),

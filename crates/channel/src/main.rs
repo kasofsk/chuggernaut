@@ -90,6 +90,15 @@ async fn main() -> anyhow::Result<()> {
     })
     .await?;
 
+    js.create_key_value(async_nats::jetstream::kv::Config {
+        bucket: chuggernaut_types::buckets::ACTION_RESULTS.to_string(),
+        history: 1,
+        storage: async_nats::jetstream::stream::StorageType::File,
+        max_age: std::time::Duration::from_secs(3600), // 1h TTL safety net
+        ..Default::default()
+    })
+    .await?;
+
     let state = Arc::new(Mutex::new(ChannelState::new()));
     let (out_tx, out_rx) = mpsc::channel::<String>(256);
 

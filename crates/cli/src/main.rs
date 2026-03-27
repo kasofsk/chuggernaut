@@ -61,6 +61,9 @@ enum Commands {
         /// Extra CLI args to forward to Claude (e.g. "--model claude-sonnet-4-5-20250514")
         #[arg(long)]
         claude_args: Option<String>,
+        /// Per-job rework limit (overrides global default)
+        #[arg(long)]
+        rework_limit: Option<u32>,
     },
     /// List jobs
     Jobs {
@@ -94,6 +97,22 @@ enum Commands {
         /// Revoke instead of Done
         #[arg(long)]
         revoke: bool,
+    },
+    /// Get or set max concurrent actions
+    Concurrency {
+        /// New value (omit to show current)
+        value: Option<usize>,
+    },
+    /// Retry rework on an escalated job (increases per-job rework limit)
+    RetryRework {
+        /// Job key
+        key: String,
+        /// Additional rework attempts to grant on top of current count (default: 1)
+        #[arg(long, conflicts_with = "limit")]
+        extra: Option<u32>,
+        /// Set per-job rework limit to this absolute value
+        #[arg(long, conflicts_with = "extra")]
+        limit: Option<u32>,
     },
     /// Channel communication with a running Claude session
     Channel {
@@ -161,6 +180,7 @@ async fn main() -> Result<()> {
             review,
             initial_state,
             claude_args,
+            rework_limit,
         } => {
             let review_level: ReviewLevel = serde_json::from_str(&format!("\"{review}\""))?;
             let initial = initial_state
@@ -180,6 +200,7 @@ async fn main() -> Result<()> {
                 max_retries: 3,
                 initial_state: initial,
                 claude_args,
+                rework_limit,
             };
 
             let nats = NatsClient::new(async_nats::connect(&cli.nats_url).await?);
@@ -299,6 +320,90 @@ async fn main() -> Result<()> {
             }
             let action = if revoke { "Revoked" } else { "Closed" };
             println!("{action} {key}");
+        }
+
+        Commands::Concurrency { value } => match value {
+            Some(v) => {
+                let client = reqwest::Client::new();
+                let resp: serde_json::Value = client
+                    .put(format!(
+                        "{}/config/max_concurrent_actions",
+                        cli.dispatcher_url
+                    ))
+                    .json(&serde_json::json!({ "value": v }))
+                    .send()
+                    .await?
+                    .json()
+                    .await?;
+                if let Some(err) = resp.get("error") {
+                    eprintln!("Error: {}", err.as_str().unwrap_or("unknown"));
+                    std::process::exit(1);
+                }
+                let prev = resp.get("previous").and_then(|v| v.as_u64()).unwrap_or(0);
+                println!("Max concurrent actions: {v} (was {prev})");
+            }
+            None => {
+                let resp: serde_json::Value = reqwest::get(format!(
+                    "{}/config/max_concurrent_actions",
+                    cli.dispatcher_url
+                ))
+                .await?
+                .json()
+                .await?;
+                let v = resp
+                    .get("max_concurrent_actions")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                println!("Max concurrent actions: {v}");
+            }
+        },
+
+        Commands::RetryRework { key, extra, limit } => {
+            let client = reqwest::Client::new();
+            let mut req_body = serde_json::Map::new();
+            if let Some(e) = extra {
+                req_body.insert("extra".into(), serde_json::json!(e));
+            }
+            if let Some(l) = limit {
+                req_body.insert("limit".into(), serde_json::json!(l));
+            }
+
+            let resp = client
+                .post(format!("{}/jobs/{key}/retry-rework", cli.dispatcher_url))
+                .json(&req_body)
+                .send()
+                .await?;
+
+            if resp.status().is_success() {
+                let body: serde_json::Value = resp.json().await?;
+                let count = body
+                    .get("rework_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let new_limit = body
+                    .get("rework_limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let dispatched = body
+                    .get("dispatched")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if dispatched {
+                    println!("Retried rework for {key} (rework_count={count}, limit={new_limit})");
+                } else {
+                    println!(
+                        "Rework limit set to {new_limit} for {key} (rework_count={count}, job stays escalated)"
+                    );
+                }
+            } else {
+                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                let err = body
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("unknown error");
+                eprintln!("Error: {err}");
+                std::process::exit(1);
+            }
         }
 
         Commands::Channel { action } => match action {
@@ -433,6 +538,7 @@ async fn main() -> Result<()> {
                     max_retries: 3,
                     initial_state: job_initial,
                     claude_args: job_def.claude_args.clone(),
+                    rework_limit: job_def.rework_limit,
                 };
 
                 let reply = tokio::time::timeout(
@@ -481,4 +587,5 @@ struct SeedJobDef {
     capabilities: Option<Vec<String>>,
     claude_args: Option<String>,
     review: Option<ReviewLevel>,
+    rework_limit: Option<u32>,
 }

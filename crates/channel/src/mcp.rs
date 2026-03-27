@@ -180,5 +180,60 @@ pub fn tool_definitions(push_notifications: bool) -> Value {
         }
     }));
 
+    // Result submission tools — always available, prompt tells Claude which to use
+    tools.push(serde_json::json!({
+        "name": "submit_pr",
+        "description": "Submit the title and body for the pull request that will be created from your work. Call this once when you are done with all changes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short, descriptive PR title"
+                },
+                "body": {
+                    "type": "string",
+                    "description": "PR body in markdown describing what changed and why"
+                }
+            },
+            "required": ["title", "body"]
+        }
+    }));
+
+    tools.push(serde_json::json!({
+        "name": "submit_changes",
+        "description": "Submit a summary of the changes you made during rework. This will be posted as a comment on the existing PR. Call this once when you are done with rework.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "Markdown summary of the changes you made in response to the reviewer's feedback"
+                }
+            },
+            "required": ["summary"]
+        }
+    }));
+
+    tools.push(serde_json::json!({
+        "name": "submit_review",
+        "description": "Submit your review decision for the pull request. Call this once when you have completed your review.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "decision": {
+                    "type": "string",
+                    "enum": ["approved", "changes_requested", "escalate"],
+                    "description": "Your review decision"
+                },
+                "feedback": {
+                    "type": "string",
+                    "description": "Review feedback (required for changes_requested, optional for approved)"
+                }
+            },
+            "required": ["decision"]
+        }
+    }));
+
     serde_json::json!(tools)
 }

@@ -185,7 +185,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         chuggernaut_worker::provider::create_provider(&args.git_url, &args.git_token);
     validate_token(&*provider, owner, repo).await?;
 
-    let (nats, _js) = connect_nats(&args.nats_url).await?;
+    let (nats, js) = connect_nats(&args.nats_url).await?;
     let cancel = CancellationToken::new();
 
     // Clone repo
@@ -277,6 +277,24 @@ async fn run(args: Args) -> anyhow::Result<()> {
     validate_worker_command_args(&args.command_args)
         .map_err(|e| anyhow::anyhow!("command_args validation failed: {e}"))?;
 
+    // For review and rework actions, enrich prompt with PR conversation history
+    let prompt = if let Some(pr_index) = parse_pr_index(&args.pr_url) {
+        let conversation = fetch_pr_conversation(&*provider, owner, repo, pr_index).await;
+        if conversation.is_empty() {
+            args.prompt.clone()
+        } else {
+            format!(
+                "{}\n\n## PR Conversation History\n\n\
+                 The following comments and reviews have been left on this PR. \
+                 Use this to understand prior feedback and avoid repeating issues \
+                 that have already been addressed.\n\n{}",
+                args.prompt, conversation
+            )
+        }
+    } else {
+        args.prompt.clone()
+    };
+
     // Build subprocess command
     info!(command = args.command, "launching subprocess");
     let mut cmd_args: Vec<String> = args
@@ -286,7 +304,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .map(String::from)
         .collect();
     cmd_args.push("--print".into());
-    cmd_args.push(args.prompt.clone());
+    cmd_args.push(prompt);
     cmd_args.push("--mcp-config".into());
     cmd_args.push(mcp_config.display().to_string());
 
@@ -298,9 +316,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .spawn()?;
 
     // Pipe stdout through jq for formatted action log output on stderr,
-    // while also collecting the raw output for review parsing.
+    // while also parsing stream-json for token usage and cost metrics.
     let stdout = child.stdout.take().expect("stdout piped");
-    let (output_tx, output_rx) = tokio::sync::oneshot::channel::<String>();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
 
     // Spawn jq as a formatter: reads Claude's stream-json, writes human-readable to stderr
     let mut jq_child = Command::new("jq")
@@ -314,7 +332,6 @@ async fn run(args: Args) -> anyhow::Result<()> {
     tokio::spawn(async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
-        let mut collected = String::new();
         let mut jq_stdin = jq_child.as_mut().and_then(|c| c.stdin.take());
         let mut metrics = SessionMetrics::default();
         while let Ok(Some(line)) = lines.next_line().await {
@@ -326,15 +343,13 @@ async fn run(args: Args) -> anyhow::Result<()> {
             }
             // Parse stream-json for token usage, rate limit events, and cost
             parse_stream_json_line(&line, &mut metrics, &metrics_tx);
-            collected.push_str(&line);
-            collected.push('\n');
         }
         // Close jq stdin so it exits
         drop(jq_stdin);
         if let Some(ref mut c) = jq_child {
             let _ = c.wait().await;
         }
-        let _ = output_tx.send(collected);
+        let _ = done_tx.send(());
     });
 
     // Wait for subprocess with cancel + deadline
@@ -368,7 +383,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
     };
 
     cancel.cancel();
-    let output = output_rx.await.unwrap_or_default();
+    // Wait for the stdout reader to finish (drives jq formatter + metrics parsing)
+    let _ = done_rx.await;
 
     // Read final session metrics for token usage reporting
     let final_metrics = metrics_rx.borrow().clone();
@@ -392,11 +408,22 @@ async fn run(args: Args) -> anyhow::Result<()> {
         || budget_warned.load(Ordering::Relaxed)
         || overage_warned.load(Ordering::Relaxed);
 
+    // Read action result from KV (submitted by Claude via submit_pr / submit_review MCP tool)
+    let action_result = read_action_result(&js, &args.job_key).await;
+
     // Post-action — handle outcome based on mode
     match args.post_action {
         PostAction::Yield => {
             let base_outcome = if exit_ok || was_deadline {
-                post_action_yield(&*provider, owner, repo, &branch, &args.job_key).await
+                post_action_yield(
+                    &*provider,
+                    owner,
+                    repo,
+                    &branch,
+                    &args.job_key,
+                    &action_result,
+                )
+                .await
             } else {
                 OutcomeType::Fail {
                     reason: "subprocess failed".to_string(),
@@ -431,12 +458,28 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 pr_index, "review post-action: parsed PR index"
             );
             let decision = if exit_ok {
-                match parse_review_output(&output) {
+                let result = match &action_result {
+                    Some(ActionResult::Review { decision, feedback }) => {
+                        info!(
+                            job_key = args.job_key,
+                            decision, "review post-action: got review from KV"
+                        );
+                        parse_review_decision(decision, feedback.as_deref())
+                    }
+                    _ => {
+                        error!(
+                            job_key = args.job_key,
+                            "reviewer did not call submit_review — no review result in KV"
+                        );
+                        Err(anyhow::anyhow!("no review result submitted via MCP"))
+                    }
+                };
+                match result {
                     Ok(result) => {
                         info!(
                             job_key = args.job_key,
                             ?result,
-                            "review post-action: parsed review output"
+                            "review post-action: parsed review result"
                         );
                         post_action_review(
                             result,
@@ -450,12 +493,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                         .await
                     }
                     Err(e) => {
-                        error!(job_key = args.job_key, error = %e, output_len = output.len(), "failed to parse review output");
-                        error!(
-                            job_key = args.job_key,
-                            output_tail = &output[output.len().saturating_sub(500)..],
-                            "review output tail"
-                        );
+                        error!(job_key = args.job_key, error = %e, "failed to parse review result");
                         escalate_decision(&args, token_usage.clone())
                     }
                 }
@@ -492,6 +530,7 @@ async fn post_action_yield(
     repo: &str,
     branch: &str,
     job_key: &str,
+    action_result: &Option<ActionResult>,
 ) -> OutcomeType {
     let repo_dir = PathBuf::from(format!(
         "/tmp/chuggernaut-work/{}",
@@ -510,18 +549,50 @@ async fn post_action_yield(
     }
 
     match provider.find_pr_by_head(owner, repo, branch).await {
-        Ok(Some(pr)) => OutcomeType::Yield {
-            pr_url: pr.html_url,
-            partial: false,
-        },
+        Ok(Some(pr)) => {
+            // PR already exists (rework or continuation) — post a comment describing the work
+            let comment_body = match action_result {
+                Some(ActionResult::Changes { summary }) => Some(summary.clone()),
+                Some(ActionResult::Pr { body, .. }) => Some(body.clone()),
+                _ => None,
+            };
+            if let Some(body) = comment_body {
+                match provider
+                    .create_comment(owner, repo, pr.number, &body)
+                    .await
+                {
+                    Ok(comment) => info!(
+                        job_key,
+                        comment_id = comment.id,
+                        "posted work summary comment on PR"
+                    ),
+                    Err(e) => warn!(job_key, error = %e, "failed to post work comment"),
+                }
+            }
+            OutcomeType::Yield {
+                pr_url: pr.html_url,
+                partial: false,
+            }
+        }
         Ok(None) => {
+            // No PR yet — create one with submitted title/body
+            let (pr_title, pr_body) = match action_result {
+                Some(ActionResult::Pr { title, body }) => (title.clone(), body.clone()),
+                _ => {
+                    error!(job_key, "worker did not call submit_pr — no PR metadata in KV");
+                    (
+                        format!("[{job_key}] Work"),
+                        format!("Worker did not call submit_pr. Automated work for job {job_key}."),
+                    )
+                }
+            };
             match provider
                 .create_pull_request(
                     owner,
                     repo,
                     CreatePullRequest {
-                        title: format!("[{job_key}] Work"),
-                        body: Some(format!("Automated work for job {job_key}")),
+                        title: pr_title,
+                        body: Some(pr_body),
                         head: branch.to_string(),
                         base: "main".to_string(),
                     },
@@ -641,6 +712,65 @@ fn escalate_decision(args: &Args, token_usage: Option<TokenUsage>) -> ReviewDeci
         pr_url: Some(args.pr_url.clone()),
         token_usage,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: fetch PR conversation history
+// ---------------------------------------------------------------------------
+
+async fn fetch_pr_conversation(
+    provider: &dyn GitProvider,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+) -> String {
+    let (comments_result, reviews_result) = tokio::join!(
+        provider.list_comments(owner, repo, pr_number),
+        provider.list_reviews(owner, repo, pr_number),
+    );
+
+    let mut entries: Vec<(Option<String>, String, String)> = Vec::new(); // (timestamp, author, body)
+
+    if let Ok(comments) = comments_result {
+        for c in comments {
+            if c.body.trim().is_empty() {
+                continue;
+            }
+            let author = c.user.map(|u| u.login).unwrap_or_else(|| "unknown".into());
+            entries.push((c.created_at, author, c.body));
+        }
+    } else {
+        warn!("failed to fetch PR comments: {:?}", comments_result.err());
+    }
+
+    if let Ok(reviews) = reviews_result {
+        for r in reviews {
+            if r.body.trim().is_empty() {
+                continue;
+            }
+            let author = r.user.map(|u| u.login).unwrap_or_else(|| "unknown".into());
+            let prefix = match r.state.as_str() {
+                "APPROVED" | "APPROVE" => "[APPROVED] ",
+                "REQUEST_CHANGES" | "CHANGES_REQUESTED" => "[CHANGES REQUESTED] ",
+                _ => "",
+            };
+            entries.push((r.submitted_at, author, format!("{prefix}{}", r.body)));
+        }
+    } else {
+        warn!("failed to fetch PR reviews: {:?}", reviews_result.err());
+    }
+
+    // Sort by timestamp
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    entries
+        .into_iter()
+        .map(|(ts, author, body)| {
+            let when = ts.unwrap_or_else(|| "unknown time".into());
+            format!("### {author} ({when})\n\n{body}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -1049,11 +1179,20 @@ async fn connect_nats(
     })
     .await?;
 
+    js.create_key_value(async_nats::jetstream::kv::Config {
+        bucket: buckets::ACTION_RESULTS.to_string(),
+        history: 1,
+        storage: async_nats::jetstream::stream::StorageType::File,
+        max_age: std::time::Duration::from_secs(3600), // 1h TTL safety net
+        ..Default::default()
+    })
+    .await?;
+
     Ok((nats, js))
 }
 
 // ---------------------------------------------------------------------------
-// Helpers: review output parsing
+// Helpers: review result parsing
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -1063,33 +1202,53 @@ enum ReviewResult {
     Escalate,
 }
 
-fn parse_review_output(output: &str) -> anyhow::Result<ReviewResult> {
-    for line in output.lines().rev() {
-        let line = line.trim();
-        if !line.starts_with('{') {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            let decision = v.get("decision").and_then(|d| d.as_str()).unwrap_or("");
-            let feedback = v
-                .get("feedback")
-                .and_then(|f| f.as_str())
-                .map(|s| s.to_string());
+/// Parse a review decision string (from KV) into a ReviewResult.
+fn parse_review_decision(decision: &str, feedback: Option<&str>) -> anyhow::Result<ReviewResult> {
+    match decision {
+        "approved" | "approve" => Ok(ReviewResult::Approved {
+            feedback: feedback.map(String::from),
+        }),
+        "changes_requested" | "request_changes" => Ok(ReviewResult::ChangesRequested {
+            feedback: feedback
+                .map(String::from)
+                .unwrap_or_else(|| "Changes requested".to_string()),
+        }),
+        "escalate" => Ok(ReviewResult::Escalate),
+        _ => Err(anyhow::anyhow!("unknown review decision: {decision}")),
+    }
+}
 
-            return match decision {
-                "approved" | "approve" => Ok(ReviewResult::Approved { feedback }),
-                "changes_requested" | "request_changes" => Ok(ReviewResult::ChangesRequested {
-                    feedback: feedback.unwrap_or_else(|| "Changes requested".to_string()),
-                }),
-                "escalate" => Ok(ReviewResult::Escalate),
-                _ => Err(anyhow::anyhow!("unknown review decision: {decision}")),
-            };
+/// Read the action result from KV (written by Claude via submit_pr / submit_review MCP tool).
+/// Deletes the key after reading so results don't accumulate.
+async fn read_action_result(
+    js: &async_nats::jetstream::Context,
+    job_key: &str,
+) -> Option<ActionResult> {
+    let kv = js
+        .get_key_value(buckets::ACTION_RESULTS)
+        .await
+        .map_err(|e| warn!(job_key, error = %e, "failed to open action_results KV"))
+        .ok()?;
+
+    let entry = kv
+        .get(job_key)
+        .await
+        .map_err(|e| warn!(job_key, error = %e, "failed to read action result from KV"))
+        .ok()?;
+
+    let payload = entry?;
+    let result = serde_json::from_slice(&payload)
+        .map_err(|e| warn!(job_key, error = %e, "failed to deserialize action result"))
+        .ok();
+
+    // Clean up — entry is no longer needed after reading
+    if result.is_some() {
+        if let Err(e) = kv.purge(job_key).await {
+            debug!(job_key, error = %e, "failed to purge action result from KV (non-fatal)");
         }
     }
 
-    Err(anyhow::anyhow!(
-        "no valid review JSON found in subprocess output"
-    ))
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -1206,36 +1365,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_review_output_approved() {
-        let output = r#"Some thinking text...
-{"decision": "approved", "feedback": "Looks good"}
-"#;
-        let result = parse_review_output(output).unwrap();
+    fn parse_review_decision_approved() {
+        let result = parse_review_decision("approved", Some("Looks good")).unwrap();
         assert!(
             matches!(result, ReviewResult::Approved { feedback } if feedback == Some("Looks good".to_string()))
         );
     }
 
     #[test]
-    fn parse_review_output_changes_requested() {
-        let output = r#"{"decision": "changes_requested", "feedback": "Fix the tests"}"#;
-        let result = parse_review_output(output).unwrap();
+    fn parse_review_decision_changes_requested() {
+        let result =
+            parse_review_decision("changes_requested", Some("Fix the tests")).unwrap();
         assert!(
             matches!(result, ReviewResult::ChangesRequested { feedback } if feedback == "Fix the tests")
         );
     }
 
     #[test]
-    fn parse_review_output_escalate() {
-        let output = r#"{"decision": "escalate"}"#;
-        let result = parse_review_output(output).unwrap();
+    fn parse_review_decision_escalate() {
+        let result = parse_review_decision("escalate", None).unwrap();
         assert!(matches!(result, ReviewResult::Escalate));
     }
 
     #[test]
-    fn parse_review_output_no_json() {
-        let output = "just some text with no JSON";
-        assert!(parse_review_output(output).is_err());
+    fn parse_review_decision_unknown() {
+        assert!(parse_review_decision("invalid", None).is_err());
     }
 
     // -----------------------------------------------------------------------

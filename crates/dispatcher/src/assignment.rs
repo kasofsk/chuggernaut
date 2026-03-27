@@ -456,9 +456,18 @@ async fn process_review_decision(
         }
         DecisionType::ChangesRequested { feedback } => {
             // Check rework limit before dispatching rework
-            let rework_count = state.jobs.get(job_key).map(|j| j.rework_count).unwrap_or(0);
+            let (rework_count, effective_limit) = state
+                .jobs
+                .get(job_key)
+                .map(|j| {
+                    (
+                        j.rework_count,
+                        j.rework_limit.unwrap_or(state.config.rework_limit),
+                    )
+                })
+                .unwrap_or((0, state.config.rework_limit));
 
-            if rework_count >= state.config.rework_limit {
+            if rework_count >= effective_limit {
                 // Rework limit exceeded — escalate to human
                 jobs::transition_job(
                     state,
@@ -474,8 +483,7 @@ async fn process_review_decision(
                     Some(job_key),
                     None,
                     Some(&format!(
-                        "rework_count={rework_count}, limit={}",
-                        state.config.rework_limit
+                        "rework_count={rework_count}, limit={effective_limit}",
                     )),
                 )
                 .await;
@@ -778,13 +786,18 @@ async fn handle_ci_check(
         }
         CiStatus::Failure | CiStatus::Error => {
             // Check rework limit before dispatching CI fix
-            let rework_count = state
+            let (rework_count, effective_limit) = state
                 .jobs
                 .get(&event.job_key)
-                .map(|j| j.rework_count)
-                .unwrap_or(0);
+                .map(|j| {
+                    (
+                        j.rework_count,
+                        j.rework_limit.unwrap_or(state.config.rework_limit),
+                    )
+                })
+                .unwrap_or((0, state.config.rework_limit));
 
-            if rework_count >= state.config.rework_limit {
+            if rework_count >= effective_limit {
                 // Rework limit exceeded — escalate
                 jobs::transition_job(
                     state,
@@ -800,8 +813,7 @@ async fn handle_ci_check(
                     Some(&event.job_key),
                     None,
                     Some(&format!(
-                        "CI failed but rework_count={rework_count} >= limit={}",
-                        state.config.rework_limit
+                        "CI failed but rework_count={rework_count} >= limit={effective_limit}",
                     )),
                 )
                 .await;

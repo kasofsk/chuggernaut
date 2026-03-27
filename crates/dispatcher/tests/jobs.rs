@@ -21,6 +21,7 @@ async fn create_job_on_deck() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
     assert_eq!(key, "test.repo.1");
@@ -43,6 +44,7 @@ async fn create_job_on_ice() {
         max_retries: 3,
         initial_state: Some(JobState::OnIce),
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnIce);
@@ -64,6 +66,7 @@ async fn create_job_sequential_keys() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let k1 = jobs::create_job(&state, make()).await.unwrap();
     let k2 = jobs::create_job(&state, make()).await.unwrap();
@@ -89,6 +92,7 @@ async fn create_job_rejects_dots_in_name() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     assert!(jobs::create_job(&state, req).await.is_err());
 }
@@ -113,6 +117,7 @@ async fn deps_blocked_then_unblocked() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
 
     let key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
@@ -146,6 +151,7 @@ async fn diamond_deps_partial_unblock() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
 
     let key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
@@ -198,6 +204,7 @@ async fn invalid_transition_rejected() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -236,6 +243,7 @@ async fn dependency_cycle_rejected() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
 
     // Create A (no deps), B (deps on A)

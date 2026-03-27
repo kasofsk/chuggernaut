@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use chuggernaut_dispatcher::{config, handlers, http, monitor, nats_init, recovery, state};
+use chuggernaut_dispatcher::{config, handlers, http, issue_sync, monitor, nats_init, recovery, state};
 use tracing::info;
 
 #[tokio::main]
@@ -44,6 +44,10 @@ async fn main() -> anyhow::Result<()> {
     // First scan fires after the handlers are ready, so dispatch requests
     // from scan_pending_reviews reach an active assignment task.
     monitor::start(state.clone());
+
+    // Phase 4: Start issue sync background task.
+    // Subscribes to the transitions stream and mirrors job state as git issues.
+    issue_sync::start(state.clone());
 
     // Start HTTP server
     let listen_addr: SocketAddr = config.http_listen.parse()?;
