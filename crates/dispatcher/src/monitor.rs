@@ -4,7 +4,6 @@ use std::time::Duration;
 use chrono::Utc;
 use tracing::{debug, info, warn};
 
-use chuggernaut_forgejo_api::ForgejoClient;
 use chuggernaut_git_provider::GitProvider;
 use chuggernaut_types::*;
 
@@ -262,11 +261,10 @@ async fn scan_ci_status(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
         return Ok(());
     }
 
-    let provider: Box<dyn GitProvider> =
-        match (&state.config.forgejo_url, &state.config.forgejo_token) {
-            (Some(url), Some(token)) => Box::new(ForgejoClient::new(url, token)),
-            _ => return Ok(()), // No git provider config, skip CI check
-        };
+    let provider: Box<dyn GitProvider> = match (&state.config.git_url, &state.config.git_token) {
+        (Some(url), Some(token)) => crate::provider::create_provider(url, token),
+        _ => return Ok(()), // No git provider config, skip CI check
+    };
 
     for (job_key, pr_url, repo) in candidates {
         let job = match state.jobs.get(&job_key) {
@@ -392,27 +390,26 @@ async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<
         })
         .collect();
 
-    let provider: Box<dyn GitProvider> =
-        match (&state.config.forgejo_url, &state.config.forgejo_token) {
-            (Some(url), Some(token)) => Box::new(ForgejoClient::new(url, token)),
-            _ => {
-                // No git provider config — can't check PR state, just dispatch reviews
-                for (job_key, pr_url, _repo, review_level) in candidates {
-                    if let Ok(Some(_)) = kv_get::<ClaimState>(&state.kv.claims, &job_key).await {
-                        continue;
-                    }
-                    crate::assignment::request_dispatch(
-                        state,
-                        crate::state::DispatchRequest::DispatchReview {
-                            job_key,
-                            pr_url,
-                            review_level,
-                        },
-                    );
+    let provider: Box<dyn GitProvider> = match (&state.config.git_url, &state.config.git_token) {
+        (Some(url), Some(token)) => crate::provider::create_provider(url, token),
+        _ => {
+            // No git provider config — can't check PR state, just dispatch reviews
+            for (job_key, pr_url, _repo, review_level) in candidates {
+                if let Ok(Some(_)) = kv_get::<ClaimState>(&state.kv.claims, &job_key).await {
+                    continue;
                 }
-                return Ok(());
+                crate::assignment::request_dispatch(
+                    state,
+                    crate::state::DispatchRequest::DispatchReview {
+                        job_key,
+                        pr_url,
+                        review_level,
+                    },
+                );
             }
-        };
+            return Ok(());
+        }
+    };
 
     for (job_key, pr_url, repo, review_level) in candidates {
         // Only re-trigger if no active claim (review not already in-flight)

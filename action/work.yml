@@ -116,8 +116,8 @@ jobs:
         with:
           job_key: ${{ inputs.job_key }}
           nats_url: ${{ env.NATS_URL }}
-          forgejo_url: ${{ github.server_url }}
-          forgejo_token: ${{ secrets.CHUGGERNAUT_WORKER_TOKEN }}
+          git_url: ${{ github.server_url }}
+          git_token: ${{ secrets.CHUGGERNAUT_WORKER_TOKEN }}
           post_action: yield
           prompt: ${{ steps.prompt.outputs.value }}
           command_args: "${{ steps.job.outputs.claude_args }} --verbose --output-format stream-json --include-partial-messages --allowedTools Bash Read Write Edit Glob Grep Agent mcp__chuggernaut__channel_check mcp__chuggernaut__channel_send mcp__chuggernaut__update_status"

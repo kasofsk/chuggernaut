@@ -10,5 +10,6 @@ pub mod jobs;
 pub mod monitor;
 pub use chuggernaut_nats::NatsClient;
 pub mod nats_init;
+pub mod provider;
 pub mod recovery;
 pub mod state;

@@ -8,6 +8,7 @@ chuggernaut-types = { workspace = true }
 chuggernaut-git-provider = { workspace = true }
 chuggernaut-nats = { workspace = true }
 chuggernaut-forgejo-api = { workspace = true }
+chuggernaut-github-api = { workspace = true }
 anyhow = { workspace = true }
 async-nats = { workspace = true }
 async-stream = { workspace = true }

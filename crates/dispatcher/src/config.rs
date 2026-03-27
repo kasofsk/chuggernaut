@@ -17,8 +17,8 @@ pub struct Config {
     pub monitor_scan_interval_secs: u64,
     pub job_retention_secs: u64,
     pub activity_limit: usize,
-    pub forgejo_url: Option<String>,
-    pub forgejo_token: Option<String>,
+    pub git_url: Option<String>,
+    pub git_token: Option<String>,
     pub action_workflow: String,
     pub action_runner_label: String,
     pub max_concurrent_actions: usize,
@@ -57,8 +57,12 @@ impl Config {
             monitor_scan_interval_secs: parse_env("CHUGGERNAUT_MONITOR_SCAN_INTERVAL_SECS", 10),
             job_retention_secs: parse_env("CHUGGERNAUT_JOB_RETENTION_SECS", 86400),
             activity_limit: parse_env("CHUGGERNAUT_ACTIVITY_LIMIT", 50),
-            forgejo_url: env::var("CHUGGERNAUT_FORGEJO_URL").ok(),
-            forgejo_token: env::var("CHUGGERNAUT_FORGEJO_TOKEN").ok(),
+            git_url: env::var("CHUGGERNAUT_GIT_URL")
+                .or_else(|_| env::var("CHUGGERNAUT_FORGEJO_URL"))
+                .ok(),
+            git_token: env::var("CHUGGERNAUT_GIT_TOKEN")
+                .or_else(|_| env::var("CHUGGERNAUT_FORGEJO_TOKEN"))
+                .ok(),
             action_workflow: env::var("CHUGGERNAUT_ACTION_WORKFLOW")
                 .unwrap_or_else(|_| "work.yml".to_string()),
             action_runner_label: env::var("CHUGGERNAUT_ACTION_RUNNER_LABEL")

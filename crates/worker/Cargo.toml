@@ -11,6 +11,7 @@ path = "src/main.rs"
 chuggernaut-types = { workspace = true }
 chuggernaut-git-provider = { workspace = true }
 chuggernaut-forgejo-api = { workspace = true }
+chuggernaut-github-api = { workspace = true }
 chuggernaut-nats = { workspace = true }
 chuggernaut-channel = { path = "../channel" }
 async-nats = { workspace = true }

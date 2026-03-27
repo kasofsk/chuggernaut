@@ -10,7 +10,6 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use chuggernaut_forgejo_api::ForgejoClient;
 use chuggernaut_git_provider::{
     CreatePullRequest, CreateReview, GitProvider, MergeMethod, MergePullRequest, ReviewEvent,
 };
@@ -68,13 +67,17 @@ struct Args {
     )]
     nats_url: String,
 
-    /// Forgejo base URL
-    #[arg(long, env = "CHUGGERNAUT_FORGEJO_URL")]
-    forgejo_url: String,
+    /// Git provider base URL (e.g. Forgejo instance or https://github.com)
+    #[arg(long = "git-url", alias = "forgejo-url", env = "CHUGGERNAUT_GIT_URL")]
+    git_url: String,
 
-    /// Forgejo API token
-    #[arg(long, env = "CHUGGERNAUT_FORGEJO_TOKEN")]
-    forgejo_token: String,
+    /// Git provider API token
+    #[arg(
+        long = "git-token",
+        alias = "forgejo-token",
+        env = "CHUGGERNAUT_GIT_TOKEN"
+    )]
+    git_token: String,
 
     /// Command to run (e.g. "claude" or a mock script for testing)
     #[arg(long, env = "CHUGGERNAUT_COMMAND", default_value = "claude")]
@@ -147,7 +150,18 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let args = Args::parse();
+    let mut args = Args::parse();
+    // Fall back to legacy CHUGGERNAUT_FORGEJO_* env vars if git_url/git_token are empty
+    if args.git_url.is_empty()
+        && let Ok(v) = std::env::var("CHUGGERNAUT_FORGEJO_URL")
+    {
+        args.git_url = v;
+    }
+    if args.git_token.is_empty()
+        && let Ok(v) = std::env::var("CHUGGERNAUT_FORGEJO_TOKEN")
+    {
+        args.git_token = v;
+    }
     info!(
         job_key = args.job_key,
         command = args.command,
@@ -168,7 +182,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let repo_full = format!("{owner}/{repo}");
 
     let provider: Box<dyn GitProvider> =
-        Box::new(ForgejoClient::new(&args.forgejo_url, &args.forgejo_token));
+        chuggernaut_worker::provider::create_provider(&args.git_url, &args.git_token);
     validate_token(&*provider, owner, repo).await?;
 
     let (nats, _js) = connect_nats(&args.nats_url).await?;
@@ -177,12 +191,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // Clone repo
     let workdir = PathBuf::from(&args.workdir);
     std::fs::create_dir_all(&workdir)?;
-    let repo_dir = chuggernaut_worker::git::clone_repo(
-        &args.forgejo_url,
-        &repo_full,
-        &args.forgejo_token,
-        &workdir,
-    )?;
+    let repo_dir =
+        chuggernaut_worker::git::clone_repo(&args.git_url, &repo_full, &args.git_token, &workdir)?;
 
     // Branch checkout — differs by post-action
     let branch = match args.post_action {
@@ -194,7 +204,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             chuggernaut_worker::git::push(&repo_dir, &b).map_err(|e| {
                 anyhow::anyhow!(
                     "git push auth check failed: {e}\n  \
-                    The CHUGGERNAUT_FORGEJO_TOKEN may be invalid for git HTTP auth"
+                    The CHUGGERNAUT_GIT_TOKEN may be invalid for git HTTP auth"
                 )
             })?;
             info!("git push auth validated");
@@ -989,7 +999,7 @@ async fn validate_token(provider: &dyn GitProvider, owner: &str, repo: &str) -> 
     let r = provider.get_repo(owner, repo).await.map_err(|e| {
         anyhow::anyhow!(
             "Token validation failed for {owner}/{repo}: {e}\n  \
-            Check that CHUGGERNAUT_FORGEJO_TOKEN is set and the token has read:repository scope"
+            Check that CHUGGERNAUT_GIT_TOKEN is set and the token has read:repository scope"
         )
     })?;
 

@@ -3,7 +3,6 @@ use std::sync::Arc;
 use futures::StreamExt;
 use tracing::{info, warn};
 
-use chuggernaut_forgejo_api::ForgejoClient;
 use chuggernaut_git_provider::GitProvider;
 use chuggernaut_types::*;
 
@@ -137,11 +136,10 @@ async fn assign_on_deck_jobs(state: &Arc<DispatcherState>) {
 /// reviews, transition to ChangesRequested. This repairs state corruption
 /// from missed review decisions (e.g. dispatcher was down when decision arrived).
 async fn repair_in_review_jobs(state: &Arc<DispatcherState>) {
-    let provider: Box<dyn GitProvider> =
-        match (&state.config.forgejo_url, &state.config.forgejo_token) {
-            (Some(url), Some(token)) => Box::new(ForgejoClient::new(url, token)),
-            _ => return,
-        };
+    let provider: Box<dyn GitProvider> = match (&state.config.git_url, &state.config.git_token) {
+        (Some(url), Some(token)) => crate::provider::create_provider(url, token),
+        _ => return,
+    };
 
     let candidates: Vec<(String, String, String)> = state
         .jobs

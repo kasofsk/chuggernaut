@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use chuggernaut_forgejo_api::ForgejoClient;
 use chuggernaut_git_provider::{DispatchWorkflow, GitProvider};
 use chuggernaut_types::*;
 
@@ -27,11 +26,11 @@ fn git_provider_context(
     state: &DispatcherState,
     job: &Job,
 ) -> DispatcherResult<(String, String, Box<dyn GitProvider>)> {
-    let (git_url, git_token) = match (&state.config.forgejo_url, &state.config.forgejo_token) {
+    let (git_url, git_token) = match (&state.config.git_url, &state.config.git_token) {
         (Some(url), Some(token)) => (url.clone(), token.clone()),
         _ => {
             return Err(DispatcherError::Validation(
-                "CHUGGERNAUT_FORGEJO_URL and CHUGGERNAUT_FORGEJO_TOKEN required for action dispatch"
+                "CHUGGERNAUT_GIT_URL and CHUGGERNAUT_GIT_TOKEN required for action dispatch"
                     .to_string(),
             ));
         }
@@ -45,7 +44,7 @@ fn git_provider_context(
         )));
     }
 
-    let provider: Box<dyn GitProvider> = Box::new(ForgejoClient::new(&git_url, &git_token));
+    let provider = crate::provider::create_provider(&git_url, &git_token);
 
     Ok((parts[0].to_string(), parts[1].to_string(), provider))
 }
@@ -248,8 +247,8 @@ mod tests {
             monitor_scan_interval_secs: 10,
             job_retention_secs: 86400,
             activity_limit: 50,
-            forgejo_url: None,
-            forgejo_token: None,
+            git_url: None,
+            git_token: None,
             action_workflow: "work.yml".to_string(),
             action_runner_label: "ubuntu-latest".to_string(),
             max_concurrent_actions: 2,

@@ -22,7 +22,7 @@ async fn action_dispatch_creates_claim_and_transitions() {
     // Start Forgejo via test-utils
     let forgejo = test_utils::start_forgejo().await;
     let forgejo_port = test_utils::forgejo_port(&forgejo).await;
-    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+    let git_url = test_utils::forgejo_host_url(forgejo_port);
 
     // Create admin user + token
     let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
@@ -68,8 +68,8 @@ async fn action_dispatch_creates_claim_and_transitions() {
         monitor_scan_interval_secs: 100,
         job_retention_secs: 86400,
         activity_limit: 50,
-        forgejo_url: Some(forgejo_url),
-        forgejo_token: Some(token),
+        git_url: Some(git_url),
+        git_token: Some(token),
         action_workflow: "work.yml".to_string(),
         action_runner_label: "ubuntu-latest".to_string(),
         max_concurrent_actions: 10,
@@ -137,7 +137,7 @@ async fn rework_dispatches_new_action_with_feedback() {
     // Start Forgejo via test-utils
     let forgejo = test_utils::start_forgejo().await;
     let forgejo_port = test_utils::forgejo_port(&forgejo).await;
-    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+    let git_url = test_utils::forgejo_host_url(forgejo_port);
 
     let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
     let token = creds.admin_token;
@@ -180,8 +180,8 @@ async fn rework_dispatches_new_action_with_feedback() {
         monitor_scan_interval_secs: 100,
         job_retention_secs: 86400,
         activity_limit: 50,
-        forgejo_url: Some(forgejo_url),
-        forgejo_token: Some(token),
+        git_url: Some(git_url),
+        git_token: Some(token),
         action_workflow: "work.yml".to_string(),
         action_runner_label: "ubuntu-latest".to_string(),
         max_concurrent_actions: 10,
@@ -337,7 +337,7 @@ async fn dispatch_next_respects_priority() {
 
     let forgejo = test_utils::start_forgejo().await;
     let forgejo_port = test_utils::forgejo_port(&forgejo).await;
-    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+    let git_url = test_utils::forgejo_host_url(forgejo_port);
 
     let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
     let token = creds.admin_token;
@@ -367,8 +367,8 @@ async fn dispatch_next_respects_priority() {
         monitor_scan_interval_secs: 100,
         job_retention_secs: 86400,
         activity_limit: 50,
-        forgejo_url: Some(forgejo_url),
-        forgejo_token: Some(token),
+        git_url: Some(git_url),
+        git_token: Some(token),
         action_workflow: "work.yml".to_string(),
         action_runner_label: "ubuntu-latest".to_string(),
         max_concurrent_actions: 1, // only 1 slot
@@ -440,7 +440,7 @@ async fn dispatch_next_after_yield() {
 
     let forgejo = test_utils::start_forgejo().await;
     let forgejo_port = test_utils::forgejo_port(&forgejo).await;
-    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+    let git_url = test_utils::forgejo_host_url(forgejo_port);
 
     let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
     let token = creds.admin_token;
@@ -482,8 +482,8 @@ async fn dispatch_next_after_yield() {
         monitor_scan_interval_secs: 100,
         job_retention_secs: 86400,
         activity_limit: 50,
-        forgejo_url: Some(forgejo_url),
-        forgejo_token: Some(token),
+        git_url: Some(git_url),
+        git_token: Some(token),
         action_workflow: "work.yml".to_string(),
         action_runner_label: "ubuntu-latest".to_string(),
         max_concurrent_actions: 1, // only 1 slot
@@ -565,7 +565,7 @@ async fn changes_requested_in_dispatch_queue() {
 
     let forgejo = test_utils::start_forgejo().await;
     let forgejo_port = test_utils::forgejo_port(&forgejo).await;
-    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+    let git_url = test_utils::forgejo_host_url(forgejo_port);
 
     let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
     let token = creds.admin_token;
@@ -595,8 +595,8 @@ async fn changes_requested_in_dispatch_queue() {
         monitor_scan_interval_secs: 100,
         job_retention_secs: 86400,
         activity_limit: 50,
-        forgejo_url: Some(forgejo_url),
-        forgejo_token: Some(token),
+        git_url: Some(git_url),
+        git_token: Some(token),
         action_workflow: "work.yml".to_string(),
         action_runner_label: "ubuntu-latest".to_string(),
         max_concurrent_actions: 1,

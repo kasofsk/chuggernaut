@@ -576,8 +576,8 @@ async fn ci_check_ignored_if_not_in_review() {
 async fn action_dispatch_failure_releases_claim() {
     // Use a bad Forgejo URL that will fail immediately
     let state = setup_with_config(|c| {
-        c.forgejo_url = Some("http://127.0.0.1:1".to_string());
-        c.forgejo_token = Some("fake-token".to_string());
+        c.git_url = Some("http://127.0.0.1:1".to_string());
+        c.git_token = Some("fake-token".to_string());
     })
     .await;
 

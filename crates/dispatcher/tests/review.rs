@@ -355,7 +355,7 @@ async fn yield_dispatches_review_action() {
 
     let forgejo = test_utils::start_forgejo().await;
     let forgejo_port = test_utils::forgejo_port(&forgejo).await;
-    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+    let git_url = test_utils::forgejo_host_url(forgejo_port);
 
     let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
     let token = creds.admin_token;
@@ -398,8 +398,8 @@ async fn yield_dispatches_review_action() {
         monitor_scan_interval_secs: 100,
         job_retention_secs: 86400,
         activity_limit: 50,
-        forgejo_url: Some(forgejo_url),
-        forgejo_token: Some(token),
+        git_url: Some(git_url),
+        git_token: Some(token),
         action_workflow: "work.yml".to_string(),
         action_runner_label: "ubuntu-latest".to_string(),
         max_concurrent_actions: 10,

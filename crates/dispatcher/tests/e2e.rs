@@ -19,7 +19,7 @@ async fn action_runner_publishes_outcome_to_nats() {
     // Start Forgejo via test-utils
     let forgejo = test_utils::start_forgejo().await;
     let forgejo_port = test_utils::forgejo_port(&forgejo).await;
-    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+    let git_url = test_utils::forgejo_host_url(forgejo_port);
     let forgejo_internal_url = test_utils::forgejo_internal_url(forgejo_port);
 
     // Create admin + token
@@ -143,7 +143,7 @@ jobs:
         .unwrap();
 
     // Dispatch the workflow
-    let forgejo_client = chuggernaut_forgejo_api::ForgejoClient::new(&forgejo_url, &token);
+    let forgejo_client = chuggernaut_forgejo_api::ForgejoClient::new(&git_url, &token);
     let dispatch_result = forgejo_client
         .dispatch_workflow(
             org,
@@ -296,7 +296,7 @@ async fn e2e_full_action_pipeline() {
     // Start Forgejo via test-utils
     let forgejo = test_utils::start_forgejo().await;
     let forgejo_port = test_utils::forgejo_port(&forgejo).await;
-    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+    let git_url = test_utils::forgejo_host_url(forgejo_port);
     let forgejo_internal_url = test_utils::forgejo_internal_url(forgejo_port);
 
     // Create admin + token
@@ -392,7 +392,7 @@ jobs:
     // Check if runner registered
     let http = reqwest::Client::new();
     let runners_resp = http
-        .get(format!("{forgejo_url}/api/v1/admin/runners"))
+        .get(format!("{git_url}/api/v1/admin/runners"))
         .header("Authorization", format!("token {token}"))
         .send()
         .await
@@ -415,8 +415,8 @@ jobs:
         monitor_scan_interval_secs: 5,
         job_retention_secs: 86400,
         activity_limit: 50,
-        forgejo_url: Some(forgejo_url.clone()),
-        forgejo_token: Some(token.clone()),
+        git_url: Some(git_url.clone()),
+        git_token: Some(token.clone()),
         action_workflow: "work.yml".to_string(),
         action_runner_label: "ubuntu-latest".to_string(),
         max_concurrent_actions: 10,
@@ -472,9 +472,7 @@ jobs:
     // Check action runs after a short delay
     tokio::time::sleep(Duration::from_secs(5)).await;
     let runs_resp = http
-        .get(format!(
-            "{forgejo_url}/api/v1/repos/{org}/repo/actions/runs"
-        ))
+        .get(format!("{git_url}/api/v1/repos/{org}/repo/actions/runs"))
         .header("Authorization", format!("token {token}"))
         .send()
         .await
@@ -491,9 +489,7 @@ jobs:
             let job_state = state.jobs.get(&key).unwrap().state;
             // Check action run status before panicking
             let runs_resp = http
-                .get(format!(
-                    "{forgejo_url}/api/v1/repos/{org}/repo/actions/runs"
-                ))
+                .get(format!("{git_url}/api/v1/repos/{org}/repo/actions/runs"))
                 .header("Authorization", format!("token {token}"))
                 .send()
                 .await
@@ -557,7 +553,7 @@ async fn e2e_full_review_cycle() {
 
     let forgejo = test_utils::start_forgejo().await;
     let forgejo_port = test_utils::forgejo_port(&forgejo).await;
-    let forgejo_url = test_utils::forgejo_host_url(forgejo_port);
+    let git_url = test_utils::forgejo_host_url(forgejo_port);
     let forgejo_internal_url = test_utils::forgejo_internal_url(forgejo_port);
 
     let creds = test_utils::setup_forgejo_users(&forgejo, forgejo_port, false).await;
@@ -654,8 +650,8 @@ jobs:
         monitor_scan_interval_secs: 5,
         job_retention_secs: 86400,
         activity_limit: 50,
-        forgejo_url: Some(forgejo_url.clone()),
-        forgejo_token: Some(token.clone()),
+        git_url: Some(git_url.clone()),
+        git_token: Some(token.clone()),
         action_workflow: "work.yml".to_string(),
         action_runner_label: "ubuntu-latest".to_string(),
         max_concurrent_actions: 10,
