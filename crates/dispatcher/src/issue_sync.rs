@@ -255,12 +255,12 @@ async fn sync_issue(
 }
 
 fn render_issue_body(job: &Job) -> String {
-    let state_str = serde_json::to_value(&job.state)
+    let state_str = serde_json::to_value(job.state)
         .ok()
         .and_then(|v| v.as_str().map(String::from))
         .unwrap_or_else(|| format!("{:?}", job.state));
 
-    let review_str = serde_json::to_value(&job.review)
+    let review_str = serde_json::to_value(job.review)
         .ok()
         .and_then(|v| v.as_str().map(String::from))
         .unwrap_or_else(|| format!("{:?}", job.review));

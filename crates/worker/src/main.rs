@@ -1242,10 +1242,10 @@ async fn read_action_result(
         .ok();
 
     // Clean up — entry is no longer needed after reading
-    if result.is_some() {
-        if let Err(e) = kv.purge(job_key).await {
-            debug!(job_key, error = %e, "failed to purge action result from KV (non-fatal)");
-        }
+    if result.is_some()
+        && let Err(e) = kv.purge(job_key).await
+    {
+        debug!(job_key, error = %e, "failed to purge action result from KV (non-fatal)");
     }
 
     result
