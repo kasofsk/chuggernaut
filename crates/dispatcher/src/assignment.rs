@@ -574,28 +574,39 @@ async fn handle_lease_expired(
             return Ok(());
         }
 
+        // Reviewing jobs go back to InReview so the monitor can re-dispatch.
+        // Work jobs (OnTheStack) go to Failed for retry.
+        let current_state = state.jobs.get(&event.job_key).map(|j| j.state);
+        let (target_state, trigger) = if current_state == Some(JobState::Reviewing) {
+            (JobState::InReview, "review_lease_expired")
+        } else {
+            (JobState::Failed, "lease_expired")
+        };
+
         info!(
             job_key = event.job_key,
             worker_id = event.worker_id,
-            "lease expired, failing job"
+            ?target_state,
+            "lease expired, transitioning job"
         );
-        // Transition to Failed (auto-releases the claim)
         jobs::transition_job(
             state,
             &event.job_key,
-            JobState::Failed,
-            "lease_expired",
+            target_state,
+            trigger,
             Some(&event.worker_id),
         )
         .await?;
         let entry = ActivityEntry {
             timestamp: Utc::now(),
-            kind: "lease_expired".to_string(),
+            kind: trigger.to_string(),
             message: format!("Worker {} lease expired", event.worker_id),
         };
         jobs::append_activity(state, &event.job_key, entry).await;
 
-        schedule_auto_retry(state, &event.job_key).await;
+        if target_state == JobState::Failed {
+            schedule_auto_retry(state, &event.job_key).await;
+        }
 
         // Slot freed
         dispatch_next(state).await?;
@@ -620,23 +631,32 @@ async fn handle_job_timeout(
                 return Ok(());
             }
 
+            // Reviewing jobs go back to InReview so the monitor can re-dispatch.
+            // Work jobs (OnTheStack) go to Failed for retry.
+            let current_state = state.jobs.get(&event.job_key).map(|j| j.state);
+            let (target_state, trigger) = if current_state == Some(JobState::Reviewing) {
+                (JobState::InReview, "review_timeout")
+            } else {
+                (JobState::Failed, "job_timeout")
+            };
+
             info!(
                 job_key = event.job_key,
                 worker_id = event.worker_id,
-                "job timeout, failing job"
+                ?target_state,
+                "job timeout, transitioning job"
             );
-            // Transition to Failed (auto-releases the claim)
             jobs::transition_job(
                 state,
                 &event.job_key,
-                JobState::Failed,
-                "job_timeout",
+                target_state,
+                trigger,
                 Some(&event.worker_id),
             )
             .await?;
             let entry = ActivityEntry {
                 timestamp: Utc::now(),
-                kind: "job_timeout".to_string(),
+                kind: trigger.to_string(),
                 message: format!(
                     "Job timed out after {}s (limit: {}s)",
                     elapsed, claim.timeout_secs
@@ -644,7 +664,9 @@ async fn handle_job_timeout(
             };
             jobs::append_activity(state, &event.job_key, entry).await;
 
-            schedule_auto_retry(state, &event.job_key).await;
+            if target_state == JobState::Failed {
+                schedule_auto_retry(state, &event.job_key).await;
+            }
 
             // Slot freed
             dispatch_next(state).await?;
