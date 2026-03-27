@@ -12,7 +12,7 @@ use chuggernaut_channel::{
     ChannelState, handle_message, handle_tool_call, mcp, nats_inbox_listener,
 };
 use chuggernaut_test_utils as test_utils;
-use chuggernaut_types::{ChannelMessage, ChannelStatus};
+use chuggernaut_types::{ActionResult, ChannelMessage, ChannelStatus};
 
 // ---------------------------------------------------------------------------
 // Shared NATS container
@@ -47,6 +47,15 @@ async fn setup_js(nats: &async_nats::Client) -> async_nats::jetstream::Context {
     // Ensure channels KV bucket exists (idempotent)
     js.create_key_value(async_nats::jetstream::kv::Config {
         bucket: chuggernaut_types::buckets::CHANNELS.to_string(),
+        history: 1,
+        storage: async_nats::jetstream::stream::StorageType::File,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    // Ensure action_results KV bucket exists (idempotent)
+    js.create_key_value(async_nats::jetstream::kv::Config {
+        bucket: chuggernaut_types::buckets::ACTION_RESULTS.to_string(),
         history: 1,
         storage: async_nats::jetstream::stream::StorageType::File,
         ..Default::default()
@@ -149,6 +158,9 @@ async fn mcp_tools_list_channel_mode() {
 
     assert!(names.contains(&"reply"));
     assert!(names.contains(&"update_status"));
+    assert!(names.contains(&"submit_pr"));
+    assert!(names.contains(&"submit_changes"));
+    assert!(names.contains(&"submit_review"));
     assert!(!names.contains(&"channel_check"));
 }
 
@@ -175,6 +187,9 @@ async fn mcp_tools_list_mcp_mode() {
     assert!(names.contains(&"channel_check"));
     assert!(names.contains(&"channel_send"));
     assert!(names.contains(&"update_status"));
+    assert!(names.contains(&"submit_pr"));
+    assert!(names.contains(&"submit_changes"));
+    assert!(names.contains(&"submit_review"));
     assert!(!names.contains(&"reply"));
 }
 
@@ -447,6 +462,190 @@ async fn update_status_without_progress() {
     let entry = kv.entry(&job_key).await.unwrap().unwrap();
     let status: ChannelStatus = serde_json::from_slice(&entry.value).unwrap();
     assert!(status.progress.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Tool: submit_pr (writes ActionResult::Pr to KV)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn submit_pr_writes_kv() {
+    let nats = nats_client().await;
+    let js = setup_js(&nats).await;
+    let state = Arc::new(Mutex::new(ChannelState::new()));
+    let job_key = unique_job_key();
+
+    let result = handle_tool_call(
+        "submit_pr",
+        &serde_json::json!({
+            "title": "Add user auth",
+            "body": "## Changes\n- Added JWT validation"
+        }),
+        &state,
+        &nats,
+        &js,
+        &job_key,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("submitted")
+    );
+
+    // Verify KV entry
+    let kv = js
+        .get_key_value(chuggernaut_types::buckets::ACTION_RESULTS)
+        .await
+        .unwrap();
+    let entry = kv.get(&job_key).await.unwrap().unwrap();
+    let parsed: ActionResult = serde_json::from_slice(&entry).unwrap();
+    match parsed {
+        ActionResult::Pr { title, body } => {
+            assert_eq!(title, "Add user auth");
+            assert_eq!(body, "## Changes\n- Added JWT validation");
+        }
+        _ => panic!("expected Pr variant"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool: submit_changes (writes ActionResult::Changes to KV)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn submit_changes_writes_kv() {
+    let nats = nats_client().await;
+    let js = setup_js(&nats).await;
+    let state = Arc::new(Mutex::new(ChannelState::new()));
+    let job_key = unique_job_key();
+
+    let result = handle_tool_call(
+        "submit_changes",
+        &serde_json::json!({
+            "summary": "Fixed error handling per reviewer feedback"
+        }),
+        &state,
+        &nats,
+        &js,
+        &job_key,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("submitted")
+    );
+
+    let kv = js
+        .get_key_value(chuggernaut_types::buckets::ACTION_RESULTS)
+        .await
+        .unwrap();
+    let entry = kv.get(&job_key).await.unwrap().unwrap();
+    let parsed: ActionResult = serde_json::from_slice(&entry).unwrap();
+    match parsed {
+        ActionResult::Changes { summary } => {
+            assert_eq!(summary, "Fixed error handling per reviewer feedback");
+        }
+        _ => panic!("expected Changes variant"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool: submit_review (writes ActionResult::Review to KV)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn submit_review_writes_kv() {
+    let nats = nats_client().await;
+    let js = setup_js(&nats).await;
+    let state = Arc::new(Mutex::new(ChannelState::new()));
+    let job_key = unique_job_key();
+
+    let result = handle_tool_call(
+        "submit_review",
+        &serde_json::json!({
+            "decision": "changes_requested",
+            "feedback": "Missing error handling in auth middleware"
+        }),
+        &state,
+        &nats,
+        &js,
+        &job_key,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("submitted")
+    );
+
+    // Verify KV entry
+    let kv = js
+        .get_key_value(chuggernaut_types::buckets::ACTION_RESULTS)
+        .await
+        .unwrap();
+    let entry = kv.get(&job_key).await.unwrap().unwrap();
+    let parsed: ActionResult = serde_json::from_slice(&entry).unwrap();
+    match parsed {
+        ActionResult::Review { decision, feedback } => {
+            assert_eq!(decision, "changes_requested");
+            assert_eq!(
+                feedback.unwrap(),
+                "Missing error handling in auth middleware"
+            );
+        }
+        _ => panic!("expected Review variant"),
+    }
+}
+
+#[tokio::test]
+async fn submit_review_approved_without_feedback() {
+    let nats = nats_client().await;
+    let js = setup_js(&nats).await;
+    let state = Arc::new(Mutex::new(ChannelState::new()));
+    let job_key = unique_job_key();
+
+    let result = handle_tool_call(
+        "submit_review",
+        &serde_json::json!({"decision": "approved"}),
+        &state,
+        &nats,
+        &js,
+        &job_key,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("submitted")
+    );
+
+    let kv = js
+        .get_key_value(chuggernaut_types::buckets::ACTION_RESULTS)
+        .await
+        .unwrap();
+    let entry = kv.get(&job_key).await.unwrap().unwrap();
+    let parsed: ActionResult = serde_json::from_slice(&entry).unwrap();
+    match parsed {
+        ActionResult::Review { decision, feedback } => {
+            assert_eq!(decision, "approved");
+            assert!(feedback.is_none());
+        }
+        _ => panic!("expected Review variant"),
+    }
 }
 
 // ---------------------------------------------------------------------------

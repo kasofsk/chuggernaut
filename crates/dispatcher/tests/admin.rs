@@ -23,6 +23,7 @@ async fn admin_close_unblocks_dependents() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
 
     let key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
@@ -64,6 +65,7 @@ async fn admin_revoke_keeps_dependents_blocked() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
 
     let key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
@@ -106,6 +108,7 @@ async fn admin_requeue_from_failed() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -180,6 +183,7 @@ async fn requeue_from_failed_to_on_ice() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -244,6 +248,7 @@ async fn thaw_from_on_ice_via_requeue() {
         max_retries: 3,
         initial_state: Some(JobState::OnIce),
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnIce);

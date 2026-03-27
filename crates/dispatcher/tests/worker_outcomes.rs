@@ -23,6 +23,7 @@ async fn worker_yield_to_in_review() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -84,6 +85,7 @@ async fn worker_fail_schedules_retry() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -146,6 +148,7 @@ async fn heartbeat_renews_lease() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -214,6 +217,7 @@ async fn partial_yield_dispatches_continuation() {
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -300,6 +304,7 @@ async fn partial_yield_max_continuations_proceeds_to_review() {
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -377,6 +382,7 @@ async fn ci_failure_triggers_changes_requested() {
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -474,6 +480,7 @@ async fn ci_error_triggers_changes_requested() {
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -545,6 +552,7 @@ async fn ci_check_ignored_if_not_in_review() {
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
     // Job is in OnDeck state
@@ -594,6 +602,7 @@ async fn action_dispatch_failure_releases_claim() {
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -634,6 +643,7 @@ async fn heartbeat_from_wrong_worker_ignored() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -699,6 +709,7 @@ async fn rework_limit_escalates_when_exceeded() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -828,6 +839,7 @@ async fn nil_token_usage_not_appended() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -881,6 +893,7 @@ async fn concurrent_heartbeats_benign() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -946,6 +959,7 @@ async fn duplicate_outcome_handled() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 

@@ -4,13 +4,15 @@
 # Build: docker build -t chuggernaut-runner-env:flutter -f Dockerfile.runner-env.flutter .
 # Register runner with label: "flutter:docker://chuggernaut-runner-env:flutter"
 # Configure dispatcher: CHUGGERNAUT_RUNNER_LABEL_MAP='{"flutter":"flutter"}'
+#
+# The Flutter/Android SDKs are built in a separate stage so they stay cached
+# even when the base runner-env image is rebuilt (e.g. for worker binary changes).
 
-FROM chuggernaut-runner-env:latest
+# --- Stage 1: download and prepare Flutter + Android SDKs (cached independently) ---
+FROM debian:bookworm-slim AS flutter-sdk
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    clang cmake ninja-build pkg-config \
-    openjdk-17-jdk-headless \
-    libgtk-3-dev \
+    git ca-certificates curl unzip openjdk-17-jdk-headless \
   && rm -rf /var/lib/apt/lists/*
 
 # Flutter SDK
@@ -30,5 +32,22 @@ RUN mkdir -p ${ANDROID_HOME}/cmdline-tools \
  && rm /tmp/cmdline.zip \
  && yes | sdkmanager --licenses > /dev/null 2>&1 \
  && sdkmanager "build-tools;34.0.0" "platforms;android-34" "platform-tools"
+
+# --- Stage 2: combine base runner-env with cached SDKs ---
+FROM chuggernaut-runner-env:latest
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang cmake ninja-build pkg-config \
+    openjdk-17-jdk-headless \
+    libgtk-3-dev \
+  && rm -rf /var/lib/apt/lists/*
+
+# Copy pre-built SDKs from the cache stage
+COPY --from=flutter-sdk /opt/flutter /opt/flutter
+COPY --from=flutter-sdk /opt/android-sdk /opt/android-sdk
+
+ENV FLUTTER_ROOT=/opt/flutter
+ENV ANDROID_HOME=/opt/android-sdk
+ENV PATH="${FLUTTER_ROOT}/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}"
 
 RUN flutter doctor

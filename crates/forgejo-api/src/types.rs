@@ -106,6 +106,49 @@ pub struct PullReviewRequestOptions {
 }
 
 // ---------------------------------------------------------------------------
+// Issues
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Issue {
+    pub number: u64,
+    pub title: String,
+    pub body: Option<String>,
+    pub state: String,
+    pub html_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateIssueOption {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EditIssueOption {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Comments
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IssueComment {
+    pub id: u64,
+    #[serde(default)]
+    pub body: String,
+    pub user: Option<ReviewUser>,
+    pub created_at: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Commit Status
 // ---------------------------------------------------------------------------
 

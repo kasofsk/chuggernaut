@@ -138,6 +138,24 @@ fn api_specs() -> Vec<RouteSpec> {
         },
         RouteSpec {
             method: "POST",
+            path: "/jobs/{key}/retry-rework",
+            summary: "Retry rework on an escalated job (increases per-job rework limit)",
+            params: Some(key_param()),
+            query: None,
+            request: None,
+            request_inline: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "extra": { "type": "integer", "description": "Additional rework attempts to grant (default: 1). Mutually exclusive with limit." },
+                    "limit": { "type": "integer", "description": "Set per-job rework limit to this absolute value. Mutually exclusive with extra." }
+                }
+            })),
+            response: None,
+            status: None,
+            sse_events: None,
+        },
+        RouteSpec {
+            method: "POST",
             path: "/jobs/{key}/channel/send",
             summary: "Send a channel message to a running worker",
             params: Some(key_param()),
@@ -232,6 +250,7 @@ mod tests {
             ("GET", "/jobs/{key}/deps"),
             ("POST", "/jobs/{key}/requeue"),
             ("POST", "/jobs/{key}/close"),
+            ("POST", "/jobs/{key}/retry-rework"),
             ("POST", "/jobs/{key}/channel/send"),
             ("GET", "/journal"),
             ("GET", "/events"),
@@ -316,6 +335,7 @@ pub fn router(state: AppState) -> Router {
         .route("/jobs/{key}/deps", get(get_job_deps))
         .route("/jobs/{key}/requeue", post(requeue_job))
         .route("/jobs/{key}/close", post(close_job))
+        .route("/jobs/{key}/retry-rework", post(retry_rework))
         .route("/jobs/{key}/channel/send", post(channel_send))
         .route("/journal", get(list_journal))
         .route("/events", get(sse_events))
@@ -372,6 +392,16 @@ struct RequeueBody {
 struct CloseBody {
     #[serde(default)]
     revoke: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RetryReworkBody {
+    /// Additional rework attempts to grant on top of current count (default: 1).
+    /// Mutually exclusive with `limit`.
+    extra: Option<u32>,
+    /// Set the per-job rework limit to this absolute value.
+    /// Mutually exclusive with `extra`.
+    limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -575,6 +605,126 @@ async fn close_job(
     }
 
     Ok(StatusCode::OK)
+}
+
+// ---------------------------------------------------------------------------
+// Retry rework endpoint
+// ---------------------------------------------------------------------------
+
+async fn retry_rework(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    Json(body): Json<RetryReworkBody>,
+) -> Result<impl IntoResponse, AppError> {
+    let job = match state.jobs.get(&key) {
+        Some(j) => j.clone(),
+        None => return Err(AppError::NotFound(format!("job not found: {key}"))),
+    };
+
+    if job.state.is_terminal() {
+        return Err(AppError::BadRequest(format!(
+            "job {key} is in terminal state {:?}",
+            job.state
+        )));
+    }
+
+    if body.extra.is_some() && body.limit.is_some() {
+        return Err(AppError::BadRequest(
+            "provide either 'extra' or 'limit', not both".to_string(),
+        ));
+    }
+
+    let new_limit = if let Some(limit) = body.limit {
+        limit
+    } else {
+        let extra = body.extra.unwrap_or(1);
+        job.rework_count + extra
+    };
+
+    // Set the per-job rework_limit
+    let (updated, _) = crate::jobs::kv_cas_rmw::<Job, _>(
+        &state.kv.jobs,
+        &key,
+        state.config.cas_max_retries,
+        |j| {
+            j.rework_limit = Some(new_limit);
+            j.updated_at = chrono::Utc::now();
+            Ok(())
+        },
+    )
+    .await?;
+    state.jobs.insert(key.clone(), updated);
+
+    // Only un-escalate and dispatch rework if the job is Escalated and the
+    // new limit gives room for more attempts. For non-escalated jobs this
+    // is purely a limit update — no state change.
+    let dispatched = if job.state == JobState::Escalated && new_limit > job.rework_count {
+        crate::jobs::transition_job(
+            &state,
+            &key,
+            JobState::ChangesRequested,
+            "admin_retry_rework",
+            None,
+        )
+        .await?;
+
+        let feedback = if let Some(ref pr_url) = job.pr_url {
+            format!(
+                "A human has reviewed the escalation and is giving you another chance. \
+                 Continue working on the PR at {pr_url}. Review the previous feedback and \
+                 make the necessary changes."
+            )
+        } else {
+            "A human has reviewed the escalation and is giving you another chance. \
+             Review the previous feedback and make the necessary changes."
+                .to_string()
+        };
+
+        crate::assignment::request_dispatch(
+            &state,
+            crate::state::DispatchRequest::AssignRework {
+                job_key: key.clone(),
+                feedback,
+            },
+        );
+        true
+    } else {
+        false
+    };
+
+    let action = if dispatched {
+        "re-dispatching rework"
+    } else if job.state == JobState::Escalated {
+        "job stays escalated (limit <= rework_count)"
+    } else {
+        "limit updated"
+    };
+
+    let entry = ActivityEntry {
+        timestamp: chrono::Utc::now(),
+        kind: "rework_limit".to_string(),
+        message: format!("Rework limit set to {new_limit}, {action}"),
+    };
+    crate::jobs::append_activity(&state, &key, entry).await;
+
+    crate::jobs::journal_append(
+        &state,
+        "rework_limit",
+        Some(&key),
+        None,
+        Some(&format!(
+            "rework_limit set to {new_limit} (was {:?}), {action}",
+            job.rework_limit
+        )),
+    )
+    .await;
+
+    Ok(Json(serde_json::json!({
+        "key": key,
+        "rework_count": job.rework_count,
+        "rework_limit": new_limit,
+        "dispatched": dispatched,
+    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -933,6 +1083,7 @@ async fn get_api_manifest() -> impl IntoResponse {
 
 enum AppError {
     NotFound(String),
+    BadRequest(String),
     Internal(DispatcherError),
 }
 
@@ -950,6 +1101,9 @@ impl IntoResponse for AppError {
         match self {
             AppError::NotFound(msg) => {
                 (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg })).into_response()
+            }
+            AppError::BadRequest(msg) => {
+                (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: msg })).into_response()
             }
             AppError::Internal(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,

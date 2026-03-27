@@ -16,6 +16,7 @@ pub struct KvStores {
     pub activities: kv::Store,
     pub journal: kv::Store,
     pub channels: kv::Store,
+    pub issue_map: kv::Store,
 }
 
 /// Create or verify all KV buckets and JetStream streams.
@@ -103,6 +104,15 @@ pub async fn initialize_with_prefix(
         })
         .await?;
 
+    let issue_map = js
+        .create_key_value(kv::Config {
+            bucket: name(chuggernaut_types::buckets::ISSUE_MAP),
+            history: 1,
+            storage: StorageType::File,
+            ..Default::default()
+        })
+        .await?;
+
     // JetStream streams — prefix both name and subjects
     let (trans_name, trans_subjects) = match prefix {
         Some(p) => (
@@ -154,5 +164,6 @@ pub async fn initialize_with_prefix(
         activities,
         journal,
         channels,
+        issue_map,
     })
 }

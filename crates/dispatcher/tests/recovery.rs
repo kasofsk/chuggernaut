@@ -22,6 +22,7 @@ async fn recovery_rebuilds_state() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key1 = jobs::create_job(&state, make("A", vec![])).await.unwrap();
     let key2 = jobs::create_job(&state, make("B", vec![1])).await.unwrap();
@@ -61,6 +62,7 @@ async fn recovery_cleans_stale_claims() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
     assert_eq!(state.jobs.get(&key).unwrap().state, JobState::OnDeck);
@@ -117,6 +119,7 @@ async fn recovery_fails_claimless_on_the_stack() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -160,6 +163,7 @@ async fn recovery_repairs_reverse_deps() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
     let key_b = jobs::create_job(&state, make("B", vec![1])).await.unwrap();

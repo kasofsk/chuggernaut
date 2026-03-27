@@ -23,6 +23,7 @@ async fn review_approved_completes_job_and_unblocks_deps() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
 
     // A (no deps) → B depends on A
@@ -99,6 +100,7 @@ async fn review_changes_requested_transitions_job() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -178,6 +180,7 @@ async fn escalated_review_transitions_job() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -249,6 +252,7 @@ async fn escalated_then_approved_via_close() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -304,6 +308,7 @@ async fn escalated_then_changes_requested() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -436,6 +441,7 @@ async fn yield_dispatches_review_action() {
         max_retries: 0,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -544,6 +550,7 @@ async fn token_usage_accumulated_from_work_and_review() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -655,6 +662,7 @@ async fn token_usage_across_rework_cycle() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 

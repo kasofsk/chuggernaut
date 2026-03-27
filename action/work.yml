@@ -26,6 +26,11 @@ on:
         required: false
         type: string
         default: "false"
+      pr_url:
+        description: "PR URL (passed during rework for conversation history)"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   work:
@@ -61,7 +66,50 @@ jobs:
           IS_REWORK: ${{ inputs.is_rework }}
           REVIEW_FEEDBACK: ${{ inputs.review_feedback }}
         run: |
-          cat > /tmp/prompt.md <<'PROMPT_EOF'
+          if [ "$IS_REWORK" = "true" ] && [ -n "$REVIEW_FEEDBACK" ]; then
+            # --- Rework prompt ---
+            cat > /tmp/prompt.md <<'PROMPT_EOF'
+          You are reworking a previously-reviewed job in this repository. A PR already exists.
+
+          ## Instructions
+
+          1. Read the **PR Conversation History** section at the end of this prompt (if present) to understand the full review discussion and what has already been addressed.
+          2. Read the reviewer's feedback below carefully.
+          3. Explore the codebase to understand the relevant code and what was already done.
+          4. Address each point in the feedback.
+          5. Make sure your changes are correct and complete.
+          5. Do NOT create a PR or commit — just make the changes to the working tree.
+          6. **REQUIRED**: When you are done, you MUST call **submit_changes** with a markdown summary of what you changed in response to the feedback. This will be posted as a comment on the existing PR.
+
+          ## Communication
+
+          You have access to a chuggernaut MCP server with these tools:
+          - **update_status**: Report your current progress. Call this after completing each major step.
+          - **channel_send**: Send a message back to the orchestrator.
+          - **channel_check**: Call this periodically to check for messages from the orchestrator.
+          - **submit_changes** (**REQUIRED**): You MUST call this exactly once before you finish. Provide a markdown summary describing what you changed and why. This is the sole mechanism for reporting your rework — if you do not call it, the rework will not be recorded on the PR.
+
+          IMPORTANT: Your very first action must be to call update_status with status "starting" and progress 0. Then proceed with the rework.
+
+          If you receive a DEADLINE WARNING, wrap up immediately: commit and push your progress, then call submit_changes with what you accomplished so far.
+          PROMPT_EOF
+
+            {
+              echo "You are reworking job ${JOB_KEY} in this repository."
+              echo ""
+              echo "## Original task: ${JOB_TITLE}"
+              echo ""
+              echo "${JOB_BODY}"
+              echo ""
+              echo "## Reviewer feedback"
+              echo ""
+              echo "${REVIEW_FEEDBACK}"
+              echo ""
+              cat /tmp/prompt.md
+            } > /tmp/full-prompt.md
+          else
+            # --- Initial work prompt ---
+            cat > /tmp/prompt.md <<'PROMPT_EOF'
           You are working on a job in this repository.
 
           ## Instructions
@@ -71,6 +119,7 @@ jobs:
           3. Implement the requested changes.
           4. Make sure your changes are correct and complete.
           5. Do NOT create a PR or commit — just make the changes to the working tree.
+          6. **REQUIRED**: When you are done, you MUST call **submit_pr** with a descriptive title and a markdown body explaining what you changed and why. Your work will not be submitted without this step.
 
           ## Communication
 
@@ -78,32 +127,22 @@ jobs:
           - **update_status**: Report your current progress. Call this after completing each major step (e.g. "exploring codebase", "implementing feature", "running tests"). Include a progress percentage if you can estimate one.
           - **channel_send**: Send a message back to the orchestrator (e.g. to reply to a status request).
           - **channel_check**: Call this periodically (every few major steps) to check for messages from the orchestrator. If someone requests a status update, respond via channel_send.
+          - **submit_pr** (**REQUIRED**): You MUST call this exactly once before you finish. Provide a short descriptive title and a markdown body summarizing your changes. This is the sole mechanism for submitting your PR metadata — if you do not call it, the PR will have no title or description.
 
           IMPORTANT: Your very first action must be to call update_status with status "starting" and progress 0. This confirms the communication channel is working. Then proceed with the task.
 
-          If you receive a DEADLINE WARNING, wrap up immediately: commit and push your progress.
+          If you receive a DEADLINE WARNING, wrap up immediately: commit and push your progress, then call submit_pr with what you accomplished so far.
           PROMPT_EOF
 
-          # Prepend dynamic content (safe from shell expansion)
-          {
-            echo "You are working on job ${JOB_KEY} in this repository."
-            echo ""
-            echo "## ${JOB_TITLE}"
-            echo ""
-            echo "${JOB_BODY}"
-            echo ""
-            cat /tmp/prompt.md
-          } > /tmp/full-prompt.md
-
-          if [ "$IS_REWORK" = "true" ] && [ -n "$REVIEW_FEEDBACK" ]; then
             {
+              echo "You are working on job ${JOB_KEY} in this repository."
               echo ""
-              echo "## Rework"
+              echo "## ${JOB_TITLE}"
               echo ""
-              echo "A reviewer has requested changes. Address the following feedback:"
+              echo "${JOB_BODY}"
               echo ""
-              echo "$REVIEW_FEEDBACK"
-            } >> /tmp/full-prompt.md
+              cat /tmp/prompt.md
+            } > /tmp/full-prompt.md
           fi
 
           {
@@ -120,12 +159,12 @@ jobs:
             --job-key "${{ inputs.job_key }}" \
             --nats-url "$NATS_URL" \
             --git-url "${{ github.server_url }}" \
-            --pr-url "" \
+            --pr-url "${{ inputs.pr_url }}" \
             --review-level "high"
         env:
           CHUGGERNAUT_GIT_TOKEN: ${{ secrets.CHUGGERNAUT_WORKER_TOKEN }}
           CHUGGERNAUT_COMMAND: claude
-          CHUGGERNAUT_COMMAND_ARGS: "${{ steps.job.outputs.claude_args }} --verbose --output-format stream-json --include-partial-messages --allowedTools Bash Read Write Edit Glob Grep Agent mcp__chuggernaut__channel_check mcp__chuggernaut__channel_send mcp__chuggernaut__update_status"
+          CHUGGERNAUT_COMMAND_ARGS: "${{ steps.job.outputs.claude_args }} --verbose --output-format stream-json --include-partial-messages --allowedTools Bash Read Write Edit Glob Grep Agent mcp__chuggernaut__channel_check mcp__chuggernaut__channel_send mcp__chuggernaut__update_status mcp__chuggernaut__submit_pr mcp__chuggernaut__submit_changes"
           CHUGGERNAUT_TIMEOUT_MINUTES: "60"
           CHUGGERNAUT_PROMPT: ${{ steps.prompt.outputs.value }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

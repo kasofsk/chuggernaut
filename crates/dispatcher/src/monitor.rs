@@ -444,7 +444,10 @@ async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<
                 continue;
             }
 
-            // Check if PR has REQUEST_CHANGES reviews (missed review decision)
+            // Check if PR has REQUEST_CHANGES reviews (missed review decision).
+            // Only act on reviews submitted after the job entered InReview
+            // (ci_check_since) to avoid re-processing stale reviews from
+            // previous rework cycles.
             if let Ok(reviews) = provider.list_reviews(parts[0], parts[1], pr_index).await
                 && let Some(latest) = reviews.iter().rev().find(|r| {
                     r.user
@@ -453,20 +456,50 @@ async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<
                 })
                 && latest.state == "REQUEST_CHANGES"
             {
-                info!(
-                    job_key,
-                    pr_url, "PR has REQUEST_CHANGES review — routing rework to assignment task"
-                );
-                // The job is InReview, not Reviewing — the assignment task's
-                // process_review_decision checks for Reviewing state. Route as
-                // a rework request so the assignment task transitions and dispatches.
-                crate::assignment::request_dispatch(
-                    state,
-                    crate::state::DispatchRequest::AssignRework {
-                        job_key: job_key.clone(),
-                        feedback: latest.body.clone(),
-                    },
-                );
+                // Skip if the review is from a previous cycle
+                let ci_check_since = state.jobs.get(&job_key).and_then(|j| j.ci_check_since);
+                let review_time = latest
+                    .submitted_at
+                    .as_ref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
+                if let (Some(since), Some(reviewed_at)) = (ci_check_since, review_time) {
+                    if reviewed_at < since {
+                        debug!(
+                            job_key,
+                            %reviewed_at,
+                            %since,
+                            "skipping stale REQUEST_CHANGES review from previous cycle"
+                        );
+                    } else {
+                        info!(
+                            job_key,
+                            pr_url,
+                            "PR has REQUEST_CHANGES review — routing rework to assignment task"
+                        );
+                        crate::assignment::request_dispatch(
+                            state,
+                            crate::state::DispatchRequest::AssignRework {
+                                job_key: job_key.clone(),
+                                feedback: latest.body.clone(),
+                            },
+                        );
+                    }
+                } else {
+                    // No timestamps to compare — treat as actionable
+                    info!(
+                        job_key,
+                        pr_url, "PR has REQUEST_CHANGES review — routing rework to assignment task"
+                    );
+                    crate::assignment::request_dispatch(
+                        state,
+                        crate::state::DispatchRequest::AssignRework {
+                            job_key: job_key.clone(),
+                            feedback: latest.body.clone(),
+                        },
+                    );
+                }
                 continue;
             }
         }

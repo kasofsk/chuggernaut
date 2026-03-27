@@ -21,6 +21,7 @@ async fn http_list_jobs() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     jobs::create_job(&state, make("A")).await.unwrap();
     jobs::create_job(&state, make("B")).await.unwrap();
@@ -54,6 +55,7 @@ async fn http_list_jobs_filter_by_state() {
         max_retries: 3,
         initial_state: initial,
         claude_args: None,
+        rework_limit: None,
     };
     jobs::create_job(&state, make("OnDeck1", None))
         .await
@@ -111,6 +113,7 @@ async fn http_get_job_detail() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -162,6 +165,7 @@ async fn http_create_job() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let resp = client
         .post(format!("{base}/jobs"))
@@ -193,6 +197,7 @@ async fn http_requeue_job() {
         max_retries: 3,
         initial_state: Some(JobState::OnIce),
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -226,6 +231,7 @@ async fn http_close_job() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -260,6 +266,7 @@ async fn http_get_journal() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     jobs::create_job(&state, req).await.unwrap();
 
@@ -292,6 +299,7 @@ async fn http_get_job_deps() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let _key_a = jobs::create_job(&state, make("A", vec![])).await.unwrap();
     let key_b = jobs::create_job(&state, make("B", vec![1])).await.unwrap();
@@ -329,6 +337,7 @@ async fn http_channel_send() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     let key = jobs::create_job(&state, req).await.unwrap();
 
@@ -374,6 +383,7 @@ async fn http_sse_snapshot() {
         max_retries: 3,
         initial_state: None,
         claude_args: None,
+        rework_limit: None,
     };
     jobs::create_job(&state, req).await.unwrap();
 

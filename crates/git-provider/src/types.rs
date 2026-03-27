@@ -77,6 +77,7 @@ pub struct PullReview {
     pub state: String,
     pub body: String,
     pub user: Option<ReviewUser>,
+    pub submitted_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +97,50 @@ pub enum ReviewEvent {
 pub struct CreateReview {
     pub body: String,
     pub event: ReviewEvent,
+}
+
+// ---------------------------------------------------------------------------
+// Issues
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct Issue {
+    pub number: u64,
+    pub title: String,
+    pub body: Option<String>,
+    pub state: String,
+    pub html_url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateIssue {
+    pub title: String,
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateIssue {
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub state: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Comments
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct Comment {
+    pub id: u64,
+    pub body: String,
+    pub user: Option<CommentUser>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommentUser {
+    pub login: String,
+    pub id: u64,
 }
 
 // ---------------------------------------------------------------------------

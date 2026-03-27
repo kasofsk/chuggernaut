@@ -84,6 +84,24 @@ impl GitHubClient {
         self.handle_response(resp).await
     }
 
+    async fn patch<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        debug!(path, "PATCH");
+        let resp = self
+            .client
+            .patch(self.url(path))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .json(body)
+            .send()
+            .await?;
+        self.handle_response(resp).await
+    }
+
     async fn handle_response<T: DeserializeOwned>(&self, resp: reqwest::Response) -> Result<T> {
         let status = resp.status().as_u16();
         if status >= 400 {
@@ -161,6 +179,7 @@ impl From<PullReview> for gp::PullReview {
                 login: u.login,
                 id: u.id,
             }),
+            submitted_at: r.submitted_at,
         }
     }
 }
@@ -181,6 +200,32 @@ impl From<CombinedStatus> for gp::CombinedStatus {
                 .collect(),
             total_count: s.total_count,
             sha: s.sha,
+        }
+    }
+}
+
+impl From<Issue> for gp::Issue {
+    fn from(i: Issue) -> Self {
+        Self {
+            number: i.number,
+            title: i.title,
+            body: i.body,
+            state: i.state,
+            html_url: i.html_url,
+        }
+    }
+}
+
+impl From<IssueComment> for gp::Comment {
+    fn from(c: IssueComment) -> Self {
+        Self {
+            id: c.id,
+            body: c.body.unwrap_or_default(),
+            user: c.user.map(|u| gp::CommentUser {
+                login: u.login,
+                id: u.id,
+            }),
+            created_at: c.created_at,
         }
     }
 }
@@ -372,6 +417,76 @@ impl gp::GitProvider for GitHubClient {
             return Err(gp::Error::Api { status, body });
         }
         Ok(vec![])
+    }
+
+    async fn create_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        opts: gp::CreateIssue,
+    ) -> gp::Result<gp::Issue> {
+        let wire = CreateIssueOption {
+            title: opts.title,
+            body: opts.body,
+        };
+        let r: Issue = self
+            .post(&format!("/repos/{owner}/{repo}/issues"), &wire)
+            .await?;
+        Ok(r.into())
+    }
+
+    async fn update_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        opts: gp::UpdateIssue,
+    ) -> gp::Result<gp::Issue> {
+        let wire = UpdateIssueOption {
+            title: opts.title,
+            body: opts.body,
+            state: opts.state,
+        };
+        let r: Issue = self
+            .patch(&format!("/repos/{owner}/{repo}/issues/{number}"), &wire)
+            .await?;
+        Ok(r.into())
+    }
+
+    async fn list_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+    ) -> gp::Result<Vec<gp::Comment>> {
+        let comments: Vec<IssueComment> = self
+            .get(&format!(
+                "/repos/{owner}/{repo}/issues/{issue_number}/comments"
+            ))
+            .await?;
+        Ok(comments.into_iter().map(Into::into).collect())
+    }
+
+    async fn create_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+        body: &str,
+    ) -> gp::Result<gp::Comment> {
+        #[derive(serde::Serialize)]
+        struct CreateComment {
+            body: String,
+        }
+        let wire: IssueComment = self
+            .post(
+                &format!("/repos/{owner}/{repo}/issues/{issue_number}/comments"),
+                &CreateComment {
+                    body: body.to_string(),
+                },
+            )
+            .await?;
+        Ok(wire.into())
     }
 
     async fn get_combined_status(

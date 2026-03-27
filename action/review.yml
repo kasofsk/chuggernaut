@@ -74,16 +74,21 @@ jobs:
 
           ## Instructions
 
-          1. Run `git diff origin/main...HEAD` to see what changed in this PR.
-          2. Read the changed files and surrounding code to understand context.
-          3. Consider: Does the implementation match the job? Are there bugs, edge cases, or security issues? Is code quality acceptable for the review level?
+          1. Read the **PR Conversation History** section at the end of this prompt (if present) to understand prior feedback and what has already been discussed or addressed.
+          2. Run `git diff origin/main...HEAD` to see what changed in this PR.
+          3. Read the changed files and surrounding code to understand context.
+          4. Consider: Does the implementation match the job? Are there bugs, edge cases, or security issues? Is code quality acceptable for the review level? Have previously requested changes been addressed?
+          5. **REQUIRED**: When you have reached your decision, you MUST call **submit_review** with your decision and feedback. Your review will not be recorded without this step.
 
-          You have access to a chuggernaut MCP server. Use **update_status** to report your review progress. Use **channel_check** periodically to check for messages from the orchestrator.
+          ## Communication
 
-          You MUST end your response with a JSON object on its own line:
-          {"decision": "approved"} or {"decision": "changes_requested", "feedback": "..."} or {"decision": "escalate"}
+          You have access to a chuggernaut MCP server with these tools:
+          - **update_status**: Report your review progress. Call this after completing each major step.
+          - **channel_check**: Call periodically to check for messages from the orchestrator.
+          - **channel_send**: Send a message back to the orchestrator.
+          - **submit_review** (**REQUIRED**): You MUST call this exactly once before you finish. Provide a decision ("approved", "changes_requested", or "escalate") and feedback explaining your reasoning. This is the sole mechanism for submitting your review — if you do not call it, the review will be escalated to a human.
 
-          After the JSON line, write nothing else.
+          IMPORTANT: Your very first action must be to call update_status with status "starting" and progress 0. Then proceed with the review.
           PROMPT_EOF
           } > /tmp/prompt.md
 
@@ -106,7 +111,7 @@ jobs:
         env:
           CHUGGERNAUT_GIT_TOKEN: ${{ secrets.CHUGGERNAUT_REVIEWER_TOKEN }}
           CHUGGERNAUT_COMMAND: claude
-          CHUGGERNAUT_COMMAND_ARGS: "${{ steps.job.outputs.claude_args }} --allowedTools Bash Read Glob Grep mcp__chuggernaut__channel_check mcp__chuggernaut__channel_send mcp__chuggernaut__update_status"
+          CHUGGERNAUT_COMMAND_ARGS: "${{ steps.job.outputs.claude_args }} --verbose --output-format stream-json --include-partial-messages --allowedTools Bash Read Glob Grep mcp__chuggernaut__channel_check mcp__chuggernaut__channel_send mcp__chuggernaut__update_status mcp__chuggernaut__submit_review"
           CHUGGERNAUT_TIMEOUT_MINUTES: "30"
           CHUGGERNAUT_PROMPT: ${{ steps.prompt.outputs.value }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
