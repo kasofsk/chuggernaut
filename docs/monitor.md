@@ -62,7 +62,7 @@ The dispatcher re-reads the job from KV (state may have changed since the scan),
 
 ### CI Status
 
-Scans in-memory jobs in OnTheStack state and checks the CI status of their associated Forgejo Action runs. Detects runs that have completed (success or failure) but whose outcome has not yet been processed by the dispatcher (e.g., because the NATS message was lost).
+Scans in-memory jobs in OnTheStack state and checks the CI status of their associated action runs via the git provider API. Detects runs that have completed (success or failure) but whose outcome has not yet been processed by the dispatcher (e.g., because the NATS message was lost).
 
 Dispatches events via `publish_and_dispatch`. On CI failure, if `rework_count >= rework_limit`, the dispatcher escalates to a human reviewer instead of retrying.
 

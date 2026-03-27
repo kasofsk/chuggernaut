@@ -160,7 +160,7 @@ Per-repo merge serialization. Prevents concurrent merges that could cause rebase
 [
   {
     "job_key": "acme.payments.57",
-    "pr_url": "http://forgejo/acme/payments/pulls/3",
+    "pr_url": "https://git.example.com/acme/payments/pulls/3",
     "queued_at": "2026-03-23T11:00:00Z"
   }
 ]
@@ -365,7 +365,7 @@ The channel provides bidirectional messaging between a running worker and extern
   "job_key": "acme.payments.57",
   "outcome": {
     "type": "yield",
-    "pr_url": "http://forgejo/acme/payments/pulls/3"
+    "pr_url": "https://git.example.com/acme/payments/pulls/3"
   },
   "token_usage": {
     "input_tokens": 25000,
@@ -382,7 +382,7 @@ Outcome types: `yield { pr_url }`, `fail { reason, logs }`. `token_usage` is opt
 {
   "job_key": "acme.payments.57",
   "decision": "approved",
-  "pr_url": "http://forgejo/acme/payments/pulls/3",
+  "pr_url": "https://git.example.com/acme/payments/pulls/3",
   "token_usage": {
     "input_tokens": 15000,
     "output_tokens": 3500,

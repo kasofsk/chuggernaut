@@ -2,7 +2,7 @@
 
 ## Overview
 
-NATS-first workflow orchestration for AI agents. Jobs live in NATS KV. Workers communicate via NATS pub/sub. Forgejo provides git hosting and pull requests. A graph viewer is the primary human interface. No issues, no CDC, no bidirectional sync.
+NATS-first workflow orchestration for AI agents. Jobs live in NATS KV. Workers communicate via NATS pub/sub. A pluggable git provider (Forgejo or GitHub) handles git hosting and pull requests. A graph viewer is the primary human interface. No issues, no CDC, no bidirectional sync.
 
 ---
 
@@ -15,7 +15,7 @@ The original forge system worked but had a fundamental problem: **contention bet
 - Complex bidirectional reconciliation between the sidecar and Forgejo
 - Forgejo API failures blocking state transitions
 
-chuggernaut eliminates this by treating **NATS as the single source of truth** for all workflow state. Forgejo is used only for what it's good at: git hosting and pull requests. The single-writer principle gives each actor a clear ownership boundary. No reconciliation required.
+chuggernaut eliminates this by treating **NATS as the single source of truth** for all workflow state. The git provider (Forgejo or GitHub) is used only for what it's good at: git hosting and pull requests. The single-writer principle gives each actor a clear ownership boundary. No reconciliation required.
 
 ---
 
@@ -25,11 +25,11 @@ chuggernaut eliminates this by treating **NATS as the single source of truth** f
 
 2. **Single-writer per key.** Each NATS KV key has exactly one actor that writes to it. Most buckets are owned entirely by one actor. All KV writes use CAS (compare-and-swap) for consistency.
 
-3. **Forgejo is for git.** Forgejo hosts repositories, pull requests, code review, and CI (Forgejo Actions). It does not store workflow state. No issues are used.
+3. **The git provider is for git.** The git provider (Forgejo or GitHub) hosts repositories, pull requests, code review, and CI actions. It does not store workflow state. No issues are used.
 
 4. **The graph viewer is the human interface.** All job visibility, dependency graphs, worker status, and activity timelines are served by the dispatcher's HTTP API and rendered in the graph viewer. No issue tracker needed.
 
-5. **Workers are ephemeral.** Each worker runs inside a Forgejo Action container. The dispatcher dispatches the action directly — there is no worker registration or assignment protocol. Workers receive their job key as a workflow input and communicate via NATS (heartbeats, outcomes, MCP channel).
+5. **Workers are ephemeral.** Each worker runs inside a CI action container (Forgejo Actions or GitHub Actions). The dispatcher dispatches the action directly — there is no worker registration or assignment protocol. Workers receive their job key as a workflow input and communicate via NATS (heartbeats, outcomes, MCP channel).
 
 6. **Failures are recoverable.** NATS KV survives restarts. The dispatcher rebuilds in-memory state (petgraph, job index) from KV on startup. Stream consumers resume from their last acknowledged position.
 
@@ -64,15 +64,15 @@ CLI / API
 │    chuggernaut.transitions.{job_key}                      │
 │                                                      │
 │  Dispatches:                                         │
-│    Forgejo Actions workflows (via API)               │
+│    CI workflows via git provider API                 │
 └──────────────────┬─────────────────────────────────┘
                    │
                    ▼
    Action Workers (ephemeral)
-   Run inside Forgejo Action containers
+   Run inside CI action containers
    Two modes: work + review
    NATS: heartbeat, outcome/decision, channel
-   Forgejo: git clone/push, PRs, review, merge
+   Git provider: clone/push, PRs, review, merge
 ```
 
 ### Monitor
@@ -107,10 +107,10 @@ See [docs/dispatcher.md](docs/dispatcher.md) for state machine, dep management, 
 
 ### Action Workers
 
-Ephemeral executors that run inside Forgejo Action containers. The dispatcher dispatches a workflow directly — there is no worker registration or assignment protocol.
+Ephemeral executors that run inside CI action containers (Forgejo Actions or GitHub Actions). The dispatcher dispatches a workflow directly — there is no worker registration or assignment protocol.
 
 **How it works:**
-1. Job reaches OnDeck → dispatcher creates claim (`worker_id = "action-{job_key}"`) and dispatches Forgejo Action
+1. Job reaches OnDeck → dispatcher creates claim (`worker_id = "action-{job_key}"`) and dispatches CI action
 2. Worker binary starts inside the action container
 3. Clones repo, checks out `work/{job_key}` branch, launches Claude as subprocess
 4. Bridges Claude's stdin/stdout via MCP channel (NATS ↔ JSON-RPC)
@@ -132,15 +132,15 @@ See [docs/worker-protocol.md](docs/worker-protocol.md) for the full protocol.
 
 ### Review (via Action Workers)
 
-Review is handled by the same worker binary in review mode (`--mode review`), dispatched as a Forgejo Action just like work. When a job transitions to InReview, the dispatcher dispatches a `review.yml` workflow. The review action:
+Review is handled by the same worker binary in review mode (`--mode review`), dispatched as a CI action just like work. When a job transitions to InReview, the dispatcher dispatches a `review.yml` workflow. The review action:
 
 1. Clones repo, checks out the PR branch
 2. Gets the diff and runs Claude to review it
-3. Posts a PR review to Forgejo (APPROVED or REQUEST_CHANGES)
+3. Posts a PR review (APPROVED or REQUEST_CHANGES)
 4. If approved, attempts to merge the PR (with retries for contention)
 5. Publishes `ReviewDecision` to NATS
 
-There is no separate reviewer process. The dispatcher handles rework counting, escalation transitions, and merge queue coordination is done inline by the review action with Forgejo API retries.
+There is no separate reviewer process. The dispatcher handles rework counting, escalation transitions, and merge queue coordination is done inline by the review action with git provider API retries.
 
 See [docs/reviewer.md](docs/reviewer.md) for the review lifecycle.
 
@@ -190,22 +190,23 @@ The `seed` command supports `--var` for template interpolation — `{{KEY}}` pla
 | Service | Purpose |
 |---------|---------|
 | **NATS with JetStream** | All state persistence (KV) + messaging (streams/pub-sub). File-backed. |
-| **Forgejo** | Git hosting, pull requests, code review, Forgejo Actions (CI). |
+| **Git provider** | Git hosting, pull requests, code review, CI actions. Forgejo or GitHub. |
 
 That's it. No PostgreSQL polling, no RocksDB, no external graph database.
 
-**Shared env vars:** `CHUGGERNAUT_NATS_URL` (default `nats://localhost:4222`) and `CHUGGERNAUT_FORGEJO_URL` (required) are used by all components. `CHUGGERNAUT_NATS_WORKER_URL` can be set separately for the dispatcher to pass a Docker-reachable NATS URL to action workers (defaults to `CHUGGERNAUT_NATS_URL`). `CHUGGERNAUT_STATIC_DIR` tells the dispatcher where to find `index.html` (required; panics at startup if missing). Per-component configuration is documented in each companion doc.
+**Shared env vars:** `CHUGGERNAUT_NATS_URL` (default `nats://localhost:4222`) and `CHUGGERNAUT_GIT_URL` (required; falls back to `CHUGGERNAUT_FORGEJO_URL`) are used by all components. `CHUGGERNAUT_GIT_TOKEN` (falls back to `CHUGGERNAUT_FORGEJO_TOKEN`) provides API auth. The provider is auto-detected from the URL (github.com → GitHub, anything else → Forgejo). `CHUGGERNAUT_NATS_WORKER_URL` can be set separately for the dispatcher to pass a Docker-reachable NATS URL to action workers (defaults to `CHUGGERNAUT_NATS_URL`). `CHUGGERNAUT_STATIC_DIR` tells the dispatcher where to find `index.html` (required; panics at startup if missing). Per-component configuration is documented in each companion doc.
 
-**Docker Compose:**
+**Docker Compose (Forgejo dev setup):**
 ```yaml
 services:
   nats:          # JetStream, file-backed storage
-  forgejo:       # git + PRs + Actions
+  forgejo:       # git + PRs + Actions (Forgejo only)
   dispatcher:    # coordinator + HTTP API
-  runner:        # shared Forgejo Actions runner
 ```
 
-Workers run inside Forgejo Action containers — no separate worker processes to manage.
+**GitHub setup:** Only NATS + dispatcher run locally; GitHub provides git hosting and CI runners. See `scripts/github-setup.sh`.
+
+Workers run inside CI action containers — no separate worker processes to manage.
 
 ---
 
@@ -221,7 +222,9 @@ chuggernaut/
     cli/                          # chuggernaut-cli: CLI binary
     channel/                      # chuggernaut-channel: MCP channel bridge
     nats/                         # chuggernaut-nats: typed NATS client
-    forgejo-api/                  # Forgejo REST client
+    git-provider/                 # Provider-agnostic GitProvider trait
+    forgejo-api/                  # Forgejo REST client (implements GitProvider)
+    github-api/                   # GitHub REST client (implements GitProvider)
     test-utils/                   # chuggernaut-test-utils: testcontainers + cleanup
   static/                         # graph viewer SPA
   docs/                           # component specs

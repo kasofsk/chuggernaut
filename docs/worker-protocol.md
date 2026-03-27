@@ -1,6 +1,6 @@
 # Worker Protocol
 
-Workers run inside Forgejo Action containers. The worker binary (`chuggernaut-worker`) operates in two modes:
+Workers run inside CI action containers (Forgejo Actions or GitHub Actions). The worker binary (`chuggernaut-worker`) operates in two modes:
 
 - **Work mode** (`--mode work`, default): dispatched when a job reaches OnDeck. Clones repo, runs Claude to do work, commits/pushes, creates PR, reports `WorkerOutcome`.
 - **Review mode** (`--mode review`): dispatched when a job enters InReview. Clones repo, checks out PR branch, runs Claude to review the diff, posts PR review, attempts merge, reports `ReviewDecision`.
@@ -20,14 +20,14 @@ Job reaches OnDeck
 │  1. Create claim             │
 │     worker_id: action-{key}  │
 │  2. Transition → OnTheStack  │
-│  3. Dispatch Forgejo Action  │
+│  3. Dispatch CI action  │
 │     inputs: job_key, nats_url│
 │     + review_feedback (rework)│
 └──────────────┬───────────────┘
                │
                ▼
 ┌──────────────────────────────┐
-│ Forgejo Actions runner       │
+│ CI actions runner       │
 │  starts container with       │
 │  chuggernaut-worker binary   │
 └──────────────┬───────────────┘
@@ -59,7 +59,7 @@ When a job reaches OnDeck, the dispatcher:
 
 1. Creates a claim with `worker_id = "action-{job_key}"` (CAS-create for exclusivity)
 2. Transitions the job to OnTheStack
-3. Dispatches the `work.yml` Forgejo Actions workflow via API with inputs:
+3. Dispatches the `work.yml` CI actions workflow via API with inputs:
    - `job_key` — job identifier
    - `nats_url` — NATS server address
    - `review_feedback` — (optional) reviewer feedback for rework assignments
@@ -72,7 +72,7 @@ The claim enables the monitor to track the action via normal lease expiry and jo
 
 When a job transitions to ChangesRequested (reviewer requests changes):
 
-1. Dispatcher dispatches a **new** Forgejo Action with the same `job_key`
+1. Dispatcher dispatches a **new** CI action with the same `job_key`
 2. Passes `review_feedback` and `is_rework=true` as additional workflow inputs
 3. The worker checks out the existing `work/{job_key}` branch (already has prior work)
 4. The existing PR auto-updates when the worker pushes new commits
@@ -84,15 +84,15 @@ No attempt is made to route rework to a "previous worker" — each action run is
 ## Git Workflow
 
 1. Read repo from job metadata (passed via NATS or workflow inputs)
-2. `git clone http://forgejo/{repo}` (credential helper provides auth)
+2. `git clone https://{git_url}/{repo}` (credential helper provides auth)
 3. Check if branch `work/{job_key}` already exists on remote:
    - If yes: checkout and pull (continuation of previous attempt or rework)
    - If no: create branch (fresh start)
 4. Launch Claude subprocess to do work
-5. Commit, push to Forgejo
+5. Commit, push
 6. Check if a PR already exists for branch `work/{job_key}`:
    - If yes: push updates the existing PR automatically
-   - If no: open PR via Forgejo API:
+   - If no: open PR via git provider API:
      - Title: `[acme.payments.57] Add retry logic to payment service`
      - Body: Job description + `Job: acme.payments.57`
      - Head: `work/acme.payments.57`
@@ -165,7 +165,7 @@ Worker → chuggernaut.review.decision
 Payload: ReviewDecision {
   job_key: "acme.payments.57",
   decision: <one of below>,
-  pr_url: "http://forgejo/acme/payments/pulls/3",
+  pr_url: "https://git.example.com/acme/payments/pulls/3",
   token_usage: { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens } | null
 }
 ```
@@ -237,7 +237,7 @@ The worker binary is distributed via the runner environment Docker image (`chugg
 
 - Built from `Dockerfile.runner-env`
 - Contains: `chuggernaut-worker` binary, `mock-claude` (for testing), git, standard tools
-- Used by the Forgejo Actions runner as the container image for job execution
+- Used by the CI actions runner as the container image for job execution
 
 ### Workflow Definition (`action/work.yml`)
 
@@ -257,9 +257,9 @@ jobs:
       - uses: actions/checkout@v4
       - run: chuggernaut-worker --job-key "${{ inputs.job_key }}"
                --nats-url "${{ inputs.nats_url }}"
-               --forgejo-url "${{ github.server_url }}"
+               --git-url "${{ github.server_url }}"
         env:
-          CHUGGERNAUT_FORGEJO_TOKEN: ${{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}
+          CHUGGERNAUT_GIT_TOKEN: ${{ secrets.CHUGGERNAUT_WORKER_TOKEN }}
           CHUGGERNAUT_COMMAND: claude
           CHUGGERNAUT_REVIEW_FEEDBACK: ${{ inputs.review_feedback }}
           CHUGGERNAUT_IS_REWORK: ${{ inputs.is_rework }}
@@ -284,10 +284,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: chuggernaut-worker --mode review --job-key "${{ inputs.job_key }}"
-               --nats-url "${{ inputs.nats_url }}" --forgejo-url "${{ github.server_url }}"
+               --nats-url "${{ inputs.nats_url }}" --git-url "${{ github.server_url }}"
                --pr-url "${{ inputs.pr_url }}" --review-level "${{ inputs.review_level }}"
         env:
-          CHUGGERNAUT_FORGEJO_TOKEN: ${{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}
+          CHUGGERNAUT_GIT_TOKEN: ${{ secrets.CHUGGERNAUT_REVIEWER_TOKEN }}
           CHUGGERNAUT_COMMAND: claude
 ```
 
@@ -299,8 +299,8 @@ jobs:
 |---------|---------|-------|
 | `CHUGGERNAUT_JOB_KEY` | (required) | Job identifier (passed as workflow input) |
 | `CHUGGERNAUT_NATS_URL` | `nats://localhost:4222` | NATS connection |
-| `CHUGGERNAUT_FORGEJO_URL` | (required) | Forgejo base URL |
-| `CHUGGERNAUT_FORGEJO_TOKEN` | (required) | Forgejo API token for git/PR operations |
+| `CHUGGERNAUT_GIT_URL` | (required) | Git provider base URL (falls back to `CHUGGERNAUT_FORGEJO_URL`) |
+| `CHUGGERNAUT_GIT_TOKEN` | (required) | Git provider API token (falls back to `CHUGGERNAUT_FORGEJO_TOKEN`) |
 | `CHUGGERNAUT_COMMAND` | `claude` | Subprocess command to run |
 | `CHUGGERNAUT_COMMAND_ARGS` | (none) | Additional args for subprocess |
 | `CHUGGERNAUT_HEARTBEAT_INTERVAL_SECS` | `10` | Heartbeat period |
