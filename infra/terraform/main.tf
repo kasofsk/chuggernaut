@@ -225,21 +225,21 @@ module "github_repos" {
   source   = "./modules/github-repo"
   for_each = local.is_github ? { for r in var.managed_repos : "${r.org}/${r.repo}" => r } : {}
 
-  github_token      = var.github_token
-  owner             = each.value.org
-  repo_name         = each.value.repo
-  worker_username   = var.github_worker_username
-  reviewer_username = var.github_reviewer_username
-  human_username    = var.human_username
-  worker_token      = var.github_worker_token
-  reviewer_token    = var.github_reviewer_token
-  nats_url          = var.nats_worker_url
-  dispatcher_url    = var.dispatcher_url
+  github_token       = var.github_token
+  owner              = each.value.org
+  repo_name          = each.value.repo
+  worker_username    = var.github_worker_username
+  reviewer_username  = var.github_reviewer_username
+  human_username     = var.human_username
+  worker_token       = var.github_worker_token
+  reviewer_token     = var.github_reviewer_token
+  nats_url           = var.nats_worker_url
+  dispatcher_url     = var.dispatcher_url
   claude_oauth_token = var.claude_oauth_token
   anthropic_api_key  = var.anthropic_api_key
-  work_workflow     = file("${path.root}/../../action/work.yml")
-  review_workflow   = file("${path.root}/../../action/review.yml")
-  initial_files     = each.value.initial_files
+  work_workflow      = file("${path.root}/../../action/work.yml")
+  review_workflow    = file("${path.root}/../../action/review.yml")
+  initial_files      = each.value.initial_files
 }
 
 # ---------------------------------------------------------------------------

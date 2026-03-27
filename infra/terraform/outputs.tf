@@ -24,7 +24,7 @@ output "reviewer_token" {
 output "repo_urls" {
   value = local.is_forgejo ? (
     { for k, v in module.forgejo_repos : k => v.repo_url }
-  ) : (
+    ) : (
     { for k, v in module.github_repos : k => v.repo_url }
   )
 }
@@ -40,7 +40,7 @@ output "nats_streams" {
 output "runner_count" {
   value = local.is_forgejo ? (
     length(module.forgejo_runners) > 0 ? module.forgejo_runners[0].runner_count : 0
-  ) : (
+    ) : (
     length(module.github_runners) > 0 ? sum([for r in module.github_runners : r.runner_count]) : 0
   )
 }
@@ -48,7 +48,7 @@ output "runner_count" {
 output "runner_containers" {
   value = local.is_forgejo ? (
     length(module.forgejo_runners) > 0 ? module.forgejo_runners[0].container_names : []
-  ) : (
+    ) : (
     flatten([for r in module.github_runners : r.container_names])
   )
 }
