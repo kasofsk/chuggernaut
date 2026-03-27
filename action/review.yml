@@ -93,17 +93,21 @@ jobs:
             echo 'CHUGGERNAUT_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - uses: {{ACTIONS_URL}}/chuggernaut/actions/chug@main
-        with:
-          job_key: ${{ inputs.job_key }}
-          nats_url: ${{ env.NATS_URL }}
-          forgejo_url: ${{ github.server_url }}
-          forgejo_token: ${{ secrets.CHUGGERNAUT_REVIEWER_TOKEN }}
-          post_action: review
-          prompt: ${{ steps.prompt.outputs.value }}
-          command_args: "${{ steps.job.outputs.claude_args }} --allowedTools Bash Read Glob Grep mcp__chuggernaut__channel_check mcp__chuggernaut__channel_send mcp__chuggernaut__update_status"
-          timeout_minutes: "30"
-          pr_url: ${{ inputs.pr_url }}
-          review_level: ${{ inputs.review_level }}
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Execute chuggernaut worker
+        shell: bash
+        run: |
+          chuggernaut-worker \
+            --post-action review \
+            --job-key "${{ inputs.job_key }}" \
+            --nats-url "$NATS_URL" \
+            --git-url "${{ github.server_url }}" \
+            --pr-url "${{ inputs.pr_url }}" \
+            --review-level "${{ inputs.review_level }}"
+        env:
+          CHUGGERNAUT_GIT_TOKEN: ${{ secrets.CHUGGERNAUT_REVIEWER_TOKEN }}
+          CHUGGERNAUT_COMMAND: claude
+          CHUGGERNAUT_COMMAND_ARGS: "${{ steps.job.outputs.claude_args }} --allowedTools Bash Read Glob Grep mcp__chuggernaut__channel_check mcp__chuggernaut__channel_send mcp__chuggernaut__update_status"
+          CHUGGERNAUT_TIMEOUT_MINUTES: "30"
+          CHUGGERNAUT_PROMPT: ${{ steps.prompt.outputs.value }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

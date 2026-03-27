@@ -1,5 +1,5 @@
 [package]
-name = "chuggernaut-forgejo-api"
+name = "chuggernaut-github-api"
 version.workspace = true
 edition.workspace = true
 

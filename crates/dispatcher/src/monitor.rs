@@ -4,6 +4,7 @@ use std::time::Duration;
 use chrono::Utc;
 use tracing::{debug, info, warn};
 
+use chuggernaut_git_provider::GitProvider;
 use chuggernaut_types::*;
 
 use crate::error::DispatcherResult;
@@ -260,13 +261,10 @@ async fn scan_ci_status(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
         return Ok(());
     }
 
-    let (forgejo_url, forgejo_token) =
-        match (&state.config.forgejo_url, &state.config.forgejo_token) {
-            (Some(url), Some(token)) => (url.clone(), token.clone()),
-            _ => return Ok(()), // No Forgejo config, skip CI check
-        };
-
-    let forgejo = chuggernaut_forgejo_api::ForgejoClient::new(&forgejo_url, &forgejo_token);
+    let provider: Box<dyn GitProvider> = match (&state.config.git_url, &state.config.git_token) {
+        (Some(url), Some(token)) => crate::provider::create_provider(url, token),
+        _ => return Ok(()), // No git provider config, skip CI check
+    };
 
     for (job_key, pr_url, repo) in candidates {
         let job = match state.jobs.get(&job_key) {
@@ -308,7 +306,7 @@ async fn scan_ci_status(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
         };
 
         // Get PR to find head SHA
-        let pr = match forgejo.get_pull_request(owner, repo_name, pr_index).await {
+        let pr = match provider.get_pull_request(owner, repo_name, pr_index).await {
             Ok(pr) => pr,
             Err(e) => {
                 debug!(job_key, error = %e, "failed to get PR for CI check");
@@ -317,7 +315,7 @@ async fn scan_ci_status(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
         };
 
         // Get combined commit status for the head SHA
-        match forgejo
+        match provider
             .get_combined_status(owner, repo_name, &pr.head.sha)
             .await
         {
@@ -392,29 +390,26 @@ async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<
         })
         .collect();
 
-    let (forgejo_url, forgejo_token) =
-        match (&state.config.forgejo_url, &state.config.forgejo_token) {
-            (Some(url), Some(token)) => (url.clone(), token.clone()),
-            _ => {
-                // No Forgejo config — can't check PR state, just dispatch reviews
-                for (job_key, pr_url, _repo, review_level) in candidates {
-                    if let Ok(Some(_)) = kv_get::<ClaimState>(&state.kv.claims, &job_key).await {
-                        continue;
-                    }
-                    crate::assignment::request_dispatch(
-                        state,
-                        crate::state::DispatchRequest::DispatchReview {
-                            job_key,
-                            pr_url,
-                            review_level,
-                        },
-                    );
+    let provider: Box<dyn GitProvider> = match (&state.config.git_url, &state.config.git_token) {
+        (Some(url), Some(token)) => crate::provider::create_provider(url, token),
+        _ => {
+            // No git provider config — can't check PR state, just dispatch reviews
+            for (job_key, pr_url, _repo, review_level) in candidates {
+                if let Ok(Some(_)) = kv_get::<ClaimState>(&state.kv.claims, &job_key).await {
+                    continue;
                 }
-                return Ok(());
+                crate::assignment::request_dispatch(
+                    state,
+                    crate::state::DispatchRequest::DispatchReview {
+                        job_key,
+                        pr_url,
+                        review_level,
+                    },
+                );
             }
-        };
-
-    let forgejo = chuggernaut_forgejo_api::ForgejoClient::new(&forgejo_url, &forgejo_token);
+            return Ok(());
+        }
+    };
 
     for (job_key, pr_url, repo, review_level) in candidates {
         // Only re-trigger if no active claim (review not already in-flight)
@@ -426,7 +421,9 @@ async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<
         let parts: Vec<&str> = repo.splitn(2, '/').collect();
         if parts.len() == 2
             && let Some(pr_index) = parse_pr_url_index(&pr_url)
-            && let Ok(pr) = forgejo.get_pull_request(parts[0], parts[1], pr_index).await
+            && let Ok(pr) = provider
+                .get_pull_request(parts[0], parts[1], pr_index)
+                .await
         {
             if pr.merged {
                 info!(
@@ -448,7 +445,7 @@ async fn scan_pending_reviews(state: &Arc<DispatcherState>) -> DispatcherResult<
             }
 
             // Check if PR has REQUEST_CHANGES reviews (missed review decision)
-            if let Ok(reviews) = forgejo.list_reviews(parts[0], parts[1], pr_index).await
+            if let Ok(reviews) = provider.list_reviews(parts[0], parts[1], pr_index).await
                 && let Some(latest) = reviews.iter().rev().find(|r| {
                     r.user
                         .as_ref()

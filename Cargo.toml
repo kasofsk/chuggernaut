@@ -2,7 +2,9 @@
 resolver = "2"
 members = [
     "crates/types",
+    "crates/git-provider",
     "crates/forgejo-api",
+    "crates/github-api",
     "crates/dispatcher",
     "crates/worker",
     "crates/cli",
@@ -19,8 +21,12 @@ license = "MIT"
 
 [workspace.dependencies]
 chuggernaut-types = { path = "crates/types" }
+chuggernaut-git-provider = { path = "crates/git-provider" }
 chuggernaut-forgejo-api = { path = "crates/forgejo-api" }
+chuggernaut-github-api = { path = "crates/github-api" }
 chuggernaut-nats = { path = "crates/nats" }
+
+async-trait = "0.1"
 
 anyhow = "1"
 async-nats = "0.46"

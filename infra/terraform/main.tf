@@ -2,8 +2,13 @@ terraform {
   required_version = ">= 1.4"
 }
 
+locals {
+  is_forgejo = var.git_provider == "forgejo"
+  is_github  = var.git_provider == "github"
+}
+
 # ---------------------------------------------------------------------------
-# NATS: KV buckets + JetStream streams
+# NATS: KV buckets + JetStream streams (provider-agnostic)
 # ---------------------------------------------------------------------------
 
 module "nats" {
@@ -11,11 +16,16 @@ module "nats" {
   nats_url = var.nats_url
 }
 
+# ===========================================================================
+# Forgejo backend
+# ===========================================================================
+
 # ---------------------------------------------------------------------------
 # Forgejo users with scoped tokens
 # ---------------------------------------------------------------------------
 
 module "worker_user" {
+  count       = local.is_forgejo ? 1 : 0
   source      = "./modules/forgejo-user"
   forgejo_url = var.forgejo_url
   admin_token = var.forgejo_admin_token
@@ -24,9 +34,6 @@ module "worker_user" {
   email       = "worker@chuggernaut.local"
   token_name  = "chuggernaut-worker"
 
-  # Minimum permissions for work actions:
-  # - clone repo, push branches, create/find PRs
-  # - NO merge (that's the reviewer's job)
   token_scopes = [
     "read:repository",
     "write:repository",
@@ -36,6 +43,7 @@ module "worker_user" {
 }
 
 module "reviewer_user" {
+  count       = local.is_forgejo ? 1 : 0
   source      = "./modules/forgejo-user"
   forgejo_url = var.forgejo_url
   admin_token = var.forgejo_admin_token
@@ -44,9 +52,6 @@ module "reviewer_user" {
   email       = "reviewer@chuggernaut.local"
   token_name  = "chuggernaut-reviewer"
 
-  # Minimum permissions for review actions:
-  # - clone repo, read PRs, submit reviews, merge (bot reviewer)
-  # - Separate user ensures reviewer cannot approve their own PRs
   token_scopes = [
     "read:repository",
     "write:repository",
@@ -56,6 +61,7 @@ module "reviewer_user" {
 }
 
 module "human_user" {
+  count       = local.is_forgejo ? 1 : 0
   source      = "./modules/forgejo-user"
   forgejo_url = var.forgejo_url
   admin_token = var.forgejo_admin_token
@@ -64,8 +70,6 @@ module "human_user" {
   email       = "${var.human_username}@chuggernaut.local"
   token_name  = var.human_username
 
-  # Human collaborator: can approve/reject PRs but cannot merge.
-  # Branch protection restricts merge to admin + reviewer bot only.
   token_scopes = [
     "read:repository",
     "write:repository",
@@ -75,10 +79,11 @@ module "human_user" {
 }
 
 # ---------------------------------------------------------------------------
-# Actions repo: chuggernaut/actions — hosts composite actions (chug)
+# Forgejo actions repo (hosts composite actions)
 # ---------------------------------------------------------------------------
 
 resource "terraform_data" "actions_org" {
+  count = local.is_forgejo ? 1 : 0
   input = "chuggernaut"
   provisioner "local-exec" {
     command = <<-EOT
@@ -97,6 +102,7 @@ resource "terraform_data" "actions_org" {
 }
 
 resource "terraform_data" "actions_repo" {
+  count      = local.is_forgejo ? 1 : 0
   depends_on = [terraform_data.actions_org]
   input      = "chuggernaut/actions"
   provisioner "local-exec" {
@@ -116,6 +122,7 @@ resource "terraform_data" "actions_repo" {
 }
 
 resource "terraform_data" "actions_files" {
+  count      = local.is_forgejo ? 1 : 0
   depends_on = [terraform_data.actions_repo]
 
   triggers_replace = {
@@ -159,14 +166,13 @@ resource "terraform_data" "actions_files" {
 }
 
 # ---------------------------------------------------------------------------
-# Managed repos: org, repo, workflows, secrets, variables
+# Forgejo managed repos
 # ---------------------------------------------------------------------------
 
-module "repos" {
+module "forgejo_repos" {
   source   = "./modules/forgejo-repo"
-  for_each = { for r in var.managed_repos : "${r.org}/${r.repo}" => r }
+  for_each = local.is_forgejo ? { for r in var.managed_repos : "${r.org}/${r.repo}" => r } : {}
 
-  # Explicit dependency: all users must exist before repo provisioning
   depends_on = [module.worker_user, module.reviewer_user, module.human_user]
 
   forgejo_url        = var.forgejo_url
@@ -174,11 +180,11 @@ module "repos" {
   org_name           = each.value.org
   repo_name          = each.value.repo
   admin_username     = var.forgejo_admin_username
-  worker_username    = module.worker_user.username
-  reviewer_username  = module.reviewer_user.username
-  human_username     = module.human_user.username
-  worker_token       = module.worker_user.token
-  reviewer_token     = module.reviewer_user.token
+  worker_username    = module.worker_user[0].username
+  reviewer_username  = module.reviewer_user[0].username
+  human_username     = module.human_user[0].username
+  worker_token       = module.worker_user[0].token
+  reviewer_token     = module.reviewer_user[0].token
   nats_url           = var.nats_worker_url
   dispatcher_url     = var.dispatcher_url
   claude_oauth_token = var.claude_oauth_token
@@ -193,7 +199,8 @@ module "repos" {
 # Forgejo Action runners
 # ---------------------------------------------------------------------------
 
-module "runners" {
+module "forgejo_runners" {
+  count                = local.is_forgejo ? 1 : 0
   source               = "./modules/forgejo-runner"
   forgejo_url          = var.forgejo_url
   forgejo_internal_url = "http://host.docker.internal:3000"
@@ -201,4 +208,55 @@ module "runners" {
   runner_count         = var.runner_count
   runner_config_path   = abspath("${path.root}/../runner/config.yaml")
   runner_labels        = var.runner_labels
+}
+
+# ===========================================================================
+# GitHub backend
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# GitHub managed repos
+#
+# No user creation needed — GitHub users/bots exist externally.
+# Tokens are provided as variables (PATs or App tokens).
+# ---------------------------------------------------------------------------
+
+module "github_repos" {
+  source   = "./modules/github-repo"
+  for_each = local.is_github ? { for r in var.managed_repos : "${r.org}/${r.repo}" => r } : {}
+
+  github_token       = var.github_token
+  owner              = each.value.org
+  repo_name          = each.value.repo
+  worker_username    = var.github_worker_username
+  reviewer_username  = var.github_reviewer_username
+  human_username     = var.human_username
+  worker_token       = var.github_worker_token
+  reviewer_token     = var.github_reviewer_token
+  nats_url           = var.nats_worker_url
+  dispatcher_url     = var.dispatcher_url
+  claude_oauth_token = var.claude_oauth_token
+  anthropic_api_key  = var.anthropic_api_key
+  work_workflow      = file("${path.root}/../../action/work.yml")
+  review_workflow    = file("${path.root}/../../action/review.yml")
+  initial_files      = each.value.initial_files
+}
+
+# ---------------------------------------------------------------------------
+# GitHub self-hosted runners
+#
+# Registers runners per-repo. For org-level runners, use the GitHub UI
+# or a separate module with the org-level registration API.
+# ---------------------------------------------------------------------------
+
+module "github_runners" {
+  source   = "./modules/github-runner"
+  for_each = local.is_github ? { for r in var.managed_repos : "${r.org}/${r.repo}" => r } : {}
+
+  github_token  = var.github_token
+  owner         = each.value.org
+  repo_name     = each.value.repo
+  runner_count  = var.runner_count
+  runner_labels = var.runner_labels != "" ? var.runner_labels : "self-hosted,chuggernaut"
+  runner_image  = "chuggernaut-runner-env:latest"
 }

@@ -30,7 +30,7 @@ cargo install cargo-llvm-cov
 
 ## Integration Tests
 
-Real NATS server via testcontainers. Each test gets a UUID-namespaced `DispatcherState` so tests run in parallel without interference. Tests that need Forgejo spin up real Forgejo containers via `chuggernaut-test-utils`.
+Real NATS server via testcontainers. Each test gets a UUID-namespaced `DispatcherState` so tests run in parallel without interference. Tests that need a git provider spin up real Forgejo containers via `chuggernaut-test-utils`.
 
 ### Job Creation (4 tests)
 
@@ -90,7 +90,7 @@ Real NATS server via testcontainers. Each test gets a UUID-namespaced `Dispatche
 
 ### Error Paths (4 tests)
 
-- `action_dispatch_failure_releases_claim` — bad Forgejo URL → claim released, job Failed
+- `action_dispatch_failure_releases_claim` — bad git provider URL → claim released, job Failed
 - `dependency_cycle_rejected` — adding A→B when B→A exists → CycleDetected error
 - `heartbeat_from_wrong_worker_ignored` — heartbeat with mismatched worker_id → claim unchanged
 - `rework_limit_not_enforced_yet` — documents that `rework_limit` config exists but isn't enforced
@@ -103,9 +103,9 @@ Real NATS server via testcontainers. Each test gets a UUID-namespaced `Dispatche
 - `concurrent_heartbeats_benign` — 10 simultaneous heartbeats → claim stays valid
 - `duplicate_outcome_handled` — same WorkerOutcome published twice → no crash
 
-### Action Dispatch with Forgejo (3 tests)
+### Action Dispatch with Git Provider (3 tests)
 
-These start real Forgejo containers and push workflow files:
+These start real Forgejo containers (testcontainers) and push workflow files:
 
 - `action_dispatch_creates_claim_and_transitions` — OnDeck → try_assign_job → OnTheStack with claim
 - `rework_dispatches_new_action_with_feedback` — full cycle: dispatch → yield → ChangesRequested → rework dispatched with feedback
@@ -114,9 +114,9 @@ These start real Forgejo containers and push workflow files:
 ### Assignment & Capacity (4 tests)
 
 - `capacity_limit_prevents_assignment` — `max_concurrent_actions=1`, slot full → `try_assign_job` returns false
-- `dispatch_next_respects_priority` — 3 OnDeck jobs with different priorities → highest dispatched first (requires Forgejo)
-- `dispatch_next_after_yield` — yield frees slot → next OnDeck job auto-dispatched (requires Forgejo)
-- `changes_requested_in_dispatch_queue` — ChangesRequested job competes with OnDeck jobs by priority (requires Forgejo)
+- `dispatch_next_respects_priority` — 3 OnDeck jobs with different priorities → highest dispatched first (requires git provider)
+- `dispatch_next_after_yield` — yield frees slot → next OnDeck job auto-dispatched (requires git provider)
+- `changes_requested_in_dispatch_queue` — ChangesRequested job competes with OnDeck jobs by priority (requires git provider)
 
 ### HTTP API (12 tests)
 
@@ -137,7 +137,7 @@ These start real Forgejo containers and push workflow files:
 
 ## End-to-End Tests (3 tests, `#[ignore]`)
 
-Full stack: NATS + Forgejo + Forgejo Actions runner (via testcontainers). Requires pre-built `chuggernaut-runner-env` Docker image and Docker socket access.
+Full stack: NATS + Forgejo + action runner (via testcontainers). Requires pre-built `chuggernaut-runner-env` Docker image and Docker socket access.
 
 ```bash
 # Build runner-env image first
@@ -147,7 +147,7 @@ docker build -t chuggernaut-runner-env -f Dockerfile.runner-env .
 cargo test -p chuggernaut-dispatcher --test integration -- --ignored --test-threads=1 --nocapture
 ```
 
-- **`action_runner_publishes_outcome_to_nats`** — Runner isolation: Forgejo Action → runner → worker binary → NATS. Verifies heartbeat, WorkerOutcome (Yield with PR URL), channel_send message, and ChannelStatus KV.
+- **`action_runner_publishes_outcome_to_nats`** — Runner isolation: CI action → runner → worker binary → NATS. Verifies heartbeat, WorkerOutcome (Yield with PR URL), channel_send message, and ChannelStatus KV.
 - **`e2e_full_action_pipeline`** — Full dispatcher pipeline: create job → dispatch action → runner → mock-claude via MCP → git commit/push → PR created → Yield → InReview.
 - **`e2e_full_review_cycle`** — Complete lifecycle: create → work action → InReview → ChangesRequested → rework action → InReview → Approved → Done. Verifies token usage records are accumulated across the rework cycle.
 
@@ -177,7 +177,7 @@ Two mechanisms ensure cleanup:
 
 ### MCP Bridge Tests
 
-The `chuggernaut-channel` integration tests include subprocess bridge tests that exercise the full MCP-over-NATS path without Docker runners or Forgejo:
+The `chuggernaut-channel` integration tests include subprocess bridge tests that exercise the full MCP-over-NATS path without Docker runners or a git provider:
 
 - **`mcp_bridge_subprocess_to_nats`**: spawns a bash MCP client, bridges stdin/stdout through `handle_message`, verifies `channel_send` → NATS outbox and `update_status` → KV.
 - **`mcp_bridge_bidirectional_nats`**: round-trip test — publishes a message to the NATS inbox, mock client calls `channel_check` to receive it, replies via `channel_send`, verified on NATS outbox.

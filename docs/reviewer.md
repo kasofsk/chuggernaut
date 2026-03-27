@@ -1,6 +1,6 @@
 # Review
 
-Review is handled by the worker binary in review mode (`--mode review`), dispatched as a Forgejo Action. There is no standalone reviewer process — the dispatcher dispatches review actions directly when a job enters InReview.
+Review is handled by the worker binary in review mode (`--mode review`), dispatched as a CI action. There is no standalone reviewer process — the dispatcher dispatches review actions directly when a job enters InReview.
 
 ---
 
@@ -12,7 +12,7 @@ Worker yields PR → dispatcher transitions to InReview
   ▼
 ┌──────────────────────────────────────────┐
 │ Dispatcher: dispatch_review_action       │
-│  1. Dispatch review.yml Forgejo Action   │
+│  1. Dispatch review.yml CI action   │
 │     inputs: job_key, nats_url, pr_url,   │
 │             review_level                 │
 └──────────────┬───────────────────────────┘
@@ -25,7 +25,7 @@ Worker yields PR → dispatcher transitions to InReview
 │  2. Get diff (origin/main...HEAD)        │
 │  3. Run Claude with review prompt        │
 │  4. Parse decision from Claude output    │
-│  5. Post PR review to Forgejo            │
+│  5. Post PR review            │
 │  6. If approved: attempt merge (retries) │
 │  7. Publish ReviewDecision to NATS       │
 │  8. Exit                                 │
@@ -42,7 +42,7 @@ When a worker yields (Yield outcome with pr_url), the dispatcher:
 
 1. Transitions the job to InReview
 2. Reads the job's `review` level
-3. Dispatches `review.yml` Forgejo Actions workflow with inputs:
+3. Dispatches `review.yml` CI actions workflow with inputs:
    - `job_key` — job identifier
    - `nats_url` — NATS server address
    - `pr_url` — the PR to review
@@ -63,7 +63,7 @@ The review action runs `chuggernaut-worker --mode review`. The worker:
    ```json
    {"decision": "changes_requested", "feedback": "Fix the tests"}
    ```
-5. Posts a PR review to Forgejo (APPROVED or REQUEST_CHANGES)
+5. Posts a PR review (APPROVED or REQUEST_CHANGES)
 6. If approved: attempts to merge the PR
 7. Publishes `ReviewDecision` to NATS with optional `token_usage`
 
@@ -101,7 +101,7 @@ Escalation happens when:
 
 The review action attempts to merge the PR directly after approval:
 
-1. Call Forgejo merge API (merge strategy)
+1. Call git provider merge API (merge strategy)
 2. If it fails (conflict, lock, etc.): retry up to 3 times with 5s/10s/15s delays
 3. If all retries fail: publish `ChangesRequested` with merge conflict feedback instead of `Approved`
 
@@ -189,10 +189,10 @@ jobs:
       - run: chuggernaut-worker --mode review
                --job-key "${{ inputs.job_key }}"
                --nats-url "${{ inputs.nats_url }}"
-               --forgejo-url "${{ github.server_url }}"
+               --git-url "${{ github.server_url }}"
                --pr-url "${{ inputs.pr_url }}"
                --review-level "${{ inputs.review_level }}"
         env:
-          CHUGGERNAUT_FORGEJO_TOKEN: ${{ secrets.CHUGGERNAUT_FORGEJO_TOKEN }}
+          CHUGGERNAUT_GIT_TOKEN: ${{ secrets.CHUGGERNAUT_REVIEWER_TOKEN }}
           CHUGGERNAUT_COMMAND: claude
 ```

@@ -666,9 +666,7 @@ async fn set_max_concurrent_actions(
 }
 
 async fn get_paused(State(state): State<AppState>) -> impl IntoResponse {
-    let paused = state
-        .paused
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let paused = state.paused.load(std::sync::atomic::Ordering::Relaxed);
     Json(serde_json::json!({ "paused": paused }))
 }
 

@@ -23,7 +23,7 @@ The dispatcher is the single coordinator in chuggernaut. It owns all job state t
             deps present      │ all deps Done (dispatcher walks reverse deps)
                               │
                          ┌────▼────┐
-                         │ OnDeck  │  dispatcher dispatches Forgejo Action
+                         │ OnDeck  │  dispatcher dispatches CI action
                          └────┬────┘
                               │ dispatch_action (CAS claim + workflow dispatch)
                          ┌────▼──────────┐
@@ -82,7 +82,7 @@ The dispatcher is the single coordinator in chuggernaut. It owns all job state t
 | (new) | OnIce | Creation with initial_state: on-ice | Write job KV (CAS) |
 | OnIce | OnDeck or Blocked | Admin requeue | Check deps; if all Done → OnDeck, else → Blocked |
 | Blocked | OnDeck | All deps Done | Update job KV (CAS), publish transition, dispatch action |
-| OnDeck | OnTheStack | Dispatcher dispatches action | CAS claim (worker_id: action-{key}), dispatch Forgejo workflow |
+| OnDeck | OnTheStack | Dispatcher dispatches action | CAS claim (worker_id: action-{key}), dispatch CI workflow |
 | OnTheStack | InReview | Worker outcome: yield | Auto-release claim (via transition_job), store pr_url, update job KV (CAS), dispatch review action |
 | InReview | Done | Review decision: approved (PR already merged) | Update job KV (CAS), walk reverse deps |
 | InReview | Escalated | Review decision: escalated | Update job KV (CAS) |
@@ -90,7 +90,7 @@ The dispatcher is the single coordinator in chuggernaut. It owns all job state t
 | InReview | ChangesRequested | Review decision: changes_requested | Update job KV (CAS) |
 | Escalated | Done | Admin close or manual resolution | Update job KV (CAS), walk reverse deps |
 | Escalated | ChangesRequested | Admin requeue | Update job KV (CAS) |
-| ChangesRequested | OnTheStack | Dispatcher dispatches rework action | CAS claim, dispatch Forgejo workflow with review_feedback |
+| ChangesRequested | OnTheStack | Dispatcher dispatches rework action | CAS claim, dispatch CI workflow with review_feedback |
 | OnTheStack | Failed | Lease expiry / job timeout / worker fail | Auto-release claim (via transition_job), store reason in `chuggernaut.activities`. If CI failure and rework_count >= rework_limit, escalate to human reviewer instead of retry. |
 | Failed | OnDeck | Auto-retry (retry_count < max_retries) | Increment retry_count, set `retry_after` = now + min(30s × 2^retry_count, 10min). Monitor detects eligible jobs and publishes advisory; dispatcher transitions to OnDeck and dispatches new action. |
 | Failed | Failed | Retry exhausted | Stay; manual requeue required |
@@ -177,7 +177,7 @@ Job reaches OnDeck → dispatcher dispatches action:
   → On success:
     - Increment active_claims counter
     - CAS update chuggernaut.jobs KV: state → OnTheStack
-    - Dispatch Forgejo Action workflow (job_key, nats_url, review_feedback)
+    - Dispatch CI action workflow (job_key, nats_url, review_feedback)
     - Publish JobTransition{OnDeck → OnTheStack}
   → On dispatch failure:
     - Release claim, transition to Failed
@@ -226,15 +226,15 @@ Monitor detects `now - claim.claimed_at > claim.timeout_secs`:
 
 ## Action Dispatch
 
-When a job reaches OnDeck (from creation, unblock, requeue, or auto-retry), the dispatcher dispatches a Forgejo Action immediately:
+When a job reaches OnDeck (from creation, unblock, requeue, or auto-retry), the dispatcher dispatches a CI action immediately:
 
 1. Create claim with `worker_id = "action-{job_key}"` (CAS-create)
 2. Transition job to OnTheStack
-3. Dispatch `work.yml` Forgejo Actions workflow with inputs: `job_key`, `nats_url`
+3. Dispatch `work.yml` CI actions workflow with inputs: `job_key`, `nats_url`
 4. If dispatch fails (API error): release claim, transition to Failed
 5. The action container starts, runs the worker binary, communicates via NATS
 
-There is no worker registration, capability matching, or idle worker selection. All jobs are dispatched as Forgejo Actions.
+There is no worker registration, capability matching, or idle worker selection. All jobs are dispatched as CI actions.
 
 ### Rework Dispatch
 
@@ -242,7 +242,7 @@ When a job transitions to ChangesRequested:
 
 1. Check `rework_count` against `CHUGGERNAUT_REWORK_LIMIT` (default 3)
    - If `rework_count >= rework_limit`: escalate to human reviewer instead of dispatching another rework
-2. Dispatcher dispatches a **new** Forgejo Action with the same `job_key`
+2. Dispatcher dispatches a **new** CI action with the same `job_key`
 3. Passes `review_feedback` and `is_rework=true` as additional workflow inputs
 4. Creates a new claim (same `worker_id = "action-{job_key}"`)
 5. Increments `rework_count` on the job
@@ -258,7 +258,7 @@ The rework limit is also enforced when handling CI failures on rework runs — i
 When a worker yields (transition to InReview), the dispatcher also dispatches a review action:
 
 1. Read the job's `review` level
-2. Dispatch `review.yml` Forgejo Actions workflow with inputs: `job_key`, `nats_url`, `pr_url`, `review_level`
+2. Dispatch `review.yml` CI actions workflow with inputs: `job_key`, `nats_url`, `pr_url`, `review_level`
 3. The review action (worker in review mode) reviews the PR, posts a review, and attempts merge if approved
 4. Publishes `ReviewDecision` to NATS — dispatcher handles the decision
 

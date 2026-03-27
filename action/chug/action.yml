@@ -8,11 +8,11 @@ inputs:
   nats_url:
     description: "NATS server URL"
     required: true
-  forgejo_url:
-    description: "Forgejo base URL"
+  git_url:
+    description: "Git provider base URL (e.g. Forgejo instance or https://github.com)"
     required: true
-  forgejo_token:
-    description: "Forgejo API token"
+  git_token:
+    description: "Git provider API token"
     required: true
   post_action:
     description: "What to do after Claude exits: yield (commit/push/PR) or review (parse decision/merge)"
@@ -59,11 +59,11 @@ runs:
           --post-action "${{ inputs.post_action }}" \
           --job-key "${{ inputs.job_key }}" \
           --nats-url "${{ inputs.nats_url }}" \
-          --forgejo-url "${{ inputs.forgejo_url }}" \
+          --git-url "${{ inputs.git_url }}" \
           --pr-url "${{ inputs.pr_url }}" \
           --review-level "${{ inputs.review_level }}"
       env:
-        CHUGGERNAUT_FORGEJO_TOKEN: ${{ inputs.forgejo_token }}
+        CHUGGERNAUT_GIT_TOKEN: ${{ inputs.git_token }}
         CHUGGERNAUT_COMMAND: ${{ inputs.command }}
         CHUGGERNAUT_COMMAND_ARGS: ${{ inputs.command_args }}
         CHUGGERNAUT_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}

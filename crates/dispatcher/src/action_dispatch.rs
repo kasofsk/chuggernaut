@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use chuggernaut_forgejo_api::{DispatchWorkflowOption, ForgejoClient};
+use chuggernaut_git_provider::{DispatchWorkflow, GitProvider};
 use chuggernaut_types::*;
 
 use crate::config::Config;
@@ -21,21 +21,20 @@ fn resolve_runner_label(config: &Config, job: &Job, default_label: &str) -> Stri
     default_label.to_string()
 }
 
-/// Extract (owner, repo) from a job's repo field and get Forgejo credentials.
-fn forgejo_context(
+/// Extract (owner, repo) from a job's repo field and create a GitProvider.
+fn git_provider_context(
     state: &DispatcherState,
     job: &Job,
-) -> DispatcherResult<(String, String, String, String)> {
-    let (forgejo_url, forgejo_token) =
-        match (&state.config.forgejo_url, &state.config.forgejo_token) {
-            (Some(url), Some(token)) => (url.clone(), token.clone()),
-            _ => {
-                return Err(DispatcherError::Validation(
-                "CHUGGERNAUT_FORGEJO_URL and CHUGGERNAUT_FORGEJO_TOKEN required for action dispatch"
+) -> DispatcherResult<(String, String, Box<dyn GitProvider>)> {
+    let (git_url, git_token) = match (&state.config.git_url, &state.config.git_token) {
+        (Some(url), Some(token)) => (url.clone(), token.clone()),
+        _ => {
+            return Err(DispatcherError::Validation(
+                "CHUGGERNAUT_GIT_URL and CHUGGERNAUT_GIT_TOKEN required for action dispatch"
                     .to_string(),
             ));
-            }
-        };
+        }
+    };
 
     let parts: Vec<&str> = job.repo.splitn(2, '/').collect();
     if parts.len() != 2 {
@@ -45,12 +44,9 @@ fn forgejo_context(
         )));
     }
 
-    Ok((
-        parts[0].to_string(),
-        parts[1].to_string(),
-        forgejo_url,
-        forgejo_token,
-    ))
+    let provider = crate::provider::create_provider(&git_url, &git_token);
+
+    Ok((parts[0].to_string(), parts[1].to_string(), provider))
 }
 
 /// Dispatch a Forgejo Action for a job.
@@ -68,7 +64,7 @@ pub async fn dispatch_action(
         .map(|j| j.clone())
         .ok_or_else(|| DispatcherError::JobNotFound(job_key.to_string()))?;
 
-    let (owner, repo, forgejo_url, forgejo_token) = forgejo_context(state, &job)?;
+    let (owner, repo, provider) = git_provider_context(state, &job)?;
 
     // Create a claim so the monitor can track this job
     let worker_id = format!("action-{job_key}");
@@ -89,8 +85,7 @@ pub async fn dispatch_action(
     )
     .await?;
 
-    // Dispatch the Forgejo Action
-    let forgejo = ForgejoClient::new(&forgejo_url, &forgejo_token);
+    // Dispatch the CI action
     let workflow = &state.config.action_workflow;
 
     let mut inputs = serde_json::json!({
@@ -104,13 +99,13 @@ pub async fn dispatch_action(
         inputs["review_feedback"] = serde_json::Value::String(feedback.to_string());
     }
 
-    if let Err(e) = forgejo
+    if let Err(e) = provider
         .dispatch_workflow(
             &owner,
             &repo,
             workflow,
-            &DispatchWorkflowOption {
-                ref_field: "main".to_string(),
+            DispatchWorkflow {
+                git_ref: "main".to_string(),
                 inputs: Some(inputs),
             },
         )
@@ -166,7 +161,7 @@ pub async fn dispatch_review_action(
         .map(|j| j.clone())
         .ok_or_else(|| DispatcherError::JobNotFound(job_key.to_string()))?;
 
-    let (owner, repo, forgejo_url, forgejo_token) = forgejo_context(state, &job)?;
+    let (owner, repo, provider) = git_provider_context(state, &job)?;
 
     // Transition InReview → Reviewing before dispatching.
     // This makes the state machine explicit: Reviewing = review action in-flight.
@@ -181,7 +176,6 @@ pub async fn dispatch_review_action(
     )
     .await?;
 
-    let forgejo = ForgejoClient::new(&forgejo_url, &forgejo_token);
     let workflow = &state.config.review_workflow;
 
     let inputs = serde_json::json!({
@@ -192,13 +186,13 @@ pub async fn dispatch_review_action(
         "runner_label": resolve_runner_label(&state.config, &job, &state.config.review_runner_label),
     });
 
-    if let Err(e) = forgejo
+    if let Err(e) = provider
         .dispatch_workflow(
             &owner,
             &repo,
             workflow,
-            &DispatchWorkflowOption {
-                ref_field: "main".to_string(),
+            DispatchWorkflow {
+                git_ref: "main".to_string(),
                 inputs: Some(inputs),
             },
         )
@@ -253,8 +247,8 @@ mod tests {
             monitor_scan_interval_secs: 10,
             job_retention_secs: 86400,
             activity_limit: 50,
-            forgejo_url: None,
-            forgejo_token: None,
+            git_url: None,
+            git_token: None,
             action_workflow: "work.yml".to_string(),
             action_runner_label: "ubuntu-latest".to_string(),
             max_concurrent_actions: 2,

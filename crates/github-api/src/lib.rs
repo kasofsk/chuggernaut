@@ -10,7 +10,7 @@ use thiserror::Error;
 use tracing::debug;
 
 #[derive(Debug, Error)]
-pub enum ForgejoError {
+pub enum GitHubError {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
     #[error("API error ({status}): {body}")]
@@ -19,26 +19,38 @@ pub enum ForgejoError {
     Json(#[from] serde_json::Error),
 }
 
-pub type Result<T> = std::result::Result<T, ForgejoError>;
+pub type Result<T> = std::result::Result<T, GitHubError>;
 
 #[derive(Clone)]
-pub struct ForgejoClient {
+pub struct GitHubClient {
     client: Client,
-    base_url: String,
+    api_url: String,
     token: String,
 }
 
-impl ForgejoClient {
+impl GitHubClient {
+    /// Create a new GitHub API client.
+    ///
+    /// `base_url` is the server URL (e.g. `https://github.com` or a GHES URL).
+    /// The API base is derived automatically:
+    /// - `https://github.com` → `https://api.github.com`
+    /// - `https://github.example.com` → `https://github.example.com/api/v3`
     pub fn new(base_url: &str, token: &str) -> Self {
+        let base = base_url.trim_end_matches('/');
+        let api_url = if base == "https://github.com" || base == "http://github.com" {
+            "https://api.github.com".to_string()
+        } else {
+            format!("{base}/api/v3")
+        };
         Self {
             client: Client::new(),
-            base_url: base_url.trim_end_matches('/').to_string(),
+            api_url,
             token: token.to_string(),
         }
     }
 
     fn url(&self, path: &str) -> String {
-        format!("{}/api/v1{path}", self.base_url)
+        format!("{}{path}", self.api_url)
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -46,8 +58,9 @@ impl ForgejoClient {
         let resp = self
             .client
             .get(self.url(path))
-            .header("Authorization", format!("token {}", self.token))
-            .header("Accept", "application/json")
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
             .send()
             .await?;
         self.handle_response(resp).await
@@ -62,8 +75,9 @@ impl ForgejoClient {
         let resp = self
             .client
             .post(self.url(path))
-            .header("Authorization", format!("token {}", self.token))
-            .header("Accept", "application/json")
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
             .json(body)
             .send()
             .await?;
@@ -74,217 +88,29 @@ impl ForgejoClient {
         let status = resp.status().as_u16();
         if status >= 400 {
             let body = resp.text().await.unwrap_or_default();
-            return Err(ForgejoError::Api { status, body });
+            return Err(GitHubError::Api { status, body });
         }
         let body = resp.text().await?;
         let parsed = serde_json::from_str(&body)?;
         Ok(parsed)
     }
-
-    // -----------------------------------------------------------------------
-    // Repository
-    // -----------------------------------------------------------------------
-
-    pub async fn get_repo(&self, owner: &str, repo: &str) -> Result<Repository> {
-        self.get(&format!("/repos/{owner}/{repo}")).await
-    }
-
-    // -----------------------------------------------------------------------
-    // Pull Requests
-    // -----------------------------------------------------------------------
-
-    pub async fn create_pull_request(
-        &self,
-        owner: &str,
-        repo: &str,
-        opts: &CreatePullRequestOption,
-    ) -> Result<PullRequest> {
-        self.post(&format!("/repos/{owner}/{repo}/pulls"), opts)
-            .await
-    }
-
-    pub async fn list_pull_requests(
-        &self,
-        owner: &str,
-        repo: &str,
-        state: Option<&str>,
-    ) -> Result<Vec<PullRequest>> {
-        let mut path = format!("/repos/{owner}/{repo}/pulls");
-        if let Some(s) = state {
-            path.push_str(&format!("?state={s}"));
-        }
-        self.get(&path).await
-    }
-
-    pub async fn get_pull_request(
-        &self,
-        owner: &str,
-        repo: &str,
-        index: u64,
-    ) -> Result<PullRequest> {
-        self.get(&format!("/repos/{owner}/{repo}/pulls/{index}"))
-            .await
-    }
-
-    /// Find a PR by head branch name. Returns None if not found.
-    pub async fn find_pr_by_head(
-        &self,
-        owner: &str,
-        repo: &str,
-        head: &str,
-    ) -> Result<Option<PullRequest>> {
-        let prs: Vec<PullRequest> = self
-            .get(&format!("/repos/{owner}/{repo}/pulls?state=open"))
-            .await?;
-        Ok(prs.into_iter().find(|pr| pr.head.ref_field == head))
-    }
-
-    pub async fn merge_pull_request(
-        &self,
-        owner: &str,
-        repo: &str,
-        index: u64,
-        opts: &MergePullRequestOption,
-    ) -> Result<()> {
-        let path = format!("/repos/{owner}/{repo}/pulls/{index}/merge");
-        debug!(path, "POST merge");
-        let resp = self
-            .client
-            .post(self.url(&path))
-            .header("Authorization", format!("token {}", self.token))
-            .json(opts)
-            .send()
-            .await?;
-        let status = resp.status().as_u16();
-        if status >= 400 {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ForgejoError::Api { status, body });
-        }
-        Ok(())
-    }
-
-    // -----------------------------------------------------------------------
-    // Reviews
-    // -----------------------------------------------------------------------
-
-    pub async fn list_reviews(
-        &self,
-        owner: &str,
-        repo: &str,
-        index: u64,
-    ) -> Result<Vec<PullReview>> {
-        self.get(&format!("/repos/{owner}/{repo}/pulls/{index}/reviews"))
-            .await
-    }
-
-    pub async fn submit_review(
-        &self,
-        owner: &str,
-        repo: &str,
-        index: u64,
-        opts: &CreatePullReviewOptions,
-    ) -> Result<PullReview> {
-        self.post(
-            &format!("/repos/{owner}/{repo}/pulls/{index}/reviews"),
-            opts,
-        )
-        .await
-    }
-
-    pub async fn add_reviewers(
-        &self,
-        owner: &str,
-        repo: &str,
-        index: u64,
-        opts: &PullReviewRequestOptions,
-    ) -> Result<Vec<PullReview>> {
-        self.post(
-            &format!("/repos/{owner}/{repo}/pulls/{index}/requested_reviewers"),
-            opts,
-        )
-        .await
-    }
-
-    // -----------------------------------------------------------------------
-    // Commit Status
-    // -----------------------------------------------------------------------
-
-    /// Get the combined commit status for a ref (branch, tag, or SHA).
-    /// Forgejo API: GET /repos/{owner}/{repo}/commits/{ref}/status
-    pub async fn get_combined_status(
-        &self,
-        owner: &str,
-        repo: &str,
-        ref_name: &str,
-    ) -> Result<CombinedStatus> {
-        self.get(&format!("/repos/{owner}/{repo}/commits/{ref_name}/status"))
-            .await
-    }
-
-    // -----------------------------------------------------------------------
-    // Actions
-    // -----------------------------------------------------------------------
-
-    pub async fn dispatch_workflow(
-        &self,
-        owner: &str,
-        repo: &str,
-        workflow_file: &str,
-        opts: &DispatchWorkflowOption,
-    ) -> Result<DispatchWorkflowRun> {
-        let path = format!("/repos/{owner}/{repo}/actions/workflows/{workflow_file}/dispatches");
-        debug!(path, "POST dispatch workflow");
-        let resp = self
-            .client
-            .post(self.url(&path))
-            .header("Authorization", format!("token {}", self.token))
-            .json(opts)
-            .send()
-            .await?;
-        let status = resp.status().as_u16();
-        if status >= 400 {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ForgejoError::Api { status, body });
-        }
-        // Some Forgejo versions return empty body (204), others return JSON
-        let body = resp.text().await.unwrap_or_default();
-        if body.is_empty() {
-            Ok(DispatchWorkflowRun {
-                id: None,
-                jobs: None,
-                run_number: None,
-            })
-        } else {
-            Ok(serde_json::from_str(&body)?)
-        }
-    }
-
-    pub async fn get_action_run(&self, owner: &str, repo: &str, run_id: u64) -> Result<ActionRun> {
-        self.get(&format!("/repos/{owner}/{repo}/actions/runs/{run_id}"))
-            .await
-    }
-
-    pub async fn list_action_runs(&self, owner: &str, repo: &str) -> Result<ActionRunList> {
-        self.get(&format!("/repos/{owner}/{repo}/actions/runs"))
-            .await
-    }
 }
 
 // ---------------------------------------------------------------------------
-// Error conversion: ForgejoError → gp::Error
+// Error conversion: GitHubError → gp::Error
 // ---------------------------------------------------------------------------
 
-impl From<ForgejoError> for gp::Error {
-    fn from(e: ForgejoError) -> Self {
+impl From<GitHubError> for gp::Error {
+    fn from(e: GitHubError) -> Self {
         match e {
-            ForgejoError::Api { status, body } => gp::Error::Api { status, body },
+            GitHubError::Api { status, body } => gp::Error::Api { status, body },
             other => gp::Error::Other(Box::new(other)),
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Type conversions: Forgejo wire types → provider-agnostic types
+// Type conversions: GitHub wire types → provider-agnostic types
 // ---------------------------------------------------------------------------
 
 impl From<Repository> for gp::Repository {
@@ -330,7 +156,7 @@ impl From<PullReview> for gp::PullReview {
         Self {
             id: r.id,
             state: r.state,
-            body: r.body,
+            body: r.body.unwrap_or_default(),
             user: r.user.map(|u| gp::ReviewUser {
                 login: u.login,
                 id: u.id,
@@ -359,12 +185,6 @@ impl From<CombinedStatus> for gp::CombinedStatus {
     }
 }
 
-impl From<DispatchWorkflowRun> for gp::DispatchWorkflowRun {
-    fn from(r: DispatchWorkflowRun) -> Self {
-        Self { id: r.id }
-    }
-}
-
 impl From<ActionRun> for gp::ActionRun {
     fn from(r: ActionRun) -> Self {
         Self {
@@ -386,11 +206,11 @@ impl From<ActionRunList> for gp::ActionRunList {
 }
 
 // ---------------------------------------------------------------------------
-// GitProvider trait implementation for ForgejoClient
+// GitProvider trait implementation for GitHubClient
 // ---------------------------------------------------------------------------
 
 #[async_trait]
-impl gp::GitProvider for ForgejoClient {
+impl gp::GitProvider for GitHubClient {
     async fn get_repo(&self, owner: &str, repo: &str) -> gp::Result<gp::Repository> {
         let r: Repository = self.get(&format!("/repos/{owner}/{repo}")).await?;
         Ok(r.into())
@@ -446,13 +266,10 @@ impl gp::GitProvider for ForgejoClient {
         repo: &str,
         head: &str,
     ) -> gp::Result<Option<gp::PullRequest>> {
-        let prs: Vec<PullRequest> = self
-            .get(&format!("/repos/{owner}/{repo}/pulls?state=open"))
-            .await?;
-        Ok(prs
-            .into_iter()
-            .find(|pr| pr.head.ref_field == head)
-            .map(Into::into))
+        // GitHub supports filtering by head branch directly
+        let path = format!("/repos/{owner}/{repo}/pulls?state=open&head={owner}:{head}");
+        let prs: Vec<PullRequest> = self.get(&path).await?;
+        Ok(prs.into_iter().next().map(Into::into))
     }
 
     async fn merge_pull_request(
@@ -463,19 +280,21 @@ impl gp::GitProvider for ForgejoClient {
         opts: gp::MergePullRequest,
     ) -> gp::Result<()> {
         let wire = MergePullRequestOption {
-            method: match opts.method {
+            merge_method: match opts.method {
                 gp::MergeMethod::Merge => "merge".to_string(),
                 gp::MergeMethod::Rebase => "rebase".to_string(),
                 gp::MergeMethod::Squash => "squash".to_string(),
             },
-            merge_message_field: opts.message,
+            commit_message: opts.message,
         };
         let path = format!("/repos/{owner}/{repo}/pulls/{number}/merge");
-        debug!(path, "POST merge");
+        debug!(path, "PUT merge");
         let resp = self
             .client
-            .post(self.url(&path))
-            .header("Authorization", format!("token {}", self.token))
+            .put(self.url(&path))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
             .json(&wire)
             .send()
             .await
@@ -510,7 +329,8 @@ impl gp::GitProvider for ForgejoClient {
         let wire = CreatePullReviewOptions {
             body: opts.body,
             event: match opts.event {
-                gp::ReviewEvent::Approve => "APPROVED".to_string(),
+                // GitHub uses "APPROVE" (no trailing D), unlike Forgejo's "APPROVED"
+                gp::ReviewEvent::Approve => "APPROVE".to_string(),
                 gp::ReviewEvent::RequestChanges => "REQUEST_CHANGES".to_string(),
                 gp::ReviewEvent::Comment => "COMMENT".to_string(),
             },
@@ -531,14 +351,27 @@ impl gp::GitProvider for ForgejoClient {
         pr_number: u64,
         reviewers: Vec<String>,
     ) -> gp::Result<Vec<gp::PullReview>> {
+        // GitHub's request-reviewers endpoint returns a PullRequest, not reviews.
+        // We just need to confirm success; return an empty vec.
         let wire = PullReviewRequestOptions { reviewers };
-        let reviews: Vec<PullReview> = self
-            .post(
-                &format!("/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers"),
-                &wire,
-            )
-            .await?;
-        Ok(reviews.into_iter().map(Into::into).collect())
+        let path = format!("/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers");
+        debug!(path, "POST add reviewers");
+        let resp = self
+            .client
+            .post(self.url(&path))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .json(&wire)
+            .send()
+            .await
+            .map_err(|e| gp::Error::Other(Box::new(e)))?;
+        let status = resp.status().as_u16();
+        if status >= 400 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(gp::Error::Api { status, body });
+        }
+        Ok(vec![])
     }
 
     async fn get_combined_status(
@@ -569,7 +402,9 @@ impl gp::GitProvider for ForgejoClient {
         let resp = self
             .client
             .post(self.url(&path))
-            .header("Authorization", format!("token {}", self.token))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
             .json(&wire)
             .send()
             .await
@@ -579,14 +414,8 @@ impl gp::GitProvider for ForgejoClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(gp::Error::Api { status, body });
         }
-        let body = resp.text().await.unwrap_or_default();
-        if body.is_empty() {
-            Ok(gp::DispatchWorkflowRun::default())
-        } else {
-            let r: DispatchWorkflowRun =
-                serde_json::from_str(&body).map_err(|e| gp::Error::Other(Box::new(e)))?;
-            Ok(r.into())
-        }
+        // GitHub always returns 204 No Content for workflow dispatches
+        Ok(gp::DispatchWorkflowRun::default())
     }
 
     async fn get_action_run(
@@ -606,5 +435,59 @@ impl gp::GitProvider for ForgejoClient {
             .get(&format!("/repos/{owner}/{repo}/actions/runs"))
             .await?;
         Ok(l.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_url_github_com() {
+        let client = GitHubClient::new("https://github.com", "tok");
+        assert_eq!(client.api_url, "https://api.github.com");
+    }
+
+    #[test]
+    fn api_url_github_com_trailing_slash() {
+        let client = GitHubClient::new("https://github.com/", "tok");
+        assert_eq!(client.api_url, "https://api.github.com");
+    }
+
+    #[test]
+    fn api_url_ghes() {
+        let client = GitHubClient::new("https://github.example.com", "tok");
+        assert_eq!(client.api_url, "https://github.example.com/api/v3");
+    }
+
+    #[test]
+    fn combined_status_deserialize() {
+        let json = r#"{
+            "state": "success",
+            "statuses": [{"id":1,"state":"success","context":"ci/test"}],
+            "total_count": 1,
+            "sha": "abc123"
+        }"#;
+        let status: CombinedStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(status.statuses.len(), 1);
+        assert_eq!(status.statuses[0].status, "success");
+    }
+
+    #[test]
+    fn pull_request_deserialize() {
+        let json = r#"{
+            "id": 1,
+            "number": 42,
+            "title": "Test PR",
+            "body": "Description",
+            "state": "open",
+            "merged": false,
+            "html_url": "https://github.com/owner/repo/pull/42",
+            "head": {"ref": "feature-branch", "sha": "abc123"},
+            "base": {"ref": "main", "sha": "def456"}
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.head.ref_field, "feature-branch");
     }
 }

@@ -14,7 +14,7 @@ pub enum GitError {
 pub type Result<T> = std::result::Result<T, GitError>;
 
 /// Clone a repo into a work directory. Returns the path to the cloned repo.
-pub fn clone_repo(forgejo_url: &str, repo: &str, token: &str, workdir: &Path) -> Result<PathBuf> {
+pub fn clone_repo(git_url: &str, repo: &str, token: &str, workdir: &Path) -> Result<PathBuf> {
     let repo_dir = workdir.join(repo.replace('/', "_"));
     if repo_dir.exists() {
         debug!(?repo_dir, "repo already cloned, pulling");
@@ -22,14 +22,22 @@ pub fn clone_repo(forgejo_url: &str, repo: &str, token: &str, workdir: &Path) ->
         return Ok(repo_dir);
     }
 
+    // GitHub App tokens require "x-access-token" as the username;
+    // Forgejo/Gitea works with any username.
+    let git_username = if git_url.contains("github.com") {
+        "x-access-token"
+    } else {
+        "chuggernaut-worker"
+    };
+
     let clone_url = format!(
-        "{}://chuggernaut-worker:{token}@{}/{repo}.git",
-        if forgejo_url.starts_with("https") {
+        "{}://{git_username}:{token}@{}/{repo}.git",
+        if git_url.starts_with("https") {
             "https"
         } else {
             "http"
         },
-        forgejo_url
+        git_url
             .trim_start_matches("http://")
             .trim_start_matches("https://"),
     );
@@ -48,7 +56,7 @@ pub fn clone_repo(forgejo_url: &str, repo: &str, token: &str, workdir: &Path) ->
     // Configure a credential helper that returns our token, overriding any
     // global helper (e.g. one set by actions/checkout) that might interfere.
     let helper_script =
-        format!("!f() {{ echo \"username=chuggernaut-worker\"; echo \"password={token}\"; }}; f");
+        format!("!f() {{ echo \"username={git_username}\"; echo \"password={token}\"; }}; f");
     run_git(&repo_dir, &["config", "credential.helper", &helper_script])?;
 
     Ok(repo_dir)
