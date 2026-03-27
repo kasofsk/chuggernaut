@@ -77,12 +77,7 @@ pub trait GitProvider: Send + Sync {
     ) -> Result<Vec<PullReview>>;
 
     // Issues
-    async fn create_issue(
-        &self,
-        owner: &str,
-        repo: &str,
-        opts: CreateIssue,
-    ) -> Result<Issue>;
+    async fn create_issue(&self, owner: &str, repo: &str, opts: CreateIssue) -> Result<Issue>;
 
     async fn update_issue(
         &self,

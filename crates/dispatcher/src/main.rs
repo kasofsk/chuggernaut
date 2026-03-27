@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
 
-use chuggernaut_dispatcher::{config, handlers, http, issue_sync, monitor, nats_init, recovery, state};
+use chuggernaut_dispatcher::{
+    config, handlers, http, issue_sync, monitor, nats_init, recovery, state,
+};
 use tracing::info;
 
 #[tokio::main]

@@ -557,10 +557,7 @@ async fn post_action_yield(
                 _ => None,
             };
             if let Some(body) = comment_body {
-                match provider
-                    .create_comment(owner, repo, pr.number, &body)
-                    .await
-                {
+                match provider.create_comment(owner, repo, pr.number, &body).await {
                     Ok(comment) => info!(
                         job_key,
                         comment_id = comment.id,
@@ -579,7 +576,10 @@ async fn post_action_yield(
             let (pr_title, pr_body) = match action_result {
                 Some(ActionResult::Pr { title, body }) => (title.clone(), body.clone()),
                 _ => {
-                    error!(job_key, "worker did not call submit_pr — no PR metadata in KV");
+                    error!(
+                        job_key,
+                        "worker did not call submit_pr — no PR metadata in KV"
+                    );
                     (
                         format!("[{job_key}] Work"),
                         format!("Worker did not call submit_pr. Automated work for job {job_key}."),
@@ -1374,8 +1374,7 @@ mod tests {
 
     #[test]
     fn parse_review_decision_changes_requested() {
-        let result =
-            parse_review_decision("changes_requested", Some("Fix the tests")).unwrap();
+        let result = parse_review_decision("changes_requested", Some("Fix the tests")).unwrap();
         assert!(
             matches!(result, ReviewResult::ChangesRequested { feedback } if feedback == "Fix the tests")
         );
