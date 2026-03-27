@@ -74,16 +74,20 @@ async fn reconcile_claims_against_jobs(state: &Arc<DispatcherState>) -> Dispatch
         if let Ok(key_str) = key
             && let Some((claim, _)) = kv_get::<ClaimState>(&state.kv.claims, &key_str).await?
         {
-            let valid = state
+            let job_active = state
                 .jobs
                 .get(&key_str)
                 .map(|j| j.state == JobState::OnTheStack || j.state == JobState::Reviewing)
                 .unwrap_or(false);
 
-            if !valid {
+            let lease_expired = claim.lease_deadline < chrono::Utc::now();
+
+            if !job_active || lease_expired {
                 warn!(
                     job_key = key_str,
                     worker_id = claim.worker_id,
+                    job_active,
+                    lease_expired,
                     "stale claim detected — deleting"
                 );
                 let _ = state.kv.claims.delete(&key_str).await;

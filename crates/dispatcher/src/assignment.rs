@@ -79,7 +79,8 @@ pub async fn assign_job(state: &Arc<DispatcherState>, job_key: &str) -> Dispatch
         return Ok(false);
     }
 
-    match crate::action_dispatch::dispatch_action(state, job_key, None, false).await {
+    let is_rework = job.state == JobState::ChangesRequested;
+    match crate::action_dispatch::dispatch_action(state, job_key, None, is_rework).await {
         Ok(()) => Ok(true),
         Err(e) => {
             debug!(job_key, "action dispatch failed: {e}");
