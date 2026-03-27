@@ -255,7 +255,9 @@ function renderNode(node, job) {
   g.appendChild(dot);
   g.appendChild(svgText(22, 49, stateLabel, `node-state ${stateClass.replace('state-', 'state-dot-')}`));
 
-  if (claim && isRunning) {
+  if (job.rework_count > 0) {
+    g.appendChild(svgText(node.width - 8, 49, `rework ×${job.rework_count}`, 'node-elapsed', 'end'));
+  } else if (claim && isRunning) {
     const elapsed = formatElapsed(claim.claimed_at);
     g.appendChild(svgText(node.width - 8, 49, elapsed, 'node-elapsed', 'end'));
   }
