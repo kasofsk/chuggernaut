@@ -155,33 +155,24 @@ pub async fn create_job(
         }
     };
 
-    let now = Utc::now();
-    let job = Job {
-        key: key.clone(),
-        repo: req.repo.clone(),
-        state: initial_state,
-        title: req.title,
-        body: req.body,
-        priority: req.priority,
-        capabilities: req.capabilities,
-        platform: req.platform,
-        timeout_secs: req.timeout_secs,
-        review: req.review,
-        max_retries: req.max_retries,
-        retry_count: 0,
-        retry_after: None,
-        pr_url: None,
-        token_usage: vec![],
-        claude_args: req.claude_args,
-        continuation_count: 0,
-        rework_count: 0,
-        rework_limit: req.rework_limit,
-        merge_conflict: false,
-        ci_status: None,
-        ci_check_since: None,
-        created_at: now,
-        updated_at: now,
-    };
+    let mut builder = Job::builder(key.clone(), req.repo.clone(), req.title)
+        .body(req.body)
+        .state(initial_state)
+        .priority(req.priority)
+        .capabilities(req.capabilities)
+        .timeout_secs(req.timeout_secs)
+        .review(req.review)
+        .max_retries(req.max_retries);
+    if let Some(p) = req.platform {
+        builder = builder.platform(p);
+    }
+    if let Some(args) = req.claude_args {
+        builder = builder.claude_args(args);
+    }
+    if let Some(limit) = req.rework_limit {
+        builder = builder.rework_limit(limit);
+    }
+    let job = builder.build();
 
     // Write job to KV
     kv_cas_create(&state.kv.jobs, &key, &job).await?;
@@ -201,7 +192,7 @@ pub async fn create_job(
 
     // Log activity
     let activity = ActivityEntry {
-        timestamp: now,
+        timestamp: Utc::now(),
         kind: "created".to_string(),
         message: format!("Job created with state {initial_state:?}"),
     };

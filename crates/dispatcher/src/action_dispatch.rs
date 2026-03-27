@@ -269,32 +269,9 @@ mod tests {
     }
 
     fn test_job(capabilities: Vec<String>) -> Job {
-        Job {
-            key: "test.repo.1".to_string(),
-            repo: "test/repo".to_string(),
-            title: "test".to_string(),
-            body: String::new(),
-            state: JobState::OnDeck,
-            priority: 50,
-            capabilities,
-            platform: None,
-            timeout_secs: 3600,
-            review: ReviewLevel::High,
-            max_retries: 3,
-            retry_count: 0,
-            retry_after: None,
-            pr_url: None,
-            token_usage: vec![],
-            claude_args: None,
-            continuation_count: 0,
-            rework_count: 0,
-            rework_limit: None,
-            merge_conflict: false,
-            ci_status: None,
-            ci_check_since: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        }
+        Job::builder("test.repo.1", "test/repo", "test")
+            .capabilities(capabilities)
+            .build()
     }
 
     #[test]

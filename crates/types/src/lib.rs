@@ -161,6 +161,109 @@ pub struct Job {
     pub updated_at: DateTime<Utc>,
 }
 
+impl Job {
+    /// Create a builder with the required fields. All optional fields default to
+    /// sensible values. Call `.build()` to produce the `Job`.
+    pub fn builder(key: impl Into<String>, repo: impl Into<String>, title: impl Into<String>) -> JobBuilder {
+        JobBuilder::new(key, repo, title)
+    }
+}
+
+pub struct JobBuilder {
+    key: String,
+    repo: String,
+    title: String,
+    body: String,
+    state: JobState,
+    priority: u8,
+    capabilities: Vec<String>,
+    platform: Option<String>,
+    timeout_secs: u64,
+    review: ReviewLevel,
+    max_retries: u32,
+    retry_count: u32,
+    retry_after: Option<DateTime<Utc>>,
+    pr_url: Option<String>,
+    token_usage: Vec<ActionTokenRecord>,
+    claude_args: Option<String>,
+    continuation_count: u32,
+    rework_count: u32,
+    rework_limit: Option<u32>,
+    merge_conflict: bool,
+    ci_status: Option<CiStatus>,
+    ci_check_since: Option<DateTime<Utc>>,
+}
+
+impl JobBuilder {
+    pub fn new(key: impl Into<String>, repo: impl Into<String>, title: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            repo: repo.into(),
+            title: title.into(),
+            body: String::new(),
+            state: JobState::OnDeck,
+            priority: 50,
+            capabilities: vec![],
+            platform: None,
+            timeout_secs: 3600,
+            review: ReviewLevel::High,
+            max_retries: 3,
+            retry_count: 0,
+            retry_after: None,
+            pr_url: None,
+            token_usage: vec![],
+            claude_args: None,
+            continuation_count: 0,
+            rework_count: 0,
+            rework_limit: None,
+            merge_conflict: false,
+            ci_status: None,
+            ci_check_since: None,
+        }
+    }
+
+    pub fn body(mut self, body: impl Into<String>) -> Self { self.body = body.into(); self }
+    pub fn state(mut self, state: JobState) -> Self { self.state = state; self }
+    pub fn priority(mut self, priority: u8) -> Self { self.priority = priority; self }
+    pub fn capabilities(mut self, caps: Vec<String>) -> Self { self.capabilities = caps; self }
+    pub fn platform(mut self, platform: impl Into<String>) -> Self { self.platform = Some(platform.into()); self }
+    pub fn timeout_secs(mut self, secs: u64) -> Self { self.timeout_secs = secs; self }
+    pub fn review(mut self, review: ReviewLevel) -> Self { self.review = review; self }
+    pub fn max_retries(mut self, n: u32) -> Self { self.max_retries = n; self }
+    pub fn claude_args(mut self, args: impl Into<String>) -> Self { self.claude_args = Some(args.into()); self }
+    pub fn rework_limit(mut self, limit: u32) -> Self { self.rework_limit = Some(limit); self }
+
+    pub fn build(self) -> Job {
+        let now = Utc::now();
+        Job {
+            key: self.key,
+            repo: self.repo,
+            state: self.state,
+            title: self.title,
+            body: self.body,
+            priority: self.priority,
+            capabilities: self.capabilities,
+            platform: self.platform,
+            timeout_secs: self.timeout_secs,
+            review: self.review,
+            max_retries: self.max_retries,
+            retry_count: self.retry_count,
+            retry_after: self.retry_after,
+            pr_url: self.pr_url,
+            token_usage: self.token_usage,
+            claude_args: self.claude_args,
+            continuation_count: self.continuation_count,
+            rework_count: self.rework_count,
+            rework_limit: self.rework_limit,
+            merge_conflict: self.merge_conflict,
+            ci_status: self.ci_status,
+            ci_check_since: self.ci_check_since,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ClaimState {
     pub worker_id: String,
@@ -1227,32 +1330,12 @@ mod tests {
 
     #[test]
     fn job_roundtrip() {
-        let job = Job {
-            key: "acme.payments.57".to_string(),
-            repo: "acme/payments".to_string(),
-            state: JobState::OnDeck,
-            title: "Add retry logic".to_string(),
-            body: "Retry with backoff".to_string(),
-            priority: 80,
-            capabilities: vec!["rust".to_string()],
-            platform: None,
-            timeout_secs: 3600,
-            review: ReviewLevel::High,
-            max_retries: 3,
-            retry_count: 0,
-            retry_after: None,
-            pr_url: None,
-            token_usage: vec![],
-            claude_args: Some("--model claude-sonnet-4-5-20250514".to_string()),
-            continuation_count: 0,
-            rework_count: 0,
-            rework_limit: None,
-            merge_conflict: false,
-            ci_status: None,
-            ci_check_since: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
+        let job = Job::builder("acme.payments.57", "acme/payments", "Add retry logic")
+            .body("Retry with backoff")
+            .priority(80)
+            .capabilities(vec!["rust".to_string()])
+            .claude_args("--model claude-sonnet-4-5-20250514")
+            .build();
         let json = serde_json::to_string(&job).unwrap();
         let back: Job = serde_json::from_str(&json).unwrap();
         assert_eq!(back.key, job.key);
