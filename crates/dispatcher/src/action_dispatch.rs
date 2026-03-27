@@ -289,6 +289,7 @@ mod tests {
             continuation_count: 0,
             rework_count: 0,
             rework_limit: None,
+            merge_conflict: false,
             ci_status: None,
             ci_check_since: None,
             created_at: chrono::Utc::now(),

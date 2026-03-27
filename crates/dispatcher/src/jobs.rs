@@ -176,6 +176,7 @@ pub async fn create_job(
         continuation_count: 0,
         rework_count: 0,
         rework_limit: req.rework_limit,
+        merge_conflict: false,
         ci_status: None,
         ci_check_since: None,
         created_at: now,

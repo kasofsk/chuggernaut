@@ -156,6 +156,7 @@ impl From<PullRequest> for gp::PullRequest {
             body: pr.body,
             state: pr.state,
             merged: pr.merged,
+            mergeable: pr.mergeable,
             html_url: pr.html_url,
             head: gp::PullRequestBranch {
                 ref_name: pr.head.ref_field,

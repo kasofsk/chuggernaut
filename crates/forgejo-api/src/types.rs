@@ -47,6 +47,8 @@ pub struct PullRequest {
     pub body: Option<String>,
     pub state: String,
     pub merged: bool,
+    #[serde(default)]
+    pub mergeable: Option<bool>,
     pub html_url: String,
     pub head: PullRequestBranch,
     pub base: PullRequestBranch,

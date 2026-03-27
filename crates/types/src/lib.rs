@@ -93,6 +93,7 @@ pub struct ActionTokenRecord {
 pub enum DecisionType {
     Approved,
     ChangesRequested { feedback: String },
+    MergeConflict { error: String },
     Escalated { reviewer_login: String },
 }
 
@@ -147,6 +148,9 @@ pub struct Job {
     /// Per-job rework limit override. None = use global config default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rework_limit: Option<u32>,
+    /// Set when the last rework was for merge conflict resolution (skip re-review).
+    #[serde(default)]
+    pub merge_conflict: bool,
     /// CI status for the PR. None = not yet checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci_status: Option<CiStatus>,
@@ -1243,6 +1247,7 @@ mod tests {
             continuation_count: 0,
             rework_count: 0,
             rework_limit: None,
+            merge_conflict: false,
             ci_status: None,
             ci_check_since: None,
             created_at: Utc::now(),

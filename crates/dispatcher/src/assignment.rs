@@ -526,6 +526,49 @@ async fn process_review_decision(
                 .await;
             }
         }
+        DecisionType::MergeConflict { error } => {
+            // Code was approved but merge failed — flag for auto-merge after rework.
+            // Don't increment rework_count (this isn't a code quality issue).
+            let (updated, _) = jobs::kv_cas_rmw::<Job, _>(
+                &state.kv.jobs,
+                job_key,
+                state.config.cas_max_retries,
+                |j| {
+                    j.merge_conflict = true;
+                    j.updated_at = Utc::now();
+                    Ok(())
+                },
+            )
+            .await?;
+            state.jobs.insert(job_key.to_string(), updated);
+
+            jobs::transition_job(
+                state,
+                job_key,
+                JobState::ChangesRequested,
+                "merge_conflict",
+                None,
+            )
+            .await?;
+
+            let feedback = format!(
+                "The code review passed but the PR has merge conflicts and cannot be merged.\n\n\
+                 Error: {error}\n\n\
+                 Please rebase your branch onto main, resolve any merge conflicts, \
+                 and push the result. Do NOT change any logic — only resolve conflicts \
+                 to produce a clean merge."
+            );
+            assign_rework(state, job_key, &feedback).await?;
+
+            jobs::journal_append(
+                state,
+                "merge_conflict",
+                Some(job_key),
+                None,
+                Some(&format!("merge failed: {error}")),
+            )
+            .await;
+        }
         DecisionType::Escalated { reviewer_login } => {
             // Transition Reviewing → Escalated (auto-releases claim)
             jobs::transition_job(
@@ -754,6 +797,115 @@ async fn handle_retry(
     Ok(())
 }
 
+async fn auto_merge_after_conflict(
+    state: &Arc<DispatcherState>,
+    job_key: &str,
+    pr_url: &str,
+) -> DispatcherResult<()> {
+    let provider: Box<dyn chuggernaut_git_provider::GitProvider> =
+        match (&state.config.git_url, &state.config.git_token) {
+            (Some(url), Some(token)) => crate::provider::create_provider(url, token),
+            _ => {
+                warn!(job_key, "no git provider configured — cannot auto-merge");
+                return Ok(());
+            }
+        };
+
+    let job = state.jobs.get(job_key).map(|j| j.clone());
+    let repo = match &job {
+        Some(j) => &j.repo,
+        None => return Ok(()),
+    };
+    let parts: Vec<&str> = repo.splitn(2, '/').collect();
+    if parts.len() != 2 {
+        return Ok(());
+    }
+    let (owner, repo_name) = (parts[0], parts[1]);
+
+    let pr_index = match chuggernaut_types::parse_pr_url_index(pr_url) {
+        Some(idx) => idx,
+        None => {
+            warn!(job_key, pr_url, "cannot parse PR index for auto-merge");
+            return Ok(());
+        }
+    };
+
+    match provider
+        .merge_pull_request(
+            owner,
+            repo_name,
+            pr_index,
+            chuggernaut_git_provider::MergePullRequest {
+                method: chuggernaut_git_provider::MergeMethod::Merge,
+                message: None,
+            },
+        )
+        .await
+    {
+        Ok(()) => {
+            info!(job_key, "auto-merged after merge-conflict rework");
+            // Clear the flag and transition to Done
+            let (updated, _) = jobs::kv_cas_rmw::<Job, _>(
+                &state.kv.jobs,
+                job_key,
+                state.config.cas_max_retries,
+                |j| {
+                    j.merge_conflict = false;
+                    j.updated_at = Utc::now();
+                    Ok(())
+                },
+            )
+            .await?;
+            state.jobs.insert(job_key.to_string(), updated);
+
+            jobs::transition_job(state, job_key, JobState::Done, "auto_merge", None).await?;
+            let unblocked = crate::deps::propagate_unblock(state, job_key).await?;
+            for key in &unblocked {
+                assign_job(state, key).await?;
+            }
+
+            let entry = ActivityEntry {
+                timestamp: Utc::now(),
+                kind: "auto_merged".to_string(),
+                message: "Auto-merged after merge-conflict resolution (review already passed)"
+                    .to_string(),
+            };
+            jobs::append_activity(state, job_key, entry).await;
+            jobs::journal_append(state, "auto_merged", Some(job_key), None, None).await;
+        }
+        Err(e) => {
+            // Merge still failing — fall back to normal review dispatch
+            warn!(
+                job_key,
+                error = %e,
+                "auto-merge failed after conflict rework — dispatching review"
+            );
+            // Clear the flag so we don't loop
+            let (updated, _) = jobs::kv_cas_rmw::<Job, _>(
+                &state.kv.jobs,
+                job_key,
+                state.config.cas_max_retries,
+                |j| {
+                    j.merge_conflict = false;
+                    j.updated_at = Utc::now();
+                    Ok(())
+                },
+            )
+            .await?;
+            state.jobs.insert(job_key.to_string(), updated);
+
+            let review_level = state
+                .jobs
+                .get(job_key)
+                .map(|j| format!("{:?}", j.review).to_lowercase())
+                .unwrap_or_else(|| "high".to_string());
+            dispatch_review(state, job_key, pr_url, &review_level).await;
+        }
+    }
+
+    Ok(())
+}
+
 async fn handle_ci_check(
     state: &Arc<DispatcherState>,
     event: CiCheckEvent,
@@ -781,6 +933,14 @@ async fn handle_ci_check(
     state.jobs.insert(event.job_key.clone(), updated);
 
     match event.ci_status {
+        CiStatus::Success if job.merge_conflict => {
+            // Merge-conflict rework complete + CI passed → auto-merge (skip re-review)
+            info!(
+                job_key = event.job_key,
+                "CI passed after merge-conflict rework — attempting auto-merge"
+            );
+            auto_merge_after_conflict(state, &event.job_key, &event.pr_url).await?;
+        }
         CiStatus::Success => {
             // CI passed — dispatch review inline
             let review_level = state

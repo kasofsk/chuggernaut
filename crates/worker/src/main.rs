@@ -214,6 +214,29 @@ async fn run(args: Args) -> anyhow::Result<()> {
             let pr_index = parse_pr_index(&args.pr_url)
                 .ok_or_else(|| anyhow::anyhow!("cannot parse PR index from: {}", args.pr_url))?;
             let pr = provider.get_pull_request(owner, repo, pr_index).await?;
+
+            // Early mergeability check — skip the review entirely if PR has conflicts
+            if pr.mergeable == Some(false) {
+                info!(
+                    job_key = args.job_key,
+                    pr_index, "PR has merge conflicts — skipping review"
+                );
+                let (nats, _js) = connect_nats(&args.nats_url).await?;
+                let decision = ReviewDecision {
+                    job_key: args.job_key.clone(),
+                    decision: DecisionType::MergeConflict {
+                        error: "PR is not mergeable (merge conflicts detected before review)"
+                            .to_string(),
+                    },
+                    pr_url: Some(args.pr_url.clone()),
+                    token_usage: None,
+                };
+                nats.publish_msg(&chuggernaut_types::subjects::REVIEW_DECISION, &decision)
+                    .await?;
+                info!(job_key = args.job_key, "merge conflict decision published");
+                return Ok(());
+            }
+
             let b = pr.head.ref_name.clone();
             chuggernaut_worker::git::checkout_branch(&repo_dir, &b)?;
             info!(
@@ -664,11 +687,11 @@ async fn post_action_review(
                     }
                 }
                 Err(e) => {
-                    warn!(job_key = args.job_key, error = %e, "merge failed, requesting changes");
+                    warn!(job_key = args.job_key, error = %e, "merge failed after approval");
                     ReviewDecision {
                         job_key: args.job_key.clone(),
-                        decision: DecisionType::ChangesRequested {
-                            feedback: format!("Approved but merge failed: {e}"),
+                        decision: DecisionType::MergeConflict {
+                            error: format!("{e}"),
                         },
                         pr_url: Some(args.pr_url.clone()),
                         token_usage: token_usage.clone(),
