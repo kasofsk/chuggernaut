@@ -10,7 +10,10 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use chuggernaut_forgejo_api::{CreatePullReviewOptions, ForgejoClient, MergePullRequestOption};
+use chuggernaut_forgejo_api::ForgejoClient;
+use chuggernaut_git_provider::{
+    CreatePullRequest, CreateReview, GitProvider, MergeMethod, MergePullRequest, ReviewEvent,
+};
 use chuggernaut_nats::NatsClient;
 use chuggernaut_types::*;
 
@@ -164,8 +167,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("invalid job key: {}", args.job_key))?;
     let repo_full = format!("{owner}/{repo}");
 
-    let forgejo = ForgejoClient::new(&args.forgejo_url, &args.forgejo_token);
-    validate_forgejo_token(&forgejo, owner, repo).await?;
+    let provider: Box<dyn GitProvider> =
+        Box::new(ForgejoClient::new(&args.forgejo_url, &args.forgejo_token));
+    validate_token(&*provider, owner, repo).await?;
 
     let (nats, _js) = connect_nats(&args.nats_url).await?;
     let cancel = CancellationToken::new();
@@ -199,8 +203,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
         PostAction::Review => {
             let pr_index = parse_pr_index(&args.pr_url)
                 .ok_or_else(|| anyhow::anyhow!("cannot parse PR index from: {}", args.pr_url))?;
-            let pr = forgejo.get_pull_request(owner, repo, pr_index).await?;
-            let b = pr.head.ref_field.clone();
+            let pr = provider.get_pull_request(owner, repo, pr_index).await?;
+            let b = pr.head.ref_name.clone();
             chuggernaut_worker::git::checkout_branch(&repo_dir, &b)?;
             info!(
                 branch = b.as_str(),
@@ -382,7 +386,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     match args.post_action {
         PostAction::Yield => {
             let base_outcome = if exit_ok || was_deadline {
-                post_action_yield(&forgejo, owner, repo, &branch, &args.job_key).await
+                post_action_yield(&*provider, owner, repo, &branch, &args.job_key).await
             } else {
                 OutcomeType::Fail {
                     reason: "subprocess failed".to_string(),
@@ -426,7 +430,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                         );
                         post_action_review(
                             result,
-                            &forgejo,
+                            &*provider,
                             owner,
                             repo,
                             pr_index,
@@ -473,7 +477,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 async fn post_action_yield(
-    forgejo: &ForgejoClient,
+    provider: &dyn GitProvider,
     owner: &str,
     repo: &str,
     branch: &str,
@@ -495,17 +499,17 @@ async fn post_action_yield(
         };
     }
 
-    match forgejo.find_pr_by_head(owner, repo, branch).await {
+    match provider.find_pr_by_head(owner, repo, branch).await {
         Ok(Some(pr)) => OutcomeType::Yield {
             pr_url: pr.html_url,
             partial: false,
         },
         Ok(None) => {
-            match forgejo
+            match provider
                 .create_pull_request(
                     owner,
                     repo,
-                    &chuggernaut_forgejo_api::CreatePullRequestOption {
+                    CreatePullRequest {
                         title: format!("[{job_key}] Work"),
                         body: Some(format!("Automated work for job {job_key}")),
                         head: branch.to_string(),
@@ -537,7 +541,7 @@ async fn post_action_yield(
 
 async fn post_action_review(
     result: ReviewResult,
-    forgejo: &ForgejoClient,
+    provider: &dyn GitProvider,
     owner: &str,
     repo: &str,
     pr_index: u64,
@@ -546,14 +550,14 @@ async fn post_action_review(
 ) -> ReviewDecision {
     match result {
         ReviewResult::Approved { feedback } => {
-            match forgejo
+            match provider
                 .submit_review(
                     owner,
                     repo,
                     pr_index,
-                    &CreatePullReviewOptions {
+                    CreateReview {
                         body: feedback.clone().unwrap_or_else(|| "LGTM".to_string()),
-                        event: "APPROVED".to_string(),
+                        event: ReviewEvent::Approve,
                     },
                 )
                 .await
@@ -568,7 +572,7 @@ async fn post_action_review(
                 }
             }
 
-            match try_merge(forgejo, owner, repo, pr_index).await {
+            match try_merge(provider, owner, repo, pr_index).await {
                 Ok(()) => {
                     info!(job_key = args.job_key, "PR merged successfully");
                     ReviewDecision {
@@ -592,14 +596,14 @@ async fn post_action_review(
             }
         }
         ReviewResult::ChangesRequested { feedback } => {
-            if let Err(e) = forgejo
+            if let Err(e) = provider
                 .submit_review(
                     owner,
                     repo,
                     pr_index,
-                    &CreatePullReviewOptions {
+                    CreateReview {
                         body: feedback.clone(),
-                        event: "REQUEST_CHANGES".to_string(),
+                        event: ReviewEvent::RequestChanges,
                     },
                 )
                 .await
@@ -981,35 +985,31 @@ fn write_mcp_config(job_key: &str, nats_url: &str, workdir: &Path) -> anyhow::Re
     Ok(path)
 }
 
-async fn validate_forgejo_token(
-    forgejo: &ForgejoClient,
-    owner: &str,
-    repo: &str,
-) -> anyhow::Result<()> {
-    let r = forgejo.get_repo(owner, repo).await.map_err(|e| {
+async fn validate_token(provider: &dyn GitProvider, owner: &str, repo: &str) -> anyhow::Result<()> {
+    let r = provider.get_repo(owner, repo).await.map_err(|e| {
         anyhow::anyhow!(
-            "Forgejo token validation failed for {owner}/{repo}: {e}\n  \
+            "Token validation failed for {owner}/{repo}: {e}\n  \
             Check that CHUGGERNAUT_FORGEJO_TOKEN is set and the token has read:repository scope"
         )
     })?;
 
     if !r.permissions.pull {
         return Err(anyhow::anyhow!(
-            "Forgejo token cannot read {owner}/{repo} — needs read:repository scope"
+            "Token cannot read {owner}/{repo} — needs read:repository scope"
         ));
     }
     if !r.permissions.push {
         return Err(anyhow::anyhow!(
-            "Forgejo token cannot push to {owner}/{repo} — needs write:repository scope"
+            "Token cannot push to {owner}/{repo} — needs write:repository scope"
         ));
     }
 
-    forgejo
+    provider
         .list_pull_requests(owner, repo, Some("open"))
         .await
         .map_err(|e| {
             anyhow::anyhow!(
-                "Forgejo token cannot list PRs on {owner}/{repo}: {e}\n  \
+                "Token cannot list PRs on {owner}/{repo}: {e}\n  \
             Check that the token has read:issue and write:issue scopes"
             )
         })?;
@@ -1019,7 +1019,7 @@ async fn validate_forgejo_token(
         pull = r.permissions.pull,
         push = r.permissions.push,
         admin = r.permissions.admin,
-        "Forgejo token validated (repo access + push + PR access)"
+        "token validated (repo access + push + PR access)"
     );
     Ok(())
 }
@@ -1128,16 +1128,11 @@ fn parse_pr_index(url: &str) -> Option<u64> {
 }
 
 async fn try_merge(
-    forgejo: &ForgejoClient,
+    provider: &dyn GitProvider,
     owner: &str,
     repo: &str,
     pr_index: u64,
 ) -> anyhow::Result<()> {
-    let opts = MergePullRequestOption {
-        method: "merge".to_string(),
-        merge_message_field: None,
-    };
-
     let max_retries = 3;
     let mut last_err = None;
 
@@ -1146,8 +1141,12 @@ async fn try_merge(
             tokio::time::sleep(Duration::from_secs(5 * attempt as u64)).await;
         }
 
-        match forgejo
-            .merge_pull_request(owner, repo, pr_index, &opts)
+        let opts = MergePullRequest {
+            method: MergeMethod::Merge,
+            message: None,
+        };
+        match provider
+            .merge_pull_request(owner, repo, pr_index, opts)
             .await
         {
             Ok(()) => return Ok(()),

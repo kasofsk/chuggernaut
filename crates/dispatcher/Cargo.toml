@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 chuggernaut-types = { workspace = true }
+chuggernaut-git-provider = { workspace = true }
 chuggernaut-nats = { workspace = true }
 chuggernaut-forgejo-api = { workspace = true }
 anyhow = { workspace = true }

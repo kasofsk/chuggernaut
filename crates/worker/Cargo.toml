@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 chuggernaut-types = { workspace = true }
+chuggernaut-git-provider = { workspace = true }
 chuggernaut-forgejo-api = { workspace = true }
 chuggernaut-nats = { workspace = true }
 chuggernaut-channel = { path = "../channel" }

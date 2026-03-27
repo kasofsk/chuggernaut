@@ -468,6 +468,7 @@ dependencies = [
  "bytes",
  "chrono",
  "chuggernaut-forgejo-api",
+ "chuggernaut-git-provider",
  "chuggernaut-nats",
  "chuggernaut-test-utils",
  "chuggernaut-types",
@@ -494,11 +495,22 @@ dependencies = [
 name = "chuggernaut-forgejo-api"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chuggernaut-git-provider",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "chuggernaut-git-provider"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -546,6 +558,7 @@ dependencies = [
  "chrono",
  "chuggernaut-channel",
  "chuggernaut-forgejo-api",
+ "chuggernaut-git-provider",
  "chuggernaut-nats",
  "chuggernaut-types",
  "clap",
