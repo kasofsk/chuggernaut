@@ -232,6 +232,7 @@ function renderNode(node, job) {
   const claim = state.claims.get(job.key);
   const channel = state.channels.get(job.key);
   const isRunning = job.state === 'on-the-stack';
+  const isActive = job.state === 'on-the-stack' || job.state === 'reviewing';
 
   // Background rect
   g.appendChild(svgEl('rect', {
@@ -280,7 +281,6 @@ function renderNode(node, job) {
   let yOffset = 58;
 
   // Channel status + progress (only for active jobs)
-  const isActive = job.state === 'on-the-stack' || job.state === 'reviewing';
   if (channel && isActive) {
     const statusText = channel.status.length > 34 ? channel.status.slice(0, 32) + '...' : channel.status;
     g.appendChild(svgText(8, yOffset + 10, `"${statusText}"`, 'node-status'));
