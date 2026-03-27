@@ -182,6 +182,11 @@ async fn scan_retry(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
 
 async fn scan_archival(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
     let now = Utc::now();
+    const ARCHIVE_THRESHOLD: usize = 200;
+    if state.jobs.len() < ARCHIVE_THRESHOLD {
+        return Ok(());
+    }
+
     let retention = chrono::Duration::seconds(state.config.job_retention_secs as i64);
 
     let mut candidates: Vec<String> = Vec::new();
