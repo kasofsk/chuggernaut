@@ -81,6 +81,12 @@ enum Commands {
         #[arg(long, default_value = "on-deck")]
         target: String,
     },
+    /// Pause or unpause dispatch (running jobs continue)
+    Pause {
+        /// Unpause instead of pause
+        #[arg(long)]
+        unpause: bool,
+    },
     /// Close a job
     Close {
         /// Job key
@@ -252,6 +258,26 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
             println!("Requeued {key}");
+        }
+
+        Commands::Pause { unpause } => {
+            let paused = !unpause;
+            let client = reqwest::Client::new();
+            let resp = client
+                .put(format!("{}/config/paused", cli.dispatcher_url))
+                .json(&serde_json::json!({ "paused": paused }))
+                .send()
+                .await?;
+            let body: serde_json::Value = resp.json().await?;
+            if let Some(err) = body.get("error") {
+                eprintln!("Error: {}", err.as_str().unwrap_or("unknown"));
+                std::process::exit(1);
+            }
+            if paused {
+                println!("Dispatch paused. Running jobs continue, no new work will be assigned.");
+            } else {
+                println!("Dispatch unpaused. Queued work will be assigned.");
+            }
         }
 
         Commands::Close { key, revoke } => {
