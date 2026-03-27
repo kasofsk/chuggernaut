@@ -99,9 +99,7 @@ pub async fn dispatch_action(
         inputs["review_feedback"] = serde_json::Value::String(feedback.to_string());
     }
 
-    if is_rework
-        && let Some(ref url) = job.pr_url
-    {
+    if is_rework && let Some(ref url) = job.pr_url {
         inputs["pr_url"] = serde_json::Value::String(url.clone());
     }
 
