@@ -257,7 +257,11 @@ function renderNode(node, job) {
   g.appendChild(svgText(22, 49, stateLabel, `node-state ${stateClass.replace('state-', 'state-dot-')}`));
 
   if (job.rework_count > 0 && (isActive || job.state === 'escalated')) {
-    g.appendChild(svgText(node.width - 8, 49, `rework ×${job.rework_count}`, 'node-elapsed', 'end'));
+    const limit = job.rework_limit || 3;
+    const maxed = job.rework_count >= limit;
+    const reworkEl = svgText(node.width - 8, 49, `rework ${job.rework_count}/${limit}`, 'node-elapsed', 'end');
+    if (maxed) reworkEl.style.fill = '#f85149';
+    g.appendChild(reworkEl);
   } else if (claim && isRunning) {
     const elapsed = formatElapsed(claim.claimed_at);
     g.appendChild(svgText(node.width - 8, 49, elapsed, 'node-elapsed', 'end'));
