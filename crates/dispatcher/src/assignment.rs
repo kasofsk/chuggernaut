@@ -117,6 +117,37 @@ async fn assign_rework(
 
 pub async fn dispatch_next(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
     while has_capacity(state).await {
+        // Prefer dispatching pending reviews over starting new work.
+        // This reduces merge conflicts by finishing in-flight jobs first.
+        let review_candidate: Option<(String, String, String)> = state
+            .jobs
+            .iter()
+            .find(|e| {
+                let job = e.value();
+                job.state == JobState::InReview
+                    && job.ci_status == Some(CiStatus::Success)
+                    && job.pr_url.is_some()
+                    && !job.merge_conflict
+            })
+            .map(|e| {
+                let job = e.value();
+                (
+                    e.key().clone(),
+                    job.pr_url.clone().unwrap(),
+                    format!("{:?}", job.review).to_lowercase(),
+                )
+            });
+
+        if let Some((job_key, pr_url, review_level)) = review_candidate {
+            info!(job_key, "dispatch_next: prioritising pending review");
+            if dispatch_review(state, &job_key, &pr_url, &review_level).await {
+                continue;
+            }
+            // Review dispatch failed (job reverted to InReview) — stop to
+            // avoid retrying the same candidate in a tight loop.
+            break;
+        }
+
         let mut candidates: Vec<(String, u8)> = state
             .jobs
             .iter()
@@ -142,12 +173,14 @@ pub async fn dispatch_next(state: &Arc<DispatcherState>) -> DispatcherResult<()>
     Ok(())
 }
 
+/// Dispatch a review action if capacity is available. Returns true if a
+/// review was successfully dispatched (capacity slot consumed).
 async fn dispatch_review(
     state: &Arc<DispatcherState>,
     job_key: &str,
     pr_url: &str,
     review_level: &str,
-) {
+) -> bool {
     let job_info = state.jobs.get(job_key).map(|j| {
         let j = j.value();
         format!(
@@ -165,13 +198,16 @@ async fn dispatch_review(
 
     if !has_capacity(state).await {
         info!(job_key, "review deferred — at runner capacity");
-        return;
+        return false;
     }
 
-    if let Err(e) =
-        crate::action_dispatch::dispatch_review_action(state, job_key, pr_url, review_level).await
+    match crate::action_dispatch::dispatch_review_action(state, job_key, pr_url, review_level).await
     {
-        warn!(job_key, error = %e, "review action dispatch failed");
+        Ok(()) => true,
+        Err(e) => {
+            warn!(job_key, error = %e, "review action dispatch failed");
+            false
+        }
     }
 }
 

@@ -265,6 +265,7 @@ mod tests {
             allowed_claude_flags: chuggernaut_types::default_allowed_claude_flags(),
             pause_on_overage: true,
             runner_label_map: label_map,
+            archive_threshold: 200,
         }
     }
 

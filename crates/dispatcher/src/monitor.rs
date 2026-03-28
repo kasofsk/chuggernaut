@@ -182,8 +182,7 @@ async fn scan_retry(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
 
 async fn scan_archival(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
     let now = Utc::now();
-    const ARCHIVE_THRESHOLD: usize = 200;
-    if state.jobs.len() < ARCHIVE_THRESHOLD {
+    if state.jobs.len() < state.config.archive_threshold {
         return Ok(());
     }
 

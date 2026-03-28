@@ -429,6 +429,7 @@ jobs:
         runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
+        archive_threshold: 200,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -665,6 +666,7 @@ jobs:
         runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
+        archive_threshold: 200,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
