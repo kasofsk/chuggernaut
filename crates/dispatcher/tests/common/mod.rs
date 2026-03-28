@@ -72,6 +72,7 @@ pub async fn setup() -> Arc<DispatcherState> {
         runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
+        archive_threshold: 200,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -114,6 +115,7 @@ pub async fn setup_with_config(overrides: impl FnOnce(&mut Config)) -> Arc<Dispa
         runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
+        archive_threshold: 200,
     };
     overrides(&mut config);
 

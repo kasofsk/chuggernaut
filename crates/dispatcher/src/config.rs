@@ -38,6 +38,9 @@ pub struct Config {
     /// runners. E.g. `{"flutter": "flutter", "rust": "rust"}`. If a job has
     /// a capability matching a key, that label is used instead of the default.
     pub runner_label_map: HashMap<String, String>,
+    /// Minimum number of jobs before archival kicks in. Prevents the monitor
+    /// from scanning small job sets needlessly. Default 200.
+    pub archive_threshold: usize,
 }
 
 impl Config {
@@ -85,6 +88,7 @@ impl Config {
                 .ok()
                 .and_then(|v| serde_json::from_str(&v).ok())
                 .unwrap_or_default(),
+            archive_threshold: parse_env("CHUGGERNAUT_ARCHIVE_THRESHOLD", 200),
         }
     }
 }

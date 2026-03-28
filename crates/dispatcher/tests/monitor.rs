@@ -61,6 +61,7 @@ async fn monitor_lease_expiry_fails_job() {
         runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
+        archive_threshold: 200,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -153,6 +154,7 @@ async fn monitor_job_timeout() {
         runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
+        archive_threshold: 200,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -238,6 +240,7 @@ async fn monitor_orphan_detection() {
         runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
+        archive_threshold: 200,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -322,6 +325,7 @@ async fn monitor_retry_eligible_transitions_to_on_deck() {
         runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
+        archive_threshold: 200,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -445,6 +449,7 @@ async fn monitor_archival_removes_done_job() {
         runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
+        archive_threshold: 0, // disable threshold so archival fires with 1 job
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -536,6 +541,7 @@ async fn monitor_lease_expiry_schedules_retry() {
         runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
+        archive_threshold: 200,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();

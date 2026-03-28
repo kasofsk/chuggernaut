@@ -82,6 +82,7 @@ async fn action_dispatch_creates_claim_and_transitions() {
         runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
+        archive_threshold: 200,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -195,6 +196,7 @@ async fn rework_dispatches_new_action_with_feedback() {
         runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
+        archive_threshold: 200,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -384,6 +386,7 @@ async fn dispatch_next_respects_priority() {
         runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
+        archive_threshold: 200,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -500,6 +503,7 @@ async fn dispatch_next_after_yield() {
         runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
+        archive_threshold: 200,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
@@ -614,6 +618,7 @@ async fn changes_requested_in_dispatch_queue() {
         runner_label_map: std::collections::HashMap::new(),
         max_continuations: 3,
         ci_poll_timeout_secs: 120,
+        archive_threshold: 200,
     };
 
     let client = async_nats::connect(&nats_url).await.unwrap();
