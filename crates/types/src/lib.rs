@@ -164,7 +164,11 @@ pub struct Job {
 impl Job {
     /// Create a builder with the required fields. All optional fields default to
     /// sensible values. Call `.build()` to produce the `Job`.
-    pub fn builder(key: impl Into<String>, repo: impl Into<String>, title: impl Into<String>) -> JobBuilder {
+    pub fn builder(
+        key: impl Into<String>,
+        repo: impl Into<String>,
+        title: impl Into<String>,
+    ) -> JobBuilder {
         JobBuilder::new(key, repo, title)
     }
 }
@@ -222,16 +226,46 @@ impl JobBuilder {
         }
     }
 
-    pub fn body(mut self, body: impl Into<String>) -> Self { self.body = body.into(); self }
-    pub fn state(mut self, state: JobState) -> Self { self.state = state; self }
-    pub fn priority(mut self, priority: u8) -> Self { self.priority = priority; self }
-    pub fn capabilities(mut self, caps: Vec<String>) -> Self { self.capabilities = caps; self }
-    pub fn platform(mut self, platform: impl Into<String>) -> Self { self.platform = Some(platform.into()); self }
-    pub fn timeout_secs(mut self, secs: u64) -> Self { self.timeout_secs = secs; self }
-    pub fn review(mut self, review: ReviewLevel) -> Self { self.review = review; self }
-    pub fn max_retries(mut self, n: u32) -> Self { self.max_retries = n; self }
-    pub fn claude_args(mut self, args: impl Into<String>) -> Self { self.claude_args = Some(args.into()); self }
-    pub fn rework_limit(mut self, limit: u32) -> Self { self.rework_limit = Some(limit); self }
+    pub fn body(mut self, body: impl Into<String>) -> Self {
+        self.body = body.into();
+        self
+    }
+    pub fn state(mut self, state: JobState) -> Self {
+        self.state = state;
+        self
+    }
+    pub fn priority(mut self, priority: u8) -> Self {
+        self.priority = priority;
+        self
+    }
+    pub fn capabilities(mut self, caps: Vec<String>) -> Self {
+        self.capabilities = caps;
+        self
+    }
+    pub fn platform(mut self, platform: impl Into<String>) -> Self {
+        self.platform = Some(platform.into());
+        self
+    }
+    pub fn timeout_secs(mut self, secs: u64) -> Self {
+        self.timeout_secs = secs;
+        self
+    }
+    pub fn review(mut self, review: ReviewLevel) -> Self {
+        self.review = review;
+        self
+    }
+    pub fn max_retries(mut self, n: u32) -> Self {
+        self.max_retries = n;
+        self
+    }
+    pub fn claude_args(mut self, args: impl Into<String>) -> Self {
+        self.claude_args = Some(args.into());
+        self
+    }
+    pub fn rework_limit(mut self, limit: u32) -> Self {
+        self.rework_limit = Some(limit);
+        self
+    }
 
     pub fn build(self) -> Job {
         let now = Utc::now();
