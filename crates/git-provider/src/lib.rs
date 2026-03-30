@@ -122,5 +122,10 @@ pub trait GitProvider: Send + Sync {
 
     async fn get_action_run(&self, owner: &str, repo: &str, run_id: u64) -> Result<ActionRun>;
 
-    async fn list_action_runs(&self, owner: &str, repo: &str) -> Result<ActionRunList>;
+    async fn list_action_runs(
+        &self,
+        owner: &str,
+        repo: &str,
+        status: Option<&str>,
+    ) -> Result<ActionRunList>;
 }

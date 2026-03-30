@@ -192,6 +192,7 @@ pub struct ActionRun {
     pub status: String, // "waiting", "running", "success", "failure"
     pub conclusion: Option<String>,
     pub html_url: Option<String>,
+    pub created: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

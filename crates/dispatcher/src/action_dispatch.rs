@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use chrono::Utc;
 use tracing::{info, warn};
 
 use chuggernaut_git_provider::{DispatchWorkflow, GitProvider};
@@ -49,6 +50,57 @@ fn git_provider_context(
     Ok((parts[0].to_string(), parts[1].to_string(), provider))
 }
 
+/// How long a queued action can sit in "waiting" before we consider runners
+/// unavailable and stop dispatching more work.
+const STALE_QUEUE_THRESHOLD_SECS: i64 = 60;
+
+/// Count how many waiting runs are older than the staleness threshold.
+/// Returns 0 if all waiting runs are fresh (recently dispatched).
+fn count_stale_waiting(runs: &chuggernaut_git_provider::ActionRunList) -> usize {
+    let now = Utc::now();
+    runs.workflow_runs
+        .iter()
+        .filter(|r| {
+            r.created
+                .as_ref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| {
+                    (now - dt.with_timezone(&Utc)).num_seconds() > STALE_QUEUE_THRESHOLD_SECS
+                })
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+/// Check that there are no stale actions stuck waiting for a runner.
+/// Only blocks dispatch if waiting actions are older than the threshold,
+/// which means runners haven't picked them up in a reasonable time.
+async fn check_queue_clear(
+    provider: &dyn GitProvider,
+    owner: &str,
+    repo: &str,
+) -> DispatcherResult<()> {
+    let runs = match provider
+        .list_action_runs(owner, repo, Some("waiting"))
+        .await
+    {
+        Ok(runs) => runs,
+        Err(e) => {
+            warn!(error = %e, "failed to check action queue — proceeding with dispatch");
+            return Ok(());
+        }
+    };
+
+    let stale_count = count_stale_waiting(&runs);
+    if stale_count > 0 {
+        Err(DispatcherError::Validation(format!(
+            "{stale_count} action(s) waiting for a runner for >{STALE_QUEUE_THRESHOLD_SECS}s — not dispatching more"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
 /// Dispatch a Forgejo Action for a job.
 /// Creates a claim, transitions to OnTheStack, and dispatches the workflow.
 /// The worker binary running inside the action will send heartbeats and report outcomes.
@@ -65,6 +117,9 @@ pub async fn dispatch_action(
         .ok_or_else(|| DispatcherError::JobNotFound(job_key.to_string()))?;
 
     let (owner, repo, provider) = git_provider_context(state, &job)?;
+
+    // Bail out if actions are already waiting for a runner — avoids pile-up.
+    check_queue_clear(provider.as_ref(), &owner, &repo).await?;
 
     // Create a claim so the monitor can track this job
     let worker_id = format!("action-{job_key}");
@@ -93,6 +148,7 @@ pub async fn dispatch_action(
         "nats_url": state.config.nats_worker_url,
         "is_rework": is_rework.to_string(),
         "runner_label": resolve_runner_label(&state.config, &job, &state.config.action_runner_label),
+        "dispatched_at": Utc::now().to_rfc3339(),
     });
 
     if let Some(feedback) = review_feedback {
@@ -167,6 +223,9 @@ pub async fn dispatch_review_action(
 
     let (owner, repo, provider) = git_provider_context(state, &job)?;
 
+    // Bail out if actions are already waiting for a runner — avoids pile-up.
+    check_queue_clear(provider.as_ref(), &owner, &repo).await?;
+
     // Transition InReview → Reviewing before dispatching.
     // This makes the state machine explicit: Reviewing = review action in-flight.
     let worker_id = format!("action-{job_key}");
@@ -188,6 +247,7 @@ pub async fn dispatch_review_action(
         "pr_url": pr_url,
         "review_level": review_level,
         "runner_label": resolve_runner_label(&state.config, &job, &state.config.review_runner_label),
+        "dispatched_at": Utc::now().to_rfc3339(),
     });
 
     if let Err(e) = provider
@@ -238,6 +298,7 @@ pub async fn dispatch_review_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chuggernaut_git_provider::{ActionRun, ActionRunList};
     use std::collections::HashMap;
 
     fn test_config(label_map: HashMap<String, String>) -> Config {
@@ -319,5 +380,79 @@ mod tests {
             resolve_runner_label(&config, &job, &config.action_runner_label),
             "flutter"
         );
+    }
+
+    // -- count_stale_waiting tests ------------------------------------------
+
+    fn make_run(id: u64, created: Option<&str>) -> ActionRun {
+        ActionRun {
+            id,
+            status: "waiting".to_string(),
+            conclusion: None,
+            html_url: None,
+            created: created.map(|s| s.to_string()),
+        }
+    }
+
+    fn make_run_list(runs: Vec<ActionRun>) -> ActionRunList {
+        let total_count = runs.len() as u64;
+        ActionRunList {
+            workflow_runs: runs,
+            total_count,
+        }
+    }
+
+    #[test]
+    fn stale_count_empty_queue() {
+        let runs = make_run_list(vec![]);
+        assert_eq!(count_stale_waiting(&runs), 0);
+    }
+
+    #[test]
+    fn stale_count_fresh_action_not_stale() {
+        let now = Utc::now().to_rfc3339();
+        let runs = make_run_list(vec![make_run(1, Some(&now))]);
+        assert_eq!(count_stale_waiting(&runs), 0);
+    }
+
+    #[test]
+    fn stale_count_old_action_is_stale() {
+        let old = (Utc::now() - chrono::Duration::seconds(300)).to_rfc3339();
+        let runs = make_run_list(vec![make_run(1, Some(&old))]);
+        assert_eq!(count_stale_waiting(&runs), 1);
+    }
+
+    #[test]
+    fn stale_count_mixed_fresh_and_stale() {
+        let now = Utc::now().to_rfc3339();
+        let old = (Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+        let runs = make_run_list(vec![
+            make_run(1, Some(&now)),
+            make_run(2, Some(&old)),
+        ]);
+        assert_eq!(count_stale_waiting(&runs), 1);
+    }
+
+    #[test]
+    fn stale_count_no_timestamp_not_stale() {
+        let runs = make_run_list(vec![make_run(1, None)]);
+        assert_eq!(count_stale_waiting(&runs), 0);
+    }
+
+    #[test]
+    fn stale_count_at_threshold_not_stale() {
+        // Exactly at the threshold boundary — should NOT be stale (> not >=)
+        let at_boundary =
+            (Utc::now() - chrono::Duration::seconds(STALE_QUEUE_THRESHOLD_SECS)).to_rfc3339();
+        let runs = make_run_list(vec![make_run(1, Some(&at_boundary))]);
+        assert_eq!(count_stale_waiting(&runs), 0);
+    }
+
+    #[test]
+    fn stale_count_just_past_threshold_is_stale() {
+        let past = (Utc::now() - chrono::Duration::seconds(STALE_QUEUE_THRESHOLD_SECS + 1))
+            .to_rfc3339();
+        let runs = make_run_list(vec![make_run(1, Some(&past))]);
+        assert_eq!(count_stale_waiting(&runs), 1);
     }
 }
