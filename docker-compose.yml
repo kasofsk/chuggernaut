@@ -59,7 +59,7 @@ services:
     image: data.forgejo.org/forgejo/runner:11
     user: root
     deploy:
-      replicas: ${CHUGGERNAUT_RUNNER_COUNT:-0}
+      replicas: ${CHUGGERNAUT_RUNNER_COUNT:-1}
     depends_on:
       - forgejo
     volumes:
