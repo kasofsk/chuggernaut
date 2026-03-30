@@ -25,6 +25,11 @@ on:
         required: false
         type: string
         default: "ubuntu-latest"
+      dispatched_at:
+        description: "ISO 8601 timestamp when the dispatcher created this run"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   review:
@@ -33,6 +38,20 @@ jobs:
     env:
       NATS_URL: ${{ inputs.nats_url || vars.CHUGGERNAUT_NATS_URL }}
     steps:
+      - name: Abort if stale
+        if: inputs.dispatched_at != ''
+        run: |
+          dispatched_epoch=$(date -d "${{ inputs.dispatched_at }}" +%s 2>/dev/null || echo 0)
+          if [ "$dispatched_epoch" -gt 0 ]; then
+            now_epoch=$(date +%s)
+            age=$((now_epoch - dispatched_epoch))
+            echo "Action age: ${age}s"
+            if [ "$age" -gt 300 ]; then
+              echo "::error::Action is ${age}s old (dispatched ${{ inputs.dispatched_at }}), aborting as stale"
+              exit 1
+            fi
+          fi
+
       - uses: actions/checkout@v4
 
       - name: Fetch job details from NATS

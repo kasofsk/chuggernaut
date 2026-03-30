@@ -233,6 +233,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 };
                 nats.publish_msg(&chuggernaut_types::subjects::REVIEW_DECISION, &decision)
                     .await?;
+                nats.flush().await?;
                 info!(job_key = args.job_key, "merge conflict decision published");
                 return Ok(());
             }

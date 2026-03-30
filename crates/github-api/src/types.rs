@@ -186,6 +186,7 @@ pub struct ActionRun {
     pub status: String, // "queued", "in_progress", "completed"
     pub conclusion: Option<String>,
     pub html_url: Option<String>,
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

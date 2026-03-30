@@ -41,7 +41,7 @@ services:
       CHUGGERNAUT_HTTP_LISTEN: "0.0.0.0:8080"
       CHUGGERNAUT_FORGEJO_URL: http://forgejo:3000
       CHUGGERNAUT_FORGEJO_TOKEN: ${CHUGGERNAUT_FORGEJO_TOKEN:-}
-      CHUGGERNAUT_MAX_CONCURRENT_ACTIONS: ${CHUGGERNAUT_MAX_CONCURRENT_ACTIONS:-1}
+      CHUGGERNAUT_MAX_CONCURRENT_ACTIONS: ${CHUGGERNAUT_MAX_CONCURRENT_ACTIONS:-${CHUGGERNAUT_RUNNER_COUNT:-1}}
       CHUGGERNAUT_ACTION_WORKFLOW: work.yml
       CHUGGERNAUT_REVIEW_WORKFLOW: review.yml
       CHUGGERNAUT_RUNNER_LABEL_MAP: ${CHUGGERNAUT_RUNNER_LABEL_MAP:-}
@@ -53,6 +53,27 @@ services:
     depends_on:
       - nats
       - forgejo
+    restart: unless-stopped
+
+  runner:
+    image: data.forgejo.org/forgejo/runner:11
+    user: root
+    deploy:
+      replicas: ${CHUGGERNAUT_RUNNER_COUNT:-0}
+    depends_on:
+      - forgejo
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./infra/runner/config.yaml:/data/config.yaml:ro
+      - ./infra/runner/entrypoint.sh:/entrypoint.sh:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      FORGEJO_URL: http://host.docker.internal:3000
+      FORGEJO_ADMIN_USER: ${FORGEJO_ADMIN_USER:-chuggernaut-admin}
+      FORGEJO_ADMIN_PASS: ${FORGEJO_ADMIN_PASS:-chuggernaut-admin}
+      RUNNER_LABELS: ${CHUGGERNAUT_RUNNER_LABELS:-ubuntu-latest:docker://chuggernaut-runner-env:latest}
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
     restart: unless-stopped
 
   # Build runner environment images.

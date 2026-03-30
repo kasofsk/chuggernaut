@@ -281,9 +281,17 @@ impl ForgejoClient {
             .await
     }
 
-    pub async fn list_action_runs(&self, owner: &str, repo: &str) -> Result<ActionRunList> {
-        self.get(&format!("/repos/{owner}/{repo}/actions/runs"))
-            .await
+    pub async fn list_action_runs(
+        &self,
+        owner: &str,
+        repo: &str,
+        status: Option<&str>,
+    ) -> Result<ActionRunList> {
+        let mut url = format!("/repos/{owner}/{repo}/actions/runs");
+        if let Some(s) = status {
+            url.push_str(&format!("?status={s}"));
+        }
+        self.get(&url).await
     }
 }
 
@@ -417,6 +425,7 @@ impl From<ActionRun> for gp::ActionRun {
             status: r.status,
             conclusion: r.conclusion,
             html_url: r.html_url,
+            created: r.created,
         }
     }
 }
@@ -716,10 +725,13 @@ impl gp::GitProvider for ForgejoClient {
         Ok(r.into())
     }
 
-    async fn list_action_runs(&self, owner: &str, repo: &str) -> gp::Result<gp::ActionRunList> {
-        let l: ActionRunList = self
-            .get(&format!("/repos/{owner}/{repo}/actions/runs"))
-            .await?;
+    async fn list_action_runs(
+        &self,
+        owner: &str,
+        repo: &str,
+        status: Option<&str>,
+    ) -> gp::Result<gp::ActionRunList> {
+        let l = self.list_action_runs(owner, repo, status).await?;
         Ok(l.into())
     }
 }

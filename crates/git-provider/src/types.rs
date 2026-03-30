@@ -185,6 +185,7 @@ pub struct ActionRun {
     pub status: String,
     pub conclusion: Option<String>,
     pub html_url: Option<String>,
+    pub created: Option<String>,
 }
 
 #[derive(Debug, Clone)]

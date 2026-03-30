@@ -53,6 +53,12 @@ impl NatsClient {
         &self.client
     }
 
+    /// Flush the client send buffer, ensuring all published messages
+    /// have been delivered to the server.
+    pub async fn flush(&self) -> Result<(), async_nats::client::FlushError> {
+        self.client.flush().await
+    }
+
     /// Access the JetStream context. Panics if not configured.
     pub fn jetstream(&self) -> &jetstream::Context {
         self.js

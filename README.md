@@ -1,6 +1,22 @@
 # chuggernaut
 
-NATS-first workflow orchestration for AI agents. Jobs live in NATS KV. Workers run inside CI action containers (Forgejo Actions or GitHub Actions). A graph viewer is the primary human interface.
+Orchestrate AI coding agents across repositories with dependency-aware job graphs.
+
+## Overview
+
+Chuggernaut turns structured work — PRDs, tickets, task lists — into a directed acyclic graph of jobs that AI agents execute autonomously. Each job is a discrete unit of work (implement a feature, write tests, update docs) with optional dependencies on other jobs. The system handles dispatch, code review, rework cycles, and dependency resolution automatically.
+
+**The workflow:**
+
+1. **Decompose** — Break a project into jobs with dependencies. A ticket like "add payments support" becomes a graph: `define schema → implement API → write tests → update docs`, where each arrow is a dependency.
+
+2. **Seed** — Load the job graph via the CLI (`chuggernaut seed` from a fixture or `chuggernaut create` one at a time). Jobs with unmet dependencies start **Blocked**; jobs ready to go land **OnDeck**.
+
+3. **Watch it run** — The dispatcher picks up OnDeck jobs, spins up CI containers with AI agents (Claude), and moves jobs through the pipeline: **OnTheStack** (agent working) → **InReview** (review agent checking the PR) → **Done** (merged). Failed reviews trigger automatic rework cycles.
+
+4. **Steer from the graph** — The graph viewer is the primary human interface. It shows the live DAG with color-coded nodes, real-time status from running agents, PR links, rework counts, and token usage. Escalated or stuck jobs surface visually for human intervention.
+
+The result: you define *what* needs to happen and *in what order*, and chuggernaut coordinates the agents to make it happen — one PR per job, reviewed and merged automatically where possible, escalated to you when not.
 
 ## Architecture
 
@@ -97,6 +113,23 @@ Generate code coverage via `cargo-llvm-cov`.
 |------|-------------|
 | `--full` | Include ignored (E2E) tests (requires Docker + runner-env image) |
 | `--lcov` | Output LCOV format to `target/coverage/lcov.info` instead of HTML |
+
+## Future work
+
+### Continuous project management
+
+The initial seed is just the starting point. After the first wave of jobs completes, new work arrives continuously — from humans via the CLI, or from **job factories** that create jobs in response to external events.
+
+A job factory is any process that can write jobs to NATS KV. It doesn't know about the dispatcher, and the dispatcher doesn't know about it. Factories only need to understand the job schema. Examples:
+
+- **Feature factory** — watches an issue tracker; when an issue is labeled `auto`, decomposes it into a job graph and writes the jobs to NATS
+- **Incident factory** — listens for deployment failure alerts, creates "investigate and fix" jobs targeting the affected repo
+- **Analytics factory** — processes user analytics to identify UX pain points, creates improvement jobs prioritised by impact
+- **Follow-up factory** — triggered when a job completes, creates downstream work (update docs, cut a release, notify stakeholders)
+
+Factories can be anything — a script on a cron, a webhook handler, a Lambda — as long as they write valid jobs with the right keys and optional dependencies. The dispatcher watches NATS KV for new jobs regardless of origin and handles dispatch, review, and dependency resolution the same way it always does. The graph view shows everything in one place.
+
+This keeps the system open-ended: the dispatcher is a fixed coordination layer, and the surface area for *what work gets done* is defined entirely by whatever factories you connect.
 
 ## License
 
