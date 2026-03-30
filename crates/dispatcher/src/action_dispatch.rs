@@ -64,9 +64,7 @@ fn count_stale_waiting(runs: &chuggernaut_git_provider::ActionRunList) -> usize 
             r.created
                 .as_ref()
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| {
-                    (now - dt.with_timezone(&Utc)).num_seconds() > STALE_QUEUE_THRESHOLD_SECS
-                })
+                .map(|dt| (now - dt.with_timezone(&Utc)).num_seconds() > STALE_QUEUE_THRESHOLD_SECS)
                 .unwrap_or(false)
         })
         .count()
@@ -426,10 +424,7 @@ mod tests {
     fn stale_count_mixed_fresh_and_stale() {
         let now = Utc::now().to_rfc3339();
         let old = (Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
-        let runs = make_run_list(vec![
-            make_run(1, Some(&now)),
-            make_run(2, Some(&old)),
-        ]);
+        let runs = make_run_list(vec![make_run(1, Some(&now)), make_run(2, Some(&old))]);
         assert_eq!(count_stale_waiting(&runs), 1);
     }
 
@@ -450,8 +445,8 @@ mod tests {
 
     #[test]
     fn stale_count_just_past_threshold_is_stale() {
-        let past = (Utc::now() - chrono::Duration::seconds(STALE_QUEUE_THRESHOLD_SECS + 1))
-            .to_rfc3339();
+        let past =
+            (Utc::now() - chrono::Duration::seconds(STALE_QUEUE_THRESHOLD_SECS + 1)).to_rfc3339();
         let runs = make_run_list(vec![make_run(1, Some(&past))]);
         assert_eq!(count_stale_waiting(&runs), 1);
     }
