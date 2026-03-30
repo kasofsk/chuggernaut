@@ -239,7 +239,10 @@ async fn recovery_claimless_on_the_stack_schedules_retry() {
 
     let recovered = state.jobs.get(&key).unwrap().clone();
     assert_eq!(recovered.state, JobState::Failed);
-    assert_eq!(recovered.retry_count, 1, "retry_count should be incremented");
+    assert_eq!(
+        recovered.retry_count, 1,
+        "retry_count should be incremented"
+    );
     assert!(
         recovered.retry_after.is_some(),
         "retry_after must be set so scan_retry picks it up"

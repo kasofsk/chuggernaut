@@ -1283,10 +1283,7 @@ async fn read_action_result(
 
 /// Look up the issue URL for a job from the issue_map KV bucket.
 /// Returns None (best-effort) if the bucket doesn't exist or the key is missing.
-async fn lookup_issue_url(
-    js: &async_nats::jetstream::Context,
-    job_key: &str,
-) -> Option<String> {
+async fn lookup_issue_url(js: &async_nats::jetstream::Context, job_key: &str) -> Option<String> {
     let kv = js
         .get_key_value(buckets::ISSUE_MAP)
         .await
