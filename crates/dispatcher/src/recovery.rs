@@ -335,6 +335,7 @@ async fn reconcile_jobs_against_claims(state: &Arc<DispatcherState>) -> Dispatch
                     None,
                 )
                 .await?;
+                crate::assignment::schedule_auto_retry(state, &key).await;
                 orphaned += 1;
             }
         }

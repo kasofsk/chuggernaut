@@ -43,6 +43,7 @@ async fn run_scans(state: &Arc<DispatcherState>) {
     if let Err(e) = scan_retry(state).await {
         warn!("retry scan failed: {e}");
     }
+    scan_retry_missing_schedule(state).await;
     if let Err(e) = scan_archival(state).await {
         warn!("archival scan failed: {e}");
     }
@@ -178,6 +179,25 @@ async fn scan_retry(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
     }
 
     Ok(())
+}
+
+/// Safety net: if a job is Failed with retries remaining but no retry_after
+/// scheduled (e.g. recovery path), schedule the retry now.
+async fn scan_retry_missing_schedule(state: &Arc<DispatcherState>) {
+    for entry in state.jobs.iter() {
+        let job = entry.value();
+        if job.state == JobState::Failed
+            && job.retry_count < job.max_retries
+            && job.retry_after.is_none()
+        {
+            warn!(
+                job_key = job.key,
+                retry_count = job.retry_count,
+                "failed job missing retry_after — scheduling now"
+            );
+            crate::assignment::schedule_auto_retry(state, &job.key).await;
+        }
+    }
 }
 
 async fn scan_archival(state: &Arc<DispatcherState>) -> DispatcherResult<()> {

@@ -446,6 +446,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     &branch,
                     &args.job_key,
                     &action_result,
+                    &js,
                 )
                 .await
             } else {
@@ -555,6 +556,7 @@ async fn post_action_yield(
     branch: &str,
     job_key: &str,
     action_result: &Option<ActionResult>,
+    js: &async_nats::jetstream::Context,
 ) -> OutcomeType {
     let repo_dir = PathBuf::from(format!(
         "/tmp/chuggernaut-work/{}",
@@ -597,7 +599,7 @@ async fn post_action_yield(
         }
         Ok(None) => {
             // No PR yet — create one with submitted title/body
-            let (pr_title, pr_body) = match action_result {
+            let (pr_title, mut pr_body) = match action_result {
                 Some(ActionResult::Pr { title, body }) => (title.clone(), body.clone()),
                 _ => {
                     error!(
@@ -610,6 +612,10 @@ async fn post_action_yield(
                     )
                 }
             };
+            // Append "Closes <issue_url>" so the linked issue auto-closes on merge.
+            if let Some(issue_url) = lookup_issue_url(js, job_key).await {
+                pr_body.push_str(&format!("\n\nCloses {issue_url}"));
+            }
             match provider
                 .create_pull_request(
                     owner,
@@ -1273,6 +1279,33 @@ async fn read_action_result(
     }
 
     result
+}
+
+/// Look up the issue URL for a job from the issue_map KV bucket.
+/// Returns None (best-effort) if the bucket doesn't exist or the key is missing.
+async fn lookup_issue_url(js: &async_nats::jetstream::Context, job_key: &str) -> Option<String> {
+    let kv = js
+        .get_key_value(buckets::ISSUE_MAP)
+        .await
+        .map_err(|e| debug!(job_key, error = %e, "issue_map KV not available"))
+        .ok()?;
+
+    let payload = kv
+        .get(job_key)
+        .await
+        .map_err(|e| debug!(job_key, error = %e, "failed to read issue_map"))
+        .ok()??;
+
+    #[derive(serde::Deserialize)]
+    struct IssueMapping {
+        issue_url: String,
+    }
+
+    let mapping: IssueMapping = serde_json::from_slice(&payload)
+        .map_err(|e| debug!(job_key, error = %e, "failed to deserialize issue mapping"))
+        .ok()?;
+
+    Some(mapping.issue_url)
 }
 
 // ---------------------------------------------------------------------------

@@ -196,3 +196,55 @@ async fn recovery_repairs_reverse_deps() {
         "recovery should repair reverse dep: A.depended_on_by should contain B"
     );
 }
+
+#[tokio::test]
+async fn recovery_claimless_on_the_stack_schedules_retry() {
+    let state = setup().await;
+
+    // Create a job and put it directly into OnTheStack in KV (no claim)
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Lost worker".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+        claude_args: None,
+        rework_limit: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Write OnTheStack state directly to KV (simulating mid-dispatch crash)
+    let (mut job, _rev) = jobs::kv_get::<Job>(&state.kv.jobs, &key)
+        .await
+        .unwrap()
+        .unwrap();
+    job.state = JobState::OnTheStack;
+    jobs::kv_put(&state.kv.jobs, &key, &job).await.unwrap();
+
+    // Clear in-memory state to simulate restart
+    state.jobs.clear();
+    {
+        let mut g = state.graph.write().await;
+        *g = chuggernaut_dispatcher::state::DepGraph::new();
+    }
+
+    // Recover — should fail the job AND schedule auto-retry
+    recovery::recover(&state).await.unwrap();
+
+    let recovered = state.jobs.get(&key).unwrap().clone();
+    assert_eq!(recovered.state, JobState::Failed);
+    assert_eq!(
+        recovered.retry_count, 1,
+        "retry_count should be incremented"
+    );
+    assert!(
+        recovered.retry_after.is_some(),
+        "retry_after must be set so scan_retry picks it up"
+    );
+}

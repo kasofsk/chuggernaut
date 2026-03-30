@@ -243,7 +243,7 @@ async fn append_token_record(
 }
 
 /// Schedule auto-retry for a failed job (sets retry_count and retry_after).
-async fn schedule_auto_retry(state: &Arc<DispatcherState>, job_key: &str) {
+pub async fn schedule_auto_retry(state: &Arc<DispatcherState>, job_key: &str) {
     let should_retry = state
         .jobs
         .get(job_key)
