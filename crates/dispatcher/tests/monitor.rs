@@ -608,3 +608,59 @@ async fn monitor_lease_expiry_schedules_retry() {
         "lease expiry should set retry_after for auto-retry"
     );
 }
+
+// ---------------------------------------------------------------------------
+// schedule_auto_retry fixes Failed jobs with missing retry_after
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn schedule_auto_retry_fixes_missing_retry_after() {
+    let state = setup().await;
+
+    let req = CreateJobRequest {
+        repo: "test/repo".to_string(),
+        title: "Missing retry_after".to_string(),
+        body: String::new(),
+        depends_on: vec![],
+        priority: 50,
+        capabilities: vec![],
+        platform: None,
+        timeout_secs: 3600,
+        review: ReviewLevel::High,
+        max_retries: 3,
+        initial_state: None,
+        claude_args: None,
+        rework_limit: None,
+    };
+    let key = jobs::create_job(&state, req).await.unwrap();
+
+    // Manually set job to Failed in both KV and memory, with no retry_after
+    // (simulates the old recovery bug)
+    {
+        let (mut job, _rev) = jobs::kv_get::<Job>(&state.kv.jobs, &key)
+            .await
+            .unwrap()
+            .unwrap();
+        job.state = JobState::Failed;
+        job.retry_count = 0;
+        job.retry_after = None;
+        jobs::kv_put(&state.kv.jobs, &key, &job).await.unwrap();
+        state.jobs.insert(key.clone(), job);
+    }
+
+    // Verify precondition
+    let before = state.jobs.get(&key).unwrap().clone();
+    assert_eq!(before.state, JobState::Failed);
+    assert!(before.retry_after.is_none());
+    assert_eq!(before.retry_count, 0);
+
+    // Call schedule_auto_retry directly (this is what the monitor safety-net calls)
+    chuggernaut_dispatcher::assignment::schedule_auto_retry(&state, &key).await;
+
+    let after = state.jobs.get(&key).unwrap().clone();
+    assert_eq!(after.retry_count, 1, "retry_count should be incremented");
+    assert!(
+        after.retry_after.is_some(),
+        "retry_after must be set so scan_retry picks it up"
+    );
+}
