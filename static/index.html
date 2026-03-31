@@ -131,6 +131,7 @@ const state = {
   deps: new Map(),       // key -> DepRecord
   channels: new Map(),   // key -> ChannelStatus
   messages: new Map(),   // key -> ChannelMessage (latest reply from Claude)
+  actionUrls: new Map(), // key -> action run URL
   journal: [],
   connected: false,
 };
@@ -269,14 +270,35 @@ function renderNode(node, job) {
     g.appendChild(svgText(node.width - 8, 49, elapsed, 'node-elapsed', 'end'));
   }
 
-  // PR link
-  if (job.pr_url) {
+  // PR link + Action link
+  const actionUrl = isActive ? state.actionUrls.get(job.key) : null;
+  if (job.pr_url && actionUrl) {
+    // Both PR and Action — show side by side
+    const prNum = job.pr_url.split('/').pop();
+    const prLink = svgText(node.width - 8, 30, `PR #${prNum}`, 'node-subtitle', 'end');
+    prLink.style.cursor = 'pointer';
+    prLink.style.fill = '#58a6ff';
+    prLink.addEventListener('click', (e) => { e.stopPropagation(); window.open(job.pr_url, '_blank'); });
+    g.appendChild(prLink);
+
+    const actLink = svgText(node.width - 58, 30, '\u25B6 Action', 'node-subtitle', 'end');
+    actLink.style.cursor = 'pointer';
+    actLink.style.fill = '#a371f7';
+    actLink.addEventListener('click', (e) => { e.stopPropagation(); window.open(actionUrl, '_blank'); });
+    g.appendChild(actLink);
+  } else if (job.pr_url) {
     const prNum = job.pr_url.split('/').pop();
     const link = svgText(node.width - 8, 30, `PR #${prNum}`, 'node-subtitle', 'end');
     link.style.cursor = 'pointer';
     link.style.fill = '#58a6ff';
     link.addEventListener('click', (e) => { e.stopPropagation(); window.open(job.pr_url, '_blank'); });
     g.appendChild(link);
+  } else if (actionUrl) {
+    const actLink = svgText(node.width - 8, 30, '\u25B6 Action', 'node-subtitle', 'end');
+    actLink.style.cursor = 'pointer';
+    actLink.style.fill = '#a371f7';
+    actLink.addEventListener('click', (e) => { e.stopPropagation(); window.open(actionUrl, '_blank'); });
+    g.appendChild(actLink);
   }
 
   let yOffset = 58;
@@ -404,6 +426,7 @@ function connect() {
     state.deps.clear();
     state.channels.clear();
     state.messages.clear();
+    state.actionUrls.clear();
 
     for (const job of (data.jobs || [])) {
       state.jobs.set(job.key, job);
@@ -416,6 +439,9 @@ function connect() {
     }
     for (const [key, ch] of Object.entries(data.channels || {})) {
       state.channels.set(key, ch);
+    }
+    for (const [key, url] of Object.entries(data.action_urls || {})) {
+      state.actionUrls.set(key, url);
     }
 
     setConnected(true);
@@ -439,6 +465,9 @@ function connect() {
       state.claims.set(data.key, data.claim);
     } else {
       state.claims.delete(data.key);
+    }
+    if (data.action_url) {
+      state.actionUrls.set(data.key, data.action_url);
     }
     render();
   });
@@ -468,6 +497,7 @@ function connect() {
     state.deps.delete(data.key);
     state.channels.delete(data.key);
     state.messages.delete(data.key);
+    state.actionUrls.delete(data.key);
     needsRelayout = true;
   });
 

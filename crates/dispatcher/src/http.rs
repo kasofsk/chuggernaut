@@ -925,12 +925,19 @@ async fn sse_events(
             }
         }
 
+        // Collect action URLs for active jobs
+        let mut action_urls_map = serde_json::Map::new();
+        for entry in state.action_urls.iter() {
+            action_urls_map.insert(entry.key().clone(), serde_json::Value::String(entry.value().clone()));
+        }
+
         let snapshot = serde_json::json!({
             "type": "snapshot",
             "jobs": jobs,
             "claims": claims_map,
             "deps": deps_map,
             "channels": channels_map,
+            "action_urls": action_urls_map,
         });
         yield Ok(Event::default().event("snapshot").json_data(snapshot).unwrap());
 
@@ -1012,7 +1019,10 @@ async fn sse_events(
                     if let Ok(hb) = serde_json::from_slice::<WorkerHeartbeat>(&msg.payload)
                         && let Ok(Some((claim, _))) = kv_get::<ClaimState>(&state.kv.claims, &hb.job_key).await
                     {
-                        let claim_event = serde_json::json!({ "key": hb.job_key, "claim": claim });
+                        let mut claim_event = serde_json::json!({ "key": hb.job_key, "claim": claim });
+                        if let Some(ref url) = hb.action_url {
+                            claim_event["action_url"] = serde_json::Value::String(url.clone());
+                        }
                         yield Ok(Event::default().event("claim_update").json_data(claim_event).unwrap());
                     }
                 }

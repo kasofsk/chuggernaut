@@ -180,6 +180,7 @@ async fn heartbeat_renews_lease() {
         cost_usd: None,
         turns: None,
         rate_limit: None,
+        action_url: None,
     };
     state
         .nats
@@ -670,6 +671,7 @@ async fn heartbeat_from_wrong_worker_ignored() {
         cost_usd: None,
         turns: None,
         rate_limit: None,
+        action_url: None,
     };
     state
         .nats
@@ -919,6 +921,7 @@ async fn concurrent_heartbeats_benign() {
                 cost_usd: None,
                 turns: None,
                 rate_limit: None,
+                action_url: None,
             };
             s.nats
                 .publish_msg(&subjects::WORKER_HEARTBEAT, &hb)

@@ -473,6 +473,9 @@ pub struct WorkerHeartbeat {
     /// Rate limit info from the most recent rate_limit_event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<HeartbeatRateLimit>,
+    /// URL to the CI action run (constructed from CI env vars by the worker).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_url: Option<String>,
 }
 
 /// Rate limit info forwarded from Claude CLI's `rate_limit_event`.
@@ -1407,6 +1410,7 @@ mod tests {
                 rate_limit_type: "five_hour".to_string(),
                 is_using_overage: true,
             }),
+            action_url: Some("https://git.example.com/acme/payments/actions/runs/42".to_string()),
         };
         let json = serde_json::to_string(&hb).unwrap();
         let back: WorkerHeartbeat = serde_json::from_str(&json).unwrap();
@@ -1427,6 +1431,7 @@ mod tests {
             cost_usd: None,
             turns: None,
             rate_limit: None,
+            action_url: None,
         };
         let json = serde_json::to_string(&hb).unwrap();
         // None fields should not appear in serialized output
@@ -1434,6 +1439,7 @@ mod tests {
         assert!(!json.contains("cost_usd"));
         assert!(!json.contains("turns"));
         assert!(!json.contains("rate_limit"));
+        assert!(!json.contains("action_url"));
     }
 
     #[test]

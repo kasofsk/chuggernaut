@@ -199,6 +199,10 @@ pub struct DispatcherState {
     /// Token usage and rate limit tracking across workers.
     pub token_tracker: RwLock<TokenTracker>,
 
+    /// Action run URLs reported by workers via heartbeats.
+    /// Key: job_key, Value: action URL.
+    pub action_urls: DashMap<String, String>,
+
     /// Channel for dispatch requests. All dispatch decisions are sent here
     /// and processed sequentially by a single task — no capacity races.
     pub dispatch_tx: mpsc::UnboundedSender<DispatchRequest>,
@@ -277,6 +281,7 @@ impl DispatcherState {
             jobs: DashMap::new(),
             graph: RwLock::new(DepGraph::new()),
             token_tracker: RwLock::new(TokenTracker::new()),
+            action_urls: DashMap::new(),
             dispatch_tx: tx.clone(),
             dispatch_rx: tokio::sync::Mutex::new(Some(rx)),
         })
@@ -301,6 +306,7 @@ impl DispatcherState {
             jobs: DashMap::new(),
             graph: RwLock::new(DepGraph::new()),
             token_tracker: RwLock::new(TokenTracker::new()),
+            action_urls: DashMap::new(),
             dispatch_tx: tx.clone(),
             dispatch_rx: tokio::sync::Mutex::new(Some(rx)),
         })

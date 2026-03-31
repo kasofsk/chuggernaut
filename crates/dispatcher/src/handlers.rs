@@ -79,6 +79,10 @@ async fn handle_worker_heartbeat(
                             "heartbeat lease renewal failed: {e}"
                         );
                     }
+                    // Store action URL if reported by worker
+                    if let Some(ref url) = hb.action_url {
+                        s.action_urls.insert(hb.job_key.clone(), url.clone());
+                    }
                     // Record token usage and rate limit info from heartbeat
                     let has_token_data = hb.token_usage.is_some() || hb.rate_limit.is_some();
                     if has_token_data {
