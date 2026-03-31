@@ -807,6 +807,15 @@ async fn fetch_pr_conversation(
 // Helpers: heartbeat
 // ---------------------------------------------------------------------------
 
+/// Build the action run URL from CI environment variables.
+/// Works with both GitHub Actions and Forgejo Actions (which set the same vars).
+fn detect_action_url() -> Option<String> {
+    let server = std::env::var("GITHUB_SERVER_URL").ok()?;
+    let repo = std::env::var("GITHUB_REPOSITORY").ok()?;
+    let run_id = std::env::var("GITHUB_RUN_ID").ok()?;
+    Some(format!("{server}/{repo}/actions/runs/{run_id}"))
+}
+
 fn spawn_heartbeat(
     nats: NatsClient,
     job_key: String,
@@ -815,6 +824,7 @@ fn spawn_heartbeat(
     metrics_rx: watch::Receiver<SessionMetrics>,
 ) {
     let hb_interval = Duration::from_secs(interval_secs);
+    let action_url = detect_action_url();
     tokio::spawn(async move {
         let worker_id = format!("action-{}", job_key);
         let mut interval = tokio::time::interval(hb_interval);
@@ -844,6 +854,7 @@ fn spawn_heartbeat(
                     rate_limit_type: rl.rate_limit_type.clone(),
                     is_using_overage: rl.is_using_overage,
                 }),
+                action_url: action_url.clone(),
             };
             match nats.publish_msg(&subjects::WORKER_HEARTBEAT, &hb).await {
                 Ok(_) => {

@@ -72,7 +72,7 @@ services:
       FORGEJO_URL: http://host.docker.internal:3000
       FORGEJO_ADMIN_USER: ${FORGEJO_ADMIN_USER:-chuggernaut-admin}
       FORGEJO_ADMIN_PASS: ${FORGEJO_ADMIN_PASS:-chuggernaut-admin}
-      RUNNER_LABELS: ${CHUGGERNAUT_RUNNER_LABELS:-ubuntu-latest:docker://chuggernaut-runner-env:latest}
+      RUNNER_LABELS: ${CHUGGERNAUT_RUNNER_LABELS:-ubuntu-latest}
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     restart: unless-stopped
 

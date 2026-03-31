@@ -243,6 +243,7 @@ async fn scan_archival(state: &Arc<DispatcherState>) -> DispatcherResult<()> {
 
         // Archive: remove from in-memory structures
         state.jobs.remove(&key);
+        state.action_urls.remove(&key);
         {
             let mut graph = state.graph.write().await;
             graph.remove_node(&key);

@@ -297,8 +297,9 @@ async fn process_outcome(
         return Ok(());
     }
 
-    // Clean up token tracker for this worker
+    // Clean up token tracker and action URL for this worker
     state.token_tracker.write().await.remove_worker(job_key);
+    state.action_urls.remove(job_key);
 
     // Record token usage for this action
     if let Some(usage) = outcome.token_usage {
@@ -473,8 +474,9 @@ async fn process_review_decision(
         return Ok(());
     }
 
-    // Clean up token tracker for this worker
+    // Clean up token tracker and action URL for this worker
     state.token_tracker.write().await.remove_worker(job_key);
+    state.action_urls.remove(job_key);
 
     // Record token usage for this review action
     if let Some(usage) = decision.token_usage {
