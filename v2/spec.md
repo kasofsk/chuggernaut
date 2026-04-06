@@ -17,14 +17,72 @@ The job graph is the source of truth, not issues or PRs. Version control is one 
 ### Job Node
 
 The fundamental primitive. A job is a node in a DAG with:
-- Named dependency declarations (DAG edges; data transfer is implicit through VCS)
+- Named dependency declarations (DAG edges; establish ordering and optionally carry VCS artifacts if the upstream produced commits)
 - Optional eval criteria (omit or leave empty for automatic pass after work success)
 - A strict state machine (see below)
-- A resource envelope and timeout
+- A resource envelope, per-task timeout, and optional job deadline
 
 ### Job Type
 
 Declarative YAML, one file per job type, lives under `jobs/` in the repo and is version controlled. Declares only the contract — image, resources, input names, eval criteria, retry limits, secrets, vars. No instance-specific wiring, no steps, no imperative logic.
+
+### Canonical Schema
+
+```yaml
+# ── Top-level ─────────────────────────────────────────────────────────────────
+name: string                   # required; unique within the repo
+image: string                  # required for agent/command work; disallowed for human work
+
+work:                          # required
+  type: agent | command | human  # required
+
+  # type: agent only
+  prompt: string               # required; path to prompt file in repo (resolved from base_ref)
+  provider: claude | codex     # optional; falls back to project → team → platform default
+  model: string                # optional; falls back to provider default
+
+  # type: command only
+  run: string                  # required; shell command executed inside the container
+
+  # type: human only
+  prompt: string               # required; shown to operator in task inbox
+
+resources:                     # optional block
+  cpu: number                  # optional; container CPU limit
+  memory: string               # optional; e.g. "4Gi"
+  task_timeout: duration       # optional; per-container execution limit; default 1h
+  job_deadline: duration       # optional; wall-clock limit on entire job (all retries + rework)
+
+work_retries: int              # optional; default 0; container retry budget for work task
+eval_retries: int              # optional; default 1; per-agent-evaluator infra retry budget
+rework_limit: int              # optional; default 0; disallowed for command work; max rework cycles after initial
+
+inputs:                        # optional; declare DAG edges (ordering only — no data routing)
+  - name: string               # required per entry
+
+eval:                          # optional; omit or leave empty for no evaluation (auto-pass)
+  - name: string               # required per evaluator
+    type: command | agent | human  # required
+
+    # type: command only
+    run: string                # required
+
+    # type: agent or human
+    prompt: string             # required; path to prompt file in repo (resolved from base_ref)
+
+    # type: agent only
+    provider: claude | codex   # optional
+    model: string              # optional
+    secrets: [string]          # optional; evaluator-specific secrets (not inherited from top-level)
+
+    required: bool             # optional; default true; false = advisory (failure recorded, no rework)
+
+knowledge: [string]            # optional; default knowledge tags for KO injection at launch
+secrets: [string]              # optional; injected into work container only
+vars: [string]                 # optional; injected into work container and all eval containers
+```
+
+### Field Rules by Subtype
 
 Valid fields per `work.type`:
 
@@ -67,7 +125,8 @@ work:
 resources:
   cpu: 2
   memory: 4Gi
-  timeout: 2h
+  task_timeout: 2h   # per-container execution limit; credentials issued per launch for this duration
+  job_deadline: 24h  # optional wall-clock limit on the entire job (all retries + rework cycles)
 work_retries: 3     # work task container retries before escalation
 eval_retries: 1     # per-agent-evaluator infra retry budget (container crash, network error); default 1; no-op if no agent evaluators are declared
 rework_limit: 2     # max rework cycles after the initial; rework_limit: 2 → cycles 1, 2, 3 permitted; failure at end of cycle 3 → escalation
@@ -107,7 +166,7 @@ work:
   type: command
   run: scripts/deploy.sh staging
 resources:
-  timeout: 30m
+  task_timeout: 30m
 work_retries: 2
 ```
 
@@ -132,6 +191,7 @@ Created at planning time, stored in NATS KV. Wires specific upstream instance ID
   },
   "state": "Frozen",
   "branch": "job/42",
+  "base_ref": null,
   "knowledge_tags": ["rust", "rest-api", "payments/stripe-integration"],
   "created_at": "2026-04-05T10:00:00Z"
 }
@@ -150,12 +210,14 @@ Named inputs are dependency declarations only — they establish DAG edges and o
 - Every input name declared in the job instance matches a name declared in the job type's `inputs:` list (no undeclared inputs)
 - Every input name declared in the job type's `inputs:` list has a corresponding wired instance ID in the job instance (no dangling inputs)
 
-**Static configuration:**
-- The job type file (`jobs/{type}.yaml`) exists in the repo at the default branch
-- For `work.type: agent` jobs: the `work.prompt` path exists in the repo at the default branch
-- For each agent evaluator in `eval:`: the evaluator's `prompt` path exists in the repo at the default branch
+**Static configuration** (fail-fast check at release time against the current HEAD of the default branch):
+- The job type file (`jobs/{type}.yaml`) exists in the repo
+- For `work.type: agent` jobs: the `work.prompt` path exists in the repo
+- For each agent or human evaluator in `eval:`: the evaluator's `prompt` path exists in the repo
 - Every secret named in the job type's `secrets:` list (top-level and per-evaluator) has an entry in the `secrets.*` KV bucket
 - Every var named in the job type's `vars:` list has an entry in the `vars.*` KV bucket
+
+These release-time checks are fail-fast feedback only, not execution guarantees. When the job transitions to Ready — either immediately on release (if all deps are Done) or when the last upstream dependency reaches Done (Blocked → Ready) — the dispatcher records `base_ref` as the exact HEAD commit of the default branch at that moment, then **re-validates** static configuration (job type file and all prompt paths for agent and human evaluators) at `base_ref`. If re-validation fails (a file was deleted or renamed between release and Ready-transition), the job transitions to Escalated with a Human task describing the missing file. Secrets and vars are validated at launch time when they are about to be injected; if any are missing at launch, the job transitions to Escalated. All subsequent execution uses `base_ref` exclusively — the moving default branch is never consulted again after Ready-transition. This eliminates TOCTOU drift between approval and execution and makes every job fully replayable from its record.
 
 Any release request that fails validation is rejected with a list of offending job instances and the specific rule violated. A job with no inputs declared in its type skips the wiring rules (there is nothing to wire).
 
@@ -165,7 +227,7 @@ Any release request that fails validation is rejected with a list of offending j
 Frozen → Ready | Blocked → Work → Evaluation → Done
                               ↑         |
                               └─────────┘  (rework: eval failed, under rework limit)
-Work → Escalated                          (work retries exhausted OR rebase conflict post-work)
+Work → Escalated                          (work retries exhausted)
 Evaluation → Escalated                    (rework limit exhausted OR squash-merge conflict post-eval)
 Escalated → Work | Evaluation | Revoked
 Frozen | Blocked | Ready | Escalated → Revoked  (operator revoke)
@@ -177,8 +239,8 @@ Done, Revoked — terminal
 - **Ready** — queued for execution
 - **Work** — work task executing; job stays here across retries within the current cycle
 - **Evaluation** — evaluation tasks running (commands, agents, human); job stays here until all tasks resolve; rework loops job back to Work
-- **Escalated** — human intervention required; triggered by work retries exhausted, rebase/merge conflict, or rework limit exceeded; operator resolves via task inbox
-- **Revoked** — terminal; only reachable from Frozen, Blocked, Ready, or Escalated. Jobs in Work or Evaluation cannot be directly revoked — the operator must escalate them first (or wait for them to reach Escalated naturally), then revoke from Escalated. On transition to Revoked, the dispatcher immediately cascades Revoked to all direct and transitive dependents that are in Frozen or Blocked state (they can never complete since an upstream will never reach Done). Ready dependents are also cascaded. Dependents already in Work, Evaluation, or Escalated are left in their current state and must be handled explicitly by the operator
+- **Escalated** — human intervention required; triggered automatically by work retries exhausted, squash-merge conflict post-eval, or rework limit exceeded; operator resolves via task inbox
+- **Revoked** — terminal; only reachable from Frozen, Blocked, Ready, or Escalated. Jobs in Work or Evaluation cannot be directly revoked — the operator must wait for them to reach Escalated naturally, then revoke from Escalated. On transition to Revoked, the dispatcher immediately cascades Revoked to all direct and transitive dependents that are in Frozen or Blocked state (they can never complete since an upstream will never reach Done). Ready dependents are also cascaded. Dependents already in Work, Evaluation, or Escalated are left in their current state and must be handled explicitly by the operator
 
 The dispatcher is the sole writer of `jobs.*` KV — including creation. All transitions flow through the dispatcher; no other service writes job records. The API layer and other consumers may read job records.
 
@@ -232,7 +294,7 @@ pub enum TaskResult {
     Work    { summary: Option<String>, structured: Option<serde_json::Value> },
     Command { pass: bool, exit_code: i32, output: String, structured: Option<serde_json::Value> },
     Agent   { pass: bool, structured: Option<serde_json::Value> },
-    Human   { pass: bool, structured: Option<serde_json::Value>, action: Option<EscalationAction> },
+    Human   { pass: bool, structured: Option<serde_json::Value>, action: Option<EscalationAction>, operator: String, resolved_at: DateTime<Utc> },
 }
 
 pub enum EscalationAction { Retry, Resolve, Revoke }
@@ -244,7 +306,7 @@ pub enum TaskResolution {
 }
 ```
 
-`action` is only set on Human tasks created for escalation (work retries exhausted, rebase conflict, or rework limit exceeded). It is ignored on Human tasks in the normal Evaluation phase.
+`action` is only set on Human tasks created for escalation (work retries exhausted, squash-merge conflict post-eval, or rework limit exceeded). It is ignored on Human tasks in the normal Evaluation phase.
 
 **Task creation rules:**
 
@@ -254,7 +316,6 @@ pub enum TaskResolution {
 | Work task fails, `work_retries` available | New task record (same cycle, attempt++) |
 | Work retries exhausted | Human task: `{ prompt: "work failed N times — decide" }` → job → Escalated |
 | Operator grants `Retry` on escalation | New work task (same cycle, attempt++); `work_retries` budget is **not** reset — if this attempt fails, escalate again immediately (no further automatic retries) |
-| Rebase conflict after work success | Human task: `{ prompt: "rebase conflict on job/{seq} — resolve and push" }` → job → Escalated |
 | Squash-merge conflict after eval pass | Human task: `{ prompt: "merge conflict on job/{seq} — resolve and push" }` → job → Escalated |
 | Job enters Evaluation | One task (attempt=1) per evaluator declared in job type |
 | Agent eval task: container exits non-zero with no prior `submit_eval`, `eval_retries` available | New task record (same cycle, attempt++); other eval tasks continue in parallel |
@@ -297,7 +358,7 @@ KV:     jobs.{owner}.{project}.{seq}                    job instance record + st
 KV:     rdeps.{owner}.{project}.{seq}                   inverse dependency index (dispatcher-maintained)
 KV:     counters.{owner}.{project}                      per-project sequential ID counter
 KV:     tasks.{owner}.{project}.{job_seq}.{task_id}     task log entries
-KV:     channels.{owner}.{project}.jobs.{seq}           agent progress updates
+KV:     channels.{owner}.{project}.jobs.{seq}           agent progress updates (latest ChannelUpdate + latest AgentReply)
 KV:     vars.{owner}.{project}.{name}                   project-scoped variable values (plaintext strings)
 KV:     secrets.{owner}.{project}.{name}                age-encrypted secret values
 KV:     users.{email}                                   user accounts
@@ -305,7 +366,8 @@ KV:     knowledge.global                                global knowledge (tools,
 KV:     knowledge.{owner}                               team-level knowledge
 KV:     knowledge.{owner}.{project}                     project-level knowledge
 KV:     platform.vapid.public                           Web Push VAPID public key
-Stream: job-events  subjects: job.events.{owner}.{project}.{seq}.{event_type}   event bus / audit log
+Stream: job-events      subjects: job.events.{owner}.{project}.{seq}.{event_type}   event bus / audit log
+Stream: channel-inbox   subjects: channel.inbox.{owner}.{project}.{seq}            append-only operator→agent message log
 ```
 
 ### Dispatcher
@@ -315,19 +377,20 @@ The **sole writer** of all job state. A single process drives all orchestration,
 Responsibilities:
 
 1. On `req.jobs.create.*`: write the job record to `jobs.*` KV, then publish `job-created` to the event stream. The `rdeps` index is updated as a best-effort cache after the job write — it is not a source of truth and is always rebuilt from `jobs.*` KV on startup (see restart reconciliation)
-2. On job `Done`: read `rdeps` index, check each dependent job's dep states, transition newly-unblocked Blocked → Ready jobs
+2. On job `Done`: read `rdeps` index, check each dependent job's dep states; for each newly-unblocked job, record `base_ref` = current HEAD of default branch, then transition Blocked → Ready
 3. On job `Revoked`: read `rdeps` index, cascade Revoked to all dependents in Frozen, Blocked, or Ready state (transitively); dependents in Work, Evaluation, or Escalated are left in their current state
-4. On `req.jobs.release.*`: validate input wiring (all five rules above); if invalid, reject with errors. Check dep states; transition Frozen → Ready (all deps Done) or Frozen → Blocked
+4. On `req.jobs.release.*`: validate input wiring (all five rules above); if invalid, reject with errors. Check dep states; if all deps Done, record `base_ref` = current HEAD of default branch and transition Frozen → Ready; otherwise transition Frozen → Blocked
 5. Pull Ready jobs and execute them (see Dispatcher Execution below)
 6. On restart: reconciliation pass — query Docker for each task in `Running` state and resume or resolve it (see Restart Reconciliation below). Any job with all dependencies Done but still Blocked is transitioned to Ready
 
 ### Failure Recovery
 
-1. **Timeout scan**: dispatcher periodically scans for tasks in `Running` state where `now - started_at > job.resources.timeout`. The task is marked Failed and retry logic applies. Tasks in `Pending` state are not timed out — the clock starts when execution begins. Human tasks (Evaluation phase and escalation) are excluded from the timeout scan — they have no timeout and no automatic abandonment. A job waiting on an unresolved human task remains blocked indefinitely; operators must manage their task inbox. This is intentional: human review gates are explicit decisions, not time-bounded.
+1. **Timeout scan**: dispatcher periodically scans for tasks in `Running` state where `now - started_at > job.resources.task_timeout`. The task is marked Failed and retry logic applies. Tasks in `Pending` state are not timed out — the clock starts when execution begins. Human tasks (Evaluation phase and escalation) are excluded from the timeout scan — they have no timeout and no automatic abandonment. A job waiting on an unresolved human task remains blocked indefinitely; operators must manage their task inbox. This is intentional: human review gates are explicit decisions, not time-bounded.
+   Additionally, if `job_deadline` is set, the dispatcher scans for jobs where `now - created_at > job_deadline` and any non-terminal job exceeding this limit is transitioned to Escalated with a Human task explaining the deadline was exceeded.
 2. **Restart reconciliation**: on dispatcher startup, rebuild the `rdeps` index from scratch by scanning all job records in `jobs.*` KV (the index is a derived cache, not a source of truth). Then apply the following in order:
    1. For each task in `Running` state, query Docker by `container_id`:
       - **Still running**: re-attach to container events and resume monitoring as normal. The container's NATS credentials remain valid for the restart window; if they have since expired the container will be unable to submit and will eventually time out or be reaped by the timeout scan.
-      - **Exited 0**: treat as successful completion — proceed to the next execution step (rebase for agent work tasks, result processing for eval tasks).
+      - **Exited 0**: treat as successful completion — proceed to the next execution step (Evaluation for work tasks, result processing for eval tasks).
       - **Exited non-0** or **not found**: treat as failure; apply normal retry logic (retry if under `work_retries` / `eval_retries`, else escalate).
    2. Transition any Blocked job whose dependencies are all Done to Ready.
    The task log in KV is the source of truth for execution state. Docker is required to be reachable at startup; the dispatcher will not start if the Docker socket is unavailable.
@@ -341,18 +404,19 @@ The dispatcher drives all job execution directly. No separate runner service.
 **For each Ready job:**
 
 1. Transition job Ready → Work; create work task for cycle 1
-2. Inject secrets (decrypted from `secrets.*` KV using age private key) and vars as env vars
-3. Issue short-lived scoped NATS JWT for the job (using the NATS operator signing key)
-4. Issue short-lived SSH certificate for the job (using the SSH CA private key)
-5. Launch container via the configured backend (Docker socket or k3s)
-6. Monitor task; on container failure: increment attempt, re-launch if under `work_retries`, else create Human escalation task and transition to Escalated
-7. On work task success (`work.type: agent` only): rebase `job/{seq}` onto current default branch. If clean → proceed to step 8. If conflict → create Human escalation task and transition to Escalated. For `work.type: command` jobs, skip this step — no branch commits are produced; proceed directly to step 8
-8. Transition job to Evaluation; create one task per evaluator in job type. If the job type declares no evaluators (`eval:` omitted or empty), skip to step 11 — Evaluation is a no-op pass.
-9. Fan out evaluation tasks in parallel; monitor each — for **agent** eval tasks: container exit without a prior `submit_eval` is an infra error, retry up to `eval_retries`; if retries exhausted, mark task Failed (infra error). For **command** eval tasks: exit code is the verdict immediately (no retries)
-10. Apply eval reduce once all eval tasks are Done or Failed: if any required task is Failed (infra error), skip rework and escalate immediately; if all required tasks are Done and any have `pass=false`, that is a product failure
-11. On eval reduce pass: for `work.type: agent` jobs — squash-merge `job/{seq}` to default branch. If clean → transition job to Done. If conflict → create Human escalation task and transition to Escalated; the operator resolves the conflict on `job/{seq}` and re-enters via the `Resolve` escalation action. For `work.type: command` jobs — transition job directly to Done (no branch commits to merge)
-12. On eval reduce product failure: for `work.type: agent` jobs — if under rework limit, increment cycle, inject all eval findings into rework context, re-enter Work (step 7 — rebase applies again); if rework limit exhausted, create Human escalation task and transition to Escalated. For `work.type: command` jobs — `rework_limit` is disallowed, so eval failure always escalates immediately (no rework loop)
-13. On escalation Human task completion: read `action` and drive next transition — `Retry`: create new work task in the **same cycle** and execute the work task (agent or command, per job type); for agent jobs the existing `job/{seq}` branch is used (operator may have modified it during escalation) and rebase onto default occurs after work task success (step 7), not before. `Resolve`: re-enter Evaluation (step 8); for agent jobs the operator has fixed the branch directly; for command jobs the operator asserts the operation completed successfully and evaluation should proceed. `Revoke`: transition to Revoked
+2. Create branch `job/{seq}` from `base_ref` (recorded at Ready-transition); load job type and prompt files from `base_ref`
+3. Inject secrets (decrypted from `secrets.*` KV using age private key) and vars as env vars
+4. Issue short-lived scoped NATS JWT for the job (using the NATS operator signing key)
+5. Issue short-lived SSH certificate for the job (using the SSH CA private key)
+6. Launch container via the configured backend (Docker socket or k3s)
+7. Monitor task; on container failure: increment attempt, re-launch if under `work_retries`, else create Human escalation task and transition to Escalated
+8. On work task success: proceed to Evaluation. The branch was created from `base_ref` which already contains all upstream work — no rebase needed.
+9. Transition job to Evaluation; create one task per evaluator in job type. If the job type declares no evaluators (`eval:` omitted or empty), skip to step 12 — Evaluation is a no-op pass.
+10. Fan out evaluation tasks in parallel; monitor each — for **agent** eval tasks: container exit without a prior `submit_eval` is an infra error, retry up to `eval_retries`; if retries exhausted, mark task Failed (infra error). For **command** eval tasks: exit code is the verdict immediately (no retries)
+11. Apply eval reduce once all eval tasks are Done or Failed: if any required task is Failed (infra error), skip rework and escalate immediately; if all required tasks are Done and any have `pass=false`, that is a product failure
+12. On eval reduce pass: squash-merge `job/{seq}` to default branch. If no commits exist on `job/{seq}` beyond `base_ref`, this is a no-op — transition job directly to Done. If commits exist and merge is clean → transition job to Done. If conflict → create Human escalation task and transition to Escalated; the operator resolves the conflict on `job/{seq}` and re-enters via the `Resolve` escalation action.
+13. On eval reduce product failure: for `work.type: agent` jobs — if under rework limit, increment cycle, inject all eval findings into rework context, re-enter Work (step 8); if rework limit exhausted, create Human escalation task and transition to Escalated. For `work.type: command` jobs — `rework_limit` is disallowed, so eval failure always escalates immediately (no rework loop)
+14. On escalation Human task completion: read `action` and drive next transition — `Retry`: create new work task in the **same cycle** and execute the work task (agent or command, per job type); the existing `job/{seq}` branch is used (operator may have modified it during escalation). `Resolve`: re-enter Evaluation (step 9); the operator has either fixed the branch directly or asserts the operation completed successfully. `Revoke`: transition to Revoked
 
 ### Environment Variables Injected at Launch
 
@@ -418,7 +482,7 @@ All eval task results land in `tasks.{owner}.{project}.{seq}.{task_id}`. Dispatc
 
 All evaluators are binary pass/fail:
 
-- `Command` — exit code is the verdict: exit 0 = pass, non-zero = fail. The dispatcher captures stdout as `output`. It then attempts to parse the full stdout as JSON; if successful, `structured` is set from the parsed value (e.g. `{ "failed_tests": [...] }`); if stdout is not valid JSON, `structured` is None. Commands that want structured rework context print JSON to stdout; commands that don't just print human-readable text. There is no submit step and no infra-error path — the dispatcher cannot distinguish a container crash from a legitimate test failure, so any non-zero exit is treated as a product failure. `eval_retries` does not apply to command evaluators; if you need retry-on-flake, build it into the command (e.g. `cargo test || cargo test`).
+- `Command` — exit code is the verdict: exit 0 = pass, non-zero = fail. The dispatcher captures stdout+stderr as `output`. After the container exits, the dispatcher reads `eval-result.json` from a well-known path in the container's working directory; if present and valid JSON, `structured` is set from it; if absent or unparseable, `structured` is None. Commands write normal logs to stdout/stderr and optionally write `eval-result.json` for structured rework context (e.g. `{ "failed_tests": [...] }`). There is no submit step and no infra-error path — the dispatcher cannot distinguish a container crash from a legitimate test failure, so any non-zero exit is treated as a product failure. `eval_retries` does not apply to command evaluators; if you need retry-on-flake, build it into the command (e.g. `cargo test || cargo test`).
 - `Agent` — pass/fail set by the `pass` field in the `submit_eval` payload (product verdict). Non-zero exit without a prior `submit_eval` = infra error, consumed by `eval_retries`. `structured` in `submit_eval` carries optional reasoning (e.g. `{ "notes": "..." }`).
 - `Human` — pass/fail set by the operator; `structured` carries the reasoning (e.g. `{ "notes": "..." }`)
 
@@ -442,7 +506,11 @@ pub struct EvalResult {
 
 ## Artifact Passing
 
-All work product lives in the version control system. Each job works on a dedicated branch (`job/{seq}`); on evaluation pass the dispatcher squash-merges to the default branch. Downstream jobs start from the default branch — upstream work is already there by the time they launch, guaranteed by the DAG dependency ordering.
+All jobs work on a dedicated branch (`job/{seq}`). On evaluation pass, the dispatcher squash-merges to the default branch if any commits exist on the job branch; otherwise the merge is a no-op. Downstream jobs start from the default branch — upstream work is already there by the time they launch, guaranteed by the DAG dependency ordering.
+
+Both job types may produce VCS artifacts. A command job that bumps a version or generates a changelog commits to `job/{seq}` like any other job; those commits land on the default branch after eval passes. Command jobs that perform pure side effects (deploy, notify) produce no commits — the squash-merge step is a no-op.
+
+Named `inputs:` declarations establish DAG ordering for all job types. Whether an upstream actually produced VCS output that a downstream will consume depends on what the upstream did, not on its job type.
 
 No separate artifact store for v1. Binary artifact storage (S3/Minio) is deferred.
 
@@ -460,7 +528,7 @@ Two MCP servers are injected into every agent invocation:
 | Tool | Used by | Purpose |
 |---|---|---|
 | `update_status` | work + eval agents | Write `ChannelUpdate` to `channels.{owner}.{project}.jobs.{seq}` KV |
-| `channel_check` | work + eval agents | Poll inbox for messages from operator |
+| `channel_check` | work + eval agents | Poll inbox for messages from operator; accepts optional `since` (stream sequence number); returns all messages after that sequence |
 | `reply` | work + eval agents | Send message to operator via NATS outbox |
 | `submit_result` | work agents | Publish work summary to dispatcher via `req.work.submit.*` request-reply; dispatcher writes task result and transitions to Evaluation |
 | `submit_eval` | eval agents | Publish eval verdict and findings to dispatcher via `req.eval.submit.*` request-reply; payload must include `pass: bool`; dispatcher writes `TaskResult::Agent` to `tasks.*` KV |
@@ -470,6 +538,8 @@ Two MCP servers are injected into every agent invocation:
 - **Work containers** — `submit_result` is optional structured context. Task outcome is determined by container exit code: exit 0 = work succeeded; non-zero = infra/runtime failure (retried per `work_retries`). A container exiting 0 without calling `submit_result` is valid and produces a work task with no structured summary.
 - **Command eval containers** — no submit step and no infra-error path. Exit code is the verdict: exit 0 = pass, non-zero = fail. `eval_retries` is not applicable.
 - **Agent eval containers** — `submit_eval` is required to record the product verdict. The dispatcher uses the `pass` field in the payload as the evaluation outcome. A non-zero container exit with no prior `submit_eval` is treated as an infra error and retried per `eval_retries`; it is not a product-level failure.
+
+**Idempotency:** when the dispatcher receives a `submit_result` or `submit_eval` request, it first reads the target task record from KV. If the task is already `Done`, it returns success immediately without re-processing — the state machine is not driven again and no duplicate events are published. If the task is `Running`, it writes the result, transitions state, and publishes events. Since the dispatcher is single-threaded and the sole writer of task state, there is no race between the read and write. An agent that retries a submit after a dispatcher crash and restart will receive a clean success on the second attempt.
 
 **NATS request reliability**: `submit_result` and `submit_eval` are request-reply calls. The agent SDK must retry these with bounded backoff until an ack is received. This makes submissions survive brief dispatcher restarts — the dispatcher comes back up and the in-flight request succeeds on the next retry. If the dispatcher remains down until the NATS JWT expires, the container will no longer be able to submit and should exit non-zero; normal timeout and retry logic then applies on the next dispatcher start.
 
@@ -488,19 +558,23 @@ Written by `update_status`; overwritten on each call. Used by the UI to display 
 
 ### Operator → Agent Messages
 
-Operators send messages to a running agent via `POST .../messages`. Each message is handled in two steps:
-
-1. Written to the `channels.*` KV entry as `last_message` (overwrites any previous operator message — no history, most recent only).
-2. Published to `channel.inbox.{owner}.{project}.{seq}` as a NATS subject for live push delivery. If no agent is subscribed the live publish is a no-op; the KV write has already persisted the message for polling.
+Operators send messages to a running agent via `POST .../messages`. Each message is appended to the `channel-inbox` JetStream stream at subject `channel.inbox.{owner}.{project}.{seq}`. Messages are never overwritten — the stream is append-only and retains all messages for the job's lifetime.
 
 ```rust
 pub struct OperatorMessage {
-    pub text: String,       // free-form text; delivered to the agent as a <channel> tag or via channel_check
+    pub text: String,
     pub sent_at: DateTime<Utc>,
 }
 ```
 
-Agent replies (`reply` tool) are published to `channel.outbox.{owner}.{project}.{seq}` and stored in the `channels.*` KV entry alongside the current `ChannelUpdate` and `last_message`. The KV entry holds only the **most recent** reply — there is no message history. The job detail view exposes the current status update, last agent reply, and last operator message.
+Agent replies (`reply` tool) are published to `channel.outbox.{owner}.{project}.{seq}` and the most recent reply is stored in the `channels.*` KV entry for display in the job detail view. Reply history is not retained.
+
+```rust
+pub struct AgentReply {
+    pub text: String,
+    pub sent_at: DateTime<Utc>,
+}
+```
 
 ### GET .../status Response
 
@@ -509,16 +583,17 @@ Agent replies (`reply` tool) are published to `channel.outbox.{owner}.{project}.
 ```rust
 pub struct ChannelStatus {
     pub job_seq: u64,
-    pub update: Option<ChannelUpdate>,      // most recent update_status call; None if none yet
-    pub last_reply: Option<OperatorMessage>, // most recent agent reply; None if none yet
-    pub last_message: Option<OperatorMessage>, // most recent operator message; None if none yet
+    pub update: Option<ChannelUpdate>,    // most recent update_status call
+    pub last_reply: Option<AgentReply>,   // most recent agent reply
 }
 ```
 
+Operator message history is available via the `channel-inbox` stream directly (consumed by the UI via SSE or by `channel_check`).
+
 ### Supports Two Modes
 
-- **Push notifications** (`claude/channel` experimental capability) — dispatcher can interrupt Claude mid-run with a message delivered as a `<channel>` tag, via the `channel.inbox.*` NATS subject
-- **Polling** — Claude calls `channel_check` periodically; reads `last_message` from the `channels.*` KV entry. Suitable for clients that don't support push (e.g. Codex). The guarantee is that polling always sees the most recent message — if multiple messages are sent between polls, only the latest is visible.
+- **Push notifications** (`claude/channel` experimental capability) — dispatcher delivers new inbox messages to Claude mid-run as a `<channel>` tag, by subscribing to `channel.inbox.{owner}.{project}.{seq}` on the `channel-inbox` stream
+- **Polling** — Claude calls `channel_check` with an optional `since` sequence number; returns all messages published after that sequence. Suitable for clients that don't support push (e.g. Codex). The agent tracks the last sequence it consumed and passes it on each subsequent call — no messages are ever silently dropped.
 
 ---
 
@@ -546,7 +621,7 @@ pub struct AgentRunConfig {
     pub system_prompt: Option<String>,    // composed from knowledge libraries
     pub mcp_servers: Vec<McpServerConfig>,
     pub env: HashMap<String, String>,
-    pub timeout: Duration,
+    pub task_timeout: Duration,
     pub eval_context: Vec<EvalResult>,     // empty on cycle 1; populated on rework cycles
 }
 
@@ -648,9 +723,10 @@ req.graph.validate.{owner}.{project}
 req.graph.release.{owner}.{project}
 req.vcs.diff.{owner}.{project}.{seq}
 req.vcs.tree.{owner}.{project}.{ref}
-req.vcs.blob.{owner}.{project}.{ref}
+req.vcs.blob.{owner}.{project}.{ref}.{path}
 req.vcs.log.{owner}.{project}
-req.vars.get.{owner}.{project}
+req.vars.list.{owner}.{project}
+req.vars.get.{owner}.{project}.{name}
 req.vars.set.{owner}.{project}.{name}
 req.vars.delete.{owner}.{project}.{name}
 req.secrets.list.{owner}.{project}
@@ -708,12 +784,12 @@ POST   /api/v1/projects/{owner}/{project}/jobs                      → forward 
 GET    /api/v1/projects/{owner}/{project}/jobs
 GET    /api/v1/projects/{owner}/{project}/jobs/{seq}
 POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/release        → validate input wiring; Frozen → Ready | Blocked; rejected with validation errors if wiring is invalid
-POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/revoke         → Frozen | Blocked | Ready | Escalated → Revoked; rejected (409) if job is in Work or Evaluation — escalate first
+POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/revoke         → Frozen | Blocked | Ready | Escalated → Revoked; rejected (409) if job is in Work or Evaluation
 
 # Graph (read + validation + release)
 GET    /api/v1/projects/{owner}/{project}/graph
-POST   /api/v1/projects/{owner}/{project}/graph/validate           → validate all Frozen jobs have valid input wiring before release
-POST   /api/v1/projects/{owner}/{project}/graph/release            → release all Frozen jobs with valid input wiring; each transitions to Ready or Blocked; equivalent to calling per-job release on each Frozen job in dependency order
+POST   /api/v1/projects/{owner}/{project}/graph/validate           → validate all Frozen jobs have valid input wiring before release; returns all errors across all jobs
+POST   /api/v1/projects/{owner}/{project}/graph/release            → atomic: validates all Frozen jobs first; if any fail validation, rejects with all errors and releases nothing; if all pass, releases each Frozen job (Ready or Blocked) in dependency order. Jobs already in non-Frozen states are unaffected.
 
 # Event streams (SSE — NATS stream bridged to HTTP)
 GET    /api/v1/projects/{owner}/{project}/events               project-wide stream
@@ -770,7 +846,7 @@ All events are published exclusively by the dispatcher to `job.events.{owner}.{p
 | `job-evaluation-started` | Dispatcher | Work → Evaluation; includes `cycle` |
 | `job-rework-started` | Dispatcher | Eval reduce failed; Evaluation → Work with cycle++; includes new `cycle` and collected `eval_context` |
 | `job-done` | Dispatcher | Evaluation → Done |
-| `job-escalated` | Dispatcher | Work retries exhausted, rebase/merge conflict, or rework limit exceeded; includes `reason` field |
+| `job-escalated` | Dispatcher | Work retries exhausted, squash-merge conflict post-eval, or rework limit exceeded; includes `reason` field |
 | `job-escalation-resolved` | Dispatcher | Operator completes escalation Human task; includes `action` (`Retry`/`Resolve`/`Revoke`) |
 | `job-revoked` | Dispatcher | Frozen \| Blocked \| Ready \| Escalated → Revoked; includes cascaded job seqs if dependents were also revoked |
 | `task-created` | Dispatcher | New task written to KV |
@@ -778,7 +854,7 @@ All events are published exclusively by the dispatcher to `job.events.{owner}.{p
 | `task-completed` | Dispatcher | Task reached Done (includes `pass` and `structured` where applicable) |
 | `task-failed` | Dispatcher | Task reached Failed |
 
-When `POST .../tasks/{id}/resolve` is called, the API layer forwards the `TaskResolution` payload to the dispatcher via NATS request-reply (`req.tasks.resolve.{owner}.{project}.{job_seq}.{task_id}`). The dispatcher handles the request: validates the `TaskResolution`, writes `TaskResult::Human` to `tasks.*` KV, publishes the `task-completed` event, and drives the next state transition. The dispatcher replies with success or error; the API returns the corresponding HTTP response. The dispatcher is the sole writer of `tasks.*` KV and the sole publisher of task events — the API layer never writes task state directly.
+When `POST .../tasks/{id}/resolve` is called, the API layer authenticates the request, extracts the operator identity from the JWT, and forwards both the `TaskResolution` payload and the operator's identity (email/sub) to the dispatcher via NATS request-reply (`req.tasks.resolve.{owner}.{project}.{job_seq}.{task_id}`). The dispatcher handles the request: validates the `TaskResolution`, writes `TaskResult::Human` (including `operator` and `resolved_at`) to `tasks.*` KV, publishes the `task-completed` event, and drives the next state transition. The dispatcher replies with success or error; the API returns the corresponding HTTP response. The dispatcher is the sole writer of `tasks.*` KV and the sole publisher of task events — the API layer never writes task state directly.
 
 ### SSE Event Stream
 
@@ -862,7 +938,7 @@ One SSH CA keypair is generated at platform init. The private key is mounted int
 
 **User SSH certs** — the API layer handles `POST /auth/ssh-cert`: the user submits their public key (authenticated via JWT cookie); the API forwards the request to the dispatcher via NATS (`req.ssh.sign-user-cert`); the dispatcher signs with the CA private key and returns a certificate valid for 24 hours with a principal equal to the user's email. Users interact with git via the `chuggernaut` CLI, which handles cert refresh transparently.
 
-**Per-job SSH certs** — issued by the dispatcher at job launch. Signed with the CA private key, validity equals the job timeout, principal is `job-{seq}`. Ref permissions are enforced by principal name in the SSH layer.
+**Per-job SSH certs** — issued by the dispatcher at each container launch. Signed with the CA private key, validity equals `task_timeout`, principal is `job-{seq}`. Ref permissions are enforced by principal name in the SSH layer.
 
 The SSH server trusts one CA (`TrustedUserCAKeys ca.pub`). No per-user key registration required.
 
@@ -893,7 +969,7 @@ KV: ssh_keys — not used; cert-based auth only
 
 ### Per-Job Machine Credentials
 
-At job launch, the dispatcher issues two short-lived credentials scoped to the specific job (duration = job timeout):
+At each container launch, the dispatcher issues two short-lived credentials valid for `task_timeout`:
 
 **NATS JWT** — subject allow list for work containers:
 ```
@@ -905,7 +981,8 @@ KV read:    knowledge.{owner}.{project}.*
 KV read:    channels.{owner}.{project}.jobs.{seq}
 KV write:   channels.{owner}.{project}.jobs.{seq}
 Publish:    req.work.submit.{owner}.{project}.{seq}
-Sub/Pub:    channel.{inbox|outbox}.{owner}.{project}.{seq}
+Subscribe:  channel.inbox.{owner}.{project}.{seq}     ← channel-inbox stream
+Publish:    channel.outbox.{owner}.{project}.{seq}
 ```
 
 Work containers do **not** publish to `job.events.*`. All events are published exclusively by the dispatcher. The `req.work.submit` subject is how the work agent signals completion with a summary (see `submit_result` tool); the dispatcher validates, writes the task result, and publishes the appropriate events.
@@ -919,7 +996,8 @@ KV read:    knowledge.{owner}.{project}.*
 KV read:    channels.{owner}.{project}.jobs.{seq}
 KV write:   channels.{owner}.{project}.jobs.{seq}
 Publish:    req.eval.submit.{owner}.{project}.{seq}.{task_id}
-Sub/Pub:    channel.{inbox|outbox}.{owner}.{project}.{seq}
+Subscribe:  channel.inbox.{owner}.{project}.{seq}     ← channel-inbox stream
+Publish:    channel.outbox.{owner}.{project}.{seq}
 ```
 
 Eval agents do **not** write to `tasks.*` KV directly. The `req.eval.submit` subject is how the eval agent signals completion with structured findings; the dispatcher validates, writes `TaskResult::Agent` to `tasks.*` KV, and drives the next transition. The dispatcher is the sole writer of `tasks.*` KV.
@@ -939,7 +1017,7 @@ pull: any    read-only, no push
 
 ### Vars
 
-Variables are project-scoped plaintext key-value pairs. Stored in NATS KV at `vars.{owner}.{project}.{name}`. The API layer forwards reads and writes via NATS request-reply; no encryption — values are not sensitive. At job launch the dispatcher reads every var declared in the job type's `vars:` list from the `vars.*` bucket and injects them as env vars into both work and eval containers. All declared vars are guaranteed to exist at this point — their presence is validated at release time (see Release Validation).
+Variables are project-scoped plaintext key-value pairs. Stored in NATS KV at `vars.{owner}.{project}.{name}`. The API layer forwards reads and writes via NATS request-reply; no encryption — values are not sensitive. At job launch the dispatcher reads every var declared in the job type's `vars:` list from the `vars.*` bucket and injects them as env vars into both work and eval containers. If any declared var is missing at launch, the job transitions to Escalated.
 
 ```rust
 pub struct Var {
@@ -971,7 +1049,7 @@ The platform generates an age keypair at init time:
 - **Public key** — available to the API layer; used to encrypt values on write (`PUT /secrets/{name}`)
 - **Private key** — mounted into the dispatcher at runtime; never exposed outside it
 
-The dispatcher decrypts values at job launch and injects them as env vars. Containers never see the key or the KV bucket. All declared secrets are guaranteed to exist at this point — their presence is validated at release time (see Release Validation).
+The dispatcher decrypts values at job launch and injects them as env vars. Containers never see the key or the KV bucket. If any declared secret is missing at launch, the job transitions to Escalated.
 
 ### SecretStore Trait
 
@@ -1032,7 +1110,7 @@ Job containers run agent code the platform didn't write. Constraints enforced by
 - No privileged mode
 - No host network
 - No host volume mounts
-- Resource limits from job spec (`cpu`, `memory`, `timeout`) enforced as container runtime constraints
+- Resource limits from job spec (`cpu`, `memory`, `task_timeout`) enforced as container runtime constraints
 - Ephemeral filesystem — wiped on exit
 - **Egress**: internet access permitted (agents need to pull dependencies, call external APIs); cluster-internal CIDRs blocked via network policy. Containers reach NATS only through the injected `NATS_URL` with their scoped token — not via free cluster routing.
 
