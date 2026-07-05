@@ -61,14 +61,14 @@ Declarative YAML, one file per job type, lives under `jobs/` in the repo and is 
 ```yaml
 # ── Top-level ────────────────────────────────────────────────────────────────
 name: string                   # required; unique within the repo
-image: string                  # required for agent/command work; disallowed for human work
+image: string                  # required for agent/command work; disallowed at top level for human work (container evaluators must declare their own image; see eval.image)
 
 work:                          # required
   type: agent | command | human  # required
 
   # type: agent only
   prompt: string               # required; path to prompt file in repo (resolved from base_ref)
-  provider: claude | codex     # optional; falls back to project → team → platform default
+  provider: claude | codex     # optional; falls back to platform default (see §12.4); project/team defaults deferred
   model: string                # optional; falls back to provider default
 
   # type: command only
@@ -101,10 +101,13 @@ eval:                          # optional; omit or leave empty for auto-pass
     # type: agent or human
     prompt: string             # path to prompt file in repo (resolved from base_ref)
 
+    # type: command or agent
+    image: string              # optional; falls back to top-level image; one of the two is required
+    secrets: [string]          # evaluator-specific secrets; not inherited from top-level
+
     # type: agent only
     provider: claude | codex
     model: string
-    secrets: [string]          # evaluator-specific secrets; not inherited from top-level
 
     required: bool             # optional; default true; false = advisory
 
@@ -135,6 +138,7 @@ vars: [string]                 # injected into work container and all eval conta
 | Field | `command` | `agent` | `human` |
 |---|---|---|---|
 | `name` | required | required | required |
+| `image` | optional² | optional² | disallowed |
 | `run` | required | disallowed | disallowed |
 | `prompt` | disallowed | required | required |
 | `provider` | disallowed | optional | disallowed |
@@ -142,11 +146,13 @@ vars: [string]                 # injected into work container and all eval conta
 | `secrets` | optional | optional | disallowed |
 | `required` | optional | optional | optional |
 
+² Falls back to the job's top-level `image`. Required per-evaluator when the job declares no top-level image (`work.type: human`).
+
 **`work.type: human`** — no container is launched. The dispatcher creates a `Human` task in `Pending` state in the Work phase; it surfaces in the operator task inbox. The operator performs the work manually, then resolves via `POST .../tasks/{task_id}/resolve`:
 - `TaskResolution::Pass` — work complete; proceeds to Evaluation (or Done if no evaluators).
 - `TaskResolution::Fail` — operator cannot/will not complete; job → Escalated with a Human escalation task.
 
-`work_retries` is disallowed for human work — there is no container to retry. Human work tasks are excluded from the timeout scan; use `job_deadline` to bound wall-clock time. If eval fails and rework budget remains, a new Human task is created for the next cycle with all eval findings injected.
+`work_retries` is disallowed for human work — there is no container to retry. Human work tasks are excluded from the timeout scan; use `job_deadline` to bound wall-clock time. If eval fails and rework budget remains, a new Human task is created for the next cycle with all eval findings injected. Command/agent evaluators on human-work jobs run in their per-evaluator `image` (required, since there is no top-level image to fall back to).
 
 **Command work jobs must be idempotent.** `work_retries` will re-run the command on failure; the command is responsible for safe handling of any partial side effects. Set `work_retries: 0` if the operation cannot be made safe to retry.
 
@@ -216,7 +222,7 @@ Tasks are the unit of execution within a job's Work and Evaluation phases. They 
 
 Each rework loop is a **cycle**. Cycle 1 = first Work + first Evaluation. Cycle 2 = rework Work + second Evaluation. Tasks carry a `cycle` number.
 
-`rework_budget` is the maximum number of additional rework cycles permitted after the initial one. With `rework_budget: 2`, cycles 1, 2, and 3 are permitted; eval failure at the end of cycle 3 triggers escalation. Equivalently: escalation occurs when `current_cycle > rework_budget + 1`.
+`rework_budget` is the maximum number of additional rework cycles permitted after the initial one. With `rework_budget: 2`, cycles 1, 2, and 3 are permitted; eval failure at the end of cycle 3 triggers escalation. Precisely: when the eval reduce fails in cycle N, the job re-enters Work as cycle N+1 iff `N ≤ rework_budget`; otherwise it escalates.
 
 ```rust
 pub struct Task {
@@ -228,7 +234,7 @@ pub struct Task {
     pub kind: TaskKind,
     pub state: TaskState,
     pub attempt: u32,                     // 1-indexed; each retry is a new task record with attempt+1
-    pub container_id: Option<String>,     // Docker container ID; None for Human tasks
+    pub container_id: Option<String>,     // backend-assigned container ID (Docker or k8s); None for Human tasks
     pub result: Option<TaskResult>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
@@ -306,8 +312,8 @@ pub enum TaskResolution {
 | Job enters Evaluation | One task (attempt=1) per evaluator declared in job type |
 | Agent eval task: container exits with no prior `submit_eval`, `eval_retries` available | Infra error; new task record (same cycle, attempt++) |
 | Agent eval task: `eval_retries` exhausted | Final task marked Failed (infra error); reduce proceeds |
-| Eval reduce fails (`work.type: agent`), under rework budget | Job re-enters Work (cycle++); all eval results feed into next work task |
-| Eval reduce fails (`work.type: agent`), rework budget exhausted | Human escalation task → job → Escalated |
+| Eval reduce fails (`work.type: agent \| human`), under rework budget | Job re-enters Work (cycle++); all eval results feed into next work task |
+| Eval reduce fails (`work.type: agent \| human`), rework budget exhausted | Human escalation task → job → Escalated |
 | Eval reduce fails (`work.type: command`) | Human escalation task → job → Escalated (rework_budget disallowed for command) |
 
 `work_retries` counts container failures within a single Work phase. `eval_retries` counts the same for individual agent eval containers. `rework_budget` counts evaluation-driven rework cycles and is entirely separate from both.
@@ -320,6 +326,8 @@ pub enum TaskResolution {
 - `Revoke` — terminates the job.
 
 Escalation never bypasses evaluation — `Done` is only reachable via an evaluation pass.
+
+**Pre-Work escalations** — escalations raised before any work task exists (Blocked→Escalated on re-validation failure, see §2.1; job-deadline escalation from Ready, see §3.5) accept only `Retry` and `Revoke`; `Resolve` is rejected with 400. For these, `Retry` re-attempts the failed step — re-runs Ready-transition re-validation for the former, re-enqueues the job for execution for the latter — rather than creating a work task.
 
 **Example task log:**
 
@@ -340,7 +348,7 @@ cycle=2  Evaluation  Human    attempt=1  Done   pass=true
 
 Users are stored in NATS KV — no separate database.
 
-**NATS KV key:** `users.{email}`
+**NATS KV key:** `users.{b64url(email)}` (emails contain characters outside the NATS key alphabet; see §1.4 key encoding)
 
 ```rust
 pub struct User {
@@ -393,6 +401,10 @@ channel-inbox   subjects: channel.inbox.{owner}.{project}.{seq}
 ```
 
 Subject components are limited to values that cannot contain `.`. Values that may contain `.` — file paths, git refs, knowledge subjects and predicates — are passed in the request payload, not embedded in the subject.
+
+**Bucket model:** each top-level prefix above (`jobs`, `rdeps`, `counters`, `tasks`, `channels`, `vars`, `secrets`, `users`, `knowledge`, `platform`, `push`) is one fixed NATS KV bucket created at platform init (see §12.1); the dotted remainder is the key within that bucket. No buckets are created dynamically.
+
+**Key encoding:** key segments that may contain characters outside the NATS key alphabet are base64url-encoded: user emails (`users.{b64url(email)}`) and knowledge subjects/predicates (`knowledge` bucket keys: `global.{b64url(subject)}.{b64url(predicate)}`, `{owner}.{b64url(subject)}.{b64url(predicate)}`, `{owner}.{project}.{b64url(subject)}.{b64url(predicate)}`). The owner name `global` is reserved to keep scope prefixes unambiguous. Secret and var `{name}`s are validated to `[A-Za-z0-9_]+` at write time (they become env var names) and stored unencoded.
 
 **`rdeps` index format:** `rdeps.{owner}.{project}.{seq}` stores a JSON array of job IDs (unsigned integers) that directly declare the indexed job as an input:
 
@@ -463,9 +475,9 @@ The authoritative definition of all valid job state transitions. No transition e
 | `Work` | `Evaluation` | Work task succeeds | — | Create one task per declared evaluator (attempt=1); publish `job-evaluation-started` |
 | `Evaluation` | `Evaluation` | Agent eval container exits without `submit_eval`, retries remain | `attempt ≤ eval_retries` | Create new eval task (same cycle, attempt++) |
 | `Evaluation` | `Escalated` | Any required eval task exhausts `eval_retries` (infra error) | — | Create Human escalation task; publish `job-escalated` |
-| `Evaluation` | `Work` | Eval reduce: product failure, under rework budget | `current_cycle ≤ rework_budget + 1` | cycle++; collect eval findings into rework context; reset `job/{seq}` to `base_ref`; publish `job-rework-started` (reason: `eval_failure`) |
+| `Evaluation` | `Work` | Eval reduce: product failure, under rework budget | evaluated cycle N ≤ `rework_budget` | cycle++; collect eval findings into rework context; reset `job/{seq}` to `base_ref`; publish `job-rework-started` (reason: `eval_failure`) |
 | `Evaluation` | `Work` | Eval reduce: squash-merge conflict (any cycle; rework budget NOT consumed) | — | Update `base_ref` to current default HEAD; cycle++; build conflict context (see §4.3); reset `job/{seq}` to new `base_ref`; publish `job-rework-started` (reason: `merge_conflict`) |
-| `Evaluation` | `Escalated` | Eval reduce: product failure, rework budget exhausted | `current_cycle > rework_budget + 1` | Create Human escalation task; publish `job-escalated` |
+| `Evaluation` | `Escalated` | Eval reduce: product failure, rework budget exhausted | evaluated cycle N > `rework_budget` | Create Human escalation task; publish `job-escalated` |
 | `Evaluation` | `Escalated` | Eval reduce: `work.type: command` and any required evaluator failed | — | Create Human escalation task; publish `job-escalated` (rework_budget disallowed for command) |
 | `Evaluation` | `Done` | Eval reduce: all required evaluators passed; squash-merge clean or no-op | — | Squash-merge `job/{seq}` to default branch (no-op if no commits); delete branch `job/{seq}`; publish `job-done` |
 | `Escalated` | `Work` | Operator resolves escalation Human task with `action: Retry` | — | Create new work task (same cycle, attempt++); publish `job-escalation-resolved` |
@@ -560,6 +572,8 @@ Responsibilities:
 - **Docker socket** — local dev and single-node self-hosted
 - **k3s** — production, multi-node
 
+The k3s implementation drives the Kubernetes Jobs API directly — create Job, watch pod status, stream logs. No CI or workflow engine (Argo, Tekton, Temporal) sits in between: those bundle their own DAG, state store, and retry semantics — the layer the dispatcher owns — and would reintroduce a second writer to reconcile against.
+
 **`ContainerBackend` trait:**
 
 ```rust
@@ -605,7 +619,7 @@ For each Ready job, the dispatcher executes the following sequence:
 
 1. Transition job Ready → Work; create work task (cycle=1, attempt=1)
 2. **For `work.type: agent | command`**: create branch `job/{seq}` from `base_ref`; load job type and prompt files from `base_ref`. **For `work.type: human`**: create branch `job/{seq}` from `base_ref`; surface the Human task in the operator inbox; await operator resolution (skip to step 8). `base_ref` is locked from this point — no external actor or event changes it except a squash-merge conflict (step 12), which updates it under dispatcher control before re-entering this step.
-   - **Rework/conflict context (cycle > 1):** if `eval_context` is non-empty or `merge_conflict` is set, the dispatcher reads the prompt file content from the repo at `base_ref`, appends a structured context block (see §4.3 for format), and passes the combined string as the prompt to the provider. Human rework tasks have the same block appended to their inbox prompt. On cycle 1, prompt files are passed as file paths.
+   - **Rework/conflict context (cycle > 1):** if `eval_context` is non-empty or `merge_conflict` is set, the dispatcher reads the prompt file content from the repo at `base_ref`, appends a structured context block (see §4.3 for format), and passes the combined string as the prompt to the provider. Human rework tasks have the same block appended to their inbox prompt. On cycle 1 the prompt is the file content alone. Prompt content is always resolved by the dispatcher and delivered to containers via a mounted file — never passed as a path (see §4.3).
 3. Inject secrets (decrypted from `secrets.*` KV using age private key) and vars as env vars
 4. Issue short-lived scoped NATS JWT for the job (see §7.4)
 5. Issue short-lived SSH certificate for the job (see §7.3)
@@ -629,7 +643,7 @@ After a work task succeeds, the dispatcher creates one task per evaluator and fa
 
 **Three evaluator types:**
 
-**`command`** — dispatcher executes the declared CLI command inside a container on the job branch. Captures exit code and stdout. After exit, extracts `/workspace/eval-result.json` from the container filesystem via `ContainerBackend::copy_file`; if present and valid JSON, sets `structured`; if absent or unparseable, `structured` is None. **All agent and command containers must clone the repo to `/workspace`** — this is required by the platform (command eval containers write `eval-result.json` there; eval containers read diffs from there). Dispatcher writes `TaskResult::Command` to `tasks.*` KV. Exit code is the verdict immediately — no submit step. `eval_retries` does not apply to command evaluators. If you need retry-on-flake, build it into the command (e.g. `cargo test || cargo test`).
+**`command`** — dispatcher executes the declared CLI command inside a container on the job branch, using the evaluator's `image` (falling back to the job's top-level `image`). The repo is cloned to `/workspace` by the dispatcher-injected bootstrap (see §4.1); `run` executes with cwd `/workspace`. Captures exit code and stdout. After exit, extracts `/workspace/eval-result.json` from the container filesystem via `ContainerBackend::copy_file`; if present and valid JSON, sets `structured`; if absent or unparseable, `structured` is None. Dispatcher writes `TaskResult::Command` to `tasks.*` KV. Exit code is the verdict immediately — no submit step. `eval_retries` does not apply to command evaluators. If you need retry-on-flake, build it into the command (e.g. `cargo test || cargo test`).
 
 **`agent`** — dispatcher invokes the configured `AgentProvider` (see §4.3) with the eval prompt. The provider launches a container, which clones the repo on the job branch, inspects the diff, and calls `submit_eval` to publish its verdict and structured findings. The dispatcher writes `TaskResult::Agent` to `tasks.*` KV. Any container exit — zero or non-zero — without a prior `submit_eval` call is an infra error, retried up to `eval_retries`, then marked Failed (infra error). A zero exit without `submit_eval` is NOT treated as a pass; the verdict can only be recorded by calling `submit_eval`. This is categorically distinct from a task that exited after calling `submit_eval { pass: false }`. See §4.2 for the canonical verdict contract.
 
@@ -656,7 +670,7 @@ pub struct EvalResult {
 }
 ```
 
-On overall fail (`work.type: agent | human`): cycle++; `structured` from all eval results is collected into `AgentRunConfig.eval_context` and passed to the next work task. If `current_cycle > rework_budget + 1`: escalate.
+On overall fail (`work.type: agent | human`): if the evaluated cycle N ≤ `rework_budget`, cycle++ and `structured` from all eval results is collected into `AgentRunConfig.eval_context` for the next work task; otherwise escalate.
 
 On overall fail (`work.type: command`): escalate immediately (rework_budget disallowed).
 
@@ -674,6 +688,8 @@ See §2.1 (state table rows for `Escalated`) and §1.2 (EscalationAction, TaskRe
 
 **Job deadline scan** — if `job_deadline` is set, the dispatcher scans for jobs in Work, Evaluation, or Ready state where `ready_at` is set and `now - ready_at > job_deadline`. Any such job is transitioned to Escalated with a Human task explaining the deadline was exceeded. If the job has a Running container at the time of deadline expiry, the dispatcher kills it (same as the timeout scan) before transitioning to Escalated. Jobs already in Escalated state are excluded — a human is already engaged. Jobs in Frozen or Blocked state are not checked — the clock does not start until `ready_at` is set (i.e., when the job first enters Ready).
 
+**One-shot enforcement:** a job escalates for deadline at most once. Once the operator resolves a deadline escalation (any resolution action), deadline enforcement is permanently disabled for that job — the deadline's purpose is to summon a human, and the human now owns pacing. The scan therefore also excludes any job whose task log contains a resolved deadline escalation task.
+
 ---
 
 ### 3.6 Restart Reconciliation
@@ -687,7 +703,8 @@ On dispatcher startup, apply in order:
    - **Work task, exited non-0** or **not found**: treat as failure; apply `work_retries`
    - **Agent eval task, exited 0**: treat as infra error (no `submit_eval` received); apply `eval_retries`
    - **Agent eval task, exited non-0** or **not found**: treat as infra error; apply `eval_retries`
-   - **Command eval task, any exit**: exit code is the verdict; proceed as normal completion
+   - **Command eval task, exited (any code)**: exit code is the verdict; proceed as normal completion
+   - **Command eval task, not found**: infra failure; task marked Failed; reduce proceeds (escalates if the evaluator is `required`)
    - Human eval tasks are never in `Running` state; not subject to this path
 3. Transition any Blocked job whose dependencies are all Done to Ready
 4. Enqueue all jobs currently in Ready state (including those that were Ready before the crash and any newly-Ready jobs from step 3) into the in-memory work queue
@@ -731,7 +748,9 @@ NATS_TOKEN      <eval-scoped JWT — see §7.4>
 RUST_EDITION    2021
 ```
 
-Work containers are dumb — they read env vars, clone the repo, branch, do work, commit, and exit. No NATS awareness required beyond optional progress streaming.
+**Workspace bootstrap:** the dispatcher wraps every work and eval container CMD with a standard bootstrap: `git clone --branch $JOB_BRANCH $REPO_URL /workspace && cd /workspace && exec {original CMD}`. Images must provide `git` and an SSH client but do not perform the clone themselves — the platform enforces the `/workspace` contract (command evaluators write `eval-result.json` there; eval agents inspect the diff there).
+
+Work containers are dumb — they read env vars, do work in `/workspace`, commit, and exit. No NATS awareness required beyond optional progress streaming.
 
 ---
 
@@ -838,13 +857,13 @@ pub struct AgentOutput {
 
 Provider and model are configured at platform level (see §12.4) with per-job-type overrides at `work:` level or per eval step. In v1, the fallback chain is: job-type declaration → platform default. Project-level and team-level defaults are deferred.
 
-**`ClaudeProvider`** — container CMD: `claude -p {prompt} --model {model} --append-system-prompt {system_prompt} --mcp-config {json}`. The `{json}` is the serialized `Vec<McpServerConfig>` passed inline on the command line.
+**`ClaudeProvider`** — container CMD: `claude -p "$(cat /chuggernaut/prompt.md)" --model {model} --append-system-prompt {system_prompt} --mcp-config {json}`. The `{json}` is the serialized `Vec<McpServerConfig>` passed inline on the command line.
 
-**`CodexProvider`** — before launch, the dispatcher serializes `AgentRunConfig.mcp_servers` into Codex's MCP config format and writes it to a temp file; the file is volume-mounted read-only into the container at `/repo/.codex/config.toml`. Container CMD: `codex exec {prompt} --model {model}` (system prompt prepended to the task prompt, no native flag).
+**`CodexProvider`** — before launch, the dispatcher serializes `AgentRunConfig.mcp_servers` into Codex's MCP config format and writes it to a temp file; the file is volume-mounted read-only into the container at `/repo/.codex/config.toml`. Container CMD: `codex exec "$(cat /chuggernaut/prompt.md)" --model {model}` (system prompt prepended to the prompt file content, no native flag).
 
 Structured context surfaces through MCP tools (`submit_result`, `submit_eval`), which send NATS request-reply messages to the dispatcher — the dispatcher never parses agent stdout.
 
-**Rework context format** — on rework cycles (cycle > 1) where `eval_context` is non-empty or `merge_conflict` is set, the dispatcher reads the prompt file from the repo at `base_ref`, appends the following block, and sets `AgentRunConfig.prompt` to the combined string. Both providers receive this as a prompt file written to a temp path inside the container image (not inline in the shell command).
+**Rework context format** — on rework cycles (cycle > 1) where `eval_context` is non-empty or `merge_conflict` is set, the dispatcher reads the prompt file from the repo at `base_ref`, appends the following block, and sets `AgentRunConfig.prompt` to the combined string. The provider writes the prompt content to a temp file on the host and volume-mounts it read-only into the container at `/chuggernaut/prompt.md` — never inline in the shell command.
 
 ```
 ---
@@ -879,7 +898,7 @@ Changes on main since base commit abc1234:
 ```
 ```
 
-On cycle 1 (no rework context), `AgentRunConfig.prompt` is the file path from the repo at `base_ref` — no temp file is written. The format distinction is transparent to the providers since both receive `prompt` as a string that is either a path or an embedded content string; the dispatcher sets the field accordingly.
+`AgentRunConfig.prompt` always carries resolved prompt content, never a path. On cycle 1 it is the prompt file content read from the repo at `base_ref`; on rework cycles the context block above is appended. Delivery is identical on every cycle: content written to a temp file, volume-mounted into the container at `/chuggernaut/prompt.md`.
 
 ---
 
@@ -923,10 +942,12 @@ One SSH CA keypair is generated at platform init. The private key is mounted int
 
 | Principal | Push permitted | Pull permitted |
 |---|---|---|
-| `job-{seq}` | `refs/heads/job/{seq}` only | any |
+| `job:{owner}/{project}:{seq}` | `refs/heads/job/{seq}` in `{owner}/{project}` only | any ref in `{owner}/{project}` |
 | `dispatcher` | any protected ref (default branch, tags) | any |
 | user email (Member+ on project) | `refs/heads/job/{seq}` only | any ref on projects where Viewer+ |
 | user email (Viewer on project) | none | any ref on projects where Viewer+ |
+
+Job principals embed the owner and project because job seqs are only unique per project — a bare `job-{seq}` principal could not be authorized against the right repo.
 
 Per-project read authorization is enforced against the user's `project_roles` claim in their SSH cert extension.
 
@@ -1094,6 +1115,8 @@ PUT    /api/v1/projects/{owner}/{project}/knowledge/{subject}/{predicate}  body:
 DELETE /api/v1/projects/{owner}/{project}/knowledge/{subject}/{predicate}  → 204 No Content
 ```
 
+**Path encoding:** `{ref}` (which may contain `/`, e.g. `job/42`) and knowledge `{subject}`/`{predicate}` (which may contain `/` or `.`) are single path segments and must be percent-encoded by clients (`job%2F42`, `payments%2Fstripe-integration`). Blob `{path}` is the greedy remainder of the URL — its slashes are not encoded. The owner name `global` is reserved so team-scope knowledge routes cannot collide with the global routes.
+
 ---
 
 ### 6.3 Events
@@ -1109,7 +1132,7 @@ All events are published exclusively by the dispatcher to `job.events.{owner}.{p
 | `job-evaluation-started` | Work → Evaluation; includes `cycle` |
 | `job-rework-started` | Evaluation → Work with cycle++; includes new `cycle`, `reason` (`eval_failure` \| `merge_conflict`), and `eval_context` (populated for `eval_failure`; empty for `merge_conflict`) |
 | `job-done` | Evaluation → Done |
-| `job-escalated` | Work retries exhausted or rework budget exceeded; includes `reason` field |
+| `job-escalated` | Any transition to Escalated (work retries exhausted, rework budget exhausted, launch/re-validation failure, required eval infra failure, human work failed, command eval failure, deadline exceeded); includes `reason` field |
 | `job-escalation-resolved` | Operator completes escalation Human task; includes `action` (`Retry`/`Resolve`/`Revoke`) |
 | `job-revoked` | Any non-terminal → Revoked; includes cascaded job seqs if dependents were also revoked |
 | `task-created` | New task written to KV; includes `kind` (`Command`\|`Agent`\|`Human`), `phase` (`Work`\|`Evaluation`), `cycle`, `attempt` |
@@ -1173,7 +1196,7 @@ Standard HTTP status codes:
 JWT (RS256). On login, validate credentials against the `users` KV bucket, sign a token:
 
 ```json
-{ "sub": "user_id", "kind": "user", "projects": { "acme/api": "member" }, "exp": ... }
+{ "sub": "user_id", "kind": "user", "project_roles": { "acme/api": "member" }, "exp": ... }
 ```
 
 API middleware validates the JWT signature and extracts the identity on every request — no external service call per request. Authentication via `httpOnly; Secure; SameSite=Strict` cookie — set on `POST /auth/login`, sent automatically with subsequent requests. XSS cannot read the token; CSRF is prevented by `SameSite=Strict`.
@@ -1245,14 +1268,16 @@ Work containers do not publish to `job.events.*`. All events are published exclu
 **SSH certificates — work containers:**
 
 ```
-push: refs/heads/job/{seq}    only their own branch
-pull: any
+principal: job:{owner}/{project}:{seq}
+push: refs/heads/job/{seq}    only their own branch, in their own project
+pull: any ref in {owner}/{project}
 ```
 
 **SSH certificates — eval containers:**
 
 ```
-pull: any    read-only, no push
+principal: job:{owner}/{project}:{seq}
+pull: any ref in {owner}/{project}    read-only, no push
 ```
 
 The NATS operator signing key is mounted into the dispatcher at runtime (k8s Secret in k8s deployments, bind-mounted file in Docker deployments).
@@ -1325,13 +1350,15 @@ Key rotation requires re-encrypting all values with the new public key — a one
 
 ### 9.1 KO Model
 
-Knowledge Objects follow a `(subject, predicate) → object` model. Each KO is a discrete fact retrievable in O(1) by `(subject, predicate)` key. Three scoped buckets:
+Knowledge Objects follow a `(subject, predicate) → object` model. Each KO is a discrete fact retrievable in O(1) by `(subject, predicate)` key. Three scopes within the single `knowledge` KV bucket (see §1.4 bucket model):
 
-- **Global** (`knowledge.global`) — stack conventions, preferred tools and libraries; not platform-specific
-- **Team** (`knowledge.{owner}`) — team practices, architectural patterns, coding standards
-- **Project** (`knowledge.{owner}.{project}`) — project-specific facts, decisions, and context
+- **Global** (`global.*` keys) — stack conventions, preferred tools and libraries; not platform-specific
+- **Team** (`{owner}.*` keys) — team practices, architectural patterns, coding standards
+- **Project** (`{owner}.{project}.*` keys) — project-specific facts, decisions, and context
 
 Scope resolution: when deduplicating KOs by `(subject, predicate)`, narrower scopes win (project overrides team overrides global).
+
+**Storage encoding:** subjects and predicates may contain any characters (including `.` and `/`); they are base64url-encoded in KV keys (see §1.4). An O(1) `get` encodes both parts and reads the key directly; `list` by subject is a prefix scan on `{scope}.{b64url(subject)}.`.
 
 ---
 
@@ -1411,6 +1438,8 @@ The SSE event stream (see §6.4) is the data backbone for the UI — the client 
 - **Job detail** — state, task log, agent status/progress via `ChannelStatus`, diff for the job branch
 - **Escalation flow** — read findings, provide context, complete or fail the escalation task
 
+**Diff rendering** uses an off-the-shelf renderer (e.g. `diff2html` or `react-diff-view`) over the unified diff returned by `GET .../diff/{seq}` — the platform does not implement its own diff view.
+
 **Push notifications** via Web Push API for task inbox alerts. VAPID keypair generated at platform init. The public key is stored at `platform.vapid.public` in NATS KV for distribution to clients; the private key is mounted into the API layer at runtime. Clients register their W3C `PushSubscription` via `POST /api/v1/push/subscribe` (see §6.2); subscriptions are stored in NATS KV at `push.{user_id}.{subscription_id}`.
 
 **Delivery mechanism:** the API layer runs a background task per instance that subscribes to the `job-events` stream with an ephemeral push consumer. For each `task-created` event where `kind` is `Human`, it reads all `push.*` KV entries for users who hold Member+ role on the affected project and enqueues Web Push notifications asynchronously (not blocking event consumption). Notifications are sent using the VAPID private key. Delivery failures (expired subscriptions, HTTP errors from the push service) are silently discarded — they do not affect task execution or event consumption. Push notifications are best-effort: if the API layer is down when a Human task is created, the notification is not re-sent when it comes back up. Operators can always check pending tasks in the task inbox. The notification payload contains: `job_seq`, `project`, `task_id`, and a human-readable summary (e.g. `"New task: security-review on job/42"`).
@@ -1456,7 +1485,7 @@ Private keys are **never** stored in NATS KV. They are written to local files an
 
 **Default branch storage:** the default branch name is stored in the git repository's `HEAD` symref (`git symbolic-ref HEAD` returns `refs/heads/{branch}`). The dispatcher reads this at runtime for all operations that reference the default branch (squash-merges, `base_ref` computation, `BASE_BRANCH` env var). There is no separate NATS KV entry for the project's default branch.
 
-No per-project NATS KV buckets are created at project creation time — they are populated lazily as jobs, tasks, secrets, vars, and knowledge objects are created. The `rdeps` index for a project is implicitly empty until the first job is created.
+Buckets are fixed and created once at platform init (see §1.4 bucket model, §12.1) — no per-project provisioning. Per-project keys appear lazily as jobs, tasks, secrets, vars, and knowledge objects are created. The `rdeps` index for a project is implicitly empty until the first job is created.
 
 ---
 
@@ -1542,3 +1571,5 @@ Platform init generates: JWT RS256 keypair, SSH CA keypair, age keypair, VAPID k
 - **Schema registry**: available as a platform service for applications to use; not a platform primitive.
 - **User git CLI (`chuggernaut` client)**: a wrapper CLI that transparently refreshes SSH certificates (via `POST /auth/ssh-cert`) before invoking `git`. In v1, users refresh SSH certs manually via the API or their own tooling and use `git` directly with the certificate.
 - **Project/team-level provider defaults**: in v1 the fallback chain is job-type declaration → platform config. Per-project and per-team agent provider/model overrides are deferred.
+- **Dependency caching for agent containers**: per-project build/dependency caches (cargo registry, node_modules) via persistent volumes or a pull-through registry cache. v1 mitigation: bake toolchains and dependencies into the declared `image`.
+- **k8s-Secret-based secret injection**: dispatcher writes a Kubernetes Secret referenced by the Job spec instead of decrypting secrets into env vars it assembles itself, keeping plaintext out of the dispatcher's launch path. v1 injects env vars directly.

@@ -1,5 +1,7 @@
 # Chuggernaut v2 — Platform Specification
 
+> **Superseded.** This is the pre-review draft, retained for reference only. `spec.md` is canonical — do not update this file.
+
 ## Introduction
 
 Chuggernaut is an AI-native software delivery platform. Instead of developers writing code directly, they define a **job graph** — a DAG of work units — and AI agents execute each job: implementing features, running evaluations, and iterating until the work passes. Humans stay in the loop at planning time and at review gates, but agents do the heavy lifting in between.

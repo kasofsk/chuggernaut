@@ -79,6 +79,10 @@ Jobs are validated three times, each at the right moment:
 2. **Ready-transition** — static files are re-verified at the exact `base_ref` locked when the job enters Ready, eliminating TOCTOU drift between approval and execution.
 3. **Launch-time** — secrets and vars are checked immediately before injection, catching anything deleted between release and launch.
 
+### Container substrate is Kubernetes Jobs / Docker, not a CI engine
+
+The `ContainerBackend` implementations drive the container runtime directly — the Docker socket in dev, the Kubernetes Jobs API in production (create Job, watch pod status, stream logs). Workflow engines and CI systems (Argo, Tekton, Temporal, forge Actions) are deliberately excluded: they bundle their own DAG, state store, and retry semantics — exactly the layer the dispatcher owns — and would reintroduce the reconcile-against-a-second-writer problem that removing the git forge eliminated.
+
 ### Merge conflicts resolved by agents, not humans
 
 When a squash-merge conflicts (another job landed first), the platform re-enters Work with an updated `base_ref` rather than escalating to a human. The agent redoes its work on the new base. This is consistent with the principle that agents handle implementation work — a rebase is implementation work.
@@ -121,3 +125,5 @@ All infrastructure is Terraformable via Kubernetes providers.
 - **Binary artifact store**: S3/Minio for non-git artifacts. Deferred; all work product in VCS for v1.
 - **macOS bare metal dispatchers**: required for Xcode builds. Execution model needs separate design.
 - **Commit signing**: GPG-signed squash-merges. Deferred.
+- **Dependency caching for agent containers**: persistent cache volumes or a pull-through registry cache. v1 mitigation: bake toolchains and dependencies into images.
+- **k8s-Secret-based secret injection**: reference a k8s Secret from the Job spec instead of decrypting into env vars in the dispatcher. v1 injects env vars directly.
