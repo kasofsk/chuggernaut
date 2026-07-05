@@ -59,7 +59,7 @@ The single NATS integration point, wrapping `async-nats`:
 
 `ContainerBackend` trait exactly as specced (§3.1), plus:
 
-- `DockerBackend` (socket; dev/single-node) and `K8sBackend` (Jobs API: create Job, watch pod status, stream logs)
+- `DockerBackend` (socket; dev and the v1 production default) and `K8sBackend` (Jobs API: create Job, watch pod status, stream logs; scale-out, built when needed)
 - The **workspace bootstrap wrapper** (§4.1): wraps every CMD with clone-to-`/workspace` + exec
 - Launch config assembly helpers (env, volumes, limits)
 

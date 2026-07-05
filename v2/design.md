@@ -79,9 +79,9 @@ Jobs are validated three times, each at the right moment:
 2. **Ready-transition** — static files are re-verified at the exact `base_ref` locked when the job enters Ready, eliminating TOCTOU drift between approval and execution.
 3. **Launch-time** — secrets and vars are checked immediately before injection, catching anything deleted between release and launch.
 
-### Container substrate is Kubernetes Jobs / Docker, not a CI engine
+### Docker is the v1 production substrate; k8s is the scale-out option
 
-The `ContainerBackend` implementations drive the container runtime directly — the Docker socket in dev, the Kubernetes Jobs API in production (create Job, watch pod status, stream logs). Workflow engines and CI systems (Argo, Tekton, Temporal, forge Actions) are deliberately excluded: they bundle their own DAG, state store, and retry semantics — exactly the layer the dispatcher owns — and would reintroduce the reconcile-against-a-second-writer problem that removing the git forge eliminated.
+The `ContainerBackend` implementations drive the container runtime directly. The workload demands only five operations (launch, wait, kill, inspect, copy-file), and deployments are per-consumer and predominantly single-node — so the Docker socket is the v1 production default, with the platform services running under docker compose on the same host. The Kubernetes Jobs backend (k3s self-hosted, or managed EKS/GKE/AKS) exists for consumers who outgrow one node. Workflow engines and CI systems (Argo, Tekton, Temporal, forge Actions) are deliberately excluded at any scale: they bundle their own DAG, state store, and retry semantics — exactly the layer the dispatcher owns — and would reintroduce the reconcile-against-a-second-writer problem that removing the git forge eliminated.
 
 ### Merge conflicts resolved by agents, not humans
 
@@ -102,7 +102,7 @@ Human evaluators and human work tasks have no timeout and are never automaticall
 | Component | Default (self-hosted) | Cloud alternative |
 |---|---|---|
 | Orchestration / state / events | NATS JetStream | NATS JetStream (managed) |
-| Container execution | k3s / Docker socket | EKS, GKE, AKS |
+| Container execution | Docker socket (v1 default); k3s for multi-node | EKS, GKE, AKS |
 | Artifact store | _(deferred)_ | S3, GCS, Azure Blob |
 | Secrets | age-encrypted NATS KV | swap `SecretStore` impl for external manager |
 | Variables | NATS KV | — |

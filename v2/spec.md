@@ -575,10 +575,10 @@ Responsibilities:
 7. On restart: reconciliation pass (see §3.6)
 
 **Dispatcher backends** — interface with two implementations:
-- **Docker socket** — local dev and single-node self-hosted
-- **k3s** — production, multi-node
+- **Docker socket** — the v1 production default. Deployments are per-consumer and predominantly single-node; the long-running services (dispatcher, API, NATS) run under docker compose and the same Docker daemon executes agent containers. Also the dev backend.
+- **k8s (k3s self-hosted, or EKS/GKE/AKS)** — scale-out option for multi-node capacity; built when a consumer outgrows a single node, not before.
 
-The k3s implementation drives the Kubernetes Jobs API directly — create Job, watch pod status, stream logs. No CI or workflow engine (Argo, Tekton, Temporal) sits in between: those bundle their own DAG, state store, and retry semantics — the layer the dispatcher owns — and would reintroduce a second writer to reconcile against.
+The k8s implementation drives the Kubernetes Jobs API directly — create Job, watch pod status, stream logs. No CI or workflow engine (Argo, Tekton, Temporal) sits in between: those bundle their own DAG, state store, and retry semantics — the layer the dispatcher owns — and would reintroduce a second writer to reconcile against.
 
 **`ContainerBackend` trait:**
 
@@ -1406,7 +1406,7 @@ Job containers run agent code the platform didn't write. Constraints enforced by
 - No host volume mounts
 - Resource limits from job spec (`cpu`, `memory`, `task_timeout`) enforced as container runtime constraints
 - Ephemeral filesystem — wiped on exit
-- **Egress**: internet access permitted (agents need to pull dependencies, call external APIs); cluster-internal CIDRs blocked via network policy. Containers reach NATS only through the injected `NATS_URL` with their scoped token (see §7.4) — not via free cluster routing
+- **Egress**: internet access permitted (agents need to pull dependencies, call external APIs); platform-internal addresses blocked — a dedicated bridge network with host firewall rules on the Docker backend, NetworkPolicy on k8s. Containers reach NATS only through the injected `NATS_URL` with their scoped token (see §7.4) — not via free network routing
 
 Image signing deferred.
 
@@ -1437,7 +1437,7 @@ Continuous security audit and inter-service mTLS deferred.
 
 ### 10.4 Frontend Security
 
-PWA served from the same axum origin as the API. Authentication via `httpOnly; Secure; SameSite=Strict` cookie containing the JWT — set on `POST /auth/login`, sent automatically with every subsequent request. XSS cannot read the token; CSRF is prevented by `SameSite=Strict`. TLS enforced everywhere via cert-manager + Let's Encrypt on the k8s ingress.
+PWA served from the same axum origin as the API. Authentication via `httpOnly; Secure; SameSite=Strict` cookie containing the JWT — set on `POST /auth/login`, sent automatically with every subsequent request. XSS cannot read the token; CSRF is prevented by `SameSite=Strict`. TLS enforced everywhere: an ACME reverse proxy (e.g. Caddy) in front of the API on Docker deployments; cert-manager + Let's Encrypt on the k8s ingress.
 
 ---
 
@@ -1647,7 +1647,7 @@ Creating zero jobs is a normal, successful triage outcome (event batch judged no
 | Component | Default (self-hosted) | Cloud alternative |
 |---|---|---|
 | Orchestration / state / events | NATS JetStream | NATS JetStream (managed) |
-| Container execution | k3s / Docker socket | EKS, GKE, AKS |
+| Container execution | Docker socket (v1 default); k3s for multi-node | EKS, GKE, AKS |
 | Artifact store | _(deferred)_ | S3, GCS, Azure Blob |
 | Secrets | age-encrypted NATS KV | swap `SecretStore` impl |
 | Variables | NATS KV | — |
