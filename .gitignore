@@ -1,6 +1,7 @@
 target/
 .env
 .envrc
+.DS_Store
 
 # Terraform
 infra/terraform/.terraform/
