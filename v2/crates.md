@@ -144,5 +144,5 @@ Invariants worth enforcing (e.g. via CI lint): only `store` depends on `async-na
 
 ## Not crates
 
-- **PWA** (Part 11) — frontend workspace at `v2/web/`, framework TBD; built assets embedded into or served by `api`.
+- **PWA** (Part 11) — frontend workspace at `v2/web/`: React + TypeScript + Vite (React Flow, `react-diff-view`, `vite-plugin-pwa`); built assets embedded into or served by `api`.
 - **SSH server** — stock `sshd` with `TrustedUserCAKeys` and an `AuthorizedPrincipalsCommand`/forced-command hook calling the `auth` ref-authorization helper; configuration, not code.

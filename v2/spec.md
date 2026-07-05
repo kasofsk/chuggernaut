@@ -1428,7 +1428,9 @@ PWA served from the same axum origin as the API. Authentication via `httpOnly; S
 
 ## Part 11: Mobile / PWA
 
-PWA — single codebase, installable on mobile home screen, served from the axum API server. Designed mobile-first; works on desktop as the primary operator interface. Frontend framework TBD.
+PWA — single codebase, installable on mobile home screen, served from the axum API server. Designed mobile-first; works on desktop as the primary operator interface.
+
+**Stack:** React + TypeScript + Vite. React Flow (xyflow) for the graph view; `react-diff-view` for diff rendering; `vite-plugin-pwa` for the manifest and service worker. State layer is thin (Zustand or React context) — the SSE stream is the source of truth and the client mostly projects it. Chosen primarily for agent-writability: v2's premise is that agents implement the work, and React/TS is where model output is most reliable.
 
 The SSE event stream (see §6.4) is the data backbone for the UI — the client connects once per project and receives all state changes in real time. No polling.
 
@@ -1438,7 +1440,7 @@ The SSE event stream (see §6.4) is the data backbone for the UI — the client 
 - **Job detail** — state, task log, agent status/progress via `ChannelStatus`, diff for the job branch
 - **Escalation flow** — read findings, provide context, complete or fail the escalation task
 
-**Diff rendering** uses an off-the-shelf renderer (e.g. `diff2html` or `react-diff-view`) over the unified diff returned by `GET .../diff/{seq}` — the platform does not implement its own diff view.
+**Diff rendering** uses `react-diff-view` over the unified diff returned by `GET .../diff/{seq}` — the platform does not implement its own diff view.
 
 **Push notifications** via Web Push API for task inbox alerts. VAPID keypair generated at platform init. The public key is stored at `platform.vapid.public` in NATS KV for distribution to clients; the private key is mounted into the API layer at runtime. Clients register their W3C `PushSubscription` via `POST /api/v1/push/subscribe` (see §6.2); subscriptions are stored in NATS KV at `push.{user_id}.{subscription_id}`.
 
