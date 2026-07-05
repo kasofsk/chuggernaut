@@ -11,7 +11,7 @@ v2 is developed as a fresh workspace under `v2/` (`v2/Cargo.toml`, `v2/crates/*`
 One fat binary plus two tiny ones:
 
 - **`chuggernaut`** — single deployable with subcommands: `chuggernaut dispatcher`, `chuggernaut api`, `chuggernaut webhooks`, `chuggernaut init`, `chuggernaut admin ...`. Dispatcher and API still run as **separate processes** with different mounted keys (age/SSH-CA/NATS-operator private keys are dispatcher-only; JWT keys and VAPID private key on the API — spec §7, §12.1); sharing a binary just means one artifact to version and deploy. Service logic lives in library crates; the bin crate is argument parsing and wiring.
-- **`chuggernaut-channel`** and **`chuggernaut-ko`** — the two MCP servers (spec §4.2). Built as small static binaries (musl) because they are volume-mounted into arbitrary agent images and must run with no runtime dependencies.
+- **`chuggernaut-channel`** and **`chuggernaut-ko`** — the two MCP servers (spec §4.2). Built as small static binaries (musl) because they are injected into arbitrary agent images (put-archive, spec §3.1) and must run with no runtime dependencies.
 
 ## Crates
 
@@ -59,9 +59,11 @@ The single NATS integration point, wrapping `async-nats`:
 
 `ContainerBackend` trait exactly as specced (§3.1), plus:
 
-- `DockerBackend` (socket; dev and the v1 production default) and `K8sBackend` (Jobs API: create Job, watch pod status, stream logs; scale-out, built when needed)
+- `DockerBackend` (v1 production default): a **fleet of one or more Docker daemons** — local socket single-node, TCP+mTLS/SSH-tunnel endpoints multi-node. Slot-capped least-loaded placement; `ContainerId` encodes the owning node (`{node}/{docker_id}`). The dispatcher is the scheduler, so nodes are dumb endpoints — no Swarm, no cluster state
+- `K8sBackend` (Jobs API: create Job, watch pod status, stream logs; scale-out beyond a small fleet, built when needed)
 - The **workspace bootstrap wrapper** (§4.1): wraps every CMD with clone-to-`/workspace` + exec
-- Launch config assembly helpers (env, volumes, limits)
+- **File injection** (put-archive after create, before start) for MCP binaries, prompt, and event batch — no host bind-mounts, so remote fleet nodes need nothing on disk
+- Launch config assembly helpers (env, injected files, limits)
 
 No knowledge of jobs or state — it launches, waits, kills, inspects, copies files.
 

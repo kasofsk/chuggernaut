@@ -30,7 +30,7 @@ pub trait AgentProvider: Send + Sync {
 pub struct AgentRunConfig {
     pub image: String,
     /// Resolved prompt content, never a path. Delivered via a temp file
-    /// volume-mounted at `/chuggernaut/prompt.md` (spec §4.3).
+    /// injected into the created container at `/chuggernaut/prompt.md` (spec §4.3).
     pub prompt: String,
     pub model: Option<String>,
     /// Composed from knowledge libraries (spec §4.4).
@@ -55,7 +55,7 @@ pub struct AgentOutput {
     pub exit_code: i32,
 }
 
-/// Path where providers mount the resolved prompt inside the container.
-pub const PROMPT_MOUNT_PATH: &str = "/chuggernaut/prompt.md";
+/// Path where providers inject the resolved prompt inside the container.
+pub const PROMPT_PATH: &str = "/chuggernaut/prompt.md";
 /// Path where factory triage jobs receive their event batch (spec §13.4).
-pub const EVENTS_MOUNT_PATH: &str = "/chuggernaut/events.json";
+pub const EVENTS_PATH: &str = "/chuggernaut/events.json";

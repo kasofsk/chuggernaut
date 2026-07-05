@@ -123,7 +123,7 @@ mod tests {
             image: "test:latest".into(),
             cmd: vec!["true".into()],
             env: HashMap::new(),
-            volumes: vec![],
+            files: vec![],
             cpu_limit: None,
             memory_limit: None,
         }

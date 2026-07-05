@@ -48,19 +48,24 @@ pub struct ContainerLaunchConfig {
     pub image: String,
     pub cmd: Vec<String>,
     pub env: HashMap<String, String>,
-    /// Read-only bind mounts (used for MCP binaries and the prompt file).
-    pub volumes: Vec<VolumeMount>,
+    /// Written into the created container before start (MCP binaries, prompt,
+    /// event batch).
+    pub files: Vec<InjectedFile>,
     /// Fractional CPUs.
     pub cpu_limit: Option<f64>,
     /// e.g. "4Gi".
     pub memory_limit: Option<String>,
 }
 
+/// Injected via the backend's file API (Docker put-archive / k8s equivalent)
+/// after create, before start. No host bind-mounts — works identically on
+/// remote fleet nodes (spec §3.1).
 #[derive(Debug, Clone)]
-pub struct VolumeMount {
-    pub host_path: String,
+pub struct InjectedFile {
     pub container_path: String,
-    pub read_only: bool,
+    pub contents: Vec<u8>,
+    /// e.g. 0o755 for the MCP binaries.
+    pub mode: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

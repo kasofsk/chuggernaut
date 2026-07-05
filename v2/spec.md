@@ -575,8 +575,16 @@ Responsibilities:
 7. On restart: reconciliation pass (see §3.6)
 
 **Dispatcher backends** — interface with two implementations:
-- **Docker socket** — the v1 production default. Deployments are per-consumer and predominantly single-node; the long-running services (dispatcher, API, NATS) run under docker compose and the same Docker daemon executes agent containers. Also the dev backend.
-- **k8s (k3s self-hosted, or EKS/GKE/AKS)** — scale-out option for multi-node capacity; built when a consumer outgrows a single node, not before.
+- **Docker fleet** — the v1 production default: one or more Docker daemons. The single-node form (local socket; also the dev backend) and the multi-node form are the same backend — the node list just has one entry or several. Platform services (dispatcher, API, NATS, sshd, TLS proxy) run under docker compose on one node; every node runs a Docker daemon reachable over TCP+mTLS (or an SSH tunnel) and executes agent containers.
+- **k8s (k3s self-hosted, or EKS/GKE/AKS)** — scale-out option beyond what a small Docker fleet covers; built when needed, not before.
+
+**Docker fleet semantics.** The dispatcher is already the scheduler — single writer, work queue, retries — so the fleet needs no cluster orchestration, only dumb endpoints:
+- **Config**: a node list, each entry `{ name, endpoint, slots }` where `slots` caps concurrent containers on that node. A single entry pointing at the local socket is the single-node deployment.
+- **Placement**: at launch, pick the node with the most free slots (ties broken by name). No affinity, no preemption.
+- **Container IDs**: `ContainerId` is already opaque; the fleet backend encodes placement as `{node}/{docker_id}` and routes `wait`/`kill`/`inspect`/`copy_file` to the owning daemon.
+- **Node failure**: a node dying makes its containers report not-found — exactly the condition §3.5/§3.6 already classify as task failure; retries land on healthy nodes. All configured nodes must be reachable at dispatcher startup (consistent with the backend-reachability rule in §3.6).
+- **Addressing discipline**: `REPO_URL` and `NATS_URL` injected into containers must be reachable from every node — never `localhost`.
+- Container-internal files (MCP binaries, prompt, events batch) are **injected via the put-archive API** into the created container before start (see §4.2, §4.3) — no host bind-mounts, so nothing needs to exist on remote node filesystems.
 
 The k8s implementation drives the Kubernetes Jobs API directly — create Job, watch pod status, stream logs. No CI or workflow engine (Argo, Tekton, Temporal) sits in between: those bundle their own DAG, state store, and retry semantics — the layer the dispatcher owns — and would reintroduce a second writer to reconcile against.
 
@@ -601,15 +609,18 @@ pub struct ContainerLaunchConfig {
     pub image: String,
     pub cmd: Vec<String>,
     pub env: HashMap<String, String>,
-    pub volumes: Vec<VolumeMount>,      // read-only bind mounts (used for MCP binaries)
+    pub files: Vec<InjectedFile>,       // written into the created container before start
     pub cpu_limit: Option<f64>,         // fractional CPUs
     pub memory_limit: Option<String>,   // e.g. "4Gi"
 }
 
-pub struct VolumeMount {
-    pub host_path: String,
+/// Injected via the backend's file API (Docker put-archive / k8s equivalent)
+/// after create, before start. No host bind-mounts — works identically on
+/// remote fleet nodes.
+pub struct InjectedFile {
     pub container_path: String,
-    pub read_only: bool,
+    pub contents: Vec<u8>,
+    pub mode: u32,                      // e.g. 0o755 for the MCP binaries
 }
 
 pub enum ContainerStatus { Running, Exited { exit_code: i32 } }
@@ -821,7 +832,7 @@ pub struct ChannelStatus {
 
 `supports_push_notifications()` on the `AgentProvider` trait (see §4.3) governs which mode the channel MCP server starts in.
 
-**MCP server distribution:** `chuggernaut-channel` and `chuggernaut-ko` are built as standalone binaries and shipped alongside the dispatcher. At container launch the dispatcher volume-mounts them (read-only) into every agent container at `/usr/local/bin/chuggernaut-channel` and `/usr/local/bin/chuggernaut-ko`. The `McpServerConfig.command` field in each `AgentRunConfig.mcp_servers` entry references one of these paths. The binaries connect to NATS using the `NATS_URL` and `NATS_TOKEN` values passed in `McpServerConfig.env`.
+**MCP server distribution:** `chuggernaut-channel` and `chuggernaut-ko` are built as standalone binaries and shipped alongside the dispatcher. At container launch the dispatcher injects them (as `InjectedFile`s, mode 0755 — see §3.1) into every created container at `/usr/local/bin/chuggernaut-channel` and `/usr/local/bin/chuggernaut-ko` before start. The `McpServerConfig.command` field in each `AgentRunConfig.mcp_servers` entry references one of these paths. The binaries connect to NATS using the `NATS_URL` and `NATS_TOKEN` values passed in `McpServerConfig.env`.
 
 ---
 
@@ -866,11 +877,11 @@ Provider and model are configured at platform level (see §12.4) with per-job-ty
 
 **`ClaudeProvider`** — container CMD: `claude -p "$(cat /chuggernaut/prompt.md)" --model {model} --append-system-prompt {system_prompt} --mcp-config {json}`. The `{json}` is the serialized `Vec<McpServerConfig>` passed inline on the command line.
 
-**`CodexProvider`** — before launch, the dispatcher serializes `AgentRunConfig.mcp_servers` into Codex's MCP config format and writes it to a temp file; the file is volume-mounted read-only into the container at `/repo/.codex/config.toml`. Container CMD: `codex exec "$(cat /chuggernaut/prompt.md)" --model {model}` (system prompt prepended to the prompt file content, no native flag).
+**`CodexProvider`** — before launch, the dispatcher serializes `AgentRunConfig.mcp_servers` into Codex's MCP config format and injects it into the container at `/repo/.codex/config.toml` (same mechanism as the prompt file). Container CMD: `codex exec "$(cat /chuggernaut/prompt.md)" --model {model}` (system prompt prepended to the prompt file content, no native flag).
 
 Structured context surfaces through MCP tools (`submit_result`, `submit_eval`), which send NATS request-reply messages to the dispatcher — the dispatcher never parses agent stdout.
 
-**Rework context format** — on rework cycles (cycle > 1) where `eval_context` is non-empty or `merge_conflict` is set, the dispatcher reads the prompt file from the repo at `base_ref`, appends the following block, and sets `AgentRunConfig.prompt` to the combined string. The provider writes the prompt content to a temp file on the host and volume-mounts it read-only into the container at `/chuggernaut/prompt.md` — never inline in the shell command.
+**Rework context format** — on rework cycles (cycle > 1) where `eval_context` is non-empty or `merge_conflict` is set, the dispatcher reads the prompt file from the repo at `base_ref`, appends the following block, and sets `AgentRunConfig.prompt` to the combined string. The provider injects the prompt content into the created container at `/chuggernaut/prompt.md` (put-archive, §3.1) — never inline in the shell command, never via a host bind-mount.
 
 ```
 ---
@@ -905,7 +916,7 @@ Changes on main since base commit abc1234:
 ```
 ```
 
-`AgentRunConfig.prompt` always carries resolved prompt content, never a path. On cycle 1 it is the prompt file content read from the repo at `base_ref`; on rework cycles the context block above is appended. Delivery is identical on every cycle: content written to a temp file, volume-mounted into the container at `/chuggernaut/prompt.md`.
+`AgentRunConfig.prompt` always carries resolved prompt content, never a path. On cycle 1 it is the prompt file content read from the repo at `base_ref`; on rework cycles the context block above is appended. Delivery is identical on every cycle: content injected into the created container at `/chuggernaut/prompt.md` before start.
 
 ---
 
@@ -1621,7 +1632,7 @@ The dispatcher runs one durable JetStream consumer per enabled factory on `inges
 
 **Batching:** on the first unconsumed event, start `batch_window`; when the window elapses or `max_batch` accumulates, create a triage job. **At most one triage job per factory is in flight** (non-terminal) at a time — events arriving while one runs simply accumulate for the next batch. This is the backpressure mechanism: an error tracker in a crash loop produces bigger batches, not more jobs.
 
-**Triage jobs** are regular jobs (§2.1 state machine applies) with `factory` provenance set, no inputs, created **and immediately released** by the dispatcher — a factory whose triage waits for operator release would not be a factory. The event batch is delivered to the triage container as a JSON array of `IngestEvent` at `/chuggernaut/events.json` (volume-mounted read-only, same mechanism as the prompt file, §4.3). Events are acked on the consumer only when the triage job reaches a terminal state, so a dispatcher crash or a revoked triage job redelivers the batch.
+**Triage jobs** are regular jobs (§2.1 state machine applies) with `factory` provenance set, no inputs, created **and immediately released** by the dispatcher — a factory whose triage waits for operator release would not be a factory. The event batch is delivered to the triage container as a JSON array of `IngestEvent` at `/chuggernaut/events.json` (injected, same mechanism as the prompt file, §4.3). Events are acked on the consumer only when the triage job reaches a terminal state, so a dispatcher crash or a revoked triage job redelivers the batch.
 
 **Job creation by the triage agent:** the `create_job` MCP tool (§4.2), backed by the extra JWT permission (§7.4). Created jobs:
 - carry `factory: {factory_name}` on the record and `job-created` event
