@@ -57,23 +57,30 @@ impl TempRepo {
     /// Clone the bare repo checked out at `branch` — the same path a real agent
     /// container takes via the workspace bootstrap.
     pub async fn clone_branch(&self, branch: &str) -> WorkClone {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let target = dir.path().join("workspace");
-        git(
-            dir.path(),
-            &[
-                "clone",
-                "--branch",
-                branch,
-                self.bare_path().to_str().unwrap(),
-                target.to_str().unwrap(),
-            ],
-        )
-        .await;
-        WorkClone {
-            _dir: dir,
-            path: target,
-        }
+        clone_branch_from(&self.bare_path(), branch).await
+    }
+}
+
+/// Standalone form of [`TempRepo::clone_branch`] for contexts that only hold a
+/// bare-repo path — e.g. a `FakeProvider` run hook standing in for an agent
+/// container committing to its job branch.
+pub async fn clone_branch_from(bare_path: &Path, branch: &str) -> WorkClone {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("workspace");
+    git(
+        dir.path(),
+        &[
+            "clone",
+            "--branch",
+            branch,
+            bare_path.to_str().unwrap(),
+            target.to_str().unwrap(),
+        ],
+    )
+    .await;
+    WorkClone {
+        _dir: dir,
+        path: target,
     }
 }
 

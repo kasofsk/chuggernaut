@@ -1,18 +1,24 @@
-//! Single-writer core (spec §3.1): owns job records, the in-memory graphs, and
-//! the work queue. This slice covers the pre-execution lifecycle — creation,
-//! release validation, Blocked→Ready unblocking with re-validation, and revoke
-//! cascades. Execution (Ready→Work onward) is the next slice.
+//! Single-writer core (spec §3.1): one tokio task owns all job/task state, the
+//! in-memory graphs, and the work queue. Everything else — NATS handlers,
+//! container monitors, scan timers — talks to it via the [`Msg`] channel and
+//! never mutates state directly. Container monitoring is concurrent; state
+//! transitions are sequential.
 
 use crate::graph::JobGraph;
 use crate::queue::{QueuedJob, ReadyQueue};
 use crate::release::{self, KvNames, ValidationError};
 use crate::state::{InvalidTransition, assert_transition};
-use crate::{escalation, queue};
+use crate::{escalation, exec, queue};
+use agent::AgentProvider;
 use chrono::Utc;
+use container::ContainerBackend;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use store::{CounterStore, JobStore, NatsStore, RdepsStore, TaskStore, split_project, subjects};
 use thiserror::Error;
-use types::{Job, JobState};
+use tokio::sync::{mpsc, oneshot};
+use types::{Job, JobState, TokenUsage};
 use vcs::RepoManager;
 
 #[derive(Debug, Error)]
@@ -29,6 +35,8 @@ pub enum CoreError {
     NotFound(String),
     #[error("validation failed: {0:?}")]
     Validation(Vec<ValidationError>),
+    #[error("core loop stopped")]
+    Stopped,
 }
 
 impl From<Vec<ValidationError>> for CoreError {
@@ -48,22 +56,165 @@ pub struct CreateJobRequest {
     pub factory: Option<String>,
 }
 
+/// `req.work.submit.*` payload (spec §4.2).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkSubmission {
+    pub summary: Option<String>,
+    pub structured: Option<serde_json::Value>,
+    pub token_usage: Option<TokenUsage>,
+}
+
+/// `req.eval.submit.*` payload (spec §4.2). `pass` is the authoritative verdict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalSubmission {
+    pub pass: bool,
+    pub structured: Option<serde_json::Value>,
+    pub token_usage: Option<TokenUsage>,
+}
+
+type Reply<T> = oneshot::Sender<Result<T>>;
+
+pub enum Msg {
+    CreateJob(CreateJobRequest, Reply<Job>),
+    ReleaseJob {
+        owner: String,
+        project: String,
+        seq: u64,
+        reply: Reply<JobState>,
+    },
+    RevokeJob {
+        owner: String,
+        project: String,
+        seq: u64,
+        reply: Reply<Vec<u64>>,
+    },
+    SubmitResult {
+        owner: String,
+        project: String,
+        seq: u64,
+        submission: WorkSubmission,
+        reply: Reply<()>,
+    },
+    SubmitEval {
+        owner: String,
+        project: String,
+        seq: u64,
+        task_id: u64,
+        submission: EvalSubmission,
+        reply: Reply<()>,
+    },
+    /// Posted by container monitor tasks — never by anything outside the crate.
+    TaskExited {
+        owner: String,
+        project: String,
+        seq: u64,
+        task_id: u64,
+        exit_code: i32,
+        /// `/workspace/eval-result.json` for command eval containers.
+        eval_json: Option<serde_json::Value>,
+    },
+}
+
+/// Cloneable façade over the core channel; the only way other components
+/// reach the dispatcher's state.
+#[derive(Clone)]
+pub struct CoreHandle {
+    tx: mpsc::Sender<Msg>,
+}
+
+impl CoreHandle {
+    async fn call<T>(&self, build: impl FnOnce(Reply<T>) -> Msg) -> Result<T> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(build(tx)).await.map_err(|_| CoreError::Stopped)?;
+        rx.await.map_err(|_| CoreError::Stopped)?
+    }
+
+    pub async fn create_job(&self, req: CreateJobRequest) -> Result<Job> {
+        self.call(|reply| Msg::CreateJob(req, reply)).await
+    }
+
+    pub async fn release_job(&self, owner: &str, project: &str, seq: u64) -> Result<JobState> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::ReleaseJob { owner, project, seq, reply }).await
+    }
+
+    pub async fn revoke_job(&self, owner: &str, project: &str, seq: u64) -> Result<Vec<u64>> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::RevokeJob { owner, project, seq, reply }).await
+    }
+
+    pub async fn submit_result(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        submission: WorkSubmission,
+    ) -> Result<()> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::SubmitResult { owner, project, seq, submission, reply })
+            .await
+    }
+
+    pub async fn submit_eval(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task_id: u64,
+        submission: EvalSubmission,
+    ) -> Result<()> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::SubmitEval { owner, project, seq, task_id, submission, reply })
+            .await
+    }
+}
+
+pub struct CoreConfig {
+    /// Base for `REPO_URL` env injection: `{repo_url_base}/{owner}/{project}.git`.
+    /// Must be reachable from every fleet node (spec §3.1). Tests use a local
+    /// path base.
+    pub repo_url_base: String,
+    pub nats_url: String,
+}
+
 pub struct Core {
-    store: NatsStore,
-    jobs: JobStore,
-    tasks: TaskStore,
-    counters: CounterStore,
-    rdeps: RdepsStore,
-    repos: RepoManager,
-    graphs: HashMap<String, JobGraph>,
+    pub(crate) store: NatsStore,
+    pub(crate) jobs: JobStore,
+    pub(crate) tasks: TaskStore,
+    pub(crate) counters: CounterStore,
+    pub(crate) rdeps: RdepsStore,
+    pub(crate) repos: RepoManager,
+    pub(crate) backend: Arc<dyn ContainerBackend>,
+    pub(crate) provider: Arc<dyn AgentProvider>,
+    pub(crate) config: CoreConfig,
+    pub(crate) graphs: HashMap<String, JobGraph>,
     pub queue: ReadyQueue,
+    /// Execution state for jobs in Work/Evaluation (this process's working
+    /// memory; restart rebuild is the reconcile slice).
+    pub(crate) active: HashMap<(String, String, u64), exec::ExecState>,
+    /// Set by [`spawn`]; monitors post `TaskExited` through it.
+    pub(crate) self_tx: Option<mpsc::Sender<Msg>>,
+}
+
+/// Start the single-writer loop; returns the handle everything else uses.
+pub fn spawn(mut core: Core) -> CoreHandle {
+    let (tx, rx) = mpsc::channel(256);
+    core.self_tx = Some(tx.clone());
+    tokio::spawn(core.run(rx));
+    CoreHandle { tx }
 }
 
 impl Core {
     /// Connect stores and rebuild in-memory state from `jobs.*` KV (spec §3.6
     /// steps 1 and 5): graphs, the rdeps index (written back — it is a derived
     /// cache), and the Ready queue.
-    pub async fn new(store: NatsStore, repos: RepoManager) -> Result<Self> {
+    pub async fn new(
+        store: NatsStore,
+        repos: RepoManager,
+        backend: Arc<dyn ContainerBackend>,
+        provider: Arc<dyn AgentProvider>,
+        config: CoreConfig,
+    ) -> Result<Self> {
         let jobs = store.jobs().await?;
         let tasks = store.tasks().await?;
         let counters = store.counters().await?;
@@ -76,8 +227,13 @@ impl Core {
             counters,
             rdeps,
             repos,
+            backend,
+            provider,
+            config,
             graphs: HashMap::new(),
             queue: ReadyQueue::default(),
+            active: HashMap::new(),
+            self_tx: None,
         };
 
         let all: Vec<Job> = core.jobs.list_all().await?;
@@ -98,8 +254,51 @@ impl Core {
         Ok(core)
     }
 
-    pub fn graph(&self, owner: &str, project: &str) -> Option<&JobGraph> {
-        self.graphs.get(&format!("{owner}/{project}"))
+    async fn run(mut self, mut rx: mpsc::Receiver<Msg>) {
+        while let Some(msg) = rx.recv().await {
+            self.handle_msg(msg).await;
+            if let Err(e) = self.drain_queue().await {
+                tracing::error!("drain_queue: {e}");
+            }
+        }
+    }
+
+    async fn handle_msg(&mut self, msg: Msg) {
+        match msg {
+            Msg::CreateJob(req, reply) => {
+                let _ = reply.send(self.create_job(req).await);
+            }
+            Msg::ReleaseJob { owner, project, seq, reply } => {
+                let _ = reply.send(self.release_job(&owner, &project, seq).await);
+            }
+            Msg::RevokeJob { owner, project, seq, reply } => {
+                let _ = reply.send(self.revoke_job(&owner, &project, seq).await);
+            }
+            Msg::SubmitResult { owner, project, seq, submission, reply } => {
+                let _ = reply.send(self.handle_submit_result(&owner, &project, seq, submission).await);
+            }
+            Msg::SubmitEval { owner, project, seq, task_id, submission, reply } => {
+                let _ = reply
+                    .send(self.handle_submit_eval(&owner, &project, seq, task_id, submission).await);
+            }
+            Msg::TaskExited { owner, project, seq, task_id, exit_code, eval_json } => {
+                if let Err(e) = self
+                    .on_task_exited(&owner, &project, seq, task_id, exit_code, eval_json)
+                    .await
+                {
+                    tracing::error!("task exit handling for {owner}/{project}#{seq}: {e}");
+                }
+            }
+        }
+    }
+
+    /// §3.1 step 5: launch every queued Ready job. Slot caps live in the
+    /// backend (fleet) — the core does not throttle.
+    pub(crate) async fn drain_queue(&mut self) -> Result<()> {
+        while let Some(q) = self.queue.dequeue() {
+            self.start_job(q).await?;
+        }
+        Ok(())
     }
 
     /// Handle `req.jobs.create.*` (spec §3.1 step 1). Jobs always land Frozen;
@@ -250,26 +449,16 @@ impl Core {
                         .await?;
                 }
                 Err(errs) => {
-                    let task_id = self.next_task_id(owner, project, dep_seq).await?;
+                    let detail = errs
+                        .iter()
+                        .map(|e| format!("- {}: {}", e.field, e.message))
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     let prompt = format!(
-                        "Job {dep_seq} failed Ready-transition re-validation at {head}:\n{}",
-                        errs.iter()
-                            .map(|e| format!("- {}: {}", e.field, e.message))
-                            .collect::<Vec<_>>()
-                            .join("\n")
+                        "Job {dep_seq} failed Ready-transition re-validation at {head}:\n{detail}"
                     );
-                    let task =
-                        escalation::escalation_task(task_id, dep_seq, &dep.project, 1, prompt);
-                    self.tasks.put(&task).await?;
-                    self.set_state(&mut dep, JobState::Escalated).await?;
-                    self.publish(
-                        owner,
-                        project,
-                        dep_seq,
-                        "job-escalated",
-                        serde_json::json!({ "reason": "revalidation_failed" }),
-                    )
-                    .await?;
+                    self.escalate(owner, project, dep_seq, "revalidation_failed", prompt)
+                        .await?;
                 }
             }
         }
@@ -277,7 +466,7 @@ impl Core {
     }
 
     /// Handle `req.jobs.revoke.*` (spec §2.1 Revoked row). Returns the seqs of
-    /// cascaded dependents. Task killing lands with the execution slice.
+    /// cascaded dependents.
     pub async fn revoke_job(&mut self, owner: &str, project: &str, seq: u64) -> Result<Vec<u64>> {
         let job = self.must_get(owner, project, seq)?.clone();
         assert_transition(job.state, JobState::Revoked)?;
@@ -291,6 +480,8 @@ impl Core {
 
         for &target in std::iter::once(&seq).chain(cascaded.iter()) {
             let mut j = self.must_get(owner, project, target)?.clone();
+            self.kill_running_containers(owner, project, target).await;
+            self.active.remove(&(owner.to_string(), project.to_string(), target));
             self.set_state(&mut j, JobState::Revoked).await?;
             // Delete job/{seq} if it exists; a missing branch is fine.
             let _ = self.repos.delete_branch(owner, project, &j.branch).await;
@@ -311,7 +502,53 @@ impl Core {
         Ok(cascaded)
     }
 
-    fn must_get(&self, owner: &str, project: &str, seq: u64) -> Result<&Job> {
+    async fn kill_running_containers(&self, owner: &str, project: &str, seq: u64) {
+        let Ok(tasks) = self.tasks.list_for_job(owner, project, seq).await else {
+            return;
+        };
+        for t in tasks {
+            if t.state == types::TaskState::Running
+                && let Some(cid) = &t.container_id {
+                    let _ = self.backend.kill(cid).await;
+                }
+        }
+    }
+
+    /// Create a Human escalation task and move the job to Escalated.
+    pub(crate) async fn escalate(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        reason: &str,
+        prompt: String,
+    ) -> Result<()> {
+        let mut job = self.must_get(owner, project, seq)?.clone();
+        let task_id = self.next_task_id(owner, project, seq).await?;
+        let cycle = self
+            .active
+            .get(&(owner.to_string(), project.to_string(), seq))
+            .map(|e| e.cycle)
+            .unwrap_or(1);
+        let task = escalation::escalation_task(task_id, seq, &job.project, cycle, prompt);
+        self.tasks.put(&task).await?;
+        self.set_state(&mut job, JobState::Escalated).await?;
+        self.publish(
+            owner,
+            project,
+            seq,
+            "job-escalated",
+            serde_json::json!({ "reason": reason }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub fn graph(&self, owner: &str, project: &str) -> Option<&JobGraph> {
+        self.graphs.get(&format!("{owner}/{project}"))
+    }
+
+    pub(crate) fn must_get(&self, owner: &str, project: &str, seq: u64) -> Result<&Job> {
         self.graphs
             .get(&format!("{owner}/{project}"))
             .and_then(|g| g.get(seq))
@@ -319,7 +556,7 @@ impl Core {
     }
 
     /// The single state-write path: §2.1 guard, then KV, then memory.
-    async fn set_state(&mut self, job: &mut Job, to: JobState) -> Result<()> {
+    pub(crate) async fn set_state(&mut self, job: &mut Job, to: JobState) -> Result<()> {
         assert_transition(job.state, to)?;
         job.state = to;
         self.jobs.put(job).await?;
@@ -330,12 +567,12 @@ impl Core {
         Ok(())
     }
 
-    async fn next_task_id(&self, owner: &str, project: &str, job_seq: u64) -> Result<u64> {
+    pub(crate) async fn next_task_id(&self, owner: &str, project: &str, job_seq: u64) -> Result<u64> {
         // Sequential within job (§1.2); safe as read-then-write: single writer.
         Ok(self.tasks.list_for_job(owner, project, job_seq).await?.len() as u64 + 1)
     }
 
-    async fn kv_names(&self, owner: &str, project: &str) -> Result<KvNames> {
+    pub(crate) async fn kv_names(&self, owner: &str, project: &str) -> Result<KvNames> {
         let prefix = format!("{owner}.{project}.");
         let name_set = |keys: Vec<String>| -> HashSet<String> {
             keys.iter()
@@ -361,7 +598,7 @@ impl Core {
         })
     }
 
-    async fn publish(
+    pub(crate) async fn publish(
         &self,
         owner: &str,
         project: &str,

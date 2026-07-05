@@ -2376,6 +2376,7 @@ dependencies = [
  "agent",
  "async-trait",
  "container",
+ "futures",
  "serde_json",
  "store",
  "tempfile",

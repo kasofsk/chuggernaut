@@ -3,11 +3,28 @@
 //! unblock-with-revalidation, escalation, and revoke cascade — everything
 //! before Ready→Work.
 
-use dispatcher::core::{Core, CoreError, CreateJobRequest};
+use dispatcher::core::{Core, CoreConfig, CoreError, CreateJobRequest};
 use std::collections::HashMap;
+use std::sync::Arc;
 use store::NatsStore;
 use test_utils::repo::TempRepo;
+use test_utils::{FakeBackend, FakeProvider};
 use types::{JobState, TaskKind, TaskState};
+
+async fn new_core(store: &NatsStore, repos_root: std::path::PathBuf) -> Core {
+    Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        Arc::new(FakeBackend::new()),
+        Arc::new(FakeProvider::new()),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: "nats://test".into(),
+        },
+    )
+    .await
+    .unwrap()
+}
 
 const BUILD_YAML: &str = r#"
 name: build
@@ -63,9 +80,7 @@ async fn setup() -> Option<(test_utils::nats::NatsTestServer, NatsStore, TempRep
         .put_json("acme.api.DEPLOY_KEY", &"encrypted-blob")
         .await
         .unwrap();
-    let core = Core::new(store.clone(), vcs::RepoManager::new(repo.bare_path().parent().unwrap().parent().unwrap()))
-        .await
-        .unwrap();
+    let core = new_core(&store, core_repos_root(&repo)).await;
     Some((server, store, repo, core))
 }
 
@@ -111,8 +126,7 @@ async fn release_blocking_unblocking_and_events() {
     done.state = JobState::Done;
     jobs.put(&done).await.unwrap();
 
-    let repos_root = core_repos_root(&_repo);
-    let mut core = Core::new(store.clone(), vcs::RepoManager::new(repos_root)).await.unwrap();
+    let mut core = new_core(&store, core_repos_root(&_repo)).await;
     core.on_job_done("acme", "api", build.id).await.unwrap();
 
     let dep = jobs.get("acme", "api", deploy.id).await.unwrap().unwrap();
@@ -176,7 +190,7 @@ async fn unblock_revalidation_failure_escalates_with_human_task() {
     done.state = JobState::Done;
     jobs.put(&done).await.unwrap();
 
-    let mut core = Core::new(store.clone(), vcs::RepoManager::new(core_repos_root(&repo))).await.unwrap();
+    let mut core = new_core(&store, core_repos_root(&repo)).await;
     core.on_job_done("acme", "api", build.id).await.unwrap();
 
     let dep = jobs.get("acme", "api", deploy.id).await.unwrap().unwrap();

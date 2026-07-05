@@ -120,7 +120,11 @@ pub struct FakeProvider {
     push_notifications: bool,
 }
 
-type RunHook = Box<dyn FnOnce(&AgentRunConfig) + Send>;
+/// Async so a hook can drive the dispatcher (e.g. submit_eval) and await the
+/// ack before the "container" exits — exactly the ordering the channel MCP
+/// server guarantees (spec §4.2 bounded-retry-until-ack).
+type RunHook =
+    Box<dyn FnOnce(AgentRunConfig) -> futures::future::BoxFuture<'static, ()> + Send>;
 
 #[derive(Default)]
 struct FakeProviderState {
@@ -150,9 +154,18 @@ impl FakeProvider {
         self.state.lock().unwrap().scripted_exits.extend(codes);
     }
 
-    /// Queue a side-effect hook for the next un-hooked run.
-    pub fn on_run(&self, hook: impl FnOnce(&AgentRunConfig) + Send + 'static) {
-        self.state.lock().unwrap().hooks.push(Some(Box::new(hook)));
+    /// Queue a side-effect hook for the next un-hooked run. The hook is awaited
+    /// before the run returns its exit code.
+    pub fn on_run<F, Fut>(&self, hook: F)
+    where
+        F: FnOnce(AgentRunConfig) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.state
+            .lock()
+            .unwrap()
+            .hooks
+            .push(Some(Box::new(move |cfg| Box::pin(hook(cfg)))));
     }
 
     pub fn runs(&self) -> Vec<AgentRunConfig> {
@@ -176,7 +189,7 @@ impl AgentProvider for FakeProvider {
             (exit, hook)
         };
         if let Some(hook) = hook {
-            hook(&config);
+            hook(config).await;
         }
         Ok(AgentOutput { exit_code })
     }
