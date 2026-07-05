@@ -1,9 +1,10 @@
 //! Declarative job type YAML schema (spec §1.1).
 //!
 //! Durations (`task_timeout`, `job_deadline`, `batch_window`) are kept as strings
-//! at this layer ("2h", "30m"); parsing to `std::time::Duration` is TODO and will
-//! live here so every consumer shares it.
+//! in the schema ("2h", "30m"); [`crate::duration::parse_duration`] is the shared
+//! parser, and `validate()` checks parseability.
 
+use crate::duration::parse_duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -41,8 +42,33 @@ pub struct WorkSpec {
     pub provider: Option<Provider>,
     /// agent only.
     pub model: Option<String>,
+    /// agent only; enables the inline review loop (spec §4.5).
+    pub review: Option<ReviewSpec>,
     /// command only.
     pub run: Option<String>,
+}
+
+pub const DEFAULT_REVIEW_ITERATIONS: u32 = 5;
+
+/// Inline review loop declaration (spec §1.1, §4.5). The reviewer runs inside
+/// the work container; its acceptance gates `submit_result`, not the merge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewSpec {
+    /// Path to reviewer prompt file in repo (resolved from base_ref).
+    pub prompt: String,
+    /// Defaults to the work provider. v1 supports claude only (release-time
+    /// validation).
+    pub provider: Option<Provider>,
+    pub model: Option<String>,
+    /// Max author↔reviewer rounds before submitting anyway. Default 5.
+    pub iterations: Option<u32>,
+}
+
+impl ReviewSpec {
+    pub fn iteration_budget(&self) -> u32 {
+        self.iterations.unwrap_or(DEFAULT_REVIEW_ITERATIONS)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +137,12 @@ pub enum FieldRuleError {
         field: &'static str,
         context: String,
     },
+    #[error("field '{field}' is invalid for {context}: {reason}")]
+    Invalid {
+        field: &'static str,
+        context: String,
+        reason: String,
+    },
 }
 
 impl JobType {
@@ -144,6 +176,25 @@ impl JobType {
                         context: ctx(WorkType::Agent),
                     });
                 }
+                if let Some(review) = &self.work.review {
+                    // v1: the resolved review provider must be claude. Only
+                    // statically resolvable here; a None-None chain falls back
+                    // to platform config, checked by the dispatcher at release.
+                    if review.provider.or(self.work.provider) == Some(Provider::Codex) {
+                        errs.push(FieldRuleError::Invalid {
+                            field: "work.review.provider",
+                            context: ctx(WorkType::Agent),
+                            reason: "inline review supports claude only in v1".into(),
+                        });
+                    }
+                    if review.iterations == Some(0) {
+                        errs.push(FieldRuleError::Invalid {
+                            field: "work.review.iterations",
+                            context: ctx(WorkType::Agent),
+                            reason: "must be at least 1".into(),
+                        });
+                    }
+                }
             }
             WorkType::Command => {
                 if self.image.is_none() {
@@ -162,6 +213,7 @@ impl JobType {
                     (self.work.prompt.is_some(), "work.prompt"),
                     (self.work.provider.is_some(), "work.provider"),
                     (self.work.model.is_some(), "work.model"),
+                    (self.work.review.is_some(), "work.review"),
                     (self.rework_budget.is_some(), "rework_budget"),
                 ] {
                     if present {
@@ -186,6 +238,7 @@ impl JobType {
                     (self.work.run.is_some(), "work.run"),
                     (self.work.provider.is_some(), "work.provider"),
                     (self.work.model.is_some(), "work.model"),
+                    (self.work.review.is_some(), "work.review"),
                 ] {
                     if present {
                         errs.push(FieldRuleError::Disallowed {
@@ -269,7 +322,64 @@ impl JobType {
             }
         }
 
+        let durations = [
+            (
+                self.resources.as_ref().and_then(|r| r.task_timeout.as_deref()),
+                "resources.task_timeout",
+            ),
+            (self.job_deadline.as_deref(), "job_deadline"),
+        ];
+        for (value, field) in durations {
+            if let Some(v) = value
+                && let Err(e) = parse_duration(v)
+            {
+                errs.push(FieldRuleError::Invalid {
+                    field,
+                    context: format!("job type '{}'", self.name),
+                    reason: e.to_string(),
+                });
+            }
+        }
+
         errs
+    }
+
+    /// Append project default evaluators (`jobs/_defaults.yaml`, spec §1.1).
+    /// An evaluator name collision between the defaults and this job type is an
+    /// error. Validate the merged result with [`JobType::validate`] — image
+    /// fallback rules apply against this job type's top-level image.
+    pub fn with_defaults(&self, defaults: &ProjectDefaults) -> Result<JobType, FieldRuleError> {
+        let mut merged = self.clone();
+        for d in &defaults.eval {
+            if self.eval.iter().any(|e| e.name == d.name) {
+                return Err(FieldRuleError::Invalid {
+                    field: "eval.name",
+                    context: format!("job type '{}'", self.name),
+                    reason: format!(
+                        "evaluator '{}' collides with a project default evaluator",
+                        d.name
+                    ),
+                });
+            }
+            merged.eval.push(d.clone());
+        }
+        Ok(merged)
+    }
+}
+
+/// Project-wide default evaluators, `jobs/_defaults.yaml` (spec §1.1). Appended
+/// to every job type's eval list at load; this is how a project gates all
+/// changes on an evergreen test suite without per-job-type declarations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectDefaults {
+    #[serde(default)]
+    pub eval: Vec<Evaluator>,
+}
+
+impl ProjectDefaults {
+    pub fn parse(yaml: &str) -> Result<Self, serde_yaml::Error> {
+        serde_yaml::from_str(yaml)
     }
 }
 
@@ -285,6 +395,10 @@ work:
   prompt: prompts/work/implement-endpoint.md
   provider: claude
   model: claude-sonnet-4-6
+  review:
+    prompt: prompts/review/implement-endpoint.md
+    model: claude-sonnet-4-6
+    iterations: 5
 resources:
   cpu: 2
   memory: 4Gi
@@ -325,7 +439,106 @@ vars: [RUST_EDITION]
         let jt = JobType::parse(SPEC_EXAMPLE).unwrap();
         assert_eq!(jt.name, "implement-endpoint");
         assert_eq!(jt.eval.len(), 4);
+        assert_eq!(jt.work.review.as_ref().unwrap().iteration_budget(), 5);
         assert_eq!(jt.validate(), vec![]);
+    }
+
+    #[test]
+    fn review_defaults_iterations_and_rejects_codex() {
+        let yaml = r#"
+name: impl
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+  provider: codex
+  review:
+    prompt: r.md
+"#;
+        let jt = JobType::parse(yaml).unwrap();
+        // review.provider unset → defaults to work provider (codex) → rejected in v1
+        assert!(jt.validate().iter().any(|e| matches!(
+            e,
+            FieldRuleError::Invalid {
+                field: "work.review.provider",
+                ..
+            }
+        )));
+        assert_eq!(jt.work.review.as_ref().unwrap().iteration_budget(), 5);
+    }
+
+    #[test]
+    fn review_disallowed_for_command_work() {
+        let yaml = r#"
+name: deploy
+image: img:latest
+work:
+  type: command
+  run: ./deploy.sh
+  review:
+    prompt: r.md
+"#;
+        let jt = JobType::parse(yaml).unwrap();
+        assert!(jt.validate().iter().any(|e| matches!(
+            e,
+            FieldRuleError::Disallowed {
+                field: "work.review",
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn durations_validated() {
+        let yaml = r#"
+name: impl
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+resources:
+  task_timeout: 2 hours
+job_deadline: 24h
+"#;
+        let jt = JobType::parse(yaml).unwrap();
+        let errs = jt.validate();
+        assert_eq!(errs.len(), 1);
+        assert!(matches!(
+            &errs[0],
+            FieldRuleError::Invalid {
+                field: "resources.task_timeout",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn project_defaults_append_and_collide() {
+        let jt = JobType::parse(SPEC_EXAMPLE).unwrap();
+        let defaults = ProjectDefaults::parse(
+            r#"
+eval:
+  - name: ci
+    type: command
+    run: ./scripts/ci.sh
+"#,
+        )
+        .unwrap();
+        let merged = jt.with_defaults(&defaults).unwrap();
+        assert_eq!(merged.eval.len(), 5);
+        assert_eq!(merged.eval.last().unwrap().name, "ci");
+        assert_eq!(merged.validate(), vec![]);
+
+        let colliding = ProjectDefaults::parse(
+            r#"
+eval:
+  - name: unit-tests
+    type: command
+    run: ./scripts/ci.sh
+"#,
+        )
+        .unwrap();
+        assert!(jt.with_defaults(&colliding).is_err());
     }
 
     #[test]

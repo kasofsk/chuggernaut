@@ -459,6 +459,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "chuggernaut-harness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "store",
+ "tokio",
+ "types",
+]
+
+[[package]]
 name = "chuggernaut-ko"
 version = "0.1.0"
 dependencies = [
@@ -2298,6 +2310,7 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
+ "test-utils",
  "thiserror 2.0.18",
  "tokio",
  "types",

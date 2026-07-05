@@ -8,6 +8,7 @@ pub const JOBS: &str = "jobs";
 pub const RDEPS: &str = "rdeps";
 pub const COUNTERS: &str = "counters";
 pub const TASKS: &str = "tasks";
+pub const STEPS: &str = "steps";
 pub const CHANNELS: &str = "channels";
 pub const VARS: &str = "vars";
 pub const SECRETS: &str = "secrets";
@@ -22,6 +23,7 @@ pub const ALL_BUCKETS: &[&str] = &[
     RDEPS,
     COUNTERS,
     TASKS,
+    STEPS,
     CHANNELS,
     VARS,
     SECRETS,

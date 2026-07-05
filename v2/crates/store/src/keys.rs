@@ -54,6 +54,11 @@ pub fn task_key(owner: &str, project: &str, job_seq: u64, task_id: u64) -> Strin
     format!("{owner}.{project}.{job_seq}.{task_id}")
 }
 
+/// Inline review step log — one key per work task (spec §1.2).
+pub fn step_key(owner: &str, project: &str, job_seq: u64, task_id: u64) -> String {
+    format!("{owner}.{project}.{job_seq}.{task_id}")
+}
+
 pub fn user_key(email: &str) -> String {
     b64(email)
 }

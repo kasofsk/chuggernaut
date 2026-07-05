@@ -16,3 +16,6 @@ thiserror.workspace = true
 tokio.workspace = true
 age.workspace = true
 futures.workspace = true
+
+[dev-dependencies]
+test-utils.workspace = true

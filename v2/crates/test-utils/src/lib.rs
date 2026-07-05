@@ -1,6 +1,7 @@
 //! Test harness: fake container backend / agent provider, NATS harness,
 //! temp-repo builder, fixture seeding (testing.md tiers 1–2).
 
+pub mod nats;
 pub mod repo;
 
 use async_trait::async_trait;
@@ -109,9 +110,7 @@ impl ContainerBackend for FakeBackend {
     }
 }
 
-// TODO: FakeProvider (scriptable AgentProvider), NATS server harness (spawned
-// nats-server or testcontainers), temp bare-repo builder, `e2e!` skip guard,
-// fixture seeding helpers.
+// TODO: FakeProvider (scriptable AgentProvider), fixture seeding helpers.
 
 #[cfg(test)]
 mod tests {

@@ -29,6 +29,10 @@ pub struct Task {
 pub enum TaskPhase {
     Work,
     Evaluation,
+    /// Merge-gate re-run of required command evaluators against the candidate
+    /// squash commit (spec §3.3 Merge Gate). Only present when the default
+    /// branch HEAD moved past `base_ref` while the job was in flight.
+    MergeGate,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

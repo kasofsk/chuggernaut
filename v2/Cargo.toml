@@ -13,6 +13,7 @@ members = [
     "crates/cli",
     "crates/chuggernaut",
     "crates/chuggernaut-channel",
+    "crates/chuggernaut-harness",
     "crates/chuggernaut-ko",
     "crates/test-utils",
 ]
