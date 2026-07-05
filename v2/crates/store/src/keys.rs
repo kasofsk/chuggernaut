@@ -1,0 +1,125 @@
+//! KV key construction and encoding (spec §1.4).
+//!
+//! Key segments that may contain characters outside the NATS key alphabet are
+//! base64url-encoded: user emails and knowledge subjects/predicates. Secret and
+//! var names are validated to `[A-Za-z0-9_]+` and stored unencoded. The owner
+//! name `global` is reserved.
+
+use crate::StoreError;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use types::KnowledgeScope;
+
+pub const RESERVED_OWNER: &str = "global";
+
+pub fn b64(segment: &str) -> String {
+    URL_SAFE_NO_PAD.encode(segment.as_bytes())
+}
+
+pub fn b64_decode(segment: &str) -> Result<String, StoreError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(segment.as_bytes())
+        .map_err(|e| StoreError::InvalidKey(e.to_string()))?;
+    String::from_utf8(bytes).map_err(|e| StoreError::InvalidKey(e.to_string()))
+}
+
+/// Validate a var/secret name: `[A-Za-z0-9_]+` (they become env var names).
+pub fn validate_name(name: &str) -> Result<(), StoreError> {
+    if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        Ok(())
+    } else {
+        Err(StoreError::InvalidKey(format!("invalid name: {name:?}")))
+    }
+}
+
+/// `[A-Za-z0-9_-]+` — ingest source, factory name, and similar subject components.
+pub fn validate_subject_component(s: &str) -> Result<(), StoreError> {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        Ok(())
+    } else {
+        Err(StoreError::InvalidKey(format!(
+            "invalid subject component: {s:?}"
+        )))
+    }
+}
+
+pub fn job_key(owner: &str, project: &str, seq: u64) -> String {
+    format!("{owner}.{project}.{seq}")
+}
+
+pub fn task_key(owner: &str, project: &str, job_seq: u64, task_id: u64) -> String {
+    format!("{owner}.{project}.{job_seq}.{task_id}")
+}
+
+pub fn user_key(email: &str) -> String {
+    b64(email)
+}
+
+pub fn channel_key(owner: &str, project: &str, seq: u64) -> String {
+    format!("{owner}.{project}.jobs.{seq}")
+}
+
+/// Key within the `knowledge` bucket: `{scope-prefix}.{b64(subject)}.{b64(predicate)}`.
+pub fn knowledge_key(scope: &KnowledgeScope, subject: &str, predicate: &str) -> String {
+    let prefix = knowledge_scope_prefix(scope);
+    format!("{prefix}.{}.{}", b64(subject), b64(predicate))
+}
+
+/// Prefix for list-by-subject scans: `{scope-prefix}.{b64(subject)}.`.
+pub fn knowledge_subject_prefix(scope: &KnowledgeScope, subject: &str) -> String {
+    format!("{}.{}.", knowledge_scope_prefix(scope), b64(subject))
+}
+
+fn knowledge_scope_prefix(scope: &KnowledgeScope) -> String {
+    match scope {
+        KnowledgeScope::Global => "global".to_string(),
+        KnowledgeScope::Team { owner } => owner.clone(),
+        KnowledgeScope::Project { owner, project } => format!("{owner}.{project}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn email_round_trips() {
+        let email = "david@kasofsk.xyz";
+        let key = user_key(email);
+        assert!(!key.contains('@'));
+        assert!(!key.contains('.'));
+        assert_eq!(b64_decode(&key).unwrap(), email);
+    }
+
+    #[test]
+    fn knowledge_key_handles_dots_and_slashes() {
+        let scope = KnowledgeScope::Project {
+            owner: "acme".into(),
+            project: "api".into(),
+        };
+        let key = knowledge_key(
+            &scope,
+            "payments/stripe-integration",
+            "webhook.retry.policy",
+        );
+        // owner + project + two encoded segments = exactly 4 dot-separated parts
+        assert_eq!(key.split('.').count(), 4);
+        let parts: Vec<&str> = key.split('.').collect();
+        assert_eq!(b64_decode(parts[2]).unwrap(), "payments/stripe-integration");
+        assert_eq!(b64_decode(parts[3]).unwrap(), "webhook.retry.policy");
+    }
+
+    #[test]
+    fn name_validation() {
+        assert!(validate_name("RUST_EDITION").is_ok());
+        assert!(validate_name("GITHUB_TOKEN").is_ok());
+        assert!(validate_name("bad-name").is_err());
+        assert!(validate_name("bad.name").is_err());
+        assert!(validate_name("").is_err());
+        assert!(validate_subject_component("sentry-prod").is_ok());
+        assert!(validate_subject_component("no.dots").is_err());
+    }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "vcs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+types.workspace = true
+chrono.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
