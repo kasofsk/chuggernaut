@@ -87,6 +87,10 @@ The `ContainerBackend` implementations drive the container runtime directly — 
 
 When a squash-merge conflicts (another job landed first), the platform re-enters Work with an updated `base_ref` rather than escalating to a human. The agent redoes its work on the new base. This is consistent with the principle that agents handle implementation work — a rebase is implementation work.
 
+### Task factories: external streams drive the graph through triage agents
+
+Chuggernaut is deployed per consumer — it is the forge, and each deployment is configured to its project's surroundings. External activity streams (error trackers, business metrics, user feedback) attach via an ingest API into a NATS stream; a **factory** (project-owned YAML, versioned in the repo) batches events and launches a **triage agent** that decides which jobs to create, if any. An agent is always in the loop — there is no direct event→job templating — and created jobs land Frozen behind the operator gate unless the factory opts into `auto_release`. Batching plus a single in-flight triage job per factory means a misbehaving upstream produces bigger batches, not job floods.
+
 ### Human tasks are time-unbounded by design
 
 Human evaluators and human work tasks have no timeout and are never automatically abandoned. A job waiting on a human task remains blocked indefinitely. Operators are responsible for their task inbox. `job_deadline` exists for wall-clock bounding when needed, but automatic abandonment of human review gates is not a platform behavior.

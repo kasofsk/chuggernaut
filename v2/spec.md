@@ -18,6 +18,7 @@ pub struct Job {
     pub branch: String,                    // "job/{id}"; set at creation; actual git branch created when job enters Work
     pub base_ref: Option<String>,          // exact HEAD of default branch; set/updated at every Ready-transition (Frozen→Ready and Blocked→Ready) and on squash-merge conflict; None until job first enters Ready
     pub knowledge_tags: Vec<String>,       // union of job type defaults and operator-supplied tags at creation
+    pub factory: Option<String>,           // factory name when created by a factory triage agent (see §13); None for operator-created jobs
     pub created_at: DateTime<Utc>,
     pub ready_at: Option<DateTime<Utc>>,   // set once (immutably) when job first enters Ready; anchor for job_deadline; None until then
 }
@@ -41,6 +42,7 @@ Example record:
   "branch": "job/42",
   "base_ref": null,
   "knowledge_tags": ["rust", "rest-api", "payments/stripe-integration"],
+  "factory": null,
   "created_at": "2026-04-05T10:00:00Z",
   "ready_at": null
 }
@@ -394,15 +396,17 @@ knowledge.{owner}                               team-level knowledge objects
 knowledge.{owner}.{project}                     project-level knowledge objects
 platform.vapid.public                           Web Push VAPID public key
 push.{user_id}.{subscription_id}                Web Push subscription records
+ingest-tokens.{owner}.{project}.{source}        hashed per-source ingest tokens (see §13.2)
 
 # Streams
 job-events      subjects: job.events.{owner}.{project}.{seq}.{event_type}
 channel-inbox   subjects: channel.inbox.{owner}.{project}.{seq}
+ingest          subjects: ingest.{owner}.{project}.{source}
 ```
 
 Subject components are limited to values that cannot contain `.`. Values that may contain `.` — file paths, git refs, knowledge subjects and predicates — are passed in the request payload, not embedded in the subject.
 
-**Bucket model:** each top-level prefix above (`jobs`, `rdeps`, `counters`, `tasks`, `channels`, `vars`, `secrets`, `users`, `knowledge`, `platform`, `push`) is one fixed NATS KV bucket created at platform init (see §12.1); the dotted remainder is the key within that bucket. No buckets are created dynamically.
+**Bucket model:** each top-level prefix above (`jobs`, `rdeps`, `counters`, `tasks`, `channels`, `vars`, `secrets`, `users`, `knowledge`, `platform`, `push`, `ingest-tokens`) is one fixed NATS KV bucket created at platform init (see §12.1); the dotted remainder is the key within that bucket. No buckets are created dynamically.
 
 **Key encoding:** key segments that may contain characters outside the NATS key alphabet are base64url-encoded: user emails (`users.{b64url(email)}`) and knowledge subjects/predicates (`knowledge` bucket keys: `global.{b64url(subject)}.{b64url(predicate)}`, `{owner}.{b64url(subject)}.{b64url(predicate)}`, `{owner}.{project}.{b64url(subject)}.{b64url(predicate)}`). The owner name `global` is reserved to keep scope prefixes unambiguous. Secret and var `{name}`s are validated to `[A-Za-z0-9_]+` at write time (they become env var names) and stored unencoded.
 
@@ -444,6 +448,7 @@ pub struct ChannelEntry {
 | `knowledge.*` | none | KO store; permanent |
 | `platform.*` | none | Platform config (VAPID public key etc.); permanent |
 | `push.*` | none | Web Push subscriptions; permanent until unsubscribed |
+| `ingest-tokens.*` | none | Hashed per-source ingest tokens; permanent until rotated |
 
 **Streams** — file storage, deny-delete policy, at-least-once delivery.
 
@@ -451,6 +456,7 @@ pub struct ChannelEntry {
 |---|---|---|---|
 | `job-events` | `job.events.>` | limits: max-age 90d | Primary audit log; append-only |
 | `channel-inbox` | `channel.inbox.>` | limits: max-age 7d | Operator→agent messages |
+| `ingest` | `ingest.>` | limits: max-age 30d | External event sources (see §13); factory consumers are durable |
 
 ---
 
@@ -770,6 +776,7 @@ Two MCP servers are injected into every agent invocation:
 | `reply` | work + eval agents | Write `AgentReply` to `channels.*` KV |
 | `submit_result` | work agents | Publish work summary via `req.work.submit.*`; payload: `{ summary?, structured?, token_usage? }`; dispatcher writes task result and transitions to Evaluation |
 | `submit_eval` | eval agents | Publish eval verdict via `req.eval.submit.*`; payload must include `pass: bool`; optional: `structured`, `token_usage`; dispatcher writes `TaskResult::Agent` |
+| `create_job` | factory triage agents only | Publish `req.jobs.create.{owner}.{project}`; payload: `{ type, inputs?, knowledge_tags? }`; created job carries `factory` provenance and follows the factory's release policy (see §13.4). Tool is absent outside triage jobs. |
 
 **Canonical completion and verdict contract:**
 
@@ -1077,6 +1084,12 @@ GET    /api/v1/projects/{owner}/{project}/log
        query params: ref (optional, default: default branch), limit (optional, default: 50)
        response: [{ "hash": string, "message": string, "author": string, "ts": DateTime<Utc> }]
 
+# Ingest (external event sources; Bearer ingest-token auth, not JWT cookies — see §13.2)
+POST   /api/v1/projects/{owner}/{project}/ingest/{source}
+       body: arbitrary JSON (the event payload)
+       → 202 Accepted; API validates the token, wraps the payload in an IngestEvent envelope,
+         publishes to ingest.{owner}.{project}.{source}; 401 on bad token; 413 over 1 MiB
+
 # Web Push notifications
 POST   /api/v1/push/subscribe                               body: W3C PushSubscription JSON; stored at push.{user_id}.{subscription_id} in NATS KV; returns { "subscription_id": string }
 DELETE /api/v1/push/subscribe/{subscription_id}             unregister device; deletes KV entry
@@ -1264,6 +1277,8 @@ Subscribe:  channel.inbox.{owner}.{project}.{seq}
 ```
 
 Work containers do not publish to `job.events.*`. All events are published exclusively by the dispatcher. Eval agents do not write to `tasks.*` KV directly — the dispatcher is the sole writer.
+
+**Factory triage jobs** (see §13) receive the work-container JWT plus one additional permission: `Publish: req.jobs.create.{owner}.{project}` — this is what backs the `create_job` MCP tool. Triage agents never receive release permissions; the dispatcher applies the factory's release policy itself.
 
 **SSH certificates — work containers:**
 
@@ -1515,6 +1530,11 @@ chuggernaut admin user delete --email <email>
 chuggernaut admin project create --owner <owner> --name <project> [--default-branch <branch>]
 chuggernaut admin project list [--owner <owner>]
 
+# Ingest tokens (see §13.2)
+chuggernaut admin ingest-token create --project <owner/project> --source <source>   # prints token once
+chuggernaut admin ingest-token list --project <owner/project>
+chuggernaut admin ingest-token delete --project <owner/project> --source <source>
+
 # Secret key rotation
 chuggernaut admin secret rotate-key
   --old-private-key <path>    Current age private key (for decryption)
@@ -1537,6 +1557,88 @@ AGENT_MODEL_DEFAULT      string              Optional. If unset, the provider's 
 ```
 
 If a job type declares `provider` and/or `model` at the `work:` level or per evaluator, those override the platform defaults for that job or evaluator. If neither the job type nor the platform config specifies a provider, the dispatcher fails to start with a configuration error.
+
+---
+
+## Part 13: Task Factories and Ingest
+
+External activity — error-tracker alerts, business metrics, user feedback submissions — can drive the job graph. A **task factory** binds an inbound event stream to a **triage agent** that decides, per batch of events, whether to create jobs. Chuggernaut deployments are per-consumer: factories are project-owned configuration, versioned in the project repo like job types.
+
+### 13.1 Model
+
+```
+external system → POST .../ingest/{source} → ingest.{owner}.{project}.{source} (JetStream)
+                                                      │
+                                     factory (durable consumer, batching window)
+                                                      │
+                                         triage job (work.type: agent, auto-run)
+                                                      │
+                                    create_job MCP tool → new jobs (Frozen, or
+                                    auto-released per factory policy)
+```
+
+Factories never create jobs directly — an agent is always in the loop. A "dumb" factory is a trivial triage prompt ("create one `handle-feedback` job per event"). Direct payload→job templating without an agent is deferred.
+
+### 13.2 Ingest
+
+**HTTP surface:** `POST /api/v1/projects/{owner}/{project}/ingest/{source}` (see §6.2). External producers authenticate with a per-source **ingest token** passed as `Authorization: Bearer {token}` — external systems cannot hold JWT cookies. Tokens are generated by `chuggernaut admin ingest-token create --project {owner}/{project} --source {source}` (printed once, stored argon2id-hashed at `ingest-tokens.{owner}.{project}.{source}`). Rotation = re-run create; revocation = `ingest-token delete`.
+
+**Internal producers** (services already inside the deployment holding NATS credentials) may publish to `ingest.{owner}.{project}.{source}` directly, bypassing HTTP.
+
+**Event envelope** — the API layer wraps every accepted payload:
+
+```rust
+pub struct IngestEvent {
+    pub source: String,
+    pub received_at: DateTime<Utc>,
+    pub payload: serde_json::Value,   // the POST body, verbatim
+}
+```
+
+`{source}` is a subject component: `[A-Za-z0-9_-]+`, no dots. Payloads over 1 MiB are rejected with 413. The ingest stream retains 30 days (§1.5); ingestion is fire-and-forget for the producer — 202 means "durably appended", not "triaged".
+
+### 13.3 Factory Definition
+
+`factories/{name}.yaml` in the project repo. Like all live configuration derived from the repo, factory definitions are read from the **default branch HEAD**; the dispatcher reloads them on startup and after every squash-merge to the default branch. (Job types pin to `base_ref` per job; factories are standing configuration and track HEAD.)
+
+```yaml
+name: string                   # required; unique within the repo
+source: string                 # required; the ingest source this factory consumes
+triage: string                 # required; job type name (must be work.type: agent) used for triage jobs
+enabled: bool                  # optional; default true
+batch_window: duration         # optional; default 5m — wait this long after the first
+                               #   unconsumed event before launching triage
+max_batch: int                 # optional; default 100 — launch immediately when reached
+auto_release: bool             # optional; default false — release policy for jobs the
+                               #   triage agent creates (see §13.4)
+```
+
+One factory per source is the expected shape, but multiple factories may consume the same source (each gets its own durable consumer). Validation (at reload): `triage` references an existing job type with `work.type: agent`; `source` is well-formed. Invalid factory files are skipped and reported via a `factory-invalid` event; they never block dispatch.
+
+### 13.4 Factory Semantics
+
+The dispatcher runs one durable JetStream consumer per enabled factory on `ingest.{owner}.{project}.{source}`.
+
+**Batching:** on the first unconsumed event, start `batch_window`; when the window elapses or `max_batch` accumulates, create a triage job. **At most one triage job per factory is in flight** (non-terminal) at a time — events arriving while one runs simply accumulate for the next batch. This is the backpressure mechanism: an error tracker in a crash loop produces bigger batches, not more jobs.
+
+**Triage jobs** are regular jobs (§2.1 state machine applies) with `factory` provenance set, no inputs, created **and immediately released** by the dispatcher — a factory whose triage waits for operator release would not be a factory. The event batch is delivered to the triage container as a JSON array of `IngestEvent` at `/chuggernaut/events.json` (volume-mounted read-only, same mechanism as the prompt file, §4.3). Events are acked on the consumer only when the triage job reaches a terminal state, so a dispatcher crash or a revoked triage job redelivers the batch.
+
+**Job creation by the triage agent:** the `create_job` MCP tool (§4.2), backed by the extra JWT permission (§7.4). Created jobs:
+- carry `factory: {factory_name}` on the record and `job-created` event
+- start Frozen; if the factory declares `auto_release: true`, the dispatcher immediately runs release validation (§2.2) and transitions them to Ready/Blocked — validation failures leave the job Frozen and surface a `factory-release-failed` event rather than escalating
+- may declare `inputs` wired to other jobs created *in the same triage run* (enables the agent to plan a small graph, e.g. `investigate → fix → verify`)
+
+Creating zero jobs is a normal, successful triage outcome (event batch judged noise). The triage job type may declare evaluators like any job; the default (no `eval`) auto-passes. Triage jobs typically produce no commits, so their squash-merge is the standard no-op (§5.1).
+
+**Operator visibility:** factory-created Frozen jobs surface exactly like Human tasks in spirit — a Web Push notification (§11) fires on `job-created` events carrying `factory` provenance when `auto_release` is false, so the operator's approval gate is one tap.
+
+### 13.5 New Events
+
+| Event type | Trigger |
+|---|---|
+| `factory-triggered` | Batch window closed; triage job created; includes `factory`, `batch_size`, triage job seq |
+| `factory-release-failed` | `auto_release` validation failed for a factory-created job; includes errors |
+| `factory-invalid` | Factory file failed validation at reload; includes `factory`, error |
 
 ---
 
@@ -1575,3 +1677,4 @@ Platform init generates: JWT RS256 keypair, SSH CA keypair, age keypair, VAPID k
 - **Project/team-level provider defaults**: in v1 the fallback chain is job-type declaration → platform config. Per-project and per-team agent provider/model overrides are deferred.
 - **Dependency caching for agent containers**: per-project build/dependency caches (cargo registry, node_modules) via persistent volumes or a pull-through registry cache. v1 mitigation: bake toolchains and dependencies into the declared `image`.
 - **k8s-Secret-based secret injection**: dispatcher writes a Kubernetes Secret referenced by the Job spec instead of decrypting secrets into env vars it assembles itself, keeping plaintext out of the dispatcher's launch path. v1 injects env vars directly.
+- **Direct-mode factories**: event → job templating without a triage agent (payload→inputs mapping mini-language). v1 factories are triage-only (§13.1); a trivial triage prompt covers the direct case at the cost of agent tokens.

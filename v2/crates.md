@@ -97,6 +97,8 @@ dispatcher/
   escalation.rs  — escalation task creation, resolution actions incl. pre-Work rules (§1.2)
   launch.rs      — launch-time validation, secret/var injection, credential issuance, container config
   scan.rs        — task-timeout and one-shot job-deadline scans (§3.5)
+  factory.rs     — factory reload from default-branch HEAD, durable ingest consumers,
+                   batching, triage job creation, auto-release policy (§13)
   reconcile.rs   — restart reconciliation (§3.6)
   handlers/      — one module per req.* subject family (jobs, graph, vcs, vars, secrets,
                    knowledge, channel, tasks, work/eval submit, usage, ssh)
@@ -111,6 +113,7 @@ dispatcher/
 - Auth middleware (`auth` crate), permission enforcement (§7.5)
 - SSE bridge with `Last-Event-ID` replay (§6.4)
 - Secret encryption on write (age public key only)
+- Ingest endpoint (§13.2): Bearer-token auth against hashed tokens, envelope wrapping, publish to the `ingest` stream
 - Web Push: subscription CRUD, the `task-created`→push background consumer (§11)
 - Serves the PWA's static assets from the same origin (§10.4)
 
