@@ -137,6 +137,28 @@ impl NatsStore {
         self.bucket(name).await
     }
 
+    /// Read up to `max` message payloads from a stream via an ephemeral pull
+    /// consumer — event-trail assertions in tests, webhook replay later.
+    pub async fn read_stream(&self, stream: &str, max: usize) -> Result<Vec<Vec<u8>>> {
+        use futures::StreamExt;
+        let stream = self.js.get_stream(stream).await.map_err(nats_err)?;
+        let consumer = stream
+            .create_consumer(jetstream::consumer::pull::Config::default())
+            .await
+            .map_err(nats_err)?;
+        let mut batch = consumer
+            .fetch()
+            .max_messages(max)
+            .messages()
+            .await
+            .map_err(nats_err)?;
+        let mut out = Vec::new();
+        while let Some(msg) = batch.next().await {
+            out.push(msg.map_err(nats_err)?.payload.to_vec());
+        }
+        Ok(out)
+    }
+
     /// Request-reply with bounded retry (spec §4.2 reliability): retries until
     /// an ack is received or attempts are exhausted, with linear backoff.
     pub async fn request_with_retry(

@@ -27,6 +27,7 @@ pub trait AgentProvider: Send + Sync {
     fn supports_push_notifications(&self) -> bool;
 }
 
+#[derive(Debug, Clone)]
 pub struct AgentRunConfig {
     pub image: String,
     /// Resolved prompt content, never a path. Delivered via a temp file
@@ -44,6 +45,7 @@ pub struct AgentRunConfig {
     pub merge_conflict: Option<String>,
 }
 
+#[derive(Debug, Clone)]
 pub struct McpServerConfig {
     pub name: String,
     pub command: String,
@@ -51,6 +53,7 @@ pub struct McpServerConfig {
     pub env: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone)]
 pub struct AgentOutput {
     pub exit_code: i32,
 }

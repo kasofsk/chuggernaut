@@ -4,6 +4,7 @@
 pub mod nats;
 pub mod repo;
 
+use agent::{AgentError, AgentOutput, AgentProvider, AgentRunConfig};
 use async_trait::async_trait;
 use container::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
@@ -110,7 +111,80 @@ impl ContainerBackend for FakeBackend {
     }
 }
 
-// TODO: FakeProvider (scriptable AgentProvider), fixture seeding helpers.
+/// Deterministic, scriptable [`AgentProvider`]: every run records its config
+/// and returns the next scripted exit code (default 0). Side effects a real
+/// agent would have (commits, submit_eval calls) are scripted per run via
+/// [`FakeProvider::on_run`].
+pub struct FakeProvider {
+    state: Mutex<FakeProviderState>,
+    push_notifications: bool,
+}
+
+type RunHook = Box<dyn FnOnce(&AgentRunConfig) + Send>;
+
+#[derive(Default)]
+struct FakeProviderState {
+    /// Exit codes handed out in run order; empty → exit 0.
+    scripted_exits: Vec<i32>,
+    /// Hooks consumed in run order, invoked with the run's config before it
+    /// "exits" — the place to simulate submit_result/submit_eval side effects.
+    hooks: Vec<Option<RunHook>>,
+    runs: Vec<AgentRunConfig>,
+}
+
+impl Default for FakeProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FakeProvider {
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(FakeProviderState::default()),
+            push_notifications: true,
+        }
+    }
+
+    pub fn script_exits(&self, codes: impl IntoIterator<Item = i32>) {
+        self.state.lock().unwrap().scripted_exits.extend(codes);
+    }
+
+    /// Queue a side-effect hook for the next un-hooked run.
+    pub fn on_run(&self, hook: impl FnOnce(&AgentRunConfig) + Send + 'static) {
+        self.state.lock().unwrap().hooks.push(Some(Box::new(hook)));
+    }
+
+    pub fn runs(&self) -> Vec<AgentRunConfig> {
+        self.state.lock().unwrap().runs.clone()
+    }
+}
+
+#[async_trait]
+impl AgentProvider for FakeProvider {
+    async fn run(&self, config: AgentRunConfig) -> Result<AgentOutput, AgentError> {
+        let (exit_code, hook) = {
+            let mut st = self.state.lock().unwrap();
+            let exit = if st.scripted_exits.is_empty() {
+                0
+            } else {
+                st.scripted_exits.remove(0)
+            };
+            let idx = st.runs.len();
+            let hook = st.hooks.get_mut(idx).and_then(Option::take);
+            st.runs.push(config.clone());
+            (exit, hook)
+        };
+        if let Some(hook) = hook {
+            hook(&config);
+        }
+        Ok(AgentOutput { exit_code })
+    }
+
+    fn supports_push_notifications(&self) -> bool {
+        self.push_notifications
+    }
+}
 
 #[cfg(test)]
 mod tests {

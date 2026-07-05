@@ -83,6 +83,11 @@ impl JobStore {
         jobs.sort_by_key(|j| j.id);
         Ok(jobs)
     }
+
+    /// Every job across all projects — the startup reconciliation scan (§3.6).
+    pub async fn list_all(&self) -> Result<Vec<Job>> {
+        self.0.list_prefix("").await
+    }
 }
 
 #[derive(Clone)]
