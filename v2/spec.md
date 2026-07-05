@@ -72,6 +72,11 @@ work:                          # required
   prompt: string               # required; path to prompt file in repo (resolved from base_ref)
   provider: claude | codex     # optional; falls back to platform default (see §12.4); project/team defaults deferred
   model: string                # optional; falls back to provider default
+  review:                      # optional; inline review loop (see §4.5); omit = no inline loop
+    prompt: string             # required; path to reviewer prompt file in repo (resolved from base_ref)
+    provider: claude           # optional; defaults to work provider; v1 supports claude only (release-time validation)
+    model: string              # optional; falls back to provider default
+    iterations: int            # optional; default 5; max author↔reviewer rounds before submitting anyway
 
   # type: command only
   run: string                  # required; shell command executed inside the container
@@ -131,6 +136,7 @@ vars: [string]                 # injected into work container and all eval conta
 | `prompt` | required | disallowed | required |
 | `provider` | optional | disallowed | disallowed |
 | `model` | optional | disallowed | disallowed |
+| `review` | optional | disallowed | disallowed |
 | `run` | disallowed | required | disallowed |
 
 ¹ `resources` is disallowed for `human` work because no container is launched. `job_deadline` is top-level and applies to all work types including `human`.
@@ -169,6 +175,10 @@ work:
   prompt: prompts/work/implement-endpoint.md
   provider: claude
   model: claude-sonnet-4-6
+  review:
+    prompt: prompts/review/implement-endpoint.md
+    model: claude-sonnet-4-6
+    iterations: 5
 resources:
   cpu: 2
   memory: 4Gi
@@ -216,6 +226,25 @@ resources:
 work_retries: 2
 ```
 
+#### Project Default Evaluators
+
+An optional file `jobs/_defaults.yaml` declares evaluators appended to **every** job type's `eval` list. This is how a project gates all changes on an evergreen test suite without each job type author remembering to declare it:
+
+```yaml
+# jobs/_defaults.yaml
+eval:
+  - name: ci
+    type: command
+    run: ./scripts/ci.sh
+    image: registry.acme.com/runners/ci:latest   # optional; falls back to the job's top-level image
+```
+
+Semantics:
+- Resolved from `base_ref` like job type files; the same evaluator field rules apply.
+- Default evaluators are appended after the job type's own evaluators. An evaluator name collision between `_defaults.yaml` and a job type is a release-time validation error.
+- A default evaluator with no `image` falls back to the job's top-level `image`; for `work.type: human` jobs (no top-level image) the default evaluator's `image` is required — validated at release.
+- Required `command` default evaluators participate in the merge gate (see §3.3) like any other required command evaluator.
+
 ---
 
 ### 1.2 Task
@@ -243,7 +272,7 @@ pub struct Task {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-pub enum TaskPhase { Work, Evaluation }
+pub enum TaskPhase { Work, Evaluation, MergeGate }
 
 pub enum TaskKind {
     Command { run: String },
@@ -317,6 +346,8 @@ pub enum TaskResolution {
 | Eval reduce fails (`work.type: agent \| human`), under rework budget | Job re-enters Work (cycle++); all eval results feed into next work task |
 | Eval reduce fails (`work.type: agent \| human`), rework budget exhausted | Human escalation task → job → Escalated |
 | Eval reduce fails (`work.type: command`) | Human escalation task → job → Escalated (rework_budget disallowed for command) |
+| Eval reduce passes, default HEAD moved past `base_ref`, candidate squash-merge clean | One `MergeGate` task (attempt=1) per required command evaluator, run against the candidate merge commit (see §3.3 Merge Gate) |
+| Any merge-gate task fails | Update `base_ref` to current default HEAD; cycle++ (rework_budget NOT consumed); re-enter Work with gate findings + conflict-style context injected |
 
 `work_retries` counts container failures within a single Work phase. `eval_retries` counts the same for individual agent eval containers. `rework_budget` counts evaluation-driven rework cycles and is entirely separate from both.
 
@@ -342,7 +373,28 @@ cycle=2  Work        Agent    attempt=1  Done              ← findings from cyc
 cycle=2  Evaluation  Command  attempt=1  Done   pass=true
 cycle=2  Evaluation  Agent    attempt=1  Done   pass=true
 cycle=2  Evaluation  Human    attempt=1  Done   pass=true
+cycle=2  MergeGate   Command  attempt=1  Done   pass=true   ← only present if default HEAD moved (see §3.3)
 ```
+
+**Steps** — work tasks running under the inline review harness (§4.5) additionally carry a step log: the author↔reviewer iterations inside the single work container. Steps are sub-task granularity; they exist for observability (the tracker UI renders the live ping-pong) and never drive dispatcher state transitions — the work task's outcome is still its exit code plus the final `submit_result`.
+
+```rust
+pub struct StepRecord {
+    pub step: u32,                            // 1-indexed within the task
+    pub kind: StepKind,
+    pub iteration: u32,                       // ping-pong round, 1-indexed
+    pub status: StepStatus,
+    pub pass: Option<bool>,                   // inline review verdict; None for author steps and running steps
+    pub findings: Option<serde_json::Value>,  // inline review findings; None for author steps
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+pub enum StepKind { AuthorIteration, InlineReview }
+pub enum StepStatus { Running, Done, Failed }
+```
+
+**NATS KV key:** `steps.{owner}.{project}.{job_seq}.{task_id}` — one key per work task holding a JSON array of `StepRecord`s. The dispatcher is the sole writer; it appends records as the harness reports step transitions via `req.step.report.*` (see §4.5). Tasks without an inline review loop have no `steps.*` entry.
 
 ---
 
@@ -387,6 +439,7 @@ jobs.{owner}.{project}.{seq}                    job instance record
 rdeps.{owner}.{project}.{seq}                   inverse dependency index (dispatcher-maintained cache)
 counters.{owner}.{project}                      per-project sequential ID counter
 tasks.{owner}.{project}.{job_seq}.{task_id}     task log entries
+steps.{owner}.{project}.{job_seq}.{task_id}     inline review step log (see §1.2, §4.5)
 channels.{owner}.{project}.jobs.{seq}           latest ChannelUpdate + latest AgentReply
 vars.{owner}.{project}.{name}                   plaintext variable values
 secrets.{owner}.{project}.{name}                age-encrypted secret values
@@ -406,7 +459,7 @@ ingest          subjects: ingest.{owner}.{project}.{source}
 
 Subject components are limited to values that cannot contain `.`. Values that may contain `.` — file paths, git refs, knowledge subjects and predicates — are passed in the request payload, not embedded in the subject.
 
-**Bucket model:** each top-level prefix above (`jobs`, `rdeps`, `counters`, `tasks`, `channels`, `vars`, `secrets`, `users`, `knowledge`, `platform`, `push`, `ingest-tokens`) is one fixed NATS KV bucket created at platform init (see §12.1); the dotted remainder is the key within that bucket. No buckets are created dynamically.
+**Bucket model:** each top-level prefix above (`jobs`, `rdeps`, `counters`, `tasks`, `steps`, `channels`, `vars`, `secrets`, `users`, `knowledge`, `platform`, `push`, `ingest-tokens`) is one fixed NATS KV bucket created at platform init (see §12.1); the dotted remainder is the key within that bucket. No buckets are created dynamically.
 
 **Key encoding:** key segments that may contain characters outside the NATS key alphabet are base64url-encoded: user emails (`users.{b64url(email)}`) and knowledge subjects/predicates (`knowledge` bucket keys: `global.{b64url(subject)}.{b64url(predicate)}`, `{owner}.{b64url(subject)}.{b64url(predicate)}`, `{owner}.{project}.{b64url(subject)}.{b64url(predicate)}`). The owner name `global` is reserved to keep scope prefixes unambiguous. Secret and var `{name}`s are validated to `[A-Za-z0-9_]+` at write time (they become env var names) and stored unencoded.
 
@@ -441,6 +494,7 @@ pub struct ChannelEntry {
 | `rdeps.*` | none | Derived cache; rebuilt on restart |
 | `counters.*` | none | Monotonic counters; permanent |
 | `tasks.*` | none | Task log is permanent |
+| `steps.*` | none | Inline review step log; permanent alongside tasks |
 | `channels.*` | 7d | Agent progress/status; short-lived |
 | `vars.*` | none | Plaintext config; permanent |
 | `secrets.*` | none | age-encrypted; permanent |
@@ -485,7 +539,9 @@ The authoritative definition of all valid job state transitions. No transition e
 | `Evaluation` | `Work` | Eval reduce: squash-merge conflict (any cycle; rework budget NOT consumed) | — | Update `base_ref` to current default HEAD; cycle++; build conflict context (see §4.3); reset `job/{seq}` to new `base_ref`; publish `job-rework-started` (reason: `merge_conflict`) |
 | `Evaluation` | `Escalated` | Eval reduce: product failure, rework budget exhausted | evaluated cycle N > `rework_budget` | Create Human escalation task; publish `job-escalated` |
 | `Evaluation` | `Escalated` | Eval reduce: `work.type: command` and any required evaluator failed | — | Create Human escalation task; publish `job-escalated` (rework_budget disallowed for command) |
-| `Evaluation` | `Done` | Eval reduce: all required evaluators passed; squash-merge clean or no-op | — | Squash-merge `job/{seq}` to default branch (no-op if no commits); delete branch `job/{seq}`; publish `job-done` |
+| `Evaluation` | `Evaluation` | Eval reduce passes; default HEAD moved past `base_ref`; candidate squash-merge clean | Merge gate required (see §3.3) | Create one `MergeGate` task per required command evaluator against the candidate merge commit; job remains in Evaluation |
+| `Evaluation` | `Work` | Merge-gate task fails (any cycle; rework budget NOT consumed) | — | Update `base_ref` to current default HEAD; cycle++; inject gate output as findings plus conflict-style context (see §3.3); reset `job/{seq}` to new `base_ref`; publish `job-rework-started` (reason: `merge_gate_failure`) |
+| `Evaluation` | `Done` | Eval reduce: all required evaluators passed; merge gate passed or skipped (see §3.3); squash-merge clean or no-op | — | Squash-merge `job/{seq}` to default branch (no-op if no commits); delete branch `job/{seq}`; publish `job-done` |
 | `Escalated` | `Work` | Operator resolves escalation Human task with `action: Retry` | — | Create new work task (same cycle, attempt++); publish `job-escalation-resolved` |
 | `Escalated` | `Evaluation` | Operator resolves escalation Human task with `action: Resolve` | — | Re-enter Evaluation; publish `job-escalation-resolved` |
 | `Escalated` | `Revoked` | Operator resolves escalation Human task with `action: Revoke` | — | See Revoked transition below; publish `job-escalation-resolved` then `job-revoked` |
@@ -525,7 +581,9 @@ Graph wiring rules (all five must hold):
 Static configuration (fail-fast check against current HEAD of default branch):
 - The job type file (`jobs/{type}.yaml`) exists
 - For `work.type: agent` jobs: `work.prompt` path exists
-- For each agent or human evaluator: the evaluator's `prompt` path exists
+- For `work.type: agent` jobs with a `review` block: `work.review.prompt` path exists; the resolved review provider (`work.review.provider`, defaulting to the resolved work provider) is `claude` — inline review is not supported for other providers in v1
+- If `jobs/_defaults.yaml` exists: it parses against the evaluator schema, and no default evaluator name collides with an evaluator declared in any job type being validated
+- For each agent or human evaluator (including project defaults): the evaluator's `prompt` path exists
 - Every secret named in `secrets:` (top-level and per-evaluator) has an entry in the `secrets.*` KV bucket
 - Every var named in `vars:` has an entry in the `vars.*` KV bucket
 
@@ -640,13 +698,13 @@ For each Ready job, the dispatcher executes the following sequence:
 3. Inject secrets (decrypted from `secrets.*` KV using age private key) and vars as env vars
 4. Issue short-lived scoped NATS JWT for the job (see §7.4)
 5. Issue short-lived SSH certificate for the job (see §7.3)
-6. Launch container via the configured backend
+6. Launch container via the configured backend. If `work.review` is declared, the container CMD is the inline review harness rather than a direct agent CLI invocation, and the reviewer prompt (resolved from `base_ref`) plus harness config are injected at launch (see §4.5)
 7. Monitor task; on container failure: increment attempt; if `attempt ≤ work_retries`, hard-reset `job/{seq}` to `base_ref` and re-launch; else create Human escalation task and transition to Escalated
 8. On work task success (container exit 0, or operator resolves Human task with `Pass`): proceed to Evaluation
 9. Transition job to Evaluation; create one task per evaluator. If no evaluators declared, skip to step 12 (auto-pass)
 10. Fan out evaluation tasks in parallel; monitor each (see §3.3)
 11. Apply eval reduce (see §3.3); handle pass or fail outcomes
-12. On eval reduce pass: squash-merge `job/{seq}` to default branch. If no commits on `job/{seq}` beyond `base_ref`, this is a no-op. If commits exist and merge is clean → transition job to Done. If conflict → snapshot the current `base_ref` into a local variable `old_base_ref` (this value is held in dispatcher memory only — not persisted to the job record), update `job.base_ref` to current default HEAD, increment cycle (without consuming `rework_budget`), reset `job/{seq}` to new `base_ref`, build conflict context using `old_base_ref` and new `base_ref` (see §4.3 for format), re-enter Work (step 2). **Squash-merge commit message format:** subject line is `job/{seq}: {job_type}`; if the work task's `TaskResult::Work.summary` is non-null, append it as the commit body. Example: `job/42: implement-endpoint\n\nAdded /api/v1/stripe/webhook handler with idempotency key.`
+12. On eval reduce pass: run the merge gate (see §3.3 Merge Gate). If default HEAD still equals `base_ref`, or `job/{seq}` has no commits beyond `base_ref`, the gate is skipped. If HEAD moved and the candidate squash-merge is clean, the gate re-runs the required command evaluators against the candidate merge commit — gate pass → proceed to squash-merge below; gate failure → update `base_ref` to current default HEAD, increment cycle (rework_budget NOT consumed), reset `job/{seq}` to new `base_ref`, inject the gate output as findings plus conflict-style context, re-enter Work (step 2). On gate pass or skip: squash-merge `job/{seq}` to default branch. If no commits on `job/{seq}` beyond `base_ref`, this is a no-op. If commits exist and merge is clean → transition job to Done. If conflict → snapshot the current `base_ref` into a local variable `old_base_ref` (this value is held in dispatcher memory only — not persisted to the job record), update `job.base_ref` to current default HEAD, increment cycle (without consuming `rework_budget`), reset `job/{seq}` to new `base_ref`, build conflict context using `old_base_ref` and new `base_ref` (see §4.3 for format), re-enter Work (step 2). **Squash-merge commit message format:** subject line is `job/{seq}: {job_type}`; if the work task's `TaskResult::Work.summary` is non-null, append it as the commit body. Example: `job/42: implement-endpoint\n\nAdded /api/v1/stripe/webhook handler with idempotency key.`
 13. On eval reduce product failure: for `agent | human` work — if under rework budget, increment cycle, inject eval findings, re-enter Work (step 2); if rework budget exhausted, create Human escalation task → Escalated. For `command` work — escalate immediately (rework_budget disallowed)
 14. On escalation Human task completion: read `action` — `Retry`: new work task same cycle; `Resolve`: re-enter Evaluation; `Revoke`: transition to Revoked
 
@@ -690,6 +748,23 @@ pub struct EvalResult {
 On overall fail (`work.type: agent | human`): if the evaluated cycle N ≤ `rework_budget`, cycle++ and `structured` from all eval results is collected into `AgentRunConfig.eval_context` for the next work task; otherwise escalate.
 
 On overall fail (`work.type: command`): escalate immediately (rework_budget disallowed).
+
+#### Merge Gate
+
+The merge gate closes the evergreen gap: eval runs against the job branch built on `base_ref`, but by the time the reduce passes, other jobs may have landed on the default branch. A textually clean merge can still be semantically broken (job A renamed a function job B calls) — without the gate, that breakage would land untested. The guarantee the gate provides: **no commit reaches the default branch without every required command evaluator passing against the exact tree that lands.**
+
+Applied after the eval reduce passes, before squash-merge:
+
+1. **Skip fast-path** — if the default branch HEAD still equals `base_ref`, or `job/{seq}` has no commits beyond `base_ref`, the evaluators already ran against exactly what will land. Skip the gate; squash-merge directly. Solo jobs pay nothing.
+2. **Candidate construction** — if HEAD moved: build the candidate squash commit (the job branch's changes squashed onto current default HEAD) via `git merge-tree --write-tree` + `git commit-tree`, and point a temp ref `merge-gate/{seq}` at it. If the merge conflicts, this is the existing squash-merge-conflict path (§3.2 step 12) — the gate never runs.
+3. **Gate tasks** — create one `MergeGate` task (attempt=1, current cycle) per **required command evaluator** (job type's own plus project defaults). Each runs exactly like a command eval container (§3.3 `command` semantics: bootstrap clone, exit code is the verdict, `eval-result.json` extraction, no retries) except `JOB_BRANCH=merge-gate/{seq}`. Agent and human evaluators do not re-run — their verdict is about the change; command evaluators verify the integration.
+4. **Reduce** — all gate tasks pass → advance the default branch to the candidate commit (this *is* the squash-merge; do not re-merge), delete `job/{seq}` and `merge-gate/{seq}`, transition to Done. Any gate task fails → delete `merge-gate/{seq}`; update `base_ref` to current default HEAD; cycle++ (**rework_budget NOT consumed** — an integration failure is not the author's product failure; same treatment as a merge conflict); reset `job/{seq}` to new `base_ref`; inject the failing command output as `EvalResult` findings plus the conflict-style context block (§4.3: commits and diffstat of what landed since the old base); publish `job-rework-started` (reason: `merge_gate_failure`); re-enter Work.
+
+**Serialization** — the gate is a merge queue of depth 1: at most one job per project is in the gate at a time. Jobs whose eval reduce passes while the gate is occupied queue FIFO; each dequeued job re-checks the skip fast-path against the then-current HEAD. Since the dispatcher already merges sequentially, this adds no new coordination — just a queue in dispatcher memory.
+
+**Bounding** — repeated gate failures don't consume `rework_budget`, so a job that genuinely can't integrate could loop Work → Evaluation → gate → Work. In practice each rework rebases onto the offending HEAD, so the loop converges unless the default branch keeps moving against the job; `job_deadline` is the backstop. Set one on long-running graphs with high merge concurrency.
+
+**Restart** — `MergeGate` tasks reconcile like command eval tasks (§3.6): exit code is the verdict; a vanished container fails the task. The candidate ref is deterministic from `job/{seq}` + the HEAD recorded when the gate opened, so the dispatcher rebuilds `merge-gate/{seq}` and re-runs the gate on restart.
 
 ---
 
@@ -787,11 +862,13 @@ Two MCP servers are injected into every agent invocation:
 | `reply` | work + eval agents | Write `AgentReply` to `channels.*` KV |
 | `submit_result` | work agents | Publish work summary via `req.work.submit.*`; payload: `{ summary?, structured?, token_usage? }`; dispatcher writes task result and transitions to Evaluation |
 | `submit_eval` | eval agents | Publish eval verdict via `req.eval.submit.*`; payload must include `pass: bool`; optional: `structured`, `token_usage`; dispatcher writes `TaskResult::Agent` |
+| `submit_review` | inline reviewer agents only | Record the inline review verdict; payload: `{ pass: bool, findings? }`. Local-only: writes `/chuggernaut/review-result.json` for the harness to read — never reaches NATS (see §4.5). Tool is absent outside inline review invocations. |
 | `create_job` | factory triage agents only | Publish `req.jobs.create.{owner}.{project}`; payload: `{ type, inputs?, knowledge_tags? }`; created job carries `factory` provenance and follows the factory's release policy (see §13.4). Tool is absent outside triage jobs. |
 
 **Canonical completion and verdict contract:**
 
 - **Work containers** — `submit_result` is optional structured context. Task outcome is determined by container exit code: exit 0 = work succeeded; non-zero = infra/runtime failure (retried per `work_retries`). A container exiting 0 without calling `submit_result` is valid.
+- **Work containers under the inline review harness** — the author agent's `submit_result` calls are intercepted locally (written to `/chuggernaut/work-result.json`, never sent to NATS mid-loop — otherwise an author call would transition the job to Evaluation while the review loop is still running). The harness sends the single authoritative `submit_result` when the loop completes (see §4.5). The exit-code contract is unchanged: harness exit 0 = work succeeded.
 - **Command eval containers** — no submit step, no infra-error path. Exit code is the verdict: exit 0 = pass, non-zero = fail. `eval_retries` does not apply.
 - **Agent eval containers** — `submit_eval` is required to record the product verdict. Any container exit (zero or non-zero) without a prior `submit_eval` call is an infra error, not a product verdict. The `pass` field in the `submit_eval` payload is authoritative. `eval_retries` applies to infra errors only — a task that exits with `pass=false` via `submit_eval` is a product failure, not an infra error, and is not retried.
 
@@ -832,7 +909,7 @@ pub struct ChannelStatus {
 
 `supports_push_notifications()` on the `AgentProvider` trait (see §4.3) governs which mode the channel MCP server starts in.
 
-**MCP server distribution:** `chuggernaut-channel` and `chuggernaut-ko` are built as standalone binaries and shipped alongside the dispatcher. At container launch the dispatcher injects them (as `InjectedFile`s, mode 0755 — see §3.1) into every created container at `/usr/local/bin/chuggernaut-channel` and `/usr/local/bin/chuggernaut-ko` before start. The `McpServerConfig.command` field in each `AgentRunConfig.mcp_servers` entry references one of these paths. The binaries connect to NATS using the `NATS_URL` and `NATS_TOKEN` values passed in `McpServerConfig.env`.
+**MCP server distribution:** `chuggernaut-channel`, `chuggernaut-ko`, and `chuggernaut-harness` (see §4.5) are built as standalone binaries and shipped alongside the dispatcher. At container launch the dispatcher injects them (as `InjectedFile`s, mode 0755 — see §3.1) into every created container at `/usr/local/bin/chuggernaut-channel` and `/usr/local/bin/chuggernaut-ko` before start. The `McpServerConfig.command` field in each `AgentRunConfig.mcp_servers` entry references one of these paths. The binaries connect to NATS using the `NATS_URL` and `NATS_TOKEN` values passed in `McpServerConfig.env`.
 
 ---
 
@@ -932,6 +1009,33 @@ Knowledge Objects (KOs) follow a `(subject, predicate) → object` model. Each K
 
 ---
 
+### 4.5 Inline Review Harness
+
+When a job type declares `work.review`, the work container runs an **inline review loop**: the author agent and a reviewer agent alternate inside the same container until the reviewer accepts or the iteration budget runs out, then the harness submits. This is the fast inner loop — same working tree, same build caches, no container relaunch per exchange. The v1 pain this replaces: every author↔reviewer round as a separate dispatched workflow with its own checkout and cold start.
+
+**The inline reviewer is advisory; the outer Evaluation phase is authoritative.** Everything in the work container runs inside the work security boundary with work-scoped credentials — the author process could in principle tamper with the reviewer's verdict, which is exactly why acceptance here never substitutes for the independent evaluators or the merge gate. The loop's job is to drive up first-pass eval success and keep iteration cheap, not to gate the merge.
+
+**Mechanics:**
+
+- `chuggernaut-harness` is a static binary injected like the MCP servers (`InjectedFile`, mode 0755, at `/usr/local/bin/chuggernaut-harness`). When `work.review` is declared, the provider sets it as the container CMD (after the standard bootstrap clone) instead of the direct agent CLI invocation.
+- The dispatcher injects `/chuggernaut/harness.json` at launch: the provider-composed author command, author continuation command template, reviewer command, and `iterations`. The harness is provider-agnostic — it executes command strings and never composes CLI flags itself. In v1 only `ClaudeProvider` composes harness configs; `review.provider` resolving to anything but `claude` is rejected at release time (§2.2).
+- The reviewer prompt is resolved from `base_ref` at launch and injected at `/chuggernaut/review-prompt.md`, same delivery rules as the work prompt (§4.3): always content, never a path.
+
+**Loop protocol** (author iteration N, review N, N starting at 1):
+
+1. **Author runs.** Iteration 1 is the standard invocation against `/chuggernaut/prompt.md`. Iterations > 1 resume the author's session (`claude -p --continue`) with the reviewer's findings as the new message — the author keeps its conversation context across iterations; the workspace and build caches persist naturally. Author exit 0 = ready for review; non-zero = the harness exits non-zero and the normal `work_retries` path applies.
+2. **Reviewer runs** as a fresh process with a fresh session every time — no accumulated sympathy for the author's choices. It inspects the working tree and the diff against `base_ref`, then calls `submit_review { pass, findings? }`. Reviewer exit without a prior `submit_review` is retried once; a second miss records a failed review step and the harness proceeds to submit (the outer eval is the gate — a broken reviewer must not wedge the job).
+3. **Verdict.** `pass: true` → acceptance; harness submits. `pass: false` → findings feed iteration N+1. Budget exhausted (`iterations` rounds, default 5) without acceptance → harness submits anyway with the unresolved findings attached; the authoritative evaluators decide.
+4. **Final submit.** The harness sends the single `req.work.submit.*` request (bounded-retry until ack, per §4.2): the author's latest intercepted `submit_result` payload, with `structured.inline_review = { iterations, accepted, unresolved_findings? }` merged in. Then it exits 0.
+
+**Local interception:** the channel MCP server runs in the author process with local-submit mode enabled — `submit_result` writes `/chuggernaut/work-result.json` instead of publishing to NATS (see §4.2). In the reviewer process it runs in review mode: `submit_review` (local write) is exposed; `submit_result` is absent. Both processes retain `update_status`, `channel_check`, `reply`, and `chuggernaut-ko` access.
+
+**Step reporting:** around each author iteration and each review invocation, the harness sends `req.step.report.{owner}.{project}.{seq}.{task_id}` (request-reply, bounded retry, **non-fatal on failure** — a lost step report degrades observability, never the loop). The dispatcher appends the `StepRecord` to `steps.*` KV (§1.2) and publishes `step-started` / `step-completed` events (§6.3), which is what the tracker UI renders as the live ping-pong under the job card.
+
+**Timeout:** `task_timeout` covers the entire loop — all author iterations and reviews in one container run. Size it for the budgeted iterations, not a single pass.
+
+---
+
 ## Part 5: Version Control
 
 ### 5.1 Branch Management
@@ -1026,8 +1130,10 @@ req.channel.status.{owner}.{project}.{seq}
 req.tasks.list.pending.{owner}.{project}
 req.tasks.list.{owner}.{project}.{job_seq}
 req.tasks.resolve.{owner}.{project}.{job_seq}.{task_id}
+req.steps.list.{owner}.{project}.{job_seq}.{task_id}
 req.work.submit.{owner}.{project}.{seq}
 req.eval.submit.{owner}.{project}.{seq}.{task_id}
+req.step.report.{owner}.{project}.{seq}.{task_id}            harness-only; appends StepRecord (see §4.5)
 req.usage.query.{owner}.{project}
 req.usage.query.{owner}.{project}.{seq}
 req.ssh.sign-user-cert              payload: { "public_key": string }
@@ -1054,6 +1160,7 @@ POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/tasks/{task_id}/resolve
 
 # Per-job task log (read)
 GET    /api/v1/projects/{owner}/{project}/jobs/{seq}/tasks          → 200 OK; body: Task[]
+GET    /api/v1/projects/{owner}/{project}/jobs/{seq}/tasks/{task_id}/steps  → 200 OK; body: StepRecord[]; empty array if the task has no inline review loop
 
 # Token usage
 GET    /api/v1/projects/{owner}/{project}/usage                     → 200 OK; body: UsageSummary; aggregate across all agent tasks in the project
@@ -1154,15 +1261,18 @@ All events are published exclusively by the dispatcher to `job.events.{owner}.{p
 | `job-unblocked` | Blocked → Ready (last upstream dep reached Done) |
 | `job-started` | Ready → Work; includes `cycle` |
 | `job-evaluation-started` | Work → Evaluation; includes `cycle` |
-| `job-rework-started` | Evaluation → Work with cycle++; includes new `cycle`, `reason` (`eval_failure` \| `merge_conflict`), and `eval_context` (populated for `eval_failure`; empty for `merge_conflict`) |
+| `job-rework-started` | Evaluation → Work with cycle++; includes new `cycle`, `reason` (`eval_failure` \| `merge_conflict` \| `merge_gate_failure`), and `eval_context` (populated for `eval_failure` and `merge_gate_failure`; empty for `merge_conflict`) |
+| `job-merge-gate-started` | Eval reduce passed with moved default HEAD; merge-gate tasks created (see §3.3); includes `cycle` |
 | `job-done` | Evaluation → Done |
 | `job-escalated` | Any transition to Escalated (work retries exhausted, rework budget exhausted, launch/re-validation failure, required eval infra failure, human work failed, command eval failure, deadline exceeded); includes `reason` field |
 | `job-escalation-resolved` | Operator completes escalation Human task; includes `action` (`Retry`/`Resolve`/`Revoke`) |
 | `job-revoked` | Any non-terminal → Revoked; includes cascaded job seqs if dependents were also revoked |
-| `task-created` | New task written to KV; includes `kind` (`Command`\|`Agent`\|`Human`), `phase` (`Work`\|`Evaluation`), `cycle`, `attempt` |
+| `task-created` | New task written to KV; includes `kind` (`Command`\|`Agent`\|`Human`), `phase` (`Work`\|`Evaluation`\|`MergeGate`), `cycle`, `attempt` |
 | `task-started` | Task transitioned to Running |
 | `task-completed` | Task reached Done; includes `pass` and `structured` where applicable; includes `token_usage` for agent tasks when reported |
 | `task-failed` | Task reached Failed |
+| `step-started` | Harness reported a step beginning (see §4.5); includes `task_id`, `step`, `kind` (`author`\|`inline-review`), `iteration` |
+| `step-completed` | Harness reported a step finished; includes `status` (`done`\|`failed`) and, for inline-review steps, `pass` and `findings` |
 
 ---
 
@@ -1271,8 +1381,11 @@ KV read:    knowledge.{owner}.{project}.*
 KV read:    channels.{owner}.{project}.jobs.{seq}
 KV write:   channels.{owner}.{project}.jobs.{seq}
 Publish:    req.work.submit.{owner}.{project}.{seq}
+Publish:    req.step.report.{owner}.{project}.{seq}.*
 Subscribe:  channel.inbox.{owner}.{project}.{seq}
 ```
+
+The `req.step.report.*` permission backs the inline review harness (§4.5). The inline reviewer runs inside the work container and shares these credentials — it sits inside the work security boundary, which is why its verdict is advisory and the Evaluation phase remains the authoritative gate.
 
 **NATS JWT — eval agent containers (more restricted):**
 

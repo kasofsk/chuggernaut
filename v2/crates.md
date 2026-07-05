@@ -8,10 +8,11 @@ v2 is developed as a fresh workspace under `v2/` (`v2/Cargo.toml`, `v2/crates/*`
 
 ## Binary strategy
 
-One fat binary plus two tiny ones:
+One fat binary plus three tiny ones:
 
 - **`chuggernaut`** — single deployable with subcommands: `chuggernaut dispatcher`, `chuggernaut api`, `chuggernaut webhooks`, `chuggernaut init`, `chuggernaut admin ...`. Dispatcher and API still run as **separate processes** with different mounted keys (age/SSH-CA/NATS-operator private keys are dispatcher-only; JWT keys and VAPID private key on the API — spec §7, §12.1); sharing a binary just means one artifact to version and deploy. Service logic lives in library crates; the bin crate is argument parsing and wiring.
 - **`chuggernaut-channel`** and **`chuggernaut-ko`** — the two MCP servers (spec §4.2). Built as small static binaries (musl) because they are injected into arbitrary agent images (put-archive, spec §3.1) and must run with no runtime dependencies.
+- **`chuggernaut-harness`** — the inline review loop driver (spec §4.5). Same static-musl injection story; runs as the work container CMD when `work.review` is declared, alternating author and reviewer agent processes and reporting steps via `req.step.report.*`.
 
 ## Crates
 
@@ -30,6 +31,7 @@ One fat binary plus two tiny ones:
 | `chuggernaut` | bin | — | Subcommand wiring for all of the above |
 | `chuggernaut-channel` | bin | §4.2 | Channel MCP server (static, mounted into agent containers) |
 | `chuggernaut-ko` | bin | §4.2, §9 | Knowledge MCP server (static, mounted into agent containers) |
+| `chuggernaut-harness` | bin | §4.5 | Inline review loop driver (static, injected as work CMD when `work.review` is declared) |
 | `test-utils` | lib | — | Embedded NATS harness, fixture builders, fake backend/provider |
 
 ### `types`
@@ -95,7 +97,8 @@ dispatcher/
   queue.rs       — in-memory FIFO of Ready job IDs (§3.1 step 5)
   release.rs     — three-pass validation (§2.2), graph validate/release (§2.3)
   exec.rs        — the §3.2 work-execution sequence
-  eval.rs        — evaluator fan-out and reduce (§3.3), per-evaluator image resolution
+  eval.rs        — evaluator fan-out and reduce (§3.3), per-evaluator image resolution,
+                   merge gate (candidate ref, gate task fan-out, depth-1 queue)
   escalation.rs  — escalation task creation, resolution actions incl. pre-Work rules (§1.2)
   launch.rs      — launch-time validation, secret/var injection, credential issuance, container config
   scan.rs        — task-timeout and one-shot job-deadline scans (§3.5)
@@ -141,7 +144,7 @@ api ────► types, store, auth
 webhooks ► types, store
 cli ────► types, store, auth, vcs
 chuggernaut (bin) ► dispatcher, api, webhooks, cli
-chuggernaut-channel / chuggernaut-ko (bins) ► types, store
+chuggernaut-channel / chuggernaut-ko / chuggernaut-harness (bins) ► types, store
 test-utils ► types, store, container (fake backend), agent (fake provider), vcs (temp repos)
 ```
 
