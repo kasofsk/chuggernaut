@@ -885,7 +885,7 @@ Structured context surfaces through MCP tools (`submit_result`, `submit_eval`), 
 (section present only when `merge_conflict` is set)
 
 The `merge_conflict` string is a human-readable plain text block constructed by the dispatcher:
-1. Files that could not be cleanly merged — from `git status --short` after the failed merge attempt (lines prefixed `UU`, `AA`, etc.)
+1. Files that could not be cleanly merged — from the conflicted-file list reported by `git merge-tree --write-tree` (repos are bare; there is no worktree for `git status`)
 2. Commit summary of what landed on default since the old `base_ref` — from `git log --oneline {old_base_ref}..{new_base_ref}`
 3. Diff summary — from `git diff --stat {old_base_ref}..{new_base_ref}`
 

@@ -1,6 +1,8 @@
 //! Test harness: fake container backend / agent provider, NATS harness,
 //! temp-repo builder, fixture seeding (testing.md tiers 1–2).
 
+pub mod repo;
+
 use async_trait::async_trait;
 use container::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,

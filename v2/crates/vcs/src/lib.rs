@@ -1,25 +1,104 @@
 //! Bare repo management and git operations (spec Part 5, §12.2).
 //!
-//! All git operations shell out to the `git` CLI against bare repos at
-//! `{repos_root}/{owner}/{project}.git`. TODO: implement.
+//! All operations shell out to the `git` CLI against bare repos at
+//! `{repos_root}/{owner}/{project}.git`. There is no working tree anywhere:
+//! branch operations are `update-ref`, and squash-merges use
+//! `git merge-tree --write-tree` (git ≥ 2.38) + `commit-tree`. The single-writer
+//! dispatcher serializes all mutations; concurrent reads are safe.
 
-use std::path::PathBuf;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+use std::path::{Path, PathBuf};
+use std::process::Output;
 use thiserror::Error;
+use tokio::process::Command;
+use types::{Job, JobState};
 
 #[derive(Debug, Error)]
 pub enum VcsError {
-    #[error("git command failed: {0}")]
-    Git(String),
-    #[error("repo not found: {0}")]
-    RepoNotFound(String),
-    #[error("merge conflict")]
-    MergeConflict,
+    #[error("git {args} failed: {stderr}")]
+    Git { args: String, stderr: String },
+    #[error("repo already exists: {0}")]
+    RepoExists(String),
+    #[error("git >= 2.38 required for merge-tree --write-tree; found: {0}")]
+    GitTooOld(String),
+    #[error("unexpected git output from {context}: {detail}")]
+    Parse {
+        context: &'static str,
+        detail: String,
+    },
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
 
+pub type Result<T> = std::result::Result<T, VcsError>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MergeOutcome {
+    Merged {
+        commit: String,
+    },
+    /// No commits on the job branch beyond `base_ref` (spec §5.1).
+    NoOp,
+    Conflict {
+        files: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct DiffResponse {
+    pub files: Vec<FileStat>,
+    pub diff: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FileStat {
+    pub path: String,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TreeEntry {
+    pub path: String,
+    pub r#type: String,
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BlobResponse {
+    pub content: String,
+    pub encoding: BlobEncoding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum BlobEncoding {
+    #[serde(rename = "utf-8")]
+    Utf8,
+    #[serde(rename = "base64")]
+    Base64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LogEntry {
+    pub hash: String,
+    pub message: String,
+    pub author: String,
+    pub ts: DateTime<Utc>,
+}
+
+/// Commit identity for all dispatcher-authored commits (init, squash-merges).
+const GIT_IDENTITY: [(&str, &str); 4] = [
+    ("GIT_AUTHOR_NAME", "chuggernaut"),
+    ("GIT_AUTHOR_EMAIL", "dispatcher@chuggernaut.local"),
+    ("GIT_COMMITTER_NAME", "chuggernaut"),
+    ("GIT_COMMITTER_EMAIL", "dispatcher@chuggernaut.local"),
+];
+
 pub struct RepoManager {
-    pub repos_root: PathBuf,
+    repos_root: PathBuf,
 }
 
 impl RepoManager {
@@ -29,14 +108,505 @@ impl RepoManager {
         }
     }
 
-    // TODO (spec §5.1, §12.2, §3.2, §4.3, §6.2):
-    // - create_project(owner, project, default_branch): init bare repo, HEAD symref,
-    //   initial empty commit
-    // - default_branch(owner, project): read HEAD symref
-    // - create_branch / delete_branch / hard_reset
-    // - squash_merge(owner, project, seq, job_type, summary) -> Ok | MergeConflict
-    // - conflict_context(old_base_ref, new_base_ref): status + log + diff-stat block
-    // - diff_for_job(job) with per-state behavior incl. Done-state `git log --grep`
-    // - tree(ref) / blob(ref, path) / log(ref, limit)
-    // - read_file_at(ref, path): job type + prompt resolution at base_ref
+    pub fn repo_path(&self, owner: &str, project: &str) -> PathBuf {
+        self.repos_root.join(owner).join(format!("{project}.git"))
+    }
+
+    /// Startup check: `merge-tree --write-tree` needs git ≥ 2.38.
+    pub async fn check_git_version(&self) -> Result<()> {
+        let out = self.exec(&self.repos_root, &["version"], None).await?;
+        let text = expect_success(out, "version")?;
+        let version = text
+            .trim()
+            .strip_prefix("git version ")
+            .unwrap_or(text.trim());
+        let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+        let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+        if (major, minor) < (2, 38) {
+            return Err(VcsError::GitTooOld(version.to_string()));
+        }
+        Ok(())
+    }
+
+    // ── Project lifecycle (spec §12.2) ──────────────────────────────────────
+
+    /// Init a bare repo with `HEAD` → `refs/heads/{default_branch}` and an
+    /// initial empty commit so HEAD is a valid ref.
+    pub async fn create_project(
+        &self,
+        owner: &str,
+        project: &str,
+        default_branch: &str,
+    ) -> Result<()> {
+        let repo = self.repo_path(owner, project);
+        if repo.exists() {
+            return Err(VcsError::RepoExists(format!("{owner}/{project}")));
+        }
+        tokio::fs::create_dir_all(&repo).await?;
+        self.run(
+            &repo,
+            &["init", "--bare", "--initial-branch", default_branch, "."],
+        )
+        .await?;
+        let empty_tree = self.run_stdin(&repo, &["mktree"], b"").await?;
+        let commit = self
+            .run(
+                &repo,
+                &[
+                    "commit-tree",
+                    empty_tree.trim(),
+                    "-m",
+                    "chuggernaut: initialize repository",
+                ],
+            )
+            .await?;
+        self.run(
+            &repo,
+            &[
+                "update-ref",
+                &format!("refs/heads/{default_branch}"),
+                commit.trim(),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Read the default branch from the `HEAD` symref (spec §5.1) — there is no
+    /// separate KV entry.
+    pub async fn default_branch(&self, owner: &str, project: &str) -> Result<String> {
+        let repo = self.repo_path(owner, project);
+        let full = self.run(&repo, &["symbolic-ref", "HEAD"]).await?;
+        Ok(full
+            .trim()
+            .strip_prefix("refs/heads/")
+            .unwrap_or(full.trim())
+            .to_string())
+    }
+
+    pub async fn resolve_ref(&self, owner: &str, project: &str, reference: &str) -> Result<String> {
+        let repo = self.repo_path(owner, project);
+        let sha = self
+            .run(
+                &repo,
+                &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+            )
+            .await?;
+        Ok(sha.trim().to_string())
+    }
+
+    // ── Branch operations (spec §3.2, §5.1) ─────────────────────────────────
+
+    pub async fn create_branch(
+        &self,
+        owner: &str,
+        project: &str,
+        branch: &str,
+        sha: &str,
+    ) -> Result<()> {
+        let repo = self.repo_path(owner, project);
+        self.run(&repo, &["update-ref", &format!("refs/heads/{branch}"), sha])
+            .await?;
+        Ok(())
+    }
+
+    /// Hard-reset in a bare repo is just moving the ref pointer.
+    pub async fn reset_branch(
+        &self,
+        owner: &str,
+        project: &str,
+        branch: &str,
+        sha: &str,
+    ) -> Result<()> {
+        self.create_branch(owner, project, branch, sha).await
+    }
+
+    pub async fn delete_branch(&self, owner: &str, project: &str, branch: &str) -> Result<()> {
+        let repo = self.repo_path(owner, project);
+        self.run(
+            &repo,
+            &["update-ref", "-d", &format!("refs/heads/{branch}")],
+        )
+        .await?;
+        Ok(())
+    }
+
+    // ── Content reads (spec §2.2, §3.2, §6.2) ───────────────────────────────
+
+    /// Job type and prompt resolution at `base_ref`. None if the path does not
+    /// exist at that ref.
+    pub async fn read_file_at(
+        &self,
+        owner: &str,
+        project: &str,
+        reference: &str,
+        path: &str,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .blob(owner, project, reference, path)
+            .await?
+            .filter(|b| b.encoding == BlobEncoding::Utf8)
+            .map(|b| b.content))
+    }
+
+    pub async fn blob(
+        &self,
+        owner: &str,
+        project: &str,
+        reference: &str,
+        path: &str,
+    ) -> Result<Option<BlobResponse>> {
+        let repo = self.repo_path(owner, project);
+        let out = self
+            .exec(
+                &repo,
+                &["cat-file", "blob", &format!("{reference}:{path}")],
+                None,
+            )
+            .await?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        Ok(Some(match String::from_utf8(out.stdout.clone()) {
+            Ok(content) => BlobResponse {
+                content,
+                encoding: BlobEncoding::Utf8,
+            },
+            Err(_) => BlobResponse {
+                content: BASE64.encode(&out.stdout),
+                encoding: BlobEncoding::Base64,
+            },
+        }))
+    }
+
+    pub async fn tree(
+        &self,
+        owner: &str,
+        project: &str,
+        reference: &str,
+    ) -> Result<Vec<TreeEntry>> {
+        let repo = self.repo_path(owner, project);
+        let out = self
+            .run(&repo, &["ls-tree", "-r", "-t", "-l", reference])
+            .await?;
+        out.lines()
+            .map(|line| {
+                // "<mode> <type> <oid> <size>\t<path>" — size is "-" for trees.
+                let (meta, path) = line.split_once('\t').ok_or_else(|| VcsError::Parse {
+                    context: "ls-tree",
+                    detail: line.to_string(),
+                })?;
+                let fields: Vec<&str> = meta.split_whitespace().collect();
+                let [_, r#type, _, size] = fields[..] else {
+                    return Err(VcsError::Parse {
+                        context: "ls-tree",
+                        detail: line.to_string(),
+                    });
+                };
+                Ok(TreeEntry {
+                    path: path.to_string(),
+                    r#type: r#type.to_string(),
+                    size: size.parse().ok(),
+                })
+            })
+            .collect()
+    }
+
+    pub async fn log(
+        &self,
+        owner: &str,
+        project: &str,
+        reference: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LogEntry>> {
+        let repo = self.repo_path(owner, project);
+        let reference = match reference {
+            Some(r) => r.to_string(),
+            None => self.default_branch(owner, project).await?,
+        };
+        let out = self
+            .run(
+                &repo,
+                &[
+                    "log",
+                    "--format=%H%x1f%s%x1f%an%x1f%aI",
+                    "-n",
+                    &limit.to_string(),
+                    &reference,
+                ],
+            )
+            .await?;
+        out.lines()
+            .map(|line| {
+                let [hash, message, author, ts] = line.splitn(4, '\x1f').collect::<Vec<_>>()[..]
+                else {
+                    return Err(VcsError::Parse {
+                        context: "log",
+                        detail: line.to_string(),
+                    });
+                };
+                let ts = DateTime::parse_from_rfc3339(ts)
+                    .map_err(|e| VcsError::Parse {
+                        context: "log ts",
+                        detail: e.to_string(),
+                    })?
+                    .with_timezone(&Utc);
+                Ok(LogEntry {
+                    hash: hash.to_string(),
+                    message: message.to_string(),
+                    author: author.to_string(),
+                    ts,
+                })
+            })
+            .collect()
+    }
+
+    // ── Squash-merge (spec §3.2 step 12, §5.1) ──────────────────────────────
+
+    pub async fn has_commits_beyond(
+        &self,
+        owner: &str,
+        project: &str,
+        base_ref: &str,
+        branch: &str,
+    ) -> Result<bool> {
+        let repo = self.repo_path(owner, project);
+        let count = self
+            .run(
+                &repo,
+                &["rev-list", "--count", &format!("{base_ref}..{branch}")],
+            )
+            .await?;
+        Ok(count.trim() != "0")
+    }
+
+    /// Squash-merge `job/{seq}` into the default branch. A squash-merge is by
+    /// definition one new commit with one parent, so this is
+    /// `merge-tree --write-tree` + `commit-tree` + `update-ref` (CAS on the old
+    /// head) — no working tree involved.
+    pub async fn squash_merge(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        base_ref: &str,
+        job_type: &str,
+        summary: Option<&str>,
+    ) -> Result<MergeOutcome> {
+        let repo = self.repo_path(owner, project);
+        let branch = format!("job/{seq}");
+        if !self
+            .has_commits_beyond(owner, project, base_ref, &branch)
+            .await?
+        {
+            return Ok(MergeOutcome::NoOp);
+        }
+        let default = self.default_branch(owner, project).await?;
+        let old_head = self.resolve_ref(owner, project, &default).await?;
+
+        let out = self
+            .exec(
+                &repo,
+                &[
+                    "merge-tree",
+                    "--write-tree",
+                    "--name-only",
+                    &default,
+                    &branch,
+                ],
+                None,
+            )
+            .await?;
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        match out.status.code() {
+            Some(0) => {
+                let tree = stdout.trim().to_string();
+                let subject = format!("job/{seq}: {job_type}");
+                let mut args = vec!["commit-tree", &tree, "-p", &old_head, "-m", &subject];
+                if let Some(s) = summary {
+                    args.extend(["-m", s]);
+                }
+                let commit = self.run(&repo, &args).await?;
+                let commit = commit.trim().to_string();
+                // CAS against the head we merged from; the single-writer dispatcher
+                // makes a race impossible, this just turns a logic bug into an error.
+                self.run(
+                    &repo,
+                    &[
+                        "update-ref",
+                        &format!("refs/heads/{default}"),
+                        &commit,
+                        &old_head,
+                    ],
+                )
+                .await?;
+                Ok(MergeOutcome::Merged { commit })
+            }
+            Some(1) => {
+                // Line 1: toplevel tree OID; then conflicted file names until a
+                // blank line separates the informational messages.
+                let mut files: Vec<String> = stdout
+                    .lines()
+                    .skip(1)
+                    .take_while(|l| !l.trim().is_empty())
+                    .map(str::to_string)
+                    .collect();
+                files.dedup();
+                Ok(MergeOutcome::Conflict { files })
+            }
+            _ => Err(VcsError::Git {
+                args: "merge-tree --write-tree".into(),
+                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+            }),
+        }
+    }
+
+    /// Human-readable conflict context block (spec §4.3): conflicting files,
+    /// commits landed on the default branch since the old base, diff summary.
+    pub async fn conflict_context(
+        &self,
+        owner: &str,
+        project: &str,
+        old_base_ref: &str,
+        new_base_ref: &str,
+        conflicting_files: &[String],
+    ) -> Result<String> {
+        let repo = self.repo_path(owner, project);
+        let default = self.default_branch(owner, project).await?;
+        let range = format!("{old_base_ref}..{new_base_ref}");
+        let log = self.run(&repo, &["log", "--oneline", &range]).await?;
+        let stat = self.run(&repo, &["diff", "--stat", &range]).await?;
+        let short_base = &old_base_ref[..old_base_ref.len().min(7)];
+
+        let mut ctx = String::from("Conflicting files:\n");
+        for f in conflicting_files {
+            ctx.push_str(&format!("  {f}\n"));
+        }
+        ctx.push_str(&format!(
+            "\nChanges on {default} since base commit {short_base}:\n"
+        ));
+        for l in log.lines() {
+            ctx.push_str(&format!("  {l}\n"));
+        }
+        ctx.push('\n');
+        for l in stat.lines() {
+            ctx.push_str(&format!("  {}\n", l.trim_start()));
+        }
+        Ok(ctx)
+    }
+
+    // ── Diff API (spec §6.2) ────────────────────────────────────────────────
+
+    /// Diff behavior by job state (spec §6.2). `Done` recovers the squash-merge
+    /// commit via an anchored `--grep` on the default branch.
+    pub async fn diff_for_job(&self, job: &Job) -> Result<DiffResponse> {
+        let Some((owner, project)) = job.project.split_once('/') else {
+            return Err(VcsError::Parse {
+                context: "job.project",
+                detail: job.project.clone(),
+            });
+        };
+        match job.state {
+            JobState::Frozen | JobState::Blocked | JobState::Ready | JobState::Revoked => {
+                Ok(DiffResponse::default())
+            }
+            JobState::Work | JobState::Evaluation | JobState::Escalated => {
+                let Some(base_ref) = job.base_ref.as_deref() else {
+                    return Ok(DiffResponse::default());
+                };
+                self.diff_range(owner, project, base_ref, &job.branch).await
+            }
+            JobState::Done => {
+                let repo = self.repo_path(owner, project);
+                let default = self.default_branch(owner, project).await?;
+                let grep = format!("^job/{}: ", job.id);
+                let sha = self
+                    .run(
+                        &repo,
+                        &["log", "-1", "--format=%H", "--grep", &grep, &default],
+                    )
+                    .await?;
+                let sha = sha.trim();
+                if sha.is_empty() {
+                    return Ok(DiffResponse::default());
+                }
+                self.diff_range(owner, project, &format!("{sha}^"), sha)
+                    .await
+            }
+        }
+    }
+
+    async fn diff_range(
+        &self,
+        owner: &str,
+        project: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<DiffResponse> {
+        let repo = self.repo_path(owner, project);
+        let range = format!("{from}..{to}");
+        let numstat = self.run(&repo, &["diff", "--numstat", &range]).await?;
+        let files = numstat
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.splitn(3, '\t');
+                let (a, d, path) = (parts.next()?, parts.next()?, parts.next()?);
+                Some(FileStat {
+                    path: path.to_string(),
+                    // "-" for binary files
+                    additions: a.parse().unwrap_or(0),
+                    deletions: d.parse().unwrap_or(0),
+                })
+            })
+            .collect();
+        let diff = self.run(&repo, &["diff", &range]).await?;
+        Ok(DiffResponse { files, diff })
+    }
+
+    // ── git plumbing ────────────────────────────────────────────────────────
+
+    async fn run(&self, repo: &Path, args: &[&str]) -> Result<String> {
+        let out = self.exec(repo, args, None).await?;
+        expect_success(out, &args.join(" "))
+    }
+
+    async fn run_stdin(&self, repo: &Path, args: &[&str], stdin: &[u8]) -> Result<String> {
+        let out = self.exec(repo, args, Some(stdin)).await?;
+        expect_success(out, &args.join(" "))
+    }
+
+    async fn exec(&self, repo: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<Output> {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(repo).args(args);
+        // Deterministic identity; ignore host-level git config (gpg signing,
+        // init.defaultBranch, etc.).
+        cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null");
+        for (k, v) in GIT_IDENTITY {
+            cmd.env(k, v);
+        }
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn()?;
+        if let Some(bytes) = stdin {
+            use tokio::io::AsyncWriteExt;
+            let mut pipe = child.stdin.take().expect("stdin piped");
+            pipe.write_all(bytes).await?;
+        } else {
+            drop(child.stdin.take());
+        }
+        Ok(child.wait_with_output().await?)
+    }
+}
+
+fn expect_success(out: Output, args: &str) -> Result<String> {
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        Err(VcsError::Git {
+            args: args.to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+        })
+    }
 }

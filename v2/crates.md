@@ -140,7 +140,7 @@ webhooks ► types, store
 cli ────► types, store, auth, vcs
 chuggernaut (bin) ► dispatcher, api, webhooks, cli
 chuggernaut-channel / chuggernaut-ko (bins) ► types, store
-test-utils ► types, store, container (fake backend), agent (fake provider)
+test-utils ► types, store, container (fake backend), agent (fake provider), vcs (temp repos)
 ```
 
 Invariants worth enforcing (e.g. via CI lint): only `store` depends on `async-nats`; only `container` and `agent` know about containers; `api` never depends on `dispatcher` (they communicate exclusively over NATS); `types` has no async runtime dependency.

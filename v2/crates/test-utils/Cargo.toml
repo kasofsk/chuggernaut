@@ -9,6 +9,7 @@ types.workspace = true
 store.workspace = true
 container.workspace = true
 agent.workspace = true
+vcs.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
