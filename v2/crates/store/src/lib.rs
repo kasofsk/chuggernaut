@@ -201,6 +201,39 @@ impl NatsStore {
         Ok(out)
     }
 
+    /// Live-subscribe to a JetStream stream with a subject filter — the SSE
+    /// bridge (spec §6.4). An ephemeral push-less pull consumer is created at
+    /// `after_seq + 1` (or the start of the stream when 0) and messages are
+    /// delivered continuously; each item carries its stream sequence so
+    /// clients can resume via `Last-Event-ID`.
+    pub async fn subscribe_stream(
+        &self,
+        stream: &str,
+        subject: &str,
+        after_seq: u64,
+    ) -> Result<StreamSubscription> {
+        use futures::StreamExt;
+        let stream = self.js.get_stream(stream).await.map_err(nats_err)?;
+        let consumer = stream
+            .create_consumer(jetstream::consumer::pull::Config {
+                filter_subject: subject.to_string(),
+                deliver_policy: if after_seq == 0 {
+                    jetstream::consumer::DeliverPolicy::All
+                } else {
+                    jetstream::consumer::DeliverPolicy::ByStartSequence {
+                        start_sequence: after_seq + 1,
+                    }
+                },
+                ..Default::default()
+            })
+            .await
+            .map_err(nats_err)?;
+        let messages = consumer.messages().await.map_err(nats_err)?;
+        Ok(StreamSubscription {
+            inner: messages.boxed(),
+        })
+    }
+
     /// Subscribe to a request subject (wildcards allowed). Keeps async-nats
     /// confined to this crate: consumers get subject/payload and a replier.
     pub async fn subscribe_requests(&self, subject: &str) -> Result<RequestSubscription> {
@@ -241,6 +274,35 @@ impl NatsStore {
             }
         }
         Err(last_err.unwrap_or_else(|| StoreError::Nats("no attempts made".into())))
+    }
+}
+
+/// A live JetStream subscription (see [`NatsStore::subscribe_stream`]).
+pub struct StreamSubscription {
+    inner: futures::stream::BoxStream<
+        'static,
+        std::result::Result<
+            jetstream::Message,
+            async_nats::error::Error<jetstream::consumer::pull::MessagesErrorKind>,
+        >,
+    >,
+}
+
+impl StreamSubscription {
+    /// Next `(stream_seq, subject, payload)`; `None` when the underlying
+    /// consumer ends. Transport errors end the stream (callers reconnect).
+    pub async fn next(&mut self) -> Option<(u64, String, Vec<u8>)> {
+        use futures::StreamExt;
+        loop {
+            let msg = self.inner.next().await?.ok()?;
+            let _ = msg.ack().await;
+            let Ok(info) = msg.info() else { continue };
+            return Some((
+                info.stream_sequence,
+                msg.subject.to_string(),
+                msg.payload.to_vec(),
+            ));
+        }
     }
 }
 

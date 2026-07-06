@@ -51,6 +51,12 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
     let core = Core::new(store.clone(), repos, backend, provider, core_config).await?;
     let handle = spawn(core);
     handlers::spawn_container_handlers(&store, handle.clone()).await?;
+    handlers::spawn_api_handlers(
+        &store,
+        handle.clone(),
+        Arc::new(RepoManager::new(&config.repos_root)),
+    )
+    .await?;
     tracing::info!(nats = %config.nats_url, repos = %config.repos_root.display(), "dispatcher up");
     Ok(handle)
 }

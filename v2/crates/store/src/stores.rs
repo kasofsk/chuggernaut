@@ -121,6 +121,14 @@ impl TaskStore {
         tasks.sort_by_key(|t| t.id);
         Ok(tasks)
     }
+
+    /// All tasks in a project — the operator inbox scan (spec §6.1
+    /// `req.tasks.list.pending`); callers filter by kind/state.
+    pub async fn list_for_project(&self, owner: &str, project: &str) -> Result<Vec<Task>> {
+        let mut tasks: Vec<Task> = self.0.list_prefix(&format!("{owner}.{project}.")).await?;
+        tasks.sort_by_key(|t| (t.job_seq, t.id));
+        Ok(tasks)
+    }
 }
 
 /// Inline review step log (spec §1.2, §4.5): one key per work task holding a

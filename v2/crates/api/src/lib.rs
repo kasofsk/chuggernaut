@@ -7,9 +7,102 @@
 pub mod ingest;
 pub mod push;
 pub mod routes;
+pub mod run;
 pub mod sse;
 
-/// Build the axum router for the full §6.2 surface. TODO.
-pub fn router() -> axum::Router {
-    axum::Router::new()
+use auth::jwt::{JwtSigner, JwtVerifier};
+use std::path::PathBuf;
+use std::sync::Arc;
+use store::NatsStore;
+
+pub struct ApiState {
+    pub store: NatsStore,
+    pub signer: JwtSigner,
+    pub verifier: JwtVerifier,
+    pub session_ttl: chrono::Duration,
+}
+
+pub type SharedState = Arc<ApiState>;
+
+/// Build the axum router: auth + the §6.2 project surface implemented so far,
+/// with the SPA (when `ui_dist` is given) served as the fallback.
+pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
+    use axum::routing::{get, post};
+
+    let mut router = axum::Router::new()
+        // Auth (§7.1)
+        .route("/auth/login", post(routes::login))
+        .route("/auth/logout", post(routes::logout))
+        .route("/auth/me", get(routes::me))
+        // Jobs
+        .route(
+            "/api/v1/projects/{owner}/{project}/jobs",
+            get(routes::jobs_list).post(routes::jobs_create),
+        )
+        .route(
+            "/api/v1/projects/{owner}/{project}/jobs/{seq}",
+            get(routes::jobs_get),
+        )
+        .route(
+            "/api/v1/projects/{owner}/{project}/jobs/{seq}/release",
+            post(routes::jobs_release),
+        )
+        .route(
+            "/api/v1/projects/{owner}/{project}/jobs/{seq}/revoke",
+            post(routes::jobs_revoke),
+        )
+        // Graph
+        .route(
+            "/api/v1/projects/{owner}/{project}/graph",
+            get(routes::graph_get),
+        )
+        // Tasks
+        .route(
+            "/api/v1/projects/{owner}/{project}/tasks/pending",
+            get(routes::tasks_pending),
+        )
+        .route(
+            "/api/v1/projects/{owner}/{project}/jobs/{seq}/tasks",
+            get(routes::tasks_list),
+        )
+        .route(
+            "/api/v1/projects/{owner}/{project}/jobs/{seq}/tasks/{task_id}/resolve",
+            post(routes::tasks_resolve),
+        )
+        // VCS
+        .route(
+            "/api/v1/projects/{owner}/{project}/diff/{seq}",
+            get(routes::diff),
+        )
+        // SSE (§6.4)
+        .route(
+            "/api/v1/projects/{owner}/{project}/events",
+            get(sse::project_events),
+        )
+        .route(
+            "/api/v1/projects/{owner}/{project}/jobs/{seq}/events",
+            get(sse::job_events),
+        )
+        .with_state(state);
+
+    if let Some(dist) = ui_dist {
+        let index = dist.join("index.html");
+        router = router.fallback_service(
+            tower_http::services::ServeDir::new(&dist)
+                .fallback(tower_http::services::ServeFile::new(index)),
+        );
+    }
+    router
+}
+
+/// Bind and serve until the process is killed.
+pub async fn serve(
+    state: SharedState,
+    addr: std::net::SocketAddr,
+    ui_dist: Option<PathBuf>,
+) -> std::io::Result<()> {
+    let app = router(state, ui_dist);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!(%addr, "api up");
+    axum::serve(listener, app).await
 }

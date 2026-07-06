@@ -29,3 +29,46 @@ pub fn job_event(owner: &str, project: &str, seq: u64, event_type: &str) -> Stri
 pub fn channel_inbox(owner: &str, project: &str, seq: u64) -> String {
     format!("channel.inbox.{owner}.{project}.{seq}")
 }
+
+// ── API-facing request subjects (spec §6.1) ─────────────────────────────────
+// Published by the api crate, handled by the dispatcher.
+
+pub fn jobs_create(owner: &str, project: &str) -> String {
+    format!("req.jobs.create.{owner}.{project}")
+}
+
+pub fn jobs_get(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.jobs.get.{owner}.{project}.{seq}")
+}
+
+pub fn jobs_list(owner: &str, project: &str) -> String {
+    format!("req.jobs.list.{owner}.{project}")
+}
+
+pub fn jobs_release(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.jobs.release.{owner}.{project}.{seq}")
+}
+
+pub fn jobs_revoke(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.jobs.revoke.{owner}.{project}.{seq}")
+}
+
+pub fn graph_get(owner: &str, project: &str) -> String {
+    format!("req.graph.get.{owner}.{project}")
+}
+
+pub fn tasks_list_pending(owner: &str, project: &str) -> String {
+    format!("req.tasks.list.pending.{owner}.{project}")
+}
+
+pub fn tasks_list(owner: &str, project: &str, job_seq: u64) -> String {
+    format!("req.tasks.list.{owner}.{project}.{job_seq}")
+}
+
+pub fn tasks_resolve(owner: &str, project: &str, job_seq: u64, task_id: u64) -> String {
+    format!("req.tasks.resolve.{owner}.{project}.{job_seq}.{task_id}")
+}
+
+pub fn vcs_diff(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.vcs.diff.{owner}.{project}.{seq}")
+}

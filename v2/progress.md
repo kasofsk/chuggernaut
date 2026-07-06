@@ -5,12 +5,15 @@ Companion to `spec.md` (normative), `design.md` (rationale), `crates.md`
 or extends the spec, and what comes next. Update it at the end of each
 implementation session.
 
-**As of:** 2026-07-06 (session 4) · 89 tests passing, clippy clean. The
-system is runnable outside tests (`init` → `admin project create` →
-`dispatcher`), per-job credentials (§7.4) are real (scoped NATS user JWTs,
-live-verified against an operator-mode server), and the SSH front (§5.2) is
-implemented end to end: `ssh-shell` forced command + pre-receive hook enforce
-the ref table against real `git clone`/`push`, and launches inject job certs.
+**As of:** 2026-07-06 (session 5) · 90 tests passing, clippy clean. The
+platform now has a working web UI path: the api crate serves the §6.2 core
+surface (auth, jobs, graph, tasks, diff, SSE) as an HTTP↔NATS bridge, the
+dispatcher answers the API-facing `req.*` families, `chuggernaut api` boots
+the server (optionally serving the built SPA), and `v2/web` holds a minimal
+React/TS UI (login, job list + create/release/revoke, inbox with resolve,
+job detail with tasks/diff/live events). Prior sessions: runnable system
+(`init` → `admin project create` → `dispatcher`), per-job §7.4 credentials,
+SSH front (§5.2) end to end.
 
 ---
 
@@ -28,8 +31,9 @@ the ref table against real `git clone`/`push`, and launches inject job certs.
 | `chuggernaut-harness` | 🔴 scaffold | Config types + loop protocol as TODO (§4.5) |
 | `chuggernaut-ko` | 🔴 stub | |
 | `auth` | ✅ done | §7 complete: RS256 platform JWTs + cookie + `JwtAuthProvider`, SSH CA signing (user 24h / per-job ephemeral keypair+cert, authz context in force-command, `git` login principal), §5.2 parsing + pull/push-entry/per-ref authz pure functions, hand-rolled NATS JWTs (operator/account/user) + §7.4 allow-lists + `.creds`/resolver-config rendering |
-| `api` | 🔴 stub | No HTTP surface; only container-facing NATS subjects handled |
-| `cli` / `chuggernaut` bin | 🟡 done (core) | `init` (§12.1: keygen incl. NATS operator/SYS/CHUG seeds + derived `nats-resolver.conf` and `dispatcher.creds`, topology, VAPID pub in KV, admin user), `admin user create/list/delete`, `admin project create/list` (§12.2, installs the pre-receive hook), `dispatcher`, `ssh-shell` (forced command: parse SSH_ORIGINAL_COMMAND, gate entry, exec git service with identity env), `ssh-authz` (pre-receive hook body). Missing: ingest tokens, role set/unset, key rotation, seed |
+| `api` | 🟡 core done | Axum bridge: login/logout/me (argon2 vs users KV → JWT cookie), jobs CRUD + release/revoke, graph, tasks pending/list/resolve, diff, SSE (project + per-job, Last-Event-ID replay), §7.5 authz per route, §6.5 error envelope, static SPA serving. Missing: vars/secrets/knowledge/usage/steps/channel/vcs tree-blob-log routes, ssh-cert, push, ingest |
+| `web` (not a crate) | 🟡 core done | `v2/web`: Vite + React 19 + TS, no framework state — SSE-triggered refetch. Login, project chooser, job table + create/release/revoke, operator inbox (Pass/Fail + escalation Retry/Resolve/Revoke keyed on job state), job detail (tasks, colored unified diff, live event log). PWA manifest/service worker + React Flow graph view still pending |
+| `cli` / `chuggernaut` bin | 🟡 done (core) | `init` (§12.1: keygen incl. NATS operator/SYS/CHUG seeds + derived `nats-resolver.conf` and `dispatcher.creds`, topology, VAPID pub in KV, admin user), `admin user create/list/delete`, `admin project create/list` (§12.2, installs the pre-receive hook), `dispatcher`, `api` (env: NATS_URL/KEYS_DIR/BIND_ADDR/UI_DIST/SESSION_TTL), `ssh-shell` (forced command: parse SSH_ORIGINAL_COMMAND, gate entry, exec git service with identity env), `ssh-authz` (pre-receive hook body). Missing: ingest tokens, role set/unset, key rotation, seed |
 | `webhooks` | 🔴 stub | |
 | `test-utils` | ✅ done | `FakeBackend`, `FakeProvider` (async run hooks mirroring submit-ack-then-exit ordering), `NatsTestServer` (Docker `nats:2-alpine`, skip-guarded; `spawn_with_config` boots operator-mode servers), `TempRepo`/`WorkClone`/`clone_branch_from` |
 
@@ -90,7 +94,18 @@ the ref table against real `git clone`/`push`, and launches inject job certs.
   exist, `ensure_topology`, `platform.vapid.public`, admin user), `admin
   project create` (§12.2 counter + bare repo + HEAD symref), `chuggernaut
   dispatcher` (env config §12.4 → `dispatcher::run`: git-version check,
-  `ping_all`, Core spawn, container handlers).
+  `ping_all`, Core spawn, container + API handlers).
+- **HTTP surface (§6, core slice)**: `api/tests/http_bridge.rs` drives the
+  full loop over HTTP against a real NATS + core — 401s, login (argon2 vs
+  users KV) → JWT cookie → `/auth/me`, create job (201) → 422 release with
+  the §6.5 `errors` envelope for a bad type → release → human work task in
+  `/tasks/pending` → resolve → human eval task → resolve → Done; jobs/graph/
+  diff/task-log reads en route; SSE stream replays the event trail from seq 0
+  with `id:` carrying the stream sequence.
+- **Web UI (`v2/web`)**: builds clean under strict TS (`npm run build`);
+  dev mode proxies to `:8080` (`npm run dev`), production is served by
+  `chuggernaut api` via `UI_DIST=web/dist`. SSE is the refresh signal —
+  every screen refetches on any project event, no polling.
 
 ## Key implementation decisions (beyond the spec text)
 
@@ -160,6 +175,20 @@ the ref table against real `git clone`/`push`, and launches inject job certs.
 - **Hook body bakes `current_exe`** at `admin project create` time — assumes
   the admin CLI runs on the SSH host with the same artifact path (true for
   the single-node compose deploy).
+- **API reply envelope over NATS**: success is the resource JSON verbatim;
+  failure is `{"error":{"status":u16,"message",..,"errors":[..]?}}` — the
+  api crate maps it straight onto §6.5 without a shared error type (zero
+  coupling between the crates; the shape is checked by the bridge test).
+- **Job mutations require Member+** (create/release/revoke ride the §7.5
+  "complete/fail a task" row; the spec table has no explicit row for them).
+- **SSE bridge is one ephemeral pull consumer per connection**
+  (`store::subscribe_stream`, filter `job.events.{owner}.{project}.>`,
+  `ByStartSequence(last_event_id+1)`); EventSource reconnect + replay comes
+  free from the NATS stream.
+- **UI state layer is "refetch on SSE event"** — no client-side store to
+  drift; right for test-project scale, revisit if event volume hurts.
+- **Escalation vs Pass/Fail resolution in the UI keys on `job.state ==
+  Escalated`** (mirrors `exec.rs` resolve validation), not on any task field.
 
 ## Known gaps / accepted debt (grep for TODO)
 
@@ -191,21 +220,23 @@ the ref table against real `git clone`/`push`, and launches inject job certs.
 
 ## Next steps (recommended order)
 
-1. **First live agent job**: build the musl channel binary, point
-   `CHANNEL_BINARY` at it, run a real `work.type: agent` job end to end on
-   the booted stack (now with the operator-mode server + scoped creds) —
-   shakes out anything the FakeProvider hides.
-2. **api crate** (§6): axum routes → NATS request-reply, SSE bridge, plus the
-   dispatcher-side handlers for the remaining `req.*` families (jobs, graph,
-   vcs, tasks/resolve, vars/secrets/knowledge, steps) and `req.ssh.sign-user-cert`
-   (§7.3). Auth middleware building blocks (`JwtAuthProvider`, `authorize`,
-   cookie helpers) are done.
+Priority (user): iterate from the UI on a test project.
+
+1. **Boot the full stack and drive it from the browser**: `init` → `admin
+   project create` → `dispatcher` + `api` (UI_DIST=web/dist) → log in,
+   create/release a job, resolve inbox tasks. First a human-work job, then
+   the first live agent job (build the musl channel binary, set
+   CHANNEL_BINARY) — shakes out anything FakeProvider hides.
+2. **UI/API gaps as they bite while iterating**: remaining §6.2 routes
+   (vcs tree/blob/log, vars/secrets/knowledge, usage, steps, channel
+   status/messages, `POST /auth/ssh-cert`), React Flow graph view,
+   react-diff-view, PWA manifest + push.
 3. **chuggernaut-ko + §4.4 knowledge injection** (system_prompt assembly).
 4. **Inline review harness** (§4.5): loop implementation + `submit_review`
    local mode in the channel binary + `req.step.report` dispatcher handler +
    step events; CodexProvider validation already rejects at release time.
 5. **Task factories + ingest (§13)** (incl. wiring
-   `triage_container_permissions`), webhooks, then the PWA.
+   `triage_container_permissions`), webhooks.
 
 ## Test layout (tiers per testing.md)
 
@@ -217,6 +248,7 @@ the ref table against real `git clone`/`push`, and launches inject job certs.
 - Tier-2 (skip-guarded on Docker): `store/tests/nats_store.rs`,
   `container/tests/docker_backend.rs`, `chuggernaut-channel/tests/stdio.rs`,
   `cli/tests/init_admin.rs`, `auth/tests/nats_live.rs` (operator-mode server),
+  `api/tests/http_bridge.rs` (tower-driven router against real NATS + core),
   and `dispatcher/tests/{lifecycle,execution,gate_and_human,recovery,nats_submit}.rs`.
 - `chuggernaut/tests/ssh_front.rs` (git + the compiled binary, no Docker):
   the §5.2 matrix over git's `ext::` transport.

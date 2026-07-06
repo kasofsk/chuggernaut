@@ -24,6 +24,8 @@ enum Command {
     /// DOCKER_NODES | DOCKER_SLOTS (spec §12.4).
     Dispatcher,
     /// Run the HTTP↔NATS API bridge (serves the PWA).
+    /// Configured via env: NATS_URL, KEYS_DIR, BIND_ADDR, UI_DIST,
+    /// SESSION_TTL (spec §6, §7.1).
     Api,
     /// Run the webhook delivery service.
     Webhooks,
@@ -51,7 +53,10 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("shutting down");
             Ok(())
         }
-        Command::Api => anyhow::bail!("not yet implemented: api"),
+        Command::Api => {
+            let config = api::run::ApiConfig::from_env()?;
+            api::run::run(config).await
+        }
         Command::Webhooks => anyhow::bail!("not yet implemented: webhooks"),
         Command::Init(args) => cli::init::run(args).await,
         Command::Admin(args) => cli::admin::run(args).await,
