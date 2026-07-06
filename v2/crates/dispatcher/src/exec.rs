@@ -7,7 +7,7 @@ use crate::core::{Core, CoreError, Msg, Result, WorkSubmission};
 use crate::escalation;
 use crate::queue::QueuedJob;
 use crate::release;
-use agent::AgentRunConfig;
+use agent::{AgentRunConfig, McpServerConfig};
 use chrono::Utc;
 use container::{ContainerLaunchConfig, bootstrap_cmd};
 use std::collections::HashMap;
@@ -202,13 +202,14 @@ impl Core {
                         job_type.work.prompt.as_deref().unwrap_or_default(),
                         &eval_context, merge_conflict.as_deref())
                     .await?;
+                let (mcp_servers, files) = self.channel_mcp(&env);
                 let config = AgentRunConfig {
                     image: job_type.image.clone().unwrap_or_default(),
                     prompt,
                     model: job_type.work.model.clone(),
                     system_prompt: None, // KO injection: knowledge slice
-                    mcp_servers: vec![], // channel/ko wiring: credentials slice
-                    files: vec![],
+                    mcp_servers,
+                    files,
                     env,
                     task_timeout: task_timeout(&job_type),
                     eval_context,
@@ -628,16 +629,60 @@ impl Core {
                 env.insert(name.clone(), value);
             }
         }
-        // TODO(§8.2): age-decrypt — SecretStore dispatcher-side construction.
-        let secrets = self.store.raw_bucket(store::buckets::SECRETS).await?;
-        for name in &job_type.secrets {
-            if let Some(value) =
-                secrets.get_json::<String>(&format!("{owner}.{project}.{name}")).await?
-            {
-                env.insert(name.clone(), value);
+        match &self.secrets {
+            // §8.2: age-decrypted immediately before injection.
+            Some(secrets) => {
+                use store::secrets::SecretStore;
+                for name in &job_type.secrets {
+                    if let Some(value) = secrets.get(owner, project, name).await? {
+                        env.insert(name.clone(), value);
+                    }
+                }
+            }
+            // Dev mode without an identity: values injected as stored.
+            None => {
+                let secrets = self.store.raw_bucket(store::buckets::SECRETS).await?;
+                for name in &job_type.secrets {
+                    if let Some(value) =
+                        secrets.get_json::<String>(&format!("{owner}.{project}.{name}")).await?
+                    {
+                        env.insert(name.clone(), value);
+                    }
+                }
             }
         }
         Ok(env)
+    }
+
+    /// The channel MCP server entry + injected binary for agent launches
+    /// (spec §4.2). Empty when no binary is configured (tests, degraded dev).
+    pub(crate) fn channel_mcp(
+        &self,
+        env: &HashMap<String, String>,
+    ) -> (Vec<McpServerConfig>, Vec<container::InjectedFile>) {
+        let Some(bytes) = &self.channel_binary else {
+            return (vec![], vec![]);
+        };
+        let path = "/usr/local/bin/chuggernaut-channel";
+        // §4.2: the binary connects using NATS_URL/NATS_TOKEN from
+        // McpServerConfig.env (the rest of its context rides on container env).
+        let mcp_env: HashMap<String, String> = ["NATS_URL", "NATS_TOKEN"]
+            .iter()
+            .filter_map(|k| env.get(*k).map(|v| (k.to_string(), v.clone())))
+            .collect();
+        (
+            vec![McpServerConfig {
+                name: "chuggernaut-channel".into(),
+                command: path.into(),
+                args: vec![],
+                env: mcp_env,
+            }],
+            vec![container::InjectedFile {
+                container_path: path.into(),
+                contents: bytes.clone(),
+                mode: 0o755,
+            }],
+        )
     }
 }
 

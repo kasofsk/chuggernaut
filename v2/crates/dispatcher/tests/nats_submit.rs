@@ -43,7 +43,7 @@ async fn submits_flow_over_nats_to_the_core() {
         vcs::RepoManager::new(repos_root),
         Arc::new(FakeBackend::new()),
         provider.clone(),
-        CoreConfig { repo_url_base: "file:///repos".into(), nats_url: server.url().into() },
+        CoreConfig { repo_url_base: "file:///repos".into(), nats_url: server.url().into(), ..Default::default() },
     )
     .await
     .unwrap();

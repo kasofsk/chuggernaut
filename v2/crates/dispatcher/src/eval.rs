@@ -194,13 +194,14 @@ impl Core {
                         evaluator.prompt.as_deref().unwrap_or_default())
                     .await?
                     .unwrap_or_default();
+                let (mcp_servers, files) = self.channel_mcp(&env);
                 let config = AgentRunConfig {
                     image: eval_image(&job_type, evaluator),
                     prompt,
                     model: evaluator.model.clone(),
                     system_prompt: None,
-                    mcp_servers: vec![],
-                    files: vec![],
+                    mcp_servers,
+                    files,
                     env,
                     task_timeout: task_timeout(&job_type),
                     eval_context: vec![],

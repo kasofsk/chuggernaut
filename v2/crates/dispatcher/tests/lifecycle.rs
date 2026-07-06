@@ -20,6 +20,7 @@ async fn new_core(store: &NatsStore, repos_root: std::path::PathBuf) -> Core {
         CoreConfig {
             repo_url_base: "file:///repos".into(),
             nats_url: "nats://test".into(),
+            ..Default::default()
         },
     )
     .await

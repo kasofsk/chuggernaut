@@ -207,12 +207,20 @@ impl CoreHandle {
     }
 }
 
+#[derive(Default)]
 pub struct CoreConfig {
     /// Base for `REPO_URL` env injection: `{repo_url_base}/{owner}/{project}.git`.
     /// Must be reachable from every fleet node (spec §3.1). Tests use a local
     /// path base.
     pub repo_url_base: String,
     pub nats_url: String,
+    /// Path to the chuggernaut-channel binary, injected into every agent
+    /// container at /usr/local/bin/chuggernaut-channel (spec §4.2). None →
+    /// agents run without the channel MCP (tests, degraded dev mode).
+    pub channel_binary: Option<std::path::PathBuf>,
+    /// age identity (`AGE-SECRET-KEY-1...`) for decrypting secrets at launch
+    /// (spec §8.2). None → secret env values are injected as stored (dev).
+    pub age_identity: Option<String>,
 }
 
 pub struct Core {
@@ -230,6 +238,10 @@ pub struct Core {
     /// Execution state for jobs in Work/Evaluation (this process's working
     /// memory; restart rebuild is the reconcile slice).
     pub(crate) active: HashMap<(String, String, u64), exec::ExecState>,
+    /// chuggernaut-channel binary bytes, loaded once at startup.
+    pub(crate) channel_binary: Option<Vec<u8>>,
+    /// Decrypting secret store; None runs raw-injection dev mode.
+    pub(crate) secrets: Option<store::secrets::AgeSecretStore>,
     /// Per-project merge queue (spec §3.3 Merge Gate: depth-1 serialization).
     /// All post-eval finalization flows through it, keyed by project slug.
     pub(crate) merge_queue: HashMap<String, std::collections::VecDeque<u64>>,
@@ -288,6 +300,20 @@ impl Core {
         let counters = store.counters().await?;
         let rdeps = store.rdeps().await?;
 
+        let channel_binary = match &config.channel_binary {
+            Some(path) => Some(tokio::fs::read(path).await.map_err(|e| {
+                CoreError::NotFound(format!("channel binary {path:?}: {e}"))
+            })?),
+            None => None,
+        };
+        let secrets = match &config.age_identity {
+            Some(identity) => Some(store::secrets::AgeSecretStore::for_dispatcher(
+                store.raw_bucket(store::buckets::SECRETS).await?,
+                identity,
+            )?),
+            None => None,
+        };
+
         let mut core = Self {
             store,
             jobs,
@@ -298,6 +324,8 @@ impl Core {
             backend,
             provider,
             config,
+            channel_binary,
+            secrets,
             graphs: HashMap::new(),
             queue: ReadyQueue::default(),
             active: HashMap::new(),

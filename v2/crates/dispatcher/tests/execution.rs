@@ -83,6 +83,7 @@ async fn rig() -> Option<Rig> {
         CoreConfig {
             repo_url_base: "file:///repos".into(),
             nats_url: server.url().into(),
+            ..Default::default()
         },
     )
     .await
@@ -248,4 +249,72 @@ async fn event_types(store: &NatsStore) -> Vec<String> {
             v["event_type"].as_str().unwrap_or_default().to_string()
         })
         .collect()
+}
+
+const IMPL_SECRET: &str = r#"
+name: impl-secret
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+secrets: [DEPLOY_KEY]
+"#;
+
+/// Full launch wiring (§4.2/§8.2): the channel MCP binary is injected with
+/// its config entry, and declared secrets arrive age-decrypted in the env.
+#[tokio::test]
+async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else { return };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone.commit_file("jobs/impl-secret.yaml", IMPL_SECRET.as_bytes(), "t").await;
+    clone.commit_file("prompts/impl.md", b"implement", "p").await;
+    clone.push("main").await;
+
+    // Encrypted write with the public key (the API layer's path)…
+    let (identity, public_key) = store::secrets::generate_age_keypair();
+    let secrets_bucket = store.raw_bucket(store::buckets::SECRETS).await.unwrap();
+    {
+        use store::secrets::SecretStore;
+        let api_side = store::secrets::AgeSecretStore::for_api(secrets_bucket, &public_key).unwrap();
+        api_side.set("acme", "api", "DEPLOY_KEY", "s3cret-value").await.unwrap();
+    }
+
+    let fake_binary = repo.bare_path().parent().unwrap().join("chuggernaut-channel");
+    tokio::fs::write(&fake_binary, b"#!/bin/sh\nexit 0\n").await.unwrap();
+
+    let provider = Arc::new(FakeProvider::new());
+    let repos_root = repo.bare_path().parent().unwrap().parent().unwrap().to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        Arc::new(FakeBackend::new()),
+        provider.clone(),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            channel_binary: Some(fake_binary),
+            age_identity: Some(identity),
+        },
+    )
+    .await
+    .unwrap();
+    let handle = spawn(core);
+
+    let job = handle.create_job(req("impl-secret")).await.unwrap();
+    handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&store, job.id, JobState::Done).await;
+
+    let runs = provider.runs();
+    assert_eq!(runs.len(), 1);
+    // …decrypted read at launch (the dispatcher's path).
+    assert_eq!(runs[0].env.get("DEPLOY_KEY").map(String::as_str), Some("s3cret-value"));
+    assert_eq!(runs[0].mcp_servers.len(), 1);
+    assert_eq!(runs[0].mcp_servers[0].command, "/usr/local/bin/chuggernaut-channel");
+    assert!(runs[0].mcp_servers[0].env.contains_key("NATS_URL"));
+    assert_eq!(runs[0].files.len(), 1);
+    assert_eq!(runs[0].files[0].container_path, "/usr/local/bin/chuggernaut-channel");
+    assert_eq!(runs[0].files[0].mode, 0o755);
 }

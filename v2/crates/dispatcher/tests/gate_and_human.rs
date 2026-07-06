@@ -93,7 +93,7 @@ async fn rig() -> Option<Rig> {
         vcs::RepoManager::new(repos_root),
         backend.clone(),
         provider.clone(),
-        CoreConfig { repo_url_base: "file:///repos".into(), nats_url: server.url().into() },
+        CoreConfig { repo_url_base: "file:///repos".into(), nats_url: server.url().into(), ..Default::default() },
     )
     .await
     .unwrap();
