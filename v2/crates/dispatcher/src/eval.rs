@@ -85,7 +85,7 @@ impl Core {
     /// Create + launch one evaluator task (§3.3 evaluator types). Shared by the
     /// Evaluation fan-out (job branch) and the merge gate (candidate branch).
     #[allow(clippy::too_many_arguments)]
-    async fn launch_evaluator_task(
+    pub(crate) async fn launch_evaluator_task(
         &mut self,
         owner: &str,
         project: &str,
@@ -131,6 +131,7 @@ impl Core {
             kind,
             state: if pending_human { TaskState::Pending } else { TaskState::Running },
             attempt,
+            evaluator: Some(evaluator.name.clone()),
             container_id: None,
             result: None,
             created_at: Utc::now(),
@@ -460,6 +461,11 @@ impl Core {
 
     /// §3.2 step 12 entry: queue the job for finalization and pump. The
     /// per-project queue is the depth-1 merge-gate serialization (§3.3).
+    /// Also the reconcile re-entry point (`refinalize`).
+    pub(crate) async fn refinalize(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        self.finalize_pass(owner, project, seq).await
+    }
+
     async fn finalize_pass(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let slug = format!("{owner}/{project}");
         let q = self.merge_queue.entry(slug).or_default();

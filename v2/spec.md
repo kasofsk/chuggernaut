@@ -265,6 +265,7 @@ pub struct Task {
     pub kind: TaskKind,
     pub state: TaskState,
     pub attempt: u32,                     // 1-indexed; each retry is a new task record with attempt+1
+    pub evaluator: Option<String>,        // evaluator name for Evaluation/MergeGate tasks; None for work and escalation tasks
     pub container_id: Option<String>,     // backend-assigned container ID (Docker or k8s); None for Human tasks
     pub result: Option<TaskResult>,
     pub created_at: DateTime<Utc>,

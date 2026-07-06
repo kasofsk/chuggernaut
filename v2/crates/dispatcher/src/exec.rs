@@ -177,6 +177,7 @@ impl Core {
             kind,
             state: if pending_human { TaskState::Pending } else { TaskState::Running },
             attempt,
+            evaluator: None,
             container_id: None,
             result: None,
             created_at: Utc::now(),
@@ -547,7 +548,7 @@ impl Core {
     /// escalation resume; dispatcher restart is the reconcile slice).
     /// `reworks_used` restarts at 0 — after a human owned the escalation, the
     /// budget question is theirs (TODO: derive from the event stream instead).
-    async fn ensure_exec_state(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+    pub(crate) async fn ensure_exec_state(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
         if self.active.contains_key(&key) {
             return Ok(());

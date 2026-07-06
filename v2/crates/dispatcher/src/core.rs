@@ -115,6 +115,9 @@ pub enum Msg {
         operator: String,
         reply: Reply<()>,
     },
+    /// §3.5 scans; fired by the internal ticker, or with a reply from
+    /// [`CoreHandle::trigger_scan`] (tests).
+    Scan { reply: Option<Reply<()>> },
     /// Posted by container monitor tasks — never by anything outside the crate.
     TaskExited {
         owner: String,
@@ -180,6 +183,12 @@ impl CoreHandle {
             .await
     }
 
+    /// Run the §3.5 scans now and wait for them to finish. Production relies
+    /// on the internal ticker; this is for tests and admin tooling.
+    pub async fn trigger_scan(&self) -> Result<()> {
+        self.call(|reply| Msg::Scan { reply: Some(reply) }).await
+    }
+
     pub async fn resolve_task(
         &self,
         owner: &str,
@@ -230,11 +239,36 @@ pub struct Core {
     pub(crate) self_tx: Option<mpsc::Sender<Msg>>,
 }
 
+const SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Start the single-writer loop; returns the handle everything else uses.
+/// Restart reconciliation (§3.6) runs inside the actor task before the first
+/// message is processed.
 pub fn spawn(mut core: Core) -> CoreHandle {
     let (tx, rx) = mpsc::channel(256);
     core.self_tx = Some(tx.clone());
-    tokio::spawn(core.run(rx));
+
+    let ticker_tx = tx.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(SCAN_INTERVAL);
+        interval.tick().await; // consume the immediate first tick
+        loop {
+            interval.tick().await;
+            if ticker_tx.send(Msg::Scan { reply: None }).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        if let Err(e) = core.reconcile().await {
+            tracing::error!("restart reconciliation: {e}");
+        }
+        if let Err(e) = core.drain_queue().await {
+            tracing::error!("post-reconcile drain: {e}");
+        }
+        core.run(rx).await
+    });
     CoreHandle { tx }
 }
 
@@ -322,6 +356,19 @@ impl Core {
                     self.handle_resolve_task(&owner, &project, seq, task_id, resolution, &operator)
                         .await,
                 );
+            }
+            Msg::Scan { reply } => {
+                let result = self.run_scans().await;
+                match reply {
+                    Some(reply) => {
+                        let _ = reply.send(result);
+                    }
+                    None => {
+                        if let Err(e) = result {
+                            tracing::error!("scan: {e}");
+                        }
+                    }
+                }
             }
             Msg::TaskExited { owner, project, seq, task_id, exit_code, eval_json } => {
                 if let Err(e) = self
@@ -445,63 +492,67 @@ impl Core {
             .unwrap_or_default();
 
         for dep_seq in dependents {
-            let Some(dep) = self.graphs.get(&slug).and_then(|g| g.get(dep_seq)) else {
-                continue;
-            };
-            let ready = dep.state == JobState::Blocked
-                && self.graphs.get(&slug).is_some_and(|g| g.deps_done(dep_seq));
-            if !ready {
-                continue;
+            self.try_unblock(owner, project, dep_seq).await?;
+        }
+        Ok(())
+    }
+
+    /// §2.1 Blocked→Ready with the §2.2 Ready-transition re-validation pass.
+    /// No-op unless the job is Blocked with all dependencies Done. Also used
+    /// by restart reconciliation (§3.6 step 3).
+    pub(crate) async fn try_unblock(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        let slug = format!("{owner}/{project}");
+        let Some(dep) = self.graphs.get(&slug).and_then(|g| g.get(seq)) else {
+            return Ok(());
+        };
+        let ready = dep.state == JobState::Blocked
+            && self.graphs.get(&slug).is_some_and(|g| g.deps_done(seq));
+        if !ready {
+            return Ok(());
+        }
+        let mut dep = dep.clone();
+
+        let default_branch = self.repos.default_branch(owner, project).await?;
+        let head = self.repos.resolve_ref(owner, project, &default_branch).await?;
+
+        let revalidation = match release::load_job_type(
+            &self.repos,
+            owner,
+            project,
+            &head,
+            &dep.r#type,
+            Some(seq),
+        )
+        .await
+        {
+            Ok(jt) => release::static_errors(&self.repos, owner, project, &head, &dep, &jt, None)
+                .await
+                .and_then(|errs| if errs.is_empty() { Ok(()) } else { Err(errs) }),
+            Err(errs) => Err(errs),
+        };
+
+        match revalidation {
+            Ok(()) => {
+                dep.base_ref = Some(head);
+                dep.ready_at.get_or_insert_with(Utc::now);
+                self.set_state(&mut dep, JobState::Ready).await?;
+                self.queue.enqueue(QueuedJob {
+                    owner: owner.into(),
+                    project: project.into(),
+                    seq,
+                });
+                self.publish(owner, project, seq, "job-unblocked", serde_json::json!({}))
+                    .await?;
             }
-            let mut dep = dep.clone();
-
-            let default_branch = self.repos.default_branch(owner, project).await?;
-            let head = self.repos.resolve_ref(owner, project, &default_branch).await?;
-
-            let revalidation = match release::load_job_type(
-                &self.repos,
-                owner,
-                project,
-                &head,
-                &dep.r#type,
-                Some(dep_seq),
-            )
-            .await
-            {
-                Ok(jt) => {
-                    release::static_errors(&self.repos, owner, project, &head, &dep, &jt, None)
-                        .await
-                        .map(|errs| (jt, errs))
-                        .and_then(|(jt, errs)| if errs.is_empty() { Ok(jt) } else { Err(errs) })
-                }
-                Err(errs) => Err(errs),
-            };
-
-            match revalidation {
-                Ok(_) => {
-                    dep.base_ref = Some(head);
-                    dep.ready_at.get_or_insert_with(Utc::now);
-                    self.set_state(&mut dep, JobState::Ready).await?;
-                    self.queue.enqueue(QueuedJob {
-                        owner: owner.into(),
-                        project: project.into(),
-                        seq: dep_seq,
-                    });
-                    self.publish(owner, project, dep_seq, "job-unblocked", serde_json::json!({}))
-                        .await?;
-                }
-                Err(errs) => {
-                    let detail = errs
-                        .iter()
-                        .map(|e| format!("- {}: {}", e.field, e.message))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let prompt = format!(
-                        "Job {dep_seq} failed Ready-transition re-validation at {head}:\n{detail}"
-                    );
-                    self.escalate(owner, project, dep_seq, "revalidation_failed", prompt)
-                        .await?;
-                }
+            Err(errs) => {
+                let detail = errs
+                    .iter()
+                    .map(|e| format!("- {}: {}", e.field, e.message))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let prompt =
+                    format!("Job {seq} failed Ready-transition re-validation at {head}:\n{detail}");
+                self.escalate(owner, project, seq, "revalidation_failed", prompt).await?;
             }
         }
         Ok(())
@@ -554,7 +605,7 @@ impl Core {
         Ok(cascaded)
     }
 
-    async fn kill_running_containers(&self, owner: &str, project: &str, seq: u64) {
+    pub(crate) async fn kill_running_containers(&self, owner: &str, project: &str, seq: u64) {
         let Ok(tasks) = self.tasks.list_for_job(owner, project, seq).await else {
             return;
         };

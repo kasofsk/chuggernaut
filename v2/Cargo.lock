@@ -694,6 +694,7 @@ dependencies = [
  "auth",
  "chrono",
  "container",
+ "futures",
  "petgraph",
  "serde",
  "serde_json",

@@ -17,6 +17,11 @@ pub struct Task {
     pub state: TaskState,
     /// 1-indexed; each retry is a new task record with attempt+1.
     pub attempt: u32,
+    /// Evaluator name for Evaluation/MergeGate tasks; None for work and
+    /// escalation tasks. Ties the task to its `eval:` declaration — restart
+    /// reconciliation and the UI both need the mapping.
+    #[serde(default)]
+    pub evaluator: Option<String>,
     /// Backend-assigned container ID (Docker or k8s); None for Human tasks.
     pub container_id: Option<String>,
     pub result: Option<TaskResult>,

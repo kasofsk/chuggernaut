@@ -23,6 +23,7 @@ pub fn escalation_task(
         kind: TaskKind::Human { prompt },
         state: TaskState::Pending,
         attempt: 1,
+        evaluator: None,
         container_id: None,
         result: None,
         created_at: Utc::now(),
