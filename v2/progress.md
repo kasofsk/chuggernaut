@@ -123,8 +123,9 @@ the ref table against real `git clone`/`push`, and launches inject job certs.
   declaration→platform fallback is applied at task-record and launch time.
   `DispatcherConfig::from_env` enforces "refuses to start without
   AGENT_PROVIDER_DEFAULT".
-- **`REPO_URL_BASE` defaults to `file://{repos_root}`** until the SSH front
-  (auth crate) lands — single-node dev works out of the box.
+- **`REPO_URL_BASE` defaults to `file://{repos_root}`** — single-node dev
+  works out of the box. The SSH front activates only when it's set to
+  `ssh://...` *and* `ssh_ca` is present (cert injection is keyed on both).
 - Crate invariant held: only `store` touches `async-nats`
   (`subscribe_requests` / `read_stream` / `read_subject_after` wrappers).
 - **NATS JWTs are hand-rolled** (`auth::nats`): `alg: ed25519-nkey`, claims
@@ -210,9 +211,9 @@ the ref table against real `git clone`/`push`, and launches inject job certs.
 
 - Unit: types (duration/schema/steps), state table, graph, provider
   invocation, channel protocol, docker tar/memory parsing.
-- Unit additions this session: auth (JWT round-trip/expiry/tamper, §5.2
+- Unit, auth suite: JWT round-trip/expiry/tamper, §5.2 git-command parsing +
   principal + pull/push tables, cert issuance via ssh-keygen -L, NATS JWT
-  shape + signature verify, §7.4 allow-list contents).
+  shape + signature verify, §7.4 allow-list contents.
 - Tier-2 (skip-guarded on Docker): `store/tests/nats_store.rs`,
   `container/tests/docker_backend.rs`, `chuggernaut-channel/tests/stdio.rs`,
   `cli/tests/init_admin.rs`, `auth/tests/nats_live.rs` (operator-mode server),
