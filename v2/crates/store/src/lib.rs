@@ -159,6 +159,61 @@ impl NatsStore {
         Ok(out)
     }
 
+    /// Read messages on one subject after a given stream sequence — the
+    /// channel_check contract (spec §4.2 polling mode). Returns
+    /// `(stream_seq, payload)` pairs so callers can track their cursor.
+    pub async fn read_subject_after(
+        &self,
+        stream: &str,
+        subject: &str,
+        after_seq: u64,
+        max: usize,
+    ) -> Result<Vec<(u64, Vec<u8>)>> {
+        use futures::StreamExt;
+        let stream = self.js.get_stream(stream).await.map_err(nats_err)?;
+        let consumer = stream
+            .create_consumer(jetstream::consumer::pull::Config {
+                filter_subject: subject.to_string(),
+                deliver_policy: if after_seq == 0 {
+                    jetstream::consumer::DeliverPolicy::All
+                } else {
+                    jetstream::consumer::DeliverPolicy::ByStartSequence {
+                        start_sequence: after_seq + 1,
+                    }
+                },
+                ..Default::default()
+            })
+            .await
+            .map_err(nats_err)?;
+        let mut batch = consumer
+            .fetch()
+            .max_messages(max)
+            .messages()
+            .await
+            .map_err(nats_err)?;
+        let mut out = Vec::new();
+        while let Some(msg) = batch.next().await {
+            let msg = msg.map_err(nats_err)?;
+            let seq = msg.info().map_err(nats_err)?.stream_sequence;
+            out.push((seq, msg.payload.to_vec()));
+        }
+        Ok(out)
+    }
+
+    /// Subscribe to a request subject (wildcards allowed). Keeps async-nats
+    /// confined to this crate: consumers get subject/payload and a replier.
+    pub async fn subscribe_requests(&self, subject: &str) -> Result<RequestSubscription> {
+        let sub = self
+            .client
+            .subscribe(subject.to_string())
+            .await
+            .map_err(nats_err)?;
+        Ok(RequestSubscription {
+            sub,
+            client: self.client.clone(),
+        })
+    }
+
     /// Request-reply with bounded retry (spec §4.2 reliability): retries until
     /// an ack is received or attempts are exhausted, with linear backoff.
     pub async fn request_with_retry(
@@ -185,5 +240,43 @@ impl NatsStore {
             }
         }
         Err(last_err.unwrap_or_else(|| StoreError::Nats("no attempts made".into())))
+    }
+}
+
+/// A stream of inbound request-reply messages (see
+/// [`NatsStore::subscribe_requests`]).
+pub struct RequestSubscription {
+    sub: async_nats::Subscriber,
+    client: async_nats::Client,
+}
+
+impl RequestSubscription {
+    pub async fn next(&mut self) -> Option<InboundRequest> {
+        use futures::StreamExt;
+        let msg = self.sub.next().await?;
+        Some(InboundRequest {
+            subject: msg.subject.to_string(),
+            payload: msg.payload.to_vec(),
+            reply_to: msg.reply.map(|r| r.to_string()),
+            client: self.client.clone(),
+        })
+    }
+}
+
+pub struct InboundRequest {
+    pub subject: String,
+    pub payload: Vec<u8>,
+    reply_to: Option<String>,
+    client: async_nats::Client,
+}
+
+impl InboundRequest {
+    pub async fn respond(&self, body: impl Into<Vec<u8>>) {
+        if let Some(reply_to) = &self.reply_to {
+            let _ = self
+                .client
+                .publish(reply_to.clone(), body.into().into())
+                .await;
+        }
     }
 }

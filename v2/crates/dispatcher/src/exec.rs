@@ -193,7 +193,8 @@ impl Core {
             return Ok(()); // operator inbox drives it from here (§1.2)
         }
 
-        let env = self.container_env(owner, project, seq, &job.branch, &job_type).await?;
+        let mut env = self.container_env(owner, project, seq, &job.branch, &job_type).await?;
+        env.insert("CHANNEL_ROLE".into(), "work".into());
         match job_type.work.r#type {
             WorkType::Agent => {
                 let prompt = self
@@ -206,7 +207,8 @@ impl Core {
                     prompt,
                     model: job_type.work.model.clone(),
                     system_prompt: None, // KO injection: knowledge slice
-                    mcp_servers: vec![], // channel/ko wiring: agent-provider slice
+                    mcp_servers: vec![], // channel/ko wiring: credentials slice
+                    files: vec![],
                     env,
                     task_timeout: task_timeout(&job_type),
                     eval_context,

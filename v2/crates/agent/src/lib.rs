@@ -37,6 +37,9 @@ pub struct AgentRunConfig {
     /// Composed from knowledge libraries (spec §4.4).
     pub system_prompt: Option<String>,
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Injected by the provider alongside the prompt — the MCP server binaries
+    /// and any per-run payloads (spec §4.2 distribution, §13.4 event batch).
+    pub files: Vec<container::InjectedFile>,
     pub env: HashMap<String, String>,
     pub task_timeout: Duration,
     /// Empty on cycle 1 and merge-conflict cycles; populated on eval-failure rework.
