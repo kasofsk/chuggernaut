@@ -200,8 +200,9 @@ impl Core {
             return Ok(()); // operator inbox drives it from here (§1.2)
         }
 
-        let mut env = self.container_env(owner, project, seq, &job.branch, &job_type).await?;
-        env.insert("CHANNEL_ROLE".into(), "work".into());
+        let env = self
+            .container_env(owner, project, seq, &job.branch, &job_type, ChannelRole::Work)
+            .await?;
         match job_type.work.r#type {
             WorkType::Agent => {
                 let prompt = self
@@ -623,6 +624,7 @@ impl Core {
         seq: u64,
         branch: &str,
         job_type: &JobType,
+        role: ChannelRole,
     ) -> Result<HashMap<String, String>> {
         let mut env = HashMap::from([
             ("JOB_ID".into(), seq.to_string()),
@@ -631,9 +633,40 @@ impl Core {
             ("BASE_BRANCH".into(), self.repos.default_branch(owner, project).await?),
             ("REPO_URL".into(), format!("{}/{owner}/{project}.git", self.config.repo_url_base)),
             ("NATS_URL".into(), self.config.nats_url.clone()),
-            // TODO(§7.4): short-lived scoped JWT — auth slice.
-            ("NATS_TOKEN".into(), String::new()),
         ]);
+        match role {
+            ChannelRole::Work => {
+                env.insert("CHANNEL_ROLE".into(), "work".into());
+            }
+            ChannelRole::Eval { task_id } => {
+                env.insert("CHANNEL_ROLE".into(), "eval".into());
+                env.insert("JOB_TASK_ID".into(), task_id.to_string());
+            }
+        }
+        // §7.4: scoped credentials valid for task_timeout, minted per launch.
+        if let Some(seed) = &self.config.nats_account_seed {
+            let signer = auth::nats::NatsUserSigner::from_account_seed(seed)
+                .map_err(|e| CoreError::Config(format!("nats account seed: {e}")))?;
+            let perms = match role {
+                ChannelRole::Work => auth::nats::work_container_permissions(owner, project, seq),
+                ChannelRole::Eval { task_id } => {
+                    auth::nats::eval_container_permissions(owner, project, seq, task_id)
+                }
+            };
+            let ttl = chrono::Duration::from_std(task_timeout(job_type))
+                .unwrap_or_else(|_| chrono::Duration::hours(1));
+            let creds = signer
+                .mint_creds(
+                    &format!("{owner}-{project}-{seq}-{}", match role {
+                        ChannelRole::Work => "work".to_string(),
+                        ChannelRole::Eval { task_id } => format!("eval-{task_id}"),
+                    }),
+                    &perms,
+                    Some(ttl),
+                )
+                .map_err(|e| CoreError::Config(format!("minting container creds: {e}")))?;
+            env.insert("NATS_CREDS".into(), creds);
+        }
         let vars = self.store.raw_bucket(store::buckets::VARS).await?;
         for name in &job_type.vars {
             if let Some(value) = vars.get_json::<String>(&format!("{owner}.{project}.{name}")).await? {
@@ -675,9 +708,9 @@ impl Core {
             return (vec![], vec![]);
         };
         let path = "/usr/local/bin/chuggernaut-channel";
-        // §4.2: the binary connects using NATS_URL/NATS_TOKEN from
+        // §4.2: the binary connects using NATS_URL/NATS_CREDS from
         // McpServerConfig.env (the rest of its context rides on container env).
-        let mcp_env: HashMap<String, String> = ["NATS_URL", "NATS_TOKEN"]
+        let mcp_env: HashMap<String, String> = ["NATS_URL", "NATS_CREDS"]
             .iter()
             .filter_map(|k| env.get(*k).map(|v| (k.to_string(), v.clone())))
             .collect();
@@ -695,6 +728,13 @@ impl Core {
             }],
         )
     }
+}
+
+/// Selects the channel tool set (§4.2) and the §7.4 credential scope.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ChannelRole {
+    Work,
+    Eval { task_id: u64 },
 }
 
 fn kind_matches_work(kind: &TaskKind, work_type: WorkType) -> bool {

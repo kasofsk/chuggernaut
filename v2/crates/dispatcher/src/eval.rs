@@ -8,7 +8,7 @@
 //! the default branch untested against the exact tree that lands.
 
 use crate::core::{Core, CoreError, EvalSubmission, Msg, Result};
-use crate::exec::{eval_image, task_timeout};
+use crate::exec::{ChannelRole, eval_image, task_timeout};
 use agent::AgentRunConfig;
 use chrono::Utc;
 use container::{ContainerLaunchConfig, bootstrap_cmd};
@@ -154,9 +154,9 @@ impl Core {
         // Eval containers get vars but only the evaluator's own secrets (§4.1).
         let mut eval_type = job_type.clone();
         eval_type.secrets = evaluator.secrets.clone();
-        let mut env = self.container_env(owner, project, seq, branch, &eval_type).await?;
-        env.insert("CHANNEL_ROLE".into(), "eval".into());
-        env.insert("JOB_TASK_ID".into(), task_id.to_string());
+        let env = self
+            .container_env(owner, project, seq, branch, &eval_type, ChannelRole::Eval { task_id })
+            .await?;
         let tx = self.self_tx.clone().expect("spawned core");
         let (o, p) = (owner.to_string(), project.to_string());
 

@@ -297,6 +297,7 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
             nats_url: server.url().into(),
             channel_binary: Some(fake_binary),
             age_identity: Some(identity),
+            nats_account_seed: Some(nkeys::KeyPair::new_account().seed().unwrap()),
             ..Default::default()
         },
     )
@@ -315,6 +316,11 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
     assert_eq!(runs[0].mcp_servers.len(), 1);
     assert_eq!(runs[0].mcp_servers[0].command, "/usr/local/bin/chuggernaut-channel");
     assert!(runs[0].mcp_servers[0].env.contains_key("NATS_URL"));
+    // §7.4: per-launch scoped credentials, forwarded to the channel binary.
+    let creds = runs[0].env.get("NATS_CREDS").expect("NATS_CREDS in container env");
+    assert!(creds.contains("BEGIN NATS USER JWT"));
+    assert_eq!(runs[0].mcp_servers[0].env.get("NATS_CREDS"), Some(creds));
+    assert_eq!(runs[0].env.get("CHANNEL_ROLE").map(String::as_str), Some("work"));
     assert_eq!(runs[0].files.len(), 1);
     assert_eq!(runs[0].files[0].container_path, "/usr/local/bin/chuggernaut-channel");
     assert_eq!(runs[0].files[0].mode, 0o755);

@@ -47,10 +47,11 @@ impl NatsStore {
         Ok(Self { client, js })
     }
 
-    /// Connect with a scoped JWT/token (per-job container credentials, spec §7.4).
-    pub async fn connect_with_token(url: &str, token: &str) -> Result<Self> {
-        let client = async_nats::ConnectOptions::new()
-            .token(token.to_string())
+    /// Connect with `.creds`-format credentials (per-job scoped user JWT +
+    /// nkey seed, spec §7.4).
+    pub async fn connect_with_creds(url: &str, creds: &str) -> Result<Self> {
+        let client = async_nats::ConnectOptions::with_credentials(creds)
+            .map_err(nats_err)?
             .connect(url)
             .await
             .map_err(nats_err)?;

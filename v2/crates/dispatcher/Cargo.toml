@@ -22,3 +22,4 @@ tracing.workspace = true
 [dev-dependencies]
 test-utils.workspace = true
 futures.workspace = true
+nkeys.workspace = true

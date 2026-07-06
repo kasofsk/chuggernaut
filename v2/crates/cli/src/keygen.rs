@@ -56,6 +56,20 @@ pub async fn ensure_all(dir: &Path) -> Result<KeygenReport> {
         write_key(&path, &format!("{public}\n"), false).await
     }).await?;
 
+    // NATS decentralized auth (§7.4): operator + system + platform account
+    // nkey seeds, generated in-process (nkeys is already in the tree via the
+    // NATS client). Derived server/dispatcher artifacts: ensure_nats_artifacts.
+    ensure(&mut report, dir, "nats_operator.seed", |path| async move {
+        let kp = nkeys::KeyPair::new_operator();
+        write_key(&path, &format!("{}\n", seed_of(&kp)?), true).await
+    }).await?;
+    for name in ["nats_sys_account.seed", "nats_account.seed"] {
+        ensure(&mut report, dir, name, |path| async move {
+            let kp = nkeys::KeyPair::new_account();
+            write_key(&path, &format!("{}\n", seed_of(&kp)?), true).await
+        }).await?;
+    }
+
     // VAPID / web push (§9): ES256 = P-256
     ensure(&mut report, dir, "vapid_private.pem", |path| async move {
         run("openssl", &["ecparam", "-name", "prime256v1", "-genkey", "-noout",
@@ -71,7 +85,55 @@ pub async fn ensure_all(dir: &Path) -> Result<KeygenReport> {
     for private in ["jwt_private.pem", "ssh_ca", "age_private.key", "vapid_private.pem"] {
         restrict(&dir.join(private)).await?;
     }
+
+    ensure_nats_artifacts(dir, &mut report).await?;
     Ok(report)
+}
+
+/// Artifacts derived from the NATS seeds, re-created when missing:
+/// `nats-resolver.conf` (mounted into the NATS server) and
+/// `dispatcher.creds` (unrestricted platform-account user, mounted into the
+/// dispatcher).
+async fn ensure_nats_artifacts(dir: &Path, report: &mut KeygenReport) -> Result<()> {
+    async fn seed(dir: &Path, name: &str) -> Result<nkeys::KeyPair> {
+        let path = dir.join(name);
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .with_context(|| format!("reading {}", path.display()))?;
+        nkeys::KeyPair::from_seed(text.trim())
+            .map_err(|e| anyhow::anyhow!("parsing {name}: {e}"))
+    }
+    let operator = seed(dir, "nats_operator.seed").await?;
+    let sys = seed(dir, "nats_sys_account.seed").await?;
+    let account = seed(dir, "nats_account.seed").await?;
+
+    ensure(report, dir, "nats-resolver.conf", |path| async move {
+        let conf = auth::nats::resolver_config(
+            &auth::nats::operator_jwt(&operator, "chuggernaut")?,
+            &sys.public_key(),
+            &auth::nats::system_account_jwt(&operator, &sys.public_key())?,
+            &account.public_key(),
+            &auth::nats::account_jwt(&operator, &account.public_key(), "CHUG")?,
+        );
+        write_key(&path, &conf, false).await
+    })
+    .await?;
+
+    ensure(report, dir, "dispatcher.creds", |path| async move {
+        let signer = auth::nats::NatsUserSigner::from_account_seed(&seed_of_str(dir, "nats_account.seed").await?)?;
+        let creds = signer.mint_creds("dispatcher", &auth::nats::Permissions::default(), None)?;
+        write_key(&path, &creds, true).await
+    })
+    .await?;
+    Ok(())
+}
+
+async fn seed_of_str(dir: &Path, name: &str) -> Result<String> {
+    Ok(tokio::fs::read_to_string(dir.join(name)).await?.trim().to_string())
+}
+
+fn seed_of(kp: &nkeys::KeyPair) -> Result<String> {
+    kp.seed().map_err(|e| anyhow::anyhow!("nkey seed: {e}"))
 }
 
 async fn ensure<F, Fut>(report: &mut KeygenReport, dir: &Path, name: &str, generate: F) -> Result<()>

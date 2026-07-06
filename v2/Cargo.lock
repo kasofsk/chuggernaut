@@ -238,14 +238,23 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 name = "auth"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "argon2",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
+ "data-encoding",
+ "futures",
  "jsonwebtoken",
+ "nkeys",
  "serde",
  "serde_json",
+ "sha2",
  "store",
+ "tempfile",
+ "test-utils",
  "thiserror 2.0.18",
+ "tokio",
  "types",
 ]
 
@@ -596,6 +605,7 @@ dependencies = [
  "auth",
  "chrono",
  "clap",
+ "nkeys",
  "serde_json",
  "store",
  "tempfile",
@@ -757,6 +767,7 @@ dependencies = [
  "chrono",
  "container",
  "futures",
+ "nkeys",
  "petgraph",
  "serde",
  "serde_json",

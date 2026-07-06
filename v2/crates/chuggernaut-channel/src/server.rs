@@ -18,7 +18,8 @@ pub struct JobContext {
     /// Present in eval containers only; addresses `req.eval.submit`.
     pub task_id: Option<u64>,
     pub nats_url: String,
-    pub nats_token: String,
+    /// `.creds`-format scoped credentials (§7.4); empty → unauthenticated dev.
+    pub nats_creds: String,
 }
 
 impl JobContext {
@@ -35,7 +36,7 @@ impl JobContext {
             role: std::env::var("CHANNEL_ROLE").unwrap_or_else(|_| "work".into()),
             task_id: std::env::var("JOB_TASK_ID").ok().and_then(|t| t.parse().ok()),
             nats_url: var("NATS_URL")?,
-            nats_token: std::env::var("NATS_TOKEN").unwrap_or_default(),
+            nats_creds: std::env::var("NATS_CREDS").unwrap_or_default(),
         })
     }
 }
@@ -53,10 +54,10 @@ impl Server {
 
     async fn store(&mut self) -> Result<&NatsStore, String> {
         if self.store.is_none() {
-            let store = if self.ctx.nats_token.is_empty() {
+            let store = if self.ctx.nats_creds.is_empty() {
                 NatsStore::connect(&self.ctx.nats_url).await
             } else {
-                NatsStore::connect_with_token(&self.ctx.nats_url, &self.ctx.nats_token).await
+                NatsStore::connect_with_creds(&self.ctx.nats_url, &self.ctx.nats_creds).await
             }
             .map_err(|e| e.to_string())?;
             self.store = Some(store);
@@ -260,7 +261,7 @@ mod tests {
             role: role.into(),
             task_id: (role == "eval").then_some(7),
             nats_url: "nats://unused".into(),
-            nats_token: String::new(),
+            nats_creds: String::new(),
         }
     }
 

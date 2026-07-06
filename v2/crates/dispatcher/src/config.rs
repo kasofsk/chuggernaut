@@ -94,6 +94,28 @@ impl DispatcherConfig {
         }
     }
 
+    /// Read the platform NATS account seed written by `chuggernaut init`
+    /// (§12.1). Missing file → None: containers connect unauthenticated
+    /// (dev mode without the operator-mode server).
+    pub async fn nats_account_seed(&self) -> Result<Option<String>> {
+        let path = self.keys_dir.join("nats_account.seed");
+        match tokio::fs::read_to_string(&path).await {
+            Ok(s) => Ok(Some(s.trim().to_string())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(CoreError::Config(format!("reading {}: {e}", path.display()))),
+        }
+    }
+
+    /// Read `dispatcher.creds` for the dispatcher's own NATS connection.
+    pub async fn dispatcher_creds(&self) -> Result<Option<String>> {
+        let path = self.keys_dir.join("dispatcher.creds");
+        match tokio::fs::read_to_string(&path).await {
+            Ok(s) => Ok(Some(s)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(CoreError::Config(format!("reading {}: {e}", path.display()))),
+        }
+    }
+
     pub async fn core_config(&self) -> Result<CoreConfig> {
         Ok(CoreConfig {
             repo_url_base: self.repo_url_base.clone(),
@@ -102,6 +124,7 @@ impl DispatcherConfig {
             age_identity: self.age_identity().await?,
             agent_provider_default: Some(self.agent_provider_default.clone()),
             agent_model_default: self.agent_model_default.clone(),
+            nats_account_seed: self.nats_account_seed().await?,
         })
     }
 }

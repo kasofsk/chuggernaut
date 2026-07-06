@@ -15,7 +15,12 @@ use vcs::RepoManager;
 /// Bring up the dispatcher and return its handle; the process stays alive as
 /// long as the caller holds it (the bin waits on ctrl-c).
 pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
-    let store = NatsStore::connect(&config.nats_url).await?;
+    // Operator-mode NATS requires the dispatcher credentials from init
+    // (§12.1); without them (open dev server) connect plain.
+    let store = match config.dispatcher_creds().await? {
+        Some(creds) => NatsStore::connect_with_creds(&config.nats_url, &creds).await?,
+        None => NatsStore::connect(&config.nats_url).await?,
+    };
 
     let repos = RepoManager::new(&config.repos_root);
     repos.check_git_version().await?;

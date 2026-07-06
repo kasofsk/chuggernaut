@@ -3,7 +3,7 @@
 //! Tools: update_status, channel_check, reply, and submit_result (work role)
 //! or submit_eval (eval role). Built as a static binary (musl) and injected
 //! into every agent container at /usr/local/bin/chuggernaut-channel; connects
-//! to NATS via NATS_URL/NATS_TOKEN. Transport: newline-delimited JSON-RPC 2.0
+//! to NATS via NATS_URL/NATS_CREDS. Transport: newline-delimited JSON-RPC 2.0
 //! over stdio.
 
 mod server;

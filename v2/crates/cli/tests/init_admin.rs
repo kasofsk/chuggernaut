@@ -30,12 +30,21 @@ async fn init_bootstraps_and_is_idempotent() {
     for name in [
         "jwt_private.pem", "jwt_public.pem", "ssh_ca", "ssh_ca.pub",
         "age_private.key", "age_public.key", "vapid_private.pem", "vapid_public.pem",
+        "nats_operator.seed", "nats_sys_account.seed", "nats_account.seed",
+        "nats-resolver.conf", "dispatcher.creds",
     ] {
         assert!(keys.join(name).exists(), "missing {name}");
     }
     use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(keys.join("age_private.key")).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o600);
+    for private in ["age_private.key", "nats_operator.seed", "dispatcher.creds"] {
+        let mode = std::fs::metadata(keys.join(private)).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{private} not 0600");
+    }
+    let resolver = std::fs::read_to_string(keys.join("nats-resolver.conf")).unwrap();
+    assert!(resolver.contains("resolver: MEMORY"));
+    assert!(std::fs::read_to_string(keys.join("dispatcher.creds"))
+        .unwrap()
+        .contains("BEGIN NATS USER JWT"));
 
     // Topology + VAPID public + admin user in KV.
     let store = NatsStore::connect(server.url()).await.unwrap();

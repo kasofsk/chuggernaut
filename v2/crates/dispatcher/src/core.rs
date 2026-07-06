@@ -230,6 +230,10 @@ pub struct CoreConfig {
     pub agent_provider_default: Option<String>,
     /// §12.4 platform model default; job-type/evaluator `model:` overrides it.
     pub agent_model_default: Option<String>,
+    /// Platform NATS account seed (`nats_account.seed`, §12.1) for minting
+    /// per-container scoped credentials (§7.4). None → containers connect
+    /// unauthenticated (tests, open dev NATS).
+    pub nats_account_seed: Option<String>,
 }
 
 pub struct Core {

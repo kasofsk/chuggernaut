@@ -8,6 +8,7 @@ license.workspace = true
 types.workspace = true
 store.workspace = true
 auth.workspace = true
+nkeys.workspace = true
 vcs.workspace = true
 anyhow.workspace = true
 chrono.workspace = true

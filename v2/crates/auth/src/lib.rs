@@ -1,5 +1,9 @@
 //! Identity and access (spec Part 7).
 
+pub mod jwt;
+pub mod nats;
+pub mod ssh;
+
 use async_trait::async_trait;
 use thiserror::Error;
 use types::{Identity, ProjectRole};
@@ -75,11 +79,24 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, AuthError> {
         .is_ok())
 }
 
-// TODO (spec §7.1, §7.3, §7.4, §12.1):
-// - JWT issue/verify (RS256), httpOnly cookie construction
-// - SSH CA: user cert signing (24h, email principal), per-job cert issuance
-// - per-job NATS JWT minting with the §7.4 allow-lists (+ triage create_job perm)
-// - sshd AuthorizedPrincipalsCommand ref-authorization helper
+/// `JwtAuthProvider` — the default `AuthProvider` (§7.1): verifies the
+/// session JWT and returns the embedded identity.
+pub struct JwtAuthProvider {
+    verifier: jwt::JwtVerifier,
+}
+
+impl JwtAuthProvider {
+    pub fn new(verifier: jwt::JwtVerifier) -> Self {
+        Self { verifier }
+    }
+}
+
+#[async_trait]
+impl AuthProvider for JwtAuthProvider {
+    async fn authenticate(&self, jwt_cookie: &str) -> Result<Identity, AuthError> {
+        self.verifier.verify(jwt_cookie)
+    }
+}
 
 #[cfg(test)]
 mod tests {

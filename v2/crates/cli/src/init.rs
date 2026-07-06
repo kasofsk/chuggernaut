@@ -37,7 +37,10 @@ pub async fn run(args: InitArgs) -> Result<()> {
         .with_context(|| format!("creating {}", args.repos_root.display()))?;
 
     // 2. NATS buckets + streams, VAPID public key at platform.vapid.public.
-    let store = NatsStore::connect(&args.nats_url)
+    // Connect with the dispatcher credentials keygen just ensured — a plain
+    // (no-auth) dev server ignores them, an operator-mode server requires them.
+    let creds = tokio::fs::read_to_string(args.keys_dir.join("dispatcher.creds")).await?;
+    let store = NatsStore::connect_with_creds(&args.nats_url, &creds)
         .await
         .with_context(|| format!("connecting to {}", args.nats_url))?;
     store.ensure_topology().await?;
@@ -61,5 +64,9 @@ pub async fn run(args: InitArgs) -> Result<()> {
 
     println!("init complete");
     println!("private keys in {} — mount them into the dispatcher/API per §12.1", args.keys_dir.display());
+    println!(
+        "to enforce per-job credentials (§7.4), start nats-server with {}",
+        args.keys_dir.join("nats-resolver.conf").display()
+    );
     Ok(())
 }
