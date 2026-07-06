@@ -6,7 +6,10 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+bollard = "0.19"
+futures.workspace = true
 serde.workspace = true
+tar = "0.4"
 thiserror.workspace = true
 tokio.workspace = true
 
