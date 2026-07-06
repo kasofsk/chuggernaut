@@ -47,6 +47,13 @@ pub enum MergeOutcome {
     },
 }
 
+/// Internal result of building a squash commit without advancing any ref.
+enum SquashBuild {
+    Commit { commit: String, old_head: String },
+    NoOp,
+    Conflict { files: Vec<String> },
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct DiffResponse {
     pub files: Vec<FileStat>,
@@ -380,11 +387,12 @@ impl RepoManager {
         Ok(count.trim() != "0")
     }
 
-    /// Squash-merge `job/{seq}` into the default branch. A squash-merge is by
-    /// definition one new commit with one parent, so this is
-    /// `merge-tree --write-tree` + `commit-tree` + `update-ref` (CAS on the old
-    /// head) — no working tree involved.
-    pub async fn squash_merge(
+    /// Build the squash commit for `job/{seq}` onto the current default head —
+    /// `merge-tree --write-tree` + `commit-tree`, no ref updated. Shared by
+    /// [`Self::squash_merge`] (advance immediately) and
+    /// [`Self::create_squash_candidate`] (park on `merge-gate/{seq}` for the
+    /// merge gate, spec §3.3).
+    async fn build_squash_commit(
         &self,
         owner: &str,
         project: &str,
@@ -392,14 +400,14 @@ impl RepoManager {
         base_ref: &str,
         job_type: &str,
         summary: Option<&str>,
-    ) -> Result<MergeOutcome> {
+    ) -> Result<SquashBuild> {
         let repo = self.repo_path(owner, project);
         let branch = format!("job/{seq}");
         if !self
             .has_commits_beyond(owner, project, base_ref, &branch)
             .await?
         {
-            return Ok(MergeOutcome::NoOp);
+            return Ok(SquashBuild::NoOp);
         }
         let default = self.default_branch(owner, project).await?;
         let old_head = self.resolve_ref(owner, project, &default).await?;
@@ -427,20 +435,10 @@ impl RepoManager {
                     args.extend(["-m", s]);
                 }
                 let commit = self.run(&repo, &args).await?;
-                let commit = commit.trim().to_string();
-                // CAS against the head we merged from; the single-writer dispatcher
-                // makes a race impossible, this just turns a logic bug into an error.
-                self.run(
-                    &repo,
-                    &[
-                        "update-ref",
-                        &format!("refs/heads/{default}"),
-                        &commit,
-                        &old_head,
-                    ],
-                )
-                .await?;
-                Ok(MergeOutcome::Merged { commit })
+                Ok(SquashBuild::Commit {
+                    commit: commit.trim().to_string(),
+                    old_head,
+                })
             }
             Some(1) => {
                 // Line 1: toplevel tree OID; then conflicted file names until a
@@ -452,13 +450,91 @@ impl RepoManager {
                     .map(str::to_string)
                     .collect();
                 files.dedup();
-                Ok(MergeOutcome::Conflict { files })
+                Ok(SquashBuild::Conflict { files })
             }
             _ => Err(VcsError::Git {
                 args: "merge-tree --write-tree".into(),
                 stderr: String::from_utf8_lossy(&out.stderr).to_string(),
             }),
         }
+    }
+
+    /// Squash-merge `job/{seq}` into the default branch. A squash-merge is by
+    /// definition one new commit with one parent — built by
+    /// [`Self::build_squash_commit`], then `update-ref` (CAS on the old head).
+    /// No working tree involved.
+    pub async fn squash_merge(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        base_ref: &str,
+        job_type: &str,
+        summary: Option<&str>,
+    ) -> Result<MergeOutcome> {
+        match self
+            .build_squash_commit(owner, project, seq, base_ref, job_type, summary)
+            .await?
+        {
+            SquashBuild::NoOp => Ok(MergeOutcome::NoOp),
+            SquashBuild::Conflict { files } => Ok(MergeOutcome::Conflict { files }),
+            SquashBuild::Commit { commit, old_head } => {
+                self.advance_default(owner, project, &commit, &old_head).await?;
+                Ok(MergeOutcome::Merged { commit })
+            }
+        }
+    }
+
+    /// Build the candidate squash commit and park it on `merge-gate/{seq}`
+    /// without touching the default branch (spec §3.3 Merge Gate). On gate
+    /// pass, [`Self::advance_default`] promotes the same commit — the
+    /// candidate IS the merge, never re-merged.
+    pub async fn create_squash_candidate(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        base_ref: &str,
+        job_type: &str,
+        summary: Option<&str>,
+    ) -> Result<MergeOutcome> {
+        match self
+            .build_squash_commit(owner, project, seq, base_ref, job_type, summary)
+            .await?
+        {
+            SquashBuild::NoOp => Ok(MergeOutcome::NoOp),
+            SquashBuild::Conflict { files } => Ok(MergeOutcome::Conflict { files }),
+            SquashBuild::Commit { commit, .. } => {
+                self.create_branch(owner, project, &format!("merge-gate/{seq}"), &commit)
+                    .await?;
+                Ok(MergeOutcome::Merged { commit })
+            }
+        }
+    }
+
+    /// Advance the default branch to `commit`, CAS on `expected_old_head`. The
+    /// single-writer dispatcher makes a race impossible; the CAS turns a logic
+    /// bug into an error instead of a silent overwrite.
+    pub async fn advance_default(
+        &self,
+        owner: &str,
+        project: &str,
+        commit: &str,
+        expected_old_head: &str,
+    ) -> Result<()> {
+        let repo = self.repo_path(owner, project);
+        let default = self.default_branch(owner, project).await?;
+        self.run(
+            &repo,
+            &[
+                "update-ref",
+                &format!("refs/heads/{default}"),
+                commit,
+                expected_old_head,
+            ],
+        )
+        .await?;
+        Ok(())
     }
 
     /// Human-readable conflict context block (spec §4.3): conflicting files,

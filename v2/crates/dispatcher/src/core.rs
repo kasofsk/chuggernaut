@@ -18,7 +18,7 @@ use std::sync::Arc;
 use store::{CounterStore, JobStore, NatsStore, RdepsStore, TaskStore, split_project, subjects};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
-use types::{Job, JobState, TokenUsage};
+use types::{Job, JobState, TaskResolution, TokenUsage};
 use vcs::RepoManager;
 
 #[derive(Debug, Error)]
@@ -35,6 +35,8 @@ pub enum CoreError {
     NotFound(String),
     #[error("validation failed: {0:?}")]
     Validation(Vec<ValidationError>),
+    #[error("invalid resolution: {0}")]
+    InvalidResolution(String),
     #[error("core loop stopped")]
     Stopped,
 }
@@ -103,6 +105,16 @@ pub enum Msg {
         submission: EvalSubmission,
         reply: Reply<()>,
     },
+    /// Operator resolves a Human task via the inbox (spec §1.2).
+    ResolveTask {
+        owner: String,
+        project: String,
+        seq: u64,
+        task_id: u64,
+        resolution: TaskResolution,
+        operator: String,
+        reply: Reply<()>,
+    },
     /// Posted by container monitor tasks — never by anything outside the crate.
     TaskExited {
         owner: String,
@@ -167,6 +179,23 @@ impl CoreHandle {
         self.call(|reply| Msg::SubmitEval { owner, project, seq, task_id, submission, reply })
             .await
     }
+
+    pub async fn resolve_task(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task_id: u64,
+        resolution: TaskResolution,
+        operator: &str,
+    ) -> Result<()> {
+        let (owner, project, operator) =
+            (owner.to_string(), project.to_string(), operator.to_string());
+        self.call(|reply| Msg::ResolveTask {
+            owner, project, seq, task_id, resolution, operator, reply,
+        })
+        .await
+    }
 }
 
 pub struct CoreConfig {
@@ -192,6 +221,11 @@ pub struct Core {
     /// Execution state for jobs in Work/Evaluation (this process's working
     /// memory; restart rebuild is the reconcile slice).
     pub(crate) active: HashMap<(String, String, u64), exec::ExecState>,
+    /// Per-project merge queue (spec §3.3 Merge Gate: depth-1 serialization).
+    /// All post-eval finalization flows through it, keyed by project slug.
+    pub(crate) merge_queue: HashMap<String, std::collections::VecDeque<u64>>,
+    /// Project slug → seq whose merge gate is currently running.
+    pub(crate) gating: HashMap<String, u64>,
     /// Set by [`spawn`]; monitors post `TaskExited` through it.
     pub(crate) self_tx: Option<mpsc::Sender<Msg>>,
 }
@@ -233,6 +267,8 @@ impl Core {
             graphs: HashMap::new(),
             queue: ReadyQueue::default(),
             active: HashMap::new(),
+            merge_queue: HashMap::new(),
+            gating: HashMap::new(),
             self_tx: None,
         };
 
@@ -280,6 +316,12 @@ impl Core {
             Msg::SubmitEval { owner, project, seq, task_id, submission, reply } => {
                 let _ = reply
                     .send(self.handle_submit_eval(&owner, &project, seq, task_id, submission).await);
+            }
+            Msg::ResolveTask { owner, project, seq, task_id, resolution, operator, reply } => {
+                let _ = reply.send(
+                    self.handle_resolve_task(&owner, &project, seq, task_id, resolution, &operator)
+                        .await,
+                );
             }
             Msg::TaskExited { owner, project, seq, task_id, exit_code, eval_json } => {
                 if let Err(e) = self
@@ -478,19 +520,29 @@ impl Core {
             .map(|g| g.cascade_targets(seq))
             .unwrap_or_default();
 
+        let slug = format!("{owner}/{project}");
         for &target in std::iter::once(&seq).chain(cascaded.iter()) {
             let mut j = self.must_get(owner, project, target)?.clone();
             self.kill_running_containers(owner, project, target).await;
             self.active.remove(&(owner.to_string(), project.to_string(), target));
             self.set_state(&mut j, JobState::Revoked).await?;
-            // Delete job/{seq} if it exists; a missing branch is fine.
+            // Delete job/{seq} and any parked candidate; missing refs are fine.
             let _ = self.repos.delete_branch(owner, project, &j.branch).await;
+            let _ = self.repos.delete_branch(owner, project, &format!("merge-gate/{target}")).await;
             self.queue.remove(&queue::QueuedJob {
                 owner: owner.into(),
                 project: project.into(),
                 seq: target,
             });
+            if let Some(q) = self.merge_queue.get_mut(&slug) {
+                q.retain(|&s| s != target);
+            }
+            if self.gating.get(&slug) == Some(&target) {
+                self.gating.remove(&slug);
+            }
         }
+        // A revoked gate occupant frees the queue for the next candidate.
+        self.pump_merges(owner, project).await?;
         self.publish(
             owner,
             project,

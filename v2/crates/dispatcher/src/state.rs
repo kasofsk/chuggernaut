@@ -21,7 +21,9 @@ pub fn assert_transition(from: JobState, to: JobState) -> Result<(), InvalidTran
         // merge-gate fan-out. Evaluation→Work: rework/conflict/gate failure.
         (Work, Work | Evaluation | Escalated) => true,
         (Evaluation, Evaluation | Work | Done | Escalated) => true,
-        (Escalated, Work | Evaluation) => true,
+        // Escalated→Ready: pre-work escalation Retry passing re-validation
+        // (§1.2 pre-work escalations; §2.1).
+        (Escalated, Work | Evaluation | Ready) => true,
         // Revoked is reachable from any non-terminal state.
         (Done | Revoked, Revoked) => false,
         (_, Revoked) => true,

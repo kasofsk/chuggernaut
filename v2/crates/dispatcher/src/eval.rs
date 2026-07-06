@@ -1,8 +1,11 @@
-//! Evaluator fan-out and reduce (spec §3.3), squash-merge/conflict
-//! finalization (§3.2 step 12). The merge-gate re-run against a candidate
-//! commit (§3.3 Merge Gate) needs candidate-ref support in `vcs` and lands
-//! next slice — until then a moved HEAD with a clean merge is logged and
-//! merged ungated.
+//! Evaluator fan-out and reduce (spec §3.3), and post-eval finalization
+//! (§3.2 step 12): squash-merge, conflict re-entry, and the merge gate.
+//!
+//! All finalization flows through a per-project depth-1 merge queue. The fast
+//! path (default HEAD unmoved, or no commits) merges immediately; a moved HEAD
+//! parks the candidate squash commit on `merge-gate/{seq}` and re-runs the
+//! required command evaluators against it before promoting — nothing reaches
+//! the default branch untested against the exact tree that lands.
 
 use crate::core::{Core, CoreError, EvalSubmission, Msg, Result};
 use crate::exec::{eval_image, task_timeout};
@@ -33,6 +36,21 @@ pub enum SlotOutcome {
     Infra,
 }
 
+/// A parked candidate awaiting its gate verdict (§3.3 Merge Gate).
+pub struct GateState {
+    pub commit: String,
+    /// Default HEAD when the candidate was built; the promote CAS target.
+    pub old_head: String,
+    pub round: EvalRound,
+}
+
+enum FinalizeStep {
+    /// Job reached Done or re-entered Work — the queue can advance.
+    Completed,
+    /// Gate tasks are running; the queue holds until they resolve.
+    Gating,
+}
+
 impl Core {
     /// Work→Evaluation (§3.2 steps 9–10): one task per evaluator, fanned out.
     /// No evaluators → auto-pass straight to finalization.
@@ -52,21 +70,28 @@ impl Core {
             return self.finalize_pass(owner, project, seq).await;
         }
 
+        let branch = job.branch.clone();
         let mut slots = Vec::new();
         for evaluator in evaluators {
-            let task_id = self.launch_eval_task(owner, project, seq, cycle, &evaluator, 1).await?;
+            let task_id = self
+                .launch_evaluator_task(owner, project, seq, TaskPhase::Evaluation, &branch, cycle, &evaluator, 1)
+                .await?;
             slots.push(EvalSlot { evaluator, task_id, attempt: 1, outcome: None });
         }
         self.active.get_mut(&key).expect("exec state").round = Some(EvalRound { slots });
         Ok(())
     }
 
-    /// Create + launch one eval task (§3.3 evaluator types). Returns task id.
-    async fn launch_eval_task(
+    /// Create + launch one evaluator task (§3.3 evaluator types). Shared by the
+    /// Evaluation fan-out (job branch) and the merge gate (candidate branch).
+    #[allow(clippy::too_many_arguments)]
+    async fn launch_evaluator_task(
         &mut self,
         owner: &str,
         project: &str,
         seq: u64,
+        phase: TaskPhase,
+        branch: &str,
         cycle: u32,
         evaluator: &Evaluator,
         attempt: u32,
@@ -76,6 +101,7 @@ impl Core {
         let job_type = self.active.get(&key).expect("exec state").job_type.clone();
         let base_ref = job.base_ref.clone().expect("base_ref set");
         let task_id = self.next_task_id(owner, project, seq).await?;
+        let phase_name = format!("{phase:?}");
 
         let (kind, pending_human) = match evaluator.r#type {
             EvaluatorType::Command => {
@@ -100,7 +126,7 @@ impl Core {
             id: task_id,
             job_seq: seq,
             project: job.project.clone(),
-            phase: TaskPhase::Evaluation,
+            phase,
             cycle,
             kind,
             state: if pending_human { TaskState::Pending } else { TaskState::Running },
@@ -113,18 +139,18 @@ impl Core {
         };
         self.tasks.put(&task).await?;
         self.publish(owner, project, seq, "task-created", serde_json::json!({
-            "task_id": task_id, "phase": "Evaluation", "cycle": cycle,
+            "task_id": task_id, "phase": phase_name, "cycle": cycle,
             "attempt": attempt, "evaluator": evaluator.name,
         }))
         .await?;
         if pending_human {
-            return Ok(task_id); // operator inbox (§3.3 human); resolve slice
+            return Ok(task_id); // operator inbox (§3.3 human)
         }
 
         // Eval containers get vars but only the evaluator's own secrets (§4.1).
         let mut eval_type = job_type.clone();
         eval_type.secrets = evaluator.secrets.clone();
-        let env = self.container_env(owner, project, seq, &job.branch, &eval_type).await?;
+        let env = self.container_env(owner, project, seq, branch, &eval_type).await?;
         let tx = self.self_tx.clone().expect("spawned core");
         let (o, p) = (owner.to_string(), project.to_string());
 
@@ -228,6 +254,36 @@ impl Core {
         Ok(())
     }
 
+    /// Human evaluator resolved via the inbox: record the verdict on the slot
+    /// and reduce if the round is complete. Called from the resolve handler.
+    pub(crate) async fn resolve_eval_slot(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task_id: u64,
+        pass: bool,
+        structured: Option<serde_json::Value>,
+    ) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        let Some(slot_idx) = self
+            .active
+            .get(&key)
+            .and_then(|e| e.round.as_ref())
+            .and_then(|r| r.slots.iter().position(|s| s.task_id == task_id && s.outcome.is_none()))
+        else {
+            return Err(CoreError::InvalidResolution(format!(
+                "task {task_id} is not an open evaluator slot"
+            )));
+        };
+        let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
+        round.slots[slot_idx].outcome = Some(SlotOutcome::Product { pass, structured });
+        if round.slots.iter().all(|s| s.outcome.is_some()) {
+            return self.reduce(owner, project, seq).await;
+        }
+        Ok(())
+    }
+
     /// Eval container exited. The verdict source depends on the type: command
     /// exit code is the verdict; an agent exit without a prior `submit_eval`
     /// is an infra error retried per `eval_retries` (§3.3).
@@ -301,8 +357,12 @@ impl Core {
                                 let slot = &exec.round.as_ref().unwrap().slots[slot_idx];
                                 (slot.evaluator.clone(), exec.cycle)
                             };
+                            let branch = self.must_get(owner, project, seq)?.branch.clone();
                             let new_id = self
-                                .launch_eval_task(owner, project, seq, cycle, &evaluator, failed.attempt + 1)
+                                .launch_evaluator_task(
+                                    owner, project, seq, TaskPhase::Evaluation, &branch, cycle,
+                                    &evaluator, failed.attempt + 1,
+                                )
                                 .await?;
                             let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
                             round.slots[slot_idx].task_id = new_id;
@@ -313,7 +373,7 @@ impl Core {
                     }
                 }
             }
-            TaskKind::Human { .. } => None, // resolve slice
+            TaskKind::Human { .. } => None, // resolved via the inbox, not an exit
         };
 
         if let Some(outcome) = outcome {
@@ -398,59 +458,274 @@ impl Core {
         }
     }
 
-    /// §3.2 step 12: squash-merge, conflict re-entry, Done.
+    /// §3.2 step 12 entry: queue the job for finalization and pump. The
+    /// per-project queue is the depth-1 merge-gate serialization (§3.3).
     async fn finalize_pass(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
-        let key = (owner.to_string(), project.to_string(), seq);
-        let mut job = self.must_get(owner, project, seq)?.clone();
-        let base_ref = job.base_ref.clone().expect("base_ref set");
-        let (summary, cycle) = {
-            let exec = self.active.get(&key).expect("exec state");
-            (
-                exec.work_submission.as_ref().and_then(|s| s.summary.clone()),
-                exec.cycle,
-            )
-        };
+        let slug = format!("{owner}/{project}");
+        let q = self.merge_queue.entry(slug).or_default();
+        if !q.contains(&seq) {
+            q.push_back(seq);
+        }
+        self.pump_merges(owner, project).await
+    }
 
-        // TODO(§3.3 Merge Gate): when default HEAD moved past base_ref and the
-        // merge is clean, re-run required command evaluators against the
-        // candidate commit before advancing. Needs candidate-ref support in
-        // vcs; until then the merge proceeds ungated (logged).
+    /// Advance the merge queue until it empties or a gate starts.
+    pub(crate) async fn pump_merges(&mut self, owner: &str, project: &str) -> Result<()> {
+        let slug = format!("{owner}/{project}");
+        while !self.gating.contains_key(&slug) {
+            let Some(&seq) = self.merge_queue.get(&slug).and_then(|q| q.front()) else {
+                return Ok(());
+            };
+            self.merge_queue.get_mut(&slug).unwrap().pop_front();
+            match self.try_finalize(owner, project, seq).await? {
+                FinalizeStep::Completed => continue,
+                FinalizeStep::Gating => {
+                    self.gating.insert(slug, seq);
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One finalization attempt against the then-current default HEAD.
+    async fn try_finalize(&mut self, owner: &str, project: &str, seq: u64) -> Result<FinalizeStep> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        let job = self.must_get(owner, project, seq)?.clone();
+        if job.state != JobState::Evaluation {
+            return Ok(FinalizeStep::Completed); // revoked while queued
+        }
+        let base_ref = job.base_ref.clone().expect("base_ref set");
+        let summary = self
+            .active
+            .get(&key)
+            .and_then(|e| e.work_submission.as_ref())
+            .and_then(|s| s.summary.clone());
+
         let default_branch = self.repos.default_branch(owner, project).await?;
         let head = self.repos.resolve_ref(owner, project, &default_branch).await?;
-        if head != base_ref {
-            tracing::warn!(
-                "job {seq}: default branch moved past base_ref; merge gate not yet implemented — merging ungated"
-            );
+
+        if head == base_ref {
+            // Fast path: evaluators already ran against exactly what lands.
+            return match self
+                .repos
+                .squash_merge(owner, project, seq, &base_ref, &job.r#type, summary.as_deref())
+                .await?
+            {
+                MergeOutcome::Merged { .. } | MergeOutcome::NoOp => {
+                    self.complete_done(owner, project, seq).await?;
+                    Ok(FinalizeStep::Completed)
+                }
+                // head == base_ref makes a conflict impossible by construction;
+                // treat one as the conflict path anyway rather than crash.
+                MergeOutcome::Conflict { files } => {
+                    self.conflict_rework(owner, project, seq, &base_ref, &head, files).await?;
+                    Ok(FinalizeStep::Completed)
+                }
+            };
         }
 
+        // HEAD moved: build the candidate and open the gate (§3.3 Merge Gate).
         match self
             .repos
-            .squash_merge(owner, project, seq, &base_ref, &job.r#type, summary.as_deref())
+            .create_squash_candidate(owner, project, seq, &base_ref, &job.r#type, summary.as_deref())
             .await?
         {
-            MergeOutcome::Merged { .. } | MergeOutcome::NoOp => {
-                let _ = self.repos.delete_branch(owner, project, &job.branch).await;
-                self.set_state(&mut job, JobState::Done).await?;
-                self.active.remove(&key);
-                self.publish(owner, project, seq, "job-done", serde_json::json!({})).await?;
-                self.on_job_done(owner, project, seq).await
+            MergeOutcome::NoOp => {
+                self.complete_done(owner, project, seq).await?;
+                Ok(FinalizeStep::Completed)
             }
             MergeOutcome::Conflict { files } => {
-                // §3.2 step 12: rebase-as-rework; budget NOT consumed.
-                let old_base = base_ref;
-                let context = self
-                    .repos
-                    .conflict_context(owner, project, &old_base, &head, &files)
+                self.conflict_rework(owner, project, seq, &base_ref, &head, files).await?;
+                Ok(FinalizeStep::Completed)
+            }
+            MergeOutcome::Merged { commit } => {
+                let gate_evaluators: Vec<Evaluator> = self
+                    .active
+                    .get(&key)
+                    .map(|e| {
+                        e.job_type
+                            .eval
+                            .iter()
+                            .filter(|ev| {
+                                ev.r#type == EvaluatorType::Command && ev.required.unwrap_or(true)
+                            })
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if gate_evaluators.is_empty() {
+                    // Nothing to re-run; the candidate promotes directly.
+                    self.repos.advance_default(owner, project, &commit, &head).await?;
+                    let _ = self
+                        .repos
+                        .delete_branch(owner, project, &format!("merge-gate/{seq}"))
+                        .await;
+                    self.complete_done(owner, project, seq).await?;
+                    return Ok(FinalizeStep::Completed);
+                }
+
+                let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
+                self.publish(owner, project, seq, "job-merge-gate-started",
+                    serde_json::json!({ "cycle": cycle }))
                     .await?;
-                job.base_ref = Some(head);
-                self.jobs.put(&job).await?;
-                self.graphs.entry(job.project.clone()).or_default().insert(job.clone());
-                self.publish(owner, project, seq, "job-rework-started", serde_json::json!({
-                    "cycle": cycle + 1, "reason": "merge_conflict", "eval_context": [],
-                }))
-                .await?;
-                self.enter_work(owner, project, seq, cycle + 1, Vec::new(), Some(context)).await
+                let gate_branch = format!("merge-gate/{seq}");
+                let mut slots = Vec::new();
+                for evaluator in gate_evaluators {
+                    let task_id = self
+                        .launch_evaluator_task(
+                            owner, project, seq, TaskPhase::MergeGate, &gate_branch, cycle,
+                            &evaluator, 1,
+                        )
+                        .await?;
+                    slots.push(EvalSlot { evaluator, task_id, attempt: 1, outcome: None });
+                }
+                self.active.get_mut(&key).expect("exec state").gate = Some(GateState {
+                    commit,
+                    old_head: head,
+                    round: EvalRound { slots },
+                });
+                Ok(FinalizeStep::Gating)
             }
         }
+    }
+
+    /// Gate container exited: command evaluators only, exit code is the
+    /// verdict (§3.3 Merge Gate).
+    pub(crate) async fn on_gate_exited(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        mut task: Task,
+        exit_code: i32,
+        eval_json: Option<serde_json::Value>,
+    ) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        let Some(slot_idx) = self
+            .active
+            .get(&key)
+            .and_then(|e| e.gate.as_ref())
+            .and_then(|g| {
+                g.round
+                    .slots
+                    .iter()
+                    .position(|s| s.task_id == task.id && s.outcome.is_none())
+            })
+        else {
+            return Ok(()); // stale monitor
+        };
+
+        let pass = exit_code == 0;
+        task.result = Some(TaskResult::Command {
+            pass,
+            exit_code,
+            output: String::new(),
+            structured: eval_json.clone(),
+        });
+        task.state = TaskState::Done;
+        task.completed_at = Some(Utc::now());
+        self.tasks.put(&task).await?;
+        self.publish(owner, project, seq, "task-completed", serde_json::json!({
+            "task_id": task.id, "phase": "MergeGate", "pass": pass,
+        }))
+        .await?;
+
+        let gate = self.active.get_mut(&key).unwrap().gate.as_mut().unwrap();
+        gate.round.slots[slot_idx].outcome =
+            Some(SlotOutcome::Product { pass, structured: eval_json });
+        if gate.round.slots.iter().any(|s| s.outcome.is_none()) {
+            return Ok(());
+        }
+        self.gate_reduce(owner, project, seq).await
+    }
+
+    async fn gate_reduce(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        let slug = format!("{owner}/{project}");
+        let gate = self.active.get_mut(&key).unwrap().gate.take().expect("gate state");
+        let failures: Vec<EvalResult> = gate
+            .round
+            .slots
+            .iter()
+            .filter_map(|s| match s.outcome.as_ref() {
+                Some(SlotOutcome::Product { pass: false, structured }) => Some(EvalResult {
+                    evaluator: s.evaluator.name.clone(),
+                    pass: false,
+                    structured: structured.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+
+        self.gating.remove(&slug);
+        let gate_branch = format!("merge-gate/{seq}");
+
+        if failures.is_empty() {
+            // Promote: the candidate commit IS the merge (§3.3).
+            self.repos.advance_default(owner, project, &gate.commit, &gate.old_head).await?;
+            let _ = self.repos.delete_branch(owner, project, &gate_branch).await;
+            self.complete_done(owner, project, seq).await?;
+        } else {
+            // Integration failure: rework on the new base, budget NOT consumed
+            // — same treatment as a merge conflict (§3.3).
+            let _ = self.repos.delete_branch(owner, project, &gate_branch).await;
+            let job = self.must_get(owner, project, seq)?.clone();
+            let old_base = job.base_ref.clone().expect("base_ref set");
+            let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
+            let context = self
+                .repos
+                .conflict_context(owner, project, &old_base, &gate.old_head, &[])
+                .await?;
+            let mut job = job;
+            job.base_ref = Some(gate.old_head.clone());
+            self.jobs.put(&job).await?;
+            self.graphs.entry(job.project.clone()).or_default().insert(job.clone());
+            self.publish(owner, project, seq, "job-rework-started", serde_json::json!({
+                "cycle": cycle + 1, "reason": "merge_gate_failure", "eval_context": failures,
+            }))
+            .await?;
+            self.enter_work(owner, project, seq, cycle + 1, failures, Some(context)).await?;
+        }
+        self.pump_merges(owner, project).await
+    }
+
+    /// Terminal success: branch cleanup, Done, dependents unblock.
+    async fn complete_done(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        let mut job = self.must_get(owner, project, seq)?.clone();
+        let _ = self.repos.delete_branch(owner, project, &job.branch).await;
+        self.set_state(&mut job, JobState::Done).await?;
+        self.active.remove(&key);
+        self.publish(owner, project, seq, "job-done", serde_json::json!({})).await?;
+        self.on_job_done(owner, project, seq).await
+    }
+
+    /// §3.2 step 12 conflict path: rebase-as-rework, budget NOT consumed.
+    async fn conflict_rework(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        old_base: &str,
+        head: &str,
+        files: Vec<String>,
+    ) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        let mut job = self.must_get(owner, project, seq)?.clone();
+        let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
+        let context = self
+            .repos
+            .conflict_context(owner, project, old_base, head, &files)
+            .await?;
+        job.base_ref = Some(head.to_string());
+        self.jobs.put(&job).await?;
+        self.graphs.entry(job.project.clone()).or_default().insert(job.clone());
+        self.publish(owner, project, seq, "job-rework-started", serde_json::json!({
+            "cycle": cycle + 1, "reason": "merge_conflict", "eval_context": [],
+        }))
+        .await?;
+        self.enter_work(owner, project, seq, cycle + 1, Vec::new(), Some(context)).await
     }
 }

@@ -4,6 +4,7 @@
 //! writer, these files are its execution verbs.
 
 use crate::core::{Core, CoreError, Msg, Result, WorkSubmission};
+use crate::escalation;
 use crate::queue::QueuedJob;
 use crate::release;
 use agent::AgentRunConfig;
@@ -12,8 +13,8 @@ use container::{ContainerLaunchConfig, bootstrap_cmd};
 use std::collections::HashMap;
 use std::time::Duration;
 use types::{
-    EvalResult, Evaluator, JobState, JobType, Task, TaskKind, TaskPhase, TaskResult, TaskState,
-    WorkType, parse_duration,
+    EscalationAction, EvalResult, Evaluator, JobState, JobType, Task, TaskKind, TaskPhase,
+    TaskResolution, TaskResult, TaskState, WorkType, parse_duration,
 };
 
 /// Working memory for a job in Work/Evaluation. Restart rebuild is the
@@ -27,6 +28,8 @@ pub struct ExecState {
     /// Latest `submit_result` payload — commit-message summary + rework context.
     pub work_submission: Option<WorkSubmission>,
     pub round: Option<crate::eval::EvalRound>,
+    /// Parked candidate + gate tasks while the merge gate runs (§3.3).
+    pub gate: Option<crate::eval::GateState>,
     /// §4.3 context for the current cycle's work task.
     pub eval_context: Vec<EvalResult>,
     pub merge_conflict: Option<String>,
@@ -122,6 +125,7 @@ impl Core {
                     .unwrap_or(0),
                 work_submission: None,
                 round: None,
+                gate: None,
                 eval_context,
                 merge_conflict,
             },
@@ -281,8 +285,11 @@ impl Core {
             // Eval tasks can legitimately be Done already — submit_eval lands
             // before the container exits, and the exit completes the slot.
             // on_eval_exited drops anything not in the current round.
-            TaskPhase::Evaluation | TaskPhase::MergeGate => {
+            TaskPhase::Evaluation => {
                 self.on_eval_exited(owner, project, seq, task, exit_code, eval_json).await
+            }
+            TaskPhase::MergeGate => {
+                self.on_gate_exited(owner, project, seq, task, exit_code, eval_json).await
             }
         }
     }
@@ -358,6 +365,222 @@ impl Core {
         Ok(())
     }
 
+    /// Operator resolution of a Pending Human task (§1.2): human work tasks,
+    /// human evaluator tasks, and escalation tasks — the valid `kind` depends
+    /// on the job state, wrong kinds are rejected (the API layer's 400).
+    pub(crate) async fn handle_resolve_task(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task_id: u64,
+        resolution: TaskResolution,
+        operator: &str,
+    ) -> Result<()> {
+        let Some(mut task) = self.tasks.get(owner, project, seq, task_id).await? else {
+            return Err(CoreError::NotFound(format!("task {task_id}")));
+        };
+        if task.state != TaskState::Pending || !matches!(task.kind, TaskKind::Human { .. }) {
+            return Err(CoreError::InvalidResolution(
+                "only Pending Human tasks can be resolved".into(),
+            ));
+        }
+        let job = self.must_get(owner, project, seq)?.clone();
+
+        let complete_task =
+            |task: &mut Task, pass: bool, structured: Option<serde_json::Value>, action| {
+                task.result = Some(TaskResult::Human {
+                    pass,
+                    structured,
+                    action,
+                    operator: operator.to_string(),
+                    resolved_at: Utc::now(),
+                });
+                task.state = TaskState::Done;
+                task.completed_at = Some(Utc::now());
+            };
+
+        match (job.state, resolution) {
+            // Escalation task (§1.2 escalation resolution).
+            (JobState::Escalated, TaskResolution::Escalation { action, structured }) => {
+                complete_task(&mut task, true, structured, Some(action));
+                self.tasks.put(&task).await?;
+                self.publish(owner, project, seq, "job-escalation-resolved",
+                    serde_json::json!({ "action": format!("{action:?}") }))
+                    .await?;
+                match action {
+                    EscalationAction::Retry if job.base_ref.is_none() => {
+                        // Pre-work escalation (§1.2): re-run the failed step —
+                        // Ready-transition re-validation — not a work task.
+                        self.prework_retry(owner, project, seq).await
+                    }
+                    EscalationAction::Retry => self.escalation_retry(owner, project, seq).await,
+                    EscalationAction::Resolve => {
+                        if job.base_ref.is_none() {
+                            return Err(CoreError::InvalidResolution(
+                                "pre-work escalations accept only Retry and Revoke".into(),
+                            ));
+                        }
+                        // §1.2: operator did the work; submit the current
+                        // branch for evaluation as-is.
+                        self.ensure_exec_state(owner, project, seq).await?;
+                        self.enter_evaluation(owner, project, seq).await
+                    }
+                    EscalationAction::Revoke => {
+                        self.revoke_job(owner, project, seq).await.map(|_| ())
+                    }
+                }
+            }
+            (JobState::Escalated, _) => Err(CoreError::InvalidResolution(
+                "escalation tasks require kind: Escalation".into(),
+            )),
+            (_, TaskResolution::Escalation { .. }) => Err(CoreError::InvalidResolution(
+                "kind: Escalation is only valid on escalation tasks".into(),
+            )),
+
+            // Human work task (§1.1 work.type: human).
+            (JobState::Work, TaskResolution::Pass { structured }) => {
+                complete_task(&mut task, true, structured, None);
+                self.tasks.put(&task).await?;
+                self.ensure_exec_state(owner, project, seq).await?;
+                self.enter_evaluation(owner, project, seq).await
+            }
+            (JobState::Work, TaskResolution::Fail { structured }) => {
+                complete_task(&mut task, false, Some(structured), None);
+                self.tasks.put(&task).await?;
+                self.active.remove(&(owner.to_string(), project.to_string(), seq));
+                self.escalate(owner, project, seq, "human_work_failed",
+                    format!("Job {seq}: operator declined the human work task"))
+                    .await
+            }
+
+            // Human evaluator task (§3.3 human).
+            (JobState::Evaluation, TaskResolution::Pass { structured }) => {
+                complete_task(&mut task, true, structured.clone(), None);
+                self.tasks.put(&task).await?;
+                self.resolve_eval_slot(owner, project, seq, task_id, true, structured).await
+            }
+            (JobState::Evaluation, TaskResolution::Fail { structured }) => {
+                complete_task(&mut task, false, Some(structured.clone()), None);
+                self.tasks.put(&task).await?;
+                self.resolve_eval_slot(owner, project, seq, task_id, false, Some(structured)).await
+            }
+
+            (state, _) => Err(CoreError::InvalidResolution(format!(
+                "no resolvable Human task in job state {state:?}"
+            ))),
+        }
+    }
+
+    /// §1.2 escalation Retry: new work task, same cycle, attempt++, branch
+    /// used AS-IS — the operator may have modified it. `work_retries` budget
+    /// is not reset.
+    async fn escalation_retry(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        self.ensure_exec_state(owner, project, seq).await?;
+        let key = (owner.to_string(), project.to_string(), seq);
+        let cycle = self.active.get(&key).expect("exec state").cycle;
+        let work_type = self.active.get(&key).expect("exec state").job_type.work.r#type;
+        let last_attempt = self
+            .tasks
+            .list_for_job(owner, project, seq)
+            .await?
+            .iter()
+            .filter(|t| {
+                t.phase == TaskPhase::Work
+                    && t.cycle == cycle
+                    && kind_matches_work(&t.kind, work_type)
+            })
+            .map(|t| t.attempt)
+            .max()
+            .unwrap_or(0);
+        let mut job = self.must_get(owner, project, seq)?.clone();
+        self.set_state(&mut job, JobState::Work).await?;
+        self.launch_work_task(owner, project, seq, cycle, last_attempt + 1).await
+    }
+
+    /// §1.2 pre-work escalation Retry: re-run Ready-transition re-validation
+    /// at current HEAD. Pass → Ready + enqueue; fail → a fresh escalation
+    /// task, job stays Escalated.
+    async fn prework_retry(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        let mut job = self.must_get(owner, project, seq)?.clone();
+        let default_branch = self.repos.default_branch(owner, project).await?;
+        let head = self.repos.resolve_ref(owner, project, &default_branch).await?;
+
+        let revalidation = match release::load_job_type(
+            &self.repos, owner, project, &head, &job.r#type, Some(seq),
+        )
+        .await
+        {
+            Ok(jt) => release::static_errors(&self.repos, owner, project, &head, &job, &jt, None)
+                .await
+                .and_then(|errs| if errs.is_empty() { Ok(()) } else { Err(errs) }),
+            Err(errs) => Err(errs),
+        };
+        match revalidation {
+            Ok(()) => {
+                job.base_ref = Some(head);
+                job.ready_at.get_or_insert_with(Utc::now);
+                self.set_state(&mut job, JobState::Ready).await?;
+                self.queue.enqueue(QueuedJob {
+                    owner: owner.into(),
+                    project: project.into(),
+                    seq,
+                });
+                self.publish(owner, project, seq, "job-unblocked", serde_json::json!({})).await
+            }
+            Err(errs) => {
+                let detail = errs
+                    .iter()
+                    .map(|e| format!("- {}: {}", e.field, e.message))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let task_id = self.next_task_id(owner, project, seq).await?;
+                let task = escalation::escalation_task(task_id, seq, &job.project, 1,
+                    format!("Job {seq} still fails re-validation at {head}:\n{detail}"));
+                self.tasks.put(&task).await?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Rebuild working memory for a job whose ExecState was dropped (post-
+    /// escalation resume; dispatcher restart is the reconcile slice).
+    /// `reworks_used` restarts at 0 — after a human owned the escalation, the
+    /// budget question is theirs (TODO: derive from the event stream instead).
+    async fn ensure_exec_state(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        if self.active.contains_key(&key) {
+            return Ok(());
+        }
+        let job = self.must_get(owner, project, seq)?.clone();
+        let base_ref = job.base_ref.clone().ok_or_else(|| {
+            CoreError::InvalidResolution(format!("job {seq} has not entered execution"))
+        })?;
+        let job_type = release::load_job_type(
+            &self.repos, owner, project, &base_ref, &job.r#type, Some(seq),
+        )
+        .await?;
+        let cycle = self
+            .tasks
+            .list_for_job(owner, project, seq)
+            .await?
+            .iter()
+            .map(|t| t.cycle)
+            .max()
+            .unwrap_or(1);
+        self.active.insert(key, ExecState {
+            job_type,
+            cycle,
+            reworks_used: 0,
+            work_submission: None,
+            round: None,
+            gate: None,
+            eval_context: vec![],
+            merge_conflict: None,
+        });
+        Ok(())
+    }
+
     async fn build_prompt(
         &self,
         owner: &str,
@@ -413,6 +636,15 @@ impl Core {
         }
         Ok(env)
     }
+}
+
+fn kind_matches_work(kind: &TaskKind, work_type: WorkType) -> bool {
+    matches!(
+        (kind, work_type),
+        (TaskKind::Agent { .. }, WorkType::Agent)
+            | (TaskKind::Command { .. }, WorkType::Command)
+            | (TaskKind::Human { .. }, WorkType::Human)
+    )
 }
 
 pub(crate) fn provider_name(job_type: &JobType) -> String {
