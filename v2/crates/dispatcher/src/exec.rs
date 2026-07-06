@@ -153,8 +153,15 @@ impl Core {
         let (kind, pending_human) = match job_type.work.r#type {
             WorkType::Agent => (
                 TaskKind::Agent {
-                    provider: provider_name(&job_type),
-                    model: job_type.work.model.clone(),
+                    provider: provider_name(
+                        job_type.work.provider,
+                        self.config.agent_provider_default.as_deref(),
+                    ),
+                    model: job_type
+                        .work
+                        .model
+                        .clone()
+                        .or_else(|| self.config.agent_model_default.clone()),
                     prompt: job_type.work.prompt.clone().unwrap_or_default(),
                 },
                 false,
@@ -206,7 +213,11 @@ impl Core {
                 let config = AgentRunConfig {
                     image: job_type.image.clone().unwrap_or_default(),
                     prompt,
-                    model: job_type.work.model.clone(),
+                    model: job_type
+                        .work
+                        .model
+                        .clone()
+                        .or_else(|| self.config.agent_model_default.clone()),
                     system_prompt: None, // KO injection: knowledge slice
                     mcp_servers,
                     files,
@@ -695,11 +706,15 @@ fn kind_matches_work(kind: &TaskKind, work_type: WorkType) -> bool {
     )
 }
 
-pub(crate) fn provider_name(job_type: &JobType) -> String {
-    job_type
-        .work
-        .provider
+/// §12.4 fallback chain: declaration → platform default → `claude` (tests
+/// construct `CoreConfig` without a default; production always sets one).
+pub(crate) fn provider_name(
+    declared: Option<types::job_type::Provider>,
+    platform_default: Option<&str>,
+) -> String {
+    declared
         .map(|p| format!("{p:?}").to_lowercase())
+        .or_else(|| platform_default.map(String::from))
         .unwrap_or_else(|| "claude".into())
 }
 

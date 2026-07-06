@@ -57,9 +57,26 @@ pub fn job_ssh_principal(owner: &str, project: &str, seq: u64) -> String {
     format!("job:{owner}/{project}:{seq}")
 }
 
+/// argon2id password hash for user records (spec §7.1, §12.1).
+pub fn hash_password(password: &str) -> Result<String, AuthError> {
+    use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
+    let salt = SaltString::generate(&mut OsRng);
+    argon2::Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| AuthError::Internal(e.to_string()))
+}
+
+pub fn verify_password(password: &str, hash: &str) -> Result<bool, AuthError> {
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    let parsed = PasswordHash::new(hash).map_err(|e| AuthError::Internal(e.to_string()))?;
+    Ok(argon2::Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok())
+}
+
 // TODO (spec §7.1, §7.3, §7.4, §12.1):
 // - JWT issue/verify (RS256), httpOnly cookie construction
-// - argon2id password hashing/verification
 // - SSH CA: user cert signing (24h, email principal), per-job cert issuance
 // - per-job NATS JWT minting with the §7.4 allow-lists (+ triage create_job perm)
 // - sshd AuthorizedPrincipalsCommand ref-authorization helper
@@ -108,5 +125,13 @@ mod tests {
     #[test]
     fn ssh_principal_format() {
         assert_eq!(job_ssh_principal("acme", "api", 42), "job:acme/api:42");
+    }
+
+    #[test]
+    fn password_round_trip() {
+        let hash = hash_password("hunter2").unwrap();
+        assert!(hash.starts_with("$argon2id$"));
+        assert!(verify_password("hunter2", &hash).unwrap());
+        assert!(!verify_password("wrong", &hash).unwrap());
     }
 }

@@ -594,9 +594,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "auth",
+ "chrono",
  "clap",
  "serde_json",
  "store",
+ "tempfile",
+ "test-utils",
  "tokio",
  "types",
  "vcs",

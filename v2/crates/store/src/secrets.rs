@@ -128,3 +128,11 @@ pub fn generate_age_keypair() -> (String, String) {
         identity.to_public().to_string(),
     )
 }
+
+/// Derive the public key (`age1...`) from an identity (`AGE-SECRET-KEY-1...`).
+/// Lets `chuggernaut init` restore a missing public key file (§12.1).
+pub fn age_public_from_identity(identity: &str) -> crate::Result<String> {
+    let identity = age::x25519::Identity::from_str(identity.trim())
+        .map_err(|e| StoreError::Nats(format!("invalid age identity: {e}")))?;
+    Ok(identity.to_public().to_string())
+}

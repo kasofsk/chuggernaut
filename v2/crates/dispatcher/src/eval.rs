@@ -109,11 +109,14 @@ impl Core {
             }
             EvaluatorType::Agent => (
                 TaskKind::Agent {
-                    provider: evaluator
-                        .provider
-                        .map(|p| format!("{p:?}").to_lowercase())
-                        .unwrap_or_else(|| "claude".into()),
-                    model: evaluator.model.clone(),
+                    provider: crate::exec::provider_name(
+                        evaluator.provider,
+                        self.config.agent_provider_default.as_deref(),
+                    ),
+                    model: evaluator
+                        .model
+                        .clone()
+                        .or_else(|| self.config.agent_model_default.clone()),
                     prompt: evaluator.prompt.clone().unwrap_or_default(),
                 },
                 false,
@@ -198,7 +201,10 @@ impl Core {
                 let config = AgentRunConfig {
                     image: eval_image(&job_type, evaluator),
                     prompt,
-                    model: evaluator.model.clone(),
+                    model: evaluator
+                        .model
+                        .clone()
+                        .or_else(|| self.config.agent_model_default.clone()),
                     system_prompt: None,
                     mcp_servers,
                     files,

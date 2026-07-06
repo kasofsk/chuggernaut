@@ -5,7 +5,9 @@ Companion to `spec.md` (normative), `design.md` (rationale), `crates.md`
 or extends the spec, and what comes next. Update it at the end of each
 implementation session.
 
-**As of:** 2026-07-05 · commit `4cccd11` · 64 tests passing, clippy clean.
+**As of:** 2026-07-05 (session 2) · 68 tests passing, clippy clean. The
+system is now runnable outside tests: `chuggernaut init` → `admin project
+create` → `dispatcher` boots against real NATS + Docker (smoke-tested live).
 
 ---
 
@@ -22,9 +24,9 @@ implementation session.
 | `chuggernaut-channel` | 🟡 partial | Working stdio MCP server: update_status/reply/channel_check + role-gated submit_result/submit_eval. Missing: `submit_review` local mode (§4.5), `create_job` (factories §13), push-mode inbox |
 | `chuggernaut-harness` | 🔴 scaffold | Config types + loop protocol as TODO (§4.5) |
 | `chuggernaut-ko` | 🔴 stub | |
-| `auth` | 🔴 stub | `NATS_TOKEN` injected empty; SSH CA absent; repos unauthenticated (tests use `file://` paths) |
+| `auth` | 🟡 partial | argon2id `hash_password`/`verify_password` added. Still missing: JWT issue/verify, SSH CA signing, per-job NATS JWT minting — `NATS_TOKEN` injected empty; repos unauthenticated (`file://`) |
 | `api` | 🔴 stub | No HTTP surface; only container-facing NATS subjects handled |
-| `cli` / `chuggernaut` bin | 🔴 stub | No init, no subcommand wiring — the system is not yet runnable outside tests |
+| `cli` / `chuggernaut` bin | 🟡 done (core) | `init` (§12.1: keygen, topology, VAPID pub in KV, admin user), `admin user create/list/delete`, `admin project create/list` (§12.2), `dispatcher` subcommand wired (`dispatcher::run`). Missing: ingest tokens, role set/unset, key rotation, seed |
 | `webhooks` | 🔴 stub | |
 | `test-utils` | ✅ done | `FakeBackend`, `FakeProvider` (async run hooks mirroring submit-ack-then-exit ordering), `NatsTestServer` (Docker `nats:2-alpine`, skip-guarded), `TempRepo`/`WorkClone`/`clone_branch_from` |
 
@@ -57,6 +59,11 @@ implementation session.
 - Launch payload: prompt + channel binary injected (put-archive), MCP config
   entry with NATS_URL/NATS_TOKEN, `CHANNEL_ROLE`/`JOB_TASK_ID` env, secrets
   age-decrypted (`for_api` encrypts / `for_dispatcher` decrypts, §8.2).
+- Bootstrap + boot: `chuggernaut init` (idempotent §12.1 — keypairs skip-if-
+  exist, `ensure_topology`, `platform.vapid.public`, admin user), `admin
+  project create` (§12.2 counter + bare repo + HEAD symref), `chuggernaut
+  dispatcher` (env config §12.4 → `dispatcher::run`: git-version check,
+  `ping_all`, Core spawn, container handlers).
 
 ## Key implementation decisions (beyond the spec text)
 
@@ -80,6 +87,17 @@ implementation session.
   framework; musl static build wants a short dep list).
 - **Docker over host installs** for test deps (user preference): NATS test
   harness runs `nats:2-alpine` in Docker with a skip guard.
+- **Keygen shells out** to `openssl` (JWT RSA, VAPID P-256) and `ssh-keygen`
+  (ed25519 CA) — same standard tooling the deploy host needs anyway; only the
+  age key is generated in-process (dispatcher consumes it directly). Private
+  key files are chmod 0600.
+- **§12.4 defaults live in `CoreConfig`** (`agent_provider_default`/
+  `agent_model_default`, both Option so test configs stay terse); the
+  declaration→platform fallback is applied at task-record and launch time.
+  `DispatcherConfig::from_env` enforces "refuses to start without
+  AGENT_PROVIDER_DEFAULT".
+- **`REPO_URL_BASE` defaults to `file://{repos_root}`** until the SSH front
+  (auth crate) lands — single-node dev works out of the box.
 - Crate invariant held: only `store` touches `async-nats`
   (`subscribe_requests` / `read_stream` / `read_subject_after` wrappers).
 
@@ -102,11 +120,9 @@ implementation session.
 
 ## Next steps (recommended order)
 
-1. **Bin wiring + init** (`chuggernaut` bin, `cli` crate): `chuggernaut init`
-   (keygen incl. `generate_age_keypair`, `ensure_topology`, admin user),
-   `chuggernaut dispatcher` (Core::new + spawn + `spawn_container_handlers` +
-   `ping_all`, config from env per §12.4). Makes the system runnable against
-   real Docker — first live agent job.
+1. **First live agent job**: build the musl channel binary, point
+   `CHANNEL_BINARY` at it, run a real `work.type: agent` job end to end on
+   the booted stack — shakes out anything the FakeProvider hides.
 2. **auth crate** (§7): per-job NATS JWT minting + allow-lists, SSH CA and
    cert issuance, sshd authz hook; replaces the empty `NATS_TOKEN` and
    `file://` repo URLs.
@@ -125,5 +141,6 @@ implementation session.
   invocation, channel protocol, docker tar/memory parsing.
 - Tier-2 (skip-guarded on Docker): `store/tests/nats_store.rs`,
   `container/tests/docker_backend.rs`, `chuggernaut-channel/tests/stdio.rs`,
+  `cli/tests/init_admin.rs`,
   and `dispatcher/tests/{lifecycle,execution,gate_and_human,recovery,nats_submit}.rs`.
 - Run everything: `cargo test --workspace` (from `v2/`; needs Docker up).

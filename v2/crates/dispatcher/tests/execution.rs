@@ -297,6 +297,7 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
             nats_url: server.url().into(),
             channel_binary: Some(fake_binary),
             age_identity: Some(identity),
+            ..Default::default()
         },
     )
     .await

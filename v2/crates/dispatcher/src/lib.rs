@@ -17,5 +17,6 @@ pub mod launch;
 pub mod queue;
 pub mod reconcile;
 pub mod release;
+pub mod run;
 pub mod scan;
 pub mod state;

@@ -19,15 +19,18 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the dispatcher (sole writer of all job/task state).
+    /// Configured via env: NATS_URL, REPOS_ROOT, REPO_URL_BASE, KEYS_DIR,
+    /// CHANNEL_BINARY, AGENT_PROVIDER_DEFAULT (required), AGENT_MODEL_DEFAULT,
+    /// DOCKER_NODES | DOCKER_SLOTS (spec §12.4).
     Dispatcher,
     /// Run the HTTP↔NATS API bridge (serves the PWA).
     Api,
     /// Run the webhook delivery service.
     Webhooks,
     /// One-time platform bootstrap: keypairs, NATS buckets/streams, admin user.
-    Init,
+    Init(cli::InitArgs),
     /// Admin operations: users, projects, ingest tokens, key rotation, seeding.
-    Admin,
+    Admin(cli::AdminArgs),
 }
 
 #[tokio::main]
@@ -35,10 +38,16 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
     match cli.command {
-        Command::Dispatcher => anyhow::bail!("not yet implemented: dispatcher"),
+        Command::Dispatcher => {
+            let config = dispatcher::config::DispatcherConfig::from_env()?;
+            let _handle = dispatcher::run::run(config).await?;
+            tokio::signal::ctrl_c().await?;
+            eprintln!("shutting down");
+            Ok(())
+        }
         Command::Api => anyhow::bail!("not yet implemented: api"),
         Command::Webhooks => anyhow::bail!("not yet implemented: webhooks"),
-        Command::Init => anyhow::bail!("not yet implemented: init"),
-        Command::Admin => anyhow::bail!("not yet implemented: admin"),
+        Command::Init(args) => cli::init::run(args).await,
+        Command::Admin(args) => cli::admin::run(args).await,
     }
 }

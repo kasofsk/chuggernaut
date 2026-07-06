@@ -37,6 +37,10 @@ pub enum CoreError {
     Validation(Vec<ValidationError>),
     #[error("invalid resolution: {0}")]
     InvalidResolution(String),
+    #[error("configuration: {0}")]
+    Config(String),
+    #[error(transparent)]
+    Backend(#[from] container::BackendError),
     #[error("core loop stopped")]
     Stopped,
 }
@@ -221,6 +225,11 @@ pub struct CoreConfig {
     /// age identity (`AGE-SECRET-KEY-1...`) for decrypting secrets at launch
     /// (spec §8.2). None → secret env values are injected as stored (dev).
     pub age_identity: Option<String>,
+    /// §12.4 platform provider default. None (tests) falls back to `claude`;
+    /// the production path always sets it — `DispatcherConfig` requires it.
+    pub agent_provider_default: Option<String>,
+    /// §12.4 platform model default; job-type/evaluator `model:` overrides it.
+    pub agent_model_default: Option<String>,
 }
 
 pub struct Core {
