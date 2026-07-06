@@ -11,6 +11,19 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use types::ProjectRole;
 
+/// Login principal present in every cert: sshd only accepts certificates
+/// whose principals include the target account, so all git traffic logs in
+/// as the `git` user (its `AuthorizedPrincipalsFile` lists exactly this).
+/// The semantic principal (§5.2) travels alongside it and in the cert's
+/// forced command.
+pub const SSH_LOGIN_PRINCIPAL: &str = "git";
+
+/// Env names `ssh-shell` exports for the repo's pre-receive hook.
+pub const ENV_PRINCIPAL: &str = "CHUGGERNAUT_PRINCIPAL";
+pub const ENV_ACCESS: &str = "CHUGGERNAUT_ACCESS";
+pub const ENV_ROLES: &str = "CHUGGERNAUT_ROLES";
+pub const ENV_REPO: &str = "CHUGGERNAUT_REPO";
+
 /// Whether a per-job certificate may push (§7.4: work rw, eval ro).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertAccess {
@@ -110,10 +123,78 @@ pub fn authorize_ref_push(
     }
 }
 
+/// Entry gate for `git-receive-pack` (before any ref is known): may this
+/// principal push *anything* to the repo? Per-ref enforcement happens in the
+/// pre-receive hook via [`authorize_ref_push`].
+pub fn authorize_push_entry(
+    principal: &Principal,
+    access: CertAccess,
+    roles: &HashMap<String, ProjectRole>,
+    owner: &str,
+    project: &str,
+) -> bool {
+    if access == CertAccess::ReadOnly {
+        return false;
+    }
+    match principal {
+        Principal::Dispatcher => true,
+        Principal::Job { owner: o, project: p, .. } => o == owner && p == project,
+        Principal::User { .. } => {
+            roles.get(&format!("{owner}/{project}")) >= Some(&ProjectRole::Member)
+        }
+    }
+}
+
 fn is_job_branch(refname: &str) -> bool {
     refname
         .strip_prefix("refs/heads/job/")
         .is_some_and(|seq| !seq.is_empty() && seq.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// The two git services reachable over SSH.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitService {
+    UploadPack,  // pull / clone
+    ReceivePack, // push
+}
+
+impl GitService {
+    pub fn command(&self) -> &'static str {
+        match self {
+            GitService::UploadPack => "git-upload-pack",
+            GitService::ReceivePack => "git-receive-pack",
+        }
+    }
+}
+
+/// Parse `SSH_ORIGINAL_COMMAND` (`git-upload-pack '/acme/api.git'`, also the
+/// `git upload-pack` spelling) into service + owner + project. Anything else
+/// — including path traversal and option-looking paths — is None (deny).
+pub fn parse_git_command(original: &str) -> Option<(GitService, String, String)> {
+    let rest = original.trim();
+    let (service, path) = if let Some(p) = strip_service(rest, "upload-pack") {
+        (GitService::UploadPack, p)
+    } else if let Some(p) = strip_service(rest, "receive-pack") {
+        (GitService::ReceivePack, p)
+    } else {
+        return None;
+    };
+    let path = path.trim().trim_matches('\'').trim_matches('"');
+    let path = path.strip_prefix('/').unwrap_or(path);
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, project) = path.split_once('/')?;
+    let valid = |s: &str| {
+        !s.is_empty()
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    };
+    (valid(owner) && valid(project))
+        .then(|| (service, owner.to_string(), project.to_string()))
+}
+
+fn strip_service<'a>(command: &'a str, service: &str) -> Option<&'a str> {
+    command
+        .strip_prefix(&format!("git-{service} "))
+        .or_else(|| command.strip_prefix(&format!("git {service} ")))
 }
 
 /// A freshly issued per-job SSH credential (§7.4): ephemeral private key +
@@ -204,7 +285,7 @@ impl SshCa {
             "-q",
             "-s", path_str(&self.ca_key_path)?,
             "-I", key_id,
-            "-n", principal,
+            "-n", &format!("{principal},{SSH_LOGIN_PRINCIPAL}"),
             "-V", &format!("+{}s", validity.num_seconds().max(1)),
             "-O", "clear",
             "-O", &format!("force-command={force_command}"),
@@ -262,6 +343,34 @@ mod tests {
         );
         // Malformed job principals fall through to user (deny-by-role).
         assert!(matches!(Principal::parse("job:acme:nope"), Principal::User { .. }));
+    }
+
+    #[test]
+    fn git_command_parsing() {
+        let ok = |cmd: &str| parse_git_command(cmd).unwrap();
+        assert_eq!(
+            ok("git-upload-pack '/acme/api.git'"),
+            (GitService::UploadPack, "acme".into(), "api".into())
+        );
+        assert_eq!(
+            ok("git-receive-pack '/acme/api.git'"),
+            (GitService::ReceivePack, "acme".into(), "api".into())
+        );
+        assert_eq!(
+            ok("git upload-pack acme/api"),
+            (GitService::UploadPack, "acme".into(), "api".into())
+        );
+        for bad in [
+            "git-upload-archive '/acme/api.git'",
+            "rm -rf /",
+            "git-upload-pack '/../etc.git'",
+            "git-upload-pack '/acme.git'",
+            "git-upload-pack '/acme/a b.git'",
+            "git-receive-pack --evil '/acme/api.git'",
+            "",
+        ] {
+            assert!(parse_git_command(bad).is_none(), "{bad:?} should be rejected");
+        }
     }
 
     #[test]

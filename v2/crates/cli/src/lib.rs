@@ -7,6 +7,8 @@
 pub mod admin;
 pub mod init;
 pub mod keygen;
+pub mod sshfront;
 
 pub use admin::AdminArgs;
 pub use init::InitArgs;
+pub use sshfront::SshShellArgs;

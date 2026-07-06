@@ -31,6 +31,12 @@ enum Command {
     Init(cli::InitArgs),
     /// Admin operations: users, projects, ingest tokens, key rotation, seeding.
     Admin(cli::AdminArgs),
+    /// SSH forced command (§5.2): gate and exec the git service. Embedded in
+    /// certificates at signing time — not for interactive use.
+    SshShell(cli::SshShellArgs),
+    /// Pre-receive hook body (§5.2): per-ref push authorization. Installed
+    /// into every bare repo by `admin project create`.
+    SshAuthz,
 }
 
 #[tokio::main]
@@ -49,5 +55,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Webhooks => anyhow::bail!("not yet implemented: webhooks"),
         Command::Init(args) => cli::init::run(args).await,
         Command::Admin(args) => cli::admin::run(args).await,
+        Command::SshShell(args) => cli::sshfront::run_shell(args).await,
+        Command::SshAuthz => cli::sshfront::run_authz().await,
     }
 }

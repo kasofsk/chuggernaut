@@ -502,9 +502,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "api",
+ "base64 0.22.1",
  "clap",
  "cli",
  "dispatcher",
+ "tempfile",
+ "test-utils",
  "tokio",
  "tracing-subscriber",
  "webhooks",
@@ -603,6 +606,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "auth",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "nkeys",

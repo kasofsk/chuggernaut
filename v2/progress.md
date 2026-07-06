@@ -5,10 +5,12 @@ Companion to `spec.md` (normative), `design.md` (rationale), `crates.md`
 or extends the spec, and what comes next. Update it at the end of each
 implementation session.
 
-**As of:** 2026-07-05 (session 3) · 83 tests passing, clippy clean. The
+**As of:** 2026-07-06 (session 4) · 89 tests passing, clippy clean. The
 system is runnable outside tests (`init` → `admin project create` →
-`dispatcher`), and per-job credentials (§7.4) are now real: launches mint
-scoped NATS user JWTs, live-verified against an operator-mode server.
+`dispatcher`), per-job credentials (§7.4) are real (scoped NATS user JWTs,
+live-verified against an operator-mode server), and the SSH front (§5.2) is
+implemented end to end: `ssh-shell` forced command + pre-receive hook enforce
+the ref table against real `git clone`/`push`, and launches inject job certs.
 
 ---
 
@@ -25,9 +27,9 @@ scoped NATS user JWTs, live-verified against an operator-mode server.
 | `chuggernaut-channel` | 🟡 partial | Working stdio MCP server: update_status/reply/channel_check + role-gated submit_result/submit_eval. Missing: `submit_review` local mode (§4.5), `create_job` (factories §13), push-mode inbox |
 | `chuggernaut-harness` | 🔴 scaffold | Config types + loop protocol as TODO (§4.5) |
 | `chuggernaut-ko` | 🔴 stub | |
-| `auth` | ✅ done (lib) | §7 complete as a library: RS256 platform JWTs + cookie + `JwtAuthProvider`, SSH CA signing (user 24h / per-job ephemeral keypair+cert, authz context in force-command), §5.2 ref-authz pure functions, hand-rolled NATS JWTs (operator/account/user) + §7.4 allow-lists + `.creds`/resolver-config rendering. Not yet deployed: sshd front (`ssh-shell` subcommand, pre-receive hooks) — repos still `file://` |
+| `auth` | ✅ done | §7 complete: RS256 platform JWTs + cookie + `JwtAuthProvider`, SSH CA signing (user 24h / per-job ephemeral keypair+cert, authz context in force-command, `git` login principal), §5.2 parsing + pull/push-entry/per-ref authz pure functions, hand-rolled NATS JWTs (operator/account/user) + §7.4 allow-lists + `.creds`/resolver-config rendering |
 | `api` | 🔴 stub | No HTTP surface; only container-facing NATS subjects handled |
-| `cli` / `chuggernaut` bin | 🟡 done (core) | `init` (§12.1: keygen incl. NATS operator/SYS/CHUG seeds + derived `nats-resolver.conf` and `dispatcher.creds`, topology, VAPID pub in KV, admin user), `admin user create/list/delete`, `admin project create/list` (§12.2), `dispatcher` subcommand wired. Missing: ingest tokens, role set/unset, key rotation, seed, `ssh-shell`/`ssh-authz` |
+| `cli` / `chuggernaut` bin | 🟡 done (core) | `init` (§12.1: keygen incl. NATS operator/SYS/CHUG seeds + derived `nats-resolver.conf` and `dispatcher.creds`, topology, VAPID pub in KV, admin user), `admin user create/list/delete`, `admin project create/list` (§12.2, installs the pre-receive hook), `dispatcher`, `ssh-shell` (forced command: parse SSH_ORIGINAL_COMMAND, gate entry, exec git service with identity env), `ssh-authz` (pre-receive hook body). Missing: ingest tokens, role set/unset, key rotation, seed |
 | `webhooks` | 🔴 stub | |
 | `test-utils` | ✅ done | `FakeBackend`, `FakeProvider` (async run hooks mirroring submit-ack-then-exit ordering), `NatsTestServer` (Docker `nats:2-alpine`, skip-guarded; `spawn_with_config` boots operator-mode servers), `TempRepo`/`WorkClone`/`clone_branch_from` |
 
@@ -70,6 +72,20 @@ scoped NATS user JWTs, live-verified against an operator-mode server.
   cross-project reads/writes and eval submits.
 - Dispatcher and `init` connect with `dispatcher.creds` when present (works
   against both open dev servers and operator-mode servers).
+- **SSH front (§5.2)**: `admin project create` installs a pre-receive hook;
+  certificates carry `chuggernaut ssh-shell --principal ... --access ...` as
+  their forced command; ssh-shell parses `SSH_ORIGINAL_COMMAND`, gates
+  pull/push entry, and execs `git-{upload,receive}-pack` with the identity in
+  `CHUGGERNAUT_*` env; the hook enforces the per-ref table. Verified by real
+  `git clone`/`push` through git's `ext::` transport (protocol-identical to
+  sshd, no daemon needed): job certs push only `job/{seq}` in their own
+  project, ro certs can't push at all, Viewer pulls but can't push, Member
+  pushes job branches but not `main`/tags, dispatcher pushes protected refs,
+  and local `file://` access passes through untouched.
+- When `ssh_ca` is present and `REPO_URL_BASE` is `ssh://`, every launch
+  (work agent/command, eval agent/command) injects a freshly issued job cert
+  (`/chuggernaut/ssh/id{,-cert.pub}`, rw work / ro eval, TTL = task_timeout)
+  plus a static `GIT_SSH_COMMAND` pointing at it.
 - Bootstrap + boot: `chuggernaut init` (idempotent §12.1 — keypairs skip-if-
   exist, `ensure_topology`, `platform.vapid.public`, admin user), `admin
   project create` (§12.2 counter + bare repo + HEAD symref), `chuggernaut
@@ -130,6 +146,19 @@ scoped NATS user JWTs, live-verified against an operator-mode server.
   user roles as b64 JSON) — stock sshd enforces it via `TrustedUserCAKeys`;
   no `ExposeAuthInfo` parsing. Per-job certs mint an ephemeral ed25519
   keypair; eval certs are read-only via the `--access` flag.
+- **Every cert carries a second principal `git`** (`SSH_LOGIN_PRINCIPAL`):
+  sshd only accepts certs whose principals include the login account, so all
+  git traffic logs in as `git` (its `AuthorizedPrincipalsFile` lists exactly
+  that) while the semantic §5.2 principal travels alongside.
+- **Entry gate vs per-ref split**: ssh-shell can only gate at repo level
+  (receive-pack learns refs after the pack arrives), so `authorize_push_entry`
+  guards entry and the pre-receive hook applies `authorize_ref_push` per ref.
+  **No identity env → the hook allows** — local/`file://` access means you're
+  already on the host (the dispatcher's own path); sshd traffic always has
+  the env because ssh-shell is the unavoidable forced command.
+- **Hook body bakes `current_exe`** at `admin project create` time — assumes
+  the admin CLI runs on the SSH host with the same artifact path (true for
+  the single-node compose deploy).
 
 ## Known gaps / accepted debt (grep for TODO)
 
@@ -142,10 +171,13 @@ scoped NATS user JWTs, live-verified against an operator-mode server.
 - Command task `TaskResult::Command.output` is always empty (no log capture).
 - Docker fleet TCP endpoints have no mTLS; `ping_all` exists but isn't called
   by anything yet (no bin wiring).
-- SSH front not deployed: `ssh-shell`/`ssh-authz` subcommands, pre-receive
-  hook installation at project creation, and sshd config are still missing —
-  job SSH certs can be issued (`SshCa::issue_job_credential`) but aren't
-  injected into launches; `REPO_URL` stays `file://`.
+- sshd itself is configuration, not code (crates.md): `TrustedUserCAKeys`,
+  a `git` account with `AuthorizedPrincipalsFile` containing `git`, and the
+  chuggernaut binary on the host. Container host-key verification is
+  disabled (`StrictHostKeyChecking=no`) — mTLS/known-hosts story deferred.
+- User SSH cert issuance flow (§7.3 `POST /auth/ssh-cert` →
+  `req.ssh.sign-user-cert`) needs the api crate; `SshCa::sign_user_cert` is
+  ready.
 - Triage (factory) containers don't get their extra `req.jobs.create`
   permission yet — factories themselves are unimplemented (§13).
 - Dispatcher creds never expire (no rotation story yet); per-launch minting
@@ -162,20 +194,16 @@ scoped NATS user JWTs, live-verified against an operator-mode server.
    `CHANNEL_BINARY` at it, run a real `work.type: agent` job end to end on
    the booted stack (now with the operator-mode server + scoped creds) —
    shakes out anything the FakeProvider hides.
-2. **SSH front deployment** (§5.2): `chuggernaut ssh-shell` (parse
-   SSH_ORIGINAL_COMMAND, gate pull, exec git-{upload,receive}-pack with
-   principal env) + pre-receive hook calling the §5.2 ref rules (auth lib
-   functions exist), hook installation in `admin project create`, job cert
-   injection into launches, `REPO_URL` → ssh.
-3. **api crate** (§6): axum routes → NATS request-reply, SSE bridge, plus the
+2. **api crate** (§6): axum routes → NATS request-reply, SSE bridge, plus the
    dispatcher-side handlers for the remaining `req.*` families (jobs, graph,
-   vcs, tasks/resolve, vars/secrets/knowledge, steps). Auth middleware
-   building blocks (`JwtAuthProvider`, `authorize`, cookie helpers) are done.
-4. **chuggernaut-ko + §4.4 knowledge injection** (system_prompt assembly).
-5. **Inline review harness** (§4.5): loop implementation + `submit_review`
+   vcs, tasks/resolve, vars/secrets/knowledge, steps) and `req.ssh.sign-user-cert`
+   (§7.3). Auth middleware building blocks (`JwtAuthProvider`, `authorize`,
+   cookie helpers) are done.
+3. **chuggernaut-ko + §4.4 knowledge injection** (system_prompt assembly).
+4. **Inline review harness** (§4.5): loop implementation + `submit_review`
    local mode in the channel binary + `req.step.report` dispatcher handler +
    step events; CodexProvider validation already rejects at release time.
-6. **Task factories + ingest (§13)** (incl. wiring
+5. **Task factories + ingest (§13)** (incl. wiring
    `triage_container_permissions`), webhooks, then the PWA.
 
 ## Test layout (tiers per testing.md)
@@ -189,4 +217,6 @@ scoped NATS user JWTs, live-verified against an operator-mode server.
   `container/tests/docker_backend.rs`, `chuggernaut-channel/tests/stdio.rs`,
   `cli/tests/init_admin.rs`, `auth/tests/nats_live.rs` (operator-mode server),
   and `dispatcher/tests/{lifecycle,execution,gate_and_human,recovery,nats_submit}.rs`.
+- `chuggernaut/tests/ssh_front.rs` (git + the compiled binary, no Docker):
+  the §5.2 matrix over git's `ext::` transport.
 - Run everything: `cargo test --workspace` (from `v2/`; needs Docker up).

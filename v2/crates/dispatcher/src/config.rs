@@ -117,7 +117,9 @@ impl DispatcherConfig {
     }
 
     pub async fn core_config(&self) -> Result<CoreConfig> {
+        let ssh_ca = self.keys_dir.join("ssh_ca");
         Ok(CoreConfig {
+            ssh_ca: ssh_ca.is_file().then_some(ssh_ca),
             repo_url_base: self.repo_url_base.clone(),
             nats_url: self.nats_url.clone(),
             channel_binary: self.channel_binary.clone(),

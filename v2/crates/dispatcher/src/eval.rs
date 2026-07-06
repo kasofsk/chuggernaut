@@ -167,7 +167,11 @@ impl Core {
                     image: eval_image(&job_type, evaluator),
                     cmd: bootstrap_cmd(&["sh".into(), "-c".into(), run]),
                     env,
-                    files: vec![],
+                    files: self
+                        .ssh_credential_files(
+                            owner, project, seq, ChannelRole::Eval { task_id }, &job_type,
+                        )
+                        .await?,
                     cpu_limit: job_type.resources.as_ref().and_then(|r| r.cpu),
                     memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
                 };
@@ -197,7 +201,13 @@ impl Core {
                         evaluator.prompt.as_deref().unwrap_or_default())
                     .await?
                     .unwrap_or_default();
-                let (mcp_servers, files) = self.channel_mcp(&env);
+                let (mcp_servers, mut files) = self.channel_mcp(&env);
+                files.extend(
+                    self.ssh_credential_files(
+                        owner, project, seq, ChannelRole::Eval { task_id }, &job_type,
+                    )
+                    .await?,
+                );
                 let config = AgentRunConfig {
                     image: eval_image(&job_type, evaluator),
                     prompt,

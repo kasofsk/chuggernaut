@@ -210,7 +210,11 @@ impl Core {
                         job_type.work.prompt.as_deref().unwrap_or_default(),
                         &eval_context, merge_conflict.as_deref())
                     .await?;
-                let (mcp_servers, files) = self.channel_mcp(&env);
+                let (mcp_servers, mut files) = self.channel_mcp(&env);
+                files.extend(
+                    self.ssh_credential_files(owner, project, seq, ChannelRole::Work, &job_type)
+                        .await?,
+                );
                 let config = AgentRunConfig {
                     image: job_type.image.clone().unwrap_or_default(),
                     prompt,
@@ -251,7 +255,9 @@ impl Core {
                     image: job_type.image.clone().unwrap_or_default(),
                     cmd: bootstrap_cmd(&["sh".into(), "-c".into(), run]),
                     env,
-                    files: vec![],
+                    files: self
+                        .ssh_credential_files(owner, project, seq, ChannelRole::Work, &job_type)
+                        .await?,
                     cpu_limit: job_type.resources.as_ref().and_then(|r| r.cpu),
                     memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
                 };
@@ -643,6 +649,18 @@ impl Core {
                 env.insert("JOB_TASK_ID".into(), task_id.to_string());
             }
         }
+        // §5.2: repos behind the SSH front need the injected cert (paths are
+        // fixed — the credential itself rides in via ssh_credential_files).
+        if self.ssh_front_active() {
+            env.insert(
+                "GIT_SSH_COMMAND".into(),
+                format!(
+                    "ssh -i {SSH_ID_PATH} -o CertificateFile={SSH_CERT_PATH} \
+                     -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+                     -o UserKnownHostsFile=/dev/null"
+                ),
+            );
+        }
         // §7.4: scoped credentials valid for task_timeout, minted per launch.
         if let Some(seed) = &self.config.nats_account_seed {
             let signer = auth::nats::NatsUserSigner::from_account_seed(seed)
@@ -698,6 +716,48 @@ impl Core {
         Ok(env)
     }
 
+    fn ssh_front_active(&self) -> bool {
+        self.config.ssh_ca.is_some() && self.config.repo_url_base.starts_with("ssh://")
+    }
+
+    /// §7.4 per-job SSH credential as injected files (work rw, eval ro).
+    /// Empty when the SSH front isn't configured (file:// dev repos, tests).
+    pub(crate) async fn ssh_credential_files(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        role: ChannelRole,
+        job_type: &JobType,
+    ) -> Result<Vec<container::InjectedFile>> {
+        if !self.ssh_front_active() {
+            return Ok(vec![]);
+        }
+        let ca = auth::ssh::SshCa::new(self.config.ssh_ca.as_ref().expect("checked"));
+        let access = match role {
+            ChannelRole::Work => auth::ssh::CertAccess::ReadWrite,
+            ChannelRole::Eval { .. } => auth::ssh::CertAccess::ReadOnly,
+        };
+        let ttl = chrono::Duration::from_std(task_timeout(job_type))
+            .unwrap_or_else(|_| chrono::Duration::hours(1));
+        let cred = ca
+            .issue_job_credential(owner, project, seq, access, ttl)
+            .await
+            .map_err(|e| CoreError::Config(format!("issuing job ssh cert: {e}")))?;
+        Ok(vec![
+            container::InjectedFile {
+                container_path: SSH_ID_PATH.into(),
+                contents: cred.private_key.into_bytes(),
+                mode: 0o600,
+            },
+            container::InjectedFile {
+                container_path: SSH_CERT_PATH.into(),
+                contents: cred.certificate.into_bytes(),
+                mode: 0o644,
+            },
+        ])
+    }
+
     /// The channel MCP server entry + injected binary for agent launches
     /// (spec §4.2). Empty when no binary is configured (tests, degraded dev).
     pub(crate) fn channel_mcp(
@@ -736,6 +796,10 @@ pub(crate) enum ChannelRole {
     Work,
     Eval { task_id: u64 },
 }
+
+/// Fixed container paths for the injected §7.4 SSH credential.
+pub(crate) const SSH_ID_PATH: &str = "/chuggernaut/ssh/id";
+pub(crate) const SSH_CERT_PATH: &str = "/chuggernaut/ssh/id-cert.pub";
 
 fn kind_matches_work(kind: &TaskKind, work_type: WorkType) -> bool {
     matches!(

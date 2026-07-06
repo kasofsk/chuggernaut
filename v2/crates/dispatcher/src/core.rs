@@ -234,6 +234,10 @@ pub struct CoreConfig {
     /// per-container scoped credentials (§7.4). None → containers connect
     /// unauthenticated (tests, open dev NATS).
     pub nats_account_seed: Option<String>,
+    /// SSH CA private key path (`ssh_ca`, §12.1) for per-job certificates
+    /// (§7.4). Certs are injected only when `repo_url_base` is `ssh://` —
+    /// `file://` dev repos need none.
+    pub ssh_ca: Option<std::path::PathBuf>,
 }
 
 pub struct Core {

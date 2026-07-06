@@ -132,6 +132,10 @@ async fn run_project(store: &NatsStore, cmd: ProjectCmd) -> Result<()> {
             vcs::RepoManager::new(&repos_root)
                 .create_project(&owner, &name, &default_branch)
                 .await?;
+            // §5.2 per-ref push authorization for SSH traffic; local access
+            // (no CHUGGERNAUT_PRINCIPAL env) passes through.
+            let bin = std::env::current_exe()?;
+            crate::sshfront::install_pre_receive_hook(&repos_root, &owner, &name, &bin).await?;
             counters.put_json(&key, &0u64).await?;
             println!(
                 "created {owner}/{name} (default branch {default_branch}) at {}",

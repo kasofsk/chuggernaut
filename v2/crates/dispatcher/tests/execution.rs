@@ -285,6 +285,15 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
     let fake_binary = repo.bare_path().parent().unwrap().join("chuggernaut-channel");
     tokio::fs::write(&fake_binary, b"#!/bin/sh\nexit 0\n").await.unwrap();
 
+    // SSH front enabled: generate a CA so launches carry a job cert (§5.2).
+    let ssh_ca = repo.bare_path().parent().unwrap().join("ssh_ca");
+    let status = tokio::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f", ssh_ca.to_str().unwrap()])
+        .status()
+        .await
+        .unwrap();
+    assert!(status.success());
+
     let provider = Arc::new(FakeProvider::new());
     let repos_root = repo.bare_path().parent().unwrap().parent().unwrap().to_path_buf();
     let core = Core::new(
@@ -293,11 +302,12 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
         Arc::new(FakeBackend::new()),
         provider.clone(),
         CoreConfig {
-            repo_url_base: "file:///repos".into(),
+            repo_url_base: "ssh://git@forge.example".into(),
             nats_url: server.url().into(),
             channel_binary: Some(fake_binary),
             age_identity: Some(identity),
             nats_account_seed: Some(nkeys::KeyPair::new_account().seed().unwrap()),
+            ssh_ca: Some(ssh_ca),
             ..Default::default()
         },
     )
@@ -321,7 +331,18 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
     assert!(creds.contains("BEGIN NATS USER JWT"));
     assert_eq!(runs[0].mcp_servers[0].env.get("NATS_CREDS"), Some(creds));
     assert_eq!(runs[0].env.get("CHANNEL_ROLE").map(String::as_str), Some("work"));
-    assert_eq!(runs[0].files.len(), 1);
-    assert_eq!(runs[0].files[0].container_path, "/usr/local/bin/chuggernaut-channel");
+    // Channel binary + §5.2 job SSH credential (key 0600 + cert).
+    let paths: Vec<&str> = runs[0].files.iter().map(|f| f.container_path.as_str()).collect();
+    assert_eq!(
+        paths,
+        ["/usr/local/bin/chuggernaut-channel", "/chuggernaut/ssh/id", "/chuggernaut/ssh/id-cert.pub"]
+    );
     assert_eq!(runs[0].files[0].mode, 0o755);
+    assert_eq!(runs[0].files[1].mode, 0o600);
+    let cert = String::from_utf8(runs[0].files[2].contents.clone()).unwrap();
+    assert!(cert.starts_with("ssh-ed25519-cert-v01@openssh.com"));
+    assert!(
+        runs[0].env.get("GIT_SSH_COMMAND").unwrap().contains("/chuggernaut/ssh/id"),
+        "GIT_SSH_COMMAND must reference the injected key"
+    );
 }
