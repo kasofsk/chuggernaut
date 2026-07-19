@@ -7,14 +7,14 @@
 //! required command evaluators against it before promoting — nothing reaches
 //! the default branch untested against the exact tree that lands.
 
-use crate::core::{Core, CoreError, EvalSubmission, Msg, Result};
+use crate::core::{Core, CoreError, EvalSubmission, Msg, Result, TaskExit};
 use crate::exec::{ChannelRole, eval_image, task_timeout};
 use agent::AgentRunConfig;
 use chrono::Utc;
 use container::{ContainerLaunchConfig, bootstrap_cmd};
 use types::{
-    EvalResult, Evaluator, EvaluatorType, JobState, Task, TaskKind, TaskPhase, TaskResult,
-    TaskState, WorkType,
+    EvalResult, Evaluator, EvaluatorType, Finalize, JobState, Task, TaskKind, TaskPhase,
+    TaskResult, TaskState, WorkType,
 };
 use vcs::MergeOutcome;
 
@@ -31,7 +31,13 @@ pub struct EvalSlot {
 
 #[derive(Clone)]
 pub enum SlotOutcome {
-    Product { pass: bool, structured: Option<serde_json::Value> },
+    Product {
+        pass: bool,
+        /// "Not satisfiable by rework" (design-lifecycle.md): a required
+        /// evaluator's abort escalates at reduce instead of consuming budget.
+        abort: bool,
+        structured: Option<serde_json::Value>,
+    },
     /// Agent eval exhausted `eval_retries` without a `submit_eval` (§3.3).
     Infra,
 }
@@ -121,10 +127,21 @@ impl Core {
                 },
                 false,
             ),
-            EvaluatorType::Human => {
-                (TaskKind::Human { prompt: evaluator.prompt.clone().unwrap_or_default() }, true)
-            }
+            EvaluatorType::Human => (
+                TaskKind::Human {
+                    prompt: format!(
+                        "{}{}",
+                        evaluator.prompt.clone().unwrap_or_default(),
+                        crate::exec::job_brief_block(&job)
+                    ),
+                },
+                true,
+            ),
         };
+        // Agent evaluators get a transcript too — an eval that fails the job
+        // is exactly the reasoning an operator wants to read back.
+        let session_id = matches!(evaluator.r#type, EvaluatorType::Agent)
+            .then(|| uuid::Uuid::new_v4().to_string());
         let mut task = Task {
             id: task_id,
             job_seq: seq,
@@ -136,6 +153,7 @@ impl Core {
             attempt,
             evaluator: Some(evaluator.name.clone()),
             container_id: None,
+            session_id: session_id.clone(),
             result: None,
             created_at: Utc::now(),
             started_at: (!pending_human).then(Utc::now),
@@ -152,10 +170,11 @@ impl Core {
         }
 
         // Eval containers get vars but only the evaluator's own secrets (§4.1).
-        let mut eval_type = job_type.clone();
-        eval_type.secrets = evaluator.secrets.clone();
         let env = self
-            .container_env(owner, project, seq, branch, &eval_type, ChannelRole::Eval { task_id })
+            .container_env(
+                owner, project, seq, branch, &job_type, &evaluator.secrets,
+                ChannelRole::Eval { task_id },
+            )
             .await?;
         let tx = self.self_tx.clone().expect("spawned core");
         let (o, p) = (owner.to_string(), project.to_string());
@@ -180,6 +199,7 @@ impl Core {
                 task.container_id = Some(id.clone());
                 self.tasks.put(&task).await?;
                 let backend = self.backend.clone();
+                let harvest = self.harvester();
                 tokio::spawn(async move {
                     let exit_code = backend.wait(&id).await.unwrap_or(-1);
                     // §3.3: extract structured findings after exit.
@@ -189,18 +209,28 @@ impl Core {
                         .ok()
                         .flatten()
                         .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+                    harvest.collect_logs(&o, &p, seq, task_id, &id).await;
                     let _ = tx
-                        .send(Msg::TaskExited { owner: o, project: p, seq, task_id, exit_code, eval_json })
+                        .send(Msg::TaskExited {
+                            owner: o, project: p, seq, task_id,
+                            exit: TaskExit { exit_code, eval_json, usage: None },
+                        })
                         .await;
                 });
             }
             EvaluatorType::Agent => {
-                let prompt = self
-                    .repos
-                    .read_file_at(owner, project, &base_ref,
-                        evaluator.prompt.as_deref().unwrap_or_default())
-                    .await?
-                    .unwrap_or_default();
+                let mut env = env;
+                self.inject_platform_agent_secrets(&mut env).await?;
+                // Evaluators judge against the same brief the author saw.
+                let prompt = format!(
+                    "{}{}",
+                    self.repos
+                        .read_file_at(owner, project, &base_ref,
+                            evaluator.prompt.as_deref().unwrap_or_default())
+                        .await?
+                        .unwrap_or_default(),
+                    crate::exec::job_brief_block(&job)
+                );
                 let (mcp_servers, mut files) = self.channel_mcp(&env);
                 files.extend(
                     self.ssh_credential_files(
@@ -222,19 +252,25 @@ impl Core {
                     task_timeout: task_timeout(&job_type),
                     eval_context: vec![],
                     merge_conflict: None,
+                    session_id: session_id.clone().unwrap_or_default(),
                 };
                 let provider = self.provider.clone();
+                let harvest = self.harvester();
                 tokio::spawn(async move {
-                    let exit_code = match provider.run(config).await {
-                        Ok(out) => out.exit_code,
+                    let (exit_code, usage) = match provider.run(config).await {
+                        Ok(out) => {
+                            let usage = harvest.collect(&o, &p, seq, task_id, &out).await;
+                            (out.exit_code, usage)
+                        }
                         Err(e) => {
                             tracing::error!("eval agent run failed: {e}");
-                            -1
+                            (-1, None)
                         }
                     };
                     let _ = tx
                         .send(Msg::TaskExited {
-                            owner: o, project: p, seq, task_id, exit_code, eval_json: None,
+                            owner: o, project: p, seq, task_id,
+                            exit: TaskExit { exit_code, eval_json: None, usage },
                         })
                         .await;
                 });
@@ -260,8 +296,11 @@ impl Core {
         if task.state == TaskState::Done {
             return Ok(());
         }
+        // abort implies fail — the verdicts are pass | fail | abort; a
+        // contradictory pass+abort submission normalizes to abort.
         task.result = Some(TaskResult::Agent {
-            pass: submission.pass,
+            pass: submission.pass && !submission.abort,
+            abort: submission.abort,
             structured: submission.structured,
             token_usage: submission.token_usage,
         });
@@ -277,6 +316,7 @@ impl Core {
 
     /// Human evaluator resolved via the inbox: record the verdict on the slot
     /// and reduce if the round is complete. Called from the resolve handler.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn resolve_eval_slot(
         &mut self,
         owner: &str,
@@ -284,6 +324,7 @@ impl Core {
         seq: u64,
         task_id: u64,
         pass: bool,
+        abort: bool,
         structured: Option<serde_json::Value>,
     ) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
@@ -298,7 +339,7 @@ impl Core {
             )));
         };
         let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
-        round.slots[slot_idx].outcome = Some(SlotOutcome::Product { pass, structured });
+        round.slots[slot_idx].outcome = Some(SlotOutcome::Product { pass, abort, structured });
         if round.slots.iter().all(|s| s.outcome.is_some()) {
             return self.reduce(owner, project, seq).await;
         }
@@ -314,9 +355,9 @@ impl Core {
         project: &str,
         seq: u64,
         mut task: Task,
-        exit_code: i32,
-        eval_json: Option<serde_json::Value>,
+        exit: TaskExit,
     ) -> Result<()> {
+        let TaskExit { exit_code, eval_json, usage } = exit;
         let key = (owner.to_string(), project.to_string(), seq);
         let Some(slot_idx) = self
             .active
@@ -347,15 +388,30 @@ impl Core {
                     "task_id": task.id, "phase": "Evaluation", "pass": pass,
                 }))
                 .await?;
-                Some(SlotOutcome::Product { pass, structured: eval_json })
+                // Command evaluators can't judge fixability: no abort verdict.
+                Some(SlotOutcome::Product { pass, abort: false, structured: eval_json })
             }
             TaskKind::Agent { .. } => {
                 // handle_submit_eval marks the task Done before the container
                 // exits; the record we were passed is the pre-exit snapshot.
-                let current = self.tasks.get(owner, project, seq, task.id).await?.unwrap_or(task);
+                let mut current =
+                    self.tasks.get(owner, project, seq, task.id).await?.unwrap_or(task);
+                // submit_eval could only self-report usage. Now that the
+                // container is gone we have the CLI's measured figure — prefer
+                // it, the same way the work path does.
+                if let (Some(measured), Some(TaskResult::Agent { token_usage, .. })) =
+                    (usage, current.result.as_mut())
+                {
+                    *token_usage = Some(measured);
+                    self.tasks.put(&current).await?;
+                }
                 match &current.result {
-                    Some(TaskResult::Agent { pass, structured, .. }) => {
-                        Some(SlotOutcome::Product { pass: *pass, structured: structured.clone() })
+                    Some(TaskResult::Agent { pass, abort, structured, .. }) => {
+                        Some(SlotOutcome::Product {
+                            pass: *pass,
+                            abort: *abort,
+                            structured: structured.clone(),
+                        })
                     }
                     _ => {
                         // Infra error: no verdict recorded (§3.3).
@@ -410,16 +466,20 @@ impl Core {
     /// §3.3 reduce, applied once all eval tasks resolved.
     async fn reduce(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
-        let (results, required_infra_failure, overall_pass, cycle, reworks_used, work_type, budget) = {
+        let (results, required_infra_failure, overall_pass, aborted, cycle, reworks_used, work_type, budget) = {
             let exec = self.active.get(&key).expect("exec state");
             let round = exec.round.as_ref().expect("round");
             let mut results = Vec::new();
             let mut infra = false;
             let mut pass = true;
+            // Required evaluators that declared the work unsalvageable
+            // (design-lifecycle.md abort verdict). Advisory aborts are plain
+            // advisory fails.
+            let mut aborted: Vec<String> = Vec::new();
             for slot in &round.slots {
                 let required = slot.evaluator.required.unwrap_or(true);
                 match slot.outcome.as_ref().expect("complete") {
-                    SlotOutcome::Product { pass: p, structured } => {
+                    SlotOutcome::Product { pass: p, abort, structured } => {
                         results.push(EvalResult {
                             evaluator: slot.evaluator.name.clone(),
                             pass: *p,
@@ -427,6 +487,9 @@ impl Core {
                         });
                         if required && !*p {
                             pass = false;
+                        }
+                        if required && *abort {
+                            aborted.push(slot.evaluator.name.clone());
                         }
                     }
                     SlotOutcome::Infra => {
@@ -445,6 +508,7 @@ impl Core {
                 results,
                 infra,
                 pass,
+                aborted,
                 exec.cycle,
                 exec.reworks_used,
                 exec.job_type.work.r#type,
@@ -460,6 +524,31 @@ impl Core {
         }
         if overall_pass {
             return self.finalize_pass(owner, project, seq).await;
+        }
+
+        // Abort verdict: rework can't fix this — skip the remaining budget and
+        // hand the evaluators' findings to a human (design-lifecycle.md).
+        if !aborted.is_empty() {
+            let findings = results
+                .iter()
+                .filter(|r| aborted.contains(&r.evaluator))
+                .map(|r| {
+                    let detail = r
+                        .structured
+                        .as_ref()
+                        .and_then(|v| serde_json::to_string_pretty(v).ok())
+                        .unwrap_or_else(|| "(no structured findings)".into());
+                    format!("**{}**:\n{detail}", r.evaluator)
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            self.active.remove(&key);
+            return self.escalate(owner, project, seq, "eval_abort",
+                format!(
+                    "Job {seq}: evaluator(s) {} declared cycle {cycle} not satisfiable by rework:\n\n{findings}",
+                    aborted.join(", ")
+                ))
+                .await;
         }
 
         // Product failure: rework under budget, else escalate (§3.3).
@@ -487,6 +576,17 @@ impl Core {
     }
 
     async fn finalize_pass(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        // `finalize: none` (design-lifecycle.md): nothing to land — the work's
+        // effect is external, the branch is scratch. Eval-pass IS the wrap-up;
+        // complete_done is the platform bookkeeping every job gets.
+        let finalize = self
+            .active
+            .get(&(owner.to_string(), project.to_string(), seq))
+            .map(|e| e.job_type.wrap_up.r#type)
+            .unwrap_or_default();
+        if finalize == Finalize::None {
+            return self.complete_done(owner, project, seq).await;
+        }
         let slug = format!("{owner}/{project}");
         let q = self.merge_queue.entry(slug).or_default();
         if !q.contains(&seq) {
@@ -495,7 +595,11 @@ impl Core {
         self.pump_merges(owner, project).await
     }
 
-    /// Advance the merge queue until it empties or a gate starts.
+    /// Advance the merge queue until it empties or a gate starts. Wrap-up is
+    /// designed to be infallible; when a finalization step fails anyway (git
+    /// plumbing, repo IO — not a Conflict, which has its own rework path), the
+    /// job escalates and the queue moves on instead of wedging
+    /// (design-lifecycle.md: unexpected wrap-up failure → triage).
     pub(crate) async fn pump_merges(&mut self, owner: &str, project: &str) -> Result<()> {
         let slug = format!("{owner}/{project}");
         while !self.gating.contains_key(&slug) {
@@ -503,15 +607,40 @@ impl Core {
                 return Ok(());
             };
             self.merge_queue.get_mut(&slug).unwrap().pop_front();
-            match self.try_finalize(owner, project, seq).await? {
-                FinalizeStep::Completed => continue,
-                FinalizeStep::Gating => {
+            match self.try_finalize(owner, project, seq).await {
+                Ok(FinalizeStep::Completed) => continue,
+                Ok(FinalizeStep::Gating) => {
                     self.gating.insert(slug, seq);
                     return Ok(());
+                }
+                Err(e) => {
+                    tracing::error!("finalizing {owner}/{project}#{seq}: {e}");
+                    self.escalate_finalize_failure(owner, project, seq, &e).await;
+                    continue;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Best-effort escalation for an unexpected finalization error. Never
+    /// returns Err: the merge queue must keep moving whatever state the job
+    /// is in (it may have been revoked out from under the queue).
+    async fn escalate_finalize_failure(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        error: &CoreError,
+    ) {
+        self.active.remove(&(owner.to_string(), project.to_string(), seq));
+        if let Err(e2) = self
+            .escalate(owner, project, seq, "finalize_failed",
+                format!("Job {seq}: wrap-up failed unexpectedly: {error}"))
+            .await
+        {
+            tracing::error!("escalating finalize failure for {owner}/{project}#{seq}: {e2}");
+        }
     }
 
     /// One finalization attempt against the then-current default HEAD.
@@ -660,11 +789,19 @@ impl Core {
 
         let gate = self.active.get_mut(&key).unwrap().gate.as_mut().unwrap();
         gate.round.slots[slot_idx].outcome =
-            Some(SlotOutcome::Product { pass, structured: eval_json });
+            Some(SlotOutcome::Product { pass, abort: false, structured: eval_json });
         if gate.round.slots.iter().any(|s| s.outcome.is_none()) {
             return Ok(());
         }
-        self.gate_reduce(owner, project, seq).await
+        // Same triage rule as pump_merges: a hard error in gate resolution
+        // (promote, rework re-entry) escalates rather than wedging the queue.
+        if let Err(e) = self.gate_reduce(owner, project, seq).await {
+            tracing::error!("gate reduce for {owner}/{project}#{seq}: {e}");
+            self.gating.remove(&format!("{owner}/{project}"));
+            self.escalate_finalize_failure(owner, project, seq, &e).await;
+            return self.pump_merges(owner, project).await;
+        }
+        Ok(())
     }
 
     async fn gate_reduce(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
@@ -676,7 +813,7 @@ impl Core {
             .slots
             .iter()
             .filter_map(|s| match s.outcome.as_ref() {
-                Some(SlotOutcome::Product { pass: false, structured }) => Some(EvalResult {
+                Some(SlotOutcome::Product { pass: false, structured, .. }) => Some(EvalResult {
                     evaluator: s.evaluator.name.clone(),
                     pass: false,
                     structured: structured.clone(),

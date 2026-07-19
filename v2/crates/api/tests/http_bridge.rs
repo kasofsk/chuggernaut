@@ -97,6 +97,7 @@ async fn http_bridge_end_to_end() {
     clone.commit_file("jobs/manual.yaml", MANUAL.as_bytes(), "type").await;
     clone.commit_file("prompts/manual.md", b"do the thing", "p").await;
     clone.commit_file("prompts/approve.md", b"check it", "p").await;
+    clone.commit_file("tags/rust.md", b"# rust\nrust conventions", "tag").await;
     clone.push("main").await;
 
     let repos_root = repo.bare_path().parent().unwrap().parent().unwrap().to_path_buf();
@@ -115,7 +116,7 @@ async fn http_bridge_end_to_end() {
     .unwrap();
     let handle = spawn(core);
     spawn_container_handlers(&store, handle.clone()).await.unwrap();
-    spawn_api_handlers(&store, handle, Arc::new(vcs::RepoManager::new(&repos_root)))
+    spawn_api_handlers(&store, handle, Arc::new(vcs::RepoManager::new(&repos_root)), None)
         .await
         .unwrap();
 
@@ -130,14 +131,43 @@ async fn http_bridge_end_to_end() {
         created_at: chrono::Utc::now(),
     };
     users.put_json(&store::keys::user_key(&user.email), &user).await.unwrap();
+    // A platform admin for the project-creation path.
+    let root = User {
+        id: "root".into(),
+        email: "root@example.com".into(),
+        password_hash: auth::hash_password("s3cret").unwrap(),
+        project_roles: Default::default(),
+        platform_admin: true,
+        created_at: chrono::Utc::now(),
+    };
+    users.put_json(&store::keys::user_key(&root.email), &root).await.unwrap();
 
     let keys_dir = tempfile::tempdir().unwrap();
     let (private, public) = gen_jwt_keys(keys_dir.path());
+    // The API decrypts artifacts with the artifacts identity (never the
+    // secrets one, §10.2); seed one and an artifact to serve.
+    let (artifacts_identity, _) = store::secrets::generate_age_keypair();
+    let artifacts = store
+        .artifacts(store::ArtifactCrypto::with_identity(&artifacts_identity).unwrap())
+        .await
+        .unwrap();
+    artifacts
+        .put(
+            "acme",
+            "api",
+            1,
+            1,
+            store::ArtifactKind::SessionTranscript,
+            br#"{"type":"user","message":"do it"}"#,
+        )
+        .await
+        .unwrap();
     let state: SharedState = Arc::new(ApiState {
         store: store.clone(),
         signer: auth::jwt::JwtSigner::from_pem(&private).unwrap(),
         verifier: auth::jwt::JwtVerifier::from_pem(&public).unwrap(),
         session_ttl: chrono::Duration::hours(1),
+        artifacts: Some(artifacts),
     });
     let router = api::router(state, None);
 
@@ -169,6 +199,84 @@ async fn http_bridge_end_to_end() {
     let (status, me, _) = call(&router, "GET", "/auth/me", Some(&cookie), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(me["sub"], "op@example.com");
+
+    // Bearer tokens (machine callers, §7.1): the same JWT via the
+    // Authorization header — what `admin user token` mints.
+    let bearer = auth::jwt::JwtSigner::from_pem(&private)
+        .unwrap()
+        .issue(
+            &types::Identity {
+                sub: "op@example.com".into(),
+                kind: types::IdentityKind::User,
+                project_roles: [("acme/api".to_string(), ProjectRole::Member)].into(),
+                platform_admin: false,
+            },
+            chrono::Duration::hours(1),
+        )
+        .unwrap();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/auth/me")
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Project creation: members get 403; a platform admin creates a project
+    // whose repo arrives seeded with the Code starter template.
+    let (status, _, _) = call(
+        &router,
+        "POST",
+        "/api/v1/projects",
+        Some(&cookie),
+        Some(serde_json::json!({"owner": "acme", "name": "web"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (_, _, admin_cookie) = call(
+        &router,
+        "POST",
+        "/auth/login",
+        None,
+        Some(serde_json::json!({"email": "root@example.com", "password": "s3cret"})),
+    )
+    .await;
+    let admin_cookie = admin_cookie.unwrap();
+    let (status, created, _) = call(
+        &router,
+        "POST",
+        "/api/v1/projects",
+        Some(&admin_cookie),
+        Some(serde_json::json!({"owner": "acme", "name": "web"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["project"], "acme/web");
+    let (status, types, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/web/job-types",
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(types[0]["name"], "code", "{types}");
+    assert_eq!(types[0]["display_name"], "Code");
+    // The seeded pre-receive hook is present and executable.
+    let hook = repos_root.join("acme/web.git/hooks/pre-receive");
+    assert!(hook.is_file(), "hook installed");
+    // Duplicate creation is a conflict.
+    let (status, _, _) = call(
+        &router,
+        "POST",
+        "/api/v1/projects",
+        Some(&admin_cookie),
+        Some(serde_json::json!({"owner": "acme", "name": "web"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
 
     // Create (201) — and a bad type is a 422 validation envelope at release.
     let (status, job, _) = call(
@@ -202,6 +310,68 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body["errors"].is_array(), "expected §6.5 errors envelope: {body}");
+
+    // Criteria: a job created with an extra evaluator reports the type's
+    // list plus its own, source-annotated, resolved at default HEAD pre-Ready.
+    let (status, extra, _) = call(
+        &router,
+        "POST",
+        "/api/v1/projects/acme/api/jobs",
+        Some(&cookie),
+        Some(serde_json::json!({
+            "type": "manual",
+            "eval": [{ "name": "linkcheck", "type": "command", "run": "lychee docs/",
+                       "image": "img:latest", "required": false }],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let extra_seq = extra["id"].as_u64().unwrap();
+    let (status, criteria, _) = call(
+        &router,
+        "GET",
+        &format!("/api/v1/projects/acme/api/jobs/{extra_seq}/criteria"),
+        Some(&cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(criteria["wrap_up"], "merge");
+    assert_eq!(criteria["errors"].as_array().unwrap().len(), 0, "{criteria}");
+    let evs = criteria["evaluators"].as_array().unwrap();
+    assert_eq!(evs.len(), 2, "{criteria}");
+    assert_eq!((evs[0]["name"].as_str(), evs[0]["source"].as_str()), (Some("approval"), Some("type")));
+    assert_eq!((evs[1]["name"].as_str(), evs[1]["source"].as_str()), (Some("linkcheck"), Some("job")));
+
+    // Library: one job type in full — raw YAML plus the parsed view.
+    let (status, jt, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/job-types/manual",
+        Some(&cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(jt["name"], "manual");
+    assert!(jt["yaml"].as_str().unwrap().contains("type: human"), "{jt}");
+    assert_eq!(jt["job_type"]["work"]["type"], "human");
+    assert_eq!(jt["job_type"]["wrap_up"]["type"], "merge");
+    let (status, _, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/job-types/no-such",
+        Some(&cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Tag vocabulary: tags/*.md stems at default HEAD.
+    let (status, tags, _) =
+        call(&router, "GET", "/api/v1/projects/acme/api/tags", Some(&cookie), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(tags, serde_json::json!(["rust"]));
 
     // Release job 1 → human work task lands in the inbox.
     let (status, released, _) = call(
@@ -239,11 +409,11 @@ async fn http_bridge_end_to_end() {
     let (status, jobs, _) =
         call(&router, "GET", "/api/v1/projects/acme/api/jobs", Some(&cookie), None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(jobs.as_array().unwrap().len(), 2);
+    assert_eq!(jobs.as_array().unwrap().len(), 3);
     let (status, graph, _) =
         call(&router, "GET", "/api/v1/projects/acme/api/graph", Some(&cookie), None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(graph.as_array().unwrap().len(), 2);
+    assert_eq!(graph.as_array().unwrap().len(), 3);
     let (status, diff, _) =
         call(&router, "GET", "/api/v1/projects/acme/api/diff/1", Some(&cookie), None).await;
     assert_eq!(status, StatusCode::OK);
@@ -345,4 +515,68 @@ async fn http_bridge_end_to_end() {
     let frame = String::from_utf8_lossy(&first);
     assert!(frame.contains("id:"), "frame should carry the stream seq: {frame}");
     assert!(frame.contains("job-created"), "replay starts at the beginning: {frame}");
+
+    // ── Artifacts: the transcript reaches the operator, decrypted ──────────
+    //
+    // Served as raw bytes off the object store rather than through a dispatcher
+    // req/reply, which could not carry a multi-MB transcript (1MB max_payload).
+    let (status, body, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/jobs/1/tasks/1/artifacts",
+        Some(&cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["artifacts"], serde_json::json!(["session.jsonl"]));
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/projects/acme/api/jobs/1/tasks/1/artifacts/session.jsonl")
+        .header(header::COOKIE, &cookie)
+        .body(Body::empty())
+        .unwrap();
+    let res = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    // JSONL, not JSON: one object per line is not a valid document.
+    assert_eq!(
+        res.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/x-ndjson"
+    );
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    assert_eq!(&bytes[..], br#"{"type":"user","message":"do it"}"#);
+
+    // Absent artifacts and unknown kinds are 404s, not 500s — a human task has
+    // no transcript, and the kind comes straight off the URL.
+    let (status, _, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/jobs/1/tasks/1/artifacts/stdout.log",
+        Some(&cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/jobs/1/tasks/1/artifacts/..%2Fsecrets",
+        Some(&cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Transcripts can contain anything the agent saw: they are behind the same
+    // project read authz as everything else, not public.
+    let (status, _, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/jobs/1/tasks/1/artifacts/session.jsonl",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

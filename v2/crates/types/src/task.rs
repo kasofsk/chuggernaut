@@ -24,6 +24,12 @@ pub struct Task {
     pub evaluator: Option<String>,
     /// Backend-assigned container ID (Docker or k8s); None for Human tasks.
     pub container_id: Option<String>,
+    /// Agent tasks only: the session id handed to the agent CLI, which names
+    /// its transcript. Recorded at task creation so the artifact stays
+    /// addressable across a dispatcher restart, and so a later cycle can resume
+    /// the conversation.
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub result: Option<TaskResult>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
@@ -80,11 +86,19 @@ pub enum TaskResult {
     },
     Agent {
         pass: bool,
+        /// Eval verdict "not satisfiable by rework" (design-lifecycle.md):
+        /// implies `pass: false`; a required evaluator's abort skips the
+        /// remaining rework budget and escalates.
+        #[serde(default)]
+        abort: bool,
         structured: Option<serde_json::Value>,
         token_usage: Option<TokenUsage>,
     },
     Human {
         pass: bool,
+        /// Same abort semantics as `Agent`; set via `TaskResolution::Fail`.
+        #[serde(default)]
+        abort: bool,
         structured: Option<serde_json::Value>,
         action: Option<EscalationAction>,
         operator: String,
@@ -117,6 +131,10 @@ pub enum TaskResolution {
     },
     Fail {
         structured: serde_json::Value,
+        /// Human evaluator's "not satisfiable by rework" (design-lifecycle.md);
+        /// only meaningful on evaluator tasks, ignored elsewhere.
+        #[serde(default)]
+        abort: bool,
     },
     Escalation {
         action: EscalationAction,
@@ -146,6 +164,14 @@ mod tests {
         for c in cases {
             let _: TaskResolution = serde_json::from_str(c).unwrap();
         }
+        // abort defaults false on the wire; explicit abort round-trips.
+        let r: TaskResolution =
+            serde_json::from_str(r#"{ "kind": "Fail", "structured": {} }"#).unwrap();
+        assert_eq!(r, TaskResolution::Fail { structured: serde_json::json!({}), abort: false });
+        let r: TaskResolution =
+            serde_json::from_str(r#"{ "kind": "Fail", "structured": {}, "abort": true }"#).unwrap();
+        assert_eq!(r, TaskResolution::Fail { structured: serde_json::json!({}), abort: true });
+
         let r: TaskResolution = serde_json::from_str(
             r#"{ "kind": "Escalation", "action": "Revoke", "structured": null }"#,
         )

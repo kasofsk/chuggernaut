@@ -6,12 +6,16 @@ import type { TaskResolution } from '../api'
 // structured findings; for the rest it's optional context.
 export function ResolveForm({
   escalation,
+  evaluator = false,
   onResolve,
 }: {
   escalation: boolean
+  /** human evaluator task: failing offers the abort verdict (design-lifecycle.md) */
+  evaluator?: boolean
   onResolve: (r: TaskResolution) => void
 }) {
   const [notes, setNotes] = useState('')
+  const [abort, setAbort] = useState(false)
   const structured = notes.trim() ? { notes: notes.trim() } : null
 
   return (
@@ -43,10 +47,16 @@ export function ResolveForm({
             className="danger"
             disabled={!structured}
             title={structured ? '' : 'failing requires notes'}
-            onClick={() => structured && onResolve({ kind: 'Fail', structured })}
+            onClick={() => structured && onResolve({ kind: 'Fail', structured, abort: abort || undefined })}
           >
             fail
           </button>
+          {evaluator && (
+            <label className="dim" title="not satisfiable by rework — skip retries and escalate to a human">
+              <input type="checkbox" checked={abort} onChange={(e) => setAbort(e.target.checked)} />{' '}
+              abort (unfixable)
+            </label>
+          )}
         </>
       )}
     </div>

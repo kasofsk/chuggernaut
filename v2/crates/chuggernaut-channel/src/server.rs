@@ -5,8 +5,8 @@
 
 use serde_json::{Value, json};
 use std::time::Duration;
-use store::{NatsStore, buckets, keys, subjects};
-use types::{AgentReply, ChannelEntry, ChannelUpdate};
+use store::{NatsStore, buckets, subjects};
+use types::{AgentReply, ChannelUpdate};
 
 /// Container identity + role, read from the injected env (spec §4.1).
 pub struct JobContext {
@@ -122,10 +122,14 @@ impl Server {
         match self.ctx.role.as_str() {
             "eval" => tools.push(tool(
                 "submit_eval",
-                "Publish the authoritative eval verdict. Required before exit.",
+                "Publish the authoritative eval verdict. Required before exit. \
+                 Set abort: true only when the work cannot be fixed by rework \
+                 (wrong premise, impossible requirement) — it skips retries and \
+                 escalates to a human.",
                 json!({ "type": "object",
                     "properties": {
                         "pass": { "type": "boolean" },
+                        "abort": { "type": "boolean" },
                         "structured": {},
                         "token_usage": {} },
                     "required": ["pass"] }),
@@ -156,7 +160,9 @@ impl Server {
                         .to_string(),
                     percent: args.get("percent").and_then(|p| p.as_u64()).map(|p| p as u8),
                 };
-                self.update_channel(|entry| entry.update = Some(update)).await?;
+                let subject = subjects::channel_update(&owner, &project, seq);
+                self.submit(&subject, &serde_json::to_value(&update).map_err(|e| e.to_string())?)
+                    .await?;
                 Ok("status updated".into())
             }
             ("reply", _) => {
@@ -168,7 +174,9 @@ impl Server {
                         .to_string(),
                     sent_at: chrono::Utc::now(),
                 };
-                self.update_channel(|entry| entry.last_reply = Some(reply)).await?;
+                let subject = subjects::channel_reply(&owner, &project, seq);
+                self.submit(&subject, &serde_json::to_value(&reply).map_err(|e| e.to_string())?)
+                    .await?;
                 Ok("reply sent".into())
             }
             ("channel_check", _) => {
@@ -222,26 +230,6 @@ impl Server {
             return Err(format!("dispatcher rejected submission: {body}"));
         }
         Ok("submitted".into())
-    }
-
-    async fn update_channel(
-        &mut self,
-        apply: impl FnOnce(&mut ChannelEntry),
-    ) -> Result<(), String> {
-        let key = keys::channel_key(&self.ctx.owner, &self.ctx.project, self.ctx.seq);
-        let bucket = self
-            .store()
-            .await?
-            .raw_bucket(buckets::CHANNELS)
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut entry: ChannelEntry = bucket
-            .get_json(&key)
-            .await
-            .map_err(|e| e.to_string())?
-            .unwrap_or(ChannelEntry { update: None, last_reply: None });
-        apply(&mut entry);
-        bucket.put_json(&key, &entry).await.map_err(|e| e.to_string())
     }
 }
 

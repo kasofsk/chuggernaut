@@ -4,7 +4,6 @@
 //! before Ready→Work.
 
 use dispatcher::core::{Core, CoreConfig, CoreError, CreateJobRequest};
-use std::collections::HashMap;
 use std::sync::Arc;
 use store::NatsStore;
 use test_utils::repo::TempRepo;
@@ -33,11 +32,11 @@ image: img:latest
 work:
   type: agent
   prompt: prompts/build.md
+  secrets: [DEPLOY_KEY]
   provider: claude
   review:
     prompt: prompts/review.md
     iterations: 3
-secrets: [DEPLOY_KEY]
 "#;
 
 const DEPLOY_YAML: &str = r#"
@@ -46,8 +45,6 @@ image: img:latest
 work:
   type: command
   run: ./deploy.sh
-inputs:
-  - name: artifact
 "#;
 
 const DEFAULTS_YAML: &str = r#"
@@ -85,13 +82,16 @@ async fn setup() -> Option<(test_utils::nats::NatsTestServer, NatsStore, TempRep
     Some((server, store, repo, core))
 }
 
-fn req(r#type: &str, inputs: &[(&str, u64)]) -> CreateJobRequest {
+fn req(r#type: &str, deps: &[u64]) -> CreateJobRequest {
     CreateJobRequest {
         owner: "acme".into(),
         project: "api".into(),
         r#type: r#type.into(),
-        inputs: inputs.iter().map(|(n, s)| (n.to_string(), *s)).collect::<HashMap<_, _>>(),
+        title: String::new(),
+        description: String::new(),
+        deps: deps.to_vec(),
         knowledge_tags: vec![],
+        eval: vec![],
         factory: None,
     }
 }
@@ -102,7 +102,7 @@ async fn release_blocking_unblocking_and_events() {
 
     let build = core.create_job(req("build", &[])).await.unwrap();
     let deploy = core
-        .create_job(req("deploy", &[("artifact", build.id)]))
+        .create_job(req("deploy", &[build.id]))
         .await
         .unwrap();
     assert_eq!(build.state, JobState::Frozen);
@@ -147,15 +147,15 @@ async fn release_blocking_unblocking_and_events() {
 async fn release_validation_rejects_bad_wiring_and_missing_secret() {
     let Some((_server, store, _repo, mut core)) = setup().await else { return };
 
-    // Unknown upstream + undeclared input name.
-    let bad = core.create_job(req("deploy", &[("nope", 999)])).await.unwrap();
+    // Unknown upstream.
+    let bad = core.create_job(req("deploy", &[999])).await.unwrap();
     let Err(CoreError::Validation(errs)) = core.release_job("acme", "api", bad.id).await else {
         panic!("expected validation failure");
     };
     let fields: Vec<&str> = errs.iter().map(|e| e.field.as_str()).collect();
-    assert!(fields.iter().all(|f| f.starts_with("inputs.")), "{errs:?}");
-    // unknown job + undeclared name + declared-but-unwired 'artifact'
-    assert_eq!(errs.len(), 3, "{errs:?}");
+    assert!(fields.iter().all(|f| f == &"deps"), "{errs:?}");
+    // depends on unknown job #999
+    assert_eq!(errs.len(), 1, "{errs:?}");
 
     // Missing secret fails static validation.
     store
@@ -177,7 +177,7 @@ async fn unblock_revalidation_failure_escalates_with_human_task() {
     let Some((_server, store, repo, mut core)) = setup().await else { return };
 
     let build = core.create_job(req("build", &[])).await.unwrap();
-    let deploy = core.create_job(req("deploy", &[("artifact", build.id)])).await.unwrap();
+    let deploy = core.create_job(req("deploy", &[build.id])).await.unwrap();
     core.release_job("acme", "api", build.id).await.unwrap();
     core.release_job("acme", "api", deploy.id).await.unwrap();
 
@@ -207,8 +207,8 @@ async fn revoke_cascades_through_pending_dependents() {
     let Some((_server, store, _repo, mut core)) = setup().await else { return };
 
     let a = core.create_job(req("build", &[])).await.unwrap();
-    let b = core.create_job(req("deploy", &[("artifact", a.id)])).await.unwrap();
-    let c = core.create_job(req("deploy", &[("artifact", b.id)])).await.unwrap();
+    let b = core.create_job(req("deploy", &[a.id])).await.unwrap();
+    let c = core.create_job(req("deploy", &[b.id])).await.unwrap();
     core.release_job("acme", "api", a.id).await.unwrap(); // Ready + queued
 
     let cascaded = core.revoke_job("acme", "api", a.id).await.unwrap();

@@ -3,7 +3,7 @@
 //! lives in `eval.rs`; both are `impl Core` blocks — the core stays the single
 //! writer, these files are its execution verbs.
 
-use crate::core::{Core, CoreError, Msg, Result, WorkSubmission};
+use crate::core::{Core, CoreError, Msg, Result, TaskExit, WorkSubmission};
 use crate::escalation;
 use crate::queue::QueuedJob;
 use crate::release;
@@ -67,6 +67,7 @@ impl Core {
             &self.repos, owner, project, &base_ref, &job.r#type, Some(seq),
         )
         .await
+        .and_then(|jt| release::with_job_evaluators(jt, &job))
         {
             Ok(jt) => jt,
             Err(errs) => {
@@ -85,6 +86,7 @@ impl Core {
         // §2.2 launch-time pass: secrets and vars re-checked before injection.
         let kv = self.kv_names(owner, project).await?;
         let missing: Vec<String> = job_type
+            .work
             .secrets
             .iter()
             .filter(|s| !kv.secrets.contains(*s))
@@ -171,10 +173,20 @@ impl Core {
                 false,
             ),
             WorkType::Human => (
-                TaskKind::Human { prompt: job_type.work.prompt.clone().unwrap_or_default() },
+                TaskKind::Human {
+                    prompt: format!(
+                        "{}{}",
+                        job_type.work.prompt.clone().unwrap_or_default(),
+                        job_brief_block(&job)
+                    ),
+                },
                 true,
             ),
         };
+        // Minted before launch and persisted with the task, so the transcript
+        // stays addressable even if the dispatcher restarts mid-run.
+        let session_id = matches!(job_type.work.r#type, WorkType::Agent)
+            .then(|| uuid::Uuid::new_v4().to_string());
         let mut task = Task {
             id: task_id,
             job_seq: seq,
@@ -186,6 +198,7 @@ impl Core {
             attempt,
             evaluator: None,
             container_id: None,
+            session_id: session_id.clone(),
             result: None,
             created_at: Utc::now(),
             started_at: (!pending_human).then(Utc::now),
@@ -201,14 +214,19 @@ impl Core {
         }
 
         let env = self
-            .container_env(owner, project, seq, &job.branch, &job_type, ChannelRole::Work)
+            .container_env(
+                owner, project, seq, &job.branch, &job_type, &job_type.work.secrets,
+                ChannelRole::Work,
+            )
             .await?;
         match job_type.work.r#type {
             WorkType::Agent => {
+                let mut env = env;
+                self.inject_platform_agent_secrets(&mut env).await?;
                 let prompt = self
                     .build_prompt(owner, project, &base_ref,
                         job_type.work.prompt.as_deref().unwrap_or_default(),
-                        &eval_context, merge_conflict.as_deref())
+                        &job_brief_block(&job), &eval_context, merge_conflict.as_deref())
                     .await?;
                 let (mcp_servers, mut files) = self.channel_mcp(&env);
                 files.extend(
@@ -223,28 +241,41 @@ impl Core {
                         .model
                         .clone()
                         .or_else(|| self.config.agent_model_default.clone()),
-                    system_prompt: None, // KO injection: knowledge slice
+                    // §4.4 upfront injection: tagged knowledge (tags/{tag}.md
+                    // at base_ref) rides the system prompt, work agents only.
+                    system_prompt: self
+                        .knowledge_block(owner, project, &base_ref, &job_type, &job)
+                        .await?,
                     mcp_servers,
                     files,
                     env,
                     task_timeout: task_timeout(&job_type),
                     eval_context,
                     merge_conflict,
+                    session_id: session_id.clone().unwrap_or_default(),
                 };
                 let provider = self.provider.clone();
                 let tx = self.self_tx.clone().expect("spawned core");
                 let (o, p) = (owner.to_string(), project.to_string());
+                let harvest = self.harvester();
                 tokio::spawn(async move {
-                    let exit_code = match provider.run(config).await {
-                        Ok(out) => out.exit_code,
+                    let (exit_code, usage) = match provider.run(config).await {
+                        Ok(out) => {
+                            // Harvest before reporting the exit: once the task
+                            // completes the job may advance, and the artifacts
+                            // are the only record of how it got here.
+                            let usage = harvest.collect(&o, &p, seq, task_id, &out).await;
+                            (out.exit_code, usage)
+                        }
                         Err(e) => {
                             tracing::error!("agent run failed: {e}");
-                            -1
+                            (-1, None)
                         }
                     };
                     let _ = tx
                         .send(Msg::TaskExited {
-                            owner: o, project: p, seq, task_id, exit_code, eval_json: None,
+                            owner: o, project: p, seq, task_id,
+                            exit: TaskExit { exit_code, eval_json: None, usage },
                         })
                         .await;
                 });
@@ -268,11 +299,16 @@ impl Core {
                 let backend = self.backend.clone();
                 let tx = self.self_tx.clone().expect("spawned core");
                 let (o, p) = (owner.to_string(), project.to_string());
+                let harvest = self.harvester();
                 tokio::spawn(async move {
                     let exit_code = backend.wait(&id).await.unwrap_or(-1);
+                    // Logs are the only record of what a command task printed —
+                    // TaskResult::Command.output has never carried it.
+                    harvest.collect_logs(&o, &p, seq, task_id, &id).await;
                     let _ = tx
                         .send(Msg::TaskExited {
-                            owner: o, project: p, seq, task_id, exit_code, eval_json: None,
+                            owner: o, project: p, seq, task_id,
+                            exit: TaskExit::code(exit_code),
                         })
                         .await;
                 });
@@ -283,14 +319,19 @@ impl Core {
     }
 
     /// Container exit fan-in: route by the task's phase.
+    /// Handles for collecting artifacts off the actor thread, inside the
+    /// per-task monitor.
+    pub(crate) fn harvester(&self) -> crate::harvest::Harvester {
+        crate::harvest::Harvester::new(self.backend.clone(), self.artifacts.clone())
+    }
+
     pub(crate) async fn on_task_exited(
         &mut self,
         owner: &str,
         project: &str,
         seq: u64,
         task_id: u64,
-        exit_code: i32,
-        eval_json: Option<serde_json::Value>,
+        exit: TaskExit,
     ) -> Result<()> {
         let Some(task) = self.tasks.get(owner, project, seq, task_id).await? else {
             return Ok(());
@@ -302,16 +343,16 @@ impl Core {
                 if task.state != TaskState::Running {
                     return Ok(());
                 }
-                self.on_work_exited(owner, project, seq, task, exit_code).await
+                self.on_work_exited(owner, project, seq, task, exit).await
             }
             // Eval tasks can legitimately be Done already — submit_eval lands
             // before the container exits, and the exit completes the slot.
             // on_eval_exited drops anything not in the current round.
             TaskPhase::Evaluation => {
-                self.on_eval_exited(owner, project, seq, task, exit_code, eval_json).await
+                self.on_eval_exited(owner, project, seq, task, exit).await
             }
             TaskPhase::MergeGate => {
-                self.on_gate_exited(owner, project, seq, task, exit_code, eval_json).await
+                self.on_gate_exited(owner, project, seq, task, exit.exit_code, exit.eval_json).await
             }
         }
     }
@@ -322,12 +363,15 @@ impl Core {
         project: &str,
         seq: u64,
         mut task: Task,
-        exit_code: i32,
+        exit: TaskExit,
     ) -> Result<()> {
+        let TaskExit { exit_code, usage, .. } = exit;
         let key = (owner.to_string(), project.to_string(), seq);
         task.completed_at = Some(Utc::now());
         if exit_code == 0 {
             task.state = TaskState::Done;
+            // Normally already written by handle_submit_result; this covers an
+            // agent that exited 0 without submitting.
             if task.result.is_none() {
                 let sub = self.active.get(&key).and_then(|e| e.work_submission.clone());
                 task.result = Some(TaskResult::Work {
@@ -335,6 +379,13 @@ impl Core {
                     structured: sub.as_ref().and_then(|s| s.structured.clone()),
                     token_usage: sub.and_then(|s| s.token_usage),
                 });
+            }
+            // Measured usage from the CLI's own JSON result wins over the
+            // agent's self-report, which it may omit or invent.
+            if let (Some(measured), Some(TaskResult::Work { token_usage, .. })) =
+                (usage, task.result.as_mut())
+            {
+                *token_usage = Some(measured);
             }
             self.tasks.put(&task).await?;
             self.publish(owner, project, seq, "task-completed", serde_json::json!({
@@ -383,8 +434,45 @@ impl Core {
         let Some(exec) = self.active.get_mut(&key) else {
             return Ok(()); // job already past Work — late duplicate, ack it
         };
-        exec.work_submission = Some(submission);
+        exec.work_submission = Some(submission.clone());
+        let cycle = exec.cycle;
+
+        // Persist it, not just cache it: the submission arrives while the
+        // container is still running (§4.2 ack-then-exit), so a dispatcher
+        // restart in that window used to lose the agent's summary entirely —
+        // ExecState rebuilds as None, and the commit message reads from it.
+        // The task is still Running; the exit handler fills in the rest.
+        if let Some(mut task) = self.running_work_task(owner, project, seq, cycle).await? {
+            task.result = Some(TaskResult::Work {
+                summary: submission.summary,
+                structured: submission.structured,
+                token_usage: submission.token_usage,
+            });
+            self.tasks.put(&task).await?;
+        }
         Ok(())
+    }
+
+    /// The Running work task of the current cycle, if any.
+    async fn running_work_task(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        cycle: u32,
+    ) -> Result<Option<Task>> {
+        Ok(self
+            .tasks
+            .list_for_job(owner, project, seq)
+            .await?
+            .into_iter()
+            .filter(|t| {
+                t.phase == TaskPhase::Work
+                    && t.cycle == cycle
+                    && t.evaluator.is_none()
+                    && t.state == TaskState::Running
+            })
+            .max_by_key(|t| t.id))
     }
 
     /// Operator resolution of a Pending Human task (§1.2): human work tasks,
@@ -410,9 +498,10 @@ impl Core {
         let job = self.must_get(owner, project, seq)?.clone();
 
         let complete_task =
-            |task: &mut Task, pass: bool, structured: Option<serde_json::Value>, action| {
+            |task: &mut Task, pass: bool, abort: bool, structured: Option<serde_json::Value>, action| {
                 task.result = Some(TaskResult::Human {
                     pass,
+                    abort,
                     structured,
                     action,
                     operator: operator.to_string(),
@@ -425,7 +514,7 @@ impl Core {
         match (job.state, resolution) {
             // Escalation task (§1.2 escalation resolution).
             (JobState::Escalated, TaskResolution::Escalation { action, structured }) => {
-                complete_task(&mut task, true, structured, Some(action));
+                complete_task(&mut task, true, false, structured, Some(action));
                 self.tasks.put(&task).await?;
                 self.publish(owner, project, seq, "job-escalation-resolved",
                     serde_json::json!({ "action": format!("{action:?}") }))
@@ -460,15 +549,16 @@ impl Core {
                 "kind: Escalation is only valid on escalation tasks".into(),
             )),
 
-            // Human work task (§1.1 work.type: human).
+            // Human work task (§1.1 work.type: human). `abort` on Fail is an
+            // evaluator concept — a declined work task escalates regardless.
             (JobState::Work, TaskResolution::Pass { structured }) => {
-                complete_task(&mut task, true, structured, None);
+                complete_task(&mut task, true, false, structured, None);
                 self.tasks.put(&task).await?;
                 self.ensure_exec_state(owner, project, seq).await?;
                 self.enter_evaluation(owner, project, seq).await
             }
-            (JobState::Work, TaskResolution::Fail { structured }) => {
-                complete_task(&mut task, false, Some(structured), None);
+            (JobState::Work, TaskResolution::Fail { structured, .. }) => {
+                complete_task(&mut task, false, false, Some(structured), None);
                 self.tasks.put(&task).await?;
                 self.active.remove(&(owner.to_string(), project.to_string(), seq));
                 self.escalate(owner, project, seq, "human_work_failed",
@@ -478,14 +568,15 @@ impl Core {
 
             // Human evaluator task (§3.3 human).
             (JobState::Evaluation, TaskResolution::Pass { structured }) => {
-                complete_task(&mut task, true, structured.clone(), None);
+                complete_task(&mut task, true, false, structured.clone(), None);
                 self.tasks.put(&task).await?;
-                self.resolve_eval_slot(owner, project, seq, task_id, true, structured).await
+                self.resolve_eval_slot(owner, project, seq, task_id, true, false, structured).await
             }
-            (JobState::Evaluation, TaskResolution::Fail { structured }) => {
-                complete_task(&mut task, false, Some(structured.clone()), None);
+            (JobState::Evaluation, TaskResolution::Fail { structured, abort }) => {
+                complete_task(&mut task, false, abort, Some(structured.clone()), None);
                 self.tasks.put(&task).await?;
-                self.resolve_eval_slot(owner, project, seq, task_id, false, Some(structured)).await
+                self.resolve_eval_slot(owner, project, seq, task_id, false, abort, Some(structured))
+                    .await
             }
 
             (state, _) => Err(CoreError::InvalidResolution(format!(
@@ -532,6 +623,7 @@ impl Core {
             &self.repos, owner, project, &head, &job.r#type, Some(seq),
         )
         .await
+        .and_then(|jt| release::with_job_evaluators(jt, &job))
         {
             Ok(jt) => release::static_errors(&self.repos, owner, project, &head, &job, &jt, None)
                 .await
@@ -582,6 +674,7 @@ impl Core {
             &self.repos, owner, project, &base_ref, &job.r#type, Some(seq),
         )
         .await?;
+        let job_type = release::with_job_evaluators(job_type, &job)?;
         let cycle = self
             .tasks
             .list_for_job(owner, project, seq)
@@ -590,11 +683,30 @@ impl Core {
             .map(|t| t.cycle)
             .max()
             .unwrap_or(1);
+        // Recover the submission from the task log rather than starting blank:
+        // it is what the squash-merge commit message is built from.
+        let work_submission = self
+            .tasks
+            .list_for_job(owner, project, seq)
+            .await?
+            .iter()
+            .filter(|t| t.phase == TaskPhase::Work && t.cycle == cycle && t.evaluator.is_none())
+            .max_by_key(|t| t.id)
+            .and_then(|t| match &t.result {
+                Some(TaskResult::Work { summary, structured, token_usage }) => {
+                    Some(WorkSubmission {
+                        summary: summary.clone(),
+                        structured: structured.clone(),
+                        token_usage: *token_usage,
+                    })
+                }
+                _ => None,
+            });
         self.active.insert(key, ExecState {
             job_type,
             cycle,
             reworks_used: 0,
-            work_submission: None,
+            work_submission,
             round: None,
             gate: None,
             eval_context: vec![],
@@ -603,12 +715,14 @@ impl Core {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn build_prompt(
         &self,
         owner: &str,
         project: &str,
         base_ref: &str,
         prompt_path: &str,
+        brief: &str,
         eval_context: &[EvalResult],
         merge_conflict: Option<&str>,
     ) -> Result<String> {
@@ -617,12 +731,14 @@ impl Core {
             .read_file_at(owner, project, base_ref, prompt_path)
             .await?
             .unwrap_or_default();
+        prompt.push_str(brief);
         if !eval_context.is_empty() || merge_conflict.is_some() {
             prompt.push_str(&rework_context_block(eval_context, merge_conflict));
         }
         Ok(prompt)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn container_env(
         &self,
         owner: &str,
@@ -630,6 +746,7 @@ impl Core {
         seq: u64,
         branch: &str,
         job_type: &JobType,
+        secrets_declared: &[String],
         role: ChannelRole,
     ) -> Result<HashMap<String, String>> {
         let mut env = HashMap::from([
@@ -651,6 +768,9 @@ impl Core {
         }
         // §5.2: repos behind the SSH front need the injected cert (paths are
         // fixed — the credential itself rides in via ssh_credential_files).
+        // No SendEnv needed for git protocol v2 — git appends
+        // `-o SendEnv=GIT_PROTOCOL` itself once it detects an OpenSSH variant.
+        // The server half (`AcceptEnv GIT_PROTOCOL`) is sshd's config.
         if self.ssh_front_active() {
             env.insert(
                 "GIT_SSH_COMMAND".into(),
@@ -695,7 +815,7 @@ impl Core {
             // §8.2: age-decrypted immediately before injection.
             Some(secrets) => {
                 use store::secrets::SecretStore;
-                for name in &job_type.secrets {
+                for name in secrets_declared {
                     if let Some(value) = secrets.get(owner, project, name).await? {
                         env.insert(name.clone(), value);
                     }
@@ -704,7 +824,7 @@ impl Core {
             // Dev mode without an identity: values injected as stored.
             None => {
                 let secrets = self.store.raw_bucket(store::buckets::SECRETS).await?;
-                for name in &job_type.secrets {
+                for name in secrets_declared {
                     if let Some(value) =
                         secrets.get_json::<String>(&format!("{owner}.{project}.{name}")).await?
                     {
@@ -714,6 +834,78 @@ impl Core {
             }
         }
         Ok(env)
+    }
+
+    /// §4.4 upfront knowledge injection, repo-versioned form: the union of
+    /// the type's `knowledge:` defaults and the job's tags, each resolved to
+    /// `tags/{tag}.md` at `base_ref` and concatenated into the work agent's
+    /// system prompt. Tags without a file are skipped — the tag may predate
+    /// its write-up. None when nothing resolves.
+    pub(crate) async fn knowledge_block(
+        &self,
+        owner: &str,
+        project: &str,
+        base_ref: &str,
+        job_type: &JobType,
+        job: &types::Job,
+    ) -> Result<Option<String>> {
+        let mut tags: Vec<&str> =
+            job_type.knowledge.iter().chain(job.knowledge_tags.iter()).map(String::as_str).collect();
+        tags.dedup_by(|a, b| a == b);
+        let mut seen = std::collections::HashSet::new();
+        let mut block = String::new();
+        for tag in tags {
+            if !seen.insert(tag) {
+                continue;
+            }
+            match self.repos.read_file_at(owner, project, base_ref, &format!("tags/{tag}.md")).await? {
+                Some(content) => {
+                    block.push_str(&format!("\n### {tag}\n{content}\n"));
+                }
+                None => tracing::debug!("knowledge tag '{tag}' has no tags/{tag}.md at {base_ref}"),
+            }
+        }
+        if block.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(format!("## Project Knowledge\n{block}")))
+    }
+
+    /// Platform agent credentials (§8.2): every secret under the reserved
+    /// `global/agents` scope is injected into every *agent* container — work
+    /// agents and agent evaluators — env-named by the secret. Declared
+    /// (project/evaluator) secrets win on name collision. Command containers
+    /// never receive them: the provider credential is agent-CLI plumbing,
+    /// not task input.
+    pub(crate) async fn inject_platform_agent_secrets(
+        &self,
+        env: &mut HashMap<String, String>,
+    ) -> Result<()> {
+        const SCOPE: &str = "agents";
+        let owner = store::keys::RESERVED_OWNER;
+        match &self.secrets {
+            Some(secrets) => {
+                use store::secrets::SecretStore;
+                for name in secrets.list(owner, SCOPE).await? {
+                    if let Some(value) = secrets.get(owner, SCOPE, &name).await? {
+                        env.entry(name).or_insert(value);
+                    }
+                }
+            }
+            // Dev mode without an identity: values injected as stored.
+            None => {
+                let bucket = self.store.raw_bucket(store::buckets::SECRETS).await?;
+                let prefix = format!("{owner}.{SCOPE}.");
+                for key in bucket.keys_with_prefix(&prefix).await? {
+                    if let (Some(name), Some(value)) =
+                        (key.strip_prefix(&prefix), bucket.get_json::<String>(&key).await?)
+                    {
+                        env.entry(name.to_string()).or_insert(value);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn ssh_front_active(&self) -> bool {
@@ -829,6 +1021,25 @@ pub(crate) fn task_timeout(job_type: &JobType) -> Duration {
         .and_then(|r| r.task_timeout.as_deref())
         .and_then(|s| parse_duration(s).ok())
         .unwrap_or(Duration::from_secs(3600))
+}
+
+/// §4.3 job brief: the instance's ticket (title/description from job
+/// creation), appended to the type's prompt for the work agent, every agent
+/// evaluator, and human task prompts. Empty when the job carries neither.
+pub(crate) fn job_brief_block(job: &types::Job) -> String {
+    if job.title.is_empty() && job.description.is_empty() {
+        return String::new();
+    }
+    let mut block = String::from("\n\n---\n## Job Brief\n");
+    if !job.title.is_empty() {
+        block.push_str(&format!("**{}**\n", job.title));
+    }
+    if !job.description.is_empty() {
+        block.push('\n');
+        block.push_str(&job.description);
+        block.push('\n');
+    }
+    block
 }
 
 /// §4.3 rework-context block appended to the prompt file content.

@@ -13,7 +13,10 @@ async fn binary_speaks_mcp_and_submits_over_nats() {
     let store = NatsStore::connect(server.url()).await.unwrap();
     store.ensure_topology().await.unwrap();
 
-    // Stand-in dispatcher: ack one submit on the work subject.
+    // Stand-in dispatcher: ack the work submit, and the channel post that
+    // `update_status` now sends. The binary no longer writes `channels` KV
+    // itself — the dispatcher owns that bucket — so what we assert here is the
+    // wire message the binary emits.
     let responder = NatsStore::connect(server.url()).await.unwrap();
     let mut sub = responder.subscribe_requests("req.work.submit.acme.api.42").await.unwrap();
     let seen = std::sync::Arc::new(tokio::sync::Mutex::new(None));
@@ -21,6 +24,19 @@ async fn binary_speaks_mcp_and_submits_over_nats() {
     tokio::spawn(async move {
         if let Some(req) = sub.next().await {
             *seen2.lock().await = Some(String::from_utf8_lossy(&req.payload).to_string());
+            req.respond(br#"{"ok":true}"#.to_vec()).await;
+        }
+    });
+
+    let mut chan_sub = responder
+        .subscribe_requests("req.channel.update.acme.api.42")
+        .await
+        .unwrap();
+    let posted = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    let posted2 = posted.clone();
+    tokio::spawn(async move {
+        if let Some(req) = chan_sub.next().await {
+            *posted2.lock().await = Some(String::from_utf8_lossy(&req.payload).to_string());
             req.respond(br#"{"ok":true}"#.to_vec()).await;
         }
     });
@@ -73,18 +89,26 @@ async fn binary_speaks_mcp_and_submits_over_nats() {
     .unwrap();
     assert_ne!(submit["result"]["isError"], true, "{submit}");
 
-    // The dispatcher-side responder saw the payload…
+    // The dispatcher-side responder saw the work payload…
     assert!(seen.lock().await.as_deref().unwrap_or_default().contains("did the thing"));
-    // …and update_status wrote the channels KV entry (spec §4.2).
-    let entry: types::ChannelEntry = store
+
+    // …and update_status arrived as a ChannelUpdate on req.channel.update,
+    // rather than as a direct KV write.
+    let post = posted.lock().await.clone().expect("channel update posted");
+    let update: types::ChannelUpdate = serde_json::from_str(&post).expect("ChannelUpdate shape");
+    assert_eq!(update.message, "working");
+    assert_eq!(update.percent, Some(40));
+
+    // Nothing wrote the channels bucket: only the dispatcher does, and this
+    // test stands in for it without persisting.
+    let entry: Option<types::ChannelEntry> = store
         .raw_bucket(store::buckets::CHANNELS)
         .await
         .unwrap()
         .get_json(&store::keys::channel_key("acme", "api", 42))
         .await
-        .unwrap()
         .unwrap();
-    assert_eq!(entry.update.unwrap().message, "working");
+    assert!(entry.is_none(), "the binary must not write channels KV itself");
 
     drop(stdin);
     let _ = child.wait().await;

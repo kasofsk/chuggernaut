@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, HostConfig};
 use bollard::query_parameters::{
-    DownloadFromContainerOptionsBuilder, ListContainersOptionsBuilder,
+    DownloadFromContainerOptionsBuilder, ListContainersOptionsBuilder, LogsOptionsBuilder,
     UploadToContainerOptionsBuilder,
 };
 use futures::StreamExt;
@@ -279,6 +279,28 @@ impl ContainerBackend for DockerBackend {
             }
         }
         Ok(None)
+    }
+
+    async fn logs(&self, id: &ContainerId) -> Result<Vec<u8>, BackendError> {
+        let (node, cid) = self.route(id)?;
+        // `follow: false` — this is called after exit, and following would hang.
+        // Both streams: a failed build's message is as often on stderr as
+        // stdout. Cross-stream ordering is Docker's, by timestamp, and is not
+        // exact for same-millisecond writes.
+        let opts = LogsOptionsBuilder::default()
+            .follow(false)
+            .stdout(true)
+            .stderr(true)
+            .build();
+        let mut stream = node.docker.logs(cid, Some(opts));
+        let mut out = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(log) => out.extend_from_slice(log.into_bytes().as_ref()),
+                Err(e) => return Err(map_err(id, e)),
+            }
+        }
+        Ok(out)
     }
 }
 

@@ -22,6 +22,8 @@ pub fn escalation_task(
         cycle,
         kind: TaskKind::Human { prompt },
         state: TaskState::Pending,
+        // Human task: no agent, no transcript.
+        session_id: None,
         attempt: 1,
         evaluator: None,
         container_id: None,

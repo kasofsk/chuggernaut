@@ -10,7 +10,7 @@ use container::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
 };
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Deterministic, scriptable [`ContainerBackend`]: every launch records its config
@@ -28,6 +28,8 @@ struct FakeBackendState {
     exits: HashMap<ContainerId, i32>,
     /// Files retrievable via copy_file, keyed by (container path).
     files: HashMap<String, Vec<u8>>,
+    /// Returned by `logs` for every container.
+    logs: Vec<u8>,
 }
 
 impl Default for FakeBackend {
@@ -56,6 +58,11 @@ impl FakeBackend {
             .unwrap()
             .files
             .insert(path.to_string(), contents.into());
+    }
+
+    /// Script what `logs` returns for every container.
+    pub fn put_logs(&self, contents: impl Into<Vec<u8>>) {
+        self.state.lock().unwrap().logs = contents.into();
     }
 
     pub fn launches(&self) -> Vec<ContainerLaunchConfig> {
@@ -109,6 +116,10 @@ impl ContainerBackend for FakeBackend {
     ) -> Result<Option<Vec<u8>>, BackendError> {
         Ok(self.state.lock().unwrap().files.get(path).cloned())
     }
+
+    async fn logs(&self, _id: &ContainerId) -> Result<Vec<u8>, BackendError> {
+        Ok(self.state.lock().unwrap().logs.clone())
+    }
 }
 
 /// Deterministic, scriptable [`AgentProvider`]: every run records its config
@@ -118,6 +129,10 @@ impl ContainerBackend for FakeBackend {
 pub struct FakeProvider {
     state: Mutex<FakeProviderState>,
     push_notifications: bool,
+    /// When set, runs launch a real (fake) container so the run reports a
+    /// container id — the handle the dispatcher needs to harvest transcripts
+    /// and logs. Mirrors ClaudeProvider, which launches via the backend.
+    backend: Option<Arc<dyn ContainerBackend>>,
 }
 
 /// Async so a hook can drive the dispatcher (e.g. submit_eval) and await the
@@ -147,7 +162,15 @@ impl FakeProvider {
         Self {
             state: Mutex::new(FakeProviderState::default()),
             push_notifications: true,
+            backend: None,
         }
+    }
+
+    /// Launch through `backend`, so runs report a container id and artifact
+    /// capture can be exercised. Without this a run has no container, like a
+    /// provider stub.
+    pub fn with_backend(backend: Arc<dyn ContainerBackend>) -> Self {
+        Self { backend: Some(backend), ..Self::new() }
     }
 
     pub fn script_exits(&self, codes: impl IntoIterator<Item = i32>) {
@@ -188,10 +211,31 @@ impl AgentProvider for FakeProvider {
             st.runs.push(config.clone());
             (exit, hook)
         };
+        // Launch before the hook so the container exists for the whole run,
+        // as it would for a real provider.
+        let container_id = match &self.backend {
+            Some(backend) => Some(
+                backend
+                    .launch(ContainerLaunchConfig {
+                        image: config.image.clone(),
+                        cmd: vec!["agent".into()],
+                        env: config.env.clone(),
+                        files: config.files.clone(),
+                        cpu_limit: None,
+                        memory_limit: None,
+                    })
+                    .await?,
+            ),
+            None => None,
+        };
         if let Some(hook) = hook {
-            hook(config).await;
+            hook(config.clone()).await;
         }
-        Ok(AgentOutput { exit_code })
+        Ok(AgentOutput {
+            exit_code,
+            container_id,
+            session_id: Some(config.session_id),
+        })
     }
 
     fn supports_push_notifications(&self) -> bool {

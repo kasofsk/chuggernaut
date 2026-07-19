@@ -2,11 +2,11 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, type Identity } from '../api'
 
-// Project chooser: lists the projects on the identity's role map, plus a
-// free-form owner/project field (platform admins have implicit access
-// everywhere, so their role map may be empty).
+// Project chooser: lists the projects visible to the caller (platform
+// admins see the whole registry), plus a free-form owner/project field.
 export function Home() {
   const [identity, setIdentity] = useState<Identity | null>(null)
+  const [projects, setProjects] = useState<string[]>([])
   const [slug, setSlug] = useState('')
   const navigate = useNavigate()
 
@@ -15,11 +15,14 @@ export function Home() {
       .me()
       .then(setIdentity)
       .catch(() => navigate('/login'))
+    api
+      .projects()
+      .then(setProjects)
+      .catch(() => {})
   }, [navigate])
 
   if (!identity) return null
 
-  const projects = Object.keys(identity.project_roles)
   const last = localStorage.getItem('last-project')
 
   function open(p: string) {
@@ -45,7 +48,10 @@ export function Home() {
                 <button className="link" onClick={() => open(p)}>
                   {p}
                 </button>
-                <span className="dim"> — {identity.project_roles[p]}</span>
+                <span className="dim">
+                  {' '}
+                  — {identity.project_roles[p] ?? (identity.platform_admin ? 'admin' : '')}
+                </span>
               </li>
             ))}
           </ul>
@@ -72,6 +78,54 @@ export function Home() {
           <button type="submit">open</button>
         </form>
       </div>
+
+      {identity.platform_admin && <NewProject onCreated={open} />}
+    </div>
+  )
+}
+
+/**
+ * Platform-admin project creation: bare repo, SSH hook, and the Code starter
+ * template (jobs/code.yaml + reusable tasks/) seeded as the first commit.
+ */
+function NewProject({ onCreated }: { onCreated: (slug: string) => void }) {
+  const [owner, setOwner] = useState('')
+  const [name, setName] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  return (
+    <div className="card">
+      <h2>New project</h2>
+      <p className="dim">
+        Creates the repo and seeds it with the Code starter (an agent
+        implements the job ticket, a second agent reviews it) plus reusable
+        tasks under <code>tasks/</code>. The owner is a namespace (org-style
+        grouping label), not a user — users and roles are managed separately.
+      </p>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault()
+          const o = owner.trim()
+          const n = name.trim()
+          if (!o || !n) return
+          setBusy(true)
+          api.createProject(o, n).then(
+            () => onCreated(`${o}/${n}`),
+            (err) => {
+              setBusy(false)
+              setError(err instanceof Error ? err.message : 'create failed')
+            },
+          )
+        }}
+      >
+        <input placeholder="owner" value={owner} onChange={(e) => setOwner(e.target.value)} />{' '}
+        <input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />{' '}
+        <button type="submit" disabled={busy || !owner.trim() || !name.trim()}>
+          create project
+        </button>
+      </form>
+      {error && <div className="error">{error}</div>}
     </div>
   )
 }

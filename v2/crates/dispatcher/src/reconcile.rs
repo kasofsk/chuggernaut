@@ -3,7 +3,7 @@
 //! `Core::new` already rebuilt the rdeps index, graphs, and the Ready queue —
 //! this pass recovers jobs that were mid-execution when the process died.
 
-use crate::core::{Core, Msg, Result};
+use crate::core::{Core, Msg, Result, TaskExit};
 use crate::eval::{EvalRound, EvalSlot, SlotOutcome};
 use chrono::Utc;
 use types::{Job, JobState, Task, TaskPhase, TaskResult, TaskState};
@@ -140,6 +140,7 @@ impl Core {
                     let outcome = match (task.state, &task.result) {
                         (TaskState::Done, Some(r)) => Some(SlotOutcome::Product {
                             pass: result_pass(r),
+                            abort: result_abort(r),
                             structured: result_structured(r),
                         }),
                         (TaskState::Failed, _) => Some(SlotOutcome::Infra),
@@ -196,7 +197,10 @@ impl Core {
                             .and_then(|b| serde_json::from_slice(&b).ok());
                         let _ = tx
                             .send(Msg::TaskExited {
-                                owner: o, project: p, seq, task_id, exit_code, eval_json,
+                                owner: o, project: p, seq, task_id,
+                                // Re-attaching after a restart: the agent
+                                // monitor that would have parsed usage is gone.
+                                exit: TaskExit { exit_code, eval_json, usage: None },
                             })
                             .await;
                     });
@@ -210,7 +214,7 @@ impl Core {
             // Provider-run tasks don't record container ids yet: not found.
             None => -1,
         };
-        self.on_task_exited(owner, project, seq, task.id, backend_exit, None).await
+        self.on_task_exited(owner, project, seq, task.id, TaskExit::code(backend_exit)).await
     }
 
     async fn retry_or_escalate_failed_work(
@@ -251,6 +255,13 @@ pub(crate) fn result_pass(result: &TaskResult) -> bool {
         | TaskResult::Agent { pass, .. }
         | TaskResult::Human { pass, .. } => *pass,
         TaskResult::Work { .. } => true,
+    }
+}
+
+pub(crate) fn result_abort(result: &TaskResult) -> bool {
+    match result {
+        TaskResult::Agent { abort, .. } | TaskResult::Human { abort, .. } => *abort,
+        TaskResult::Command { .. } | TaskResult::Work { .. } => false,
     }
 }
 

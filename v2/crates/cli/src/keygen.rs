@@ -56,6 +56,22 @@ pub async fn ensure_all(dir: &Path) -> Result<KeygenReport> {
         write_key(&path, &format!("{public}\n"), false).await
     }).await?;
 
+    // Artifacts (transcripts, container logs) — a *separate* age keypair from
+    // the secrets one above. §10.2 keeps the secrets identity dispatcher-only,
+    // but the API must decrypt artifacts to serve them, and proxying blobs
+    // through the dispatcher would reintroduce the NATS max_payload cap that
+    // the object store exists to avoid. Different key, different trust
+    // boundary: this one guards artifacts at rest, not from the API.
+    ensure(&mut report, dir, "age_artifacts.key", |path| async move {
+        let (identity, _) = store::secrets::generate_age_keypair();
+        write_key(&path, &format!("{identity}\n"), true).await
+    }).await?;
+    ensure(&mut report, dir, "age_artifacts_public.key", |path| async move {
+        let identity = tokio::fs::read_to_string(path.with_file_name("age_artifacts.key")).await?;
+        let public = store::secrets::age_public_from_identity(&identity)?;
+        write_key(&path, &format!("{public}\n"), false).await
+    }).await?;
+
     // NATS decentralized auth (§7.4): operator + system + platform account
     // nkey seeds, generated in-process (nkeys is already in the tree via the
     // NATS client). Derived server/dispatcher artifacts: ensure_nats_artifacts.

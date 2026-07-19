@@ -20,6 +20,11 @@ pub struct DispatcherConfig {
     /// `KEYS_DIR` (default `/data/keys`) — where `chuggernaut init` wrote the
     /// keypairs (§12.1). The dispatcher reads `age_private.key` from here.
     pub keys_dir: PathBuf,
+    /// `NATS_URL_CONTAINER` — the NATS URL injected into containers, when it
+    /// differs from the dispatcher's own (e.g. dispatcher on the Docker host
+    /// uses `localhost`, containers need `host.docker.internal`). Defaults to
+    /// `NATS_URL`.
+    pub nats_url_container: Option<String>,
     /// `CHANNEL_BINARY` — path to the chuggernaut-channel binary injected into
     /// agent containers (§4.2). Unset → agents run without the channel MCP.
     pub channel_binary: Option<PathBuf>,
@@ -30,6 +35,11 @@ pub struct DispatcherConfig {
     /// `DOCKER_NODES` — comma-separated `name|endpoint|slots` entries.
     /// Unset → single local-socket node with `DOCKER_SLOTS` slots (default 4).
     pub docker_nodes: Vec<DockerNodeConfig>,
+    /// `HOOK_BIN` — chuggernaut binary path baked into new repos' pre-receive
+    /// hooks (§5.2), as seen from the SSH host (e.g.
+    /// `/usr/local/bin/chuggernaut` inside the sshd container). Unset → this
+    /// process's own path.
+    pub hook_bin: Option<PathBuf>,
 }
 
 fn env_opt(name: &str) -> Option<String> {
@@ -76,10 +86,12 @@ impl DispatcherConfig {
             repos_root,
             repo_url_base,
             keys_dir: PathBuf::from(env_opt("KEYS_DIR").unwrap_or_else(|| "/data/keys".into())),
+            nats_url_container: env_opt("NATS_URL_CONTAINER"),
             channel_binary: env_opt("CHANNEL_BINARY").map(PathBuf::from),
             agent_provider_default,
             agent_model_default: env_opt("AGENT_MODEL_DEFAULT"),
             docker_nodes,
+            hook_bin: env_opt("HOOK_BIN").map(PathBuf::from),
         })
     }
 
@@ -87,6 +99,19 @@ impl DispatcherConfig {
     /// file → None: secrets are injected as stored (dev raw mode, §8.2).
     pub async fn age_identity(&self) -> Result<Option<String>> {
         let path = self.keys_dir.join("age_private.key");
+        match tokio::fs::read_to_string(&path).await {
+            Ok(s) => Ok(Some(s.trim().to_string())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(CoreError::Config(format!("reading {}: {e}", path.display()))),
+        }
+    }
+
+    /// Read the artifacts age identity written by `chuggernaut init` (§12.1).
+    /// Distinct from `age_private.key`: the API also holds this one so it can
+    /// decrypt transcripts for display, while the secrets key stays
+    /// dispatcher-only (§10.2). Missing file → None: capture is disabled.
+    pub async fn artifacts_identity(&self) -> Result<Option<String>> {
+        let path = self.keys_dir.join("age_artifacts.key");
         match tokio::fs::read_to_string(&path).await {
             Ok(s) => Ok(Some(s.trim().to_string())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -121,9 +146,10 @@ impl DispatcherConfig {
         Ok(CoreConfig {
             ssh_ca: ssh_ca.is_file().then_some(ssh_ca),
             repo_url_base: self.repo_url_base.clone(),
-            nats_url: self.nats_url.clone(),
+            nats_url: self.nats_url_container.clone().unwrap_or_else(|| self.nats_url.clone()),
             channel_binary: self.channel_binary.clone(),
             age_identity: self.age_identity().await?,
+            artifacts_identity: self.artifacts_identity().await?,
             agent_provider_default: Some(self.agent_provider_default.clone()),
             agent_model_default: self.agent_model_default.clone(),
             nats_account_seed: self.nats_account_seed().await?,

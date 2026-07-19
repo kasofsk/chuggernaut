@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProjectDefaults",
+  "description": "Project-wide default evaluators, `jobs/_defaults.yaml` (spec §1.1). Appended\nto every job type's eval list at load; this is how a project gates all\nchanges on an evergreen test suite without per-job-type declarations.",
+  "type": "object",
+  "properties": {
+    "eval": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Evaluator"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "Evaluator": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "description": "command/agent: optional, falls back to top-level image; one of the two required.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required": {
+          "description": "Default true; false = advisory.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "run": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secrets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "type": {
+          "$ref": "#/$defs/EvaluatorType"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "EvaluatorType": {
+      "type": "string",
+      "enum": [
+        "command",
+        "agent",
+        "human"
+      ]
+    },
+    "Provider": {
+      "type": "string",
+      "enum": [
+        "claude",
+        "codex"
+      ]
+    }
+  }
+}

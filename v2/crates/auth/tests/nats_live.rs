@@ -75,12 +75,23 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
         .await
         .expect("work connect");
 
-    // Allowed: write own channel entry (KV put).
+    // Allowed: read own channel entry, but NOT write it. Containers post
+    // through `req.channel.*` so the dispatcher stays the bucket's sole writer
+    // and each post becomes durable event history rather than an overwrite.
     let channels = work.raw_bucket(buckets::CHANNELS).await.unwrap();
-    channels
-        .put_json(&keys::channel_key("acme", "api", 1), &json!({ "update": null }))
+    let _: Option<Value> = channels
+        .get_json(&keys::channel_key("acme", "api", 1))
         .await
-        .expect("channel write");
+        .expect("channel read");
+    let denied = tokio::time::timeout(
+        Duration::from_secs(3),
+        channels.put_json(&keys::channel_key("acme", "api", 1), &json!({ "update": null })),
+    )
+    .await;
+    assert!(
+        !matches!(denied, Ok(Ok(()))),
+        "direct channel KV write must be denied: {denied:?}"
+    );
 
     // Allowed: read own job record (KV direct get).
     let job: Option<Value> = work
@@ -138,14 +149,14 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
         .await;
     assert!(denied.is_err(), "eval submit must be denied for work creds");
 
-    // Denied: writing another project's channel entry.
+    // Denied: reading another project's channel entry.
     let denied = tokio::time::timeout(
         Duration::from_secs(3),
-        channels.put_json(&keys::channel_key("acme", "web", 9), &json!({ "update": null })),
+        channels.get_json::<Value>(&keys::channel_key("acme", "web", 9)),
     )
     .await;
     assert!(
-        !matches!(denied, Ok(Ok(()))),
-        "cross-project channel write must not succeed: {denied:?}"
+        !matches!(denied, Ok(Ok(Some(_)))),
+        "cross-project channel read must not succeed: {denied:?}"
     );
 }

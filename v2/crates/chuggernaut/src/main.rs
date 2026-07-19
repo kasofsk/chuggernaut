@@ -39,6 +39,13 @@ enum Command {
     /// Pre-receive hook body (§5.2): per-ref push authorization. Installed
     /// into every bare repo by `admin project create`.
     SshAuthz,
+    /// Emit the JSON Schema for repo-authored YAML (jobs/{type}.yaml,
+    /// jobs/_defaults.yaml) — commit it and point yaml-language-server at it
+    /// for in-editor validation.
+    Schema(cli::SchemaArgs),
+    /// Statically validate job type YAML files (parse + §1.1 field rules,
+    /// with a sibling _defaults.yaml merged). Repo checks happen at release.
+    Validate(cli::ValidateArgs),
 }
 
 #[tokio::main]
@@ -62,5 +69,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Admin(args) => cli::admin::run(args).await,
         Command::SshShell(args) => cli::sshfront::run_shell(args).await,
         Command::SshAuthz => cli::sshfront::run_authz().await,
+        Command::Schema(args) => cli::schema::run(args),
+        Command::Validate(args) => cli::validate::run(args),
     }
 }

@@ -4,7 +4,6 @@
 
 use dispatcher::core::{Core, CoreConfig, CreateJobRequest, spawn};
 use dispatcher::handlers::spawn_container_handlers;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use store::NatsStore;
@@ -93,8 +92,11 @@ async fn submits_flow_over_nats_to_the_core() {
             owner: "acme".into(),
             project: "api".into(),
             r#type: "impl-agent".into(),
-            inputs: HashMap::new(),
+            title: String::new(),
+            description: String::new(),
+            deps: vec![],
             knowledge_tags: vec![],
+            eval: vec![],
             factory: None,
         })
         .await
@@ -116,4 +118,130 @@ async fn submits_flow_over_nats_to_the_core() {
         format!("{log:?}").contains("job/1: impl-agent"),
         "squash commit subject missing: {log:?}"
     );
+}
+
+/// Channel posts used to be written straight to `channels` KV by the container:
+/// a second writer to platform state, last-write-wins, invisible to the
+/// dispatcher, in a bucket with a 7-day TTL. So an agent's progress narrative
+/// was destroyed as it was written.
+///
+/// Now each post goes through the dispatcher, which keeps the KV entry as the
+/// latest-value cache §6.2's `GET .../status` reads, and publishes an event
+/// that *is* the history.
+#[tokio::test]
+async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else { return };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone.commit_file("jobs/impl-agent.yaml", IMPL_AGENT.as_bytes(), "type").await;
+    clone.commit_file("prompts/impl.md", b"implement", "p").await;
+    clone.commit_file("prompts/eval.md", b"review", "p").await;
+    clone.push("main").await;
+
+    let provider = Arc::new(FakeProvider::new());
+    let repos_root = repo.bare_path().parent().unwrap().parent().unwrap().to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        Arc::new(FakeBackend::new()),
+        provider.clone(),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let handle = spawn(core);
+    spawn_container_handlers(&store, handle.clone()).await.unwrap();
+
+    // The agent narrates progress the way the channel MCP server does.
+    let post_store = store.clone();
+    provider.on_run(move |_cfg| async move {
+        for body in [
+            br#"{"message":"cloning","percent":10}"#.as_slice(),
+            br#"{"message":"running tests","percent":60}"#.as_slice(),
+        ] {
+            let reply = post_store
+                .request_with_retry(
+                    "req.channel.update.acme.api.1",
+                    body,
+                    10,
+                    Duration::from_millis(200),
+                )
+                .await
+                .unwrap();
+            assert!(String::from_utf8_lossy(&reply.payload).contains("ok"));
+        }
+        post_store
+            .request_with_retry(
+                "req.channel.reply.acme.api.1",
+                br#"{"text":"on it","sent_at":"2026-07-16T10:00:00Z"}"#,
+                10,
+                Duration::from_millis(200),
+            )
+            .await
+            .unwrap();
+    });
+
+    let job = handle
+        .create_job(CreateJobRequest {
+            owner: "acme".into(),
+            project: "api".into(),
+            r#type: "impl-agent".into(),
+            title: String::new(),
+            description: String::new(),
+            deps: vec![],
+            knowledge_tags: vec![],
+            eval: vec![],
+            factory: None,
+        })
+        .await
+        .unwrap();
+    handle.release_job("acme", "api", job.id).await.unwrap();
+
+    // Both updates and the reply survive as events — the whole point.
+    let mut updates = Vec::new();
+    let mut replies = Vec::new();
+    for _ in 0..50 {
+        let events = store
+            .read_subject_after("job-events", "job.events.acme.api.1.>", 0, 256)
+            .await
+            .unwrap();
+        updates = events
+            .iter()
+            .filter_map(|(_seq, bytes)| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+            .filter(|v| v["event_type"] == "channel-update")
+            .collect();
+        replies = events
+            .iter()
+            .filter_map(|(_seq, bytes)| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+            .filter(|v| v["event_type"] == "channel-reply")
+            .collect();
+        if updates.len() >= 2 && !replies.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(updates.len(), 2, "both updates must survive: {updates:?}");
+    assert_eq!(updates[0]["message"], "cloning");
+    assert_eq!(updates[0]["percent"], 10);
+    assert_eq!(updates[1]["message"], "running tests");
+    assert_eq!(replies.len(), 1, "reply recorded: {replies:?}");
+    assert_eq!(replies[0]["text"], "on it");
+
+    // The KV entry still holds the latest of each, for GET .../status.
+    let entry: serde_json::Value = store
+        .raw_bucket(store::buckets::CHANNELS)
+        .await
+        .unwrap()
+        .get_json(&store::keys::channel_key("acme", "api", 1))
+        .await
+        .unwrap()
+        .expect("channel entry");
+    assert_eq!(entry["update"]["message"], "running tests");
+    assert_eq!(entry["last_reply"]["text"], "on it");
 }

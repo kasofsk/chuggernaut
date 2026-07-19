@@ -41,6 +41,14 @@ pub trait ContainerBackend: Send + Sync {
         id: &ContainerId,
         path: &str,
     ) -> Result<Option<Vec<u8>>, BackendError>;
+    /// Captured stdout and stderr. Read after exit; this does not follow.
+    /// Containers are never removed, so this stays available until the node is
+    /// pruned.
+    ///
+    /// Order is preserved *within* each stream, but not across them: Docker
+    /// orders frames by timestamp, so writes to stdout and stderr in the same
+    /// millisecond can come back either way round (measured, not assumed).
+    async fn logs(&self, id: &ContainerId) -> Result<Vec<u8>, BackendError>;
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +85,22 @@ pub enum ContainerStatus {
 /// Wrap a container CMD with the standard workspace bootstrap (spec §4.1):
 /// clone the job branch to /workspace, cd, exec the original command.
 /// Images must provide `git` and an SSH client; they never clone themselves.
+///
+/// `--single-branch` skips every other in-flight `job/*` and `merge-gate/*`
+/// ref; the container only ever works on its own branch, and all merging is
+/// server-side. This is the big one — without it each task also drags in every
+/// concurrent job's unmerged work.
+///
+/// `--filter=blob:none` skips historical blobs while keeping the commit graph,
+/// so `git log`/`git blame` still work as agent context.
+///
+/// Both depend on server-side setup, and both fail *silently-ish* without it:
+/// - `uploadpack.allowFilter` on the bare repo (`RepoManager::create_project`),
+///   else the filter is ignored and the full history ships anyway.
+/// - git protocol **v2** through the SSH front (`AcceptEnv GIT_PROTOCOL` in
+///   sshd_config). On v0, upload-pack refuses the promisor remote's follow-up
+///   fetch for unadvertised blobs: the clone "succeeds" and checkout leaves an
+///   empty workspace. git supplies the client half itself.
 pub fn bootstrap_cmd(original: &[String]) -> Vec<String> {
     let joined = original
         .iter()
@@ -87,7 +111,7 @@ pub fn bootstrap_cmd(original: &[String]) -> Vec<String> {
         "sh".into(),
         "-c".into(),
         format!(
-            "git clone --branch \"$JOB_BRANCH\" \"$REPO_URL\" /workspace && cd /workspace && exec {joined}"
+            "git clone --single-branch --filter=blob:none --branch \"$JOB_BRANCH\" \"$REPO_URL\" /workspace && cd /workspace && exec {joined}"
         ),
     ]
 }
@@ -111,7 +135,22 @@ mod tests {
         let cmd = bootstrap_cmd(&["claude".into(), "-p".into(), "do the thing".into()]);
         assert_eq!(cmd[0], "sh");
         assert_eq!(cmd[1], "-c");
-        assert!(cmd[2].starts_with("git clone --branch"));
+        assert!(cmd[2].starts_with("git clone "));
         assert!(cmd[2].ends_with("exec claude -p 'do the thing'"));
+    }
+
+    /// The clone must stay narrow: every task in a job re-clones, so the flags
+    /// are the whole cost story.
+    #[test]
+    fn bootstrap_clone_is_narrow() {
+        let cmd = bootstrap_cmd(&["true".into()]);
+        assert!(cmd[2].contains("--single-branch"), "{}", cmd[2]);
+        assert!(cmd[2].contains("--filter=blob:none"), "{}", cmd[2]);
+        // The branch and URL stay shell-quoted env refs, cloned to /workspace.
+        assert!(
+            cmd[2].contains("--branch \"$JOB_BRANCH\" \"$REPO_URL\" /workspace"),
+            "{}",
+            cmd[2]
+        );
     }
 }

@@ -10,30 +10,37 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct JobType {
     pub name: String,
+    /// Human-facing name for the library and the create-form type picker;
+    /// falls back to `name`.
+    pub display_name: Option<String>,
+    /// One-line summary shown alongside the display name in the type picker.
+    pub description: Option<String>,
     /// Required for agent/command work; disallowed at top level for human work.
     pub image: Option<String>,
     pub work: WorkSpec,
+    /// The third step of the job (work → evaluation → wrap-up): what happens
+    /// after eval-pass (design-lifecycle.md).
+    #[serde(default)]
+    pub wrap_up: WrapUp,
     pub resources: Option<Resources>,
     pub job_deadline: Option<String>,
     pub work_retries: Option<u32>,
     pub eval_retries: Option<u32>,
     pub rework_budget: Option<u32>,
     #[serde(default)]
-    pub inputs: Vec<InputDecl>,
-    #[serde(default)]
     pub eval: Vec<Evaluator>,
     #[serde(default)]
     pub knowledge: Vec<String>,
-    #[serde(default)]
-    pub secrets: Vec<String>,
     #[serde(default)]
     pub vars: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkSpec {
     pub r#type: WorkType,
     /// agent/human: required. command: disallowed.
@@ -46,6 +53,11 @@ pub struct WorkSpec {
     pub review: Option<ReviewSpec>,
     /// command only.
     pub run: Option<String>,
+    /// Secrets injected into the work container (agent/command). Scoped here
+    /// because that is the only container they reach — evaluators declare
+    /// their own (§4.1). Disallowed for human work (no container).
+    #[serde(default)]
+    pub secrets: Vec<String>,
 }
 
 pub const DEFAULT_REVIEW_ITERATIONS: u32 = 5;
@@ -54,6 +66,7 @@ pub const DEFAULT_REVIEW_ITERATIONS: u32 = 5;
 /// the work container; its acceptance gates `submit_result`, not the merge.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ReviewSpec {
     /// Path to reviewer prompt file in repo (resolved from base_ref).
     pub prompt: String,
@@ -71,8 +84,37 @@ impl ReviewSpec {
     }
 }
 
+/// Wrap-up declaration (design-lifecycle.md): the job's third step. A block
+/// rather than a bare scalar so future wrap-up behavior (e.g. a
+/// `deployed/{env}` tag ref) extends it without reshaping the schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WrapUp {
+    /// `merge` (default) squash-merges the job branch through the merge
+    /// queue/gate; `none` goes straight to Done — for jobs whose effect is
+    /// external (deploys, reports) and whose branch is scratch.
+    #[serde(default)]
+    pub r#type: Finalize,
+}
+
+/// Wrap-up mode after eval-pass (design-lifecycle.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum Finalize {
+    /// Squash-merge the job branch to the default branch (merge queue, merge
+    /// gate, conflict rework) — the code-change wrap-up.
+    #[default]
+    Merge,
+    /// Nothing to land: eval-pass goes straight to Done. The job branch is
+    /// scratch and is deleted unmerged.
+    None,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum WorkType {
     Agent,
     Command,
@@ -81,6 +123,7 @@ pub enum WorkType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum Provider {
     Claude,
     Codex,
@@ -88,6 +131,7 @@ pub enum Provider {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Resources {
     pub cpu: Option<f64>,
     pub memory: Option<String>,
@@ -96,12 +140,7 @@ pub struct Resources {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct InputDecl {
-    pub name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Evaluator {
     pub name: String,
     pub r#type: EvaluatorType,
@@ -119,6 +158,7 @@ pub struct Evaluator {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum EvaluatorType {
     Command,
     Agent,
@@ -235,6 +275,7 @@ impl JobType {
                     (self.image.is_some(), "image"),
                     (self.resources.is_some(), "resources"),
                     (self.work_retries.is_some(), "work_retries"),
+                    (!self.work.secrets.is_empty(), "work.secrets"),
                     (self.work.run.is_some(), "work.run"),
                     (self.work.provider.is_some(), "work.provider"),
                     (self.work.model.is_some(), "work.model"),
@@ -372,6 +413,7 @@ impl JobType {
 /// changes on an evergreen test suite without per-job-type declarations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProjectDefaults {
     #[serde(default)]
     pub eval: Vec<Evaluator>,
@@ -395,6 +437,7 @@ work:
   prompt: prompts/work/implement-endpoint.md
   provider: claude
   model: claude-sonnet-4-6
+  secrets: [GITHUB_TOKEN]
   review:
     prompt: prompts/review/implement-endpoint.md
     model: claude-sonnet-4-6
@@ -407,9 +450,6 @@ job_deadline: 24h
 work_retries: 3
 eval_retries: 1
 rework_budget: 2
-inputs:
-  - name: spec
-  - name: codebase
 eval:
   - name: unit-tests
     type: command
@@ -430,7 +470,6 @@ eval:
 knowledge:
   - rust
   - rest-api
-secrets: [GITHUB_TOKEN]
 vars: [RUST_EDITION]
 "#;
 
@@ -559,6 +598,25 @@ eval:
             errs.iter()
                 .any(|e| matches!(e, FieldRuleError::Required { field: "image", .. }))
         );
+    }
+
+    #[test]
+    fn wrap_up_defaults_to_merge_and_parses_none() {
+        let jt = JobType::parse(SPEC_EXAMPLE).unwrap();
+        assert_eq!(jt.wrap_up.r#type, Finalize::Merge);
+
+        let yaml = r#"
+name: deploy
+image: img:latest
+work:
+  type: command
+  run: ./deploy.sh
+wrap_up:
+  type: none
+"#;
+        let jt = JobType::parse(yaml).unwrap();
+        assert_eq!(jt.wrap_up.r#type, Finalize::None);
+        assert_eq!(jt.validate(), vec![]);
     }
 
     #[test]

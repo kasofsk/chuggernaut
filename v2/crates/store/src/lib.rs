@@ -1,5 +1,6 @@
 //! NATS KV/stream access — the only crate that talks to NATS (spec §1.4–1.5).
 
+pub mod artifacts;
 pub mod buckets;
 pub mod keys;
 pub mod secrets;
@@ -7,6 +8,7 @@ pub mod stores;
 pub mod subjects;
 pub mod vars;
 
+pub use artifacts::{ArtifactCrypto, ArtifactKind, ArtifactStore};
 pub use stores::{Bucket, CounterStore, JobStore, RdepsStore, StepStore, TaskStore, split_project};
 
 use async_nats::jetstream;
@@ -105,6 +107,20 @@ impl NatsStore {
                 .await
                 .map_err(nats_err)?;
         }
+
+        // Blobs live in an object store, not KV: transcripts routinely exceed
+        // the 1MB max_payload. 90d matches `job-events`, the trail they pair
+        // with. Deletion stays allowed — unlike the streams — because artifacts
+        // are observability data an operator may need to purge.
+        self.js
+            .create_object_store(jetstream::object_store::Config {
+                bucket: buckets::OBJECT_ARTIFACTS.to_string(),
+                max_age: 90 * DAY,
+                storage: jetstream::stream::StorageType::File,
+                ..Default::default()
+            })
+            .await
+            .map_err(nats_err)?;
         Ok(())
     }
 
@@ -131,6 +147,18 @@ impl NatsStore {
 
     pub async fn rdeps(&self) -> Result<RdepsStore> {
         Ok(RdepsStore(self.bucket(buckets::RDEPS).await?))
+    }
+
+    /// Per-task blobs (transcripts, logs). `crypto` decides whether this handle
+    /// can read: the dispatcher passes an identity, an encrypt-only caller does
+    /// not. See [`artifacts`] for why this key is not the secrets key.
+    pub async fn artifacts(&self, crypto: ArtifactCrypto) -> Result<ArtifactStore> {
+        let obj = self
+            .js
+            .get_object_store(buckets::OBJECT_ARTIFACTS)
+            .await
+            .map_err(nats_err)?;
+        Ok(ArtifactStore::new(obj, crypto))
     }
 
     /// Raw bucket access for stores not yet given a typed wrapper.

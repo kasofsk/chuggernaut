@@ -13,11 +13,14 @@ pub struct Job {
     pub id: u64,                           // sequential per project; maintained via counter in NATS KV
     pub project: String,                   // "{owner}/{repo}" slug
     pub r#type: String,                    // job type name; references jobs/{type}.yaml at base_ref
-    pub inputs: HashMap<String, u64>,      // input name → upstream job id; empty if job type declares no inputs
+    pub title: String,                     // ticket-style instance identity: what this run is for (may be empty). The type carries the *how*; title/description carry the *what*.
+    pub description: String,               // the ticket body; injected into work and eval prompts as the §4.3 job brief
+    pub deps: Vec<u64>,                    // upstream job ids this job depends on (ordering edges: upstreams must be Done first; their work is in this job's base, their structured results available to it). Plain ids, no named roles — picked at creation, validated at release.
     pub state: JobState,
     pub branch: String,                    // "job/{id}"; set at creation; actual git branch created when job enters Work
     pub base_ref: Option<String>,          // exact HEAD of default branch; set/updated at every Ready-transition (Frozen→Ready and Blocked→Ready) and on squash-merge conflict; None until job first enters Ready
     pub knowledge_tags: Vec<String>,       // union of job type defaults and operator-supplied tags at creation
+    pub eval: Vec<Evaluator>,              // additive per-job evaluators, layered on top of the type's eval list at execution; the type's evaluators are a floor — creation can add criteria, never remove or override them; name collisions are a release-time error (see design-lifecycle.md)
     pub factory: Option<String>,           // factory name when created by a factory triage agent (see §13); None for operator-created jobs
     pub created_at: DateTime<Utc>,
     pub ready_at: Option<DateTime<Utc>>,   // set once (immutably) when job first enters Ready; anchor for job_deadline; None until then
@@ -37,11 +40,14 @@ Example record:
   "id": 42,
   "project": "acme/api",
   "type": "implement-endpoint",
-  "inputs": { "spec": 11, "codebase": 22 },
+  "title": "Stripe webhook endpoint",
+  "description": "Add /api/v1/stripe/webhook with idempotency-key handling; see the payments runbook for retry semantics.",
+  "deps": [11, 22],
   "state": "Frozen",
   "branch": "job/42",
   "base_ref": null,
   "knowledge_tags": ["rust", "rest-api", "payments/stripe-integration"],
+  "eval": [],
   "factory": null,
   "created_at": "2026-04-05T10:00:00Z",
   "ready_at": null
@@ -56,13 +62,15 @@ IDs are sequential integers scoped per project, maintained via a counter at `cou
 
 #### Job Type
 
-Declarative YAML, one file per job type, lives under `jobs/` in the repo and is version-controlled. Declares only the contract — image, resources, input names, eval criteria, retry limits, secrets, vars. Not an instance; no imperative logic.
+Declarative YAML, one file per job type, lives under `jobs/` in the repo and is version-controlled. Declares only the contract — image, resources, eval criteria, retry limits, secrets, vars. Not an instance; no imperative logic. (Dependencies are per-instance, chosen at job creation — the type does not declare them.)
 
 **Canonical schema:**
 
 ```yaml
 # ── Top-level ────────────────────────────────────────────────────────────────
-name: string                   # required; unique within the repo
+name: string                   # required; unique within the repo (the file stem — the wire identifier)
+display_name: string           # optional; human-facing name for the library and the create-form type picker; falls back to name
+description: string            # optional; one-line summary shown alongside the display name in the type picker
 image: string                  # required for agent/command work; disallowed at top level for human work (container evaluators must declare their own image; see eval.image)
 
 work:                          # required
@@ -81,6 +89,9 @@ work:                          # required
   # type: command only
   run: string                  # required; shell command executed inside the container
 
+  # type: agent or command
+  secrets: [string]            # optional; injected into the work container only — scoped here because that is the only container top-level-declared secrets ever reached; evaluators declare their own. Disallowed for human work (no container).
+
   # type: human only
   prompt: string               # required; shown to operator in task inbox
 
@@ -89,14 +100,14 @@ resources:                     # optional; disallowed for work.type: human
   memory: string               # e.g. "4Gi"
   task_timeout: duration       # per-container execution limit; default 1h
 
+wrap_up:                       # optional; the job's third step (work → evaluation → wrap-up); see design-lifecycle.md
+  type: merge | none           # default merge: squash-merge the job branch through the merge queue/gate. none: eval-pass goes straight to Done — for jobs whose effect is external (deploys, reports); the job branch is scratch and is deleted unmerged
+
 job_deadline: duration         # optional; wall-clock limit on entire job (all retries + rework); clock starts when job first enters Ready; applies to all work types
 
 work_retries: int              # optional; default 0; disallowed for work.type: human
 eval_retries: int              # optional; default 1; per-agent-evaluator infra retry budget; no-op for command/human evaluators
 rework_budget: int             # optional; default 0; disallowed for command work
-
-inputs:                        # optional; declare DAG edges (ordering only)
-  - name: string
 
 eval:                          # optional; omit or leave empty for auto-pass
   - name: string
@@ -119,7 +130,6 @@ eval:                          # optional; omit or leave empty for auto-pass
     required: bool             # optional; default true; false = advisory
 
 knowledge: [string]            # default knowledge tags for KO injection at launch
-secrets: [string]              # injected into work container only
 vars: [string]                 # injected into work container and all eval containers
 ```
 
@@ -132,6 +142,7 @@ vars: [string]                 # injected into work container and all eval conta
 | `work_retries` | optional | optional | disallowed |
 | `eval_retries` | optional | optional | optional |
 | `rework_budget` | optional | disallowed | optional |
+| `wrap_up` | optional | optional | optional |
 | `eval` | optional | optional | optional |
 | `prompt` | required | disallowed | required |
 | `provider` | optional | disallowed | disallowed |
@@ -187,9 +198,6 @@ job_deadline: 24h
 work_retries: 3
 eval_retries: 1
 rework_budget: 2
-inputs:
-  - name: spec
-  - name: codebase
 eval:
   - name: unit-tests
     type: command
@@ -221,10 +229,41 @@ image: registry.acme.com/runners/deploy:latest
 work:
   type: command
   run: scripts/deploy.sh staging
+wrap_up:
+  type: none                   # the deploy's effect is external; nothing to merge
 resources:
   task_timeout: 30m
 work_retries: 2
+eval:
+  - name: smoke
+    type: command
+    run: scripts/smoke.sh staging
 ```
+
+#### Authoring Support
+
+The YAML schema above is machine-derived from the platform's own parse types
+(single source of truth — it cannot drift from the code):
+
+- `chuggernaut schema job-type | defaults` emits the JSON Schema
+  (draft 2020-12). Canonical copies live in `schemas/` (platform repo,
+  regenerated under test). In a project repo, commit it next to the files it
+  describes and add a yaml-language-server modeline for in-editor validation,
+  autocomplete, and hover docs:
+
+  ```sh
+  chuggernaut schema job-type > jobs/.job-type.schema.json
+  ```
+  ```yaml
+  # yaml-language-server: $schema=.job-type.schema.json
+  name: implement-endpoint
+  ...
+  ```
+
+- `chuggernaut validate jobs/*.yaml` runs the static slice offline (parse +
+  the field-rules matrices below, with a sibling `_defaults.yaml` merged) —
+  for contributors and CI. Repo-dependent checks (prompt files exist,
+  secrets/vars set) still run at release (§2.2).
 
 #### Project Default Evaluators
 
@@ -286,8 +325,8 @@ pub enum TaskState { Pending, Running, Done, Failed }
 pub enum TaskResult {
     Work    { summary: Option<String>, structured: Option<serde_json::Value>, token_usage: Option<TokenUsage> },
     Command { pass: bool, exit_code: i32, output: String, structured: Option<serde_json::Value> },
-    Agent   { pass: bool, structured: Option<serde_json::Value>, token_usage: Option<TokenUsage> },
-    Human   { pass: bool, structured: Option<serde_json::Value>, action: Option<EscalationAction>, operator: String, resolved_at: DateTime<Utc> },
+    Agent   { pass: bool, abort: bool, structured: Option<serde_json::Value>, token_usage: Option<TokenUsage> },
+    Human   { pass: bool, abort: bool, structured: Option<serde_json::Value>, action: Option<EscalationAction>, operator: String, resolved_at: DateTime<Utc> },
 }
 
 pub enum EscalationAction { Retry, Resolve, Revoke }
@@ -301,10 +340,12 @@ pub struct TokenUsage {
 
 pub enum TaskResolution {
     Pass       { structured: Option<serde_json::Value> },
-    Fail       { structured: serde_json::Value },              // structured required on fail
+    Fail       { structured: serde_json::Value, abort: bool },  // structured required on fail; abort defaults false
     Escalation { action: EscalationAction, structured: Option<serde_json::Value> },  // only valid on escalation Human tasks
 }
 ```
+
+**Abort verdict** (design-lifecycle.md): `abort: true` on an evaluator verdict (`submit_eval` for agent evaluators, `TaskResolution::Fail` for human evaluators) declares the work *not satisfiable by rework* — wrong premise, impossible requirement. It implies fail (a contradictory `pass: true, abort: true` submission normalizes to abort). At the eval reduce, an abort from any **required** evaluator skips the remaining rework budget and escalates immediately, carrying the aborting evaluators' structured findings in the escalation prompt. Advisory (`required: false`) aborts are recorded as plain advisory fails. Command evaluators have no abort — an exit code cannot judge fixability. `abort` on a human *work* task resolution is ignored (a declined work task escalates regardless).
 
 **JSON serialization** (adjacent tagging — `kind` field discriminates):
 
@@ -470,7 +511,7 @@ Subject components are limited to values that cannot contain `.`. Values that ma
 [43, 77, 103]
 ```
 
-This is a dispatcher-maintained cache derived from `inputs` on each `Job` record. **Write lifecycle:** written only on job creation — when job N is created with `inputs: { slot: M }`, the dispatcher appends N to `rdeps[M]`. It is never updated on revocation or completion (those transitions read `rdeps`, not write it). If the write fails on creation, it is non-fatal and does not roll back the job write; the index is always rebuilt from scratch on startup, guaranteeing eventual consistency. **Read lifecycle:** consulted on job Done (to find newly-unblocked dependents) and on job Revoked (to cascade). Each dependent's current state is checked before acting — stale entries pointing to already-terminal jobs are harmless.
+This is a dispatcher-maintained cache derived from `deps` on each `Job` record. **Write lifecycle:** written only on job creation — when job N is created with `deps: [M]`, the dispatcher appends N to `rdeps[M]`. It is never updated on revocation or completion (those transitions read `rdeps`, not write it). If the write fails on creation, it is non-fatal and does not roll back the job write; the index is always rebuilt from scratch on startup, guaranteeing eventual consistency. **Read lifecycle:** consulted on job Done (to find newly-unblocked dependents) and on job Revoked (to cascade). Each dependent's current state is checked before acting — stale entries pointing to already-terminal jobs are harmless.
 
 **`channels.*` KV entry format:** `channels.{owner}.{project}.jobs.{seq}` stores a `ChannelEntry`. `update_status` overwrites the `update` field; `reply` overwrites the `last_reply` field — both are read-modify-write operations. The `GET .../status` endpoint reads this entry and adds `job_seq` from the URL.
 
@@ -574,11 +615,10 @@ Validation runs in three passes, each at the right moment:
 **Release-time checks (applied on every `release` request, per-job and graph-level):**
 
 Graph wiring rules (all five must hold):
-- Every named input references an existing upstream job instance in the same project
+- Every dependency references an existing, non-Revoked upstream job in the same project
 - No job references itself (no self-edges)
 - No job references a downstream job (no cycles; full topological sort required)
-- Every input name in the job instance matches a name declared in the job type's `inputs:` list
-- Every input name declared in the job type's `inputs:` list has a corresponding wired instance ID
+- No duplicate dependencies
 
 Static configuration (fail-fast check against current HEAD of default branch):
 - The job type file (`jobs/{type}.yaml`) exists
@@ -586,7 +626,7 @@ Static configuration (fail-fast check against current HEAD of default branch):
 - For `work.type: agent` jobs with a `review` block: `work.review.prompt` path exists; the resolved review provider (`work.review.provider`, defaulting to the resolved work provider) is `claude` — inline review is not supported for other providers in v1
 - If `jobs/_defaults.yaml` exists: it parses against the evaluator schema, and no default evaluator name collides with an evaluator declared in any job type being validated
 - For each agent or human evaluator (including project defaults): the evaluator's `prompt` path exists
-- Every secret named in `secrets:` (top-level and per-evaluator) has an entry in the `secrets.*` KV bucket
+- Every secret named in `secrets:` (`work.secrets` and per-evaluator) has an entry in the `secrets.*` KV bucket
 - Every var named in `vars:` has an entry in the `vars.*` KV bucket
 
 **Ready-transition re-validation** (Blocked→Ready only; Frozen→Ready already had the check at release):
@@ -597,7 +637,7 @@ The dispatcher re-validates static configuration (job type file and all prompt p
 
 Secrets and vars declared in the job type are checked immediately before injection. If any are missing, the job transitions to Escalated.
 
-Any release request that fails validation is rejected with a list of offending job instances and the specific rule violated. A job with no inputs declared in its type skips wiring rules.
+Any release request that fails validation is rejected with a list of offending job instances and the specific rule violated. A job with no dependencies skips wiring rules.
 
 All subsequent execution uses `base_ref` exclusively — the moving default branch is never consulted again after Ready-transition.
 
@@ -706,8 +746,9 @@ For each Ready job, the dispatcher executes the following sequence:
 9. Transition job to Evaluation; create one task per evaluator. If no evaluators declared, skip to step 12 (auto-pass)
 10. Fan out evaluation tasks in parallel; monitor each (see §3.3)
 11. Apply eval reduce (see §3.3); handle pass or fail outcomes
-12. On eval reduce pass: run the merge gate (see §3.3 Merge Gate). If default HEAD still equals `base_ref`, or `job/{seq}` has no commits beyond `base_ref`, the gate is skipped. If HEAD moved and the candidate squash-merge is clean, the gate re-runs the required command evaluators against the candidate merge commit — gate pass → proceed to squash-merge below; gate failure → update `base_ref` to current default HEAD, increment cycle (rework_budget NOT consumed), reset `job/{seq}` to new `base_ref`, inject the gate output as findings plus conflict-style context, re-enter Work (step 2). On gate pass or skip: squash-merge `job/{seq}` to default branch. If no commits on `job/{seq}` beyond `base_ref`, this is a no-op. If commits exist and merge is clean → transition job to Done. If conflict → snapshot the current `base_ref` into a local variable `old_base_ref` (this value is held in dispatcher memory only — not persisted to the job record), update `job.base_ref` to current default HEAD, increment cycle (without consuming `rework_budget`), reset `job/{seq}` to new `base_ref`, build conflict context using `old_base_ref` and new `base_ref` (see §4.3 for format), re-enter Work (step 2). **Squash-merge commit message format:** subject line is `job/{seq}: {job_type}`; if the work task's `TaskResult::Work.summary` is non-null, append it as the commit body. Example: `job/42: implement-endpoint\n\nAdded /api/v1/stripe/webhook handler with idempotency key.`
-13. On eval reduce product failure: for `agent | human` work — if under rework budget, increment cycle, inject eval findings, re-enter Work (step 2); if rework budget exhausted, create Human escalation task → Escalated. For `command` work — escalate immediately (rework_budget disallowed)
+12. On eval reduce pass: if the job type declares `wrap_up.type: none`, skip the merge gate and squash-merge entirely — transition straight to Done (the work's effect is external; the job branch is scratch and is deleted unmerged). Otherwise run the merge gate (see §3.3 Merge Gate). If default HEAD still equals `base_ref`, or `job/{seq}` has no commits beyond `base_ref`, the gate is skipped. If HEAD moved and the candidate squash-merge is clean, the gate re-runs the required command evaluators against the candidate merge commit — gate pass → proceed to squash-merge below; gate failure → update `base_ref` to current default HEAD, increment cycle (rework_budget NOT consumed), reset `job/{seq}` to new `base_ref`, inject the gate output as findings plus conflict-style context, re-enter Work (step 2). On gate pass or skip: squash-merge `job/{seq}` to default branch. If no commits on `job/{seq}` beyond `base_ref`, this is a no-op. If commits exist and merge is clean → transition job to Done. If conflict → snapshot the current `base_ref` into a local variable `old_base_ref` (this value is held in dispatcher memory only — not persisted to the job record), update `job.base_ref` to current default HEAD, increment cycle (without consuming `rework_budget`), reset `job/{seq}` to new `base_ref`, build conflict context using `old_base_ref` and new `base_ref` (see §4.3 for format), re-enter Work (step 2). **Squash-merge commit message format:** subject line is `job/{seq}: {job_type}`; if the work task's `TaskResult::Work.summary` is non-null, append it as the commit body. Example: `job/42: implement-endpoint\n\nAdded /api/v1/stripe/webhook handler with idempotency key.`
+    **Finalization hard failures**: wrap-up is designed to be infallible, but an unexpected error in any finalization step (git plumbing, repo IO — anything other than a `Conflict`, which has its own rework path) creates a Human escalation task (reason `finalize_failed`) and the merge queue advances past the job instead of stalling (design-lifecycle.md: unexpected wrap-up failure → triage).
+13. On eval reduce product failure: for `agent | human` work — if under rework budget, increment cycle, inject eval findings, re-enter Work (step 2); if rework budget exhausted, create Human escalation task → Escalated. For `command` work — escalate immediately (rework_budget disallowed). If a required evaluator returned `abort: true`, escalate immediately regardless of remaining budget (reason `eval_abort`; see §1.2 Abort verdict)
 14. On escalation Human task completion: read `action` — `Retry`: new work task same cycle; `Resolve`: re-enter Evaluation; `Revoke`: transition to Revoked
 
 **Completeness contract for work containers:** task outcome is determined by container exit code — exit 0 = work succeeded; non-zero = infra/runtime failure (retried per `work_retries`). Calling `submit_result` is optional but provides richer rework context.
@@ -736,6 +777,7 @@ After a work task succeeds, the dispatcher creates one task per evaluator and fa
   - `Human` — `pass` field set by operator
 - `required: false` evaluators are advisory — failure (product or infra) is recorded but does not trigger rework or escalation
 - Overall result: if any `required` evaluator fails (product failure) → overall fail
+- **Abort**: if any `required` agent/human evaluator returned `abort: true`, the fail bypasses rework entirely — escalate immediately with the aborting evaluators' findings, whatever the remaining budget (§1.2 Abort verdict). Advisory aborts are plain advisory fails.
 
 **`EvalResult`** — the rework context passed to the next work cycle:
 
@@ -821,7 +863,8 @@ BASE_BRANCH     main
 REPO_URL        ssh://git@platform/acme/api.git
 NATS_URL        nats://...
 NATS_TOKEN      <work-scoped JWT — see §7.4>
-# secrets (decrypted from age-encrypted NATS KV; named as declared in top-level secrets:)
+# secrets (decrypted from age-encrypted NATS KV; named as declared in work.secrets:)
+# platform agent credentials (agent containers only): every secret in the reserved global/agents scope, env-named by the secret; declared secrets win on collision
 GITHUB_TOKEN    ...
 # vars (from NATS KV; named as declared in top-level vars:)
 RUST_EDITION    2021
@@ -863,9 +906,9 @@ Two MCP servers are injected into every agent invocation:
 | `channel_check` | work + eval agents | Poll inbox; accepts optional `since` (stream sequence number); returns all messages after that sequence |
 | `reply` | work + eval agents | Write `AgentReply` to `channels.*` KV |
 | `submit_result` | work agents | Publish work summary via `req.work.submit.*`; payload: `{ summary?, structured?, token_usage? }`; dispatcher writes task result and transitions to Evaluation |
-| `submit_eval` | eval agents | Publish eval verdict via `req.eval.submit.*`; payload must include `pass: bool`; optional: `structured`, `token_usage`; dispatcher writes `TaskResult::Agent` |
+| `submit_eval` | eval agents | Publish eval verdict via `req.eval.submit.*`; payload must include `pass: bool`; optional: `abort: bool` (default false; "not satisfiable by rework" — skips remaining rework budget and escalates, §1.2), `structured`, `token_usage`; dispatcher writes `TaskResult::Agent` |
 | `submit_review` | inline reviewer agents only | Record the inline review verdict; payload: `{ pass: bool, findings? }`. Local-only: writes `/chuggernaut/review-result.json` for the harness to read — never reaches NATS (see §4.5). Tool is absent outside inline review invocations. |
-| `create_job` | factory triage agents only | Publish `req.jobs.create.{owner}.{project}`; payload: `{ type, inputs?, knowledge_tags? }`; created job carries `factory` provenance and follows the factory's release policy (see §13.4). Tool is absent outside triage jobs. |
+| `create_job` | factory triage agents only | Publish `req.jobs.create.{owner}.{project}`; payload: `{ type, title?, description?, deps?, knowledge_tags? }`; created job carries `factory` provenance and follows the factory's release policy (see §13.4). Tool is absent outside triage jobs. |
 
 **Canonical completion and verdict contract:**
 
@@ -960,7 +1003,17 @@ Provider and model are configured at platform level (see §12.4) with per-job-ty
 
 Structured context surfaces through MCP tools (`submit_result`, `submit_eval`), which send NATS request-reply messages to the dispatcher — the dispatcher never parses agent stdout.
 
-**Rework context format** — on rework cycles (cycle > 1) where `eval_context` is non-empty or `merge_conflict` is set, the dispatcher reads the prompt file from the repo at `base_ref`, appends the following block, and sets `AgentRunConfig.prompt` to the combined string. The provider injects the prompt content into the created container at `/chuggernaut/prompt.md` (put-archive, §3.1) — never inline in the shell command, never via a host bind-mount.
+**Job brief format** — when a job carries a `title` and/or `description`, the dispatcher appends this block to the prompt file content for the work agent, for every agent evaluator (evaluators judge against the same brief the author saw), and to Human task prompts:
+
+```
+---
+## Job Brief
+**{title}**
+
+{description}
+```
+
+**Rework context format** — on rework cycles (cycle > 1) where `eval_context` is non-empty or `merge_conflict` is set, the dispatcher reads the prompt file from the repo at `base_ref`, appends the following block (after the job brief, if any), and sets `AgentRunConfig.prompt` to the combined string. The provider injects the prompt content into the created container at `/chuggernaut/prompt.md` (put-archive, §3.1) — never inline in the shell command, never via a host bind-mount.
 
 ```
 ---
@@ -1003,7 +1056,7 @@ Changes on main since base commit abc1234:
 
 Knowledge Objects (KOs) follow a `(subject, predicate) → object` model. Each KO is a discrete fact retrievable in O(1). Three scoped buckets (see §1.4 for KV keys).
 
-**Upfront injection (tagged, work containers only):** job types declare default knowledge tags; operators may add more at job creation time. The union forms the job's `knowledge_tags`. At launch the dispatcher resolves each tag by making three separate `list` requests — `req.knowledge.list.global`, `req.knowledge.list.{owner}`, and `req.knowledge.list.{owner}.{project}` — each with `{ "subject": tag }` in the payload. KOs from all three buckets are collected and deduplicated by `(subject, predicate)` with narrower scopes winning (project overrides team overrides global). The resulting KOs are concatenated and injected via `--append-system-prompt` for Claude, prepended to the prompt for Codex. Upfront injection applies to work containers only — eval containers do not receive a pre-injected system prompt.
+**Upfront injection (tagged, work containers only) — IMPLEMENTED, repo-versioned form:** job types declare default knowledge tags (`knowledge:`); operators may add more at job creation. At launch the dispatcher resolves the union by reading `tags/{tag}.md` from the project repo at `base_ref` (tags without a file are skipped), concatenates them into a `## Project Knowledge` block, and injects it via `--append-system-prompt` for Claude (prepended to the prompt for Codex). Work containers only — eval containers do not receive a pre-injected system prompt. The repo is the primary tag store; the NATS KO buckets described below (global/team scopes, runtime queries via chuggernaut-ko) remain the deferred extension for knowledge that spans projects.
 
 **Runtime querying (MCP, all agent containers):** agents query further KOs at runtime via the `chuggernaut-ko` MCP server. Both work and eval containers receive NATS JWT credentials with read access to all three knowledge buckets (see §7.4); the MCP server uses these to resolve queries without dispatcher involvement.
 
@@ -1050,7 +1103,7 @@ Git is a storage layer, not the center of gravity. The platform manages all bran
 - **Diff API**: the platform's axum API serves diffs on demand (`git diff`, `git log`) via the VCS NATS subjects (see §6.1) and HTTP routes (see §6.2)
 - **Branch protection**: enforced in the SSH layer — only the dispatcher identity may push to protected refs (default branch); see §5.2
 
-**Artifact passing:** all jobs work on a dedicated branch (`job/{seq}`). On evaluation pass, the dispatcher squash-merges to the default branch if any commits exist on the job branch; otherwise the merge is a no-op. Downstream jobs start from the default branch — upstream work is already there by the time they launch, guaranteed by DAG dependency ordering. Named `inputs:` declarations establish DAG ordering; whether an upstream actually produced VCS output depends on what the upstream did, not its job type.
+**Artifact passing:** all jobs work on a dedicated branch (`job/{seq}`). On evaluation pass, the dispatcher squash-merges to the default branch if any commits exist on the job branch; otherwise the merge is a no-op. Downstream jobs start from the default branch — upstream work is already there by the time they launch, guaranteed by DAG dependency ordering. `deps` establish that ordering; whether an upstream actually produced VCS output depends on what the upstream did, not its job type.
 
 **Branch cleanup:** `job/{seq}` branches are deleted by the dispatcher immediately after the squash-merge on Done and immediately after task cleanup on Revoked. Job branches are not retained after a terminal state is reached.
 
@@ -1101,6 +1154,12 @@ req.jobs.get.{owner}.{project}.{seq}
 req.jobs.list.{owner}.{project}
 req.jobs.release.{owner}.{project}.{seq}
 req.jobs.revoke.{owner}.{project}.{seq}
+req.jobs.criteria.{owner}.{project}.{seq}                    response: { ref, wrap_up, evaluators: [Evaluator + source: "type"|"job"], errors: [string] } — resolved eval criteria at the job's pinned ref
+req.jobtypes.get.{owner}.{project}                           payload: { name }; response: { name, ref, yaml, job_type: JobType|null, errors } — one type in full (raw + parsed, defaults merged) for the library UI
+req.tags.list.{owner}.{project}                              response: string[] — available knowledge tags (`tags/*.md` stems at default HEAD; a tag's meaning lives in its repo-versioned markdown file)
+req.projects.create                                          payload: { owner, name }; creates the bare repo (+ pre-receive hook, + Code starter template seed, + job counter); 409 if it exists. Platform admins only at the API layer.
+req.vcs.file.{owner}.{project}                               payload: { path }; response: { path, ref, content } — one repo file at default HEAD (prompt viewer / repo browser)
+req.vcs.tree.{owner}.{project}                               response: { branch, ref, entries: [{path, type, size}] } — full recursive tree at default HEAD (repo browser)
 req.graph.get.{owner}.{project}                              response: Job[] (all jobs in project)
 req.graph.validate.{owner}.{project}
 req.graph.release.{owner}.{project}
@@ -1148,7 +1207,7 @@ Push subscription management (`POST /api/v1/push/subscribe`, `DELETE /api/v1/pus
 ### 6.2 HTTP Routes
 
 ```
-# Auth
+# Auth — every authenticated route accepts the JWT session cookie (browser) OR `Authorization: Bearer <jwt>` (machine callers; mint with `admin user token --email … --ttl 720h`). Same RS256 JWT, same verification; roles are baked in at mint time (no revocation list — keep TTLs short).
 POST   /auth/login                                                  → 200 OK; sets httpOnly JWT cookie
 POST   /auth/logout                                                 → 200 OK; clears cookie
 GET    /auth/me                                                     → 200 OK; body: Identity
@@ -1170,11 +1229,20 @@ GET    /api/v1/projects/{owner}/{project}/jobs/{seq}/usage          → 200 OK; 
 
 # Jobs
 POST   /api/v1/projects/{owner}/{project}/jobs
-       body: { "type": "implement-endpoint", "inputs": { "spec": 11, "codebase": 22 }, "knowledge_tags": ["payments/stripe-integration"] }
+       body: { "type": "implement-endpoint", "title": "Stripe webhook endpoint", "description": "...", "deps": [11, 22], "knowledge_tags": ["payments/stripe-integration"], "eval": [ { "name": "extra-ci", "type": "command", "run": "./ci.sh" } ] }
+       title/description optional; the instance's ticket — injected into work and eval prompts as the §4.3 job brief
        knowledge_tags optional; merged with job type's default tags
+       eval optional; additive per-job evaluators layered on top of the type's list (§1.1 evaluator schema); validated at release — name collisions with the type's evaluators are a 422
        → 201 Created; body: Job record
 GET    /api/v1/projects/{owner}/{project}/jobs                      → 200 OK; body: Job[]
+POST   /api/v1/projects                                             body: { owner, name } → 201; platform admins only. Creates repo + hook + Code starter template + counter (§12.2); 409 if it exists.
+GET    /api/v1/projects/{owner}/{project}/job-types                 → 200 OK; body: [{ name, display_name, description }] (jobs/*.yaml at default HEAD; display metadata for the type picker — a file that fails to parse still lists, stem only)
+GET    /api/v1/projects/{owner}/{project}/job-types/{name}          → 200 OK; body: { name, ref, yaml, job_type, errors } — the library view (raw + parsed, defaults merged)
+GET    /api/v1/projects/{owner}/{project}/tags                      → 200 OK; body: string[] — available knowledge tags (tags/*.md stems; drives the create-form tag picker)
+GET    /api/v1/projects/{owner}/{project}/file?path={path}          → 200 OK; body: { path, ref, content } — one repo file at default HEAD (the create form's prompt links; 404 if absent)
+GET    /api/v1/projects/{owner}/{project}/tree                      → 200 OK; body: { branch, ref, entries } — full recursive tree at default HEAD (Files tab)
 GET    /api/v1/projects/{owner}/{project}/jobs/{seq}                → 200 OK; body: Job
+GET    /api/v1/projects/{owner}/{project}/jobs/{seq}/criteria       → 200 OK; body: { ref, wrap_up, evaluators: [Evaluator + source], errors } — the criteria the job will be (or was) judged against, resolved at base_ref (or default HEAD before Ready)
 POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/release        → 200 OK; body: Job (updated state); 422 with error list if validation fails
 POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/revoke         → 200 OK; body: Job (updated state); 409 if already Done or Revoked
 
@@ -1307,7 +1375,7 @@ Validation errors (422) use an `errors` array with per-item detail:
 ```json
 {
   "errors": [
-    { "job_seq": 42, "field": "inputs.spec", "message": "input 'spec' references unknown job 99" }
+    { "job_seq": 42, "field": "deps", "message": "depends on unknown job #99" }
   ]
 }
 ```
@@ -1320,7 +1388,7 @@ Standard HTTP status codes:
 - `403` — authenticated but insufficient role for the operation
 - `404` — job, task, var, secret, or knowledge entry not found
 - `409` — conflict (e.g. revoke on a Done job)
-- `422` — validation failure (input wiring errors, static config errors)
+- `422` — validation failure (dependency wiring errors, static config errors)
 - `500` — internal error (NATS unavailable, git command failure)
 
 ---
@@ -1747,12 +1815,12 @@ The dispatcher runs one durable JetStream consumer per enabled factory on `inges
 
 **Batching:** on the first unconsumed event, start `batch_window`; when the window elapses or `max_batch` accumulates, create a triage job. **At most one triage job per factory is in flight** (non-terminal) at a time — events arriving while one runs simply accumulate for the next batch. This is the backpressure mechanism: an error tracker in a crash loop produces bigger batches, not more jobs.
 
-**Triage jobs** are regular jobs (§2.1 state machine applies) with `factory` provenance set, no inputs, created **and immediately released** by the dispatcher — a factory whose triage waits for operator release would not be a factory. The event batch is delivered to the triage container as a JSON array of `IngestEvent` at `/chuggernaut/events.json` (injected, same mechanism as the prompt file, §4.3). Events are acked on the consumer only when the triage job reaches a terminal state, so a dispatcher crash or a revoked triage job redelivers the batch.
+**Triage jobs** are regular jobs (§2.1 state machine applies) with `factory` provenance set, no dependencies, created **and immediately released** by the dispatcher — a factory whose triage waits for operator release would not be a factory. The event batch is delivered to the triage container as a JSON array of `IngestEvent` at `/chuggernaut/events.json` (injected, same mechanism as the prompt file, §4.3). Events are acked on the consumer only when the triage job reaches a terminal state, so a dispatcher crash or a revoked triage job redelivers the batch.
 
 **Job creation by the triage agent:** the `create_job` MCP tool (§4.2), backed by the extra JWT permission (§7.4). Created jobs:
 - carry `factory: {factory_name}` on the record and `job-created` event
 - start Frozen; if the factory declares `auto_release: true`, the dispatcher immediately runs release validation (§2.2) and transitions them to Ready/Blocked — validation failures leave the job Frozen and surface a `factory-release-failed` event rather than escalating
-- may declare `inputs` wired to other jobs created *in the same triage run* (enables the agent to plan a small graph, e.g. `investigate → fix → verify`)
+- may declare `deps` on other jobs created *in the same triage run* (enables the agent to plan a small graph, e.g. `investigate → fix → verify`)
 
 Creating zero jobs is a normal, successful triage outcome (event batch judged noise). The triage job type may declare evaluators like any job; the default (no `eval`) auto-passes. Triage jobs typically produce no commits, so their squash-merge is the standard no-op (§5.1).
 
@@ -1803,4 +1871,4 @@ Platform init generates: JWT RS256 keypair, SSH CA keypair, age keypair, VAPID k
 - **Project/team-level provider defaults**: in v1 the fallback chain is job-type declaration → platform config. Per-project and per-team agent provider/model overrides are deferred.
 - **Dependency caching for agent containers**: per-project build/dependency caches (cargo registry, node_modules) via persistent volumes or a pull-through registry cache. v1 mitigation: bake toolchains and dependencies into the declared `image`.
 - **k8s-Secret-based secret injection**: dispatcher writes a Kubernetes Secret referenced by the Job spec instead of decrypting secrets into env vars it assembles itself, keeping plaintext out of the dispatcher's launch path. v1 injects env vars directly.
-- **Direct-mode factories**: event → job templating without a triage agent (payload→inputs mapping mini-language). v1 factories are triage-only (§13.1); a trivial triage prompt covers the direct case at the cost of agent tokens.
+- **Direct-mode factories**: event → job templating without a triage agent (payload→job-fields mapping mini-language). v1 factories are triage-only (§13.1); a trivial triage prompt covers the direct case at the cost of agent tokens.

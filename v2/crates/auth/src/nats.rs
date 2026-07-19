@@ -201,19 +201,20 @@ fn kv_read(perms: &mut Permissions, bucket: &str, key_patterns: &[String]) {
     }
 }
 
-fn kv_write(perms: &mut Permissions, bucket: &str, key: &str) {
-    perms.publish.push(format!("$KV.{bucket}.{key}"));
-}
-
-/// Both container roles share: inbox replies, the operator channel KV entry
-/// (read+write), knowledge reads, and the `channel-inbox` stream poll.
+/// Both container roles share: inbox replies, reading their own channel entry,
+/// posting status/replies to the dispatcher, knowledge reads, and the
+/// `channel-inbox` stream poll.
 fn common_container(perms: &mut Permissions, owner: &str, project: &str, seq: u64) {
     perms.subscribe.push("_INBOX.>".into());
     perms.subscribe.push(store::subjects::channel_inbox(owner, project, seq));
 
     let channel_key = store::keys::channel_key(owner, project, seq);
     kv_read(perms, store::buckets::CHANNELS, std::slice::from_ref(&channel_key));
-    kv_write(perms, store::buckets::CHANNELS, &channel_key);
+    // Deliberately no `kv_write` on CHANNELS: containers post through the
+    // dispatcher instead, keeping it the sole writer of the bucket and making
+    // each post durable event history rather than a last-write-wins overwrite.
+    perms.publish.push(store::subjects::channel_update(owner, project, seq));
+    perms.publish.push(store::subjects::channel_reply(owner, project, seq));
 
     // Knowledge keys nest b64 segments (`global.{s}.{p}`, `{owner}.{s}.{p}`,
     // `{owner}.{project}.{s}.{p}`): `{owner}.>` covers the §7.4 owner and
@@ -340,7 +341,8 @@ mod tests {
         for needle in [
             "req.work.submit.acme.api.42",
             "req.step.report.acme.api.42.*",
-            "$KV.channels.acme.api.jobs.42",
+            "req.channel.update.acme.api.42",
+            "req.channel.reply.acme.api.42",
             "$JS.API.DIRECT.GET.KV_jobs.$KV.jobs.acme.api.42",
             "$JS.API.DIRECT.GET.KV_tasks.$KV.tasks.acme.api.42.*",
             "$JS.API.DIRECT.GET.KV_knowledge.$KV.knowledge.global.>",
@@ -351,6 +353,19 @@ mod tests {
         }
         assert!(p.subscribe.contains(&"_INBOX.>".to_string()));
         assert!(p.subscribe.contains(&"channel.inbox.acme.api.42".to_string()));
+        // Reads its own channel entry, but cannot write it: posts go through
+        // the dispatcher so it stays the bucket's sole writer and each post
+        // becomes durable event history instead of an in-place overwrite.
+        assert!(
+            p.publish
+                .iter()
+                .any(|s| s == "$JS.API.DIRECT.GET.KV_channels.$KV.channels.acme.api.jobs.42")
+        );
+        assert!(
+            !p.publish.iter().any(|s| s.starts_with("$KV.channels")),
+            "container must not write channels KV directly: {:?}",
+            p.publish
+        );
         // No eval submit, no job creation, no event publishing.
         for forbidden in ["req.eval.submit", "req.jobs.create", "job.events"] {
             assert!(!p.publish.iter().any(|s| s.contains(forbidden)), "found {forbidden}");
@@ -366,6 +381,10 @@ mod tests {
                 .iter()
                 .any(|s| s == "$JS.API.DIRECT.GET.KV_tasks.$KV.tasks.acme.api.42.7")
         );
+        // An eval agent reports status like a work agent, through the
+        // dispatcher — and likewise cannot write the bucket itself.
+        assert!(p.publish.iter().any(|s| s == "req.channel.update.acme.api.42"));
+        assert!(!p.publish.iter().any(|s| s.starts_with("$KV.channels")));
         for forbidden in ["req.work.submit", "req.step.report", "KV_jobs"] {
             assert!(!p.publish.iter().any(|s| s.contains(forbidden)), "found {forbidden}");
         }

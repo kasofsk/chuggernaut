@@ -176,6 +176,80 @@ impl RepoManager {
             ],
         )
         .await?;
+        self.ensure_upload_filter(owner, project).await?;
+        Ok(())
+    }
+
+    /// Write `hooks/pre-receive` into a bare repo (body from `auth::ssh`,
+    /// §5.2/§12.2), mode 0755.
+    pub async fn install_pre_receive_hook(
+        &self,
+        owner: &str,
+        project: &str,
+        body: &str,
+    ) -> Result<()> {
+        let hook = self.repo_path(owner, project).join("hooks").join("pre-receive");
+        tokio::fs::create_dir_all(hook.parent().unwrap()).await?;
+        tokio::fs::write(&hook, body).await?;
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).await?;
+        Ok(())
+    }
+
+    /// Commit a set of files onto the default branch of a bare repo, via a
+    /// temporary worktree. Used to seed a fresh project with the platform
+    /// starter template (§12.2). Files whose path ends in `.sh` are committed
+    /// executable.
+    pub async fn seed_files(
+        &self,
+        owner: &str,
+        project: &str,
+        files: &[(&str, &str)],
+        message: &str,
+    ) -> Result<()> {
+        let repo = self.repo_path(owner, project);
+        let branch = self.default_branch(owner, project).await?;
+        let tmp = tempfile::tempdir()?;
+        let wt = tmp.path().join("wt");
+        let wt_str = wt.to_string_lossy().to_string();
+        self.run(&repo, &["worktree", "add", &wt_str, &branch]).await?;
+        let result: Result<()> = async {
+            for (path, contents) in files {
+                let dest = wt.join(path);
+                if let Some(parent) = dest.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                tokio::fs::write(&dest, contents).await?;
+                if path.ends_with(".sh") {
+                    use std::os::unix::fs::PermissionsExt;
+                    tokio::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
+                        .await?;
+                }
+            }
+            self.run(&wt, &["add", "-A"]).await?;
+            self.run(&wt, &["commit", "-m", message]).await?;
+            Ok(())
+        }
+        .await;
+        // Always detach the worktree — a stale registration would block the
+        // next seed. The temp dir itself is cleaned by its guard.
+        let _ = self.run(&repo, &["worktree", "remove", "--force", &wt_str]).await;
+        result
+    }
+
+    /// Advertise partial-clone support on the bare repo. This is the server
+    /// half only: `container::bootstrap_cmd` does not yet pass
+    /// `--filter=blob:none`, because the SSH front speaks git protocol v0 and
+    /// v0 upload-pack refuses the promisor remote's follow-up fetch (see
+    /// `chuggernaut/tests/ssh_front.rs`). It does make direct/`file://` partial
+    /// clones work, and is the prerequisite for enabling the flag once the
+    /// front carries protocol v2.
+    ///
+    /// Idempotent — safe to call on repos created before this landed.
+    pub async fn ensure_upload_filter(&self, owner: &str, project: &str) -> Result<()> {
+        let repo = self.repo_path(owner, project);
+        self.run(&repo, &["config", "uploadpack.allowFilter", "true"])
+            .await?;
         Ok(())
     }
 

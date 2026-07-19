@@ -30,13 +30,26 @@ async fn init_bootstraps_and_is_idempotent() {
     for name in [
         "jwt_private.pem", "jwt_public.pem", "ssh_ca", "ssh_ca.pub",
         "age_private.key", "age_public.key", "vapid_private.pem", "vapid_public.pem",
+        "age_artifacts.key", "age_artifacts_public.key",
         "nats_operator.seed", "nats_sys_account.seed", "nats_account.seed",
         "nats-resolver.conf", "dispatcher.creds",
     ] {
         assert!(keys.join(name).exists(), "missing {name}");
     }
+    // The artifacts key is distinct from the secrets key — same generator, but
+    // sharing them would hand the API the secrets identity (§10.2).
+    assert_ne!(
+        std::fs::read_to_string(keys.join("age_private.key")).unwrap(),
+        std::fs::read_to_string(keys.join("age_artifacts.key")).unwrap(),
+        "artifacts key must not be the secrets key"
+    );
     use std::os::unix::fs::PermissionsExt;
-    for private in ["age_private.key", "nats_operator.seed", "dispatcher.creds"] {
+    for private in [
+        "age_private.key",
+        "age_artifacts.key",
+        "nats_operator.seed",
+        "dispatcher.creds",
+    ] {
         let mode = std::fs::metadata(keys.join(private)).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "{private} not 0600");
     }
@@ -82,12 +95,17 @@ async fn admin_project_and_user_commands() {
     let store = NatsStore::connect(server.url()).await.unwrap();
     store.ensure_topology().await.unwrap();
 
-    let admin_args = |cmd| AdminArgs { nats_url: server.url().to_string(), cmd };
+    let admin_args = |cmd| AdminArgs {
+        nats_url: server.url().to_string(),
+        keys_dir: dir.path().join("no-keys"), // absent → plain connect
+        cmd,
+    };
     admin::run(admin_args(AdminCmd::Project(ProjectCmd::Create {
         owner: "acme".into(),
         name: "api".into(),
         default_branch: "trunk".into(),
         repos_root: repos_root.clone(),
+        hook_bin: None,
     })))
     .await
     .unwrap();
@@ -106,6 +124,7 @@ async fn admin_project_and_user_commands() {
                 name: name.into(),
                 default_branch: "main".into(),
                 repos_root: repos_root.clone(),
+                hook_bin: None,
             })))
             .await
             .is_err(),

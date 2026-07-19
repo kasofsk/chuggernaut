@@ -30,6 +30,21 @@ pub fn channel_inbox(owner: &str, project: &str, seq: u64) -> String {
     format!("channel.inbox.{owner}.{project}.{seq}")
 }
 
+/// Agent status updates and replies (spec §4.2), routed through the dispatcher
+/// rather than written to KV by the container.
+///
+/// The container used to write the `channels` bucket itself, which made it a
+/// second writer and left the dispatcher blind — so updates could only ever be
+/// last-write-wins, with no history. Going through the dispatcher keeps the
+/// single-writer rule and lets each update also become a `job-events` entry.
+pub fn channel_update(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.channel.update.{owner}.{project}.{seq}")
+}
+
+pub fn channel_reply(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.channel.reply.{owner}.{project}.{seq}")
+}
+
 // ── API-facing request subjects (spec §6.1) ─────────────────────────────────
 // Published by the api crate, handled by the dispatcher.
 
@@ -41,8 +56,32 @@ pub fn jobs_get(owner: &str, project: &str, seq: u64) -> String {
     format!("req.jobs.get.{owner}.{project}.{seq}")
 }
 
+/// Available job types at default-branch HEAD (`jobs/*.yaml`), for the create UI.
+pub fn job_types_list(owner: &str, project: &str) -> String {
+    format!("req.jobtypes.list.{owner}.{project}")
+}
+
+/// One job type in full (raw YAML + parsed, defaults merged) at default-branch
+/// HEAD, for the library UI. The type name rides in the payload — file stems
+/// are not valid subject tokens.
+pub fn job_types_get(owner: &str, project: &str) -> String {
+    format!("req.jobtypes.get.{owner}.{project}")
+}
+
+/// Available knowledge tags at default-branch HEAD (`tags/*.md` stems), for
+/// the create-job tag picker. Tags are repo-versioned like job types.
+pub fn tags_list(owner: &str, project: &str) -> String {
+    format!("req.tags.list.{owner}.{project}")
+}
+
 pub fn jobs_list(owner: &str, project: &str) -> String {
     format!("req.jobs.list.{owner}.{project}")
+}
+
+/// Resolved evaluation criteria for a job: the type's evaluators (incl.
+/// project defaults) plus the job's additive ones, at the job's pinned ref.
+pub fn jobs_criteria(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.jobs.criteria.{owner}.{project}.{seq}")
 }
 
 pub fn jobs_release(owner: &str, project: &str, seq: u64) -> String {
@@ -51,6 +90,24 @@ pub fn jobs_release(owner: &str, project: &str, seq: u64) -> String {
 
 pub fn jobs_revoke(owner: &str, project: &str, seq: u64) -> String {
     format!("req.jobs.revoke.{owner}.{project}.{seq}")
+}
+
+/// Create a project (§12.2 via the API): bare repo, hook, starter template,
+/// counter. Owner/name ride in the payload — they are being validated, so
+/// they cannot ride in the subject.
+pub fn projects_create() -> String {
+    "req.projects.create".into()
+}
+
+/// Read one repo file at default-branch HEAD (payload: { path }) — prompt
+/// viewers and the like. Repo paths cannot ride in subjects.
+pub fn vcs_file(owner: &str, project: &str) -> String {
+    format!("req.vcs.file.{owner}.{project}")
+}
+
+/// Full recursive tree at default-branch HEAD — the repo browser.
+pub fn vcs_tree(owner: &str, project: &str) -> String {
+    format!("req.vcs.tree.{owner}.{project}")
 }
 
 pub fn graph_get(owner: &str, project: &str) -> String {

@@ -2,7 +2,7 @@
 //! ticker in `core::spawn` (and `CoreHandle::trigger_scan` in tests); both
 //! scans run inside the single-writer loop like any other message.
 
-use crate::core::{Core, Result};
+use crate::core::{Core, Result, TaskExit};
 use crate::exec::task_timeout;
 use crate::release;
 use chrono::Utc;
@@ -47,7 +47,7 @@ impl Core {
                 if let Some(cid) = &task.container_id {
                     let _ = self.backend.kill(cid).await;
                 }
-                self.on_task_exited(&owner, &project, seq, task.id, -1, None).await?;
+                self.on_task_exited(&owner, &project, seq, task.id, TaskExit::code(-1)).await?;
             }
         }
         Ok(())

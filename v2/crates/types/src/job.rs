@@ -1,8 +1,8 @@
 //! Job record and state machine states (spec §1.1, §2.1).
 
+use crate::job_type::Evaluator;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// A node in the project DAG. Stored in NATS KV at `jobs.{owner}.{project}.{seq}`;
 /// the dispatcher is its sole writer.
@@ -14,8 +14,20 @@ pub struct Job {
     pub project: String,
     /// Job type name; references `jobs/{type}.yaml` at `base_ref`.
     pub r#type: String,
-    /// Input name → upstream job id; empty if job type declares no inputs.
-    pub inputs: HashMap<String, u64>,
+    /// Ticket-style instance identity: what this particular run is for.
+    /// The type carries the *how* (prompts, evaluators); title/description
+    /// carry the *what*, and are injected into work and eval prompts as the
+    /// job brief (§4.3). Empty for jobs whose prompt is self-contained.
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    /// Upstream job ids this job depends on. Edges are ordering: upstreams
+    /// must be Done first (their work is in this job's base, their structured
+    /// results are available to it). Plain ids, no named roles — picked at
+    /// creation, validated (existence, no cycles) at release.
+    #[serde(default)]
+    pub deps: Vec<u64>,
     pub state: JobState,
     /// `"job/{id}"`; set at creation; actual git branch created when job enters Work.
     pub branch: String,
@@ -24,6 +36,12 @@ pub struct Job {
     pub base_ref: Option<String>,
     /// Union of job type defaults and operator-supplied tags at creation.
     pub knowledge_tags: Vec<String>,
+    /// Additive per-job evaluators (design-lifecycle.md): layered on top of the
+    /// type's `eval:` list at execution. The type's evaluators are a floor —
+    /// creation can add criteria, never remove or override them. Name
+    /// collisions with the type's evaluators are a release-time error.
+    #[serde(default)]
+    pub eval: Vec<Evaluator>,
     /// Factory name when created by a factory triage agent (spec §13); None for
     /// operator-created jobs.
     pub factory: Option<String>,
@@ -60,7 +78,7 @@ mod tests {
           "id": 42,
           "project": "acme/api",
           "type": "implement-endpoint",
-          "inputs": { "spec": 11, "codebase": 22 },
+          "deps": [11, 22],
           "state": "Frozen",
           "branch": "job/42",
           "base_ref": null,
@@ -72,7 +90,7 @@ mod tests {
         let job: Job = serde_json::from_str(json).unwrap();
         assert_eq!(job.id, 42);
         assert_eq!(job.state, JobState::Frozen);
-        assert_eq!(job.inputs["spec"], 11);
+        assert_eq!(job.deps, vec![11, 22]);
         let back = serde_json::to_string(&job).unwrap();
         let again: Job = serde_json::from_str(&back).unwrap();
         assert_eq!(job, again);

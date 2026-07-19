@@ -1,0 +1,17 @@
+# First live agent job: writes a file per the prompt, verified by a command
+# evaluator. Copy to jobs/hello.yaml in the project repo (plus
+# prompt-hello.md → prompts/work/hello.md).
+name: hello
+image: chuggernaut/agent:dev
+work:
+  type: agent
+  prompt: prompts/work/hello.md
+resources:
+  task_timeout: 15m
+work_retries: 1
+eval_retries: 1
+rework_budget: 1
+eval:
+  - name: greeting-exists
+    type: command
+    run: test -f greeting.txt && grep -q . greeting.txt

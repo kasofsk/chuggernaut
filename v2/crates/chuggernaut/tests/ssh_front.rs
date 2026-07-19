@@ -60,6 +60,71 @@ fn roles_b64(role: &str) -> String {
     URL_SAFE_NO_PAD.encode(format!(r#"{{"acme/api":"{role}"}}"#))
 }
 
+/// `container::bootstrap_cmd` clones with `--filter=blob:none`, which only
+/// works over git protocol v2. sshd hands upload-pack `version=2` solely when
+/// it is configured to `AcceptEnv GIT_PROTOCOL` (git supplies the client half
+/// itself). Drop that line and every task container still "clones" fine, then
+/// checks out an empty workspace — a silent, total breakage.
+///
+/// This asserts the dev deployment's config because the ext:: harness below
+/// cannot cover it: ext:: never propagates GIT_PROTOCOL, so it is pinned to v0
+/// regardless of sshd. Verified against the real sshd container by hand.
+#[test]
+fn dev_sshd_accepts_git_protocol_v2() {
+    let sshd_config = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../deploy/dev/sshd_config");
+    let text = std::fs::read_to_string(&sshd_config)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", sshd_config.display()));
+    assert!(
+        text.lines()
+            .any(|l| l.split_whitespace().eq(["AcceptEnv", "GIT_PROTOCOL"])),
+        "sshd_config must AcceptEnv GIT_PROTOCOL or partial clone silently \
+         yields empty workspaces; see container::bootstrap_cmd"
+    );
+}
+
+/// `--single-branch` is what `bootstrap_cmd` actually ships; it must work
+/// through the forced command and fetch only the job's own ref.
+#[tokio::test]
+async fn single_branch_clone_works_over_the_ssh_front() {
+    let front = Front::setup().await;
+    let work = tempfile::tempdir().unwrap();
+    let job_args = "--kind job --principal job:acme/api:1 --access rw";
+
+    let pull = front.remote("sb-pull.sh", "git-upload-pack", job_args);
+    let (ok, err) = git(work.path(), &["clone", &pull, "seed"]);
+    assert!(ok, "seed clone: {err}");
+    let seed = work.path().join("seed");
+    std::fs::write(seed.join("f.txt"), "content").unwrap();
+    git(&seed, &["add", "."]);
+    git(
+        &seed,
+        &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "c"],
+    );
+    let push = front.remote("sb-push.sh", "git-receive-pack", job_args);
+    let (ok, err) = git(&seed, &["push", &push, "HEAD:refs/heads/job/1"]);
+    assert!(ok, "seed push: {err}");
+
+    let (ok, err) = git(
+        work.path(),
+        &["clone", "--single-branch", "--branch", "job/1", &pull, "co"],
+    );
+    assert!(ok, "single-branch clone: {err}");
+    let co = work.path().join("co");
+    assert_eq!(std::fs::read_to_string(co.join("f.txt")).unwrap(), "content");
+
+    // Only the job branch came across, not main.
+    let listed = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&co)
+        .args(["for-each-ref", "--format=%(refname)", "refs/remotes/origin"])
+        .output()
+        .unwrap();
+    let refs = String::from_utf8_lossy(&listed.stdout);
+    assert!(refs.contains("job/1"), "{refs}");
+    assert!(!refs.contains("origin/main"), "fetched main too: {refs}");
+}
+
 #[tokio::test]
 async fn job_certs_clone_and_push_only_their_branch() {
     let front = Front::setup().await;

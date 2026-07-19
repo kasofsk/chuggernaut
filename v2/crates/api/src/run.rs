@@ -61,11 +61,27 @@ pub async fn run(config: ApiConfig) -> anyhow::Result<()> {
         Err(_) => NatsStore::connect(&config.nats_url).await?,
     };
 
+    // The artifacts identity — not `age_private.key`, which stays
+    // dispatcher-only (§10.2). Missing → the platform captures no artifacts,
+    // and the routes report that rather than failing startup.
+    let artifacts = match tokio::fs::read_to_string(config.keys_dir.join("age_artifacts.key")).await
+    {
+        Ok(identity) => {
+            let crypto = store::ArtifactCrypto::with_identity(&identity)?;
+            Some(store.artifacts(crypto).await?)
+        }
+        Err(_) => {
+            tracing::warn!("no age_artifacts.key: transcripts and logs will not be served");
+            None
+        }
+    };
+
     let state: SharedState = Arc::new(ApiState {
         store,
         signer: JwtSigner::from_pem(&private)?,
         verifier: JwtVerifier::from_pem(&public)?,
         session_ttl: config.session_ttl,
+        artifacts,
     });
     if let Some(dist) = &config.ui_dist
         && !dist.join("index.html").exists()

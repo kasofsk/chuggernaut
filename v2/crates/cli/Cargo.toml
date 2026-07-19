@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-types.workspace = true
+types = { workspace = true, features = ["schema"] }
+schemars.workspace = true
+serde_yaml.workspace = true
 store.workspace = true
 auth.workspace = true
 nkeys.workspace = true

@@ -145,12 +145,9 @@ async fn default_branch(repo: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Hook body written into `hooks/pre-receive` at project creation (§12.2).
-/// Bakes the absolute path of the running binary — the SSH host runs the
-/// same artifact.
-pub fn pre_receive_hook_body(chuggernaut_bin: &Path) -> String {
-    format!("#!/bin/sh\nexec {} ssh-authz\n", chuggernaut_bin.display())
-}
+/// Re-exported: the body generator lives with the identity contract it bakes
+/// (`auth::ssh`), the installer with the repo layout (`vcs`).
+pub use auth::ssh::pre_receive_hook_body;
 
 /// Install the pre-receive hook into a bare repo.
 pub async fn install_pre_receive_hook(
@@ -159,15 +156,9 @@ pub async fn install_pre_receive_hook(
     project: &str,
     chuggernaut_bin: &Path,
 ) -> Result<()> {
-    let hook = repos_root
-        .join(owner)
-        .join(format!("{project}.git"))
-        .join("hooks")
-        .join("pre-receive");
-    tokio::fs::create_dir_all(hook.parent().unwrap()).await?;
-    tokio::fs::write(&hook, pre_receive_hook_body(chuggernaut_bin)).await?;
-    use std::os::unix::fs::PermissionsExt;
-    tokio::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).await?;
+    vcs::RepoManager::new(repos_root)
+        .install_pre_receive_hook(owner, project, &pre_receive_hook_body(chuggernaut_bin))
+        .await?;
     Ok(())
 }
 
@@ -189,5 +180,7 @@ mod tests {
         let body = pre_receive_hook_body(Path::new("/usr/local/bin/chuggernaut"));
         assert!(body.starts_with("#!/bin/sh\n"));
         assert!(body.contains("/usr/local/bin/chuggernaut ssh-authz"));
+        // Local access (no identity env) must not depend on the baked path.
+        assert!(body.contains("[ -z \"$CHUGGERNAUT_PRINCIPAL\" ] && exit 0"));
     }
 }

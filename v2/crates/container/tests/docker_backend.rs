@@ -46,6 +46,39 @@ fn rm(id: &str) {
     let _ = Command::new("docker").args(["rm", "-f", cid]).output();
 }
 
+/// Log capture is the only window into a failed command task — `TaskResult`
+/// carries no output. Both streams must come back.
+///
+/// Note what is *not* asserted: cross-stream ordering. Docker orders frames by
+/// timestamp, and a measured run returned stderr before an earlier stdout write
+/// in the same millisecond. Only within-stream order is guaranteed.
+#[tokio::test]
+async fn logs_capture_both_streams_after_exit() {
+    let Some(be) = docker() else { return };
+    let id = be
+        .launch(cfg("echo to-stdout; echo after; echo to-stderr >&2; exit 3"))
+        .await
+        .unwrap();
+    assert_eq!(be.wait(&id).await.unwrap(), 3);
+
+    // Read *after* exit: a failed container is exactly when logs matter, and
+    // follow:false must not hang on an already-dead container.
+    let text = String::from_utf8_lossy(&be.logs(&id).await.unwrap()).to_string();
+    assert!(text.contains("to-stdout"), "missing stdout: {text:?}");
+    assert!(text.contains("to-stderr"), "missing stderr: {text:?}");
+    assert!(
+        text.find("to-stdout") < text.find("after"),
+        "within-stream order broken: {text:?}"
+    );
+
+    // Idempotent, like wait — reconciliation may re-read.
+    assert_eq!(be.logs(&id).await.unwrap(), be.logs(&id).await.unwrap());
+
+    let unknown = "local/deadbeefdeadbeef".to_string();
+    assert!(be.logs(&unknown).await.is_err());
+    rm(&id);
+}
+
 #[tokio::test]
 async fn exit_codes_round_trip() {
     let Some(be) = docker() else { return };

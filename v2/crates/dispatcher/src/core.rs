@@ -57,8 +57,14 @@ pub struct CreateJobRequest {
     pub owner: String,
     pub project: String,
     pub r#type: String,
-    pub inputs: HashMap<String, u64>,
+    /// Ticket-style identity: what this run is for (optional, empty = none).
+    pub title: String,
+    pub description: String,
+    pub deps: Vec<u64>,
     pub knowledge_tags: Vec<String>,
+    /// Additive per-job evaluators; validated (field rules + name collisions
+    /// against the type's list) at release, not creation.
+    pub eval: Vec<types::Evaluator>,
     pub factory: Option<String>,
 }
 
@@ -74,8 +80,41 @@ pub struct WorkSubmission {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalSubmission {
     pub pass: bool,
+    /// "Not satisfiable by rework" (design-lifecycle.md): implies fail; a
+    /// required evaluator's abort escalates instead of consuming rework budget.
+    #[serde(default)]
+    pub abort: bool,
     pub structured: Option<serde_json::Value>,
     pub token_usage: Option<TokenUsage>,
+}
+
+/// What a container monitor observed when its task exited. These three always
+/// travel together from the monitor to the exit handlers.
+#[derive(Debug, Clone, Default)]
+pub struct TaskExit {
+    pub exit_code: i32,
+    /// `/workspace/eval-result.json` for command eval containers.
+    pub eval_json: Option<serde_json::Value>,
+    /// Usage measured from the agent CLI's JSON result, collected by the
+    /// monitor before it reported the exit. `None` for command containers, for
+    /// unparseable stdout, and on the restart re-attach path (where the monitor
+    /// that would have parsed it no longer exists).
+    pub usage: Option<TokenUsage>,
+}
+
+impl TaskExit {
+    /// An exit with nothing harvested — command containers, scans, reconcile.
+    pub fn code(exit_code: i32) -> Self {
+        Self { exit_code, ..Default::default() }
+    }
+}
+
+/// One agent-authored channel post. `ChannelEntry` keeps only the latest of
+/// each, so the durable history is the event stream, not the KV entry.
+#[derive(Debug, Clone)]
+pub enum ChannelPost {
+    Update(types::ChannelUpdate),
+    Reply(types::AgentReply),
 }
 
 type Reply<T> = oneshot::Sender<Result<T>>;
@@ -119,6 +158,16 @@ pub enum Msg {
         operator: String,
         reply: Reply<()>,
     },
+    /// `req.channel.update` / `req.channel.reply` (spec §4.2). Routed through
+    /// the core so the dispatcher stays the sole writer of `channels` KV and
+    /// every update also lands in the event stream as history.
+    ChannelPost {
+        owner: String,
+        project: String,
+        seq: u64,
+        post: ChannelPost,
+        reply: Reply<()>,
+    },
     /// §3.5 scans; fired by the internal ticker, or with a reply from
     /// [`CoreHandle::trigger_scan`] (tests).
     Scan { reply: Option<Reply<()>> },
@@ -128,9 +177,7 @@ pub enum Msg {
         project: String,
         seq: u64,
         task_id: u64,
-        exit_code: i32,
-        /// `/workspace/eval-result.json` for command eval containers.
-        eval_json: Option<serde_json::Value>,
+        exit: TaskExit,
     },
 }
 
@@ -187,6 +234,18 @@ impl CoreHandle {
             .await
     }
 
+    pub async fn channel_post(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        post: ChannelPost,
+    ) -> Result<()> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::ChannelPost { owner, project, seq, post, reply })
+            .await
+    }
+
     /// Run the §3.5 scans now and wait for them to finish. Production relies
     /// on the internal ticker; this is for tests and admin tooling.
     pub async fn trigger_scan(&self) -> Result<()> {
@@ -217,6 +276,8 @@ pub struct CoreConfig {
     /// Must be reachable from every fleet node (spec §3.1). Tests use a local
     /// path base.
     pub repo_url_base: String,
+    /// Container-facing NATS URL (`NATS_URL` env injection) — may differ from
+    /// the dispatcher's own connection URL (`NATS_URL_CONTAINER`, §12.4).
     pub nats_url: String,
     /// Path to the chuggernaut-channel binary, injected into every agent
     /// container at /usr/local/bin/chuggernaut-channel (spec §4.2). None →
@@ -225,6 +286,11 @@ pub struct CoreConfig {
     /// age identity (`AGE-SECRET-KEY-1...`) for decrypting secrets at launch
     /// (spec §8.2). None → secret env values are injected as stored (dev).
     pub age_identity: Option<String>,
+    /// Separate age identity (`age_artifacts.key`) for transcripts and logs.
+    /// Deliberately not `age_identity`: the API needs to decrypt artifacts to
+    /// display them, while the secrets key stays dispatcher-only (§10.2).
+    /// None → artifacts are not captured.
+    pub artifacts_identity: Option<String>,
     /// §12.4 platform provider default. None (tests) falls back to `claude`;
     /// the production path always sets it — `DispatcherConfig` requires it.
     pub agent_provider_default: Option<String>,
@@ -259,6 +325,8 @@ pub struct Core {
     pub(crate) channel_binary: Option<Vec<u8>>,
     /// Decrypting secret store; None runs raw-injection dev mode.
     pub(crate) secrets: Option<store::secrets::AgeSecretStore>,
+    /// Transcript/log blob store; None disables capture (see `harvest`).
+    pub(crate) artifacts: Option<Arc<store::ArtifactStore>>,
     /// Per-project merge queue (spec §3.3 Merge Gate: depth-1 serialization).
     /// All post-eval finalization flows through it, keyed by project slug.
     pub(crate) merge_queue: HashMap<String, std::collections::VecDeque<u64>>,
@@ -330,6 +398,8 @@ impl Core {
             )?),
             None => None,
         };
+        let artifacts =
+            crate::harvest::artifact_store(&store, config.artifacts_identity.as_deref()).await?;
 
         let mut core = Self {
             store,
@@ -343,6 +413,7 @@ impl Core {
             config,
             channel_binary,
             secrets,
+            artifacts,
             graphs: HashMap::new(),
             queue: ReadyQueue::default(),
             active: HashMap::new(),
@@ -354,7 +425,7 @@ impl Core {
         let all: Vec<Job> = core.jobs.list_all().await?;
         for job in all {
             let (owner, project) = split_slug(&job.project)?;
-            for &upstream in job.inputs.values() {
+            for &upstream in &job.deps {
                 core.rdeps.append(&owner, &project, upstream, job.id).await?;
             }
             if job.state == JobState::Ready {
@@ -415,9 +486,12 @@ impl Core {
                     }
                 }
             }
-            Msg::TaskExited { owner, project, seq, task_id, exit_code, eval_json } => {
+            Msg::ChannelPost { owner, project, seq, post, reply } => {
+                let _ = reply.send(self.on_channel_post(&owner, &project, seq, post).await);
+            }
+            Msg::TaskExited { owner, project, seq, task_id, exit } => {
                 if let Err(e) = self
-                    .on_task_exited(&owner, &project, seq, task_id, exit_code, eval_json)
+                    .on_task_exited(&owner, &project, seq, task_id, exit)
                     .await
                 {
                     tracing::error!("task exit handling for {owner}/{project}#{seq}: {e}");
@@ -443,17 +517,20 @@ impl Core {
             id: seq,
             project: format!("{}/{}", req.owner, req.project),
             r#type: req.r#type,
-            inputs: req.inputs,
+            title: req.title,
+            description: req.description,
+            deps: req.deps,
             state: JobState::Frozen,
             branch: format!("job/{seq}"),
             base_ref: None,
             knowledge_tags: req.knowledge_tags,
+            eval: req.eval,
             factory: req.factory,
             created_at: Utc::now(),
             ready_at: None,
         };
         self.jobs.put(&job).await?;
-        for &upstream in job.inputs.values() {
+        for &upstream in &job.deps {
             // Non-fatal by spec §2.3 — the index is rebuilt on startup.
             let _ = self.rdeps.append(&req.owner, &req.project, upstream, seq).await;
         }
@@ -484,8 +561,9 @@ impl Core {
         let job_type =
             release::load_job_type(&self.repos, owner, project, &head, &job.r#type, Some(seq))
                 .await?;
+        let job_type = release::with_job_evaluators(job_type, &job)?;
         let graph = self.graphs.entry(job.project.clone()).or_default();
-        let mut errs = release::wiring_errors(&job, &job_type, graph);
+        let mut errs = release::wiring_errors(&job, graph);
         let kv = self.kv_names(owner, project).await?;
         errs.extend(
             release::static_errors(&self.repos, owner, project, &head, &job, &job_type, Some(&kv))
@@ -569,6 +647,7 @@ impl Core {
             Some(seq),
         )
         .await
+        .and_then(|jt| release::with_job_evaluators(jt, &dep))
         {
             Ok(jt) => release::static_errors(&self.repos, owner, project, &head, &dep, &jt, None)
                 .await

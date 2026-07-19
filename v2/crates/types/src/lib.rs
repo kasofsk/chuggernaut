@@ -17,7 +17,7 @@ pub use duration::{DurationParseError, parse_duration};
 pub use ingest::IngestEvent;
 pub use job::{Job, JobState};
 pub use job_type::{
-    Evaluator, EvaluatorType, JobType, ProjectDefaults, ReviewSpec, WorkSpec, WorkType,
+    Evaluator, EvaluatorType, Finalize, JobType, ProjectDefaults, ReviewSpec, WorkSpec, WorkType,
 };
 pub use knowledge::{KnowledgeObject, KnowledgeScope};
 pub use step::{StepKind, StepRecord, StepStatus};

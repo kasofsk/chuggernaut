@@ -4,7 +4,6 @@
 //! Retry.
 
 use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use store::NatsStore;
@@ -106,8 +105,11 @@ fn req(r#type: &str) -> CreateJobRequest {
         owner: "acme".into(),
         project: "api".into(),
         r#type: r#type.into(),
-        inputs: HashMap::new(),
+        title: String::new(),
+        description: String::new(),
+        deps: vec![],
         knowledge_tags: vec![],
+        eval: vec![],
         factory: None,
     }
 }

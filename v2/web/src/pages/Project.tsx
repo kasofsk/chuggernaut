@@ -4,6 +4,7 @@ import { ApiError, api, type Job, type Task } from '../api'
 import { useProjectEvents } from '../useEvents'
 import { StateBadge } from '../components/StateBadge'
 import { ResolveForm } from '../components/ResolveForm'
+import { ProjectTabs } from '../components/ProjectTabs'
 
 export function ProjectPage() {
   const { owner = '', project = '' } = useParams()
@@ -11,7 +12,6 @@ export function ProjectPage() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [pending, setPending] = useState<Task[]>([])
   const [error, setError] = useState<string | null>(null)
-  const [showCreate, setShowCreate] = useState(false)
 
   const refresh = useCallback(() => {
     Promise.all([api.jobs(owner, project), api.pendingTasks(owner, project)])
@@ -49,6 +49,7 @@ export function ProjectPage() {
           {owner}/{project}
         </h1>
       </header>
+      <ProjectTabs owner={owner} project={project} />
       {error && <div className="error banner">{error}</div>}
 
       {pending.length > 0 && (
@@ -58,7 +59,7 @@ export function ProjectPage() {
             <div className="inbox-task" key={`${t.job_seq}:${t.id}`}>
               <div className="inbox-head">
                 <Link to={`/p/${owner}/${project}/jobs/${t.job_seq}`}>
-                  job/{t.job_seq}
+                  #{t.job_seq}
                 </Link>
                 <span className="dim">
                   {' '}
@@ -69,6 +70,7 @@ export function ProjectPage() {
               {t.kind.kind === 'Human' && <pre className="prompt">{t.kind.prompt}</pre>}
               <ResolveForm
                 escalation={jobBySeq.get(t.job_seq)?.state === 'Escalated'}
+                evaluator={t.phase === 'Evaluation'}
                 onResolve={(r) => act(() => api.resolve(owner, project, t.job_seq, t.id, r))}
               />
             </div>
@@ -79,27 +81,18 @@ export function ProjectPage() {
       <section className="card">
         <div className="row-head">
           <h2>Jobs</h2>
-          <button onClick={() => setShowCreate(!showCreate)}>
-            {showCreate ? 'cancel' : 'new job'}
-          </button>
+          <Link to={`/p/${owner}/${project}/jobs/new`}>
+            <button>new job</button>
+          </Link>
         </div>
-        {showCreate && (
-          <CreateJob
-            onCreate={(type, inputs) =>
-              act(async () => {
-                await api.createJob(owner, project, { type, inputs })
-                setShowCreate(false)
-              })
-            }
-          />
-        )}
         <table className="jobs">
           <thead>
             <tr>
               <th>#</th>
+              <th>title</th>
               <th>type</th>
               <th>state</th>
-              <th>inputs</th>
+              <th>deps</th>
               <th>created</th>
               <th></th>
             </tr>
@@ -110,20 +103,30 @@ export function ProjectPage() {
                 <td>
                   <Link to={`/p/${owner}/${project}/jobs/${j.id}`}>{j.id}</Link>
                 </td>
-                <td>{j.type}</td>
+                <td>
+                  <Link to={`/p/${owner}/${project}/jobs/${j.id}`}>
+                    {j.title || <span className="dim">—</span>}
+                  </Link>
+                </td>
+                <td>
+                  <Link className="dim" to={`/p/${owner}/${project}/library/${encodeURIComponent(j.type)}`}>
+                    {j.type}
+                  </Link>
+                </td>
                 <td>
                   <StateBadge state={j.state} />
                 </td>
                 <td className="dim">
-                  {Object.entries(j.inputs)
-                    .map(([k, v]) => `${k}←${v}`)
-                    .join(', ')}
+                  {j.deps.map((d) => `#${d}`).join(', ')}
                 </td>
                 <td className="dim">{new Date(j.created_at).toLocaleString()}</td>
                 <td className="actions">
                   {j.state === 'Frozen' && (
-                    <button onClick={() => act(() => api.release(owner, project, j.id))}>
-                      release
+                    <button
+                      title="hand the job to the dispatcher: work → evaluation → wrap-up"
+                      onClick={() => act(() => api.release(owner, project, j.id))}
+                    >
+                      ▶ run
                     </button>
                   )}
                   {j.state !== 'Done' && j.state !== 'Revoked' && (
@@ -139,7 +142,7 @@ export function ProjectPage() {
             ))}
             {jobs.length === 0 && (
               <tr>
-                <td colSpan={6} className="dim">
+                <td colSpan={7} className="dim">
                   no jobs yet
                 </td>
               </tr>
@@ -148,45 +151,5 @@ export function ProjectPage() {
         </table>
       </section>
     </div>
-  )
-}
-
-function CreateJob({
-  onCreate,
-}: {
-  onCreate: (type: string, inputs: Record<string, number>) => void
-}) {
-  const [type, setType] = useState('')
-  const [inputs, setInputs] = useState('{}')
-  const [parseError, setParseError] = useState<string | null>(null)
-
-  return (
-    <form
-      className="create-job"
-      onSubmit={(e) => {
-        e.preventDefault()
-        try {
-          const parsed = JSON.parse(inputs || '{}')
-          setParseError(null)
-          onCreate(type, parsed)
-        } catch {
-          setParseError('inputs must be JSON like {"spec": 1}')
-        }
-      }}
-    >
-      <input
-        placeholder="job type (jobs/{type}.yaml)"
-        value={type}
-        onChange={(e) => setType(e.target.value)}
-        required
-      />
-      <input
-        placeholder='inputs, e.g. {"spec": 1}'
-        value={inputs}
-        onChange={(e) => setInputs(e.target.value)}
-      />
-      <button type="submit">create</button>
-      {parseError && <div className="error">{parseError}</div>}
-    </form>
   )
 }

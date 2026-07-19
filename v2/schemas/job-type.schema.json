@@ -1,0 +1,352 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JobType",
+  "type": "object",
+  "properties": {
+    "description": {
+      "description": "One-line summary shown alongside the display name in the type picker.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "display_name": {
+      "description": "Human-facing name for the library and the create-form type picker;\nfalls back to `name`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "eval": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Evaluator"
+      }
+    },
+    "eval_retries": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "image": {
+      "description": "Required for agent/command work; disallowed at top level for human work.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "job_deadline": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "knowledge": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "name": {
+      "type": "string"
+    },
+    "resources": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Resources"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "rework_budget": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "vars": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "work": {
+      "$ref": "#/$defs/WorkSpec"
+    },
+    "work_retries": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "wrap_up": {
+      "description": "The third step of the job (work → evaluation → wrap-up): what happens\nafter eval-pass (design-lifecycle.md).",
+      "$ref": "#/$defs/WrapUp",
+      "default": {
+        "type": "merge"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "work"
+  ],
+  "$defs": {
+    "Evaluator": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "description": "command/agent: optional, falls back to top-level image; one of the two required.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required": {
+          "description": "Default true; false = advisory.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "run": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secrets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "type": {
+          "$ref": "#/$defs/EvaluatorType"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "EvaluatorType": {
+      "type": "string",
+      "enum": [
+        "command",
+        "agent",
+        "human"
+      ]
+    },
+    "Finalize": {
+      "description": "Wrap-up mode after eval-pass (design-lifecycle.md).",
+      "oneOf": [
+        {
+          "description": "Squash-merge the job branch to the default branch (merge queue, merge\ngate, conflict rework) — the code-change wrap-up.",
+          "type": "string",
+          "const": "merge"
+        },
+        {
+          "description": "Nothing to land: eval-pass goes straight to Done. The job branch is\nscratch and is deleted unmerged.",
+          "type": "string",
+          "const": "none"
+        }
+      ]
+    },
+    "Provider": {
+      "type": "string",
+      "enum": [
+        "claude",
+        "codex"
+      ]
+    },
+    "Resources": {
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "memory": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_timeout": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ReviewSpec": {
+      "description": "Inline review loop declaration (spec §1.1, §4.5). The reviewer runs inside\nthe work container; its acceptance gates `submit_result`, not the merge.",
+      "type": "object",
+      "properties": {
+        "iterations": {
+          "description": "Max author↔reviewer rounds before submitting anyway. Default 5.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "description": "Path to reviewer prompt file in repo (resolved from base_ref).",
+          "type": "string"
+        },
+        "provider": {
+          "description": "Defaults to the work provider. v1 supports claude only (release-time\nvalidation).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "prompt"
+      ]
+    },
+    "WorkSpec": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "agent only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "description": "agent/human: required. command: disallowed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "description": "agent only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "review": {
+          "description": "agent only; enables the inline review loop (spec §4.5).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run": {
+          "description": "command only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secrets": {
+          "description": "Secrets injected into the work container (agent/command). Scoped here\nbecause that is the only container they reach — evaluators declare\ntheir own (§4.1). Disallowed for human work (no container).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "type": {
+          "$ref": "#/$defs/WorkType"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ]
+    },
+    "WorkType": {
+      "type": "string",
+      "enum": [
+        "agent",
+        "command",
+        "human"
+      ]
+    },
+    "WrapUp": {
+      "description": "Wrap-up declaration (design-lifecycle.md): the job's third step. A block\nrather than a bare scalar so future wrap-up behavior (e.g. a\n`deployed/{env}` tag ref) extends it without reshaping the schema.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "description": "`merge` (default) squash-merges the job branch through the merge\nqueue/gate; `none` goes straight to Done — for jobs whose effect is\nexternal (deploys, reports) and whose branch is scratch.",
+          "$ref": "#/$defs/Finalize",
+          "default": "merge"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

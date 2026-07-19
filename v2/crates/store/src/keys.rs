@@ -67,6 +67,18 @@ pub fn channel_key(owner: &str, project: &str, seq: u64) -> String {
     format!("{owner}.{project}.jobs.{seq}")
 }
 
+/// Object name within the `artifacts` object store: one blob per (task, kind).
+/// `kind` carries a dot (`session.jsonl`), so it is always the trailing
+/// segment — parse from the left.
+pub fn artifact_key(owner: &str, project: &str, job_seq: u64, task_id: u64, kind: &str) -> String {
+    format!("{owner}.{project}.{job_seq}.{task_id}.{kind}")
+}
+
+/// Prefix matching every artifact of one task, for listing.
+pub fn artifact_task_prefix(owner: &str, project: &str, job_seq: u64, task_id: u64) -> String {
+    format!("{owner}.{project}.{job_seq}.{task_id}.")
+}
+
 /// Key within the `knowledge` bucket: `{scope-prefix}.{b64(subject)}.{b64(predicate)}`.
 pub fn knowledge_key(scope: &KnowledgeScope, subject: &str, predicate: &str) -> String {
     let prefix = knowledge_scope_prefix(scope);

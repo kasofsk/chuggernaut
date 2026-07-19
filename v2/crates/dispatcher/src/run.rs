@@ -55,6 +55,7 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
         &store,
         handle.clone(),
         Arc::new(RepoManager::new(&config.repos_root)),
+        config.hook_bin.clone(),
     )
     .await?;
     tracing::info!(nats = %config.nats_url, repos = %config.repos_root.display(), "dispatcher up");

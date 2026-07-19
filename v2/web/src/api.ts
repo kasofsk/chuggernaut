@@ -11,15 +11,89 @@ export type JobState =
   | 'Done'
   | 'Revoked'
 
+export interface Evaluator {
+  name: string
+  type: 'command' | 'agent' | 'human'
+  image?: string | null
+  run?: string | null
+  prompt?: string | null
+  provider?: 'claude' | 'codex' | null
+  model?: string | null
+  secrets?: string[]
+  /** default true; false = advisory */
+  required?: boolean | null
+}
+
+/** GET .../jobs/{seq}/criteria — the criteria the job is judged against. */
+export interface JobCriteria {
+  /** the ref the criteria were resolved at (base_ref, or default HEAD before Ready) */
+  ref: string
+  /** wrap-up mode from the job type; null when the type failed to load */
+  wrap_up: 'merge' | 'none' | null
+  evaluators: (Evaluator & { source: 'type' | 'job' })[]
+  errors: string[]
+}
+
+/** GET .../job-types — the type picker's vocabulary. */
+export interface JobTypeSummary {
+  /** file stem — the wire identifier (jobs/{name}.yaml) */
+  name: string
+  /** human-facing name; falls back to the stem */
+  display_name: string
+  /** one-line summary; may be empty */
+  description: string
+}
+
+/** GET .../job-types/{name} — one job type in full, for the library. */
+export interface JobTypeDetail {
+  name: string
+  /** default-branch HEAD the definition was read at */
+  ref: string
+  /** the file as authored */
+  yaml: string
+  /** parsed, with jobs/_defaults.yaml merged — what actually runs; null on parse failure */
+  job_type: {
+    name: string
+    display_name: string | null
+    description: string | null
+    image: string | null
+    wrap_up: { type: 'merge' | 'none' }
+    work: {
+      type: 'agent' | 'command' | 'human'
+      prompt: string | null
+      run: string | null
+      provider: 'claude' | 'codex' | null
+      model: string | null
+      review: { prompt: string; iterations?: number | null } | null
+      secrets: string[]
+    }
+    resources: { cpu: number | null; memory: string | null; task_timeout: string | null } | null
+    job_deadline: string | null
+    work_retries: number | null
+    eval_retries: number | null
+    rework_budget: number | null
+    eval: Evaluator[]
+    knowledge: string[]
+    vars: string[]
+  } | null
+  errors: string[]
+}
+
 export interface Job {
   id: number
   project: string
   type: string
-  inputs: Record<string, number>
+  /** ticket-style identity: what this run is for (may be empty) */
+  title: string
+  description: string
+  /** upstream job ids that must be Done before this job starts */
+  deps: number[]
   state: JobState
   branch: string
   base_ref: string | null
   knowledge_tags: string[]
+  /** additive per-job evaluators, layered on top of the type's list */
+  eval: Evaluator[]
   factory: string | null
   created_at: string
   ready_at: string | null
@@ -41,11 +115,15 @@ export interface Task {
   attempt: number
   evaluator: string | null
   container_id: string | null
+  /// Agent tasks only: names the captured session transcript.
+  session_id: string | null
   result: Record<string, unknown> | null
   created_at: string
   started_at: string | null
   completed_at: string | null
 }
+
+export type ArtifactKind = 'session.jsonl' | 'stdout.log'
 
 export interface Identity {
   sub: string
@@ -61,7 +139,9 @@ export interface DiffResponse {
 
 export type TaskResolution =
   | { kind: 'Pass'; structured: unknown | null }
-  | { kind: 'Fail'; structured: unknown }
+  // abort (evaluator tasks only): "not satisfiable by rework" — skips the
+  // remaining rework budget and escalates.
+  | { kind: 'Fail'; structured: unknown; abort?: boolean }
   | { kind: 'Escalation'; action: 'Retry' | 'Resolve' | 'Revoke'; structured: unknown | null }
 
 export class ApiError extends Error {
@@ -91,13 +171,35 @@ export const api = {
     req<Identity>('POST', '/auth/login', { email, password }),
   logout: () => req<unknown>('POST', '/auth/logout'),
   me: () => req<Identity>('GET', '/auth/me'),
+  projects: () => req<string[]>('GET', '/api/v1/projects'),
+  /** Platform admins only: bare repo + hook + Code starter template. */
+  createProject: (owner: string, name: string) =>
+    req<{ project: string }>('POST', '/api/v1/projects', { owner, name }),
 
+  jobTypes: (owner: string, project: string) =>
+    req<JobTypeSummary[]>('GET', `/api/v1/projects/${owner}/${project}/job-types`),
+  tree: (owner: string, project: string) =>
+    req<{ branch: string; ref: string; entries: { path: string; type: string; size: number | null }[] }>(
+      'GET',
+      `/api/v1/projects/${owner}/${project}/tree`,
+    ),
+  file: (owner: string, project: string, path: string) =>
+    req<{ path: string; ref: string; content: string }>(
+      'GET',
+      `/api/v1/projects/${owner}/${project}/file?path=${encodeURIComponent(path)}`,
+    ),
+  tags: (owner: string, project: string) =>
+    req<string[]>('GET', `/api/v1/projects/${owner}/${project}/tags`),
+  jobType: (owner: string, project: string, name: string) =>
+    req<JobTypeDetail>('GET', `/api/v1/projects/${owner}/${project}/job-types/${encodeURIComponent(name)}`),
   jobs: (owner: string, project: string) =>
     req<Job[]>('GET', `/api/v1/projects/${owner}/${project}/jobs`),
   job: (owner: string, project: string, seq: number) =>
     req<Job>('GET', `/api/v1/projects/${owner}/${project}/jobs/${seq}`),
-  createJob: (owner: string, project: string, body: { type: string; inputs?: Record<string, number>; knowledge_tags?: string[] }) =>
+  createJob: (owner: string, project: string, body: { type: string; title?: string; description?: string; deps?: number[]; knowledge_tags?: string[]; eval?: Evaluator[] }) =>
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs`, body),
+  criteria: (owner: string, project: string, seq: number) =>
+    req<JobCriteria>('GET', `/api/v1/projects/${owner}/${project}/jobs/${seq}/criteria`),
   release: (owner: string, project: string, seq: number) =>
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/release`),
   revoke: (owner: string, project: string, seq: number) =>
@@ -112,4 +214,27 @@ export const api = {
 
   diff: (owner: string, project: string, seq: number) =>
     req<DiffResponse>('GET', `/api/v1/projects/${owner}/${project}/diff/${seq}`),
+
+  artifacts: (owner: string, project: string, seq: number, taskId: number) =>
+    req<{ artifacts: ArtifactKind[] }>(
+      'GET',
+      `/api/v1/projects/${owner}/${project}/jobs/${seq}/tasks/${taskId}/artifacts`,
+    ),
+  // Artifacts are bytes (JSONL / plain text), not JSON, so they bypass req().
+  artifactUrl: (owner: string, project: string, seq: number, taskId: number, kind: ArtifactKind) =>
+    `/api/v1/projects/${owner}/${project}/jobs/${seq}/tasks/${taskId}/artifacts/${kind}`,
+  artifactText: async (
+    owner: string,
+    project: string,
+    seq: number,
+    taskId: number,
+    kind: ArtifactKind,
+  ): Promise<string> => {
+    const res = await fetch(
+      api.artifactUrl(owner, project, seq, taskId, kind),
+      { credentials: 'same-origin' },
+    )
+    if (!res.ok) throw new ApiError(res.status, null)
+    return res.text()
+  },
 }

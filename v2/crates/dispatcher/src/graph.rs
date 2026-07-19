@@ -9,13 +9,13 @@ use types::{Job, JobState};
 #[derive(Default)]
 pub struct JobGraph {
     jobs: HashMap<u64, Job>,
-    /// Inverse dependency index: seq → jobs that declare it as an input.
+    /// Inverse dependency index: seq → jobs that depend on it.
     rdeps: HashMap<u64, Vec<u64>>,
 }
 
 impl JobGraph {
     pub fn insert(&mut self, job: Job) {
-        for &upstream in job.inputs.values() {
+        for &upstream in &job.deps {
             let deps = self.rdeps.entry(upstream).or_default();
             if !deps.contains(&job.id) {
                 deps.push(job.id);
@@ -36,7 +36,7 @@ impl JobGraph {
         self.jobs.values()
     }
 
-    /// Jobs that directly declare `seq` as an input.
+    /// Jobs that directly depend on `seq`.
     pub fn dependents(&self, seq: u64) -> &[u64] {
         self.rdeps.get(&seq).map(Vec::as_slice).unwrap_or_default()
     }
@@ -46,7 +46,7 @@ impl JobGraph {
         self.jobs
             .get(&seq)
             .map(|job| {
-                job.inputs.values().all(|dep| {
+                job.deps.iter().all(|dep| {
                     self.jobs
                         .get(dep)
                         .is_some_and(|d| d.state == JobState::Done)
@@ -55,10 +55,10 @@ impl JobGraph {
             .unwrap_or(false)
     }
 
-    /// Would wiring `candidate` (with its declared inputs) close a cycle?
-    /// DFS upstream from the candidate's inputs looking for the candidate.
-    pub fn creates_cycle(&self, candidate_seq: u64, inputs: &[u64]) -> bool {
-        let mut stack: Vec<u64> = inputs.to_vec();
+    /// Would wiring `candidate` (with its dependencies) close a cycle?
+    /// DFS upstream from the candidate's deps looking for the candidate.
+    pub fn creates_cycle(&self, candidate_seq: u64, deps: &[u64]) -> bool {
+        let mut stack: Vec<u64> = deps.to_vec();
         let mut seen = HashSet::new();
         while let Some(seq) = stack.pop() {
             if seq == candidate_seq {
@@ -68,7 +68,7 @@ impl JobGraph {
                 continue;
             }
             if let Some(job) = self.jobs.get(&seq) {
-                stack.extend(job.inputs.values().copied());
+                stack.extend(job.deps.iter().copied());
             }
         }
         false
@@ -105,21 +105,20 @@ impl JobGraph {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use std::collections::HashMap as Map;
 
-    fn job(seq: u64, inputs: &[(&str, u64)], state: JobState) -> Job {
+    fn job(seq: u64, deps: &[u64], state: JobState) -> Job {
         Job {
             id: seq,
             project: "acme/api".into(),
             r#type: "t".into(),
-            inputs: inputs
-                .iter()
-                .map(|(n, s)| (n.to_string(), *s))
-                .collect::<Map<_, _>>(),
+            title: String::new(),
+            description: String::new(),
+            deps: deps.to_vec(),
             state,
             branch: format!("job/{seq}"),
             base_ref: None,
             knowledge_tags: vec![],
+            eval: vec![],
             factory: None,
             created_at: Utc::now(),
             ready_at: None,
@@ -131,7 +130,7 @@ mod tests {
         let mut g = JobGraph::default();
         g.insert(job(1, &[], JobState::Done));
         g.insert(job(2, &[], JobState::Work));
-        g.insert(job(3, &[("a", 1), ("b", 2)], JobState::Blocked));
+        g.insert(job(3, &[1, 2], JobState::Blocked));
         assert!(!g.deps_done(3));
         g.get_mut(2).unwrap().state = JobState::Done;
         assert!(g.deps_done(3));
@@ -142,8 +141,8 @@ mod tests {
     fn cycle_detection() {
         let mut g = JobGraph::default();
         g.insert(job(1, &[], JobState::Frozen));
-        g.insert(job(2, &[("a", 1)], JobState::Frozen));
-        g.insert(job(3, &[("a", 2)], JobState::Frozen));
+        g.insert(job(2, &[1], JobState::Frozen));
+        g.insert(job(3, &[2], JobState::Frozen));
         // Wiring 1 to depend on 3 closes 1→2→3→1.
         assert!(g.creates_cycle(1, &[3]));
         assert!(!g.creates_cycle(4, &[3]));
@@ -155,10 +154,10 @@ mod tests {
     fn cascade_stops_at_in_flight_dependents() {
         let mut g = JobGraph::default();
         g.insert(job(1, &[], JobState::Work));
-        g.insert(job(2, &[("a", 1)], JobState::Blocked));
-        g.insert(job(3, &[("a", 2)], JobState::Frozen));
-        g.insert(job(4, &[("a", 1)], JobState::Work)); // in flight — untouched
-        g.insert(job(5, &[("a", 4)], JobState::Frozen)); // behind the in-flight edge
+        g.insert(job(2, &[1], JobState::Blocked));
+        g.insert(job(3, &[2], JobState::Frozen));
+        g.insert(job(4, &[1], JobState::Work)); // in flight — untouched
+        g.insert(job(5, &[4], JobState::Frozen)); // behind the in-flight edge
         // 4 stays in Work per §2.1, and the cascade does not continue through
         // a non-revoked node — 5's fate rides on 4's outcome, not on job 1.
         assert_eq!(g.cascade_targets(1), vec![2, 3]);

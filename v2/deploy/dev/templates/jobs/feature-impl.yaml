@@ -1,0 +1,27 @@
+# Generic feature implementation job (design-lifecycle.md vocabulary: an
+# agent work task, judged by an agent code-review task).
+#
+# Convention: the operator describes the feature in FEATURE.md on the default
+# branch before releasing the job; the work prompt points the agent at it.
+# Copy into the project repo as jobs/feature-impl.yaml (with the prompts).
+name: feature-impl
+display_name: Feature
+description: Implement a feature described in the job ticket; an independent agent reviews it against the same brief.
+image: chuggernaut/agent:dev
+work:
+  type: agent
+  prompt: prompts/work/feature-impl.md
+resources:
+  task_timeout: 30m
+work_retries: 1
+eval_retries: 1
+rework_budget: 2
+eval:
+  # Add a command evaluator once the repo has a test suite, e.g.:
+  # - name: tests
+  #   type: command
+  #   run: ./ci.sh
+  - name: code-review
+    type: agent
+    prompt: prompts/eval/code-review.md
+  

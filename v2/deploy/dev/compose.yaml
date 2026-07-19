@@ -1,0 +1,30 @@
+# Dev stack: operator-mode NATS + the SSH front. The dispatcher and api run
+# on the host (see README.md); agent containers are launched by the
+# dispatcher as siblings and reach both services via host.docker.internal.
+services:
+  nats:
+    image: nats:2-alpine
+    command: ["-c", "/keys/nats-resolver.conf", "-js", "-sd", "/data"]
+    ports:
+      - "4222:4222"
+    volumes:
+      # Written by `chuggernaut init --keys-dir deploy/dev/data/keys`.
+      - ./data/keys:/keys:ro
+      - nats-data:/data
+
+  ssh:
+    build:
+      context: ../..
+      dockerfile: deploy/dev/Dockerfile.ssh
+    image: chuggernaut/ssh:dev
+    ports:
+      - "2222:22"
+    volumes:
+      # Same repos the host dispatcher operates on directly.
+      - ./data/repos:/data/repos
+      - ./data/keys/ssh_ca.pub:/etc/chuggernaut/ssh_ca.pub:ro
+      - ssh-hostkeys:/etc/ssh/hostkeys
+
+volumes:
+  nats-data:
+  ssh-hostkeys:

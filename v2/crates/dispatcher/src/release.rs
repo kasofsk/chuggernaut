@@ -35,46 +35,44 @@ pub struct KvNames {
     pub vars: HashSet<String>,
 }
 
-/// Graph wiring rules (§2.2, all five). `graph` must already contain the job.
-pub fn wiring_errors(job: &Job, job_type: &JobType, graph: &JobGraph) -> Vec<ValidationError> {
+/// Graph wiring rules (§2.2): dependencies exist, no self-edges, no cycles,
+/// no duplicates, nothing Revoked. `graph` must already contain the job.
+pub fn wiring_errors(job: &Job, graph: &JobGraph) -> Vec<ValidationError> {
     let mut errs = Vec::new();
     let seq = Some(job.id);
 
-    for (name, upstream) in &job.inputs {
-        if graph.get(*upstream).is_none() {
-            errs.push(ValidationError::new(
+    for &upstream in &job.deps {
+        match graph.get(upstream) {
+            None => errs.push(ValidationError::new(
                 seq,
-                format!("inputs.{name}"),
-                format!("input '{name}' references unknown job {upstream}"),
-            ));
+                "deps",
+                format!("depends on unknown job #{upstream}"),
+            )),
+            Some(dep) if dep.state == types::JobState::Revoked => {
+                errs.push(ValidationError::new(
+                    seq,
+                    "deps",
+                    format!("depends on revoked job #{upstream}"),
+                ));
+            }
+            Some(_) => {}
         }
-        if *upstream == job.id {
-            errs.push(ValidationError::new(
-                seq,
-                format!("inputs.{name}"),
-                "job references itself",
-            ));
+        if upstream == job.id {
+            errs.push(ValidationError::new(seq, "deps", "job depends on itself"));
         }
-        if !job_type.inputs.iter().any(|d| &d.name == name) {
+    }
+    let mut seen = HashSet::new();
+    for &upstream in &job.deps {
+        if !seen.insert(upstream) {
             errs.push(ValidationError::new(
                 seq,
-                format!("inputs.{name}"),
-                format!("input '{name}' is not declared by job type '{}'", job_type.name),
+                "deps",
+                format!("duplicate dependency #{upstream}"),
             ));
         }
     }
-    for decl in &job_type.inputs {
-        if !job.inputs.contains_key(&decl.name) {
-            errs.push(ValidationError::new(
-                seq,
-                format!("inputs.{}", decl.name),
-                format!("declared input '{}' is not wired", decl.name),
-            ));
-        }
-    }
-    let upstream: Vec<u64> = job.inputs.values().copied().collect();
-    if graph.creates_cycle(job.id, &upstream) {
-        errs.push(ValidationError::new(seq, "inputs", "dependency cycle detected"));
+    if graph.creates_cycle(job.id, &job.deps) {
+        errs.push(ValidationError::new(seq, "deps", "dependency cycle detected"));
     }
     errs
 }
@@ -134,6 +132,37 @@ pub async fn load_job_type(
     }
 }
 
+/// Layer the job's additive evaluators (design-lifecycle.md) on top of the
+/// type's list. The type's evaluators are a floor: a name collision is an
+/// error, and the merged list must still pass the §1.1 field rules (which
+/// also enforces the image fallback for the extras). The base type already
+/// validated clean in `load_job_type`, so any error here is the extras'.
+pub fn with_job_evaluators(job_type: JobType, job: &Job) -> Result<JobType, Vec<ValidationError>> {
+    if job.eval.is_empty() {
+        return Ok(job_type);
+    }
+    let mut merged = job_type;
+    let mut errs = Vec::new();
+    for e in &job.eval {
+        if merged.eval.iter().any(|x| x.name == e.name) {
+            errs.push(ValidationError::new(
+                Some(job.id),
+                "eval.name",
+                format!("job evaluator '{}' collides with a declared evaluator", e.name),
+            ));
+            continue;
+        }
+        merged.eval.push(e.clone());
+    }
+    errs.extend(
+        merged
+            .validate()
+            .into_iter()
+            .map(|e| ValidationError::new(Some(job.id), "eval", e.to_string())),
+    );
+    if errs.is_empty() { Ok(merged) } else { Err(errs) }
+}
+
 /// Static configuration checks (§2.2): prompt paths exist at `reference`;
 /// declared secrets and vars exist in KV. Pass `check_kv: false` for the
 /// Blocked→Ready re-validation, which re-checks files only.
@@ -176,6 +205,7 @@ pub async fn static_errors(
 
     if let Some(kv) = kv {
         let declared_secrets = job_type
+            .work
             .secrets
             .iter()
             .chain(job_type.eval.iter().flat_map(|e: &Evaluator| e.secrets.iter()));

@@ -4,7 +4,6 @@
 //! exhaustion, and the eval-failure rework loop with §4.3 context injection.
 
 use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, EvalSubmission, spawn};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use store::NatsStore;
@@ -44,6 +43,7 @@ work:
   type: agent
   prompt: prompts/impl.md
 work_retries: 1
+knowledge: [rust]
 "#;
 
 struct Rig {
@@ -56,6 +56,12 @@ struct Rig {
 }
 
 async fn rig() -> Option<Rig> {
+    rig_with_artifacts(None).await
+}
+
+/// `artifacts_identity` enables transcript/log capture; the provider then
+/// launches through the backend so runs report a container id to harvest from.
+async fn rig_with_artifacts(artifacts_identity: Option<String>) -> Option<Rig> {
     let server = test_utils::nats::NatsTestServer::spawn()?;
     let store = NatsStore::connect(server.url()).await.unwrap();
     store.ensure_topology().await.unwrap();
@@ -67,13 +73,19 @@ async fn rig() -> Option<Rig> {
         ("jobs/flaky.yaml", FLAKY),
         ("prompts/impl.md", "implement it"),
         ("prompts/eval.md", "review it"),
+        ("tags/rust.md", "# rust\nrust conventions here"),
+        ("tags/style.md", "# style\nhouse style here"),
     ] {
         clone.commit_file(path, content.as_bytes(), path).await;
     }
     clone.push("main").await;
 
     let backend = Arc::new(FakeBackend::new());
-    let provider = Arc::new(FakeProvider::new());
+    let provider = Arc::new(if artifacts_identity.is_some() {
+        FakeProvider::with_backend(backend.clone())
+    } else {
+        FakeProvider::new()
+    });
     let repos_root = repo.bare_path().parent().unwrap().parent().unwrap().to_path_buf();
     let core = Core::new(
         store.clone(),
@@ -83,6 +95,7 @@ async fn rig() -> Option<Rig> {
         CoreConfig {
             repo_url_base: "file:///repos".into(),
             nats_url: server.url().into(),
+            artifacts_identity,
             ..Default::default()
         },
     )
@@ -97,8 +110,11 @@ fn req(r#type: &str) -> CreateJobRequest {
         owner: "acme".into(),
         project: "api".into(),
         r#type: r#type.into(),
-        inputs: HashMap::new(),
+        title: String::new(),
+        description: String::new(),
+        deps: vec![],
         knowledge_tags: vec![],
+        eval: vec![],
         factory: None,
     }
 }
@@ -199,6 +215,7 @@ async fn eval_failure_reworks_with_context_then_passes() {
     rig.provider.on_run(move |_| async move {
         h.submit_eval("acme", "api", 1, 2, EvalSubmission {
             pass: false,
+            abort: false,
             structured: Some(serde_json::json!({"issues": ["missing tests"]})),
             token_usage: None,
         })
@@ -210,6 +227,7 @@ async fn eval_failure_reworks_with_context_then_passes() {
     rig.provider.on_run(move |_| async move {
         h.submit_eval("acme", "api", 1, 4, EvalSubmission {
             pass: true,
+            abort: false,
             structured: None,
             token_usage: None,
         })
@@ -217,7 +235,10 @@ async fn eval_failure_reworks_with_context_then_passes() {
         .unwrap();
     });
 
-    let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    let mut create = req("impl-agent");
+    create.title = "Add fortune file".into();
+    create.description = "Create fortune.txt with an aphorism.".into();
+    let job = rig.handle.create_job(create).await.unwrap();
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
@@ -225,6 +246,12 @@ async fn eval_failure_reworks_with_context_then_passes() {
     let runs = rig.provider.runs();
     assert_eq!(runs.len(), 4);
     assert!(runs[0].eval_context.is_empty());
+    // The §4.3 job brief reaches the work agent AND the agent evaluator.
+    for run in [&runs[0], &runs[1]] {
+        assert!(run.prompt.contains("Job Brief"), "{}", run.prompt);
+        assert!(run.prompt.contains("Add fortune file"), "{}", run.prompt);
+        assert!(run.prompt.contains("aphorism"), "{}", run.prompt);
+    }
     let rework = &runs[2];
     assert_eq!(rework.eval_context.len(), 1);
     assert!(!rework.eval_context[0].pass);
@@ -257,7 +284,7 @@ image: img:latest
 work:
   type: agent
   prompt: prompts/impl.md
-secrets: [DEPLOY_KEY]
+  secrets: [DEPLOY_KEY]
 "#;
 
 /// Full launch wiring (§4.2/§8.2): the channel MCP binary is injected with
@@ -280,6 +307,9 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
         use store::secrets::SecretStore;
         let api_side = store::secrets::AgeSecretStore::for_api(secrets_bucket, &public_key).unwrap();
         api_side.set("acme", "api", "DEPLOY_KEY", "s3cret-value").await.unwrap();
+        // Platform agent credential (reserved global/agents scope): reaches
+        // every agent container without any declaration in the job type.
+        api_side.set("global", "agents", "PROVIDER_TOKEN", "tok-123").await.unwrap();
     }
 
     let fake_binary = repo.bare_path().parent().unwrap().join("chuggernaut-channel");
@@ -323,6 +353,8 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
     assert_eq!(runs.len(), 1);
     // …decrypted read at launch (the dispatcher's path).
     assert_eq!(runs[0].env.get("DEPLOY_KEY").map(String::as_str), Some("s3cret-value"));
+    // Platform agent credential injected without being declared anywhere.
+    assert_eq!(runs[0].env.get("PROVIDER_TOKEN").map(String::as_str), Some("tok-123"));
     assert_eq!(runs[0].mcp_servers.len(), 1);
     assert_eq!(runs[0].mcp_servers[0].command, "/usr/local/bin/chuggernaut-channel");
     assert!(runs[0].mcp_servers[0].env.contains_key("NATS_URL"));
@@ -345,4 +377,310 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
         runs[0].env.get("GIT_SSH_COMMAND").unwrap().contains("/chuggernaut/ssh/id"),
         "GIT_SSH_COMMAND must reference the injected key"
     );
+}
+
+/// The artifacts a job leaves behind. Before this, an agent's session transcript
+/// died with its container: the provider dropped the container id, so nothing
+/// could name the file even though the container itself was never removed.
+#[tokio::test]
+async fn agent_run_captures_transcript_logs_and_measured_usage() {
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let Some(rig) = rig_with_artifacts(Some(identity.clone())).await else { return };
+
+    // stdout as the real CLI emits it under `--output-format json`: the result
+    // object carries the authoritative usage.
+    rig.backend.put_logs(
+        br#"Cloning into '/workspace'...
+{"type":"result","subtype":"success","is_error":false,"session_id":"s","total_cost_usd":0.01,"usage":{"input_tokens":1200,"cache_creation_input_tokens":300,"cache_read_input_tokens":400,"output_tokens":56}}"#
+            .to_vec(),
+    );
+
+    let bare = rig.repo.bare_path();
+    let backend = rig.backend.clone();
+    rig.provider.on_run(move |cfg| async move {
+        // The CLI writes its transcript keyed by the session id the dispatcher
+        // chose; put it exactly where `--session-id` + CLAUDE_CONFIG_DIR say.
+        backend.put_file(
+            &agent::transcript_path(&cfg.session_id),
+            br#"{"type":"user","message":"do it"}"#.to_vec(),
+        );
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone.commit_file("src/new.rs", b"pub fn f() {}", "implement").await;
+        clone.push(&branch).await;
+    });
+    rig.backend.put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig.store.tasks().await.unwrap();
+    let log = tasks.list_for_job("acme", "api", job.id).await.unwrap();
+    let work = log.iter().find(|t| t.phase == TaskPhase::Work).unwrap();
+
+    // The session id is persisted, so the transcript stays addressable after a
+    // restart rather than being lost with the process.
+    let session_id = work.session_id.clone().expect("work task records a session id");
+
+    let artifacts = rig
+        .store
+        .artifacts(store::ArtifactCrypto::with_identity(&identity).unwrap())
+        .await
+        .unwrap();
+
+    let transcript = artifacts
+        .get("acme", "api", job.id, work.id, store::ArtifactKind::SessionTranscript)
+        .await
+        .unwrap()
+        .expect("transcript captured");
+    assert_eq!(transcript, br#"{"type":"user","message":"do it"}"#);
+
+    let stdout = artifacts
+        .get("acme", "api", job.id, work.id, store::ArtifactKind::Stdout)
+        .await
+        .unwrap()
+        .expect("stdout captured");
+    assert!(String::from_utf8_lossy(&stdout).contains("Cloning into"));
+
+    // Usage is measured from the CLI's own result object, not self-reported —
+    // the agent here never called submit_result with a token_usage.
+    match work.result.as_ref().expect("work result") {
+        types::TaskResult::Work { token_usage, .. } => {
+            let u = token_usage.as_ref().expect("measured usage");
+            assert_eq!(u.input_tokens, 1200);
+            assert_eq!(u.output_tokens, 56);
+            assert_eq!(u.cache_write_tokens, Some(300));
+            assert_eq!(u.cache_read_tokens, Some(400));
+        }
+        other => panic!("unexpected work result: {other:?}"),
+    }
+
+    // The command evaluator's container logs are captured too — TaskResult
+    // carries no output, so this is the only record of what it printed.
+    let eval = log.iter().find(|t| t.phase == TaskPhase::Evaluation).unwrap();
+    assert!(
+        artifacts
+            .get("acme", "api", job.id, eval.id, store::ArtifactKind::Stdout)
+            .await
+            .unwrap()
+            .is_some(),
+        "eval container logs captured"
+    );
+    // Command evals run no agent, so they have no session.
+    assert!(eval.session_id.is_none());
+    assert!(!session_id.is_empty());
+}
+
+// ── Lifecycle generalization (design-lifecycle.md) ───────────────────────
+
+const DEPLOY_NONE: &str = r#"
+name: deploy-none
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+wrap_up:
+  type: none
+eval:
+  - name: smoke
+    type: command
+    run: ./smoke.sh
+"#;
+
+/// `finalize: none`: eval-pass goes straight to Done — no squash-merge, the
+/// job branch is scratch and is deleted unmerged.
+#[tokio::test]
+async fn finalize_none_completes_without_merging() {
+    let Some(rig) = rig().await else { return };
+    let clone = rig.repo.clone_branch("main").await;
+    clone.commit_file("jobs/deploy-none.yaml", DEPLOY_NONE.as_bytes(), "type").await;
+    clone.push("main").await;
+
+    // The "agent" commits scratch to its branch, like a deploy that jots notes.
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone.commit_file("deploy.log", b"deployed v1", "scratch").await;
+        clone.push(&branch).await;
+    });
+
+    let job = rig.handle.create_job(req("deploy-none")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    // The evaluator still ran; nothing landed on main; the branch is gone.
+    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(tasks[1].phase, TaskPhase::Evaluation);
+    assert_eq!(tasks[1].state, TaskState::Done);
+    let scratch = rig
+        .repo
+        .manager
+        .read_file_at("acme", "api", "main", "deploy.log")
+        .await
+        .unwrap();
+    assert_eq!(scratch, None, "scratch branch content must not merge");
+    assert!(
+        rig.repo.manager.resolve_ref("acme", "api", &job.branch).await.is_err(),
+        "job branch deleted at Done"
+    );
+}
+
+/// Abort verdict: a required evaluator declaring the work unsalvageable
+/// escalates immediately — the remaining rework budget is not consumed.
+#[tokio::test]
+async fn eval_abort_escalates_without_consuming_rework_budget() {
+    let Some(rig) = rig().await else { return };
+    let handle = rig.handle.clone();
+
+    rig.provider.on_run(|_| async {}); // work cycle 1
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval("acme", "api", 1, 2, EvalSubmission {
+            pass: false,
+            abort: true,
+            structured: Some(serde_json::json!({"reason": "endpoint spec references a retired API"})),
+            token_usage: None,
+        })
+        .await
+        .unwrap();
+    });
+
+    // impl-agent has rework_budget: 1 — abort must not spend it.
+    let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    assert_eq!(rig.provider.runs().len(), 2, "no cycle-2 work after abort");
+    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
+    assert_eq!(tasks.len(), 3);
+    match &tasks[1].result {
+        Some(types::TaskResult::Agent { pass: false, abort: true, .. }) => {}
+        other => panic!("unexpected eval result: {other:?}"),
+    }
+    match &tasks[2].kind {
+        types::TaskKind::Human { prompt } => {
+            assert!(prompt.contains("not satisfiable by rework"), "{prompt}");
+            assert!(prompt.contains("retired API"), "findings forwarded: {prompt}");
+        }
+        other => panic!("expected escalation task, got {other:?}"),
+    }
+}
+
+/// Additive per-job evaluators: layered on top of the type's list and executed
+/// like declared ones.
+#[tokio::test]
+async fn job_level_evaluators_run_alongside_type_evaluators() {
+    let Some(rig) = rig().await else { return };
+
+    let mut r = req("flaky"); // type declares no evaluators
+    r.eval = vec![types::Evaluator {
+        name: "extra-ci".into(),
+        r#type: types::EvaluatorType::Command,
+        image: None, // falls back to the type's top-level image
+        run: Some("./ci.sh".into()),
+        prompt: None,
+        provider: None,
+        model: None,
+        secrets: vec![],
+        required: None,
+    }];
+    let job = rig.handle.create_job(r).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
+    let eval = tasks.iter().find(|t| t.phase == TaskPhase::Evaluation).expect("eval task");
+    assert_eq!(eval.evaluator.as_deref(), Some("extra-ci"));
+    assert_eq!(eval.state, TaskState::Done);
+}
+
+/// §4.4 upfront knowledge injection: the union of the type's `knowledge:`
+/// defaults and the job's tags rides the work agent's system prompt, read
+/// from tags/{tag}.md at base_ref. Unknown tags are skipped.
+#[tokio::test]
+async fn knowledge_tags_inject_into_work_system_prompt() {
+    let Some(rig) = rig().await else { return };
+
+    let mut create = req("flaky"); // type declares knowledge: [rust]
+    create.knowledge_tags = vec!["style".into(), "no-such-tag".into()];
+    let job = rig.handle.create_job(create).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let runs = rig.provider.runs();
+    let system = runs[0].system_prompt.as_deref().expect("knowledge block");
+    assert!(system.contains("Project Knowledge"), "{system}");
+    assert!(system.contains("rust conventions here"), "type default: {system}");
+    assert!(system.contains("house style here"), "job tag: {system}");
+    assert!(!system.contains("no-such-tag"), "missing tags are skipped: {system}");
+}
+
+/// The type's evaluators are a floor: a job evaluator colliding with a
+/// declared name is a release-time validation error.
+#[tokio::test]
+async fn job_evaluator_name_collision_fails_release() {
+    let Some(rig) = rig().await else { return };
+
+    let mut r = req("impl-cmd"); // type declares evaluator "tests"
+    r.eval = vec![types::Evaluator {
+        name: "tests".into(),
+        r#type: types::EvaluatorType::Command,
+        image: None,
+        run: Some("./sneaky.sh".into()),
+        prompt: None,
+        provider: None,
+        model: None,
+        secrets: vec![],
+        required: None,
+    }];
+    let job = rig.handle.create_job(r).await.unwrap(); // creation always lands Frozen
+    let err = rig.handle.release_job("acme", "api", job.id).await.unwrap_err();
+    assert!(err.to_string().contains("collides"), "{err}");
+}
+
+/// Unexpected wrap-up failure → triage, and the merge queue moves on instead
+/// of wedging (design-lifecycle.md). Simulated by deleting the job branch
+/// out from under finalization.
+#[tokio::test]
+async fn finalize_hard_failure_escalates_instead_of_wedging() {
+    let Some(rig) = rig().await else { return };
+    let handle = rig.handle.clone();
+    let bare = rig.repo.bare_path();
+
+    rig.provider.on_run(|_| async {}); // work cycle 1
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        // Sabotage wrap-up: the branch vanishes before the squash-merge.
+        let out = tokio::process::Command::new("git")
+            .args(["-C", bare.to_str().unwrap(), "update-ref", "-d", "refs/heads/job/1"])
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        h.submit_eval("acme", "api", 1, 2, EvalSubmission {
+            pass: true,
+            abort: false,
+            structured: None,
+            token_usage: None,
+        })
+        .await
+        .unwrap();
+    });
+
+    let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
+    match &tasks.last().unwrap().kind {
+        types::TaskKind::Human { prompt } => {
+            assert!(prompt.contains("wrap-up failed unexpectedly"), "{prompt}");
+        }
+        other => panic!("expected escalation task, got {other:?}"),
+    }
+    let events = event_types(&rig.store).await;
+    assert!(events.contains(&"job-escalated".to_string()));
 }

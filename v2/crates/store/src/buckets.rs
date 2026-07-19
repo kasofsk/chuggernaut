@@ -37,3 +37,8 @@ pub const ALL_BUCKETS: &[&str] = &[
 pub const STREAM_JOB_EVENTS: &str = "job-events";
 pub const STREAM_CHANNEL_INBOX: &str = "channel-inbox";
 pub const STREAM_INGEST: &str = "ingest";
+
+/// JetStream **Object** Store for per-task blobs (session transcripts,
+/// container logs). Not a KV bucket: object store chunks internally, so blobs
+/// are not bound by the 1MB `max_payload` a req/reply route would hit.
+pub const OBJECT_ARTIFACTS: &str = "artifacts";

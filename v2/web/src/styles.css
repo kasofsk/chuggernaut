@@ -120,6 +120,19 @@ input:focus {
   border-color: var(--accent);
 }
 
+select {
+  background: #0f1117;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+}
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .login-wrap {
   display: grid;
   place-items: center;
@@ -247,11 +260,60 @@ td.actions button {
 
 .create-job {
   display: flex;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  padding: 0.9rem;
+  background: #0f1117;
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
-.create-job input {
+.create-job .field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.create-job .field > span {
+  color: var(--dim);
+  font-size: 0.85rem;
+}
+.create-job .field > input,
+.create-job .field > select,
+.create-job .field > textarea {
+  width: 100%;
+}
+.create-job .field > textarea {
+  font: inherit;
+  resize: vertical;
+}
+.kv-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.kv-key {
+  flex: 2;
+}
+.kv-val {
   flex: 1;
+  min-width: 6rem;
+}
+.kv-del {
+  padding: 0.35rem 0.6rem;
+  line-height: 1;
+  color: var(--dim);
+}
+.kv-del:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.create-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+.create-actions button[type='submit'] {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .meta {
@@ -312,4 +374,249 @@ td.actions button {
 }
 .events li {
   padding: 0.15rem 0;
+}
+
+/* Artifacts: transcripts and container logs (§4.2). */
+.linklike {
+  background: none;
+  border: none;
+  padding: 0;
+  margin-right: 0.5rem;
+  color: var(--link, #4a9eff);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+.artifact-viewer {
+  margin-top: 0.6rem;
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+}
+.artifact-head {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border, #333);
+}
+.artifact-head strong {
+  margin-right: auto;
+}
+/* Transcripts run to megabytes: bound the viewport and let it scroll rather
+   than growing the page. Both axes — JSONL lines are single long lines. */
+.artifact-body {
+  margin: 0;
+  padding: 0.6rem;
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+/* Channel: the agent's narrative, from the event stream. */
+.channel-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.channel-log li {
+  padding: 0.2rem 0;
+  border-bottom: 1px solid var(--border-faint, #222);
+}
+.channel-log .pct {
+  font-variant-numeric: tabular-nums;
+}
+
+.tabs {
+  max-width: 1100px;
+  margin: 0 auto 1rem;
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border, #333);
+}
+.tabs a {
+  padding: 0.4rem 0.9rem;
+  border-radius: 6px 6px 0 0;
+  color: inherit;
+  text-decoration: none;
+  opacity: 0.7;
+}
+.tabs a:hover {
+  opacity: 1;
+}
+.tabs a.active {
+  opacity: 1;
+  font-weight: 600;
+  border: 1px solid var(--border, #333);
+  border-bottom-color: var(--bg, #111);
+  margin-bottom: -1px;
+}
+.subhead {
+  margin: 1rem 0 0.5rem;
+  font-size: 0.95rem;
+}
+.yaml {
+  margin-top: 0.75rem;
+}
+.yaml summary {
+  cursor: pointer;
+}
+
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.35rem 0;
+}
+.tag {
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--border, #444);
+  background: transparent;
+  color: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  opacity: 0.75;
+}
+.tag:hover {
+  opacity: 1;
+}
+.tag-on {
+  opacity: 1;
+  border-color: #7aa2f7;
+  color: #7aa2f7;
+  font-weight: 600;
+}
+
+.dep-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem;
+  background: var(--card);
+}
+.dep-suggestion {
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0.3rem 0.5rem;
+  border-radius: 4px;
+}
+.dep-suggestion:hover {
+  background: #262b38;
+}
+
+.option-on {
+  border: 1px solid var(--accent);
+  background: rgba(110, 168, 254, 0.08);
+}
+
+/* ── Responsive (mobile) ─────────────────────────────────────────────────
+   Wide content (tables, diffs) scrolls inside its card rather than the
+   page; controls wrap instead of overflowing; inputs stay ≥16px on small
+   screens so iOS doesn't zoom on focus. */
+.table-scroll,
+.card {
+  overflow-x: auto;
+}
+
+@media (max-width: 640px) {
+  .page {
+    padding: 0.6rem;
+  }
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: 0.15rem;
+  }
+  .topbar h1 {
+    font-size: 1.05rem;
+  }
+  input,
+  select,
+  textarea {
+    font-size: 16px; /* prevent iOS focus zoom */
+  }
+  table.jobs {
+    font-size: 13px;
+  }
+  table.jobs th,
+  table.jobs td {
+    padding: 0.3rem 0.4rem;
+  }
+  .result-cell {
+    max-width: 140px;
+  }
+  /* evaluator rows and resolve controls stack instead of overflowing */
+  .kv-row {
+    flex-wrap: wrap;
+  }
+  .kv-row .kv-key,
+  .kv-row .kv-val {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+  .resolve {
+    flex-wrap: wrap;
+  }
+  .resolve input {
+    flex: 1 1 100%;
+  }
+  .meta {
+    gap: 0.15rem 0.6rem;
+  }
+  .meta dd {
+    font-size: 12px;
+  }
+  .create-actions button[type='submit'] {
+    width: 100%;
+  }
+  td.actions button {
+    margin: 0.15rem 0.3rem 0.15rem 0;
+    display: inline-block;
+  }
+}
+
+.type-title {
+  margin: 0;
+}
+.type-slug {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.option-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+}
+.option-row .dep-suggestion {
+  flex: 1;
+}
+.option-peek {
+  display: flex;
+  align-items: center;
+  padding: 0 0.6rem;
+  border-radius: 4px;
+  text-decoration: none;
+  color: var(--dim);
+}
+.option-peek:hover {
+  background: #262b38;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.yaml-full {
+  max-height: none;
+}
+
+.prompt-links {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.85rem;
+  margin-top: 0.35rem;
 }

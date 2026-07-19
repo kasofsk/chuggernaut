@@ -7,8 +7,12 @@
 pub mod admin;
 pub mod init;
 pub mod keygen;
+pub mod schema;
 pub mod sshfront;
+pub mod validate;
 
 pub use admin::AdminArgs;
 pub use init::InitArgs;
+pub use schema::SchemaArgs;
 pub use sshfront::SshShellArgs;
+pub use validate::ValidateArgs;

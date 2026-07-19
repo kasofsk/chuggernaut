@@ -10,11 +10,14 @@ fn job(repo: &TempRepo, id: u64, state: JobState, base_ref: Option<String>) -> J
         id,
         project: format!("{}/{}", repo.owner, repo.project),
         r#type: "implement-endpoint".into(),
-        inputs: Default::default(),
+        title: String::new(),
+        description: String::new(),
+        deps: Vec::new(),
         state,
         branch: format!("job/{id}"),
         base_ref,
         knowledge_tags: vec![],
+        eval: vec![],
         factory: None,
         created_at: chrono::Utc::now(),
         ready_at: None,
@@ -25,6 +28,75 @@ fn job(repo: &TempRepo, id: u64, state: JobState, base_ref: Option<String>) -> J
 async fn git_version_is_sufficient() {
     let repo = TempRepo::create("acme", "api").await;
     repo.manager.check_git_version().await.unwrap();
+}
+
+/// `container::bootstrap_cmd` clones with `--filter=blob:none`; the server only
+/// honours that when `uploadpack.allowFilter` is set on the bare repo (set by
+/// `create_project`). Without it git warns and silently falls back to a full
+/// clone, so assert the blobs are really omitted.
+///
+/// Note `remote.origin.promisor` is set by the client either way and proves
+/// nothing — the discriminator is whether a historical blob is actually absent.
+#[tokio::test]
+async fn create_project_allows_partial_clone() {
+    let repo = TempRepo::create("acme", "api").await;
+
+    let cfg = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo.bare_path())
+        .args(["config", "--get", "uploadpack.allowFilter"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&cfg.stdout).trim(), "true");
+
+    // Two versions of one file: v1's blob is history, not in the current tree,
+    // so a working filtered clone must leave it behind.
+    let work = repo.clone_branch("main").await;
+    work.commit_file("f.txt", b"old-content-v1", "v1").await;
+    work.commit_file("f.txt", b"new-content-v2", "v2").await;
+    work.push("main").await;
+
+    let dest = tempfile::tempdir().unwrap();
+    let target = dest.path().join("filtered");
+    let out = std::process::Command::new("git")
+        .args([
+            "clone",
+            "--single-branch",
+            "--filter=blob:none",
+            "--branch",
+            "main",
+        ])
+        .arg(format!("file://{}", repo.bare_path().display()))
+        .arg(&target)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "clone failed: {stderr}");
+    assert!(
+        !stderr.contains("filtering not recognized by server"),
+        "server rejected the filter: {stderr}"
+    );
+
+    let listed = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&target)
+        .args(["rev-list", "--objects", "--all", "--missing=print"])
+        .output()
+        .unwrap();
+    let omitted = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter(|l| l.starts_with('?'))
+        .count();
+    assert!(omitted > 0, "no blobs omitted — filter did not take effect");
+
+    // History is still walkable; that's what --depth 1 would have cost us.
+    let log = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&target)
+        .args(["log", "--oneline"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&log.stdout).lines().count(), 3);
 }
 
 #[tokio::test]

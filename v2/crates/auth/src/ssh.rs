@@ -24,6 +24,18 @@ pub const ENV_ACCESS: &str = "CHUGGERNAUT_ACCESS";
 pub const ENV_ROLES: &str = "CHUGGERNAUT_ROLES";
 pub const ENV_REPO: &str = "CHUGGERNAUT_REPO";
 
+/// Hook body written into `hooks/pre-receive` at project creation (§12.2).
+/// Bakes the path the binary has *on the SSH host*. The no-identity fast
+/// path (local/`file://` access — the dispatcher's own pushes) lives in the
+/// script itself so it holds even where the baked path doesn't exist (repos
+/// shared between the host dispatcher and an sshd container).
+pub fn pre_receive_hook_body(chuggernaut_bin: &std::path::Path) -> String {
+    format!(
+        "#!/bin/sh\n[ -z \"${ENV_PRINCIPAL}\" ] && exit 0\nexec {} ssh-authz\n",
+        chuggernaut_bin.display()
+    )
+}
+
 /// Whether a per-job certificate may push (§7.4: work rw, eval ro).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertAccess {

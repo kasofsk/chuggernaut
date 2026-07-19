@@ -1,62 +1,89 @@
 ---
 name: chug
-description: "Query and command the running Chuggernaut system. Use when the user says /chug followed by a question or command about jobs, system state, or dispatcher config."
+description: "Query and command the running Chuggernaut v2 platform. Use when the user says /chug followed by a question or command about projects, jobs, job types, tasks, or the running system."
 argument-hint: "<question or command about the running system>"
 allowed-tools: [Bash, Read, Grep, Glob]
 ---
 
-You are interacting with a **live Chuggernaut dispatcher** on behalf of the user.
-The user's input is a question or command about the running system. Translate it into the appropriate API calls, execute them, and present the results clearly.
+You are interacting with a **live Chuggernaut v2 platform** on behalf of the
+user. Translate their input into API calls, execute them, and present the
+results clearly.
 
-## Connection
+## Auth — you act as `claude@dev.local`
 
-- **Dispatcher HTTP API:** `http://localhost:8080`
-- Use `curl -s` for all API calls. Parse JSON with `jq`.
+You authenticate **as a user, not as the platform**: a dedicated machine user
+(`claude@dev.local`) whose bearer token lives at
+`~/chuggernaut/v2/deploy/dev/data/keys/claude.token`. Every action you take
+is attributed to that user and bounded by its roles — never use
+`dispatcher.creds` (the platform identity) for API work. On 401 the token
+has expired; re-mint it:
 
-## API Reference
+```sh
+cd ~/chuggernaut/v2
+./target/release/chuggernaut admin --keys-dir deploy/dev/data/keys \
+  user token --email claude@dev.local > deploy/dev/data/keys/claude.token
+```
 
-### Read operations
+Every call:
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /jobs` | List all jobs. Optional `?state=<State>` filter. |
-| `GET /jobs/{key}` | Job detail (job + claim + activities). Key format: `owner.repo.seq` — but if the user says just a number like "job 21", you need to figure out the owner.repo prefix first (list jobs and match). |
-| `GET /jobs/{key}/deps` | Job dependencies and whether all are done. |
-| `GET /journal?limit=N` | Dispatcher action log (default 100). |
-| `GET /config/max_concurrent_actions` | Current concurrency limit. |
-| `GET /config/paused` | Whether dispatch is paused. |
+```sh
+BASE=http://localhost:8081
+TOK=$(cat ~/chuggernaut/v2/deploy/dev/data/keys/claude.token)
+curl -s -H "Authorization: Bearer $TOK" $BASE/api/v1/projects | jq
+```
 
-### Write operations
+## Vocabulary
 
-| Endpoint | Body | Description |
-|----------|------|-------------|
-| `POST /jobs` | `CreateJobRequest` JSON | Create a job. |
-| `POST /jobs/{key}/requeue` | `{"target": "on-deck"}` or `{"target": "on-ice"}` | Requeue a failed/escalated job. |
-| `POST /jobs/{key}/close` | `{"revoke": true}` (optional) | Close or revoke a job. |
-| `POST /jobs/{key}/retry-rework` | `{"extra": N}` or `{"limit": N}` | Grant more rework attempts. |
-| `POST /jobs/{key}/channel/send` | `{"message": "...", "sender": "user"}` | Send a message to a running Claude worker. |
-| `PUT /config/max_concurrent_actions` | `{"value": N}` | Set concurrency limit. |
-| `PUT /config/paused` | `{"paused": true/false}` | Pause or unpause dispatch. |
+**Job** = graph node (`#N`, ticket-style title/description, deps, lifecycle
+work → evaluation → wrap-up). **Task** = one execution inside a job (phase
+Work|Evaluation, kind command|agent|human). **Job type** = repo-versioned
+definition (`jobs/{type}.yaml`). Reusable tasks are plain files in the
+project repo: scripts (command tasks) and markdown instructions (agent
+tasks).
 
-## Resolving short job references
+## API reference (all under $BASE, JSON, Bearer auth)
 
-Users will say things like "job 21" or just "21". To resolve:
-1. `curl -s http://localhost:8080/jobs | jq -r '.jobs[] | select(.key | endswith(".21")) | .key'`
-2. If exactly one match, use it. If multiple, show them and ask.
+### Read
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/projects` | project slugs |
+| `GET /api/v1/projects/{o}/{p}/jobs` | Job[] (id, title, state, deps, type) |
+| `GET /api/v1/projects/{o}/{p}/jobs/{seq}` | one Job |
+| `GET /api/v1/projects/{o}/{p}/jobs/{seq}/criteria` | resolved evaluators + wrap_up + ref |
+| `GET /api/v1/projects/{o}/{p}/jobs/{seq}/tasks` | Task[] (phase, kind, state, result, model) |
+| `GET /api/v1/projects/{o}/{p}/jobs/{seq}/tasks/{id}/artifacts` | artifact kinds |
+| `GET .../tasks/{id}/artifacts/session.jsonl` or `stdout.log` | transcript / logs (raw bytes) |
+| `GET /api/v1/projects/{o}/{p}/diff/{seq}` | the job branch's diff |
+| `GET /api/v1/projects/{o}/{p}/job-types` | [{name, display_name, description}] |
+| `GET /api/v1/projects/{o}/{p}/job-types/{name}` | full type (raw YAML + parsed) |
+| `GET /api/v1/projects/{o}/{p}/tags` | knowledge tags (tags/*.md stems) |
+| `GET /api/v1/projects/{o}/{p}/tasks/pending` | human-task inbox |
+| `GET /api/v1/projects/{o}/{p}/events` (SSE) | live events; `.../jobs/{seq}/events` per job |
 
-## Presenting results
+### Write
+| Endpoint | Body | Effect |
+|---|---|---|
+| `POST /api/v1/projects` | `{owner, name}` | create project (platform admins; seeds the Code starter) |
+| `POST /api/v1/projects/{o}/{p}/jobs` | `{type, title?, description?, deps?: [id], knowledge_tags?, eval?: [Evaluator]}` | create job (lands Frozen). description = the ticket; injected into work AND eval prompts |
+| `POST .../jobs/{seq}/release` | — | ▶ run the job |
+| `POST .../jobs/{seq}/revoke` | — | revoke (cascades to Frozen/Blocked/Ready dependents) |
+| `POST .../jobs/{seq}/tasks/{id}/resolve` | `{kind: "Pass"\|"Fail"\|"Escalation", structured, abort?, action?}` | resolve a human task; `abort: true` on an evaluator Fail = unfixable, escalate |
 
-- For job detail: show **state**, **title**, **PR URL** (if any), **retry/rework counts**, **created/updated timestamps**, and the **last few activity entries**.
-- For job lists: show a compact table with **seq**, **state**, **title** (truncated), **priority**.
-- For journal: show recent entries in reverse chronological order.
-- For write operations: confirm what was done and show the updated state.
-- Keep output concise. Don't dump raw JSON unless the user asks for it.
+## Conventions
 
-## Handling errors
-
-- If the dispatcher is unreachable, say so clearly — suggest checking `docker compose ps` or `dev-up.sh`.
-- If a job key doesn't resolve, say which number was tried and that no match was found.
-
-## Confirming destructive actions
-
-Before executing write operations (requeue, close, revoke, pause, config changes), briefly state what you're about to do and proceed — the user invoked `/chug` with intent, so don't over-ask. But for `close --revoke` (which is terminal), confirm first.
+- Refer to jobs as `#N`; numbers are per-project and monotonic.
+- **Creating a job does not start it** — release ("run") is separate. Release
+  releases real agent containers (spends tokens): only do it when the user
+  clearly asked to run, otherwise create and tell them it's ready to run.
+- Write job descriptions like tickets: what to build, constraints,
+  acceptance criteria. The work agent and its reviewer both see it verbatim.
+- To watch a running job: poll `.../jobs/{seq}` + `.../tasks`, or read SSE
+  with `curl -N --max-time 30`. `channel-update` events are the agent
+  narrating its own progress.
+- Revoke kills running containers — confirm with the user first.
+- Presenting: job lists as compact tables (#, title, state, type); job detail
+  as state + title + tasks summary; don't dump raw JSON unless asked.
+- If the API is unreachable, say so and suggest checking that the dispatcher
+  and api processes are up (see `v2/deploy/dev/README.md` "Run").
+- For dispatcher internals beyond the API, read `~/chuggernaut/v2/spec.md`
+  and `progress.md` rather than guessing.

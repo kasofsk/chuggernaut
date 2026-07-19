@@ -54,13 +54,19 @@ impl FromRequestParts<SharedState> for Auth {
         parts: &mut Parts,
         state: &SharedState,
     ) -> Result<Self, Self::Rejection> {
-        let cookie = parts
+        // `Authorization: Bearer <jwt>` first (machine callers — CLI-minted
+        // tokens, §7.1), then the browser session cookie. Same JWT either way.
+        let bearer = parts
+            .headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        let cookie_token = parts
             .headers
             .get(header::COOKIE)
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(ApiError::unauthorized)?;
-        let token =
-            auth::jwt::token_from_cookie_header(cookie).ok_or_else(ApiError::unauthorized)?;
+            .and_then(auth::jwt::token_from_cookie_header);
+        let token = bearer.or(cookie_token).ok_or_else(ApiError::unauthorized)?;
         let identity = state
             .verifier
             .verify(token)
@@ -188,6 +194,50 @@ pub async fn me(Auth(identity): Auth) -> Json<Identity> {
     Json(identity)
 }
 
+// ── Projects ─────────────────────────────────────────────────────────────
+
+/// Projects visible to the caller. Platform admins see the whole registry
+/// (the counters bucket, written at `admin project create`, §12.2); everyone
+/// else sees the keys of their role map. Returns sorted `owner/project`
+/// strings.
+pub async fn projects_list(
+    State(state): State<SharedState>,
+    Auth(identity): Auth,
+) -> ApiResult<Json<Vec<String>>> {
+    let mut projects: Vec<String> = if identity.platform_admin {
+        let counters = state
+            .store
+            .raw_bucket(store::buckets::COUNTERS)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        counters
+            .keys_with_prefix("")
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?
+            .iter()
+            .filter_map(|k| k.split_once('.').map(|(o, p)| format!("{o}/{p}")))
+            .collect()
+    } else {
+        identity.project_roles.keys().cloned().collect()
+    };
+    projects.sort();
+    Ok(Json(projects))
+}
+
+/// Create a project (§12.2 via the API): bare repo, pre-receive hook, the
+/// Code starter template, and the job counter. Platform admins only — role
+/// grants for other users remain an admin-CLI concern.
+pub async fn projects_create(
+    State(state): State<SharedState>,
+    Auth(identity): Auth,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<Response> {
+    if !identity.platform_admin {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "platform admin required"));
+    }
+    forward(&state, &store::subjects::projects_create(), body, StatusCode::CREATED).await
+}
+
 // ── Jobs ─────────────────────────────────────────────────────────────────
 
 pub async fn jobs_create(
@@ -230,6 +280,109 @@ pub async fn jobs_get(
     forward(
         &state,
         &store::subjects::jobs_get(&owner, &project, seq),
+        serde_json::json!({}),
+        StatusCode::OK,
+    )
+    .await
+}
+
+/// Resolved evaluation criteria for a job: the type's evaluators plus the
+/// job's additive ones, annotated with `source`, at the ref execution uses.
+pub async fn job_criteria(
+    State(state): State<SharedState>,
+    Path((owner, project, seq)): Path<(String, String, u64)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::jobs_criteria(&owner, &project, seq),
+        serde_json::json!({}),
+        StatusCode::OK,
+    )
+    .await
+}
+
+pub async fn job_types_list(
+    State(state): State<SharedState>,
+    Path((owner, project)): Path<(String, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::job_types_list(&owner, &project),
+        serde_json::json!({}),
+        StatusCode::OK,
+    )
+    .await
+}
+
+/// One job type in full (raw YAML + parsed, defaults merged) for the library.
+pub async fn job_type_get(
+    State(state): State<SharedState>,
+    Path((owner, project, name)): Path<(String, String, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::job_types_get(&owner, &project),
+        serde_json::json!({ "name": name }),
+        StatusCode::OK,
+    )
+    .await
+}
+
+/// Available knowledge tags (`tags/*.md` stems at default HEAD).
+pub async fn tags_list(
+    State(state): State<SharedState>,
+    Path((owner, project)): Path<(String, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::tags_list(&owner, &project),
+        serde_json::json!({}),
+        StatusCode::OK,
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+pub struct FileQuery {
+    pub path: String,
+}
+
+/// One repo file at default-branch HEAD (`?path=...`) — the UI's prompt
+/// viewer. Read access only.
+pub async fn vcs_file(
+    State(state): State<SharedState>,
+    Path((owner, project)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<FileQuery>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::vcs_file(&owner, &project),
+        serde_json::json!({ "path": q.path }),
+        StatusCode::OK,
+    )
+    .await
+}
+
+/// Full recursive tree at default-branch HEAD — the repo browser.
+pub async fn vcs_tree(
+    State(state): State<SharedState>,
+    Path((owner, project)): Path<(String, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::vcs_tree(&owner, &project),
         serde_json::json!({}),
         StatusCode::OK,
     )
@@ -346,4 +499,62 @@ pub async fn diff(
         StatusCode::OK,
     )
     .await
+}
+
+// ── Artifacts (§4.2): session transcripts and container logs ────────────────
+//
+// These stream from the object store rather than riding a req/reply through
+// the dispatcher: a transcript routinely exceeds NATS's 1MB max_payload, which
+// a reply cannot carry. Decryption happens here because the API holds the
+// `age_artifacts` identity — a separate key from the secrets one, which stays
+// dispatcher-only (§10.2).
+
+/// Kinds present for a task, so the UI knows what to offer.
+pub async fn artifacts_list(
+    State(state): State<SharedState>,
+    Path((owner, project, seq, task_id)): Path<(String, String, u64, u64)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    let Some(artifacts) = &state.artifacts else {
+        return Ok(Json(serde_json::json!({ "artifacts": [] })).into_response());
+    };
+    let kinds = artifacts
+        .list_for_task(&owner, &project, seq, task_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let names: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
+    Ok(Json(serde_json::json!({ "artifacts": names })).into_response())
+}
+
+/// One artifact, decrypted. Served as bytes, not JSON: a transcript is JSONL
+/// and a log is plain text, and both can be large.
+pub async fn artifact_get(
+    State(state): State<SharedState>,
+    Path((owner, project, seq, task_id, kind)): Path<(String, String, u64, u64, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    let kind = store::ArtifactKind::parse(&kind)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "unknown artifact kind"))?;
+    let artifacts = state
+        .artifacts
+        .as_ref()
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "artifact capture is not configured"))?;
+    let bytes = artifacts
+        .get(&owner, &project, seq, task_id, kind)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "artifact not found"))?;
+    let content_type = match kind {
+        // JSONL, not JSON: one object per line, so it is not a valid document.
+        store::ArtifactKind::SessionTranscript => "application/x-ndjson",
+        store::ArtifactKind::Stdout => "text/plain; charset=utf-8",
+    };
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, content_type)],
+        bytes,
+    )
+        .into_response())
 }
