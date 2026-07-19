@@ -109,7 +109,7 @@ export function ProjectPage() {
                   </Link>
                 </td>
                 <td>
-                  <Link className="dim" to={`/p/${owner}/${project}/library/${encodeURIComponent(j.type)}`}>
+                  <Link className="dim" to={`/p/${owner}/${project}/job-types/${encodeURIComponent(j.type)}`}>
                     {j.type}
                   </Link>
                 </td>

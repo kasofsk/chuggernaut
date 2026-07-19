@@ -18,6 +18,9 @@ createRoot(document.getElementById('root')!).render(
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<Home />} />
         <Route path="/p/:owner/:project" element={<ProjectPage />} />
+        <Route path="/p/:owner/:project/job-types" element={<LibraryPage />} />
+        <Route path="/p/:owner/:project/job-types/:name" element={<JobTypePage />} />
+        {/* legacy alias */}
         <Route path="/p/:owner/:project/library" element={<LibraryPage />} />
         <Route path="/p/:owner/:project/library/:name" element={<JobTypePage />} />
         <Route path="/p/:owner/:project/jobs/new" element={<NewJobPage />} />

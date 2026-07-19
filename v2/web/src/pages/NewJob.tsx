@@ -235,7 +235,7 @@ function CreateJob({
               </button>
               <a
                 className="option-peek"
-                href={`/p/${owner}/${project}/library/${encodeURIComponent(t.name)}`}
+                href={`/p/${owner}/${project}/job-types/${encodeURIComponent(t.name)}`}
                 target="_blank"
                 rel="noreferrer"
                 title={`see what ${t.display_name} does (library, new tab)`}

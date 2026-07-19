@@ -82,7 +82,7 @@ function TypeCard({
             {expanded ? (
               jt?.display_name || t.name
             ) : (
-              <Link to={`/p/${owner}/${project}/library/${encodeURIComponent(t.name)}`}>
+              <Link to={`/p/${owner}/${project}/job-types/${encodeURIComponent(t.name)}`}>
                 {jt?.display_name || t.name}
               </Link>
             )}
@@ -198,7 +198,7 @@ export function JobTypePage() {
         <Link to={`/p/${owner}/${project}`}>
           {owner}/{project}
         </Link>
-        <Link to={`/p/${owner}/${project}/library`}>Job types</Link>
+        <Link to={`/p/${owner}/${project}/job-types`}>Job types</Link>
       </header>
       <ProjectTabs owner={owner} project={project} />
       {error && <div className="error banner">{error}</div>}
