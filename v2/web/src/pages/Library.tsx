@@ -198,7 +198,7 @@ export function JobTypePage() {
         <Link to={`/p/${owner}/${project}`}>
           {owner}/{project}
         </Link>
-        <Link to={`/p/${owner}/${project}/library`}>Library</Link>
+        <Link to={`/p/${owner}/${project}/library`}>Job types</Link>
       </header>
       <ProjectTabs owner={owner} project={project} />
       {error && <div className="error banner">{error}</div>}
