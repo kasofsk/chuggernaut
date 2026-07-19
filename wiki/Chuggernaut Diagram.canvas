@@ -1,0 +1,38 @@
+{
+	"nodes":[
+		{"id":"d93fb9cb7a9d470a","type":"text","text":"Ticket\n- instructions\n- acceptance criteria\n- required capabilities\n\t- iOS simulator\n\t- RO prod access\n\t- deploy privileges\n- tags\n\t- blessed practices\n\t- \"design\", \"backend\", \"infra\",\n- activity\n- subgraph of tasks (e.g. write code -> review -> run CI)","x":-440,"y":-360,"width":250,"height":420},
+		{"id":"5e72b262b103e707","type":"text","text":"Work\n- Output\n\t- claude sessions\n\t- source code\n\t- updates\n\t- artifact\n\t- deployment logs\n\t- feedback\n\t\t- reviews\n\t\t- acceptance decisions","x":-120,"y":-360,"width":250,"height":420},
+		{"id":"c259867e0033c1f4","type":"text","text":"Checks\n- source code\n- unit/integration/e2e tests\n- comments\n- operations\n- deployment\n- ","x":-440,"y":100,"width":250,"height":200},
+		{"id":"c22ae7673dc5ffeb","type":"text","text":"Operations\n- do work\n- respond to metrics\n- triage jobs","x":200,"y":-360,"width":250,"height":420},
+		{"id":"c9765a5be4bd621b","type":"text","text":"Workflow\n- output / review / loop\n- deployment\n- read metrics / act / loop","x":200,"y":100,"width":250,"height":200},
+		{"id":"630ab10b05690c74","type":"text","text":"Web API","x":-120,"y":400,"width":250,"height":60},
+		{"id":"b0a3cf7f8a5a083b","type":"text","text":"Dispatcher","x":-120,"y":504,"width":250,"height":60},
+		{"id":"094f47e3e4e4017b","type":"text","text":"Worker Containers","x":-120,"y":604,"width":250,"height":58},
+		{"id":"057111a641f376e8","type":"text","text":"Message Bus","x":200,"y":400,"width":250,"height":60},
+		{"id":"b5f830dcf8c052b1","type":"text","text":"Web UI","x":-440,"y":400,"width":250,"height":60},
+		{"id":"186950e52e84029b","type":"text","text":"Blessed Practices\n- For:\n\t- capabilities\n\t- triage\n\t- operations","x":-120,"y":100,"width":250,"height":200},
+		{"id":"b9fa530ea89d6e3c","type":"text","text":"do work","x":730,"y":-220,"width":250,"height":60},
+		{"id":"51e2d1aec1f8ffcf","type":"text","text":"evaluate work","x":1060,"y":-220,"width":250,"height":60},
+		{"id":"cc9d8af6a38fdd60","type":"text","text":"engineer","x":760,"y":430,"width":250,"height":60},
+		{"id":"07c1607255880c4c","type":"text","text":"designer","x":1090,"y":430,"width":250,"height":60},
+		{"id":"994e322e7a41c01e","type":"text","text":"project manager","x":760,"y":550,"width":250,"height":60},
+		{"id":"3ccde5c51835df06","type":"text","text":"analyst","x":1090,"y":550,"width":250,"height":60},
+		{"id":"014c694571258ecb","type":"text","text":"ceo (you?)","x":760,"y":670,"width":250,"height":60},
+		{"id":"ab40611cec89be9f","type":"text","text":"executive assisstant","x":1090,"y":670,"width":250,"height":60},
+		{"id":"ff10ea957c7ac276","type":"text","text":"wrap-up","x":1480,"y":-220,"width":100,"height":60},
+		{"id":"2d60a2b5f4cd37f9","type":"text","text":"done","x":1760,"y":-220,"width":250,"height":60},
+		{"id":"df4eb9371695ce36","type":"text","text":"triage","x":1145,"y":-450,"width":80,"height":60},
+		{"id":"85ebbad968e4bc42","type":"text","text":"triage","x":1490,"y":-450,"width":80,"height":60},
+		{"id":"d3d13aedf984f822","type":"text","text":"Coding Task\n- variable iteration limit","x":730,"y":-100,"width":250,"height":140},
+		{"id":"743734c0483dd2af","type":"text","text":"Deploy Task\n- iteration limit of 1 ?\n\n\nDeploy Eval Criteria\n- if anything looks abnormal, fail the deploy and triage a new task to rollback / debug etc","x":1060,"y":-100,"width":250,"height":280}
+	],
+	"edges":[
+		{"id":"bf012fe3a0c88b59","fromNode":"d93fb9cb7a9d470a","fromSide":"right","toNode":"5e72b262b103e707","toSide":"left"},
+		{"id":"2b0d17665b6f542a","fromNode":"51e2d1aec1f8ffcf","fromSide":"top","toNode":"b9fa530ea89d6e3c","toSide":"top","label":"feedback"},
+		{"id":"a1911b2db3bd7933","fromNode":"b9fa530ea89d6e3c","fromSide":"right","toNode":"51e2d1aec1f8ffcf","toSide":"left"},
+		{"id":"83085e47b1dff068","fromNode":"51e2d1aec1f8ffcf","fromSide":"right","toNode":"ff10ea957c7ac276","toSide":"left","label":"pass"},
+		{"id":"d90adf0b050a1c1d","fromNode":"ff10ea957c7ac276","fromSide":"right","toNode":"2d60a2b5f4cd37f9","toSide":"left","label":"pass"},
+		{"id":"a2e640e420f07d60","fromNode":"ff10ea957c7ac276","fromSide":"top","toNode":"85ebbad968e4bc42","toSide":"bottom","label":"fail"},
+		{"id":"8595c70e4db9f2a1","fromNode":"51e2d1aec1f8ffcf","fromSide":"top","toNode":"df4eb9371695ce36","toSide":"bottom","label":"fail"}
+	]
+}
