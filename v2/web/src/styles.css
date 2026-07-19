@@ -620,3 +620,21 @@ td.actions button {
   font-size: 0.85rem;
   margin-top: 0.35rem;
 }
+
+/* YamlView tokens */
+.y-comment {
+  color: var(--dim);
+  font-style: italic;
+}
+.y-key {
+  color: var(--accent);
+}
+.y-dash {
+  color: var(--purple);
+}
+.y-str {
+  color: var(--green);
+}
+.y-lit {
+  color: var(--orange);
+}

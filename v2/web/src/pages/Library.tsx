@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, type JobTypeDetail } from '../api'
 import { ProjectTabs } from '../components/ProjectTabs'
 import { EvaluatorTable } from '../components/EvaluatorTable'
+import { YamlView } from '../components/YamlView'
 
 /**
  * The job type library: every jobs/{type}.yaml at default-branch HEAD, shown
@@ -155,14 +156,14 @@ function TypeCard({
           <h3 className="subhead">
             jobs/{t.name}.yaml <span className="dim">· at {t.ref.slice(0, 10)}</span>
           </h3>
-          <pre className="prompt yaml-full">{t.yaml}</pre>
+          <YamlView yaml={t.yaml} full />
         </>
       ) : (
         <details className="yaml">
           <summary className="dim">
             jobs/{t.name}.yaml <span className="dim">· at {t.ref.slice(0, 10)}</span>
           </summary>
-          <pre className="prompt">{t.yaml}</pre>
+          <YamlView yaml={t.yaml} />
         </details>
       )}
     </section>

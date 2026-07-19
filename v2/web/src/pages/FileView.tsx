@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ApiError, api } from '../api'
 import { ProjectTabs } from '../components/ProjectTabs'
+import { YamlView } from '../components/YamlView'
 
 type TreeEntry = { path: string; type: string; size: number | null }
 
@@ -116,7 +117,15 @@ export function FileViewPage() {
       {path ? (
         <section className="card">
           <h2>{crumbs(path)}</h2>
-          {file ? <pre className="prompt yaml-full">{file.content}</pre> : !error && 'loading…'}
+          {file ? (
+            /\.ya?ml$/.test(file.path) ? (
+              <YamlView yaml={file.content} full />
+            ) : (
+              <pre className="prompt yaml-full">{file.content}</pre>
+            )
+          ) : (
+            !error && 'loading…'
+          )}
         </section>
       ) : (
         <section className="card">
