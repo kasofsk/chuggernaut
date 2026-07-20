@@ -52,7 +52,7 @@ export function NewJobPage() {
           availableTags={availableTags}
           jobs={jobs}
           initialType={params.get('type') ?? ''}
-          onCreate={(type, title, description, deps, knowledgeTags, evals) =>
+          onCreate={(type, title, description, deps, knowledgeTags, evals, timeout) =>
             api
               .createJob(owner, project, {
                 type,
@@ -61,6 +61,7 @@ export function NewJobPage() {
                 deps: deps.length ? deps : undefined,
                 knowledge_tags: knowledgeTags.length ? knowledgeTags : undefined,
                 eval: evals.length ? evals : undefined,
+                timeout: timeout || undefined,
               })
               .then(
                 (job) => navigate(`/p/${owner}/${project}/jobs/${job.id}`),
@@ -103,6 +104,7 @@ function CreateJob({
     deps: number[],
     knowledgeTags: string[],
     evals: Evaluator[],
+    timeout: string,
   ) => void
 }) {
   const [type, setType] = useState(initialType)
@@ -133,6 +135,9 @@ function CreateJob({
   const [evalRows, setEvalRows] = useState<EvalRow[]>([])
   const [selectedTags, setSelectedTags] = useState<string[]>([])
   const [tags, setTags] = useState('')
+  const [timeout, setTimeout] = useState('')
+  // The type's default work-task timeout, shown as the input placeholder.
+  const typeTimeout = typeDetail?.job_type?.resources?.task_timeout ?? null
 
   function toggleTag(tag: string) {
     setSelectedTags((ts) => (ts.includes(tag) ? ts.filter((t) => t !== tag) : [...ts, tag]))
@@ -187,7 +192,7 @@ function CreateJob({
       return
     }
     setError(null)
-    onCreate(type, title.trim(), description.trim(), deps, knowledgeTags, evals)
+    onCreate(type, title.trim(), description.trim(), deps, knowledgeTags, evals, timeout.trim())
   }
 
   return (
@@ -403,6 +408,20 @@ function CreateJob({
             ))}
         </datalist>
       </div>
+
+      <label className="field">
+        <span>
+          Work timeout{' '}
+          <span className="dim">
+            (optional; overrides the type default for this job's work — evaluators keep the default)
+          </span>
+        </span>
+        <input
+          value={timeout}
+          onChange={(e) => setTimeout(e.target.value)}
+          placeholder={typeTimeout ? `${typeTimeout} (type default)` : 'e.g. 45m, 2h, 1h30m'}
+        />
+      </label>
 
       <div className="create-actions">
         <button type="submit">create job</button>

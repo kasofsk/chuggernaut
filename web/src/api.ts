@@ -102,6 +102,9 @@ export interface Job {
   knowledge_tags: string[]
   /** additive per-job evaluators, layered on top of the type's list */
   eval: Evaluator[]
+  /** per-job work-task timeout override (duration string), layering over the
+   *  type's resources.task_timeout; null → the type default applies */
+  timeout: string | null
   factory: string | null
   created_at: string
   ready_at: string | null
@@ -118,7 +121,7 @@ export interface Task {
   id: number
   job_seq: number
   project: string
-  phase: 'Work' | 'Evaluation' | 'MergeGate'
+  phase: 'Work' | 'Evaluation' | 'MergeGate' | 'Triage'
   cycle: number
   kind: TaskKind
   state: 'Pending' | 'Running' | 'Done' | 'Failed'
@@ -196,6 +199,8 @@ export interface DispatcherSnapshot {
   nodes: WorkerNode[]
   agent_provider_default: string
   agent_model_default: string | null
+  /** platform image for operator-dispatched triage agents; null → unavailable */
+  triage_image: string | null
   repos_root: string
   repo_url_base: string
   nats_url: string
@@ -280,7 +285,7 @@ export const api = {
     req<Job[]>('GET', `/api/v1/projects/${owner}/${project}/jobs`),
   job: (owner: string, project: string, seq: number) =>
     req<Job>('GET', `/api/v1/projects/${owner}/${project}/jobs/${seq}`),
-  createJob: (owner: string, project: string, body: { type: string; title?: string; description?: string; deps?: number[]; knowledge_tags?: string[]; eval?: Evaluator[] }) =>
+  createJob: (owner: string, project: string, body: { type: string; title?: string; description?: string; deps?: number[]; knowledge_tags?: string[]; eval?: Evaluator[]; timeout?: string }) =>
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs`, body),
   criteria: (owner: string, project: string, seq: number) =>
     req<JobCriteria>('GET', `/api/v1/projects/${owner}/${project}/jobs/${seq}/criteria`),
@@ -288,6 +293,9 @@ export const api = {
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/release`),
   revoke: (owner: string, project: string, seq: number) =>
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/revoke`),
+  /** Dispatch an advisory triage agent over an Escalated/Stalled job (§1.2). */
+  triage: (owner: string, project: string, seq: number) =>
+    req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/triage`),
 
   pendingTasks: (owner: string, project: string) =>
     req<Task[]>('GET', `/api/v1/projects/${owner}/${project}/tasks/pending`),

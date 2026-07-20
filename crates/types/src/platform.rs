@@ -30,6 +30,10 @@ pub struct DispatcherConfigSnapshot {
     pub agent_provider_default: String,
     /// `AGENT_MODEL_DEFAULT`, if set.
     pub agent_model_default: Option<String>,
+    /// `TRIAGE_IMAGE` — platform image for operator-dispatched triage agents
+    /// (§1.2). None → the triage action is unavailable.
+    #[serde(default)]
+    pub triage_image: Option<String>,
     /// `REPOS_ROOT` — bare repos on disk.
     pub repos_root: String,
     /// `REPO_URL_BASE` — clone URL base injected into containers.

@@ -85,6 +85,8 @@ export function PlatformSettingsPage() {
                   </dd>
                   <dt>model</dt>
                   <dd>{d.agent_model_default ? <code>{d.agent_model_default}</code> : <span className="dim">—</span>}</dd>
+                  <dt title="platform image for operator-dispatched triage agents (§1.2)">triage image</dt>
+                  <dd>{d.triage_image ? <code>{d.triage_image}</code> : <span className="dim">— (triage unavailable)</span>}</dd>
                   <dt>secrets encryption</dt>
                   <dd>{d.secrets_encryption ? <span className="badge">on</span> : <span className="dim">off</span>}</dd>
                 </dl>

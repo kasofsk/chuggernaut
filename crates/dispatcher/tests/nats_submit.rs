@@ -97,6 +97,7 @@ async fn submits_flow_over_nats_to_the_core() {
             deps: vec![],
             knowledge_tags: vec![],
             eval: vec![],
+            timeout: None,
             factory: None,
         })
         .await
@@ -197,6 +198,7 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
             deps: vec![],
             knowledge_tags: vec![],
             eval: vec![],
+            timeout: None,
             factory: None,
         })
         .await

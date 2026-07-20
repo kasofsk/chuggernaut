@@ -411,11 +411,13 @@ td.actions button {
 .inbox h2 {
   color: var(--orange);
 }
-.inbox-task {
+.inbox-task,
+.triage-task {
   border-top: 1px solid var(--border);
   padding: var(--sp-3) 0;
 }
-.inbox-task:first-of-type {
+.inbox-task:first-of-type,
+.triage-task:first-of-type {
   border-top: none;
 }
 .prompt {

@@ -633,6 +633,24 @@ pub async fn jobs_revoke(
     .await
 }
 
+/// Dispatch an advisory triage agent over an Escalated/Stalled job (§1.2).
+/// Member+ like the other job mutations; the dispatcher enforces the state
+/// guard (409) and TRIAGE_IMAGE availability (422).
+pub async fn jobs_triage(
+    State(state): State<SharedState>,
+    Path((owner, project, seq)): Path<(String, String, u64)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    member_on(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::jobs_triage(&owner, &project, seq),
+        serde_json::json!({}),
+        StatusCode::OK,
+    )
+    .await
+}
+
 // ── Graph ────────────────────────────────────────────────────────────────
 
 pub async fn graph_get(

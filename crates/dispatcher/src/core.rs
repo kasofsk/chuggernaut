@@ -80,6 +80,9 @@ pub struct CreateJobRequest {
     /// Additive per-job evaluators; validated (field rules + name collisions
     /// against the type's list) at release, not creation.
     pub eval: Vec<types::Evaluator>,
+    /// Optional per-job work-task timeout override (duration string, §1.1);
+    /// parseability validated at release. None → the type default applies.
+    pub timeout: Option<String>,
     pub factory: Option<String>,
 }
 
@@ -115,6 +118,10 @@ pub struct TaskExit {
     /// unparseable stdout, and on the restart re-attach path (where the monitor
     /// that would have parsed it no longer exists).
     pub usage: Option<TokenUsage>,
+    /// The agent CLI's final result text, harvested from stdout. Only carried
+    /// by triage runs (spec §1.2), which have no channel MCP and so report
+    /// their assessment through the CLI's JSON result rather than `submit_result`.
+    pub assessment: Option<String>,
 }
 
 impl TaskExit {
@@ -147,6 +154,14 @@ pub enum Msg {
         project: String,
         seq: u64,
         reply: Reply<Vec<u64>>,
+    },
+    /// `req.jobs.triage.*` (spec §1.2): dispatch an advisory triage agent over
+    /// an Escalated/Stalled job. Never changes job state.
+    TriageJob {
+        owner: String,
+        project: String,
+        seq: u64,
+        reply: Reply<()>,
     },
     SubmitResult {
         owner: String,
@@ -253,6 +268,11 @@ impl CoreHandle {
     pub async fn revoke_job(&self, owner: &str, project: &str, seq: u64) -> Result<Vec<u64>> {
         let (owner, project) = (owner.to_string(), project.to_string());
         self.call(|reply| Msg::RevokeJob { owner, project, seq, reply }).await
+    }
+
+    pub async fn triage_job(&self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::TriageJob { owner, project, seq, reply }).await
     }
 
     pub async fn submit_result(
@@ -370,6 +390,9 @@ pub struct CoreConfig {
     pub agent_provider_default: Option<String>,
     /// §12.4 platform model default; job-type/evaluator `model:` overrides it.
     pub agent_model_default: Option<String>,
+    /// `TRIAGE_IMAGE` (§1.2): platform image for operator-dispatched triage
+    /// agents. None → the triage action is unavailable.
+    pub triage_image: Option<String>,
     /// Platform NATS account seed (`nats_account.seed`, §12.1) for minting
     /// per-container scoped credentials (§7.4). None → containers connect
     /// unauthenticated (tests, open dev NATS).
@@ -567,6 +590,9 @@ impl Core {
             Msg::RevokeJob { owner, project, seq, reply } => {
                 let _ = reply.send(self.revoke_job(&owner, &project, seq).await);
             }
+            Msg::TriageJob { owner, project, seq, reply } => {
+                let _ = reply.send(self.triage_job(&owner, &project, seq).await);
+            }
             Msg::SubmitResult { owner, project, seq, submission, reply } => {
                 let _ = reply.send(self.handle_submit_result(&owner, &project, seq, submission).await);
             }
@@ -646,6 +672,7 @@ impl Core {
             base_ref: None,
             knowledge_tags: req.knowledge_tags,
             eval: req.eval,
+            timeout: req.timeout,
             factory: req.factory,
             created_at: Utc::now(),
             ready_at: None,

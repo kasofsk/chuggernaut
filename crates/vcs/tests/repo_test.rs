@@ -18,6 +18,7 @@ fn job(repo: &TempRepo, id: u64, state: JobState, base_ref: Option<String>) -> J
         base_ref,
         knowledge_tags: vec![],
         eval: vec![],
+        timeout: None,
         factory: None,
         created_at: chrono::Utc::now(),
         ready_at: None,

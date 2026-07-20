@@ -156,6 +156,11 @@ struct CreateJobBody {
     /// Additive per-job evaluators (design-lifecycle.md); validated at release.
     #[serde(default)]
     eval: Vec<types::Evaluator>,
+    /// Optional per-job work-task timeout override (duration string, §1.1);
+    /// layers over the type's `resources.task_timeout` for Work tasks only.
+    /// Parseability validated at release. Absent → the type default applies.
+    #[serde(default)]
+    timeout: Option<String>,
 }
 
 /// Wire body for `req.tasks.resolve`: the §6.2 `TaskResolution` plus the
@@ -366,6 +371,7 @@ async fn spawn_read_handlers(
                             deps: b.deps,
                             knowledge_tags: b.knowledge_tags,
                             eval: b.eval,
+                            timeout: b.timeout,
                             factory: None,
                         };
                         match jobs_handle.create_job(create).await {
@@ -389,6 +395,13 @@ async fn spawn_read_handlers(
                     }
                 }
                 ("revoke", Some(seq)) => match jobs_handle.revoke_job(owner, project, seq).await {
+                    Err(e) => error_reply(&e),
+                    Ok(_) => fetch_job(&jobs_store, owner, project, seq).await,
+                },
+                // Operator-dispatched advisory triage (§1.2): launches a triage
+                // agent over the job state; never changes job state. Reply is
+                // the job as-is (unchanged), like revoke's re-fetch.
+                ("triage", Some(seq)) => match jobs_handle.triage_job(owner, project, seq).await {
                     Err(e) => error_reply(&e),
                     Ok(_) => fetch_job(&jobs_store, owner, project, seq).await,
                 },
@@ -924,6 +937,7 @@ mod tests {
             base_ref: None,
             knowledge_tags: vec![],
             eval: vec![],
+            timeout: None,
             factory: None,
             created_at: Utc::now(),
             ready_at: None,

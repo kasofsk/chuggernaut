@@ -32,6 +32,11 @@ pub struct DispatcherConfig {
     pub agent_provider_default: String,
     /// `AGENT_MODEL_DEFAULT` (optional, §12.4).
     pub agent_model_default: Option<String>,
+    /// `TRIAGE_IMAGE` — platform-level image for operator-dispatched triage
+    /// agents (spec §1.2). A platform default rather than the failing job's own
+    /// type image, so triage works uniformly on any job type (agent/command/
+    /// human). Unset → the triage action is unavailable (422).
+    pub triage_image: Option<String>,
     /// `DOCKER_NODES` — comma-separated `name|endpoint|slots` entries.
     /// Unset → single local-socket node with `DOCKER_SLOTS` slots (default 4).
     pub docker_nodes: Vec<DockerNodeConfig>,
@@ -90,6 +95,7 @@ impl DispatcherConfig {
             channel_binary: env_opt("CHANNEL_BINARY").map(PathBuf::from),
             agent_provider_default,
             agent_model_default: env_opt("AGENT_MODEL_DEFAULT"),
+            triage_image: env_opt("TRIAGE_IMAGE"),
             docker_nodes,
             hook_bin: env_opt("HOOK_BIN").map(PathBuf::from),
         })
@@ -152,6 +158,7 @@ impl DispatcherConfig {
             artifacts_identity: self.artifacts_identity().await?,
             agent_provider_default: Some(self.agent_provider_default.clone()),
             agent_model_default: self.agent_model_default.clone(),
+            triage_image: self.triage_image.clone(),
             nats_account_seed: self.nats_account_seed().await?,
             hook_bin: self.hook_bin.clone(),
         })

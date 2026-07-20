@@ -59,6 +59,10 @@ export function JobDetail() {
   const pendingHuman = tasks.filter(
     (t) => t.kind.kind === 'Human' && t.state === 'Pending',
   )
+  // Advisory triage runs (§1.2), newest first.
+  const triageTasks = tasks
+    .filter((t) => t.phase === 'Triage')
+    .sort((a, b) => b.id - a.id)
 
   return (
     <div className="page">
@@ -101,6 +105,14 @@ export function JobDetail() {
           </dd>
           <dt>created</dt>
           <dd>{new Date(job.created_at).toLocaleString()}</dd>
+          {job.timeout && (
+            <>
+              <dt>timeout</dt>
+              <dd title="per-job work-task timeout override (evaluators keep the type default)">
+                <code>{job.timeout}</code> <span className="dim">override</span>
+              </dd>
+            </>
+          )}
           {criteria?.wrap_up && (
             <>
               <dt>wrap-up</dt>
@@ -115,6 +127,14 @@ export function JobDetail() {
               onClick={() => api.release(owner, project, job.id).then(refresh, setActionError(setError))}
             >
               ▶ run
+            </button>
+          )}
+          {(job.state === 'Escalated' || job.state === 'Stalled') && (
+            <button
+              title="run an advisory triage agent over the job state — assessment + recommendation, no change to the job"
+              onClick={() => api.triage(owner, project, job.id).then(refresh, setActionError(setError))}
+            >
+              dispatch triage
             </button>
           )}
           {job.state !== 'Done' && job.state !== 'Revoked' && (
@@ -150,6 +170,28 @@ export function JobDetail() {
               />
             </div>
           ))}
+        </section>
+      )}
+
+      {triageTasks.length > 0 && (
+        <section className="card">
+          <h2>Triage <span className="dim">advisory — nothing changed on the job</span></h2>
+          {triageTasks.map((t) => {
+            const r = t.result as Record<string, unknown> | null
+            const assessment = r && typeof r.assessment === 'string' ? r.assessment : null
+            return (
+              <div className="triage-task" key={t.id}>
+                <div className="inbox-head">
+                  task {t.id} · cycle {t.cycle} · <TaskBadge state={t.state} />
+                </div>
+                {assessment ? (
+                  <pre className="prompt">{assessment}</pre>
+                ) : (
+                  <div className="dim">{t.state === 'Running' ? 'running…' : 'no assessment produced'}</div>
+                )}
+              </div>
+            )
+          })}
         </section>
       )}
 
@@ -270,7 +312,9 @@ function resultSummary(t: Task): string {
   if ('exit_code' in r && typeof r.exit_code === 'number') parts.push(`exit ${r.exit_code}`)
   if ('summary' in r && r.summary) parts.push(String(r.summary))
   if ('action' in r && r.action) parts.push(String(r.action))
-  if ('structured' in r && r.structured) parts.push(JSON.stringify(r.structured))
+  // Triage carries prose; the full text renders in the assessments section.
+  if ('assessment' in r && typeof r.assessment === 'string') parts.push('assessment ↓')
+  else if ('structured' in r && r.structured) parts.push(JSON.stringify(r.structured))
   return parts.join(' · ').slice(0, 200)
 }
 

@@ -178,6 +178,21 @@ Triage means the platform has run out of automation for *this* job. Its outlets:
 Triage agents are declared, not implicit — a job type (or project config) opts
 in. An operator-facing escalation never silently becomes an agent decision.
 
+### Manual triage (advisory) — the operator-dispatched middle ground
+
+Between "escalate to a human" and "an agent creates a job" sits a third, human-in-
+command outlet, live today: **manual triage**. When a job is `Escalated` or
+`Stalled`, the operator can dispatch a triage agent (`POST .../jobs/{seq}/triage`,
+§1.2) that reads the whole job state — brief, escalation reason, every task's
+result, and the captured Stdout logs — and writes an **assessment +
+recommendation** (`TaskPhase::Triage` / `TaskResult::Triage`). It is purely
+advisory: it never changes job state (no §2.1 transition), so the operator still
+owns the Retry / Resolve / Revoke decision — the assessment just informs it.
+Unlike the declared triage agents above, it is dispatched on demand, not wired
+into the escalation edge, and runs in a platform image (`TRIAGE_IMAGE`) so it
+works on any job type. It is the "help me understand why this failed" button,
+distinct from "let automation try once more."
+
 ---
 
 ## Decision: eval criteria are a floor, additive per job

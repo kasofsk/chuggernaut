@@ -394,6 +394,7 @@ async fn held_job_lands_after_merged_release_sync() {
             deps: vec![],
             knowledge_tags: vec![],
             eval: vec![],
+            timeout: None,
             factory: None,
         })
         .await
@@ -486,6 +487,7 @@ async fn reserved_chug_secrets_never_reach_containers() {
             deps: vec![],
             knowledge_tags: vec![],
             eval: vec![],
+            timeout: None,
             factory: None,
         })
         .await

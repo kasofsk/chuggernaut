@@ -170,10 +170,13 @@ impl Core {
         }
 
         // Eval containers get vars but only the evaluator's own secrets (§4.1).
+        // Evaluators keep the job type's timeout — the per-job `Job.timeout`
+        // override is Work-scoped only (§1.1, §3.5).
+        let eval_timeout = task_timeout(&job_type);
         let env = self
             .container_env(
                 owner, project, seq, branch, &job_type, &evaluator.secrets,
-                ChannelRole::Eval { task_id },
+                ChannelRole::Eval { task_id }, eval_timeout,
             )
             .await?;
         let tx = self.self_tx.clone().expect("spawned core");
@@ -188,7 +191,7 @@ impl Core {
                     env,
                     files: self
                         .ssh_credential_files(
-                            owner, project, seq, ChannelRole::Eval { task_id }, &job_type,
+                            owner, project, seq, ChannelRole::Eval { task_id }, eval_timeout,
                         )
                         .await?,
                     cpu_limit: job_type.resources.as_ref().and_then(|r| r.cpu),
@@ -213,7 +216,7 @@ impl Core {
                     let _ = tx
                         .send(Msg::TaskExited {
                             owner: o, project: p, seq, task_id,
-                            exit: TaskExit { exit_code, eval_json, usage: None },
+                            exit: TaskExit { exit_code, eval_json, usage: None, assessment: None },
                         })
                         .await;
                 });
@@ -234,7 +237,7 @@ impl Core {
                 let (mcp_servers, mut files) = self.channel_mcp(&env);
                 files.extend(
                     self.ssh_credential_files(
-                        owner, project, seq, ChannelRole::Eval { task_id }, &job_type,
+                        owner, project, seq, ChannelRole::Eval { task_id }, eval_timeout,
                     )
                     .await?,
                 );
@@ -270,7 +273,7 @@ impl Core {
                     let _ = tx
                         .send(Msg::TaskExited {
                             owner: o, project: p, seq, task_id,
-                            exit: TaskExit { exit_code, eval_json: None, usage },
+                            exit: TaskExit { exit_code, eval_json: None, usage, assessment: None },
                         })
                         .await;
                 });
@@ -357,7 +360,7 @@ impl Core {
         mut task: Task,
         exit: TaskExit,
     ) -> Result<()> {
-        let TaskExit { exit_code, eval_json, usage } = exit;
+        let TaskExit { exit_code, eval_json, usage, .. } = exit;
         let key = (owner.to_string(), project.to_string(), seq);
         let Some(slot_idx) = self
             .active

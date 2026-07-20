@@ -92,6 +92,11 @@ pub fn jobs_revoke(owner: &str, project: &str, seq: u64) -> String {
     format!("req.jobs.revoke.{owner}.{project}.{seq}")
 }
 
+/// Operator-dispatched advisory triage (spec §1.2).
+pub fn jobs_triage(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.jobs.triage.{owner}.{project}.{seq}")
+}
+
 /// Create a project (§12.2 via the API): bare repo, hook, starter template,
 /// counter. Owner/name ride in the payload — they are being validated, so
 /// they cannot ride in the subject.

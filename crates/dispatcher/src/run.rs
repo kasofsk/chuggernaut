@@ -84,6 +84,7 @@ async fn publish_config_snapshot(store: &NatsStore, config: &DispatcherConfig, s
             .collect(),
         agent_provider_default: config.agent_provider_default.clone(),
         agent_model_default: config.agent_model_default.clone(),
+        triage_image: config.triage_image.clone(),
         repos_root: config.repos_root.display().to_string(),
         repo_url_base: config.repo_url_base.clone(),
         nats_url: config.nats_url.clone(),

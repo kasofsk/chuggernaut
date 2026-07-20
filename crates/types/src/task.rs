@@ -44,6 +44,11 @@ pub enum TaskPhase {
     /// squash commit (spec §3.3 Merge Gate). Only present when the default
     /// branch HEAD moved past `base_ref` while the job was in flight.
     MergeGate,
+    /// Operator-dispatched triage (spec §1.2): an advisory agent run over the
+    /// whole job state that produces a written assessment + recommendation.
+    /// Purely advisory — it never drives a job transition. Only created while
+    /// the job is Escalated or Stalled, and may be repeated.
+    Triage,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,6 +108,14 @@ pub enum TaskResult {
         action: Option<EscalationAction>,
         operator: String,
         resolved_at: DateTime<Utc>,
+    },
+    /// Result of an operator-dispatched triage task (spec §1.2). The agent's
+    /// written assessment + recommendation, captured from the CLI JSON result
+    /// text (triage runs without the channel MCP, so there is no `submit_result`).
+    /// Advisory only — never consulted by any state transition.
+    Triage {
+        assessment: String,
+        token_usage: Option<TokenUsage>,
     },
 }
 
@@ -182,6 +195,37 @@ mod tests {
                 action: EscalationAction::Revoke,
                 structured: None
             }
+        );
+    }
+
+    #[test]
+    fn triage_phase_and_result_round_trip() {
+        // TaskPhase::Triage round-trips.
+        let p: TaskPhase = serde_json::from_str(r#""Triage""#).unwrap();
+        assert_eq!(p, TaskPhase::Triage);
+        assert_eq!(serde_json::to_string(&p).unwrap(), r#""Triage""#);
+
+        // TaskResult::Triage round-trips, with and without token usage.
+        let with_usage = TaskResult::Triage {
+            assessment: "Work failed on a missing migration; recommend Revoke.".into(),
+            token_usage: Some(TokenUsage {
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            }),
+        };
+        let json = serde_json::to_string(&with_usage).unwrap();
+        assert!(json.contains(r#""kind":"Triage""#));
+        assert_eq!(serde_json::from_str::<TaskResult>(&json).unwrap(), with_usage);
+
+        let no_usage: TaskResult = serde_json::from_str(
+            r#"{ "kind": "Triage", "assessment": "insufficient signal", "token_usage": null }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            no_usage,
+            TaskResult::Triage { assessment: "insufficient signal".into(), token_usage: None }
         );
     }
 }

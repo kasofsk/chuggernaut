@@ -92,6 +92,7 @@ fn req(r#type: &str, deps: &[u64]) -> CreateJobRequest {
         deps: deps.to_vec(),
         knowledge_tags: vec![],
         eval: vec![],
+        timeout: None,
         factory: None,
     }
 }

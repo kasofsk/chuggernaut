@@ -125,6 +125,28 @@ pub fn parse_usage(stdout: &[u8]) -> Option<types::TokenUsage> {
     })
 }
 
+/// Pull the agent's final result text out of the CLI's `--output-format json`
+/// result object — its `result` field. Used to capture a **triage assessment**
+/// (spec §1.2), which runs without the channel MCP: there is no `submit_result`
+/// call, so the CLI's own JSON result on stdout is the only channel for the
+/// written output.
+///
+/// Same last-parseable-line scan as [`parse_usage`] — anything the container
+/// printed before the result object (clone, npm noise) is skipped. Returns
+/// `None` when stdout carries no result object or the result is empty.
+pub fn parse_result(stdout: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stdout);
+    let value: serde_json::Value = text
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str(line.trim()).ok())?;
+    value
+        .get("result")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+}
+
 /// Claude CLI `--mcp-config` payload: `{"mcpServers": {name: {command, args, env}}}`.
 fn mcp_config_json(servers: &[McpServerConfig]) -> String {
     let map: serde_json::Map<String, serde_json::Value> = servers
@@ -252,6 +274,25 @@ mod tests {
             crate::transcript_path("da08d5f3-844e-430e-8363-39b4882f437b"),
             "/chuggernaut/claude/projects/-workspace/da08d5f3-844e-430e-8363-39b4882f437b.jsonl"
         );
+    }
+
+    #[test]
+    fn parses_result_text_for_triage() {
+        // A success result object carries the agent's prose in `result`.
+        let json = r#"{"type":"result","subtype":"success","is_error":false,"result":"The work task failed because the migration script referenced a dropped column. Recommend Revoke.","session_id":"x","usage":{"input_tokens":1,"output_tokens":2}}"#;
+        assert_eq!(
+            parse_result(json.as_bytes()).as_deref(),
+            Some(
+                "The work task failed because the migration script referenced a dropped column. Recommend Revoke."
+            )
+        );
+        // Past leading container noise.
+        let mut stdout = b"Cloning into '/workspace'...\n".to_vec();
+        stdout.extend_from_slice(json.as_bytes());
+        assert!(parse_result(&stdout).is_some());
+        // Empty / missing result → None, never an empty assessment.
+        assert!(parse_result(br#"{"type":"result","result":""}"#).is_none());
+        assert!(parse_result(b"plain output").is_none());
     }
 
     #[test]
