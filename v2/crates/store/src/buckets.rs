@@ -15,6 +15,7 @@ pub const SECRETS: &str = "secrets";
 pub const USERS: &str = "users";
 pub const KNOWLEDGE: &str = "knowledge";
 pub const PLATFORM: &str = "platform";
+pub const PROJECTS: &str = "projects";
 pub const PUSH: &str = "push";
 pub const INGEST_TOKENS: &str = "ingest-tokens";
 
@@ -30,6 +31,7 @@ pub const ALL_BUCKETS: &[&str] = &[
     USERS,
     KNOWLEDGE,
     PLATFORM,
+    PROJECTS,
     PUSH,
     INGEST_TOKENS,
 ];

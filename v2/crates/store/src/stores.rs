@@ -7,7 +7,7 @@ use crate::{Result, StoreError, keys};
 use futures::TryStreamExt;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use types::{Job, StepRecord, Task};
+use types::{Job, ProjectRecord, StepRecord, Task};
 
 fn nats_err(e: impl std::fmt::Display) -> StoreError {
     StoreError::Nats(e.to_string())
@@ -227,6 +227,33 @@ impl RdepsStore {
         self.0
             .put_json(&keys::job_key(owner, project, seq), &deps)
             .await
+    }
+}
+
+/// Platform-level project records (linked-origin projects). Absence of a
+/// record means a classic self-hosted project — only linked projects (and any
+/// future project-level platform state) get an entry.
+#[derive(Clone)]
+pub struct ProjectStore(pub(crate) Bucket);
+
+impl ProjectStore {
+    pub async fn put(&self, owner: &str, project: &str, record: &ProjectRecord) -> Result<()> {
+        self.0.put_json(&format!("{owner}.{project}"), record).await
+    }
+
+    pub async fn get(&self, owner: &str, project: &str) -> Result<Option<ProjectRecord>> {
+        self.0.get_json(&format!("{owner}.{project}")).await
+    }
+
+    /// Every `(owner.project key, record)` — the startup hold-restore scan.
+    pub async fn list_all(&self) -> Result<Vec<(String, ProjectRecord)>> {
+        let mut out = Vec::new();
+        for key in self.0.keys_with_prefix("").await? {
+            if let Some(record) = self.0.get_json(&key).await? {
+                out.push((key, record));
+            }
+        }
+        Ok(out)
     }
 }
 

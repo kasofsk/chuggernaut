@@ -602,6 +602,12 @@ impl Core {
     /// (design-lifecycle.md: unexpected wrap-up failure → triage).
     pub(crate) async fn pump_merges(&mut self, owner: &str, project: &str) -> Result<()> {
         let slug = format!("{owner}/{project}");
+        // An Open origin release holds the queue: nothing lands on integration
+        // until the release PR resolves (jobs still eval and enqueue). The
+        // post-merge reset is lossless because of exactly this hold.
+        if self.release_holds.contains(&slug) {
+            return Ok(());
+        }
         while !self.gating.contains_key(&slug) {
             let Some(&seq) = self.merge_queue.get(&slug).and_then(|q| q.front()) else {
                 return Ok(());
@@ -826,8 +832,18 @@ impl Core {
         let gate_branch = format!("merge-gate/{seq}");
 
         if failures.is_empty() {
-            // Promote: the candidate commit IS the merge (§3.3).
-            self.repos.advance_default(owner, project, &gate.commit, &gate.old_head).await?;
+            // Promote: the candidate commit IS the merge (§3.3). A failed CAS
+            // means HEAD moved under the parked candidate (an origin-release
+            // reset, or restart-race leftovers) — re-enqueue for finalization
+            // against the new HEAD instead of escalating.
+            if let Err(e) = self.repos.advance_default(owner, project, &gate.commit, &gate.old_head).await {
+                tracing::warn!(
+                    "gate promote for {owner}/{project}#{seq}: HEAD moved under candidate ({e}); refinalizing"
+                );
+                let _ = self.repos.delete_branch(owner, project, &gate_branch).await;
+                self.refinalize(owner, project, seq).await?;
+                return Ok(());
+            }
             let _ = self.repos.delete_branch(owner, project, &gate_branch).await;
             self.complete_done(owner, project, seq).await?;
         } else {

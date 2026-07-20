@@ -115,7 +115,7 @@ fn error_reply(e: &CoreError) -> Vec<u8> {
     let status = match e {
         CoreError::NotFound(_) => 404,
         CoreError::Validation(_) => 422,
-        CoreError::Transition(_) | CoreError::InvalidResolution(_) => 409,
+        CoreError::Transition(_) | CoreError::InvalidResolution(_) | CoreError::Conflict(_) => 409,
         _ => 500,
     };
     let mut body = serde_json::json!({
@@ -198,6 +198,77 @@ pub async fn spawn_api_handlers(
             req.respond(body).await;
         }
     });
+
+    // ── req.projects.link — linked-origin project creation (origin fetch +
+    // integration HEAD + config seed). Runs through the core actor: it needs
+    // the dispatcher's age identity for the deploy key.
+    let mut link_sub = store.subscribe_requests(&store::subjects::projects_link()).await?;
+    let link_handle = handle.clone();
+    tokio::spawn(async move {
+        while let Some(req) = link_sub.next().await {
+            #[derive(serde::Deserialize)]
+            struct Body {
+                owner: String,
+                name: String,
+                origin_url: String,
+                #[serde(default)]
+                main_branch: Option<String>,
+            }
+            let body = match serde_json::from_slice::<Body>(&req.payload) {
+                Err(e) => bad_request(&e.to_string()),
+                Ok(b) => {
+                    if let Err(e) = store::keys::validate_subject_component(&b.owner)
+                        .and_then(|()| store::keys::validate_subject_component(&b.name))
+                    {
+                        bad_request(&e.to_string())
+                    } else if b.owner == store::keys::RESERVED_OWNER {
+                        bad_request(&format!("owner {:?} is reserved", b.owner))
+                    } else {
+                        match link_handle
+                            .link_project(&b.owner, &b.name, &b.origin_url, b.main_branch)
+                            .await
+                        {
+                            Ok(record) => ok_reply(&record),
+                            Err(e) => error_reply(&e),
+                        }
+                    }
+                }
+            };
+            req.respond(body).await;
+        }
+    });
+
+    // ── req.origin.{release,status,sync}.{owner}.{project} — the origin
+    // release surface (PR-based shipping for linked projects).
+    for kind in ["release", "status", "sync"] {
+        let mut sub = store.subscribe_requests(&format!("req.origin.{kind}.>")).await?;
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            while let Some(req) = sub.next().await {
+                let parts: Vec<&str> = req.subject.split('.').collect();
+                let (Some(owner), Some(project)) = (parts.get(3).copied(), parts.get(4).copied())
+                else {
+                    req.respond(br#"{"error":"malformed subject"}"#.to_vec()).await;
+                    continue;
+                };
+                let body = match kind {
+                    "release" => match handle.origin_release(owner, project).await {
+                        Ok(record) => ok_reply(&record),
+                        Err(e) => error_reply(&e),
+                    },
+                    "status" => match handle.origin_status(owner, project).await {
+                        Ok(status) => ok_reply(&status),
+                        Err(e) => error_reply(&e),
+                    },
+                    _ => match handle.origin_sync(owner, project).await {
+                        Ok(status) => ok_reply(&status),
+                        Err(e) => error_reply(&e),
+                    },
+                };
+                req.respond(body).await;
+            }
+        });
+    }
     spawn_read_handlers(store, handle, repos).await
 }
 
@@ -249,7 +320,7 @@ async fn create_project(
     }
     if let Err(e) = repos
         .seed_files(owner, name, crate::seed::CODE_TEMPLATE,
-            "chuggernaut: seed the Code starter template")
+            "chuggernaut: seed the Code starter template", false)
         .await
     {
         return error_reply(&CoreError::Vcs(e));

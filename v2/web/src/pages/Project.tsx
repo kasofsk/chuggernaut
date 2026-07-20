@@ -5,6 +5,7 @@ import { useProjectEvents } from '../useEvents'
 import { StateBadge } from '../components/StateBadge'
 import { ResolveForm } from '../components/ResolveForm'
 import { ProjectTabs } from '../components/ProjectTabs'
+import { OriginPanel } from '../components/OriginPanel'
 
 export function ProjectPage() {
   const { owner = '', project = '' } = useParams()
@@ -51,6 +52,7 @@ export function ProjectPage() {
       </header>
       <ProjectTabs owner={owner} project={project} />
       {error && <div className="error banner">{error}</div>}
+      <OriginPanel owner={owner} project={project} />
 
       {pending.length > 0 && (
         <section className="card inbox">
@@ -85,7 +87,8 @@ export function ProjectPage() {
             <button>new job</button>
           </Link>
         </div>
-        <table className="jobs">
+        <div className="table-scroll">
+          <table className="jobs">
           <thead>
             <tr>
               <th>#</th>
@@ -148,7 +151,8 @@ export function ProjectPage() {
               </tr>
             )}
           </tbody>
-        </table>
+          </table>
+        </div>
       </section>
     </div>
   )

@@ -151,6 +151,23 @@ pub enum ProjectCmd {
         #[arg(long)]
         hook_bin: Option<PathBuf>,
     },
+    /// Link an existing external repo (GitHub) as a new project: the
+    /// dispatcher fetches the origin, creates the `integration` branch, and
+    /// seeds the chuggernaut config. Requires a running dispatcher (it holds
+    /// the deploy key) and the `CHUG_ORIGIN_DEPLOY_KEY` / `CHUG_ORIGIN_PAT`
+    /// project secrets — set them first with `admin secret set`.
+    Link {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+        /// Origin git URL, e.g. `ssh://git@github.com/acme/api.git`.
+        #[arg(long)]
+        origin_url: String,
+        /// Origin default branch; autodetected from the origin when omitted.
+        #[arg(long)]
+        main_branch: Option<String>,
+    },
     List {
         #[arg(long)]
         owner: Option<String>,
@@ -358,6 +375,49 @@ async fn run_project(store: &NatsStore, cmd: ProjectCmd) -> Result<()> {
                 "created {owner}/{name} (default branch {default_branch}) at {}",
                 repos_root.join(&owner).join(format!("{name}.git")).display()
             );
+        }
+        ProjectCmd::Link { owner, name, origin_url, main_branch } => {
+            keys::validate_subject_component(&owner)?;
+            keys::validate_subject_component(&name)?;
+            // Preflight the origin credentials so the failure mode is a clear
+            // pointer at `admin secret set` instead of a dispatcher error.
+            let needs_ssh = origin_url.starts_with("ssh://") || origin_url.contains('@');
+            let is_github = origin_url.contains("github.com");
+            let secrets = store.raw_bucket(store::buckets::SECRETS).await?;
+            for (needed, secret) in
+                [(needs_ssh, "CHUG_ORIGIN_DEPLOY_KEY"), (is_github, "CHUG_ORIGIN_PAT")]
+            {
+                if needed
+                    && secrets
+                        .get_json::<String>(&format!("{owner}.{name}.{secret}"))
+                        .await?
+                        .is_none()
+                {
+                    bail!(
+                        "secret {secret} is not set for {owner}/{name} — \
+                         run: chuggernaut admin secret set --scoped {owner}/{name}.{secret}"
+                    );
+                }
+            }
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "owner": owner, "name": name, "origin_url": origin_url,
+                "main_branch": main_branch,
+            }))?;
+            let reply = store
+                .request_with_retry(
+                    &store::subjects::projects_link(),
+                    &payload,
+                    3,
+                    std::time::Duration::from_millis(300),
+                )
+                .await
+                .context("dispatcher unavailable (link requires a running dispatcher)")?;
+            let value: serde_json::Value = serde_json::from_slice(&reply.payload)?;
+            if let Some(err) = value.get("error") {
+                bail!("link failed: {err}");
+            }
+            let main = value["origin"]["main_branch"].as_str().unwrap_or("?");
+            println!("linked {owner}/{name} -> {origin_url} (origin main: {main})");
         }
         ProjectCmd::List { owner } => {
             let prefix = owner.map(|o| format!("{o}.")).unwrap_or_default();

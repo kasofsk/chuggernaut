@@ -1132,6 +1132,26 @@ For credential issuance details, see §7.3 (User SSH certs) and §7.4 (Per-job S
 
 ---
 
+### 5.3 Linked-Origin Projects
+
+A project may be **linked** to an existing externally-hosted repo (GitHub): the external host owns the default branch, chuggernaut never pushes it, and work ships as pull requests. Classic self-hosted projects are unchanged; a project is linked iff its `projects.{owner}.{project}` KV record has `origin` set.
+
+**Branch model.** The local bare repo's `HEAD` symref points at a chuggernaut-owned **`integration`** branch, so the entire §3.2/§3.3 merge machinery (job branches, squash-merge, merge queue, merge gate, SSH branch protection) operates on `integration` untouched — "default branch" *is* integration. The origin's default branch is tracked as `refs/remotes/origin/{main}` via a normal fetch refspec: not a local head, so unpushable through the SSH front. Agents keep talking only to the internal SSH front / local repo; `REPO_URL` never points at the origin.
+
+**Creation** (`req.projects.link`): init bare + `remote add origin` + single-branch fetch refspec; origin main autodetected via `ls-remote --symref` when unspecified; `integration` created at origin main; pre-receive hook installed; the config subset of the starter template (jobs/, prompts/, tasks/ — no README) seeded **skip-existing** onto integration, reaching the origin via the first release PR.
+
+**Credentials.** Project secrets `CHUG_ORIGIN_DEPLOY_KEY` (OpenSSH private key, write deploy key — git fetch/push) and `CHUG_ORIGIN_PAT` (fine-grained PAT, pull requests read/write — PR API), set via `admin secret set` before linking. The `CHUG_` name prefix is **reserved**: declaring such a secret in a job type is a release-validation error and injection skips them — origin credentials are dispatcher-only and never reach a container. Origin git ops decrypt the key to a 0600 tempfile for the duration of the command (`GIT_SSH_COMMAND`, `StrictHostKeyChecking=accept-new`) with a 60s timeout so a hung remote cannot wedge the single-writer actor.
+
+**Origin release** (`req.origin.release`, explicit trigger only): guards — linked project, no Open release, **no merge gate in flight** (a gate completing after the snapshot would land a commit the post-merge reset silently discards), integration ahead of origin main. Sequence (crash-safe): persist `release_counter`+1 → pin `refs/chug/release-{n}` at the integration tip (keeps pre-reset history reachable for held jobs' `base_ref`s) → push integration to the origin as `chug/release-{n}` → open PR `chug/release-{n}` → main (title `chug release {n}`, body lists squash subjects since the last base) → persist `ReleaseState{Open}` + hold. A crash before the final persist burns `n`; the orphan origin branch is harmless.
+
+**Hold.** While a release is Open the project's merge queue is held: jobs still eval and enqueue, nothing lands on integration (`pump_merges` returns early). This makes the post-merge hard reset lossless by construction. Holds are rebuilt from `projects.*` KV at startup, before reconcile re-enqueues recovered jobs.
+
+**Sync** (`req.origin.sync`, also run opportunistically by `origin.status`): fetch, then — PR merged (any merge method) → mark `Merged`, hard-reset `integration` onto the new origin main, clear the hold, pump; held jobs finalize against the new HEAD through the existing gate/conflict-rework paths. PR closed unmerged → mark `Closed`, clear the hold, no reset. No open release → fast-forward integration onto origin main when it has nothing unreleased (external commits flow in); otherwise leave it — divergence surfaces as PR conflicts at the next release (v1 limitation; no automated resolution). Non-GitHub origins (no PR API, e.g. `file://`) release by branch push only; origin main moving off the release base is the merge signal.
+
+**Failure surfacing.** Fetch/push/API failures inside release/sync return errors to the caller (409/422/500 envelopes) — the dispatcher never blocks job execution on origin availability; job launch reads only local refs.
+
+---
+
 ## Part 6: API Layer
 
 The API layer is a bridge, not a service:
@@ -1158,6 +1178,10 @@ req.jobs.criteria.{owner}.{project}.{seq}                    response: { ref, wr
 req.jobtypes.get.{owner}.{project}                           payload: { name }; response: { name, ref, yaml, job_type: JobType|null, errors } — one type in full (raw + parsed, defaults merged) for the library UI
 req.tags.list.{owner}.{project}                              response: string[] — available knowledge tags (`tags/*.md` stems at default HEAD; a tag's meaning lives in its repo-versioned markdown file)
 req.projects.create                                          payload: { owner, name }; creates the bare repo (+ pre-receive hook, + Code starter template seed, + job counter); 409 if it exists. Platform admins only at the API layer.
+req.projects.link                                            payload: { owner, name, origin_url, main_branch? }; linked-origin project creation (§5.3): fetch from origin, HEAD → integration, config seed (skip-existing), project record + counter. Requires CHUG_ORIGIN_* project secrets first. Platform admins only at the API layer.
+req.origin.release.{owner}.{project}                         open an origin release (§5.3): push integration → chug/release-{n} on the origin, open the PR, hold the merge queue; 409 when a release is open / a gate is in flight / nothing to release
+req.origin.status.{owner}.{project}                          response: { origin, release, release_counter, origin_main_sha, integration_sha, ahead_by, held }; opportunistically reconciles an Open release's PR state
+req.origin.sync.{owner}.{project}                            fetch the origin and reconcile (§5.3): merged PR → reset integration onto new origin main + clear hold; closed → clear hold, no reset
 req.vcs.file.{owner}.{project}                               payload: { path }; response: { path, ref, content } — one repo file at default HEAD (prompt viewer / repo browser)
 req.vcs.tree.{owner}.{project}                               response: { branch, ref, entries: [{path, type, size}] } — full recursive tree at default HEAD (repo browser)
 req.graph.get.{owner}.{project}                              response: Job[] (all jobs in project)
@@ -1236,6 +1260,12 @@ POST   /api/v1/projects/{owner}/{project}/jobs
        → 201 Created; body: Job record
 GET    /api/v1/projects/{owner}/{project}/jobs                      → 200 OK; body: Job[]
 POST   /api/v1/projects                                             body: { owner, name } → 201; platform admins only. Creates repo + hook + Code starter template + counter (§12.2); 409 if it exists.
+POST   /api/v1/projects/link                                        body: { owner, name, origin_url, main_branch? } → 201; platform admins only. Linked-origin creation (§5.3); 422 when the CHUG_ORIGIN_* secrets are missing; 409 if it exists.
+
+# Origin (linked projects, §5.3)
+GET    /api/v1/projects/{owner}/{project}/origin                    → 200 OK; body: { origin, release, release_counter, origin_main_sha, integration_sha, ahead_by, held }; 404 on classic projects. Viewer+.
+POST   /api/v1/projects/{owner}/{project}/origin/release            → 201; opens the release PR and holds the merge queue; 409 when a release is open / gate in flight / nothing to release. Project Admin.
+POST   /api/v1/projects/{owner}/{project}/origin/sync               → 200 OK; fetch + reconcile (merged PR → integration reset + hold cleared). Project Admin.
 GET    /api/v1/projects/{owner}/{project}/job-types                 → 200 OK; body: [{ name, display_name, description }] (jobs/*.yaml at default HEAD; display metadata for the type picker — a file that fails to parse still lists, stem only)
 GET    /api/v1/projects/{owner}/{project}/job-types/{name}          → 200 OK; body: { name, ref, yaml, job_type, errors } — the library view (raw + parsed, defaults merged)
 GET    /api/v1/projects/{owner}/{project}/tags                      → 200 OK; body: string[] — available knowledge tags (tags/*.md stems; drives the create-form tag picker)

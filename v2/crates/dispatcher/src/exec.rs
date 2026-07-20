@@ -811,11 +811,17 @@ impl Core {
                 env.insert(name.clone(), value);
             }
         }
+        // Reserved names (origin credentials) are rejected at release
+        // validation; skipping them here too keeps them out of containers even
+        // if a job record predates the rule.
+        let injectable = secrets_declared
+            .iter()
+            .filter(|n| !n.starts_with(crate::origin::RESERVED_SECRET_PREFIX));
         match &self.secrets {
             // §8.2: age-decrypted immediately before injection.
             Some(secrets) => {
                 use store::secrets::SecretStore;
-                for name in secrets_declared {
+                for name in injectable {
                     if let Some(value) = secrets.get(owner, project, name).await? {
                         env.insert(name.clone(), value);
                     }
@@ -824,7 +830,7 @@ impl Core {
             // Dev mode without an identity: values injected as stored.
             None => {
                 let secrets = self.store.raw_bucket(store::buckets::SECRETS).await?;
-                for name in secrets_declared {
+                for name in injectable {
                     if let Some(value) =
                         secrets.get_json::<String>(&format!("{owner}.{project}.{name}")).await?
                     {
@@ -887,6 +893,9 @@ impl Core {
             Some(secrets) => {
                 use store::secrets::SecretStore;
                 for name in secrets.list(owner, SCOPE).await? {
+                    if name.starts_with(crate::origin::RESERVED_SECRET_PREFIX) {
+                        continue;
+                    }
                     if let Some(value) = secrets.get(owner, SCOPE, &name).await? {
                         env.entry(name).or_insert(value);
                     }
@@ -899,6 +908,7 @@ impl Core {
                 for key in bucket.keys_with_prefix(&prefix).await? {
                     if let (Some(name), Some(value)) =
                         (key.strip_prefix(&prefix), bucket.get_json::<String>(&key).await?)
+                        && !name.starts_with(crate::origin::RESERVED_SECRET_PREFIX)
                     {
                         env.entry(name.to_string()).or_insert(value);
                     }

@@ -130,7 +130,8 @@ export function FileViewPage() {
       ) : (
         <section className="card">
           <h2>{crumbs(dir)}</h2>
-          <table className="jobs">
+          <div className="table-scroll">
+            <table className="jobs">
             <tbody>
               {dir && (
                 <tr>
@@ -173,7 +174,8 @@ export function FileViewPage() {
                 </tr>
               )}
             </tbody>
-          </table>
+            </table>
+          </div>
         </section>
       )}
     </div>

@@ -44,6 +44,20 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
             "/api/v1/projects",
             get(routes::projects_list).post(routes::projects_create),
         )
+        .route("/api/v1/projects/link", post(routes::projects_link))
+        // Origin (linked projects)
+        .route(
+            "/api/v1/projects/{owner}/{project}/origin",
+            get(routes::origin_get),
+        )
+        .route(
+            "/api/v1/projects/{owner}/{project}/origin/release",
+            post(routes::origin_release),
+        )
+        .route(
+            "/api/v1/projects/{owner}/{project}/origin/sync",
+            post(routes::origin_sync),
+        )
         // Jobs
         .route(
             "/api/v1/projects/{owner}/{project}/jobs",

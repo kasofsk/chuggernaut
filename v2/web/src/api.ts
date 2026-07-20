@@ -144,6 +144,26 @@ export type TaskResolution =
   | { kind: 'Fail'; structured: unknown; abort?: boolean }
   | { kind: 'Escalation'; action: 'Retry' | 'Resolve' | 'Revoke'; structured: unknown | null }
 
+/** GET .../origin — linked-origin state (404 on classic projects). */
+export interface OriginStatus {
+  origin: { url: string; main_branch: string; github_repo: string | null } | null
+  release: {
+    number: number
+    pr_number: number
+    pr_url: string
+    base_main_sha: string
+    integration_sha: string
+    status: 'open' | 'merged' | 'closed'
+  } | null
+  release_counter: number
+  origin_main_sha: string | null
+  integration_sha: string | null
+  /** commits on integration not yet on origin main — the unreleased backlog */
+  ahead_by: number
+  /** merge queue held by an open release PR */
+  held: boolean
+}
+
 export class ApiError extends Error {
   status: number
   body: unknown
@@ -175,6 +195,14 @@ export const api = {
   /** Platform admins only: bare repo + hook + Code starter template. */
   createProject: (owner: string, name: string) =>
     req<{ project: string }>('POST', '/api/v1/projects', { owner, name }),
+
+  /** Linked-origin state; throws 404 on classic projects. */
+  origin: (owner: string, project: string) =>
+    req<OriginStatus>('GET', `/api/v1/projects/${owner}/${project}/origin`),
+  originRelease: (owner: string, project: string) =>
+    req<unknown>('POST', `/api/v1/projects/${owner}/${project}/origin/release`),
+  originSync: (owner: string, project: string) =>
+    req<OriginStatus>('POST', `/api/v1/projects/${owner}/${project}/origin/sync`),
 
   jobTypes: (owner: string, project: string) =>
     req<JobTypeSummary[]>('GET', `/api/v1/projects/${owner}/${project}/job-types`),

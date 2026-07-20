@@ -9,7 +9,9 @@ pub mod subjects;
 pub mod vars;
 
 pub use artifacts::{ArtifactCrypto, ArtifactKind, ArtifactStore};
-pub use stores::{Bucket, CounterStore, JobStore, RdepsStore, StepStore, TaskStore, split_project};
+pub use stores::{
+    Bucket, CounterStore, JobStore, ProjectStore, RdepsStore, StepStore, TaskStore, split_project,
+};
 
 use async_nats::jetstream;
 use std::time::Duration;
@@ -147,6 +149,10 @@ impl NatsStore {
 
     pub async fn rdeps(&self) -> Result<RdepsStore> {
         Ok(RdepsStore(self.bucket(buckets::RDEPS).await?))
+    }
+
+    pub async fn projects(&self) -> Result<ProjectStore> {
+        Ok(ProjectStore(self.bucket(buckets::PROJECTS).await?))
     }
 
     /// Per-task blobs (transcripts, logs). `crypto` decides whether this handle

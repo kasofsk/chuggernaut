@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ApiError, api, type Evaluator, type Job, type JobTypeDetail, type JobTypeSummary } from '../api'
 import { ProjectTabs } from '../components/ProjectTabs'
+import { RichSelect } from '../components/RichSelect'
 
 /**
  * Create-job page: writing the ticket. Fetches the type library, the tag
@@ -105,10 +106,8 @@ function CreateJob({
   ) => void
 }) {
   const [type, setType] = useState(initialType)
-  const [typeQuery, setTypeQuery] = useState('')
   // Default selection once the list loads: ?type= wins, then "Feature",
-  // then the first available type. Runs only until a selection exists;
-  // searching never clears the selection, so this cannot fight the input.
+  // then the first available type. Runs only until a selection exists.
   useEffect(() => {
     if (type || !jobTypes.length) return
     const feature = jobTypes.find((t) => /feature/i.test(t.display_name) || /feature/i.test(t.name))
@@ -127,15 +126,6 @@ function CreateJob({
     api.jobType(owner, project, type).then(setTypeDetail, () => setTypeDetail(null))
   }, [owner, project, type])
 
-  const typeMatches = jobTypes.filter((t) => {
-    const q = typeQuery.trim().toLowerCase()
-    if (!q) return true
-    return (
-      t.display_name.toLowerCase().includes(q) ||
-      t.name.toLowerCase().includes(q) ||
-      t.description.toLowerCase().includes(q)
-    )
-  })
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [deps, setDeps] = useState<number[]>([])
@@ -214,37 +204,29 @@ function CreateJob({
 
       <div className="field">
         <span>Job type</span>
-        {jobTypes.length > 3 && (
-          <input
-            placeholder="filter…"
-            value={typeQuery}
-            onChange={(e) => setTypeQuery(e.target.value)}
+        <div className="type-select">
+          <RichSelect
+            value={type}
+            onChange={setType}
+            placeholder="pick a job type…"
+            options={jobTypes.map((t) => ({
+              value: t.name,
+              label: t.display_name,
+              description: t.description || undefined,
+              detail: t.display_name !== t.name ? t.name : undefined,
+            }))}
           />
-        )}
-        <div className="dep-suggestions">
-          {typeMatches.map((t) => (
-            <div className="option-row" key={t.name}>
-              <button
-                type="button"
-                className={t.name === type ? 'dep-suggestion option-on' : 'dep-suggestion'}
-                onClick={() => setType(t.name)}
-              >
-                <b>{t.display_name}</b>
-                {t.description && <span className="dim"> — {t.description}</span>}
-                {t.display_name !== t.name && <span className="dim"> · {t.name}</span>}
-              </button>
-              <a
-                className="option-peek"
-                href={`/p/${owner}/${project}/job-types/${encodeURIComponent(t.name)}`}
-                target="_blank"
-                rel="noreferrer"
-                title={`see what ${t.display_name} does (library, new tab)`}
-              >
-                ↗
-              </a>
-            </div>
-          ))}
-          {typeMatches.length === 0 && <div className="dim">no matching job types</div>}
+          {type && (
+            <a
+              className="option-peek"
+              href={`/p/${owner}/${project}/job-types/${encodeURIComponent(type)}`}
+              target="_blank"
+              rel="noreferrer"
+              title="see what this job type does (library, new tab)"
+            >
+              ↗
+            </a>
+          )}
         </div>
         {typeDetail?.job_type && (
           <div className="dim prompt-links">

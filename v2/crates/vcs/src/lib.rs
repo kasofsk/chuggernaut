@@ -31,6 +31,8 @@ pub enum VcsError {
     },
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("git {args} timed out after {seconds}s")]
+    Timeout { args: String, seconds: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, VcsError>;
@@ -95,6 +97,19 @@ pub struct LogEntry {
     pub author: String,
     pub ts: DateTime<Utc>,
 }
+
+/// Environment for origin-facing git commands (fetch, push, ls-remote).
+/// `ssh_command` becomes `GIT_SSH_COMMAND` — the dispatcher builds it around a
+/// decrypted deploy key; `None` for `file://` origins (tests, local mirrors).
+#[derive(Debug, Clone, Default)]
+pub struct OriginEnv {
+    pub ssh_command: Option<String>,
+}
+
+/// Bound on origin-facing git commands (fetch/push/ls-remote): these hit the
+/// network from inside the single-writer dispatcher task, so a hung remote
+/// must fail the operation, not wedge the actor. Local plumbing stays unbounded.
+const ORIGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Commit identity for all dispatcher-authored commits (init, squash-merges).
 const GIT_IDENTITY: [(&str, &str); 4] = [
@@ -200,12 +215,17 @@ impl RepoManager {
     /// temporary worktree. Used to seed a fresh project with the platform
     /// starter template (§12.2). Files whose path ends in `.sh` are committed
     /// executable.
+    ///
+    /// With `skip_existing`, paths already present at the branch tip are left
+    /// untouched (seeding config into a linked repo must never clobber user
+    /// files), and the commit is skipped entirely when nothing new is staged.
     pub async fn seed_files(
         &self,
         owner: &str,
         project: &str,
         files: &[(&str, &str)],
         message: &str,
+        skip_existing: bool,
     ) -> Result<()> {
         let repo = self.repo_path(owner, project);
         let branch = self.default_branch(owner, project).await?;
@@ -216,6 +236,9 @@ impl RepoManager {
         let result: Result<()> = async {
             for (path, contents) in files {
                 let dest = wt.join(path);
+                if skip_existing && dest.exists() {
+                    continue;
+                }
                 if let Some(parent) = dest.parent() {
                     tokio::fs::create_dir_all(parent).await?;
                 }
@@ -227,7 +250,10 @@ impl RepoManager {
                 }
             }
             self.run(&wt, &["add", "-A"]).await?;
-            self.run(&wt, &["commit", "-m", message]).await?;
+            let staged = self.exec(&wt, &["diff", "--cached", "--quiet"], None).await?;
+            if !staged.status.success() {
+                self.run(&wt, &["commit", "-m", message]).await?;
+            }
             Ok(())
         }
         .await;
@@ -235,6 +261,142 @@ impl RepoManager {
         // next seed. The temp dir itself is cleaned by its guard.
         let _ = self.run(&repo, &["worktree", "remove", "--force", &wt_str]).await;
         result
+    }
+
+    // ── Linked-origin projects ──────────────────────────────────────────────
+
+    /// Create a project whose canonical default branch lives on an external
+    /// origin: init a bare repo, register `origin` with a single-branch fetch
+    /// refspec, fetch, and point `HEAD` at a local `integration` branch created
+    /// from the origin's default branch. Returns the origin main branch name
+    /// (autodetected via `ls-remote --symref origin HEAD` when not given).
+    ///
+    /// The origin branch is tracked as `refs/remotes/origin/{main}` — never a
+    /// local head, so the SSH front cannot expose it and the merge machinery
+    /// (which follows `HEAD`) only ever sees `integration`.
+    pub async fn create_linked_project(
+        &self,
+        owner: &str,
+        project: &str,
+        origin_url: &str,
+        main_branch: Option<&str>,
+        env: &OriginEnv,
+    ) -> Result<String> {
+        let repo = self.repo_path(owner, project);
+        if repo.exists() {
+            return Err(VcsError::RepoExists(format!("{owner}/{project}")));
+        }
+        tokio::fs::create_dir_all(&repo).await?;
+        self.run(&repo, &["init", "--bare", "."]).await?;
+
+        let result: Result<String> = async {
+            self.run(&repo, &["remote", "add", "origin", origin_url]).await?;
+            let main = match main_branch {
+                Some(m) => m.to_string(),
+                None => self.detect_origin_head(&repo, env).await?,
+            };
+            self.run(
+                &repo,
+                &[
+                    "config",
+                    "remote.origin.fetch",
+                    &format!("+refs/heads/{main}:refs/remotes/origin/{main}"),
+                ],
+            )
+            .await?;
+            self.run(&repo, &["config", "chuggernaut.originMain", &main]).await?;
+            self.run_origin(&repo, &["fetch", "origin"], env).await?;
+            let sha = self
+                .run(&repo, &["rev-parse", "--verify", &format!("refs/remotes/origin/{main}^{{commit}}")])
+                .await?;
+            self.run(&repo, &["update-ref", "refs/heads/integration", sha.trim()]).await?;
+            self.run(&repo, &["symbolic-ref", "HEAD", "refs/heads/integration"]).await?;
+            self.ensure_upload_filter(owner, project).await?;
+            Ok(main)
+        }
+        .await;
+        if result.is_err() {
+            // A half-linked repo would block a retry on the RepoExists guard.
+            let _ = tokio::fs::remove_dir_all(&repo).await;
+        }
+        result
+    }
+
+    /// `ls-remote --symref origin HEAD` → the origin's default branch name.
+    async fn detect_origin_head(&self, repo: &Path, env: &OriginEnv) -> Result<String> {
+        let out = self.run_origin(repo, &["ls-remote", "--symref", "origin", "HEAD"], env).await?;
+        // First line: "ref: refs/heads/{main}\tHEAD"
+        out.lines()
+            .find_map(|l| {
+                l.strip_prefix("ref: ")
+                    .and_then(|r| r.split_whitespace().next())
+                    .and_then(|r| r.strip_prefix("refs/heads/"))
+            })
+            .map(str::to_string)
+            .ok_or_else(|| VcsError::Parse {
+                context: "ls-remote --symref",
+                detail: out.lines().next().unwrap_or("").to_string(),
+            })
+    }
+
+    /// The origin's default branch name, recorded at link time.
+    pub async fn origin_main_branch(&self, owner: &str, project: &str) -> Result<String> {
+        let repo = self.repo_path(owner, project);
+        Ok(self.run(&repo, &["config", "--get", "chuggernaut.originMain"]).await?.trim().to_string())
+    }
+
+    /// `remote.origin.url`, `None` when the project has no origin (classic).
+    pub async fn origin_url(&self, owner: &str, project: &str) -> Result<Option<String>> {
+        let repo = self.repo_path(owner, project);
+        let out = self.exec(&repo, &["config", "--get", "remote.origin.url"], None).await?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()))
+    }
+
+    /// Fetch the origin's default branch; returns the new
+    /// `refs/remotes/origin/{main}` commit.
+    pub async fn fetch_origin(&self, owner: &str, project: &str, env: &OriginEnv) -> Result<String> {
+        let repo = self.repo_path(owner, project);
+        self.run_origin(&repo, &["fetch", "origin"], env).await?;
+        self.origin_main_sha(owner, project).await
+    }
+
+    /// Resolve `refs/remotes/origin/{main}` as last fetched (no network).
+    pub async fn origin_main_sha(&self, owner: &str, project: &str) -> Result<String> {
+        let main = self.origin_main_branch(owner, project).await?;
+        self.resolve_ref(owner, project, &format!("refs/remotes/origin/{main}")).await
+    }
+
+    /// Push `local_ref` to the origin as `remote_ref`.
+    pub async fn push_origin(
+        &self,
+        owner: &str,
+        project: &str,
+        local_ref: &str,
+        remote_ref: &str,
+        force: bool,
+        env: &OriginEnv,
+    ) -> Result<()> {
+        let repo = self.repo_path(owner, project);
+        let refspec = format!("{local_ref}:{remote_ref}");
+        let mut args = vec!["push"];
+        if force {
+            args.push("--force");
+        }
+        args.extend(["origin", &refspec]);
+        self.run_origin(&repo, &args, env).await?;
+        Ok(())
+    }
+
+    /// Point an arbitrary fully-qualified ref (e.g. the `refs/chug/release-{n}`
+    /// history pins) at a commit. [`Self::create_branch`]/[`Self::reset_branch`]
+    /// only speak `refs/heads/`.
+    pub async fn update_ref(&self, owner: &str, project: &str, full_ref: &str, sha: &str) -> Result<()> {
+        let repo = self.repo_path(owner, project);
+        self.run(&repo, &["update-ref", full_ref, sha]).await?;
+        Ok(())
     }
 
     /// Advertise partial-clone support on the bare repo. This is the server
@@ -451,6 +613,18 @@ impl RepoManager {
         base_ref: &str,
         branch: &str,
     ) -> Result<bool> {
+        Ok(self.count_commits_beyond(owner, project, base_ref, branch).await? != 0)
+    }
+
+    /// `rev-list --count {base_ref}..{branch}` — ahead-by counts for the
+    /// origin status surface.
+    pub async fn count_commits_beyond(
+        &self,
+        owner: &str,
+        project: &str,
+        base_ref: &str,
+        branch: &str,
+    ) -> Result<u64> {
         let repo = self.repo_path(owner, project);
         let count = self
             .run(
@@ -458,7 +632,10 @@ impl RepoManager {
                 &["rev-list", "--count", &format!("{base_ref}..{branch}")],
             )
             .await?;
-        Ok(count.trim() != "0")
+        count.trim().parse().map_err(|_| VcsError::Parse {
+            context: "rev-list --count",
+            detail: count.trim().to_string(),
+        })
     }
 
     /// Build the squash commit for `job/{seq}` onto the current default head —
@@ -720,12 +897,36 @@ impl RepoManager {
         expect_success(out, &args.join(" "))
     }
 
+    /// Origin-facing command: per-call `GIT_SSH_COMMAND` and a hard timeout —
+    /// a hung remote fails the operation instead of wedging the single-writer
+    /// dispatcher (the process is killed on drop via `kill_on_drop`).
+    async fn run_origin(&self, repo: &Path, args: &[&str], env: &OriginEnv) -> Result<String> {
+        let fut = self.exec_with(repo, args, None, env.ssh_command.as_deref());
+        match tokio::time::timeout(ORIGIN_TIMEOUT, fut).await {
+            Ok(out) => expect_success(out?, &args.join(" ")),
+            Err(_) => Err(VcsError::Timeout {
+                args: args.join(" "),
+                seconds: ORIGIN_TIMEOUT.as_secs(),
+            }),
+        }
+    }
+
     async fn run_stdin(&self, repo: &Path, args: &[&str], stdin: &[u8]) -> Result<String> {
         let out = self.exec(repo, args, Some(stdin)).await?;
         expect_success(out, &args.join(" "))
     }
 
     async fn exec(&self, repo: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<Output> {
+        self.exec_with(repo, args, stdin, None).await
+    }
+
+    async fn exec_with(
+        &self,
+        repo: &Path,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+        ssh_command: Option<&str>,
+    ) -> Result<Output> {
         let mut cmd = Command::new("git");
         cmd.arg("-C").arg(repo).args(args);
         // Deterministic identity; ignore host-level git config (gpg signing,
@@ -735,6 +936,10 @@ impl RepoManager {
         for (k, v) in GIT_IDENTITY {
             cmd.env(k, v);
         }
+        if let Some(ssh) = ssh_command {
+            cmd.env("GIT_SSH_COMMAND", ssh);
+        }
+        cmd.kill_on_drop(true);
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());

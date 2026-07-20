@@ -100,6 +100,16 @@ fn member_on(identity: &Identity, owner: &str, project: &str) -> ApiResult<()> {
     )
 }
 
+/// Project-Admin gate (§7.5 config row) — origin releases ship the project.
+fn admin_on(identity: &Identity, owner: &str, project: &str) -> ApiResult<()> {
+    require(
+        identity,
+        Action::ManageProjectConfig {
+            project: format!("{owner}/{project}"),
+        },
+    )
+}
+
 /// Publish to a §6.1 subject and map the reply envelope to HTTP.
 async fn forward(
     state: &SharedState,
@@ -236,6 +246,71 @@ pub async fn projects_create(
         return Err(ApiError::new(StatusCode::FORBIDDEN, "platform admin required"));
     }
     forward(&state, &store::subjects::projects_create(), body, StatusCode::CREATED).await
+}
+
+/// Link an existing external repo as a new project (linked-origin mode).
+/// Platform admins only, like `projects_create`. Body: `{ owner, name,
+/// origin_url, main_branch? }` — requires the `CHUG_ORIGIN_*` secrets to be
+/// set on the project first.
+pub async fn projects_link(
+    State(state): State<SharedState>,
+    Auth(identity): Auth,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<Response> {
+    if !identity.platform_admin {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "platform admin required"));
+    }
+    forward(&state, &store::subjects::projects_link(), body, StatusCode::CREATED).await
+}
+
+// ── Origin (linked projects) ─────────────────────────────────────────────
+
+/// Link + release state with an opportunistic PR check (Viewer+).
+pub async fn origin_get(
+    State(state): State<SharedState>,
+    Path((owner, project)): Path<(String, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::origin_status(&owner, &project),
+        serde_json::json!({}),
+        StatusCode::OK,
+    )
+    .await
+}
+
+/// Open an origin release PR (project Admin).
+pub async fn origin_release(
+    State(state): State<SharedState>,
+    Path((owner, project)): Path<(String, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    admin_on(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::origin_release(&owner, &project),
+        serde_json::json!({}),
+        StatusCode::CREATED,
+    )
+    .await
+}
+
+/// Fetch the origin and reconcile release state (project Admin).
+pub async fn origin_sync(
+    State(state): State<SharedState>,
+    Path((owner, project)): Path<(String, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    admin_on(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::origin_sync(&owner, &project),
+        serde_json::json!({}),
+        StatusCode::OK,
+    )
+    .await
 }
 
 // ── Jobs ─────────────────────────────────────────────────────────────────

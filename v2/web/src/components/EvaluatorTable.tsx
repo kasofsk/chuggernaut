@@ -20,7 +20,8 @@ export function EvaluatorTable({
     return <div className="dim">no evaluators — evaluation auto-passes</div>
   }
   return (
-    <table className="jobs">
+    <div className="table-scroll">
+      <table className="jobs">
       <thead>
         <tr>
           <th>name</th>
@@ -64,6 +65,7 @@ export function EvaluatorTable({
           </tr>
         ))}
       </tbody>
-    </table>
+      </table>
+    </div>
   )
 }

@@ -99,6 +99,30 @@ pub fn projects_create() -> String {
     "req.projects.create".into()
 }
 
+/// Link an existing external repo as a new project (linked-origin mode):
+/// bare repo + fetch from origin + `integration` branch + hook + config seed.
+/// Owner/name ride in the payload, same as `projects_create`.
+pub fn projects_link() -> String {
+    "req.projects.link".into()
+}
+
+/// Open an origin release: push `integration` to the origin as
+/// `chug/release-{n}` and open a PR into the origin's default branch.
+pub fn origin_release(owner: &str, project: &str) -> String {
+    format!("req.origin.release.{owner}.{project}")
+}
+
+/// Origin link + current release state (+ opportunistic PR check).
+pub fn origin_status(owner: &str, project: &str) -> String {
+    format!("req.origin.status.{owner}.{project}")
+}
+
+/// Fetch the origin and reconcile: merged PR → reset `integration` onto the
+/// new origin main and clear the merge-queue hold.
+pub fn origin_sync(owner: &str, project: &str) -> String {
+    format!("req.origin.sync.{owner}.{project}")
+}
+
 /// Read one repo file at default-branch HEAD (payload: { path }) — prompt
 /// viewers and the like. Repo paths cannot ride in subjects.
 pub fn vcs_file(owner: &str, project: &str) -> String {

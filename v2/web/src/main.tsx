@@ -10,10 +10,14 @@ import { FileViewPage } from './pages/FileView'
 import { TagsPage } from './pages/Tags'
 import { PromptsPage } from './pages/Prompts'
 import { JobDetail } from './pages/JobDetail'
+import { ThemePicker, applySavedTheme } from './theme'
 import './styles.css'
+
+applySavedTheme()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
+    <ThemePicker />
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />

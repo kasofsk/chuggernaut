@@ -116,22 +116,116 @@ impl WorkClone {
     }
 }
 
+/// A local bare repo standing in for a GitHub origin (linked-origin tests):
+/// linked via its `file://` URL, mutated through clones to simulate external
+/// pushes and PR merges (merge-commit and squash variants).
+pub struct FakeOrigin {
+    _dir: TempDir,
+    pub path: PathBuf,
+}
+
+impl FakeOrigin {
+    /// Bare repo with default branch `main` and one initial commit.
+    pub async fn create() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("upstream.git");
+        tokio::fs::create_dir_all(&path).await.expect("mkdir");
+        git(&path, &["init", "--bare", "--initial-branch", "main", "."]).await;
+        let origin = Self { _dir: dir, path };
+        // Seed via a clone: an empty bare repo has no refs to clone from, so
+        // build the first commit with plumbing.
+        let empty = git_out(&origin.path, &["mktree"], Some(b"")).await;
+        let commit = git_out(
+            &origin.path,
+            &["commit-tree", empty.trim(), "-m", "upstream: initial"],
+            None,
+        )
+        .await;
+        git(&origin.path, &["update-ref", "refs/heads/main", commit.trim()]).await;
+        origin
+    }
+
+    /// `file://` URL for linking.
+    pub fn url(&self) -> String {
+        format!("file://{}", self.path.display())
+    }
+
+    pub async fn main_sha(&self) -> String {
+        git_out(&self.path, &["rev-parse", "refs/heads/main"], None)
+            .await
+            .trim()
+            .to_string()
+    }
+
+    /// Clone at `main`, commit a file, push — an external commit landing on
+    /// the origin's default branch.
+    pub async fn commit_to_main(&self, rel_path: &str, contents: &[u8], message: &str) {
+        let clone = clone_branch_from(&self.path, "main").await;
+        clone.commit_file(rel_path, contents, message).await;
+        clone.push("main").await;
+    }
+
+    /// Simulate merging a release branch into main the way GitHub does.
+    /// `squash: true` = "squash and merge" (one new commit, release history
+    /// discarded); `false` = "create a merge commit".
+    pub async fn merge_branch_to_main(&self, branch: &str, squash: bool) {
+        let clone = clone_branch_from(&self.path, "main").await;
+        if squash {
+            git(clone.path(), &["merge", "--squash", &format!("origin/{branch}")]).await;
+            git(clone.path(), &["commit", "-m", &format!("squash-merge {branch}")]).await;
+        } else {
+            git(
+                clone.path(),
+                &["merge", "--no-ff", "-m", &format!("merge {branch}"), &format!("origin/{branch}")],
+            )
+            .await;
+        }
+        clone.push("main").await;
+    }
+
+    pub async fn branch_exists(&self, branch: &str) -> bool {
+        Command::new("git")
+            .current_dir(&self.path)
+            .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
+            .output()
+            .await
+            .expect("spawn git")
+            .status
+            .success()
+    }
+}
+
 async fn git(cwd: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .current_dir(cwd)
+    git_out(cwd, args, None).await;
+}
+
+async fn git_out(cwd: &Path, args: &[&str], stdin: Option<&[u8]>) -> String {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd)
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_AUTHOR_NAME", "fake-agent")
         .env("GIT_AUTHOR_EMAIL", "agent@test.local")
         .env("GIT_COMMITTER_NAME", "fake-agent")
-        .env("GIT_COMMITTER_EMAIL", "agent@test.local")
-        .output()
-        .await
-        .expect("spawn git");
+        .env("GIT_COMMITTER_EMAIL", "agent@test.local");
+    if stdin.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn git");
+    if let Some(bytes) = stdin {
+        use tokio::io::AsyncWriteExt;
+        let mut pipe = child.stdin.take().expect("stdin piped");
+        pipe.write_all(bytes).await.expect("write stdin");
+        drop(pipe);
+    }
+    let out = child.wait_with_output().await.expect("git output");
     assert!(
         out.status.success(),
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    String::from_utf8_lossy(&out.stdout).to_string()
 }

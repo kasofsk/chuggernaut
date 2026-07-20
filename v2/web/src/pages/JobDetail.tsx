@@ -149,7 +149,8 @@ export function JobDetail() {
 
       <section className="card">
         <h2>Tasks</h2>
-        <table className="jobs">
+        <div className="table-scroll">
+          <table className="jobs">
           <thead>
             <tr>
               <th>#</th>
@@ -191,7 +192,8 @@ export function JobDetail() {
               </tr>
             )}
           </tbody>
-        </table>
+          </table>
+        </div>
       </section>
 
       <ChannelLog events={events} />

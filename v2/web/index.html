@@ -4,6 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Chuggernaut</title>
+    <script>
+      // Apply the saved theme before first paint to avoid a flash of the
+      // default look. Mirrors the storage key in src/theme.tsx.
+      try {
+        var t = localStorage.getItem('chug-theme')
+        if (t) document.documentElement.dataset.theme = t
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

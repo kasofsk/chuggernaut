@@ -20,6 +20,23 @@ pub const CODE_TEMPLATE: &[(&str, &str)] = &[
     ("tasks/ci.sh", include_str!("../templates/code/tasks/ci.sh")),
 ];
 
+/// The subset of [`CODE_TEMPLATE`] seeded into a linked-origin project: the
+/// chuggernaut config surface (job types, prompts, tasks) without the README —
+/// the existing repo already has its own identity. Seeded with skip-existing,
+/// so a repo that already carries chuggernaut config keeps its own files.
+pub const CONFIG_TEMPLATE: &[(&str, &str)] = &[
+    ("jobs/code.yaml", include_str!("../templates/code/jobs/code.yaml")),
+    (
+        "prompts/work/code.md",
+        include_str!("../templates/code/prompts/work/code.md"),
+    ),
+    (
+        "tasks/review-code.md",
+        include_str!("../templates/code/tasks/review-code.md"),
+    ),
+    ("tasks/ci.sh", include_str!("../templates/code/tasks/ci.sh")),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;

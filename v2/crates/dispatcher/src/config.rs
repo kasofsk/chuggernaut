@@ -153,6 +153,7 @@ impl DispatcherConfig {
             agent_provider_default: Some(self.agent_provider_default.clone()),
             agent_model_default: self.agent_model_default.clone(),
             nats_account_seed: self.nats_account_seed().await?,
+            hook_bin: self.hook_bin.clone(),
         })
     }
 }

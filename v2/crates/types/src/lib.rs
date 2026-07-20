@@ -8,6 +8,7 @@ pub mod ingest;
 pub mod job;
 pub mod job_type;
 pub mod knowledge;
+pub mod project;
 pub mod step;
 pub mod task;
 pub mod user;
@@ -20,6 +21,7 @@ pub use job_type::{
     Evaluator, EvaluatorType, Finalize, JobType, ProjectDefaults, ReviewSpec, WorkSpec, WorkType,
 };
 pub use knowledge::{KnowledgeObject, KnowledgeScope};
+pub use project::{OriginLink, ProjectRecord, ReleaseState, ReleaseStatus, github_repo_from_url};
 pub use step::{StepKind, StepRecord, StepStatus};
 pub use task::{
     EscalationAction, EvalResult, Task, TaskKind, TaskPhase, TaskResolution, TaskResult, TaskState,

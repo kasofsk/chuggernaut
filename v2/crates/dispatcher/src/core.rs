@@ -5,6 +5,7 @@
 //! transitions are sequential.
 
 use crate::graph::JobGraph;
+use crate::origin::OriginStatusResponse;
 use crate::queue::{QueuedJob, ReadyQueue};
 use crate::release::{self, KvNames, ValidationError};
 use crate::state::{InvalidTransition, assert_transition};
@@ -15,7 +16,9 @@ use container::ContainerBackend;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use store::{CounterStore, JobStore, NatsStore, RdepsStore, TaskStore, split_project, subjects};
+use store::{
+    CounterStore, JobStore, NatsStore, ProjectStore, RdepsStore, TaskStore, split_project, subjects,
+};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use types::{Job, JobState, TaskResolution, TokenUsage};
@@ -37,12 +40,24 @@ pub enum CoreError {
     Validation(Vec<ValidationError>),
     #[error("invalid resolution: {0}")]
     InvalidResolution(String),
+    /// Request is well-formed but clashes with current state (HTTP 409):
+    /// project already exists, release already open, gate in flight, …
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("configuration: {0}")]
     Config(String),
     #[error(transparent)]
     Backend(#[from] container::BackendError),
     #[error("core loop stopped")]
     Stopped,
+}
+
+impl CoreError {
+    /// Map an io error into `Config` with context — for the odd filesystem
+    /// touch outside the store/vcs layers (origin deploy-key tempfiles).
+    pub(crate) fn from_io(context: &'static str) -> impl FnOnce(std::io::Error) -> CoreError {
+        move |e| CoreError::Config(format!("{context}: {e}"))
+    }
 }
 
 impl From<Vec<ValidationError>> for CoreError {
@@ -168,6 +183,37 @@ pub enum Msg {
         post: ChannelPost,
         reply: Reply<()>,
     },
+    /// `req.projects.link`: create a linked-origin project (origin fetch +
+    /// `integration` HEAD + config seed). Runs in the core actor because it
+    /// needs the age identity (deploy key) and writes platform project state.
+    LinkProject {
+        owner: String,
+        name: String,
+        origin_url: String,
+        main_branch: Option<String>,
+        reply: Reply<types::ProjectRecord>,
+    },
+    /// `req.origin.release`: push `integration` as `chug/release-{n}` and open
+    /// a PR on the origin; holds the project's merge queue while it is open.
+    OriginRelease {
+        owner: String,
+        project: String,
+        reply: Reply<types::ProjectRecord>,
+    },
+    /// `req.origin.status`: link + release state with an opportunistic PR
+    /// check (a merged/closed PR is reconciled inline).
+    OriginStatus {
+        owner: String,
+        project: String,
+        reply: Reply<OriginStatusResponse>,
+    },
+    /// `req.origin.sync`: fetch the origin and reconcile — merged PR → reset
+    /// `integration` onto the new origin main and release the hold.
+    OriginSync {
+        owner: String,
+        project: String,
+        reply: Reply<OriginStatusResponse>,
+    },
     /// §3.5 scans; fired by the internal ticker, or with a reply from
     /// [`CoreHandle::trigger_scan`] (tests).
     Scan { reply: Option<Reply<()>> },
@@ -252,6 +298,34 @@ impl CoreHandle {
         self.call(|reply| Msg::Scan { reply: Some(reply) }).await
     }
 
+    pub async fn link_project(
+        &self,
+        owner: &str,
+        name: &str,
+        origin_url: &str,
+        main_branch: Option<String>,
+    ) -> Result<types::ProjectRecord> {
+        let (owner, name, origin_url) =
+            (owner.to_string(), name.to_string(), origin_url.to_string());
+        self.call(|reply| Msg::LinkProject { owner, name, origin_url, main_branch, reply })
+            .await
+    }
+
+    pub async fn origin_release(&self, owner: &str, project: &str) -> Result<types::ProjectRecord> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::OriginRelease { owner, project, reply }).await
+    }
+
+    pub async fn origin_status(&self, owner: &str, project: &str) -> Result<OriginStatusResponse> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::OriginStatus { owner, project, reply }).await
+    }
+
+    pub async fn origin_sync(&self, owner: &str, project: &str) -> Result<OriginStatusResponse> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::OriginSync { owner, project, reply }).await
+    }
+
     pub async fn resolve_task(
         &self,
         owner: &str,
@@ -304,6 +378,11 @@ pub struct CoreConfig {
     /// (§7.4). Certs are injected only when `repo_url_base` is `ssh://` —
     /// `file://` dev repos need none.
     pub ssh_ca: Option<std::path::PathBuf>,
+    /// Binary path baked into new repos' pre-receive hooks (§5.2) — the path
+    /// the binary has on the SSH host. None → this process's own executable.
+    /// Used by the core for `req.projects.link`; `spawn_api_handlers` takes
+    /// the same value for `req.projects.create`.
+    pub hook_bin: Option<std::path::PathBuf>,
 }
 
 pub struct Core {
@@ -332,6 +411,14 @@ pub struct Core {
     pub(crate) merge_queue: HashMap<String, std::collections::VecDeque<u64>>,
     /// Project slug → seq whose merge gate is currently running.
     pub(crate) gating: HashMap<String, u64>,
+    /// Platform project records (linked-origin state).
+    pub(crate) projects: ProjectStore,
+    /// PR surface for origin releases; a fake in integration tests.
+    pub(crate) pr_api: Arc<dyn crate::github::PullRequestApi>,
+    /// Project slugs whose merge queue is held by an Open origin release
+    /// (nothing lands on integration until the release PR resolves). Derived
+    /// from `projects.*` KV; rebuilt at startup.
+    pub(crate) release_holds: HashSet<String>,
     /// Set by [`spawn`]; monitors post `TaskExited` through it.
     pub(crate) self_tx: Option<mpsc::Sender<Msg>>,
 }
@@ -384,6 +471,7 @@ impl Core {
         let tasks = store.tasks().await?;
         let counters = store.counters().await?;
         let rdeps = store.rdeps().await?;
+        let projects = store.projects().await?;
 
         let channel_binary = match &config.channel_binary {
             Some(path) => Some(tokio::fs::read(path).await.map_err(|e| {
@@ -419,8 +507,21 @@ impl Core {
             active: HashMap::new(),
             merge_queue: HashMap::new(),
             gating: HashMap::new(),
+            projects,
+            pr_api: Arc::new(crate::github::GithubClient::new()),
+            release_holds: HashSet::new(),
             self_tx: None,
         };
+
+        // Restore merge-queue holds for Open origin releases before reconcile
+        // runs — recovered Evaluation jobs must re-enqueue without landing.
+        for (key, record) in core.projects.list_all().await? {
+            if matches!(&record.release, Some(r) if r.status == types::ReleaseStatus::Open)
+                && let Some((owner, project)) = key.split_once('.')
+            {
+                core.release_holds.insert(format!("{owner}/{project}"));
+            }
+        }
 
         let all: Vec<Job> = core.jobs.list_all().await?;
         for job in all {
@@ -438,6 +539,12 @@ impl Core {
             core.graphs.entry(job.project.clone()).or_default().insert(job);
         }
         Ok(core)
+    }
+
+    /// Swap the PR client — integration tests inject a scripted fake.
+    pub fn with_pr_api(mut self, pr_api: Arc<dyn crate::github::PullRequestApi>) -> Self {
+        self.pr_api = pr_api;
+        self
     }
 
     async fn run(mut self, mut rx: mpsc::Receiver<Msg>) {
@@ -472,6 +579,20 @@ impl Core {
                     self.handle_resolve_task(&owner, &project, seq, task_id, resolution, &operator)
                         .await,
                 );
+            }
+            Msg::LinkProject { owner, name, origin_url, main_branch, reply } => {
+                let _ = reply.send(
+                    self.link_project(&owner, &name, &origin_url, main_branch.as_deref()).await,
+                );
+            }
+            Msg::OriginRelease { owner, project, reply } => {
+                let _ = reply.send(self.origin_release(&owner, &project).await);
+            }
+            Msg::OriginStatus { owner, project, reply } => {
+                let _ = reply.send(self.origin_status(&owner, &project).await);
+            }
+            Msg::OriginSync { owner, project, reply } => {
+                let _ = reply.send(self.origin_sync(&owner, &project).await);
             }
             Msg::Scan { reply } => {
                 let result = self.run_scans().await;

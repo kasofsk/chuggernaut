@@ -19,7 +19,11 @@ pub struct ValidationError {
 }
 
 impl ValidationError {
-    fn new(job_seq: Option<u64>, field: impl Into<String>, message: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        job_seq: Option<u64>,
+        field: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             job_seq,
             field: field.into(),
@@ -210,7 +214,18 @@ pub async fn static_errors(
             .iter()
             .chain(job_type.eval.iter().flat_map(|e: &Evaluator| e.secrets.iter()));
         for s in declared_secrets {
-            if !kv.secrets.contains(s) {
+            // Origin credentials are dispatcher-only: reserved names never
+            // reach a container, so declaring one is a static error.
+            if s.starts_with(crate::origin::RESERVED_SECRET_PREFIX) {
+                errs.push(ValidationError::new(
+                    seq,
+                    "secrets",
+                    format!(
+                        "secret '{s}' uses the reserved '{}' prefix (dispatcher-only origin credentials)",
+                        crate::origin::RESERVED_SECRET_PREFIX
+                    ),
+                ));
+            } else if !kv.secrets.contains(s) {
                 errs.push(ValidationError::new(
                     seq,
                     "secrets",
