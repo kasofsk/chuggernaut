@@ -1,0 +1,1020 @@
+/* ── Design tokens ───────────────────────────────────────────────────────
+   Theme-independent defaults; any [data-theme='...'] block may override
+   them (e.g. a denser theme can shrink the spacing scale). */
+:root {
+  /* typography */
+  --font: system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
+  --fs-xs: 0.75rem; /* fine print: table headers, slugs */
+  --fs-sm: 0.85rem; /* secondary: hints, badges, metadata */
+  --fs-md: 0.9375rem; /* body */
+  --fs-lg: 1.1rem; /* subheads */
+  --fs-xl: 1.5rem; /* page title */
+
+  /* spacing scale */
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.5rem;
+  --sp-6: 2rem;
+
+  /* radii */
+  --r-sm: 6px; /* controls: buttons, inputs, small panels */
+  --r-md: 8px; /* inner panels */
+  --r-lg: 10px; /* cards */
+  --r-full: 999px; /* pills */
+
+  /* elevation */
+  --shadow-card:
+    0 1px 2px rgba(0, 0, 0, 0.15),
+    0 4px 16px rgba(0, 0, 0, 0.1);
+}
+
+/* ── Themes ──────────────────────────────────────────────────────────────
+   Every color in the app comes from these variables. To try a new look,
+   add a [data-theme='...'] block and register the name in src/theme.tsx.
+   --inset: recessed surfaces (inputs, code blocks); --btn-bg: buttons and
+   hover fills; --border-faint: subtle row separators. */
+:root,
+[data-theme='tokyo'] {
+  color-scheme: dark;
+  --bg: #1a1b26;
+  --card: #24283b;
+  --inset: #16161e;
+  --btn-bg: #2f334d;
+  --border: #3b4261;
+  --border-faint: #292e42;
+  --text: #c0caf5;
+  --dim: #787fa8;
+  --accent: #7aa2f7;
+  --danger: #f7768e;
+  --green: #9ece6a;
+  --orange: #e0af68;
+  --purple: #bb9af7;
+  --red: #f7768e;
+  --blue: #7aa2f7;
+  --gray: #565f89;
+}
+
+[data-theme='midnight'] {
+  color-scheme: dark;
+  --bg: #12141a;
+  --card: #1b1e27;
+  --inset: #0f1117;
+  --btn-bg: #262b38;
+  --border: #2c3040;
+  --border-faint: #222530;
+  --text: #dfe3ec;
+  --dim: #8b91a3;
+  --accent: #6ea8fe;
+  --danger: #e5695e;
+  --green: #4cba7c;
+  --orange: #e0a458;
+  --purple: #a78bfa;
+  --red: #e5695e;
+  --blue: #6ea8fe;
+  --gray: #6b7183;
+}
+
+[data-theme='gruvbox'] {
+  color-scheme: dark;
+  --bg: #282828;
+  --card: #32302f;
+  --inset: #1d2021;
+  --btn-bg: #3c3836;
+  --border: #504945;
+  --border-faint: #3c3836;
+  --text: #ebdbb2;
+  --dim: #a89984;
+  --accent: #83a598;
+  --danger: #fb4934;
+  --green: #b8bb26;
+  --orange: #fe8019;
+  --purple: #d3869b;
+  --red: #fb4934;
+  --blue: #83a598;
+  --gray: #928374;
+}
+
+[data-theme='nord'] {
+  color-scheme: dark;
+  --bg: #2e3440;
+  --card: #3b4252;
+  --inset: #272c36;
+  --btn-bg: #434c5e;
+  --border: #4c566a;
+  --border-faint: #434c5e;
+  --text: #eceff4;
+  --dim: #93a1b5;
+  --accent: #88c0d0;
+  --danger: #bf616a;
+  --green: #a3be8c;
+  --orange: #d08770;
+  --purple: #b48ead;
+  --red: #bf616a;
+  --blue: #81a1c1;
+  --gray: #6b7689;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  /* Faint accent glow at the top of the viewport; fixed so it doesn't
+     scroll away or tile. */
+  background-image: radial-gradient(
+    1400px 420px at 50% -120px,
+    color-mix(in srgb, var(--accent) 8%, transparent),
+    transparent
+  );
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+  color: var(--text);
+  font: var(--fs-md) / 1.5 var(--font);
+}
+
+code,
+pre {
+  font-family: var(--font-mono);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+a,
+button,
+input,
+select,
+.badge,
+.tag,
+.dep-suggestion,
+.option-peek,
+table.jobs tbody tr {
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    box-shadow 0.15s ease,
+    opacity 0.15s ease;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+.page {
+  margin: 0 auto;
+  padding: var(--sp-4) var(--sp-6) var(--sp-6);
+}
+
+/* ── Topbar: breadcrumb links + page title ──────────────────────────── */
+.topbar {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-4);
+}
+.topbar h1 {
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  margin: 0;
+  letter-spacing: -0.01em;
+  background: linear-gradient(90deg, var(--accent), var(--purple));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.topbar a {
+  font-size: var(--fs-md);
+}
+.who {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: var(--fs-sm);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-full);
+  padding: 0.15rem 0.7rem;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: var(--sp-4) var(--sp-5);
+  margin-bottom: var(--sp-4);
+  box-shadow: var(--shadow-card);
+}
+/* Section label: small caps, dim — content inside stands out instead. */
+.card h2 {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+}
+
+.row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--sp-2);
+}
+.row-head h2 {
+  margin: 0;
+}
+
+button {
+  background: var(--btn-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 0.35rem 0.8rem;
+  cursor: pointer;
+  font: inherit;
+}
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--btn-bg));
+}
+button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+button.danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--btn-bg));
+}
+button.link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  padding: 0;
+}
+button.link:hover {
+  text-decoration: underline;
+  background: none;
+}
+
+input,
+select,
+textarea {
+  background: var(--inset);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+}
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+input::placeholder,
+textarea::placeholder {
+  color: color-mix(in srgb, var(--dim) 70%, transparent);
+}
+
+.login-wrap {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+}
+.login {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  width: 280px;
+}
+.login h1 {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-xl);
+  text-align: center;
+  background: linear-gradient(90deg, var(--accent), var(--purple));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.error {
+  color: var(--danger);
+}
+.error.banner {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid var(--danger);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) 0.8rem;
+  margin-bottom: var(--sp-4);
+}
+
+table.jobs {
+  width: 100%;
+  border-collapse: collapse;
+}
+table.jobs th {
+  text-align: left;
+  color: var(--dim);
+  font-weight: 600;
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.3rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+table.jobs td {
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--border-faint);
+  vertical-align: top;
+}
+table.jobs tbody tr:hover {
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+table.jobs tr:last-child td {
+  border-bottom: none;
+}
+td.actions {
+  white-space: nowrap;
+}
+td.actions button {
+  margin-left: 0.3rem;
+}
+.result-cell {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.6rem;
+  border-radius: var(--r-full);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  border: 1px solid;
+  --badge: var(--gray);
+  color: var(--badge);
+  border-color: color-mix(in srgb, var(--badge) 35%, transparent);
+  background: color-mix(in srgb, var(--badge) 12%, transparent);
+}
+.badge-green {
+  --badge: var(--green);
+}
+.badge-red {
+  --badge: var(--red);
+}
+.badge-blue {
+  --badge: var(--blue);
+}
+.badge-orange {
+  --badge: var(--orange);
+}
+.badge-purple {
+  --badge: var(--purple);
+}
+.badge-gray {
+  --badge: var(--gray);
+}
+
+.dim {
+  color: var(--dim);
+}
+
+.inbox {
+  border-color: color-mix(in srgb, var(--orange) 40%, var(--border));
+  border-left: 3px solid var(--orange);
+  background: color-mix(in srgb, var(--orange) 4%, var(--card));
+}
+.inbox h2 {
+  color: var(--orange);
+}
+.inbox-task,
+.triage-task {
+  border-top: 1px solid var(--border);
+  padding: var(--sp-3) 0;
+}
+.inbox-task:first-of-type,
+.triage-task:first-of-type {
+  border-top: none;
+}
+.prompt {
+  background: var(--inset);
+  border-radius: var(--r-sm);
+  padding: 0.6rem;
+  white-space: pre-wrap;
+  margin: var(--sp-2) 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.resolve {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+}
+.resolve input {
+  flex: 1;
+}
+
+/* ── Create-job form ─────────────────────────────────────────────────────
+   Lives inside a .card, which provides the surface — no extra panel box.
+   Labels read at body size in text color; the parenthetical hint inside
+   stays dim and small. */
+.create-job {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.create-job .field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.create-job .field > span {
+  color: var(--text);
+  font-weight: 600;
+  font-size: var(--fs-md);
+}
+.create-job .field > span .dim {
+  font-weight: 400;
+  font-size: var(--fs-sm);
+}
+.create-job .field > input,
+.create-job .field > select,
+.create-job .field > textarea {
+  width: 100%;
+}
+.create-job .field > textarea {
+  resize: vertical;
+}
+.create-job .field > button.link {
+  align-self: flex-start;
+}
+.kv-row {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+}
+.kv-key {
+  flex: 2;
+}
+.kv-val {
+  flex: 1;
+  min-width: 6rem;
+}
+.kv-del {
+  padding: 0.35rem 0.6rem;
+  line-height: 1;
+  color: var(--dim);
+}
+.kv-del:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--btn-bg));
+}
+.create-actions {
+  display: flex;
+  gap: var(--sp-2);
+}
+.create-actions button[type='submit'],
+.row-head button {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+  padding: 0.45rem 1rem;
+}
+.create-actions button[type='submit']:hover:not(:disabled),
+.row-head button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 85%, var(--text));
+  border-color: color-mix(in srgb, var(--accent) 85%, var(--text));
+}
+
+.meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.2rem var(--sp-4);
+  margin: 0;
+}
+.meta dt {
+  color: var(--dim);
+}
+.meta dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+/* Wrapping list of names (secret / credential names — no values). */
+.name-list {
+  list-style: none;
+  margin: var(--sp-2) 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.name-list li {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1rem 0.45rem;
+}
+
+.project-list {
+  list-style: none;
+  margin: 0 0 var(--sp-3);
+  padding: 0;
+}
+.project-list li {
+  padding: 0.2rem 0;
+}
+
+.diff {
+  background: var(--inset);
+  border-radius: var(--r-sm);
+  padding: 0.6rem;
+  overflow-x: auto;
+  font-size: var(--fs-xs);
+  margin: 0;
+}
+.diff-add {
+  background: color-mix(in srgb, var(--green) 15%, transparent);
+  color: color-mix(in srgb, var(--green) 60%, var(--text));
+}
+.diff-del {
+  background: color-mix(in srgb, var(--red) 15%, transparent);
+  color: color-mix(in srgb, var(--red) 60%, var(--text));
+}
+.diff-hunk {
+  color: var(--accent);
+}
+.diff-file {
+  color: var(--dim);
+}
+
+.events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 300px;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.events li {
+  padding: 0.15rem 0;
+}
+
+/* Artifacts: transcripts and container logs (§4.2). */
+.linklike {
+  background: none;
+  border: none;
+  padding: 0;
+  margin-right: var(--sp-2);
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+.artifact-viewer {
+  margin-top: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.artifact-head {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: center;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+.artifact-head strong {
+  margin-right: auto;
+}
+/* Transcripts run to megabytes: bound the viewport and let it scroll rather
+   than growing the page. Both axes — JSONL lines are single long lines. */
+.artifact-body {
+  margin: 0;
+  padding: 0.6rem;
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre;
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+
+/* Channel: the agent's narrative, from the event stream. */
+.channel-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.channel-log li {
+  padding: 0.2rem 0;
+  border-bottom: 1px solid var(--border-faint);
+}
+.channel-log .pct {
+  font-variant-numeric: tabular-nums;
+}
+
+.tabs {
+  margin: 0 0 var(--sp-4);
+  display: flex;
+  gap: var(--sp-1);
+  border-bottom: 1px solid var(--border);
+  /* On narrow screens the tab set is wider than the viewport; scroll it
+     horizontally rather than pushing the whole page sideways. Scrollbar is
+     hidden — the active-tab underline signals there's more to swipe to. */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+.tabs a {
+  padding: 0.45rem 0.9rem;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  color: inherit;
+  text-decoration: none;
+  opacity: 0.7;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.tabs a:hover {
+  opacity: 1;
+  text-decoration: none;
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+.tabs a.active {
+  opacity: 1;
+  font-weight: 600;
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.subhead {
+  margin: var(--sp-4) 0 var(--sp-2);
+  font-size: var(--fs-lg);
+}
+.yaml {
+  margin-top: var(--sp-3);
+}
+.yaml summary {
+  cursor: pointer;
+}
+
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.35rem 0;
+}
+.tag {
+  padding: 0.15rem 0.6rem;
+  border-radius: var(--r-full);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  opacity: 0.75;
+}
+.tag:hover {
+  opacity: 1;
+}
+.tag-on {
+  opacity: 1;
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.dep-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 0.3rem;
+  background: var(--inset);
+}
+.dep-suggestion {
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0.3rem 0.5rem;
+  border-radius: var(--r-sm);
+}
+.dep-suggestion:hover {
+  background: var(--btn-bg);
+}
+
+.option-on {
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+/* ── Responsive (mobile) ─────────────────────────────────────────────────
+   Wide content (tables, diffs) scrolls inside its card rather than the
+   page; controls wrap instead of overflowing; inputs stay ≥16px on small
+   screens so iOS doesn't zoom on focus. */
+.table-scroll {
+  overflow-x: auto;
+}
+
+@media (max-width: 640px) {
+  .page {
+    padding: 0.6rem;
+  }
+  .card {
+    padding: var(--sp-4);
+  }
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: 0.15rem;
+  }
+  .topbar h1 {
+    font-size: var(--fs-lg);
+  }
+  input,
+  select,
+  textarea {
+    font-size: 16px; /* prevent iOS focus zoom */
+  }
+  table.jobs {
+    font-size: 13px;
+  }
+  table.jobs th,
+  table.jobs td {
+    padding: 0.3rem 0.4rem;
+  }
+  .result-cell {
+    max-width: 140px;
+  }
+  /* evaluator rows and resolve controls stack instead of overflowing */
+  .kv-row {
+    flex-wrap: wrap;
+  }
+  .kv-row .kv-key,
+  .kv-row .kv-val {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+  .resolve {
+    flex-wrap: wrap;
+  }
+  .resolve input {
+    flex: 1 1 100%;
+  }
+  .meta {
+    gap: 0.15rem 0.6rem;
+  }
+  .meta dd {
+    font-size: var(--fs-xs);
+  }
+  .create-actions button[type='submit'] {
+    width: 100%;
+  }
+  td.actions button {
+    margin: 0.15rem 0.3rem 0.15rem 0;
+    display: inline-block;
+  }
+  /* Section headers (title + action buttons) stack instead of colliding when
+     the title or button labels are long — Origin, Tags, Library, Prompts. */
+  .row-head {
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+  }
+  .row-head h2 {
+    flex: 1 1 100%;
+  }
+  .origin .actions,
+  .create-actions {
+    flex-wrap: wrap;
+  }
+  /* Origin's "held for release" badge sits below the title rather than
+     stretching the header off-screen. */
+  .origin .badge.held {
+    margin-left: 0;
+  }
+  /* Artifact toolbar (name + open/close/raw links) wraps rather than
+     overflowing the viewer card. */
+  .artifact-head {
+    flex-wrap: wrap;
+    row-gap: 0.2rem;
+  }
+}
+
+.type-title {
+  margin: 0;
+}
+.type-slug {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.option-row {
+  display: flex;
+  align-items: stretch;
+  gap: var(--sp-1);
+}
+.option-row .dep-suggestion {
+  flex: 1;
+}
+
+/* Job-type picker: dropdown + library peek link side by side. */
+.type-select {
+  display: flex;
+  align-items: stretch;
+  gap: var(--sp-1);
+}
+
+/* ── RichSelect: a select whose menu rows carry a description ─────────── */
+.rich-select {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.rich-select-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  text-align: left;
+  background: var(--inset);
+  padding: 0.4rem 0.6rem;
+}
+.rich-select-trigger:hover:not(:disabled) {
+  background: var(--inset);
+  border-color: var(--accent);
+}
+.rich-select-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+}
+.rich-select-caret {
+  color: var(--dim);
+  font-size: var(--fs-xs);
+}
+.rich-select-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-card);
+  padding: var(--sp-1);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.rich-option {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  padding: 0.4rem 0.6rem;
+}
+.rich-option:hover:not(:disabled),
+.rich-option-hi {
+  background: var(--btn-bg);
+  border-color: transparent;
+}
+.rich-option-selected,
+.rich-option-selected.rich-option-hi {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.rich-option-title {
+  font-weight: 600;
+}
+.rich-option-desc {
+  font-size: var(--fs-sm);
+  font-weight: 400;
+}
+.rich-option-empty {
+  padding: 0.4rem 0.6rem;
+}
+.option-peek {
+  display: flex;
+  align-items: center;
+  padding: 0 0.6rem;
+  border-radius: var(--r-sm);
+  text-decoration: none;
+  color: var(--dim);
+}
+.option-peek:hover {
+  background: var(--btn-bg);
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.yaml-full {
+  max-height: none;
+}
+
+.prompt-links {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: var(--fs-sm);
+  margin-top: 0.35rem;
+}
+
+.theme-picker {
+  position: fixed;
+  bottom: var(--sp-3);
+  right: var(--sp-3);
+  z-index: 10;
+}
+.theme-picker select {
+  font-size: var(--fs-sm);
+  padding: 0.25rem 0.4rem;
+  color: var(--dim);
+  opacity: 0.7;
+}
+.theme-picker select:hover,
+.theme-picker select:focus {
+  opacity: 1;
+  color: var(--text);
+}
+
+/* YamlView tokens */
+.y-comment {
+  color: var(--dim);
+  font-style: italic;
+}
+.y-key {
+  color: var(--accent);
+}
+.y-dash {
+  color: var(--purple);
+}
+.y-str {
+  color: var(--green);
+}
+.y-lit {
+  color: var(--orange);
+}
+
+/* ── Origin panel (linked projects) ─────────────────────────────────────── */
+.origin .badge.held {
+  --badge: var(--orange);
+  margin-left: 0.6rem;
+  vertical-align: middle;
+}
+.origin .actions {
+  display: flex;
+  gap: 0.5rem;
+}
+.origin-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.35rem 1rem;
+  margin: 0.5rem 0 0;
+}
+.origin-facts dt {
+  color: var(--fg-dim, #888);
+  font-size: var(--fs-sm);
+  align-self: center;
+}
+.origin-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}

@@ -1,11 +1,19 @@
 target/
 .env
 .envrc
+.DS_Store
 
-# Terraform
-infra/terraform/.terraform/
-infra/terraform/*.tfstate
-infra/terraform/*.tfstate.backup
-infra/terraform/terraform.tfvars
-infra/terraform/.terraform.lock.hcl
-infra/terraform/.tokens/
+# web
+web/node_modules/
+web/dist/
+
+# prod deploy — local secrets, rendered artifacts, deploy marker
+deploy/prod/chuggernaut.env
+deploy/prod/out/
+deploy/prod/rclone.conf
+deploy/prod/*.local
+.deployed-sha
+
+# infra/ — orphaned terraform experiment with LIVE plaintext secrets
+# (terraform.tfvars, .tokens/*). Never commit.
+infra/

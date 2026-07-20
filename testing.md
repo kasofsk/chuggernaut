@@ -1,0 +1,47 @@
+# Chuggernaut v2 — Testing Strategy
+
+Normal tests plus fixture-driven end-to-end runs. Three tiers, in increasing cost; CI runs the first two on every PR, the third nightly and on demand.
+
+## Tier 1: Unit
+
+Pure-logic tests, no I/O, colocated with the code:
+
+- `types` — job type YAML parsing and the §1.1 field-rules matrices (table-driven: every field × work/eval subtype combination), task resolution `kind` validity (§1.2), serde round-trips for every wire type
+- `dispatcher::state` — the §2.1 transition table, table-driven: every (state, trigger, guard) row asserts the resulting state and effects; invalid transitions assert rejection. The rework-budget boundary (`N ≤ rework_budget`), retry exhaustion, one-shot deadline, and pre-Work escalation rules each get explicit cases
+- `store` key encoding — base64url round-trips for emails and KO subject/predicate including `.`/`/`-containing values; var/secret name validation
+- `agent` prompt assembly — rework context block formatting, KO dedup with narrower-scope-wins
+- `auth` — permission rules table (§7.5), SSH principal formatting, JWT claim round-trips
+
+## Tier 2: Integration (per crate, real dependencies, fake peers)
+
+- `store` against a **real NATS server** (testcontainers or a spawned `nats-server` binary — `test-utils` provides the harness): bucket creation, watch semantics, stream replay-from-sequence, request-reply retry
+- `vcs` against **temp bare repos on disk**: branch lifecycle, squash-merge (clean, no-op, conflict), conflict-context builder, diff-by-job-state including the Done-state `git log --grep` recovery
+- `container` against the **local Docker socket** (skipped when unavailable): launch/wait/kill/inspect/copy_file, bootstrap wrapper, resource limits
+- `dispatcher` with **real NATS + fake `ContainerBackend` + fake `AgentProvider`** (`test-utils`): full lifecycle runs entirely in-process — seed jobs, drive Ready→Work→Evaluation→Done, retries, rework, escalation, revoke cascades, restart reconciliation (kill and restart the dispatcher task mid-run, assert §3.6 behavior), factory batching/backpressure with synthetic ingest events
+- `api` with **real NATS + a stub responder**: route auth matrix, SSE replay via `Last-Event-ID`, secret encryption on write, ingest token validation
+
+The fake backend/provider are deterministic and scriptable per test ("container exits 0 after committing file X", "agent calls submit_eval with pass=false"). This tier is where most behavioral coverage lives — it is fast enough for every PR.
+
+## Tier 3: End-to-end (fixtures)
+
+Full stack — NATS, dispatcher, API, real containers — driven from the `fixtures/` projects. The flow mirrors real usage: start from the issues/features defined in the fixture, seed the graph, run to completion, assert outcomes.
+
+**Fixtures:**
+
+- `fixtures/sample.json` — minimal 4-job graph; the smoke test
+- `fixtures/studybuddy/` — realistic 26-job, 5-phase Flutter project with full ticket bodies and dependencies; the load-bearing e2e fixture
+
+The v1 fixture format (`title`/`body`/`deps`/`priority`/`capabilities`) predates v2 job types. A v2 seed step maps each fixture entry to a job instance: ticket body → work prompt file committed to the project repo, `deps` → `inputs`, `capabilities` → job type selection. The seed tool lives in `cli` (`chuggernaut seed <project> <fixture>`), so e2e tests exercise the same path users do.
+
+**Two agent modes:**
+
+1. **Scripted agent** (default, hermetic, runs nightly): the work "agent" is a deterministic image that reads its prompt and makes predictable commits (e.g. writes a file named after the job). Asserts the *platform*: dependency ordering, branch/merge behavior (including forced merge-conflict scenarios via overlapping file edits), eval fan-out with command evaluators, escalation and task-inbox flows via the API, factory runs end-to-end (POST synthetic Sentry-style events to `/ingest/{source}`, assert triage job → created jobs → provenance and release policy).
+2. **Real agent smoke** (manual/tagged, costs tokens): `sample.json` with real Claude against a scratch project — asserts provider integration, MCP tool wiring, and prompt delivery, not outcomes. Gated behind an env var with a hard token budget.
+
+**Assertions** run against the public surfaces only — the HTTP API and git history (final graph state, one squash-merge per non-noop job with the §3.2 commit format, event stream contents) — never against KV internals, so e2e tests survive internal refactors.
+
+## Conventions
+
+- `test-utils` owns: NATS harness, temp-repo builder, fake backend/provider, fixture seeding, and an `e2e!` guard macro that skips when Docker/NATS are unavailable
+- Every bug fix lands with a regression test at the lowest tier that can express it
+- Coverage is tracked per crate (v1 discipline carries over); `dispatcher::state` and `release` validation are held to ~100% branch coverage — they are the correctness core

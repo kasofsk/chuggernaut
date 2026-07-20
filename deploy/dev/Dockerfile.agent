@@ -1,0 +1,20 @@
+# Dev agent image (the job type's `image:`): full toolchain + the claude CLI.
+# The dispatcher injects the prompt, channel MCP binary, and SSH credential;
+# everything else must already be here (spec §4.3 — the image provides the
+# development environment).
+FROM node:22-bookworm
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git openssh-client ripgrep jq ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @anthropic-ai/claude-code
+
+# Headless agents run as root inside a disposable container; IS_SANDBOX lets
+# `--dangerously-skip-permissions` through the CLI's root check.
+ENV IS_SANDBOX=1
+
+# The clone happens as root at /workspace; commits need an identity.
+RUN git config --system user.name "Chuggernaut Agent" \
+ && git config --system user.email "agent@chuggernaut.local" \
+ && git config --system --add safe.directory '*'

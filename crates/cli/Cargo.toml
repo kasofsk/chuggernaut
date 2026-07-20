@@ -1,25 +1,24 @@
 [package]
-name = "chuggernaut-cli"
+name = "cli"
 version.workspace = true
 edition.workspace = true
-
-[[bin]]
-name = "chuggernaut"
-path = "src/main.rs"
+license.workspace = true
 
 [dependencies]
-chuggernaut-types = { workspace = true }
-chuggernaut-nats = { workspace = true }
-async-nats.workspace = true
-clap = { workspace = true }
-chrono = { workspace = true }
-reqwest = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+types = { workspace = true, features = ["schema"] }
+schemars.workspace = true
+serde_yaml.workspace = true
+store.workspace = true
+auth.workspace = true
+nkeys.workspace = true
+vcs.workspace = true
 anyhow.workspace = true
-bytes.workspace = true
-uuid = { workspace = true, features = ["v4"] }
-futures.workspace = true
+base64.workspace = true
+chrono.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+test-utils.workspace = true
+tempfile.workspace = true

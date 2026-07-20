@@ -1,0 +1,36 @@
+# API service: the HTTP↔NATS bridge that also serves the web SPA. Unlike the
+# dispatcher it needs no Docker socket and no repos filesystem — only NATS and a
+# few mounted keys — so it containerizes cleanly. The web UI is built and baked
+# in here, so the running image is self-contained (no host UI_DIST). Build
+# context is the workspace root.
+
+# 1. Build the web SPA → /web/dist (served by the api from UI_DIST).
+FROM node:22-bookworm AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+# 2. Compile the chuggernaut binary (only the `api` subcommand is used).
+FROM rust:1-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends cmake clang \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release -p chuggernaut \
+ && cp target/release/chuggernaut /chuggernaut
+
+# 3. Slim runtime: binary + baked-in web assets. Keys are mounted read-only at
+#    /keys by compose; NATS_URL/BIND_ADDR come from the environment.
+FROM debian:bookworm-slim AS api
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /chuggernaut /usr/local/bin/chuggernaut
+COPY --from=web /web/dist /srv/web
+ENV UI_DIST=/srv/web KEYS_DIR=/keys BIND_ADDR=0.0.0.0:8080
+EXPOSE 8080
+ENTRYPOINT ["chuggernaut", "api"]

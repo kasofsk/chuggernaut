@@ -1,0 +1,22 @@
+# Chuggernaut SSH front (§5.2). Certificates signed by the platform CA are
+# the only way in; each cert's forced command is `chuggernaut ssh-shell ...`.
+Port 22
+HostKey /etc/ssh/hostkeys/ssh_host_ed25519_key
+
+# Every chuggernaut cert carries the login principal `git` alongside its
+# semantic principal (SSH_LOGIN_PRINCIPAL, §5.2).
+TrustedUserCAKeys /etc/chuggernaut/ssh_ca.pub
+AuthorizedPrincipalsFile /etc/ssh/principals/%u
+AllowUsers git
+
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+UsePAM no
+LogLevel VERBOSE
+
+# Git protocol v2. Without this, upload-pack falls back to v0: ref
+# advertisement is unfiltered, and v0 refuses a partial clone's promisor
+# fetch for unadvertised blobs, so `--filter` clones check out empty.
+# ssh-shell execs the git service, so the value is inherited on its own.
+AcceptEnv GIT_PROTOCOL

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Rendered by install-launchd.sh: @REPO@ -> checkout, @HOME@ -> $HOME.
+     Promotes the newest hourly object to monthly/ on the 1st (server-side copy). -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.chuggernaut.backup-monthly</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>@REPO@/deploy/prod/backup-r2.sh</string>
+    <string>promote</string>
+    <string>monthly</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Day</key><integer>1</integer><key>Hour</key><integer>3</integer><key>Minute</key><integer>40</integer></dict>
+  <key>WorkingDirectory</key><string>@REPO@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>@HOME@</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:@HOME@/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key><string>@HOME@/Library/Logs/chuggernaut/backup.log</string>
+  <key>StandardErrorPath</key><string>@HOME@/Library/Logs/chuggernaut/backup.log</string>
+</dict>
+</plist>

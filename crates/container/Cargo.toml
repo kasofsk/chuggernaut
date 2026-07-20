@@ -1,0 +1,16 @@
+[package]
+name = "container"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bollard = "0.19"
+futures.workspace = true
+serde.workspace = true
+tar = "0.4"
+thiserror.workspace = true
+tokio.workspace = true
+
+# Backend impls will add: bollard (Docker), kube + k8s-openapi (k3s)

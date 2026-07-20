@@ -1,0 +1,24 @@
+[package]
+name = "chuggernaut"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "chuggernaut"
+path = "src/main.rs"
+
+[dependencies]
+dispatcher.workspace = true
+api.workspace = true
+webhooks.workspace = true
+cli.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+test-utils.workspace = true
+tempfile.workspace = true
+base64.workspace = true

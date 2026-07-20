@@ -1,0 +1,67 @@
+# Prod stack: operator-mode NATS, the SSH front, and the api (HTTP↔NATS bridge +
+# web UI), pointed at the external data dir (${KEYS_DIR}/${REPOS_ROOT}) with a
+# fixed project name so the network is predictable (chuggernaut_default). Only
+# the DISPATCHER runs on the host under launchd (it needs the Docker socket and
+# the repos filesystem, see README); it launches agent containers as siblings
+# and reaches these services via host.docker.internal.
+#
+# All ${VARS} are substituted from the environment — boot.sh sources
+# deploy/prod/chuggernaut.env (set -a) before invoking compose.
+name: chuggernaut
+
+services:
+  nats:
+    image: nats:2-alpine
+    restart: unless-stopped
+    command: ["-c", "/keys/nats-resolver.conf", "-js", "-sd", "/data"]
+    ports:
+      - "4222:4222"
+    volumes:
+      - ${KEYS_DIR}:/keys:ro
+      - nats-data:/data
+
+  ssh:
+    build:
+      context: ../..
+      dockerfile: deploy/dev/Dockerfile.ssh
+      args:
+        # Match the host uid that owns the bind-mounted bare repos so the
+        # container's git user can write them (Colima maps host uid through).
+        GIT_UID: ${GIT_UID:-501}
+    image: chuggernaut/ssh:${CHUG_IMAGE_TAG:-prod}
+    restart: unless-stopped
+    ports:
+      - "2222:22"
+    volumes:
+      - ${REPOS_ROOT}:/data/repos
+      - ${KEYS_DIR}/ssh_ca.pub:/etc/chuggernaut/ssh_ca.pub:ro
+      - ssh-hostkeys:/etc/ssh/hostkeys
+
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/prod/Dockerfile.api
+    image: chuggernaut/api:${CHUG_IMAGE_TAG:-prod}
+    restart: unless-stopped
+    depends_on:
+      - nats
+    environment:
+      NATS_URL: nats://nats:4222
+      KEYS_DIR: /keys
+      BIND_ADDR: 0.0.0.0:8080
+      SESSION_TTL: ${SESSION_TTL:-24h}
+    # Loopback only — cloudflared fronts it (see README §5). Use 0.0.0.0 for LAN.
+    ports:
+      - "127.0.0.1:8080:8080"
+    # Mount ONLY the four files the api reads (crates/api/src/run.rs), read-only —
+    # not the whole keys dir. dispatcher.creds = NATS auth; jwt_* = session
+    # tokens; age_artifacts.key = transcript/log decryption for display.
+    volumes:
+      - ${KEYS_DIR}/dispatcher.creds:/keys/dispatcher.creds:ro
+      - ${KEYS_DIR}/jwt_private.pem:/keys/jwt_private.pem:ro
+      - ${KEYS_DIR}/jwt_public.pem:/keys/jwt_public.pem:ro
+      - ${KEYS_DIR}/age_artifacts.key:/keys/age_artifacts.key:ro
+
+volumes:
+  nats-data:
+  ssh-hostkeys:

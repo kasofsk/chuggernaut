@@ -1,0 +1,43 @@
+# SSH front (§5.2) for dev: sshd + the linux chuggernaut binary (forced
+# command `ssh-shell` + pre-receive hook `ssh-authz`). Also the source of the
+# linux chuggernaut-channel binary (`--target artifacts`) injected into agent
+# containers — both are compiled here so the host never needs a linux
+# toolchain. Build context is v2/ (the workspace root).
+
+FROM rust:1-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends cmake clang \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+# Cache mounts keep the registry and target out of layers; artifacts are
+# copied to / so later stages can reach them.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release -p chuggernaut -p chuggernaut-channel \
+ && cp target/release/chuggernaut target/release/chuggernaut-channel /
+
+# `docker build --target artifacts --output type=local,dest=out` extracts the
+# channel binary for the dispatcher's CHANNEL_BINARY.
+FROM scratch AS artifacts
+COPY --from=build /chuggernaut-channel /
+
+FROM debian:bookworm-slim AS ssh
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server git \
+ && rm -rf /var/lib/apt/lists/*
+
+# Match the host owner of the bind-mounted repos volume so git can write.
+ARG GIT_UID=501
+# `-p '*'`: no usable password but NOT locked — sshd (UsePAM no) rejects
+# locked accounts even for key auth.
+RUN useradd -m -u ${GIT_UID} -s /bin/sh -p '*' git
+
+COPY --from=build /chuggernaut /usr/local/bin/chuggernaut
+COPY deploy/dev/sshd_config /etc/ssh/sshd_config
+COPY deploy/dev/entrypoint-ssh.sh /entrypoint.sh
+RUN mkdir -p /etc/ssh/principals /run/sshd \
+ && echo git > /etc/ssh/principals/git \
+ && chmod +x /entrypoint.sh
+
+EXPOSE 22
+ENTRYPOINT ["/entrypoint.sh"]

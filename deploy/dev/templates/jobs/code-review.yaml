@@ -1,0 +1,16 @@
+# Generic standalone review job. The work product is the review itself, not a
+# code change, so wrap-up is `finalize: none`: eval-pass goes straight to
+# Done, nothing merges, and the job's output is the structured result the
+# agent submits (verdict + findings), plus the archived transcript.
+name: code-review
+display_name: Code Review
+description: Standalone review of the repository; the report is the deliverable — nothing merges.
+image: chuggernaut/agent:dev
+wrap_up:
+  type: none
+work:
+  type: agent
+  prompt: prompts/work/code-review.md
+resources:
+  task_timeout: 20m
+work_retries: 1

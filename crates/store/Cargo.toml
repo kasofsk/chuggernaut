@@ -1,0 +1,22 @@
+[package]
+name = "store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+types.workspace = true
+async-nats.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+age.workspace = true
+flate2.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+test-utils.workspace = true
