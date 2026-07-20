@@ -374,14 +374,7 @@ async fn spawn_read_handlers(
                         }
                     }
                 },
-                ("get", Some(seq)) => match jobs_store.jobs().await {
-                    Ok(jobs) => match jobs.get(owner, project, seq).await {
-                        Ok(Some(job)) => ok_reply(&job),
-                        Ok(None) => NOT_FOUND.to_vec(),
-                        Err(e) => error_reply(&e.into()),
-                    },
-                    Err(e) => error_reply(&e.into()),
-                },
+                ("get", Some(seq)) => fetch_job(&jobs_store, owner, project, seq).await,
                 ("list", None) => match jobs_store.jobs().await {
                     Ok(jobs) => match jobs.list(owner, project).await {
                         Ok(list) => ok_reply(&list),
@@ -706,14 +699,49 @@ async fn job_criteria(
 }
 
 async fn fetch_job(store: &NatsStore, owner: &str, project: &str, seq: u64) -> Vec<u8> {
-    match store.jobs().await {
-        Ok(jobs) => match jobs.get(owner, project, seq).await {
-            Ok(Some(job)) => ok_reply(&job),
-            Ok(None) => NOT_FOUND.to_vec(),
-            Err(e) => error_reply(&e.into()),
-        },
-        Err(e) => error_reply(&e.into()),
+    let jobs = match store.jobs().await {
+        Ok(j) => j,
+        Err(e) => return error_reply(&e.into()),
+    };
+    let job = match jobs.get(owner, project, seq).await {
+        Ok(Some(job)) => job,
+        Ok(None) => return NOT_FOUND.to_vec(),
+        Err(e) => return error_reply(&e.into()),
+    };
+    // Task-log read is best-effort: the job still serializes if it fails.
+    let tasks = match store.tasks().await {
+        Ok(t) => t.list_for_job(owner, project, seq).await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    job_reply_with_awaiting(&job, &tasks)
+}
+
+/// Serialize a job with the derived `awaiting_human` field (fix #3): the first
+/// Pending Human task in the log, if any, with its kind inferred from the job
+/// state. Makes "is a human being asked to do something?" answerable from the
+/// job payload — a Pending human task can sit in Work (human work), Evaluation
+/// (human evaluator), or an escalation state (Escalated/Stalled). Derived on
+/// read, never stored, like the retry/rework counts (§1.1).
+fn job_reply_with_awaiting(job: &types::Job, tasks: &[types::Task]) -> Vec<u8> {
+    use types::JobState;
+    let awaiting = tasks
+        .iter()
+        .find(|t| {
+            t.state == types::TaskState::Pending && matches!(t.kind, types::TaskKind::Human { .. })
+        })
+        .map(|t| {
+            let kind = match job.state {
+                JobState::Work => "work",
+                JobState::Evaluation => "eval",
+                _ => "escalation", // Escalated | Stalled
+            };
+            serde_json::json!({ "task_id": t.id, "kind": kind })
+        });
+    let mut value = serde_json::to_value(job).unwrap_or_else(|_| serde_json::json!({}));
+    if let serde_json::Value::Object(map) = &mut value {
+        map.insert("awaiting_human".into(), awaiting.unwrap_or(serde_json::Value::Null));
     }
+    serde_json::to_vec(&value).unwrap_or_else(|_| br#"{"error":{"status":500}}"#.to_vec())
 }
 
 /// One job type in full for the library UI: raw YAML as authored, plus the
@@ -874,5 +902,83 @@ async fn list_pending(store: &NatsStore, owner: &str, project: &str) -> Vec<u8> 
             Err(e) => error_reply(&e.into()),
         },
         Err(e) => error_reply(&e.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::job_reply_with_awaiting;
+    use chrono::Utc;
+    use types::{Job, JobState, Task, TaskKind, TaskPhase, TaskState};
+
+    fn job(state: JobState) -> Job {
+        Job {
+            id: 1,
+            project: "acme/api".into(),
+            r#type: "t".into(),
+            title: String::new(),
+            description: String::new(),
+            deps: vec![],
+            state,
+            branch: "job/1".into(),
+            base_ref: None,
+            knowledge_tags: vec![],
+            eval: vec![],
+            factory: None,
+            created_at: Utc::now(),
+            ready_at: None,
+        }
+    }
+
+    fn human_task(id: u64, phase: TaskPhase, state: TaskState) -> Task {
+        Task {
+            id,
+            job_seq: 1,
+            project: "acme/api".into(),
+            phase,
+            cycle: 1,
+            kind: TaskKind::Human { prompt: "do it".into() },
+            state,
+            attempt: 1,
+            evaluator: None,
+            container_id: None,
+            session_id: None,
+            result: None,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    fn awaiting(job: &Job, tasks: &[Task]) -> serde_json::Value {
+        let bytes = job_reply_with_awaiting(job, tasks);
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["awaiting_human"].clone()
+    }
+
+    #[test]
+    fn awaiting_human_kind_follows_state() {
+        // Post-work escalation: kind escalation, carrying the task id.
+        let v = awaiting(&job(JobState::Escalated), &[human_task(3, TaskPhase::Work, TaskState::Pending)]);
+        assert_eq!(v["task_id"], 3);
+        assert_eq!(v["kind"], "escalation");
+        // Pre-work escalation (Stalled) is escalation too.
+        let v = awaiting(&job(JobState::Stalled), &[human_task(3, TaskPhase::Work, TaskState::Pending)]);
+        assert_eq!(v["kind"], "escalation");
+        // Human work task in the Work phase.
+        let v = awaiting(&job(JobState::Work), &[human_task(1, TaskPhase::Work, TaskState::Pending)]);
+        assert_eq!(v["kind"], "work");
+        // Human evaluator task in the Evaluation phase.
+        let v = awaiting(&job(JobState::Evaluation), &[human_task(2, TaskPhase::Evaluation, TaskState::Pending)]);
+        assert_eq!(v["kind"], "eval");
+    }
+
+    #[test]
+    fn awaiting_human_null_without_pending_human_task() {
+        // A resolved (Done) human task does not count.
+        let v = awaiting(&job(JobState::Evaluation), &[human_task(1, TaskPhase::Evaluation, TaskState::Done)]);
+        assert!(v.is_null());
+        // No tasks at all.
+        let v = awaiting(&job(JobState::Work), &[]);
+        assert!(v.is_null());
     }
 }

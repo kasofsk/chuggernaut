@@ -1,7 +1,7 @@
 # Chuggernaut — working notes
 
 A NATS-backed job orchestrator: jobs form a DAG, the **dispatcher**
-drives each through Ready→Work→Evaluation→Done in containers, the **api** bridges HTTP↔NATS,
+drives each through Ready→Work→Evaluation→WrapUp→Done in containers, the **api** bridges HTTP↔NATS,
 and `web` is the operator UI (its own `CLAUDE.md`).
 
 ## Where the knowledge already lives

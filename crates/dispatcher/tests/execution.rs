@@ -127,7 +127,10 @@ async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::J
                 return job;
             }
             assert!(
-                !matches!(job.state, JobState::Escalated | JobState::Revoked) || want == job.state,
+                !matches!(
+                    job.state,
+                    JobState::Escalated | JobState::Stalled | JobState::Revoked
+                ) || want == job.state,
                 "job reached terminal-ish {:?} while waiting for {want:?}",
                 job.state
             );

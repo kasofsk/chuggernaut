@@ -45,6 +45,13 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
             get(routes::projects_list).post(routes::projects_create),
         )
         .route("/api/v1/projects/link", post(routes::projects_link))
+        // Platform-wide config (read-only settings; platform admins only)
+        .route("/api/v1/platform/config", get(routes::platform_config_get))
+        // Per-project config (read-only settings; Viewer+)
+        .route(
+            "/api/v1/projects/{owner}/{project}/config",
+            get(routes::project_config_get),
+        )
         // Origin (linked projects)
         .route(
             "/api/v1/projects/{owner}/{project}/origin",

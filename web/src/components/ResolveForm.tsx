@@ -1,15 +1,19 @@
 import { useState } from 'react'
 import type { TaskResolution } from '../api'
 
-// Human-task resolution (§1.2). Escalation tasks (job in Escalated) take
-// Retry/Resolve/Revoke; work/eval Human tasks take Pass/Fail. Fail requires
-// structured findings; for the rest it's optional context.
+// Human-task resolution (§1.2). Post-work escalation tasks (job Escalated) take
+// Retry/Resolve/Revoke; pre-work escalations (job Stalled) take only
+// Retry/Revoke — there is nothing to submit for evaluation. Work/eval Human
+// tasks take Pass/Fail. Fail requires structured findings; else it's optional.
 export function ResolveForm({
   escalation,
+  preWork = false,
   evaluator = false,
   onResolve,
 }: {
   escalation: boolean
+  /** pre-work escalation (job Stalled): Resolve is not offered (§1.2) */
+  preWork?: boolean
   /** human evaluator task: failing offers the abort verdict (design-lifecycle.md) */
   evaluator?: boolean
   onResolve: (r: TaskResolution) => void
@@ -30,9 +34,11 @@ export function ResolveForm({
           <button onClick={() => onResolve({ kind: 'Escalation', action: 'Retry', structured })}>
             retry
           </button>
-          <button onClick={() => onResolve({ kind: 'Escalation', action: 'Resolve', structured })}>
-            resolve
-          </button>
+          {!preWork && (
+            <button onClick={() => onResolve({ kind: 'Escalation', action: 'Resolve', structured })}>
+              resolve
+            </button>
+          )}
           <button
             className="danger"
             onClick={() => onResolve({ kind: 'Escalation', action: 'Revoke', structured })}

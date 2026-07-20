@@ -8,6 +8,7 @@ pub mod ingest;
 pub mod job;
 pub mod job_type;
 pub mod knowledge;
+pub mod platform;
 pub mod project;
 pub mod step;
 pub mod task;
@@ -18,9 +19,11 @@ pub use duration::{DurationParseError, parse_duration};
 pub use ingest::IngestEvent;
 pub use job::{Job, JobState};
 pub use job_type::{
-    Evaluator, EvaluatorType, Finalize, JobType, ProjectDefaults, ReviewSpec, WorkSpec, WorkType,
+    Evaluator, EvaluatorType, JobType, ProjectDefaults, ReviewSpec, WorkSpec, WorkType, WrapUpMode,
+    WrapUpSpec,
 };
 pub use knowledge::{KnowledgeObject, KnowledgeScope};
+pub use platform::{DispatcherConfigSnapshot, WorkerNode};
 pub use project::{OriginLink, ProjectRecord, ReleaseState, ReleaseStatus, github_repo_from_url};
 pub use step::{StepKind, StepRecord, StepStatus};
 pub use task::{

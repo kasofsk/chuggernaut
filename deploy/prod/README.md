@@ -1,11 +1,11 @@
 # Production stack — standing Chuggernaut instance on a Mac Mini
 
 This is the canonical runbook for the always-on instance we use to drive **other**
-projects. It runs the same topology as `deploy/dev` — NATS + the SSH front in
-containers, the **dispatcher** and **api** as native host processes, agent
-containers launched as siblings — but supervised by **launchd**, deployed
-**automatically on every green `main`** via the Mini's GitHub self-hosted runner,
-and **backed up hourly to Cloudflare R2**.
+projects. NATS, the SSH front, and the **api** (HTTP↔NATS bridge + web UI) run as
+**compose containers**; only the **dispatcher** runs as a native host process
+under **launchd** (it needs the Docker socket and the repos filesystem), launching
+agent containers as siblings. Deployed **automatically on every green `main`** via
+the Mini's GitHub self-hosted runner, and **backed up hourly to Cloudflare R2**.
 
 Chuggernaut itself is still developed on the laptop and pushed to GitHub; the Mini
 only *consumes* `main`.
@@ -66,17 +66,16 @@ chug init --keys-dir "$KEYS_DIR" --repos-root "$REPOS_ROOT" || true
 # 2. images + linux channel binary
 GIT_UID=$(id -u) deploy/prod/build.sh
 
-# 3. boot the substrate (colima + NATS + sshd, waits for NATS)
+# 3. boot the substrate (colima + NATS + sshd + api, waits for NATS). The api
+#    container mounts the jwt/creds/artifacts keys generated in step 1.
 deploy/prod/boot.sh
 
 # 4. finish init (topology, VAPID, admin user) — idempotent
 chug init --keys-dir "$KEYS_DIR" --repos-root "$REPOS_ROOT" \
   --admin-email you@kasofsk.xyz --admin-password 'CHANGE-ME'
 
-# 5. build the web UI (served by the api from web/dist)
-(cd web && npm ci && npm run build)
-
-# 6. install + start the launchd services (boot, dispatcher, api, backups)
+# 5. install + start the launchd services (boot, dispatcher, backups). The api
+#    is a compose container (step 3), not a launchd service.
 deploy/prod/install-launchd.sh
 
 # 7. agent provider credentials (injected into every agent container)
@@ -93,22 +92,26 @@ Create projects with `chug admin project create --owner <o> --name <n> --repos-r
 
 ---
 
-## 2. Services & operations (launchd)
+## 2. Services & operations
 
-Agents installed by `install-launchd.sh` (logs in `~/Library/Logs/chuggernaut/`):
+**Containers** (compose; `docker compose -f deploy/prod/compose.yaml ps`): `nats`,
+`ssh`, and `api` — the api publishes the UI to `127.0.0.1:8080`.
+
+**launchd agents** installed by `install-launchd.sh` (logs in
+`~/Library/Logs/chuggernaut/`):
 
 | Label | Kind | What |
 |---|---|---|
-| `com.chuggernaut.boot` | RunAtLoad | `boot.sh`: colima + compose + wait-for-NATS |
-| `com.chuggernaut.dispatcher` | KeepAlive | `run-dispatcher.sh` |
-| `com.chuggernaut.api` | KeepAlive | `run-api.sh` (serves UI on `$BIND_ADDR`) |
+| `com.chuggernaut.boot` | RunAtLoad | `boot.sh`: colima + compose (nats/ssh/api) + wait-for-NATS |
+| `com.chuggernaut.dispatcher` | KeepAlive | `run-dispatcher.sh` (the only host service) |
 | `com.chuggernaut.backup-hourly` | :00 hourly | `backup-r2.sh` |
 | `com.chuggernaut.backup-daily` | 03:20 | `backup-r2.sh promote daily` |
 | `com.chuggernaut.backup-monthly` | 1st 03:40 | `backup-r2.sh promote monthly` |
 
 ```sh
-launchctl print gui/$(id -u)/com.chuggernaut.api        # status
-launchctl kickstart -k gui/$(id -u)/com.chuggernaut.dispatcher   # restart (safe; §3.6 reconciles)
+docker compose -f deploy/prod/compose.yaml ps          # container status (nats/ssh/api)
+docker compose -f deploy/prod/compose.yaml logs -f api  # api logs
+launchctl kickstart -k gui/$(id -u)/com.chuggernaut.dispatcher   # restart dispatcher (safe; §3.6 reconciles)
 deploy/prod/install-launchd.sh            # reload after editing a plist template
 deploy/prod/install-launchd.sh uninstall  # remove all agents
 tail -f ~/Library/Logs/chuggernaut/*.log
@@ -123,10 +126,12 @@ tail -f ~/Library/Logs/chuggernaut/*.log
 `deploy/prod/update.sh <head_sha>`. `update.sh`:
 
 1. no-ops if `.deployed-sha` already matches the target,
-2. else checks the SHA out in `$CHUG_REPO`, snapshots the old binary to
-   `chuggernaut.prev`, `cargo build --release`, `npm run build`, `build.sh`,
-   idempotent `chug init`, refresh the `ssh` image, `kickstart` both services,
-   then health-checks `http://$BIND_ADDR/` (non-zero → the Actions job fails).
+2. else checks the SHA out in `$CHUG_REPO`, snapshots the old dispatcher binary
+   to `chuggernaut.prev`, `cargo build --release` (host dispatcher), `build.sh`
+   (ssh/agent/api images — the api image builds the web UI itself), idempotent
+   `chug init`, rebuilds + restarts the `ssh` and `api` containers, `kickstart`s
+   the dispatcher, then health-checks `http://127.0.0.1:8080/` (non-zero → the
+   Actions job fails).
 
 CI now also runs on `push: [main]` (see `.github/workflows/ci.yml`) so there is a
 green run for `deploy.yml` to gate on.
@@ -135,10 +140,10 @@ green run for `deploy.yml` to gate on.
 ```sh
 CHUG_REPO=~/chuggernaut deploy/prod/update.sh              # deploy origin/main now
 CHUG_REPO=~/chuggernaut deploy/prod/update.sh <good-sha>   # roll back to a known-good commit
-# fast binary-only rollback:
+# fast dispatcher-only rollback (host binary):
 cp ~/chuggernaut/target/release/chuggernaut.prev ~/chuggernaut/target/release/chuggernaut
 launchctl kickstart -k gui/$(id -u)/com.chuggernaut.dispatcher
-launchctl kickstart -k gui/$(id -u)/com.chuggernaut.api
+# the api is a container — roll it back by rebuilding at the good SHA (update.sh)
 ```
 
 ---
@@ -197,8 +202,8 @@ mkdir /tmp/restore && tar xzf /tmp/restore.tgz -C /tmp/restore
 
 ## 5. Remote access — Cloudflare Tunnel
 
-The api binds `127.0.0.1:8080` (`BIND_ADDR`), so nothing is exposed except through
-the tunnel.
+The api container publishes to `127.0.0.1:8080` (loopback only), so nothing is
+exposed except through the tunnel.
 
 ```sh
 cloudflared tunnel login

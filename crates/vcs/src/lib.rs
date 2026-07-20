@@ -834,10 +834,13 @@ impl RepoManager {
             });
         };
         match job.state {
-            JobState::Frozen | JobState::Blocked | JobState::Ready | JobState::Revoked => {
-                Ok(DiffResponse::default())
-            }
-            JobState::Work | JobState::Evaluation | JobState::Escalated => {
+            // Stalled is pre-work: no branch commits to diff (§1.2).
+            JobState::Frozen
+            | JobState::Blocked
+            | JobState::Ready
+            | JobState::Stalled
+            | JobState::Revoked => Ok(DiffResponse::default()),
+            JobState::Work | JobState::Evaluation | JobState::WrapUp | JobState::Escalated => {
                 let Some(base_ref) = job.base_ref.as_deref() else {
                     return Ok(DiffResponse::default());
                 };

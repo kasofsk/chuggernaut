@@ -102,9 +102,9 @@ export function FileViewPage() {
     <div className="page">
       <header className="topbar">
         <Link to="/">Chuggernaut</Link>
-        <Link to={`/p/${owner}/${project}`}>
+        <h1>
           {owner}/{project}
-        </Link>
+        </h1>
         {tree && (
           <span className="dim">
             {tree.branch} @ {tree.ref.slice(0, 10)}

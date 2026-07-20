@@ -82,7 +82,7 @@ mod tests {
     fn job_type_schema_shape() {
         let v: serde_json::Value = serde_json::from_str(&generate(SchemaKind::JobType)).unwrap();
         assert_eq!(v["additionalProperties"], serde_json::json!(false));
-        let finalize = &v["$defs"]["Finalize"];
+        let finalize = &v["$defs"]["WrapUpMode"];
         let variants: Vec<&str> = finalize["oneOf"]
             .as_array()
             .into_iter()

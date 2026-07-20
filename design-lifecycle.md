@@ -5,8 +5,8 @@ feedback/failure distinction, and unifying triage. Extends `design.md`; section
 references (§) are to `spec.md`.
 
 **Status:** implemented (session 9) except triage agents, which wait on
-factories (§13): `finalize: merge | none`, the `abort` verdict, the
-finalization hard-failure escalation, and additive per-job evaluators are all
+factories (§13): `wrap_up: merge | none`, the `abort` verdict, the
+wrap-up hard-failure escalation, and additive per-job evaluators are all
 live and under test (`dispatcher/tests/execution.rs`, "Lifecycle
 generalization" section). Spec deltas landed in §1.1, §1.2, §3.2, §3.3, §4.2,
 §6.2.
@@ -48,10 +48,11 @@ machinery, rework loop, and escalation path are generic.
 | do work | `JobState::Work`, work task per §3.2 |
 | evaluate work | `JobState::Evaluation`, evaluator fan-out/reduce per §3.3 |
 | feedback edge | rework: re-enter Work at `cycle + 1` with `eval_context`, bounded by `rework_budget` |
-| eval fail edge | escalation (budget exhausted, infra failure, or explicit abort — see below) |
-| wrap-up | finalization: merge queue, squash-merge, merge gate (§3.3) — for code jobs |
-| wrap-up fail edge | conflict/gate failure → free rework (recoverable); hard errors → escalation (see below) |
-| triage | Human escalation task (§3.4); triage agents generalize factories (§13) |
+| eval fail edge | escalation (budget exhausted, infra failure, or explicit abort — see below) → `JobState::Escalated` |
+| wrap-up | `JobState::WrapUp`: merge queue, squash-merge, merge gate (§3.3) — for code jobs (`wrap_up: merge`) |
+| wrap-up fail edge | conflict/gate failure → free rework (WrapUp→Work, recoverable); hard errors → escalation (WrapUp→Escalated, see below) |
+| triage (pre-work) | `JobState::Stalled` — config re-validation failure or deadline-before-start; Retry/Revoke only |
+| triage (post-work) | `JobState::Escalated` — Human escalation task (§3.4); triage agents generalize factories (§13) |
 | done | `complete_done`: record Done, publish, delete branch, unblock dependents |
 
 ---
@@ -63,12 +64,13 @@ any unit of work whose effect lives outside the repo. The work/eval/wrap-up
 lifecycle applies unchanged; what differs is that there is no branch to merge,
 so the merge-shaped wrap-up (squash, conflict rework, merge gate) does not apply.
 
-### `finalize:` mode on the job type
+### `wrap_up:` mode on the job type
 
 ```yaml
 # jobs/deploy-staging.yaml
 name: deploy-staging
-finalize: none        # merge (default) | none
+wrap_up:
+  type: none          # merge (default) | none
 ```
 
 - **`merge`** (default) — today's behavior, unchanged: merge queue, squash-merge,
@@ -95,13 +97,13 @@ smoke tests → rework with the failure context" is exactly the feedback edge.
 
 Every job keeps a `base_ref`: it pins which version of the job type YAML, deploy
 scripts, and evaluator definitions the whole job runs against (repo-versioned
-config). For `finalize: merge` jobs it is also the merge base and advances on
-conflict rework. For `finalize: none` jobs it never moves — it is only the pin.
+config). For `wrap_up: merge` jobs it is also the merge base and advances on
+conflict rework. For `wrap_up: none` jobs it never moves — it is only the pin.
 
 ### The job branch stays, as scratch
 
-`job/{seq}` is created for every job regardless of finalize mode. The workspace
-clone flow, channel, and artifact capture all assume it. For `finalize: none`
+`job/{seq}` is created for every job regardless of wrap-up mode. The workspace
+clone flow, channel, and artifact capture all assume it. For `wrap_up: none`
 it is simply deleted at Done without merging; commits on it are scratch by
 definition.
 
@@ -152,11 +154,11 @@ The diagram's "wrap-up fail → triage" edge is refined into two classes:
    context handed to the agent. A rebase-and-retry is feedback-shaped;
    escalating every conflict to a human would defeat the point. (Unchanged.)
 2. **Unexpected hard failures** — git plumbing errors, repo IO failures, any
-   `Err` (not `Conflict`) out of finalization. These become an escalation task,
-   and the per-project merge queue advances past the job rather than stalling.
-   Today such an error bubbles out of `try_finalize` into the message loop with
-   no catch, wedging the job in Evaluation and stalling the queue — this is the
-   gap to close. Wrap-up is designed to be infallible; when it fails anyway, a
+   `Err` (not `Conflict`) out of wrap-up. These become an escalation task
+   (WrapUp→Escalated), and the per-project merge queue advances past the job
+   rather than stalling. Before this, such an error bubbled out of
+   `try_finalize` into the message loop with no catch, wedging the job in the
+   landing phase and stalling the queue. Wrap-up is designed to be infallible; when it fails anyway, a
    human finds out.
 
 ---
@@ -408,19 +410,19 @@ the repo records, humans own the floor.
 
 ## Deferred
 
-- **`finalize: custom` (user-defined wrap-up steps).** Reintroduces a fallible,
+- **`wrap_up: custom` (user-defined wrap-up steps).** Reintroduces a fallible,
   retry-ambiguous phase exactly where infallibility is wanted. Everything a
   custom step would do — tag a release, notify, update a registry — lives
   either at the end of the work phase (which already has feedback/retry
   semantics) or as a small downstream job. Two modes cover code and not-code;
   resist the third until something truly cannot be expressed.
-- **`finalize: tag` (platform-owned deploy record in git).** Advancing a
+- **`wrap_up: tag` (platform-owned deploy record in git).** Advancing a
   `deployed/{env}` ref to `base_ref` at Done — repo-versioned record of what is
   running where, near-infallible fast-forward the dispatcher owns. Attractive,
   but the structured result on the Done job already carries "version X went to
   environment Y"; build it when something needs to read it from git.
-- **Concurrency groups.** The merge queue incidentally serializes finalization
-  per project; `finalize: none` jobs skip it, so two deploys to the same
+- **Concurrency groups.** The merge queue incidentally serializes wrap-up
+  per project; `wrap_up: none` jobs skip it, so two deploys to the same
   environment could run concurrently. The honest fix is a `concurrency:` group
   on the job type (GH Actions precedent): jobs in the same group do not enter
   Work while another is active. Separate small mechanism; defer until a real

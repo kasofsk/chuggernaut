@@ -13,8 +13,8 @@ use agent::AgentRunConfig;
 use chrono::Utc;
 use container::{ContainerLaunchConfig, bootstrap_cmd};
 use types::{
-    EvalResult, Evaluator, EvaluatorType, Finalize, JobState, Task, TaskKind, TaskPhase,
-    TaskResult, TaskState, WorkType,
+    EvalResult, Evaluator, EvaluatorType, JobState, Task, TaskKind, TaskPhase,
+    TaskResult, TaskState, WorkType, WrapUpMode,
 };
 use vcs::MergeOutcome;
 
@@ -579,13 +579,23 @@ impl Core {
         // `finalize: none` (design-lifecycle.md): nothing to land — the work's
         // effect is external, the branch is scratch. Eval-pass IS the wrap-up;
         // complete_done is the platform bookkeeping every job gets.
-        let finalize = self
+        let wrap_up = self
             .active
             .get(&(owner.to_string(), project.to_string(), seq))
             .map(|e| e.job_type.wrap_up.r#type)
             .unwrap_or_default();
-        if finalize == Finalize::None {
+        if wrap_up == WrapUpMode::None {
+            // Nothing to land: eval-pass IS the wrap-up (Evaluation→Done).
             return self.complete_done(owner, project, seq).await;
+        }
+        // Eval passed; the job is now landing. Enter WrapUp (§2.1, §3.3) — the
+        // merge queue, gate, and squash run in this state, not Evaluation.
+        // refinalize (reconcile) re-enters while already WrapUp; skip the write.
+        let mut job = self.must_get(owner, project, seq)?.clone();
+        if job.state == JobState::Evaluation {
+            self.set_state(&mut job, JobState::WrapUp).await?;
+            self.publish(owner, project, seq, "job-wrapup-started", serde_json::json!({}))
+                .await?;
         }
         let slug = format!("{owner}/{project}");
         let q = self.merge_queue.entry(slug).or_default();
@@ -653,7 +663,7 @@ impl Core {
     async fn try_finalize(&mut self, owner: &str, project: &str, seq: u64) -> Result<FinalizeStep> {
         let key = (owner.to_string(), project.to_string(), seq);
         let job = self.must_get(owner, project, seq)?.clone();
-        if job.state != JobState::Evaluation {
+        if job.state != JobState::WrapUp {
             return Ok(FinalizeStep::Completed); // revoked while queued
         }
         let base_ref = job.base_ref.clone().expect("base_ref set");

@@ -38,4 +38,4 @@ for tmpl in "$HERE/launchd/"*.plist.template; do
   echo "installed $label"
 done
 
-echo "done — logs in ~/Library/Logs/chuggernaut/ ; 'launchctl print $DOMAIN/com.chuggernaut.api' for status"
+echo "done — logs in ~/Library/Logs/chuggernaut/ ; 'launchctl print $DOMAIN/com.chuggernaut.dispatcher' for status"

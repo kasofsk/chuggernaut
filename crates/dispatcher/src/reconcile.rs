@@ -32,6 +32,8 @@ impl Core {
             match job.state {
                 JobState::Work => self.recover_work(&owner, &project, job.id).await?,
                 JobState::Evaluation => self.recover_evaluation(&owner, &project, job.id).await?,
+                JobState::WrapUp => self.recover_wrapup(&owner, &project, job.id).await?,
+                // Escalated/Stalled wait on the operator inbox; nothing to recover.
                 _ => {}
             }
         }
@@ -69,42 +71,39 @@ impl Core {
         }
     }
 
+    /// Recover a job crashed while landing (§2.1 WrapUp; §3.3 Merge Gate,
+    /// Restart). Any in-flight gate is superseded — its Running tasks fail and
+    /// the candidate branch is dropped — and the job re-enters the merge queue
+    /// via `refinalize`, which re-opens the gate fresh against current HEAD. A
+    /// job merely parked in the queue (no gate running) simply re-enqueues.
+    async fn recover_wrapup(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        self.ensure_exec_state(owner, project, seq).await?;
+        let key = (owner.to_string(), project.to_string(), seq);
+        let cycle = self.active.get(&key).expect("exec state").cycle;
+        let all = self.tasks.list_for_job(owner, project, seq).await?;
+        for t in all.iter().filter(|t| {
+            t.phase == TaskPhase::MergeGate && t.cycle == cycle && t.state == TaskState::Running
+        }) {
+            let mut failed = t.clone();
+            if let Some(cid) = &failed.container_id {
+                let _ = self.backend.kill(cid).await;
+            }
+            failed.state = TaskState::Failed;
+            failed.completed_at = Some(Utc::now());
+            self.tasks.put(&failed).await?;
+        }
+        let _ = self
+            .repos
+            .delete_branch(owner, project, &format!("merge-gate/{seq}"))
+            .await;
+        self.refinalize(owner, project, seq).await
+    }
+
     async fn recover_evaluation(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         self.ensure_exec_state(owner, project, seq).await?;
         let key = (owner.to_string(), project.to_string(), seq);
         let cycle = self.active.get(&key).expect("exec state").cycle;
         let all = self.tasks.list_for_job(owner, project, seq).await?;
-
-        // A gate was in flight (spec §3.3 Merge Gate, Restart): supersede it —
-        // fail its Running tasks, drop the candidate, re-open the gate fresh.
-        let gate_open = all
-            .iter()
-            .any(|t| t.phase == TaskPhase::MergeGate && t.cycle == cycle && t.state == TaskState::Running)
-            || self
-                .repos
-                .resolve_ref(owner, project, &format!("merge-gate/{seq}"))
-                .await
-                .is_ok();
-        let eval_done_and_gating = gate_open
-            || all.iter().any(|t| t.phase == TaskPhase::MergeGate && t.cycle == cycle);
-        if eval_done_and_gating {
-            for t in all.iter().filter(|t| {
-                t.phase == TaskPhase::MergeGate && t.cycle == cycle && t.state == TaskState::Running
-            }) {
-                let mut failed = t.clone();
-                if let Some(cid) = &failed.container_id {
-                    let _ = self.backend.kill(cid).await;
-                }
-                failed.state = TaskState::Failed;
-                failed.completed_at = Some(Utc::now());
-                self.tasks.put(&failed).await?;
-            }
-            let _ = self
-                .repos
-                .delete_branch(owner, project, &format!("merge-gate/{seq}"))
-                .await;
-            return self.refinalize(owner, project, seq).await;
-        }
 
         // Rebuild the round: one slot per evaluator, latest task per name.
         let evaluators = self.active.get(&key).expect("exec state").job_type.eval.clone();

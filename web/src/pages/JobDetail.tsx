@@ -69,6 +69,11 @@ export function JobDetail() {
         </Link>
         <h1>
           #{job.id} <StateBadge state={job.state} />
+          {job.awaiting_human && (
+            <span className="badge badge-orange" title="a human task is pending in the inbox below">
+              action needed
+            </span>
+          )}
         </h1>
       </header>
       {error && <div className="error banner">{error}</div>}
@@ -136,7 +141,8 @@ export function JobDetail() {
               </div>
               {t.kind.kind === 'Human' && <pre className="prompt">{t.kind.prompt}</pre>}
               <ResolveForm
-                escalation={job.state === 'Escalated'}
+                escalation={job.state === 'Escalated' || job.state === 'Stalled'}
+                preWork={job.state === 'Stalled'}
                 evaluator={t.phase === 'Evaluation'}
                 onResolve={(r) =>
                   api.resolve(owner, project, job.id, t.id, r).then(refresh, setActionError(setError))

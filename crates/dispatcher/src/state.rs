@@ -15,15 +15,26 @@ pub fn assert_transition(from: JobState, to: JobState) -> Result<(), InvalidTran
     use JobState::*;
     let valid = match (from, to) {
         (Frozen, Ready | Blocked) => true,
-        (Blocked, Ready | Escalated) => true,
-        (Ready, Work | Escalated) => true,
-        // Work→Work: retry within cycle. Evaluation→Evaluation: eval retry or
-        // merge-gate fan-out. Evaluation→Work: rework/conflict/gate failure.
+        // Blocked→Stalled: Ready-transition re-validation failed (pre-work).
+        (Blocked, Ready | Stalled) => true,
+        // Ready→Stalled: job_deadline elapsed before work started (pre-work).
+        (Ready, Work | Stalled) => true,
+        // Work→Work: retry within cycle. Work→Evaluation: work succeeded.
         (Work, Work | Evaluation | Escalated) => true,
-        (Evaluation, Evaluation | Work | Done | Escalated) => true,
-        // Escalated→Ready: pre-work escalation Retry passing re-validation
-        // (§1.2 pre-work escalations; §2.1).
-        (Escalated, Work | Evaluation | Ready) => true,
+        // Evaluation→Evaluation: eval retry only (gate fan-out lives in WrapUp).
+        // Evaluation→Work: product-failure rework. Evaluation→WrapUp: eval passed,
+        // wrap_up: merge. Evaluation→Done: eval passed, wrap_up: none.
+        (Evaluation, Evaluation | Work | WrapUp | Done | Escalated) => true,
+        // WrapUp→WrapUp: merge-gate fan-out. WrapUp→Work: squash conflict or
+        // gate failure (free rework). WrapUp→Done: clean squash / no-op.
+        // WrapUp→Escalated: unexpected hard wrap-up failure (git plumbing).
+        (WrapUp, WrapUp | Work | Done | Escalated) => true,
+        // Post-work escalation: Retry→Work, Resolve→Evaluation.
+        (Escalated, Work | Evaluation) => true,
+        // Pre-work (Stalled) escalation: Retry re-runs the failed step →Ready
+        // (or self-loops if re-validation still fails). Resolve is not in the
+        // table, so it is structurally impossible (§1.2).
+        (Stalled, Ready | Stalled) => true,
         // Revoked is reachable from any non-terminal state.
         (Done | Revoked, Revoked) => false,
         (_, Revoked) => true,
@@ -47,14 +58,25 @@ mod tests {
             (Frozen, Ready),
             (Frozen, Blocked),
             (Blocked, Ready),
-            (Blocked, Escalated),
+            (Blocked, Stalled),
             (Ready, Work),
+            (Ready, Stalled),
             (Work, Evaluation),
             (Evaluation, Work),
+            (Evaluation, WrapUp),
             (Evaluation, Done),
+            (WrapUp, WrapUp),
+            (WrapUp, Work),
+            (WrapUp, Done),
+            (WrapUp, Escalated),
+            (Escalated, Work),
             (Escalated, Evaluation),
+            (Stalled, Ready),
+            (Stalled, Stalled),
             (Frozen, Revoked),
             (Escalated, Revoked),
+            (Stalled, Revoked),
+            (WrapUp, Revoked),
         ] {
             assert!(assert_transition(from, to).is_ok(), "{from:?}→{to:?}");
         }
@@ -62,13 +84,26 @@ mod tests {
             (Frozen, Work),
             (Frozen, Done),
             (Blocked, Work),
+            // Pre-work escalations use Stalled, never Escalated.
+            (Blocked, Escalated),
+            (Ready, Escalated),
             (Ready, Evaluation),
             (Ready, Done),
             (Work, Done),
+            (Work, WrapUp),
             (Done, Work),
             (Done, Revoked),
             (Revoked, Revoked),
             (Escalated, Done),
+            // Post-work escalation resolves to Work/Evaluation, not Ready.
+            (Escalated, Ready),
+            // Stalled (pre-work) may not jump into execution or evaluation.
+            (Stalled, Work),
+            (Stalled, Evaluation),
+            (Stalled, Escalated),
+            // WrapUp only follows an eval pass; nothing re-enters Ready/Evaluation.
+            (WrapUp, Ready),
+            (WrapUp, Evaluation),
         ] {
             assert!(assert_transition(from, to).is_err(), "{from:?}→{to:?}");
         }

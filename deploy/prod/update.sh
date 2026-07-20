@@ -46,13 +46,11 @@ if [ -f target/release/chuggernaut ]; then
   cp -f target/release/chuggernaut target/release/chuggernaut.prev
 fi
 
-# 1. Native build.
+# 1. Native build of the host dispatcher binary.
 cargo build --release
 
-# 2. Web SPA (served by the api from web/dist via UI_DIST).
-( cd web && npm ci && npm run build )
-
-# 3. Images + linux channel binary.
+# 2. Images + linux channel binary (ssh front, agent image, api image — the api
+#    image builds the web UI itself, so there's no host web build here).
 CHUG_IMAGE_TAG="${CHUG_IMAGE_TAG:-prod}" deploy/prod/build.sh
 
 # Load prod config for the steps below.
@@ -63,16 +61,17 @@ set +a
 # 4. Idempotent init — creates only missing keys (e.g. a newly-added age key).
 target/release/chuggernaut init --keys-dir "$KEYS_DIR" --repos-root "$REPOS_ROOT"
 
-# 5. Rebuild/refresh the ssh front if its image changed.
-GIT_UID="$(id -u)" docker compose -f deploy/prod/compose.yaml up -d --build ssh
+# 5. Rebuild + restart the container services whose code changed: the ssh front
+#    and the api (HTTP↔NATS bridge + web UI, built from source in its image).
+GIT_UID="$(id -u)" docker compose -f deploy/prod/compose.yaml up -d --build ssh api
 
-# 6. Restart the host services (dispatcher restart is safe — §3.6 reconciles).
-UID_N="$(id -u)"
-launchctl kickstart -k "gui/$UID_N/com.chuggernaut.dispatcher"
-launchctl kickstart -k "gui/$UID_N/com.chuggernaut.api"
+# 6. Restart the dispatcher (the only host service; restart is safe — §3.6
+#    reconciles in-memory state from KV).
+launchctl kickstart -k "gui/$(id -u)/com.chuggernaut.dispatcher"
 
-# 7. Health check — non-zero exit here fails the Actions job.
-HEALTH_URL="http://${BIND_ADDR:-127.0.0.1:8080}/"
+# 7. Health check — non-zero exit here fails the Actions job. The api container
+#    publishes to loopback :8080.
+HEALTH_URL="http://127.0.0.1:8080/"
 ok=""
 for _ in $(seq 1 30); do
   if curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then ok=1; break; fi

@@ -24,4 +24,7 @@ docker build -f "$DEV/Dockerfile.ssh" --build-arg "GIT_UID=$GIT_UID" \
 # Agent image the job types run in.
 docker build -f "$DEV/Dockerfile.agent" -t "chuggernaut/agent:$TAG" "$DEV"
 
-echo "built chuggernaut/ssh:$TAG, chuggernaut/agent:$TAG; channel -> $(pwd)/out/chuggernaut-channel"
+# API service image (HTTP↔NATS bridge + web UI baked in).
+docker build -f Dockerfile.api -t "chuggernaut/api:$TAG" "$CTX"
+
+echo "built chuggernaut/{ssh,agent,api}:$TAG; channel -> $(pwd)/out/chuggernaut-channel"

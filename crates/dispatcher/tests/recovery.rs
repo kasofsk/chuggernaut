@@ -184,6 +184,79 @@ async fn restart_recovers_orphaned_running_work_task() {
     assert_eq!(provider.runs().len(), 1); // only the retry ran here
 }
 
+/// A dispatcher died mid-wrap-up: the job record says WrapUp (eval already
+/// passed) and the job was parked in the in-memory merge queue, which is lost
+/// on restart. Reconciliation re-enters it into the queue and it lands
+/// (§2.1 WrapUp; §3.6 step 3). No gate was in flight, so the fast path squashes.
+#[tokio::test]
+async fn restart_lands_job_orphaned_in_wrapup() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else { return };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone.commit_file("jobs/flaky.yaml", FLAKY.as_bytes(), "type").await;
+    clone.commit_file("prompts/impl.md", b"implement it", "prompt").await;
+    clone.push("main").await;
+    let head = repo.head().await;
+    // Job branch at HEAD: nothing to merge → squash is a NoOp that still lands.
+    repo.create_job_branch(1, &head).await;
+
+    store.jobs().await.unwrap().put(&Job {
+        id: 1,
+        project: "acme/api".into(),
+        r#type: "flaky".into(),
+        title: String::new(),
+        description: String::new(),
+        deps: vec![],
+        state: JobState::WrapUp,
+        branch: "job/1".into(),
+        base_ref: Some(head),
+        knowledge_tags: vec![],
+        eval: vec![],
+        factory: None,
+        created_at: Utc::now(),
+        ready_at: Some(Utc::now()),
+    })
+    .await
+    .unwrap();
+    // A completed work task so ensure_exec_state can rebuild cycle/submission.
+    store.tasks().await.unwrap().put(&Task {
+        id: 1,
+        job_seq: 1,
+        project: "acme/api".into(),
+        phase: TaskPhase::Work,
+        cycle: 1,
+        kind: TaskKind::Agent { provider: "claude".into(), model: None, prompt: "prompts/impl.md".into() },
+        state: TaskState::Done,
+        attempt: 1,
+        evaluator: None,
+        container_id: None,
+        session_id: None,
+        result: Some(types::TaskResult::Work { summary: None, structured: None, token_usage: None }),
+        created_at: Utc::now(),
+        started_at: Some(Utc::now()),
+        completed_at: Some(Utc::now()),
+    })
+    .await
+    .unwrap();
+
+    let repos_root = repo.bare_path().parent().unwrap().parent().unwrap().to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        Arc::new(FakeBackend::new()),
+        Arc::new(FakeProvider::new()),
+        CoreConfig { repo_url_base: "file:///repos".into(), nats_url: server.url().into(), ..Default::default() },
+    )
+    .await
+    .unwrap();
+    let _handle = spawn(core);
+
+    // Recovery re-drives wrap-up and the job reaches Done.
+    wait_for_state(&store, 1, JobState::Done).await;
+}
+
 /// Upstream reached Done while the dispatcher was dead: reconciliation
 /// unblocks the dependent and runs it.
 #[tokio::test]

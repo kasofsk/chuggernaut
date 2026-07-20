@@ -6,7 +6,9 @@ const COLORS: Record<JobState, string> = {
   Ready: 'blue',
   Work: 'blue',
   Evaluation: 'purple',
+  WrapUp: 'blue',
   Escalated: 'orange',
+  Stalled: 'orange',
   Done: 'green',
   Revoked: 'red',
 }

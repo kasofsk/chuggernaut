@@ -71,7 +71,11 @@ export function ProjectPage() {
               </div>
               {t.kind.kind === 'Human' && <pre className="prompt">{t.kind.prompt}</pre>}
               <ResolveForm
-                escalation={jobBySeq.get(t.job_seq)?.state === 'Escalated'}
+                escalation={
+                  jobBySeq.get(t.job_seq)?.state === 'Escalated' ||
+                  jobBySeq.get(t.job_seq)?.state === 'Stalled'
+                }
+                preWork={jobBySeq.get(t.job_seq)?.state === 'Stalled'}
                 evaluator={t.phase === 'Evaluation'}
                 onResolve={(r) => act(() => api.resolve(owner, project, t.job_seq, t.id, r))}
               />

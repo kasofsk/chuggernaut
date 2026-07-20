@@ -234,6 +234,145 @@ pub async fn projects_list(
     Ok(Json(projects))
 }
 
+// ── Config (read-only settings overview) ────────────────────────────────────
+
+/// Reserved secret names holding a linked project's git-origin credentials
+/// (mirrors the dispatcher's `origin::SECRET_DEPLOY_KEY`/`SECRET_PAT`). Surfaced
+/// as presence flags under the origin group, never listed among general secrets.
+const ORIGIN_DEPLOY_KEY: &str = "CHUG_ORIGIN_DEPLOY_KEY";
+const ORIGIN_PAT: &str = "CHUG_ORIGIN_PAT";
+
+/// Strip `prefix` off each key and return the sorted remainders.
+fn names_under(keys: Vec<String>, prefix: &str) -> Vec<String> {
+    let mut names: Vec<String> = keys
+        .iter()
+        .filter_map(|k| k.strip_prefix(prefix).map(String::from))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Read a KV bucket's keys with the given prefix, mapping errors to 500.
+async fn bucket_keys(state: &SharedState, bucket: &str, prefix: &str) -> ApiResult<Vec<String>> {
+    state
+        .store
+        .raw_bucket(bucket)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .keys_with_prefix(prefix)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))
+}
+
+/// Read-only project config for the settings tab: vars (name+value), secret
+/// NAMES (values never leave the dispatcher), and the git-origin link + which
+/// origin credentials are present. Viewer+ (§7.5).
+pub async fn project_config_get(
+    State(state): State<SharedState>,
+    Path((owner, project)): Path<(String, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    let prefix = format!("{owner}.{project}.");
+
+    // vars — non-sensitive, name + value.
+    let vars_bucket = state
+        .store
+        .raw_bucket(store::buckets::VARS)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let mut vars = Vec::new();
+    for key in vars_bucket
+        .keys_with_prefix(&prefix)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+    {
+        let Some(name) = key.strip_prefix(&prefix) else {
+            continue;
+        };
+        let value: Option<String> = vars_bucket
+            .get_json(&key)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        vars.push(serde_json::json!({ "name": name, "value": value.unwrap_or_default() }));
+    }
+    vars.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+
+    // secrets — NAMES ONLY (the api holds no decryption key). Split the reserved
+    // origin credentials out into presence flags.
+    let secret_names = names_under(
+        bucket_keys(&state, store::buckets::SECRETS, &prefix).await?,
+        &prefix,
+    );
+    let has = |n: &str| secret_names.iter().any(|s| s == n);
+    let deploy_key = has(ORIGIN_DEPLOY_KEY);
+    let pat = has(ORIGIN_PAT);
+    let secrets: Vec<&String> = secret_names
+        .iter()
+        .filter(|n| n.as_str() != ORIGIN_DEPLOY_KEY && n.as_str() != ORIGIN_PAT)
+        .collect();
+
+    // origin link (from the project record; absent = classic self-hosted).
+    let record: Option<types::ProjectRecord> = state
+        .store
+        .raw_bucket(store::buckets::PROJECTS)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .get_json(&format!("{owner}.{project}"))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let origin = record.and_then(|r| r.origin);
+
+    Ok(Json(serde_json::json!({
+        "vars": vars,
+        "secrets": secrets,
+        "origin": origin,
+        "origin_credentials": { "deploy_key": deploy_key, "pat": pat },
+    }))
+    .into_response())
+}
+
+/// Read-only platform config for the platform settings page: the dispatcher's
+/// published snapshot (fleet + defaults), the `global/agents` secret NAMES, and
+/// whether web-push (VAPID) is configured. Platform admins only.
+pub async fn platform_config_get(
+    State(state): State<SharedState>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    if !identity.platform_admin {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "platform admin required",
+        ));
+    }
+    let platform = state
+        .store
+        .raw_bucket(store::buckets::PLATFORM)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let dispatcher: Option<types::DispatcherConfigSnapshot> = platform
+        .get_json("dispatcher.config")
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let vapid_public: Option<String> = platform
+        .get_json("vapid.public")
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let agent_prefix = format!("{}.agents.", store::keys::RESERVED_OWNER);
+    let agent_secrets = names_under(
+        bucket_keys(&state, store::buckets::SECRETS, &agent_prefix).await?,
+        &agent_prefix,
+    );
+
+    Ok(Json(serde_json::json!({
+        "dispatcher": dispatcher,
+        "agent_secrets": agent_secrets,
+        "vapid_public": vapid_public.is_some(),
+    }))
+    .into_response())
+}
+
 /// Create a project (§12.2 via the API): bare repo, pre-receive hook, the
 /// Code starter template, and the job counter. Platform admins only — role
 /// grants for other users remain an admin-CLI concern.

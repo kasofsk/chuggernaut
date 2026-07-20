@@ -7,9 +7,17 @@ export type JobState =
   | 'Ready'
   | 'Work'
   | 'Evaluation'
+  | 'WrapUp'
   | 'Escalated'
+  | 'Stalled'
   | 'Done'
   | 'Revoked'
+
+/** Derived (never stored): the pending human task a job is waiting on, if any. */
+export interface AwaitingHuman {
+  task_id: number
+  kind: 'work' | 'eval' | 'escalation'
+}
 
 export interface Evaluator {
   name: string
@@ -97,6 +105,8 @@ export interface Job {
   factory: string | null
   created_at: string
   ready_at: string | null
+  /** derived server-side from the task log; null when no human action is pending */
+  awaiting_human?: AwaitingHuman | null
 }
 
 export type TaskKind =
@@ -164,6 +174,46 @@ export interface OriginStatus {
   held: boolean
 }
 
+/** GET .../config — read-only project settings overview. */
+export interface ProjectConfig {
+  vars: { name: string; value: string }[]
+  /** secret NAMES only — values never leave the dispatcher */
+  secrets: string[]
+  /** the linked git origin, or null on a classic self-hosted project */
+  origin: { url: string; main_branch: string; github_repo: string | null } | null
+  /** presence of the reserved origin-credential secrets */
+  origin_credentials: { deploy_key: boolean; pat: boolean }
+}
+
+export interface WorkerNode {
+  name: string
+  endpoint: string
+  slots: number
+}
+
+/** The dispatcher's runtime config snapshot (fleet + defaults + paths). */
+export interface DispatcherSnapshot {
+  nodes: WorkerNode[]
+  agent_provider_default: string
+  agent_model_default: string | null
+  repos_root: string
+  repo_url_base: string
+  nats_url: string
+  nats_url_container: string | null
+  channel_binary: string | null
+  hook_bin: string | null
+  secrets_encryption: boolean
+}
+
+/** GET /platform/config — read-only platform settings (admins only). */
+export interface PlatformConfig {
+  /** null when the dispatcher hasn't published a snapshot (offline/older) */
+  dispatcher: DispatcherSnapshot | null
+  /** global/agents secret NAMES injected into every agent container */
+  agent_secrets: string[]
+  vapid_public: boolean
+}
+
 export class ApiError extends Error {
   status: number
   body: unknown
@@ -203,6 +253,12 @@ export const api = {
     req<unknown>('POST', `/api/v1/projects/${owner}/${project}/origin/release`),
   originSync: (owner: string, project: string) =>
     req<OriginStatus>('POST', `/api/v1/projects/${owner}/${project}/origin/sync`),
+
+  /** Read-only project settings: vars, secret names, origin link + creds. */
+  projectConfig: (owner: string, project: string) =>
+    req<ProjectConfig>('GET', `/api/v1/projects/${owner}/${project}/config`),
+  /** Read-only platform settings (admins only): fleet, defaults, agent creds. */
+  platformConfig: () => req<PlatformConfig>('GET', '/api/v1/platform/config'),
 
   jobTypes: (owner: string, project: string) =>
     req<JobTypeSummary[]>('GET', `/api/v1/projects/${owner}/${project}/job-types`),

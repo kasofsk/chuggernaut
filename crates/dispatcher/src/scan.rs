@@ -120,11 +120,21 @@ impl Core {
                 seq,
             });
             self.active.remove(&key);
-            self.escalate(&owner, &project, seq, "job_deadline_exceeded",
-                format!("{DEADLINE_MARKER} Job {seq} exceeded its job_deadline ({}). \
-                     Resolve to re-enable pacing under your control.",
-                    deadline_str.unwrap_or_default()))
-                .await?;
+            let dl = deadline_str.unwrap_or_default();
+            // Deadline from Ready is a pre-work escalation (no work task):
+            // Stalled, resolved Retry/Revoke only. From Work/Evaluation it is
+            // post-work: Escalated, where Resolve is also available (§1.2, §3.5).
+            if job.state == JobState::Ready {
+                self.stall(&owner, &project, seq, "job_deadline_exceeded",
+                    format!("{DEADLINE_MARKER} Job {seq} exceeded its job_deadline ({dl}) \
+                         before starting. Retry to re-enable pacing under your control."))
+                    .await?;
+            } else {
+                self.escalate(&owner, &project, seq, "job_deadline_exceeded",
+                    format!("{DEADLINE_MARKER} Job {seq} exceeded its job_deadline ({dl}). \
+                         Resolve to re-enable pacing under your control."))
+                    .await?;
+            }
         }
         Ok(())
     }

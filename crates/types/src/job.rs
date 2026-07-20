@@ -57,7 +57,18 @@ pub enum JobState {
     Ready,
     Work,
     Evaluation,
+    /// Eval passed; the job is landing (merge queue → merge gate → squash).
+    /// Only `wrap_up: merge` jobs enter here; `wrap_up: none` goes
+    /// Evaluation→Done directly (spec §2.1, §3.3).
+    WrapUp,
+    /// Post-work human intervention: automation ran out after work executed.
+    /// Resolved Retry/Resolve/Revoke.
     Escalated,
+    /// Pre-work human intervention: the job could not start or become ready
+    /// (config re-validation failed, or its deadline elapsed while still
+    /// Ready). No work task exists. Resolved Retry/Revoke only — Resolve is
+    /// rejected (spec §1.2 pre-Work escalations).
+    Stalled,
     Done,
     Revoked,
 }

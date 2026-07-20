@@ -8,7 +8,7 @@ use std::sync::Arc;
 use store::NatsStore;
 use test_utils::repo::TempRepo;
 use test_utils::{FakeBackend, FakeProvider};
-use types::{JobState, TaskKind, TaskState};
+use types::{EscalationAction, JobState, TaskKind, TaskResolution, TaskState};
 
 async fn new_core(store: &NatsStore, repos_root: std::path::PathBuf) -> Core {
     Core::new(
@@ -173,7 +173,7 @@ async fn release_validation_rejects_bad_wiring_and_missing_secret() {
 }
 
 #[tokio::test]
-async fn unblock_revalidation_failure_escalates_with_human_task() {
+async fn unblock_revalidation_failure_stalls_with_human_task() {
     let Some((_server, store, repo, mut core)) = setup().await else { return };
 
     let build = core.create_job(req("build", &[])).await.unwrap();
@@ -194,12 +194,99 @@ async fn unblock_revalidation_failure_escalates_with_human_task() {
     let mut core = new_core(&store, core_repos_root(&repo)).await;
     core.on_job_done("acme", "api", build.id).await.unwrap();
 
+    // Pre-work escalation (§1.2): no work task ran, so the job Stalls rather
+    // than Escalates — resolvable Retry/Revoke only.
     let dep = jobs.get("acme", "api", deploy.id).await.unwrap().unwrap();
-    assert_eq!(dep.state, JobState::Escalated);
+    assert_eq!(dep.state, JobState::Stalled);
     let tasks = store.tasks().await.unwrap().list_for_job("acme", "api", deploy.id).await.unwrap();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].state, TaskState::Pending);
     assert!(matches!(&tasks[0].kind, TaskKind::Human { prompt } if prompt.contains("re-validation")));
+}
+
+/// A Stalled (pre-work) escalation accepts only Retry and Revoke (§1.2, fix
+/// #2): Resolve is rejected *without* consuming the task, and a Retry re-runs
+/// Ready-transition re-validation — reaching Ready once the type parses again.
+/// The dedicated state is what makes Resolve→Evaluation impossible here.
+#[tokio::test]
+async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
+    let Some((_server, store, repo, mut core)) = setup().await else { return };
+
+    let build = core.create_job(req("build", &[])).await.unwrap();
+    let deploy = core.create_job(req("deploy", &[build.id])).await.unwrap();
+    core.release_job("acme", "api", build.id).await.unwrap();
+    core.release_job("acme", "api", deploy.id).await.unwrap();
+
+    // Break the deploy type on main between release and unblock.
+    let clone = repo.clone_branch("main").await;
+    clone.commit_file("jobs/deploy.yaml", b"not: [valid", "break deploy type").await;
+    clone.push("main").await;
+
+    let jobs = store.jobs().await.unwrap();
+    let mut done = jobs.get("acme", "api", build.id).await.unwrap().unwrap();
+    done.state = JobState::Done;
+    jobs.put(&done).await.unwrap();
+
+    // A fresh core observes the dep complete and Stalls deploy on re-validation.
+    let mut core2 = new_core(&store, core_repos_root(&repo)).await;
+    core2.on_job_done("acme", "api", build.id).await.unwrap();
+    assert_eq!(
+        jobs.get("acme", "api", deploy.id).await.unwrap().unwrap().state,
+        JobState::Stalled
+    );
+    let task_id = store
+        .tasks().await.unwrap()
+        .list_for_job("acme", "api", deploy.id).await.unwrap()[0]
+        .id;
+
+    let handle = dispatcher::core::spawn(core2);
+
+    // Resolve is rejected and leaves the escalation task Pending (the reject
+    // happens before the task is marked done — fix #2's ordering).
+    let err = handle
+        .resolve_task("acme", "api", deploy.id, task_id,
+            TaskResolution::Escalation { action: EscalationAction::Resolve, structured: None },
+            "david")
+        .await;
+    assert!(matches!(err, Err(CoreError::InvalidResolution(_))), "got {err:?}");
+    let task = store.tasks().await.unwrap()
+        .list_for_job("acme", "api", deploy.id).await.unwrap()
+        .into_iter().find(|t| t.id == task_id).unwrap();
+    assert_eq!(task.state, TaskState::Pending, "rejected Resolve must not consume the task");
+
+    // Fix the type on main; Retry re-validates and clears the stall.
+    let clone = repo.clone_branch("main").await;
+    clone.commit_file("jobs/deploy.yaml", DEPLOY_YAML.as_bytes(), "fix deploy type").await;
+    clone.push("main").await;
+
+    handle
+        .resolve_task("acme", "api", deploy.id, task_id,
+            TaskResolution::Escalation { action: EscalationAction::Retry, structured: None },
+            "david")
+        .await
+        .unwrap();
+
+    let mut cleared = false;
+    for _ in 0..100 {
+        let s = jobs.get("acme", "api", deploy.id).await.unwrap().unwrap().state;
+        if !matches!(s, JobState::Stalled) {
+            assert!(
+                matches!(
+                    s,
+                    JobState::Ready
+                        | JobState::Work
+                        | JobState::Evaluation
+                        | JobState::WrapUp
+                        | JobState::Done
+                ),
+                "Retry should move the job forward, got {s:?}"
+            );
+            cleared = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(cleared, "Retry after the fix must clear the stall toward Ready");
 }
 
 #[tokio::test]

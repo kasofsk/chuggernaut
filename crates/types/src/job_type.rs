@@ -24,7 +24,7 @@ pub struct JobType {
     /// The third step of the job (work → evaluation → wrap-up): what happens
     /// after eval-pass (design-lifecycle.md).
     #[serde(default)]
-    pub wrap_up: WrapUp,
+    pub wrap_up: WrapUpSpec,
     pub resources: Option<Resources>,
     pub job_deadline: Option<String>,
     pub work_retries: Option<u32>,
@@ -90,19 +90,19 @@ impl ReviewSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct WrapUp {
+pub struct WrapUpSpec {
     /// `merge` (default) squash-merges the job branch through the merge
     /// queue/gate; `none` goes straight to Done — for jobs whose effect is
     /// external (deploys, reports) and whose branch is scratch.
     #[serde(default)]
-    pub r#type: Finalize,
+    pub r#type: WrapUpMode,
 }
 
 /// Wrap-up mode after eval-pass (design-lifecycle.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub enum Finalize {
+pub enum WrapUpMode {
     /// Squash-merge the job branch to the default branch (merge queue, merge
     /// gate, conflict rework) — the code-change wrap-up.
     #[default]
@@ -603,7 +603,7 @@ eval:
     #[test]
     fn wrap_up_defaults_to_merge_and_parses_none() {
         let jt = JobType::parse(SPEC_EXAMPLE).unwrap();
-        assert_eq!(jt.wrap_up.r#type, Finalize::Merge);
+        assert_eq!(jt.wrap_up.r#type, WrapUpMode::Merge);
 
         let yaml = r#"
 name: deploy
@@ -615,7 +615,7 @@ wrap_up:
   type: none
 "#;
         let jt = JobType::parse(yaml).unwrap();
-        assert_eq!(jt.wrap_up.r#type, Finalize::None);
+        assert_eq!(jt.wrap_up.r#type, WrapUpMode::None);
         assert_eq!(jt.validate(), vec![]);
     }
 

@@ -400,20 +400,20 @@ async fn held_job_lands_after_merged_release_sync() {
         .unwrap();
     handle.release_job("acme", "api", job.id).await.unwrap();
 
-    // The job reaches Evaluation-complete but cannot land: state stays
-    // Evaluation and integration does not move.
+    // The job passes evaluation and enters WrapUp but cannot land: it parks in
+    // the merge queue behind the release hold and integration does not move.
     let jobs = rig.store.jobs().await.unwrap();
     for _ in 0..100 {
         let j = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
         assert_ne!(j.state, JobState::Done, "must not land while held");
-        if j.state == JobState::Evaluation {
+        if j.state == JobState::WrapUp {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     tokio::time::sleep(Duration::from_millis(300)).await; // let any wrong landing surface
     let j = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
-    assert_eq!(j.state, JobState::Evaluation, "held in the merge queue");
+    assert_eq!(j.state, JobState::WrapUp, "held in the merge queue");
     assert_eq!(
         rig.repos().resolve_ref("acme", "api", "integration").await.unwrap(),
         integration_at_release,

@@ -26,7 +26,7 @@ pub struct Job {
     pub ready_at: Option<DateTime<Utc>>,   // set once (immutably) when job first enters Ready; anchor for job_deadline; None until then
 }
 
-pub enum JobState { Frozen, Blocked, Ready, Work, Evaluation, Escalated, Done, Revoked }
+pub enum JobState { Frozen, Blocked, Ready, Work, Evaluation, WrapUp, Escalated, Stalled, Done, Revoked }
 ```
 
 `retry_count` and `rework_count` are not stored on the job record — they are derived from the task log (`attempt` on work tasks and `cycle` on tasks respectively). `ready_at` is set once, immutably, when the job first transitions to Ready (Frozen→Ready or Blocked→Ready); it anchors `job_deadline` enforcement.
@@ -363,7 +363,8 @@ pub enum TaskResolution {
 |---|---|---|
 | Human work task (Work phase, `work.type: human`) | `Pass`, `Fail` | 400 if `Escalation` submitted |
 | Human evaluator task (Evaluation phase) | `Pass`, `Fail` | 400 if `Escalation` submitted |
-| Escalation task (Escalated state) | `Escalation` | 400 if `Pass` or `Fail` submitted |
+| Post-work escalation task (Escalated state) | `Escalation` (`Retry`/`Resolve`/`Revoke`) | 400 if `Pass` or `Fail` submitted |
+| Pre-work escalation task (Stalled state) | `Escalation` (`Retry`/`Revoke`) | 400 if `Pass`/`Fail` submitted, or `Escalation` with `action: Resolve` |
 
 `action` is only meaningful on escalation tasks. `structured` is required (non-null) on `Fail`; optional on all others.
 
@@ -402,7 +403,7 @@ pub enum TaskResolution {
 
 Escalation never bypasses evaluation — `Done` is only reachable via an evaluation pass.
 
-**Pre-Work escalations** — escalations raised before any work task exists (Blocked→Escalated on re-validation failure, see §2.1; job-deadline escalation from Ready, see §3.5) accept only `Retry` and `Revoke`; `Resolve` is rejected with 400. For these, `Retry` re-attempts the failed step — re-runs Ready-transition re-validation for the former, re-enqueues the job for execution for the latter — rather than creating a work task.
+**Pre-Work escalations** — escalations raised before any work task exists put the job in the **`Stalled`** state (not `Escalated`): Blocked→Stalled on re-validation failure (see §2.1); job-deadline escalation from Ready (Ready→Stalled, see §3.5). They accept only `Retry` and `Revoke`; `Resolve` is rejected with 400. For these, `Retry` re-attempts the failed step — re-runs Ready-transition re-validation for the former, re-enqueues the job for execution for the latter — rather than creating a work task. The distinction is carried by the state itself: `Stalled` has no transition into `Work` or `Evaluation`, so a mis-routed `Resolve` is impossible by construction rather than guarded at resolve time.
 
 **Example task log:**
 
@@ -568,8 +569,9 @@ The authoritative definition of all valid job state transitions. No transition e
 | `Frozen` | `Ready` | `POST .../release` accepted | All deps Done | Record `base_ref` = current default HEAD; set `ready_at`; publish `job-released` |
 | `Frozen` | `Blocked` | `POST .../release` accepted | At least one dep not Done | Publish `job-released` |
 | `Blocked` | `Ready` | Last upstream dep reaches Done | All deps Done; re-validation of static config at `base_ref` passes | Record `base_ref` = current default HEAD; set `ready_at`; publish `job-unblocked` |
-| `Blocked` | `Escalated` | Last upstream dep reaches Done | Re-validation of static config at `base_ref` fails (file deleted or renamed since release) | Create Human task describing the missing file; publish `job-escalated` |
+| `Blocked` | `Stalled` | Last upstream dep reaches Done | Re-validation of static config at `base_ref` fails (file deleted or renamed since release) | Create Human task describing the missing file; publish `job-stalled` |
 | `Ready` | `Work` | Dispatcher picks up job | — | Create work task (cycle=1, attempt=1); create branch `job/{seq}` from `base_ref`; launch container or surface Human task; publish `job-started` |
+| `Ready` | `Stalled` | `job_deadline` elapsed before work started (§3.5) | — | Create Human task noting the deadline; publish `job-stalled` |
 | `Work` | `Work` | Work task fails, retries remain | `attempt ≤ work_retries` | Hard-reset `job/{seq}` to `base_ref`; create new task (same cycle, attempt++) |
 | `Work` | `Escalated` | Work task fails, no retries left | `attempt > work_retries` | Create Human escalation task; publish `job-escalated` |
 | `Work` | `Escalated` | Human work task resolved `Fail` | — | Create Human escalation task; publish `job-escalated` |
@@ -578,17 +580,22 @@ The authoritative definition of all valid job state transitions. No transition e
 | `Evaluation` | `Evaluation` | Agent eval container exits without `submit_eval`, retries remain | `attempt ≤ eval_retries` | Create new eval task (same cycle, attempt++) |
 | `Evaluation` | `Escalated` | Any required eval task exhausts `eval_retries` (infra error) | — | Create Human escalation task; publish `job-escalated` |
 | `Evaluation` | `Work` | Eval reduce: product failure, under rework budget | evaluated cycle N ≤ `rework_budget` | cycle++; collect eval findings into rework context; reset `job/{seq}` to `base_ref`; publish `job-rework-started` (reason: `eval_failure`) |
-| `Evaluation` | `Work` | Eval reduce: squash-merge conflict (any cycle; rework budget NOT consumed) | — | Update `base_ref` to current default HEAD; cycle++; build conflict context (see §4.3); reset `job/{seq}` to new `base_ref`; publish `job-rework-started` (reason: `merge_conflict`) |
 | `Evaluation` | `Escalated` | Eval reduce: product failure, rework budget exhausted | evaluated cycle N > `rework_budget` | Create Human escalation task; publish `job-escalated` |
 | `Evaluation` | `Escalated` | Eval reduce: `work.type: command` and any required evaluator failed | — | Create Human escalation task; publish `job-escalated` (rework_budget disallowed for command) |
-| `Evaluation` | `Evaluation` | Eval reduce passes; default HEAD moved past `base_ref`; candidate squash-merge clean | Merge gate required (see §3.3) | Create one `MergeGate` task per required command evaluator against the candidate merge commit; job remains in Evaluation |
-| `Evaluation` | `Work` | Merge-gate task fails (any cycle; rework budget NOT consumed) | — | Update `base_ref` to current default HEAD; cycle++; inject gate output as findings plus conflict-style context (see §3.3); reset `job/{seq}` to new `base_ref`; publish `job-rework-started` (reason: `merge_gate_failure`) |
-| `Evaluation` | `Done` | Eval reduce: all required evaluators passed; merge gate passed or skipped (see §3.3); squash-merge clean or no-op | — | Squash-merge `job/{seq}` to default branch (no-op if no commits); delete branch `job/{seq}`; publish `job-done` |
+| `Evaluation` | `WrapUp` | Eval reduce passes; `wrap_up: merge` | — | Enter wrap-up: enqueue on the per-project merge queue; publish `job-wrapup-started` |
+| `Evaluation` | `Done` | Eval reduce passes; `wrap_up: none` | — | Delete the scratch branch `job/{seq}`; publish `job-done` |
+| `WrapUp` | `WrapUp` | Default HEAD moved past `base_ref`; candidate squash-merge clean; merge gate required (see §3.3) | — | Create one `MergeGate` task per required command evaluator against the candidate merge commit; job remains in WrapUp |
+| `WrapUp` | `Work` | Squash-merge conflict (any cycle; rework budget NOT consumed) | — | Update `base_ref` to current default HEAD; cycle++; build conflict context (see §4.3); reset `job/{seq}` to new `base_ref`; publish `job-rework-started` (reason: `merge_conflict`) |
+| `WrapUp` | `Work` | Merge-gate task fails (any cycle; rework budget NOT consumed) | — | Update `base_ref` to current default HEAD; cycle++; inject gate output as findings plus conflict-style context (see §3.3); reset `job/{seq}` to new `base_ref`; publish `job-rework-started` (reason: `merge_gate_failure`) |
+| `WrapUp` | `Done` | All required evaluators passed; merge gate passed or skipped (see §3.3); squash-merge clean or no-op | — | Squash-merge `job/{seq}` to default branch (no-op if no commits); delete branch `job/{seq}`; publish `job-done` |
+| `WrapUp` | `Escalated` | Unexpected hard wrap-up failure — git plumbing / repo IO, not a conflict (design-lifecycle.md) | — | Create Human escalation task; the merge queue advances past the job rather than wedging; publish `job-escalated` |
 | `Escalated` | `Work` | Operator resolves escalation Human task with `action: Retry` | — | Create new work task (same cycle, attempt++); publish `job-escalation-resolved` |
-| `Escalated` | `Ready` | Operator resolves a pre-Work escalation with `action: Retry`; re-validation passes (see §1.2 pre-Work escalations) | No work task exists for the job | Record `base_ref` = current default HEAD; set `ready_at` if unset; enqueue; publish `job-escalation-resolved` then `job-unblocked` |
 | `Escalated` | `Evaluation` | Operator resolves escalation Human task with `action: Resolve` | — | Re-enter Evaluation; publish `job-escalation-resolved` |
 | `Escalated` | `Revoked` | Operator resolves escalation Human task with `action: Revoke` | — | See Revoked transition below; publish `job-escalation-resolved` then `job-revoked` |
-| any non-terminal | `Revoked` | `POST .../revoke` | Job not already Done or Revoked | Kill Running tasks; cancel Pending tasks; cascade Revoked to Frozen/Blocked/Ready dependents (transitively); dependents in Work/Evaluation/Escalated left in current state; delete branch `job/{seq}` if it exists; publish `job-revoked` |
+| `Stalled` | `Ready` | Operator resolves a pre-Work escalation with `action: Retry`; the failed step succeeds (re-validation passes / re-enqueue) — see §1.2 pre-Work escalations | — | Record `base_ref` = current default HEAD; set `ready_at` if unset; enqueue; publish `job-escalation-resolved` then `job-unblocked` |
+| `Stalled` | `Stalled` | Operator resolves a pre-Work escalation with `action: Retry`; the failed step still fails | — | Create a new Human task describing the failure; job remains Stalled |
+| `Stalled` | `Revoked` | Operator resolves a pre-Work escalation with `action: Revoke` | — | See Revoked transition below; publish `job-escalation-resolved` then `job-revoked` |
+| any non-terminal | `Revoked` | `POST .../revoke` | Job not already Done or Revoked | Kill Running tasks; cancel Pending tasks; cascade Revoked to Frozen/Blocked/Ready dependents (transitively); dependents in Work/Evaluation/WrapUp/Escalated/Stalled left in current state; delete branch `job/{seq}` if it exists; publish `job-revoked` |
 
 **State descriptions:**
 - **Frozen** — created, awaiting operator approval; no execution begins
@@ -596,7 +603,9 @@ The authoritative definition of all valid job state transitions. No transition e
 - **Ready** — queued for execution; `base_ref` is set
 - **Work** — work task executing; job stays here across retries within the current cycle
 - **Evaluation** — evaluation tasks running; job stays here until all tasks resolve
-- **Escalated** — human intervention required; operator resolves via task inbox
+- **WrapUp** — evaluation passed; the job is landing (`wrap_up: merge` only): merge queue, merge gate, squash. `wrap_up: none` jobs skip this state (Evaluation→Done). See §3.3
+- **Escalated** — post-work human intervention: work executed but automation ran out. Operator resolves Retry / Resolve / Revoke via the task inbox
+- **Stalled** — pre-work human intervention: the job could not start or become ready (config re-validation failed, or `job_deadline` elapsed while still Ready). No work task exists. Operator resolves Retry / Revoke only — `Resolve` is rejected (§1.2)
 - **Done** — terminal; evaluation passed and squash-merge completed
 - **Revoked** — terminal; reachable from any non-terminal state
 
@@ -746,10 +755,10 @@ For each Ready job, the dispatcher executes the following sequence:
 9. Transition job to Evaluation; create one task per evaluator. If no evaluators declared, skip to step 12 (auto-pass)
 10. Fan out evaluation tasks in parallel; monitor each (see §3.3)
 11. Apply eval reduce (see §3.3); handle pass or fail outcomes
-12. On eval reduce pass: if the job type declares `wrap_up.type: none`, skip the merge gate and squash-merge entirely — transition straight to Done (the work's effect is external; the job branch is scratch and is deleted unmerged). Otherwise run the merge gate (see §3.3 Merge Gate). If default HEAD still equals `base_ref`, or `job/{seq}` has no commits beyond `base_ref`, the gate is skipped. If HEAD moved and the candidate squash-merge is clean, the gate re-runs the required command evaluators against the candidate merge commit — gate pass → proceed to squash-merge below; gate failure → update `base_ref` to current default HEAD, increment cycle (rework_budget NOT consumed), reset `job/{seq}` to new `base_ref`, inject the gate output as findings plus conflict-style context, re-enter Work (step 2). On gate pass or skip: squash-merge `job/{seq}` to default branch. If no commits on `job/{seq}` beyond `base_ref`, this is a no-op. If commits exist and merge is clean → transition job to Done. If conflict → snapshot the current `base_ref` into a local variable `old_base_ref` (this value is held in dispatcher memory only — not persisted to the job record), update `job.base_ref` to current default HEAD, increment cycle (without consuming `rework_budget`), reset `job/{seq}` to new `base_ref`, build conflict context using `old_base_ref` and new `base_ref` (see §4.3 for format), re-enter Work (step 2). **Squash-merge commit message format:** subject line is `job/{seq}: {job_type}`; if the work task's `TaskResult::Work.summary` is non-null, append it as the commit body. Example: `job/42: implement-endpoint\n\nAdded /api/v1/stripe/webhook handler with idempotency key.`
+12. On eval reduce pass: if the job type declares `wrap_up.type: none`, skip the merge gate and squash-merge entirely — transition straight to Done (the work's effect is external; the job branch is scratch and is deleted unmerged). Otherwise transition to **`WrapUp`** and run the merge gate (see §3.3 Merge Gate) — the whole merge path (queue, gate, squash, conflict rework) runs in `WrapUp`, not `Evaluation`. If default HEAD still equals `base_ref`, or `job/{seq}` has no commits beyond `base_ref`, the gate is skipped. If HEAD moved and the candidate squash-merge is clean, the gate re-runs the required command evaluators against the candidate merge commit — gate pass → proceed to squash-merge below; gate failure → update `base_ref` to current default HEAD, increment cycle (rework_budget NOT consumed), reset `job/{seq}` to new `base_ref`, inject the gate output as findings plus conflict-style context, re-enter Work (step 2). On gate pass or skip: squash-merge `job/{seq}` to default branch. If no commits on `job/{seq}` beyond `base_ref`, this is a no-op. If commits exist and merge is clean → transition job to Done. If conflict → snapshot the current `base_ref` into a local variable `old_base_ref` (this value is held in dispatcher memory only — not persisted to the job record), update `job.base_ref` to current default HEAD, increment cycle (without consuming `rework_budget`), reset `job/{seq}` to new `base_ref`, build conflict context using `old_base_ref` and new `base_ref` (see §4.3 for format), re-enter Work (step 2). **Squash-merge commit message format:** subject line is `job/{seq}: {job_type}`; if the work task's `TaskResult::Work.summary` is non-null, append it as the commit body. Example: `job/42: implement-endpoint\n\nAdded /api/v1/stripe/webhook handler with idempotency key.`
     **Finalization hard failures**: wrap-up is designed to be infallible, but an unexpected error in any finalization step (git plumbing, repo IO — anything other than a `Conflict`, which has its own rework path) creates a Human escalation task (reason `finalize_failed`) and the merge queue advances past the job instead of stalling (design-lifecycle.md: unexpected wrap-up failure → triage).
 13. On eval reduce product failure: for `agent | human` work — if under rework budget, increment cycle, inject eval findings, re-enter Work (step 2); if rework budget exhausted, create Human escalation task → Escalated. For `command` work — escalate immediately (rework_budget disallowed). If a required evaluator returned `abort: true`, escalate immediately regardless of remaining budget (reason `eval_abort`; see §1.2 Abort verdict)
-14. On escalation Human task completion: read `action` — `Retry`: new work task same cycle; `Resolve`: re-enter Evaluation; `Revoke`: transition to Revoked
+14. On escalation Human task completion: read `action`. Post-work (job `Escalated`) — `Retry`: new work task same cycle; `Resolve`: re-enter Evaluation; `Revoke`: Revoked. Pre-work (job `Stalled`) — `Retry`: re-run the failed step (Ready-transition re-validation / re-enqueue → Ready); `Resolve`: rejected (400); `Revoke`: Revoked
 
 **Completeness contract for work containers:** task outcome is determined by container exit code — exit 0 = work succeeded; non-zero = infra/runtime failure (retried per `work_retries`). Calling `submit_result` is optional but provides richer rework context.
 
@@ -797,7 +806,7 @@ On overall fail (`work.type: command`): escalate immediately (rework_budget disa
 
 The merge gate closes the evergreen gap: eval runs against the job branch built on `base_ref`, but by the time the reduce passes, other jobs may have landed on the default branch. A textually clean merge can still be semantically broken (job A renamed a function job B calls) — without the gate, that breakage would land untested. The guarantee the gate provides: **no commit reaches the default branch without every required command evaluator passing against the exact tree that lands.**
 
-Applied after the eval reduce passes, before squash-merge:
+Applied after the eval reduce passes, before squash-merge — the job is in the **`WrapUp`** state throughout (§2.1); a pass lands (WrapUp→Done), a gate failure reworks (WrapUp→Work):
 
 1. **Skip fast-path** — if the default branch HEAD still equals `base_ref`, or `job/{seq}` has no commits beyond `base_ref`, the evaluators already ran against exactly what will land. Skip the gate; squash-merge directly. Solo jobs pay nothing.
 2. **Candidate construction** — if HEAD moved: build the candidate squash commit (the job branch's changes squashed onto current default HEAD) via `git merge-tree --write-tree` + `git commit-tree`, and point a temp ref `merge-gate/{seq}` at it. If the merge conflicts, this is the existing squash-merge-conflict path (§3.2 step 12) — the gate never runs.
@@ -806,7 +815,7 @@ Applied after the eval reduce passes, before squash-merge:
 
 **Serialization** — the gate is a merge queue of depth 1: at most one job per project is in the gate at a time. Jobs whose eval reduce passes while the gate is occupied queue FIFO; each dequeued job re-checks the skip fast-path against the then-current HEAD. Since the dispatcher already merges sequentially, this adds no new coordination — just a queue in dispatcher memory.
 
-**Bounding** — repeated gate failures don't consume `rework_budget`, so a job that genuinely can't integrate could loop Work → Evaluation → gate → Work. In practice each rework rebases onto the offending HEAD, so the loop converges unless the default branch keeps moving against the job; `job_deadline` is the backstop. Set one on long-running graphs with high merge concurrency.
+**Bounding** — repeated gate failures don't consume `rework_budget`, so a job that genuinely can't integrate could loop Work → Evaluation → WrapUp (gate) → Work. In practice each rework rebases onto the offending HEAD, so the loop converges unless the default branch keeps moving against the job; `job_deadline` is the backstop. Set one on long-running graphs with high merge concurrency.
 
 **Restart** — `MergeGate` tasks reconcile like command eval tasks (§3.6): exit code is the verdict; a vanished container fails the task. The candidate ref is deterministic from `job/{seq}` + the HEAD recorded when the gate opened, so the dispatcher rebuilds `merge-gate/{seq}` and re-runs the gate on restart.
 
@@ -822,7 +831,7 @@ See §2.1 (state table rows for `Escalated`) and §1.2 (EscalationAction, TaskRe
 
 **Task timeout scan** — dispatcher periodically scans for tasks in `Running` state where `now - started_at > job.resources.task_timeout`. The task is marked Failed and retry logic applies. Tasks in `Pending` state are not timed out — the clock starts when execution begins. Human tasks (any phase or type) are excluded from the timeout scan — they have no timeout and no automatic abandonment. This is intentional: human review gates are explicit decisions, not time-bounded.
 
-**Job deadline scan** — if `job_deadline` is set, the dispatcher scans for jobs in Work, Evaluation, or Ready state where `ready_at` is set and `now - ready_at > job_deadline`. Any such job is transitioned to Escalated with a Human task explaining the deadline was exceeded. If the job has a Running container at the time of deadline expiry, the dispatcher kills it (same as the timeout scan) before transitioning to Escalated. Jobs already in Escalated state are excluded — a human is already engaged. Jobs in Frozen or Blocked state are not checked — the clock does not start until `ready_at` is set (i.e., when the job first enters Ready).
+**Job deadline scan** — if `job_deadline` is set, the dispatcher scans for jobs in Work, Evaluation, or Ready state where `ready_at` is set and `now - ready_at > job_deadline`. Any such job is transitioned to a human-intervention state with a Human task explaining the deadline was exceeded: a job still in **Ready** (no work task yet) goes to **Stalled** (pre-work — Retry re-enqueues, Resolve rejected); a job in **Work** or **Evaluation** goes to **Escalated** (post-work — Resolve also available). If the job has a Running container at the time of deadline expiry, the dispatcher kills it (same as the timeout scan) first. Jobs already in Escalated or Stalled state are excluded — a human is already engaged. Jobs in Frozen or Blocked state (and in WrapUp — landing is platform-owned, like the merge queue) are not checked; the clock does not start until `ready_at` is set (i.e., when the job first enters Ready).
 
 **One-shot enforcement:** a job escalates for deadline at most once. Once the operator resolves a deadline escalation (any resolution action), deadline enforcement is permanently disabled for that job — the deadline's purpose is to summon a human, and the human now owns pacing. The scan therefore also excludes any job whose task log contains a resolved deadline escalation task.
 
@@ -841,9 +850,11 @@ On dispatcher startup, apply in order:
    - **Agent eval task, exited non-0** or **not found**: treat as infra error; apply `eval_retries`
    - **Command eval task, exited (any code)**: exit code is the verdict; proceed as normal completion
    - **Command eval task, not found**: infra failure; task marked Failed; reduce proceeds (escalates if the evaluator is `required`)
+   - **MergeGate task** (job in `WrapUp`): a gate in flight is superseded — its Running task is failed, the `merge-gate/{seq}` candidate is dropped, and the job re-enters the merge queue, which re-opens the gate fresh against current HEAD
    - Human eval tasks are never in `Running` state; not subject to this path
-3. Transition any Blocked job whose dependencies are all Done to Ready
-4. Enqueue all jobs currently in Ready state (including those that were Ready before the crash and any newly-Ready jobs from step 3) into the in-memory work queue
+3. For each job in `WrapUp` (the merge queue is in-memory and lost on restart), re-enter it into the merge queue — with or without a gate in flight — so landing resumes
+4. Transition any Blocked job whose dependencies are all Done to Ready
+5. Enqueue all jobs currently in Ready state (including those that were Ready before the crash and any newly-Ready jobs from step 4) into the in-memory work queue
 
 The task log in `tasks.*` KV is the source of truth for execution state. The configured backend must be reachable at startup; the dispatcher will not start if the backend is unavailable.
 

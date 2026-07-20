@@ -512,7 +512,8 @@ impl Core {
             };
 
         match (job.state, resolution) {
-            // Escalation task (§1.2 escalation resolution).
+            // Post-work escalation task (§1.2): work executed, automation ran
+            // out. Retry re-enters Work; Resolve re-enters Evaluation.
             (JobState::Escalated, TaskResolution::Escalation { action, structured }) => {
                 complete_task(&mut task, true, false, structured, Some(action));
                 self.tasks.put(&task).await?;
@@ -520,18 +521,8 @@ impl Core {
                     serde_json::json!({ "action": format!("{action:?}") }))
                     .await?;
                 match action {
-                    EscalationAction::Retry if job.base_ref.is_none() => {
-                        // Pre-work escalation (§1.2): re-run the failed step —
-                        // Ready-transition re-validation — not a work task.
-                        self.prework_retry(owner, project, seq).await
-                    }
                     EscalationAction::Retry => self.escalation_retry(owner, project, seq).await,
                     EscalationAction::Resolve => {
-                        if job.base_ref.is_none() {
-                            return Err(CoreError::InvalidResolution(
-                                "pre-work escalations accept only Retry and Revoke".into(),
-                            ));
-                        }
                         // §1.2: operator did the work; submit the current
                         // branch for evaluation as-is.
                         self.ensure_exec_state(owner, project, seq).await?;
@@ -542,7 +533,29 @@ impl Core {
                     }
                 }
             }
-            (JobState::Escalated, _) => Err(CoreError::InvalidResolution(
+            // Pre-work escalation task (§1.2): no work task exists. Retry
+            // re-runs the failed step (re-validation / re-enqueue) via
+            // prework_retry; Resolve is rejected — there is nothing to submit.
+            (JobState::Stalled, TaskResolution::Escalation { action, structured }) => {
+                if matches!(action, EscalationAction::Resolve) {
+                    return Err(CoreError::InvalidResolution(
+                        "pre-work escalations accept only Retry and Revoke".into(),
+                    ));
+                }
+                complete_task(&mut task, true, false, structured, Some(action));
+                self.tasks.put(&task).await?;
+                self.publish(owner, project, seq, "job-escalation-resolved",
+                    serde_json::json!({ "action": format!("{action:?}") }))
+                    .await?;
+                match action {
+                    EscalationAction::Retry => self.prework_retry(owner, project, seq).await,
+                    EscalationAction::Revoke => {
+                        self.revoke_job(owner, project, seq).await.map(|_| ())
+                    }
+                    EscalationAction::Resolve => unreachable!("rejected above"),
+                }
+            }
+            (JobState::Escalated | JobState::Stalled, _) => Err(CoreError::InvalidResolution(
                 "escalation tasks require kind: Escalation".into(),
             )),
             (_, TaskResolution::Escalation { .. }) => Err(CoreError::InvalidResolution(

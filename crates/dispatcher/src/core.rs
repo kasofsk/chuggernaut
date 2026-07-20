@@ -797,7 +797,7 @@ impl Core {
                     .join("\n");
                 let prompt =
                     format!("Job {seq} failed Ready-transition re-validation at {head}:\n{detail}");
-                self.escalate(owner, project, seq, "revalidation_failed", prompt).await?;
+                self.stall(owner, project, seq, "revalidation_failed", prompt).await?;
             }
         }
         Ok(())
@@ -886,6 +886,36 @@ impl Core {
             project,
             seq,
             "job-escalated",
+            serde_json::json!({ "reason": reason }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Create a Human escalation task and move the job to Stalled — the
+    /// pre-work counterpart of [`escalate`] (§1.2 pre-Work escalations). Used
+    /// when no work task exists: Ready-transition re-validation failure, or a
+    /// job_deadline that elapsed while the job was still Ready. The operator
+    /// resolves Retry (re-run the failed step) or Revoke only.
+    pub(crate) async fn stall(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        reason: &str,
+        prompt: String,
+    ) -> Result<()> {
+        let mut job = self.must_get(owner, project, seq)?.clone();
+        let task_id = self.next_task_id(owner, project, seq).await?;
+        // Pre-work: cycle 1, no exec state.
+        let task = escalation::escalation_task(task_id, seq, &job.project, 1, prompt);
+        self.tasks.put(&task).await?;
+        self.set_state(&mut job, JobState::Stalled).await?;
+        self.publish(
+            owner,
+            project,
+            seq,
+            "job-stalled",
             serde_json::json!({ "reason": reason }),
         )
         .await?;
