@@ -8,6 +8,7 @@ import { LibraryPage, JobTypePage } from './pages/Library'
 import { NewJobPage } from './pages/NewJob'
 import { FileViewPage } from './pages/FileView'
 import { TagsPage } from './pages/Tags'
+import { PromptsPage } from './pages/Prompts'
 import { JobDetail } from './pages/JobDetail'
 import './styles.css'
 
@@ -24,6 +25,7 @@ createRoot(document.getElementById('root')!).render(
         <Route path="/p/:owner/:project/library" element={<LibraryPage />} />
         <Route path="/p/:owner/:project/library/:name" element={<JobTypePage />} />
         <Route path="/p/:owner/:project/jobs/new" element={<NewJobPage />} />
+        <Route path="/p/:owner/:project/prompts" element={<PromptsPage />} />
         <Route path="/p/:owner/:project/tags" element={<TagsPage />} />
         <Route path="/p/:owner/:project/files" element={<FileViewPage />} />
         <Route path="/p/:owner/:project/jobs/:seq" element={<JobDetail />} />

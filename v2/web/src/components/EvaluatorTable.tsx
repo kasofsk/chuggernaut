@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import type { Evaluator } from '../api'
 
 /**
@@ -5,9 +6,13 @@ import type { Evaluator } from '../api'
  * Used by the job detail criteria card (with source column) and the library.
  */
 export function EvaluatorTable({
+  owner,
+  project,
   evaluators,
   showSource,
 }: {
+  owner: string
+  project: string
   evaluators: (Evaluator & { source?: 'type' | 'job' })[]
   showSource?: boolean
 }) {
@@ -31,7 +36,13 @@ export function EvaluatorTable({
             <td>{e.name}</td>
             <td>{e.type}</td>
             <td className="dim">
-              {e.type === 'command' ? <code>{e.run}</code> : e.prompt}
+              {e.type === 'command' ? (
+                <code>{e.run}</code>
+              ) : e.prompt ? (
+                <Link to={`/p/${owner}/${project}/files?path=${encodeURIComponent(e.prompt)}`}>
+                  {e.prompt} ↗
+                </Link>
+              ) : null}
               {e.model ? ` · ${e.model}` : ''}
             </td>
             <td>

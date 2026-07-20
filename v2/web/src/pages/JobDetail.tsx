@@ -123,7 +123,7 @@ export function JobDetail() {
         </div>
       </section>
 
-      {criteria && <CriteriaCard criteria={criteria} />}
+      {criteria && <CriteriaCard owner={owner} project={project} criteria={criteria} />}
 
       {pendingHuman.length > 0 && (
         <section className="card inbox">
@@ -232,7 +232,7 @@ export function JobDetail() {
  * The criteria the job will be (or was) judged against: the type's evaluators
  * plus any per-job additions, resolved at the same ref execution uses.
  */
-function CriteriaCard({ criteria }: { criteria: JobCriteria }) {
+function CriteriaCard({ owner, project, criteria }: { owner: string; project: string; criteria: JobCriteria }) {
   return (
     <section className="card">
       <h2>
@@ -245,7 +245,7 @@ function CriteriaCard({ criteria }: { criteria: JobCriteria }) {
           ))}
         </div>
       )}
-      <EvaluatorTable evaluators={criteria.evaluators} showSource />
+      <EvaluatorTable owner={owner} project={project} evaluators={criteria.evaluators} showSource />
     </section>
   )
 }

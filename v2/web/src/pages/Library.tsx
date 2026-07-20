@@ -114,7 +114,14 @@ function TypeCard({
                   <code>{jt.work.run}</code>
                 </>
               ) : (
-                <> · {jt.work.prompt}</>
+                <>
+                  {' · '}
+                  {jt.work.prompt && (
+                    <Link to={`/p/${owner}/${project}/files?path=${encodeURIComponent(jt.work.prompt)}`}>
+                      {jt.work.prompt} ↗
+                    </Link>
+                  )}
+                </>
               )}
               {jt.work.model ? ` · ${jt.work.model}` : ''}
               {jt.work.review ? ' · inline review' : ''}
@@ -142,7 +149,7 @@ function TypeCard({
             )}
           </dl>
           <h3 className="subhead">2 · Evaluation</h3>
-          <EvaluatorTable evaluators={jt.eval} />
+          <EvaluatorTable owner={owner} project={project} evaluators={jt.eval} />
           <h3 className="subhead">3 · Wrap-up</h3>
           <div className="dim">
             {jt.wrap_up.type === 'none'
