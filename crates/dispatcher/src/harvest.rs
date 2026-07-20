@@ -47,8 +47,24 @@ impl Harvester {
         task_id: u64,
         out: &AgentOutput,
     ) -> Option<TokenUsage> {
+        self.collect_agent(owner, project, seq, task_id, out).await.1
+    }
+
+    /// Full agent-run collection: stores stdout + transcript and returns both
+    /// the CLI's final **result text** and measured token usage. Work and eval
+    /// runs only need the usage (via [`collect`]); triage (spec §1.2) also needs
+    /// the result text — it runs without the channel MCP, so the CLI's own JSON
+    /// result on stdout is the only channel for the assessment.
+    pub(crate) async fn collect_agent(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task_id: u64,
+        out: &AgentOutput,
+    ) -> (Option<String>, Option<TokenUsage>) {
         let Some(id) = &out.container_id else {
-            return None; // provider without a container (fakes, stubs)
+            return (None, None); // provider without a container (fakes, stubs)
         };
 
         let logs = match self.backend.logs(id).await {
@@ -59,13 +75,14 @@ impl Harvester {
             }
         };
 
-        // Usage comes from the logs, not the transcript: the CLI's JSON result
-        // is a documented interface, while the transcript format is internal
-        // and version-unstable.
+        // Both come from the logs, not the transcript: the CLI's JSON result is
+        // a documented interface, while the transcript format is internal and
+        // version-unstable.
         let usage = logs.as_deref().and_then(agent::claude::parse_usage);
         if usage.is_none() {
             tracing::debug!("job {seq} task {task_id}: no usage in agent stdout");
         }
+        let result = logs.as_deref().and_then(agent::claude::parse_result);
 
         if let Some(bytes) = logs {
             self.store(owner, project, seq, task_id, ArtifactKind::Stdout, &bytes)
@@ -96,7 +113,7 @@ impl Harvester {
                 Err(e) => tracing::warn!("job {seq} task {task_id}: transcript copy failed: {e}"),
             }
         }
-        usage
+        (result, usage)
     }
 
     /// Collect just the logs, for a container the dispatcher launched itself

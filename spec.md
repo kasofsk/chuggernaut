@@ -21,6 +21,7 @@ pub struct Job {
     pub base_ref: Option<String>,          // exact HEAD of default branch; set/updated at every Ready-transition (Frozen→Ready and Blocked→Ready) and on squash-merge conflict; None until job first enters Ready
     pub knowledge_tags: Vec<String>,       // union of job type defaults and operator-supplied tags at creation
     pub eval: Vec<Evaluator>,              // additive per-job evaluators, layered on top of the type's eval list at execution; the type's evaluators are a floor — creation can add criteria, never remove or override them; name collisions are a release-time error (see design-lifecycle.md)
+    pub timeout: Option<String>,           // optional per-job work-task timeout override (duration string, e.g. "45m"), layering over the type's resources.task_timeout exactly like `eval` layers over the type's evaluators — but Work-phase tasks only; evaluators keep the type default. Any valid duration. Parseability validated at release. None → the type default applies
     pub factory: Option<String>,           // factory name when created by a factory triage agent (see §13); None for operator-created jobs
     pub created_at: DateTime<Utc>,
     pub ready_at: Option<DateTime<Utc>>,   // set once (immutably) when job first enters Ready; anchor for job_deadline; None until then
@@ -48,6 +49,7 @@ Example record:
   "base_ref": null,
   "knowledge_tags": ["rust", "rest-api", "payments/stripe-integration"],
   "eval": [],
+  "timeout": null,
   "factory": null,
   "created_at": "2026-04-05T10:00:00Z",
   "ready_at": null
@@ -312,7 +314,7 @@ pub struct Task {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-pub enum TaskPhase { Work, Evaluation, MergeGate }
+pub enum TaskPhase { Work, Evaluation, MergeGate, Triage }
 
 pub enum TaskKind {
     Command { run: String },
@@ -327,6 +329,7 @@ pub enum TaskResult {
     Command { pass: bool, exit_code: i32, output: String, structured: Option<serde_json::Value> },
     Agent   { pass: bool, abort: bool, structured: Option<serde_json::Value>, token_usage: Option<TokenUsage> },
     Human   { pass: bool, abort: bool, structured: Option<serde_json::Value>, action: Option<EscalationAction>, operator: String, resolved_at: DateTime<Utc> },
+    Triage  { assessment: String, token_usage: Option<TokenUsage> },  // operator-dispatched advisory triage (see below); assessment is the agent's written recommendation, captured from the CLI result text (no submit_result — triage runs without the channel MCP)
 }
 
 pub enum EscalationAction { Retry, Resolve, Revoke }
@@ -404,6 +407,8 @@ pub enum TaskResolution {
 Escalation never bypasses evaluation — `Done` is only reachable via an evaluation pass.
 
 **Pre-Work escalations** — escalations raised before any work task exists put the job in the **`Stalled`** state (not `Escalated`): Blocked→Stalled on re-validation failure (see §2.1); job-deadline escalation from Ready (Ready→Stalled, see §3.5). They accept only `Retry` and `Revoke`; `Resolve` is rejected with 400. For these, `Retry` re-attempts the failed step — re-runs Ready-transition re-validation for the former, re-enqueues the job for execution for the latter — rather than creating a work task. The distinction is carried by the state itself: `Stalled` has no transition into `Work` or `Evaluation`, so a mis-routed `Resolve` is impossible by construction rather than guarded at resolve time.
+
+**Manual triage (advisory)** — when a job is `Escalated` or `Stalled`, the operator may **dispatch a triage task** (`POST .../jobs/{seq}/triage`, §6.2) to help understand *why* it failed. The dispatcher runs an agent over the whole job state — the job brief, the escalation reason, every task that ran with its result, and the per-task captured Stdout logs (decrypted via the `age_artifacts` identity) — and records its written assessment + recommendation as a `TaskPhase::Triage` task carrying `TaskResult::Triage`. Triage is **purely advisory**: it never changes job state and creates no job transition (there is no `Triage` row in the §2.1 table). The operator still decides Retry / Resolve / Revoke. It runs in a platform-level image (`TRIAGE_IMAGE`, §12.4) with provider/model from the platform agent defaults, so it works uniformly on any job type (agent/command/human). The run is self-contained — the prompt embeds the job state in plaintext and there is no channel MCP, so the assessment is read back from the agent CLI's own JSON result text rather than a `submit_result` call. Session transcripts are omitted from the prompt by design (opaque, large, low value). Triage may be dispatched repeatedly; a revoke's container cleanup kills an in-flight triage.
 
 **Example task log:**
 
@@ -829,7 +834,7 @@ See §2.1 (state table rows for `Escalated`) and §1.2 (EscalationAction, TaskRe
 
 ### 3.5 Timeout and Deadline
 
-**Task timeout scan** — dispatcher periodically scans for tasks in `Running` state where `now - started_at > job.resources.task_timeout`. The task is marked Failed and retry logic applies. Tasks in `Pending` state are not timed out — the clock starts when execution begins. Human tasks (any phase or type) are excluded from the timeout scan — they have no timeout and no automatic abandonment. This is intentional: human review gates are explicit decisions, not time-bounded.
+**Task timeout scan** — dispatcher periodically scans for tasks in `Running` state where `now - started_at > task_timeout`. The task is marked Failed and retry logic applies. The applicable `task_timeout` is **per task phase**: a Work-phase task uses the per-job override `Job.timeout` (§1.1) when set, else the type's `resources.task_timeout`; every other phase (Evaluation, MergeGate, Triage) uses the type default. This is what keeps the override work-scoped — evaluators are unaffected by it. The same resolved Work timeout also governs the work agent's own container deadline and the §7.4 credential TTLs, so a longer override does not outlive its credentials. Tasks in `Pending` state are not timed out — the clock starts when execution begins. Human tasks (any phase or type) are excluded from the timeout scan — they have no timeout and no automatic abandonment. This is intentional: human review gates are explicit decisions, not time-bounded.
 
 **Job deadline scan** — if `job_deadline` is set, the dispatcher scans for jobs in Work, Evaluation, or Ready state where `ready_at` is set and `now - ready_at > job_deadline`. Any such job is transitioned to a human-intervention state with a Human task explaining the deadline was exceeded: a job still in **Ready** (no work task yet) goes to **Stalled** (pre-work — Retry re-enqueues, Resolve rejected); a job in **Work** or **Evaluation** goes to **Escalated** (post-work — Resolve also available). If the job has a Running container at the time of deadline expiry, the dispatcher kills it (same as the timeout scan) first. Jobs already in Escalated or Stalled state are excluded — a human is already engaged. Jobs in Frozen or Blocked state (and in WrapUp — landing is platform-owned, like the merge queue) are not checked; the clock does not start until `ready_at` is set (i.e., when the job first enters Ready).
 
@@ -1286,6 +1291,7 @@ GET    /api/v1/projects/{owner}/{project}/jobs/{seq}                → 200 OK; 
 GET    /api/v1/projects/{owner}/{project}/jobs/{seq}/criteria       → 200 OK; body: { ref, wrap_up, evaluators: [Evaluator + source], errors } — the criteria the job will be (or was) judged against, resolved at base_ref (or default HEAD before Ready)
 POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/release        → 200 OK; body: Job (updated state); 422 with error list if validation fails
 POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/revoke         → 200 OK; body: Job (updated state); 409 if already Done or Revoked
+POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/triage         → 200 OK; body: Job (unchanged); dispatches an advisory triage agent (§1.2). 409 unless the job is Escalated or Stalled; 422 if TRIAGE_IMAGE is unconfigured. Member+. Never changes job state
 
 # Graph
 GET    /api/v1/projects/{owner}/{project}/graph                     → 200 OK; body: Job[] (all jobs in the project)
@@ -1789,6 +1795,7 @@ Dispatcher configuration (environment variables or config file):
 ```
 AGENT_PROVIDER_DEFAULT   claude | codex      Required. No built-in default — dispatcher refuses to start without this.
 AGENT_MODEL_DEFAULT      string              Optional. If unset, the provider's built-in default model is used.
+TRIAGE_IMAGE             string              Optional. Platform image for operator-dispatched triage agents (§1.2). Provider/model reuse AGENT_PROVIDER_DEFAULT / AGENT_MODEL_DEFAULT. Unset → the triage action is unavailable (422). A platform-level image (rather than the failing job's own type image) so triage works uniformly across agent/command/human job types.
 ```
 
 If a job type declares `provider` and/or `model` at the `work:` level or per evaluator, those override the platform defaults for that job or evaluator. If neither the job type nor the platform config specifies a provider, the dispatcher fails to start with a configuration error.

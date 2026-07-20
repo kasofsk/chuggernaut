@@ -90,6 +90,7 @@ fn req(r#type: &str) -> CreateJobRequest {
         deps: vec![],
         knowledge_tags: vec![],
         eval: vec![],
+        timeout: None,
         factory: None,
     }
 }
@@ -136,6 +137,7 @@ async fn restart_recovers_orphaned_running_work_task() {
         base_ref: Some(head),
         knowledge_tags: vec![],
         eval: vec![],
+        timeout: None,
         factory: None,
         created_at: Utc::now(),
         ready_at: Some(Utc::now()),
@@ -214,6 +216,7 @@ async fn restart_lands_job_orphaned_in_wrapup() {
         base_ref: Some(head),
         knowledge_tags: vec![],
         eval: vec![],
+        timeout: None,
         factory: None,
         created_at: Utc::now(),
         ready_at: Some(Utc::now()),
@@ -392,6 +395,7 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
         base_ref: Some(head),
         knowledge_tags: vec![],
         eval: vec![],
+        timeout: None,
         factory: None,
         created_at: Utc::now(),
         ready_at: Some(Utc::now()),

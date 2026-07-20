@@ -183,6 +183,15 @@ pub async fn static_errors(
     let mut errs = Vec::new();
     let mut require_file = Vec::new();
 
+    // §1.1 per-job timeout override: parseability validated at release (the
+    // string is on the Job, not pinned to a ref), consistent with "wiring
+    // validated at release, not creation".
+    if let Some(t) = &job.timeout
+        && let Err(e) = types::parse_duration(t)
+    {
+        errs.push(ValidationError::new(seq, "timeout", e.to_string()));
+    }
+
     if job_type.work.r#type == WorkType::Agent {
         if let Some(p) = &job_type.work.prompt {
             require_file.push(("work.prompt".to_string(), p.clone()));

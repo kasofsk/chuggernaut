@@ -96,6 +96,8 @@ async fn rig_with_artifacts(artifacts_identity: Option<String>) -> Option<Rig> {
             repo_url_base: "file:///repos".into(),
             nats_url: server.url().into(),
             artifacts_identity,
+            // Enables the operator-dispatched triage action (§1.2).
+            triage_image: Some("triage:latest".into()),
             ..Default::default()
         },
     )
@@ -115,6 +117,7 @@ fn req(r#type: &str) -> CreateJobRequest {
         deps: vec![],
         knowledge_tags: vec![],
         eval: vec![],
+        timeout: None,
         factory: None,
     }
 }
@@ -686,4 +689,167 @@ async fn finalize_hard_failure_escalates_instead_of_wedging() {
     }
     let events = event_types(&rig.store).await;
     assert!(events.contains(&"job-escalated".to_string()));
+}
+
+// ── Issue #31: per-job timeout override + operator-dispatched triage ────────
+
+/// The per-job `Job.timeout` override (§1.1) drives the Work agent's own run
+/// timeout, while the evaluator keeps the type default — the override is
+/// Work-scoped. Asserted at the mechanism: the recorded run configs.
+#[tokio::test]
+async fn work_timeout_override_applies_to_work_not_eval() {
+    let Some(rig) = rig().await else { return };
+    let handle = rig.handle.clone();
+
+    rig.provider.on_run(|_| async {}); // work c1
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval("acme", "api", 1, 2, EvalSubmission {
+            pass: true, abort: false, structured: None, token_usage: None,
+        })
+        .await
+        .unwrap();
+    });
+
+    let mut create = req("impl-agent");
+    create.timeout = Some("45m".into());
+    let job = rig.handle.create_job(create).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let runs = rig.provider.runs();
+    assert_eq!(runs.len(), 2);
+    // Work: the 45m override. Eval: the type default (no `resources` → 1h).
+    assert_eq!(runs[0].task_timeout, Duration::from_secs(45 * 60));
+    assert_eq!(runs[1].task_timeout, Duration::from_secs(3600));
+}
+
+/// A Work task that outlives the per-job override is killed by the §3.5 timeout
+/// scan — the override applies at kill time, escalating the job.
+#[tokio::test]
+async fn work_timeout_override_times_out_running_work_task() {
+    let Some(rig) = rig().await else { return };
+    // The work "container" never exits on its own — the scan must end it.
+    rig.provider.on_run(|_| async { tokio::time::sleep(Duration::from_secs(30)).await });
+
+    let mut create = req("impl-agent"); // no work_retries → escalates on first fail
+    create.timeout = Some("1s".into());
+    let job = rig.handle.create_job(create).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Work).await;
+
+    // Age the Running work task past the 1s override, then scan.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    rig.handle.trigger_scan().await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
+    let work = tasks.iter().find(|t| t.phase == TaskPhase::Work).unwrap();
+    assert_eq!(work.state, TaskState::Failed, "the override should have timed out the work task");
+}
+
+/// The evaluator keeps the type default even when the job carries a short work
+/// override: a scan after the (short) override elapses must not touch the
+/// Evaluation-phase task — the override does not leak past Work.
+#[tokio::test]
+async fn eval_task_ignores_work_timeout_override() {
+    let Some(rig) = rig().await else { return };
+    rig.provider.on_run(|_| async {}); // work c1: exits immediately
+    // Eval "container" blocks so it is Running when the scan fires.
+    rig.provider.on_run(|_| async { tokio::time::sleep(Duration::from_secs(30)).await });
+
+    let mut create = req("impl-agent");
+    create.timeout = Some("1s".into());
+    let job = rig.handle.create_job(create).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Evaluation).await;
+
+    // Age well past the 1s work override; the eval task's 1h default protects it.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    rig.handle.trigger_scan().await.unwrap();
+
+    let job_now = rig.store.jobs().await.unwrap().get("acme", "api", job.id).await.unwrap().unwrap();
+    assert_eq!(job_now.state, JobState::Evaluation, "eval must survive the work override");
+    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
+    let eval = tasks.iter().find(|t| t.phase == TaskPhase::Evaluation).unwrap();
+    assert_eq!(eval.state, TaskState::Running, "the work override must not time out the eval task");
+}
+
+/// A malformed `Job.timeout` is rejected at release (§1.1: parseability
+/// validated at release, not creation) — creation still succeeds.
+#[tokio::test]
+async fn malformed_timeout_override_rejected_at_release() {
+    let Some(rig) = rig().await else { return };
+    let mut create = req("impl-agent");
+    create.timeout = Some("2 hours".into()); // not a valid duration string
+    let job = rig.handle.create_job(create).await.unwrap(); // creation is permissive
+    let err = rig.handle.release_job("acme", "api", job.id).await.unwrap_err();
+    match err {
+        dispatcher::core::CoreError::Validation(errs) => {
+            assert!(errs.iter().any(|e| e.field == "timeout"), "{errs:?}");
+        }
+        other => panic!("expected a validation error on timeout, got {other:?}"),
+    }
+}
+
+/// Operator-dispatched triage (§1.2) over an Escalated job: creates a Triage
+/// agent task, captures the assessment from the CLI's JSON result (no channel
+/// MCP), and leaves the job Escalated — purely advisory.
+#[tokio::test]
+async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let Some(rig) = rig_with_artifacts(Some(identity)).await else { return };
+
+    // Drive the job to Escalated: both work attempts fail (flaky: work_retries 1).
+    rig.provider.script_exits([2, 3]);
+    let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    // The triage agent's assessment rides the CLI's JSON `result` on stdout.
+    rig.backend.put_logs(
+        br#"{"type":"result","subtype":"success","is_error":false,"result":"Root cause: the work container exited non-zero on both attempts. Recommend Revoke.","session_id":"t","usage":{"input_tokens":10,"output_tokens":20}}"#
+            .to_vec(),
+    );
+
+    rig.handle.triage_job("acme", "api", job.id).await.unwrap();
+
+    // Poll for the Triage task to land with a recorded assessment.
+    let tasks = rig.store.tasks().await.unwrap();
+    let mut triage = None;
+    for _ in 0..100 {
+        let log = tasks.list_for_job("acme", "api", job.id).await.unwrap();
+        if let Some(t) = log.iter().find(|t| t.phase == TaskPhase::Triage && t.result.is_some()) {
+            triage = Some(t.clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let triage = triage.expect("triage task recorded a result");
+    assert_eq!(triage.state, TaskState::Done);
+    match triage.result.as_ref().unwrap() {
+        types::TaskResult::Triage { assessment, .. } => {
+            assert!(assessment.contains("Recommend Revoke"), "{assessment}");
+        }
+        other => panic!("expected a Triage result, got {other:?}"),
+    }
+
+    // Advisory: the job state is untouched.
+    let job_now = rig.store.jobs().await.unwrap().get("acme", "api", job.id).await.unwrap().unwrap();
+    assert_eq!(job_now.state, JobState::Escalated);
+
+    // The run used the platform triage image and carried no channel MCP.
+    let last = rig.provider.runs().pop().unwrap();
+    assert_eq!(last.image, "triage:latest");
+    assert!(last.mcp_servers.is_empty(), "triage runs without the channel MCP");
+}
+
+/// Triage is rejected unless the job is Escalated or Stalled (§1.2).
+#[tokio::test]
+async fn triage_rejected_on_non_intervention_state() {
+    let Some(rig) = rig().await else { return };
+    // A freshly created job is Frozen.
+    let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    let err = rig.handle.triage_job("acme", "api", job.id).await.unwrap_err();
+    assert!(matches!(err, dispatcher::core::CoreError::Conflict(_)), "{err:?}");
 }

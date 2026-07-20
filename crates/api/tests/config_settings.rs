@@ -107,6 +107,7 @@ async fn config_endpoints() {
                 }],
                 agent_provider_default: "claude".into(),
                 agent_model_default: Some("claude-sonnet-5".into()),
+                triage_image: Some("registry.acme.com/triage:latest".into()),
                 repos_root: "/data/repos".into(),
                 repo_url_base: "ssh://git@host:2222".into(),
                 nats_url: "nats://localhost:4222".into(),
@@ -181,6 +182,7 @@ async fn config_endpoints() {
     assert_eq!(status, StatusCode::OK, "{pc}");
     assert_eq!(pc["dispatcher"]["nodes"][0]["name"], "local");
     assert_eq!(pc["dispatcher"]["agent_provider_default"], "claude");
+    assert_eq!(pc["dispatcher"]["triage_image"], "registry.acme.com/triage:latest");
     assert_eq!(pc["agent_secrets"], serde_json::json!(["ANTHROPIC_API_KEY"]));
     assert_eq!(pc["vapid_public"], false);
     assert!(

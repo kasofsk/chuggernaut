@@ -6,7 +6,7 @@ use crate::core::{Core, Result, TaskExit};
 use crate::exec::task_timeout;
 use crate::release;
 use chrono::Utc;
-use types::{JobState, TaskKind, TaskResult, TaskState, parse_duration};
+use types::{JobState, TaskKind, TaskPhase, TaskResult, TaskState, parse_duration};
 
 /// Prompt marker identifying deadline escalation tasks — the one-shot rule
 /// (§3.5) excludes jobs whose task log contains a *resolved* one.
@@ -25,17 +25,23 @@ impl Core {
         let keys: Vec<(String, String, u64)> = self.active.keys().cloned().collect();
         let now = Utc::now();
         for (owner, project, seq) in keys {
-            let timeout = self
+            // The per-job override is Work-scoped (§1.1, §3.5): Work-phase tasks
+            // use it, every other phase uses the type default. Enforcing the
+            // split here — at kill time — is what keeps the override work-scoped.
+            let (work_timeout, type_timeout) = match self
                 .active
                 .get(&(owner.clone(), project.clone(), seq))
-                .map(|e| task_timeout(&e.job_type));
-            let Some(timeout) = timeout else { continue };
+            {
+                Some(e) => (e.work_timeout(), task_timeout(&e.job_type)),
+                None => continue,
+            };
             let expired: Vec<_> = self
                 .tasks
                 .list_for_job(&owner, &project, seq)
                 .await?
                 .into_iter()
                 .filter(|t| {
+                    let timeout = if t.phase == TaskPhase::Work { work_timeout } else { type_timeout };
                     t.state == TaskState::Running
                         && !matches!(t.kind, TaskKind::Human { .. })
                         && t.started_at
@@ -43,6 +49,8 @@ impl Core {
                 })
                 .collect();
             for task in expired {
+                let timeout =
+                    if task.phase == TaskPhase::Work { work_timeout } else { type_timeout };
                 tracing::warn!("task {}#{} timed out after {timeout:?}", seq, task.id);
                 if let Some(cid) = &task.container_id {
                     let _ = self.backend.kill(cid).await;

@@ -42,6 +42,14 @@ pub struct Job {
     /// collisions with the type's evaluators are a release-time error.
     #[serde(default)]
     pub eval: Vec<Evaluator>,
+    /// Optional per-job work-task timeout override (duration string, §1.1).
+    /// Layers over the job type's `resources.task_timeout` exactly like [`eval`]
+    /// layers over the type's evaluators — but for Work tasks only; evaluators
+    /// keep the type default. Any valid duration (shorter or longer). Parseability
+    /// is validated at release, consistent with "wiring validated at release, not
+    /// creation". None means the type default applies.
+    #[serde(default)]
+    pub timeout: Option<String>,
     /// Factory name when created by a factory triage agent (spec §13); None for
     /// operator-created jobs.
     pub factory: Option<String>,
@@ -102,6 +110,31 @@ mod tests {
         assert_eq!(job.id, 42);
         assert_eq!(job.state, JobState::Frozen);
         assert_eq!(job.deps, vec![11, 22]);
+        // `timeout` is optional and defaults to None on records that predate it.
+        assert_eq!(job.timeout, None);
+        let back = serde_json::to_string(&job).unwrap();
+        let again: Job = serde_json::from_str(&back).unwrap();
+        assert_eq!(job, again);
+    }
+
+    #[test]
+    fn job_round_trips_with_timeout_override() {
+        let json = r#"{
+          "id": 7,
+          "project": "acme/api",
+          "type": "deploy",
+          "deps": [],
+          "state": "Frozen",
+          "branch": "job/7",
+          "base_ref": null,
+          "knowledge_tags": [],
+          "timeout": "45m",
+          "factory": null,
+          "created_at": "2026-07-20T10:00:00Z",
+          "ready_at": null
+        }"#;
+        let job: Job = serde_json::from_str(json).unwrap();
+        assert_eq!(job.timeout.as_deref(), Some("45m"));
         let back = serde_json::to_string(&job).unwrap();
         let again: Job = serde_json::from_str(&back).unwrap();
         assert_eq!(job, again);

@@ -33,6 +33,18 @@ pub struct ExecState {
     /// §4.3 context for the current cycle's work task.
     pub eval_context: Vec<EvalResult>,
     pub merge_conflict: Option<String>,
+    /// Per-job work-task timeout override (`Job.timeout`, §1.1), resolved once
+    /// at Work entry. Applies to Work-phase tasks only — evaluators keep the
+    /// type default. None → the type's `resources.task_timeout` applies.
+    pub work_timeout: Option<Duration>,
+}
+
+impl ExecState {
+    /// The timeout governing this job's Work-phase tasks: the per-job override
+    /// if set, else the job type's `resources.task_timeout` (§1.1, §3.5).
+    pub(crate) fn work_timeout(&self) -> Duration {
+        self.work_timeout.unwrap_or_else(|| task_timeout(&self.job_type))
+    }
 }
 
 impl Core {
@@ -115,6 +127,10 @@ impl Core {
                 .await?;
         }
 
+        // §1.1 per-job override: parseability is validated at release, so a
+        // malformed string here is a stale record — fall back to the type
+        // default rather than failing the launch.
+        let work_timeout = job.timeout.as_deref().and_then(|s| parse_duration(s).ok());
         self.active.insert(
             (owner.to_string(), project.to_string(), seq),
             ExecState {
@@ -130,6 +146,7 @@ impl Core {
                 gate: None,
                 eval_context,
                 merge_conflict,
+                work_timeout,
             },
         );
         self.launch_work_task(owner, project, seq, cycle, 1).await
@@ -147,6 +164,10 @@ impl Core {
         let key = (owner.to_string(), project.to_string(), seq);
         let exec = self.active.get(&key).expect("exec state");
         let job_type = exec.job_type.clone();
+        // §1.1 per-job override for Work-phase tasks (else type default). Drives
+        // the agent run timeout and the §7.4 credential TTLs so creds outlive a
+        // longer override.
+        let work_timeout = exec.work_timeout();
         let (eval_context, merge_conflict) = (exec.eval_context.clone(), exec.merge_conflict.clone());
         let job = self.must_get(owner, project, seq)?.clone();
         let base_ref = job.base_ref.clone().expect("base_ref set in Work");
@@ -216,7 +237,7 @@ impl Core {
         let env = self
             .container_env(
                 owner, project, seq, &job.branch, &job_type, &job_type.work.secrets,
-                ChannelRole::Work,
+                ChannelRole::Work, work_timeout,
             )
             .await?;
         match job_type.work.r#type {
@@ -230,7 +251,7 @@ impl Core {
                     .await?;
                 let (mcp_servers, mut files) = self.channel_mcp(&env);
                 files.extend(
-                    self.ssh_credential_files(owner, project, seq, ChannelRole::Work, &job_type)
+                    self.ssh_credential_files(owner, project, seq, ChannelRole::Work, work_timeout)
                         .await?,
                 );
                 let config = AgentRunConfig {
@@ -249,7 +270,7 @@ impl Core {
                     mcp_servers,
                     files,
                     env,
-                    task_timeout: task_timeout(&job_type),
+                    task_timeout: work_timeout,
                     eval_context,
                     merge_conflict,
                     session_id: session_id.clone().unwrap_or_default(),
@@ -275,7 +296,7 @@ impl Core {
                     let _ = tx
                         .send(Msg::TaskExited {
                             owner: o, project: p, seq, task_id,
-                            exit: TaskExit { exit_code, eval_json: None, usage },
+                            exit: TaskExit { exit_code, eval_json: None, usage, assessment: None },
                         })
                         .await;
                 });
@@ -287,7 +308,7 @@ impl Core {
                     cmd: bootstrap_cmd(&["sh".into(), "-c".into(), run]),
                     env,
                     files: self
-                        .ssh_credential_files(owner, project, seq, ChannelRole::Work, &job_type)
+                        .ssh_credential_files(owner, project, seq, ChannelRole::Work, work_timeout)
                         .await?,
                     cpu_limit: job_type.resources.as_ref().and_then(|r| r.cpu),
                     memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
@@ -353,6 +374,13 @@ impl Core {
             }
             TaskPhase::MergeGate => {
                 self.on_gate_exited(owner, project, seq, task, exit.exit_code, exit.eval_json).await
+            }
+            // Advisory triage (§1.2): record the assessment; never touch job state.
+            TaskPhase::Triage => {
+                if task.state != TaskState::Running {
+                    return Ok(());
+                }
+                self.on_triage_exited(owner, project, seq, task, exit).await
             }
         }
     }
@@ -724,6 +752,7 @@ impl Core {
             gate: None,
             eval_context: vec![],
             merge_conflict: None,
+            work_timeout: job.timeout.as_deref().and_then(|s| parse_duration(s).ok()),
         });
         Ok(())
     }
@@ -761,6 +790,10 @@ impl Core {
         job_type: &JobType,
         secrets_declared: &[String],
         role: ChannelRole,
+        // §7.4 credential TTL: the resolved timeout of the task these creds
+        // serve (work override or type default), so a longer-running task's
+        // credentials outlive it.
+        creds_ttl: Duration,
     ) -> Result<HashMap<String, String>> {
         let mut env = HashMap::from([
             ("JOB_ID".into(), seq.to_string()),
@@ -779,21 +812,7 @@ impl Core {
                 env.insert("JOB_TASK_ID".into(), task_id.to_string());
             }
         }
-        // §5.2: repos behind the SSH front need the injected cert (paths are
-        // fixed — the credential itself rides in via ssh_credential_files).
-        // No SendEnv needed for git protocol v2 — git appends
-        // `-o SendEnv=GIT_PROTOCOL` itself once it detects an OpenSSH variant.
-        // The server half (`AcceptEnv GIT_PROTOCOL`) is sshd's config.
-        if self.ssh_front_active() {
-            env.insert(
-                "GIT_SSH_COMMAND".into(),
-                format!(
-                    "ssh -i {SSH_ID_PATH} -o CertificateFile={SSH_CERT_PATH} \
-                     -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
-                     -o UserKnownHostsFile=/dev/null"
-                ),
-            );
-        }
+        self.inject_git_ssh_command(&mut env);
         // §7.4: scoped credentials valid for task_timeout, minted per launch.
         if let Some(seed) = &self.config.nats_account_seed {
             let signer = auth::nats::NatsUserSigner::from_account_seed(seed)
@@ -804,7 +823,7 @@ impl Core {
                     auth::nats::eval_container_permissions(owner, project, seq, task_id)
                 }
             };
-            let ttl = chrono::Duration::from_std(task_timeout(job_type))
+            let ttl = chrono::Duration::from_std(creds_ttl)
                 .unwrap_or_else(|_| chrono::Duration::hours(1));
             let creds = signer
                 .mint_creds(
@@ -931,8 +950,26 @@ impl Core {
         Ok(())
     }
 
-    fn ssh_front_active(&self) -> bool {
+    pub(crate) fn ssh_front_active(&self) -> bool {
         self.config.ssh_ca.is_some() && self.config.repo_url_base.starts_with("ssh://")
+    }
+
+    /// §5.2: repos behind the SSH front need the injected cert (paths are fixed
+    /// — the credential itself rides in via `ssh_credential_files`). No SendEnv
+    /// needed for git protocol v2 — git appends `-o SendEnv=GIT_PROTOCOL` itself
+    /// once it detects an OpenSSH variant (the server half `AcceptEnv
+    /// GIT_PROTOCOL` is sshd's config). No-op when the SSH front is inactive.
+    pub(crate) fn inject_git_ssh_command(&self, env: &mut HashMap<String, String>) {
+        if self.ssh_front_active() {
+            env.insert(
+                "GIT_SSH_COMMAND".into(),
+                format!(
+                    "ssh -i {SSH_ID_PATH} -o CertificateFile={SSH_CERT_PATH} \
+                     -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+                     -o UserKnownHostsFile=/dev/null"
+                ),
+            );
+        }
     }
 
     /// §7.4 per-job SSH credential as injected files (work rw, eval ro).
@@ -943,7 +980,9 @@ impl Core {
         project: &str,
         seq: u64,
         role: ChannelRole,
-        job_type: &JobType,
+        // §7.4 credential TTL: the resolved timeout of the task these creds
+        // serve (work override or type default).
+        creds_ttl: Duration,
     ) -> Result<Vec<container::InjectedFile>> {
         if !self.ssh_front_active() {
             return Ok(vec![]);
@@ -953,7 +992,7 @@ impl Core {
             ChannelRole::Work => auth::ssh::CertAccess::ReadWrite,
             ChannelRole::Eval { .. } => auth::ssh::CertAccess::ReadOnly,
         };
-        let ttl = chrono::Duration::from_std(task_timeout(job_type))
+        let ttl = chrono::Duration::from_std(creds_ttl)
             .unwrap_or_else(|_| chrono::Duration::hours(1));
         let cred = ca
             .issue_job_credential(owner, project, seq, access, ttl)

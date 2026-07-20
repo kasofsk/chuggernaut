@@ -199,7 +199,7 @@ impl Core {
                                 owner: o, project: p, seq, task_id,
                                 // Re-attaching after a restart: the agent
                                 // monitor that would have parsed usage is gone.
-                                exit: TaskExit { exit_code, eval_json, usage: None },
+                                exit: TaskExit { exit_code, eval_json, usage: None, assessment: None },
                             })
                             .await;
                     });
@@ -253,14 +253,16 @@ pub(crate) fn result_pass(result: &TaskResult) -> bool {
         TaskResult::Command { pass, .. }
         | TaskResult::Agent { pass, .. }
         | TaskResult::Human { pass, .. } => *pass,
-        TaskResult::Work { .. } => true,
+        // Triage is advisory (§1.2) — never an eval verdict, so this is never
+        // consulted; treat it as a non-failure for completeness.
+        TaskResult::Work { .. } | TaskResult::Triage { .. } => true,
     }
 }
 
 pub(crate) fn result_abort(result: &TaskResult) -> bool {
     match result {
         TaskResult::Agent { abort, .. } | TaskResult::Human { abort, .. } => *abort,
-        TaskResult::Command { .. } | TaskResult::Work { .. } => false,
+        TaskResult::Command { .. } | TaskResult::Work { .. } | TaskResult::Triage { .. } => false,
     }
 }
 
@@ -270,5 +272,7 @@ pub(crate) fn result_structured(result: &TaskResult) -> Option<serde_json::Value
         | TaskResult::Agent { structured, .. }
         | TaskResult::Human { structured, .. }
         | TaskResult::Work { structured, .. } => structured.clone(),
+        // Triage carries prose, not structured findings.
+        TaskResult::Triage { .. } => None,
     }
 }
