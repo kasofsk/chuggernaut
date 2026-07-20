@@ -53,7 +53,10 @@ impl PullRequestApi for FakePr {
         _title: &str,
         _body: &str,
     ) -> Result<PrInfo, GithubError> {
-        self.created.lock().unwrap().push((repo.into(), head.into(), base.into()));
+        self.created
+            .lock()
+            .unwrap()
+            .push((repo.into(), head.into(), base.into()));
         Ok(self.current.lock().unwrap().clone())
     }
 
@@ -98,7 +101,13 @@ impl Rig {
     /// path against the fake API (a `file://` origin parses to no github_repo).
     async fn pretend_github(&self, record: &mut ProjectRecord) {
         record.origin.as_mut().unwrap().github_repo = Some("acme/upstream".into());
-        self.store.projects().await.unwrap().put("acme", "api", record).await.unwrap();
+        self.store
+            .projects()
+            .await
+            .unwrap()
+            .put("acme", "api", record)
+            .await
+            .unwrap();
         self.store
             .raw_bucket(store::buckets::SECRETS)
             .await
@@ -150,13 +159,19 @@ async fn link_seeds_config_without_clobbering_and_leaves_origin_untouched() {
     let origin_main_before = rig.origin.main_sha().await;
 
     let mut core = rig.core().await;
-    let record = core.link_project("acme", "api", &rig.origin.url(), None).await.unwrap();
+    let record = core
+        .link_project("acme", "api", &rig.origin.url(), None)
+        .await
+        .unwrap();
 
     let link = record.origin.expect("linked");
     assert_eq!(link.main_branch, "main");
     assert_eq!(link.github_repo, None); // file:// origin
     let repos = rig.repos();
-    assert_eq!(repos.default_branch("acme", "api").await.unwrap(), "integration");
+    assert_eq!(
+        repos.default_branch("acme", "api").await.unwrap(),
+        "integration"
+    );
     // Origin untouched by linking.
     assert_eq!(rig.origin.main_sha().await, origin_main_before);
     // Existing file preserved; missing template files seeded.
@@ -177,13 +192,17 @@ async fn link_seeds_config_without_clobbering_and_leaves_origin_untouched() {
     // Integration is ahead of origin main by exactly the seed commit.
     let origin_sha = repos.origin_main_sha("acme", "api").await.unwrap();
     assert_eq!(
-        repos.count_commits_beyond("acme", "api", &origin_sha, "integration").await.unwrap(),
+        repos
+            .count_commits_beyond("acme", "api", &origin_sha, "integration")
+            .await
+            .unwrap(),
         1
     );
 
     // Double-link is a conflict.
     assert!(matches!(
-        core.link_project("acme", "api", &rig.origin.url(), None).await,
+        core.link_project("acme", "api", &rig.origin.url(), None)
+            .await,
         Err(CoreError::Conflict(_))
     ));
 }
@@ -193,7 +212,12 @@ async fn ssh_origin_requires_deploy_key_secret() {
     let Some(rig) = rig().await else { return };
     let mut core = rig.core().await;
     let err = core
-        .link_project("acme", "api", "ssh://git@github.com/acme/upstream.git", None)
+        .link_project(
+            "acme",
+            "api",
+            "ssh://git@github.com/acme/upstream.git",
+            None,
+        )
         .await
         .unwrap_err();
     let CoreError::Validation(errs) = err else {
@@ -208,7 +232,10 @@ async fn ssh_origin_requires_deploy_key_secret() {
 async fn release_pushes_branch_opens_pr_and_holds() {
     let Some(rig) = rig().await else { return };
     let mut core = rig.core().await;
-    let mut record = core.link_project("acme", "api", &rig.origin.url(), None).await.unwrap();
+    let mut record = core
+        .link_project("acme", "api", &rig.origin.url(), None)
+        .await
+        .unwrap();
     rig.pretend_github(&mut record).await;
     commit_to_integration(&rig, &[("src/feature.py", "print('job 1')")]).await;
 
@@ -217,13 +244,27 @@ async fn release_pushes_branch_opens_pr_and_holds() {
     assert_eq!(release.number, 1);
     assert_eq!(release.pr_number, 1);
     assert_eq!(release.status, ReleaseStatus::Open);
-    assert!(rig.origin.branch_exists("chug/release-1").await, "branch pushed to origin");
+    assert!(
+        rig.origin.branch_exists("chug/release-1").await,
+        "branch pushed to origin"
+    );
     // Local pin at the snapshot.
-    let pin = rig.repos().resolve_ref("acme", "api", "refs/chug/release-1").await.unwrap();
+    let pin = rig
+        .repos()
+        .resolve_ref("acme", "api", "refs/chug/release-1")
+        .await
+        .unwrap();
     assert_eq!(pin, release.integration_sha);
     // PR opened head → base.
     let created = rig.pr.created.lock().unwrap().clone();
-    assert_eq!(created, vec![("acme/upstream".into(), "chug/release-1".into(), "main".into())]);
+    assert_eq!(
+        created,
+        vec![(
+            "acme/upstream".into(),
+            "chug/release-1".into(),
+            "main".into()
+        )]
+    );
     // Status reflects the hold.
     let status = core.origin_status("acme", "api").await.unwrap();
     assert!(status.held);
@@ -239,10 +280,14 @@ async fn release_pushes_branch_opens_pr_and_holds() {
 async fn release_with_nothing_ahead_is_a_conflict() {
     let Some(rig) = rig().await else { return };
     let mut core = rig.core().await;
-    core.link_project("acme", "api", &rig.origin.url(), None).await.unwrap();
+    core.link_project("acme", "api", &rig.origin.url(), None)
+        .await
+        .unwrap();
     // Merge the seed commit upstream so integration == origin main.
     let record = core.origin_release("acme", "api").await.unwrap(); // seed commit is releasable
-    rig.origin.merge_branch_to_main("chug/release-1", false).await;
+    rig.origin
+        .merge_branch_to_main("chug/release-1", false)
+        .await;
     core.origin_sync("acme", "api").await.unwrap();
     assert_eq!(
         record.release.unwrap().pr_number,
@@ -259,17 +304,25 @@ async fn release_with_nothing_ahead_is_a_conflict() {
 async fn merged_pr_resets_integration_and_clears_hold() {
     let Some(rig) = rig().await else { return };
     let mut core = rig.core().await;
-    let mut record = core.link_project("acme", "api", &rig.origin.url(), None).await.unwrap();
+    let mut record = core
+        .link_project("acme", "api", &rig.origin.url(), None)
+        .await
+        .unwrap();
     rig.pretend_github(&mut record).await;
     commit_to_integration(&rig, &[("src/feature.py", "print('job 1')")]).await;
     core.origin_release("acme", "api").await.unwrap();
 
     // GitHub squash-merges the PR (worst case: shared trees, no shared commits).
-    rig.origin.merge_branch_to_main("chug/release-1", true).await;
+    rig.origin
+        .merge_branch_to_main("chug/release-1", true)
+        .await;
     rig.pr.script("closed", true);
 
     let status = core.origin_sync("acme", "api").await.unwrap();
-    assert_eq!(status.release.as_ref().unwrap().status, ReleaseStatus::Merged);
+    assert_eq!(
+        status.release.as_ref().unwrap().status,
+        ReleaseStatus::Merged
+    );
     assert!(!status.held);
     assert_eq!(status.ahead_by, 0, "integration reset onto new origin main");
     assert_eq!(
@@ -277,7 +330,12 @@ async fn merged_pr_resets_integration_and_clears_hold() {
         Some(rig.origin.main_sha().await.as_str())
     );
     // The pre-reset history stays reachable through the pin.
-    assert!(rig.repos().resolve_ref("acme", "api", "refs/chug/release-1").await.is_ok());
+    assert!(
+        rig.repos()
+            .resolve_ref("acme", "api", "refs/chug/release-1")
+            .await
+            .is_ok()
+    );
 
     // A fresh release afterward gets n=2.
     commit_to_integration(&rig, &[("src/more.py", "print('job 2')")]).await;
@@ -289,7 +347,10 @@ async fn merged_pr_resets_integration_and_clears_hold() {
 async fn closed_unmerged_pr_clears_hold_without_reset() {
     let Some(rig) = rig().await else { return };
     let mut core = rig.core().await;
-    let mut record = core.link_project("acme", "api", &rig.origin.url(), None).await.unwrap();
+    let mut record = core
+        .link_project("acme", "api", &rig.origin.url(), None)
+        .await
+        .unwrap();
     rig.pretend_github(&mut record).await;
     commit_to_integration(&rig, &[("src/feature.py", "print('job 1')")]).await;
     let record = core.origin_release("acme", "api").await.unwrap();
@@ -298,10 +359,16 @@ async fn closed_unmerged_pr_clears_hold_without_reset() {
     rig.pr.script("closed", false); // closed without merging
 
     let status = core.origin_sync("acme", "api").await.unwrap();
-    assert_eq!(status.release.as_ref().unwrap().status, ReleaseStatus::Closed);
+    assert_eq!(
+        status.release.as_ref().unwrap().status,
+        ReleaseStatus::Closed
+    );
     assert!(!status.held);
     // No reset: unreleased work stays on integration.
-    assert_eq!(status.integration_sha.as_deref(), Some(integration_before.as_str()));
+    assert_eq!(
+        status.integration_sha.as_deref(),
+        Some(integration_before.as_str())
+    );
     assert!(status.ahead_by > 0);
 }
 
@@ -309,14 +376,20 @@ async fn closed_unmerged_pr_clears_hold_without_reset() {
 async fn sync_fast_forwards_external_commits_when_nothing_unreleased() {
     let Some(rig) = rig().await else { return };
     let mut core = rig.core().await;
-    core.link_project("acme", "api", &rig.origin.url(), None).await.unwrap();
+    core.link_project("acme", "api", &rig.origin.url(), None)
+        .await
+        .unwrap();
     // Ship the seed so integration == origin main.
     core.origin_release("acme", "api").await.unwrap();
-    rig.origin.merge_branch_to_main("chug/release-1", false).await;
+    rig.origin
+        .merge_branch_to_main("chug/release-1", false)
+        .await;
     core.origin_sync("acme", "api").await.unwrap();
 
     // A human pushes to GitHub main directly.
-    rig.origin.commit_to_main("docs/human.md", b"external", "human commit").await;
+    rig.origin
+        .commit_to_main("docs/human.md", b"external", "human commit")
+        .await;
     let status = core.origin_sync("acme", "api").await.unwrap();
     assert_eq!(
         status.integration_sha.as_deref(),
@@ -329,7 +402,10 @@ async fn sync_fast_forwards_external_commits_when_nothing_unreleased() {
 async fn restart_restores_hold_for_open_release() {
     let Some(rig) = rig().await else { return };
     let mut core = rig.core().await;
-    let mut record = core.link_project("acme", "api", &rig.origin.url(), None).await.unwrap();
+    let mut record = core
+        .link_project("acme", "api", &rig.origin.url(), None)
+        .await
+        .unwrap();
     rig.pretend_github(&mut record).await;
     commit_to_integration(&rig, &[("src/feature.py", "print('job 1')")]).await;
     core.origin_release("acme", "api").await.unwrap();
@@ -338,7 +414,10 @@ async fn restart_restores_hold_for_open_release() {
     // A fresh Core (restart) must come up held.
     let mut core = rig.core().await;
     let status = core.origin_status("acme", "api").await.unwrap();
-    assert!(status.held, "hold restored from the project record at startup");
+    assert!(
+        status.held,
+        "hold restored from the project record at startup"
+    );
 }
 
 const QUICK_YAML: &str = r#"
@@ -356,13 +435,19 @@ work:
 async fn held_job_lands_after_merged_release_sync() {
     let Some(rig) = rig().await else { return };
     let mut core = rig.core().await;
-    let mut record = core.link_project("acme", "api", &rig.origin.url(), None).await.unwrap();
+    let mut record = core
+        .link_project("acme", "api", &rig.origin.url(), None)
+        .await
+        .unwrap();
     rig.pretend_github(&mut record).await;
-    commit_to_integration(&rig, &[
-        ("jobs/quick.yaml", QUICK_YAML),
-        ("prompts/quick.md", "do the thing"),
-        ("src/feature.py", "print('job 0')"),
-    ])
+    commit_to_integration(
+        &rig,
+        &[
+            ("jobs/quick.yaml", QUICK_YAML),
+            ("prompts/quick.md", "do the thing"),
+            ("src/feature.py", "print('job 0')"),
+        ],
+    )
     .await;
 
     // Fake agent: commit to the job branch.
@@ -372,7 +457,9 @@ async fn held_job_lands_after_merged_release_sync() {
         async move {
             let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
             let clone = clone_branch_from(&bare, &branch).await;
-            clone.commit_file("src/job_work.py", b"print('job work')", "implement").await;
+            clone
+                .commit_file("src/job_work.py", b"print('job work')", "implement")
+                .await;
             clone.push(&branch).await;
         }
     });
@@ -416,13 +503,18 @@ async fn held_job_lands_after_merged_release_sync() {
     let j = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
     assert_eq!(j.state, JobState::WrapUp, "held in the merge queue");
     assert_eq!(
-        rig.repos().resolve_ref("acme", "api", "integration").await.unwrap(),
+        rig.repos()
+            .resolve_ref("acme", "api", "integration")
+            .await
+            .unwrap(),
         integration_at_release,
         "integration unmoved during the hold"
     );
 
     // GitHub squash-merges; sync resets integration and pumps the queue.
-    rig.origin.merge_branch_to_main("chug/release-1", true).await;
+    rig.origin
+        .merge_branch_to_main("chug/release-1", true)
+        .await;
     rig.pr.script("closed", true);
     handle.origin_sync("acme", "api").await.unwrap();
 
@@ -447,7 +539,10 @@ async fn held_job_lands_after_merged_release_sync() {
     );
     let origin_sha = repos.origin_main_sha("acme", "api").await.unwrap();
     assert_eq!(
-        repos.count_commits_beyond("acme", "api", &origin_sha, "integration").await.unwrap(),
+        repos
+            .count_commits_beyond("acme", "api", &origin_sha, "integration")
+            .await
+            .unwrap(),
         1,
         "exactly the job's squash commit sits above the new origin main"
     );
@@ -459,7 +554,9 @@ async fn held_job_lands_after_merged_release_sync() {
 async fn reserved_chug_secrets_never_reach_containers() {
     let Some(rig) = rig().await else { return };
     let mut core = rig.core().await;
-    core.link_project("acme", "api", &rig.origin.url(), None).await.unwrap();
+    core.link_project("acme", "api", &rig.origin.url(), None)
+        .await
+        .unwrap();
     commit_to_integration(&rig, &[
         (
             "jobs/sneaky.yaml",

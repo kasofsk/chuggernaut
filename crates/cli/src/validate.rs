@@ -99,11 +99,20 @@ mod tests {
         let bad = dir.path().join("bad.yaml");
         std::fs::write(&bad, "name: bad\nwork:\n  type: agent\n  prompt: p.md\n").unwrap();
         let errors = validate_file(&bad);
-        assert!(errors.iter().any(|e| e.contains("'image' is required")), "{errors:?}");
+        assert!(
+            errors.iter().any(|e| e.contains("'image' is required")),
+            "{errors:?}"
+        );
 
         let unknown = dir.path().join("unknown.yaml");
-        std::fs::write(&unknown, "name: u\nbogus_field: 1\nwork:\n  type: command\n  run: x\n")
-            .unwrap();
-        assert!(validate_file(&unknown)[0].contains("parse error"), "deny_unknown_fields");
+        std::fs::write(
+            &unknown,
+            "name: u\nbogus_field: 1\nwork:\n  type: command\n  run: x\n",
+        )
+        .unwrap();
+        assert!(
+            validate_file(&unknown)[0].contains("parse error"),
+            "deny_unknown_fields"
+        );
     }
 }

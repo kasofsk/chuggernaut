@@ -45,9 +45,7 @@ pub fn parse_duration(input: &str) -> Result<Duration, DurationParseError> {
         if digits.is_empty() {
             return Err(invalid("expected a number"));
         }
-        let value: u64 = digits
-            .parse()
-            .map_err(|_| invalid("number out of range"))?;
+        let value: u64 = digits.parse().map_err(|_| invalid("number out of range"))?;
         let unit = chars.next().ok_or_else(|| invalid("missing unit"))?;
         let idx = UNITS
             .iter()
@@ -81,10 +79,7 @@ mod tests {
         assert_eq!(parse_duration("30m").unwrap(), Duration::from_secs(1_800));
         assert_eq!(parse_duration("24h").unwrap(), Duration::from_secs(86_400));
         assert_eq!(parse_duration("7d").unwrap(), Duration::from_secs(604_800));
-        assert_eq!(
-            parse_duration("1h30m").unwrap(),
-            Duration::from_secs(5_400)
-        );
+        assert_eq!(parse_duration("1h30m").unwrap(), Duration::from_secs(5_400));
         assert_eq!(
             parse_duration("1d2h3m4s").unwrap(),
             Duration::from_secs(93_784)
@@ -93,7 +88,9 @@ mod tests {
 
     #[test]
     fn rejects_malformed() {
-        for bad in ["", "  ", "h", "30", "30x", "1m1h", "1h1h", "0s", "-5m", "1.5h"] {
+        for bad in [
+            "", "  ", "h", "30", "30x", "1m1h", "1h1h", "0s", "-5m", "1.5h",
+        ] {
             assert!(parse_duration(bad).is_err(), "should reject {bad:?}");
         }
     }

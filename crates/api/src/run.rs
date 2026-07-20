@@ -36,7 +36,9 @@ impl ApiConfig {
         };
         Ok(Self {
             nats_url: env_opt("NATS_URL").unwrap_or_else(|| "nats://localhost:4222".into()),
-            keys_dir: env_opt("KEYS_DIR").unwrap_or_else(|| "/data/keys".into()).into(),
+            keys_dir: env_opt("KEYS_DIR")
+                .unwrap_or_else(|| "/data/keys".into())
+                .into(),
             bind_addr: bind_addr
                 .parse()
                 .map_err(|e| anyhow::anyhow!("BIND_ADDR {bind_addr:?}: {e}"))?,

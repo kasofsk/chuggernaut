@@ -365,7 +365,9 @@ impl JobType {
 
         let durations = [
             (
-                self.resources.as_ref().and_then(|r| r.task_timeout.as_deref()),
+                self.resources
+                    .as_ref()
+                    .and_then(|r| r.task_timeout.as_deref()),
                 "resources.task_timeout",
             ),
             (self.job_deadline.as_deref(), "job_deadline"),

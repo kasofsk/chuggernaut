@@ -88,10 +88,7 @@ pub fn account_jwt(
 
 /// The system account: JetStream must stay disabled on it (the server
 /// refuses to start otherwise), so no storage limits.
-pub fn system_account_jwt(
-    operator: &KeyPair,
-    account_public: &str,
-) -> Result<String, AuthError> {
+pub fn system_account_jwt(operator: &KeyPair, account_public: &str) -> Result<String, AuthError> {
     encode_jwt(
         account_public,
         "SYS",
@@ -136,7 +133,9 @@ pub struct NatsUserSigner {
 
 impl NatsUserSigner {
     pub fn from_account_seed(seed: &str) -> Result<Self, AuthError> {
-        Ok(Self { account: KeyPair::from_seed(seed.trim()).map_err(internal)? })
+        Ok(Self {
+            account: KeyPair::from_seed(seed.trim()).map_err(internal)?,
+        })
     }
 
     /// Mint a fresh user nkey + JWT and render the `.creds` content.
@@ -161,7 +160,13 @@ impl NatsUserSigner {
         nats.insert("type".into(), json!("user"));
         nats.insert("version".into(), json!(2));
         let exp = expires_in.map(|d| (chrono::Utc::now() + d).timestamp());
-        let jwt = encode_jwt(&user.public_key(), name, Value::Object(nats), exp, &self.account)?;
+        let jwt = encode_jwt(
+            &user.public_key(),
+            name,
+            Value::Object(nats),
+            exp,
+            &self.account,
+        )?;
         Ok(format_creds(&jwt, &user.seed().map_err(internal)?))
     }
 }
@@ -193,11 +198,13 @@ pub fn resolver_config(
 /// KV read of specific keys: direct-get subjects + the stream-info call
 /// async-nats issues when binding the bucket.
 fn kv_read(perms: &mut Permissions, bucket: &str, key_patterns: &[String]) {
-    perms.publish.push(format!("$JS.API.STREAM.INFO.KV_{bucket}"));
+    perms
+        .publish
+        .push(format!("$JS.API.STREAM.INFO.KV_{bucket}"));
     for pattern in key_patterns {
-        perms
-            .publish
-            .push(format!("$JS.API.DIRECT.GET.KV_{bucket}.$KV.{bucket}.{pattern}"));
+        perms.publish.push(format!(
+            "$JS.API.DIRECT.GET.KV_{bucket}.$KV.{bucket}.{pattern}"
+        ));
     }
 }
 
@@ -206,20 +213,34 @@ fn kv_read(perms: &mut Permissions, bucket: &str, key_patterns: &[String]) {
 /// `channel-inbox` stream poll.
 fn common_container(perms: &mut Permissions, owner: &str, project: &str, seq: u64) {
     perms.subscribe.push("_INBOX.>".into());
-    perms.subscribe.push(store::subjects::channel_inbox(owner, project, seq));
+    perms
+        .subscribe
+        .push(store::subjects::channel_inbox(owner, project, seq));
 
     let channel_key = store::keys::channel_key(owner, project, seq);
-    kv_read(perms, store::buckets::CHANNELS, std::slice::from_ref(&channel_key));
+    kv_read(
+        perms,
+        store::buckets::CHANNELS,
+        std::slice::from_ref(&channel_key),
+    );
     // Deliberately no `kv_write` on CHANNELS: containers post through the
     // dispatcher instead, keeping it the sole writer of the bucket and making
     // each post durable event history rather than a last-write-wins overwrite.
-    perms.publish.push(store::subjects::channel_update(owner, project, seq));
-    perms.publish.push(store::subjects::channel_reply(owner, project, seq));
+    perms
+        .publish
+        .push(store::subjects::channel_update(owner, project, seq));
+    perms
+        .publish
+        .push(store::subjects::channel_reply(owner, project, seq));
 
     // Knowledge keys nest b64 segments (`global.{s}.{p}`, `{owner}.{s}.{p}`,
     // `{owner}.{project}.{s}.{p}`): `{owner}.>` covers the §7.4 owner and
     // project grants in one pattern.
-    kv_read(perms, store::buckets::KNOWLEDGE, &["global.>".into(), format!("{owner}.>")]);
+    kv_read(
+        perms,
+        store::buckets::KNOWLEDGE,
+        &["global.>".into(), format!("{owner}.>")],
+    );
 
     // channel_check: ephemeral pull consumer on the inbox stream. Unnamed
     // ephemeral creation targets `CONSUMER.CREATE.{stream}` exactly (no
@@ -227,20 +248,40 @@ fn common_container(perms: &mut Permissions, owner: &str, project: &str, seq: u6
     // appends `.{name}.{filter}`.
     let stream = store::buckets::STREAM_CHANNEL_INBOX;
     perms.publish.push(format!("$JS.API.STREAM.INFO.{stream}"));
-    perms.publish.push(format!("$JS.API.CONSUMER.CREATE.{stream}"));
-    perms.publish.push(format!("$JS.API.CONSUMER.CREATE.{stream}.>"));
-    perms.publish.push(format!("$JS.API.CONSUMER.INFO.{stream}.>"));
-    perms.publish.push(format!("$JS.API.CONSUMER.MSG.NEXT.{stream}.>"));
+    perms
+        .publish
+        .push(format!("$JS.API.CONSUMER.CREATE.{stream}"));
+    perms
+        .publish
+        .push(format!("$JS.API.CONSUMER.CREATE.{stream}.>"));
+    perms
+        .publish
+        .push(format!("$JS.API.CONSUMER.INFO.{stream}.>"));
+    perms
+        .publish
+        .push(format!("$JS.API.CONSUMER.MSG.NEXT.{stream}.>"));
 }
 
 /// §7.4 work-container allow-list.
 pub fn work_container_permissions(owner: &str, project: &str, seq: u64) -> Permissions {
     let mut perms = Permissions::default();
     common_container(&mut perms, owner, project, seq);
-    kv_read(&mut perms, store::buckets::JOBS, &[store::keys::job_key(owner, project, seq)]);
-    kv_read(&mut perms, store::buckets::TASKS, &[format!("{owner}.{project}.{seq}.*")]);
-    perms.publish.push(store::subjects::work_submit(owner, project, seq));
-    perms.publish.push(format!("req.step.report.{owner}.{project}.{seq}.*"));
+    kv_read(
+        &mut perms,
+        store::buckets::JOBS,
+        &[store::keys::job_key(owner, project, seq)],
+    );
+    kv_read(
+        &mut perms,
+        store::buckets::TASKS,
+        &[format!("{owner}.{project}.{seq}.*")],
+    );
+    perms
+        .publish
+        .push(store::subjects::work_submit(owner, project, seq));
+    perms
+        .publish
+        .push(format!("req.step.report.{owner}.{project}.{seq}.*"));
     perms
 }
 
@@ -253,15 +294,23 @@ pub fn eval_container_permissions(
 ) -> Permissions {
     let mut perms = Permissions::default();
     common_container(&mut perms, owner, project, seq);
-    kv_read(&mut perms, store::buckets::TASKS, &[store::keys::task_key(owner, project, seq, task_id)]);
-    perms.publish.push(store::subjects::eval_submit(owner, project, seq, task_id));
+    kv_read(
+        &mut perms,
+        store::buckets::TASKS,
+        &[store::keys::task_key(owner, project, seq, task_id)],
+    );
+    perms
+        .publish
+        .push(store::subjects::eval_submit(owner, project, seq, task_id));
     perms
 }
 
 /// §13: factory triage jobs get the work allow-list plus `create_job`.
 pub fn triage_container_permissions(owner: &str, project: &str, seq: u64) -> Permissions {
     let mut perms = work_container_permissions(owner, project, seq);
-    perms.publish.push(format!("req.jobs.create.{owner}.{project}"));
+    perms
+        .publish
+        .push(format!("req.jobs.create.{owner}.{project}"));
     perms
 }
 
@@ -298,13 +347,18 @@ mod tests {
         assert_eq!(claims["iss"], account.public_key());
         assert!(claims["sub"].as_str().unwrap().starts_with('U'));
         assert_eq!(claims["nats"]["type"], "user");
-        assert_eq!(claims["nats"]["pub"]["allow"][0], "req.work.submit.acme.api.42");
+        assert_eq!(
+            claims["nats"]["pub"]["allow"][0],
+            "req.work.submit.acme.api.42"
+        );
         assert!(claims["exp"].as_i64().unwrap() > chrono::Utc::now().timestamp());
 
         // Signature verifies against the account key over header.payload.
         let signing_input = format!("{header}.{payload}");
         let sig_bytes = BASE64URL_NOPAD.decode(sig.as_bytes()).unwrap();
-        account.verify(signing_input.as_bytes(), &sig_bytes).unwrap();
+        account
+            .verify(signing_input.as_bytes(), &sig_bytes)
+            .unwrap();
 
         // The seed in the creds parses as a user nkey.
         let seed = creds
@@ -352,7 +406,10 @@ mod tests {
             assert!(p.publish.iter().any(|s| s == needle), "missing {needle}");
         }
         assert!(p.subscribe.contains(&"_INBOX.>".to_string()));
-        assert!(p.subscribe.contains(&"channel.inbox.acme.api.42".to_string()));
+        assert!(
+            p.subscribe
+                .contains(&"channel.inbox.acme.api.42".to_string())
+        );
         // Reads its own channel entry, but cannot write it: posts go through
         // the dispatcher so it stays the bucket's sole writer and each post
         // becomes durable event history instead of an in-place overwrite.
@@ -368,14 +425,21 @@ mod tests {
         );
         // No eval submit, no job creation, no event publishing.
         for forbidden in ["req.eval.submit", "req.jobs.create", "job.events"] {
-            assert!(!p.publish.iter().any(|s| s.contains(forbidden)), "found {forbidden}");
+            assert!(
+                !p.publish.iter().any(|s| s.contains(forbidden)),
+                "found {forbidden}"
+            );
         }
     }
 
     #[test]
     fn eval_allow_list_is_narrower() {
         let p = eval_container_permissions("acme", "api", 42, 7);
-        assert!(p.publish.iter().any(|s| s == "req.eval.submit.acme.api.42.7"));
+        assert!(
+            p.publish
+                .iter()
+                .any(|s| s == "req.eval.submit.acme.api.42.7")
+        );
         assert!(
             p.publish
                 .iter()
@@ -383,10 +447,17 @@ mod tests {
         );
         // An eval agent reports status like a work agent, through the
         // dispatcher — and likewise cannot write the bucket itself.
-        assert!(p.publish.iter().any(|s| s == "req.channel.update.acme.api.42"));
+        assert!(
+            p.publish
+                .iter()
+                .any(|s| s == "req.channel.update.acme.api.42")
+        );
         assert!(!p.publish.iter().any(|s| s.starts_with("$KV.channels")));
         for forbidden in ["req.work.submit", "req.step.report", "KV_jobs"] {
-            assert!(!p.publish.iter().any(|s| s.contains(forbidden)), "found {forbidden}");
+            assert!(
+                !p.publish.iter().any(|s| s.contains(forbidden)),
+                "found {forbidden}"
+            );
         }
     }
 
@@ -394,8 +465,11 @@ mod tests {
     fn triage_adds_job_creation_only() {
         let work = work_container_permissions("acme", "api", 42);
         let triage = triage_container_permissions("acme", "api", 42);
-        let extra: Vec<_> =
-            triage.publish.iter().filter(|s| !work.publish.contains(s)).collect();
+        let extra: Vec<_> = triage
+            .publish
+            .iter()
+            .filter(|s| !work.publish.contains(s))
+            .collect();
         assert_eq!(extra, vec!["req.jobs.create.acme.api"]);
     }
 }

@@ -63,12 +63,9 @@ impl JwtVerifier {
     }
 
     pub fn verify(&self, token: &str) -> Result<Identity, AuthError> {
-        let data = jsonwebtoken::decode::<Claims>(
-            token,
-            &self.key,
-            &Validation::new(Algorithm::RS256),
-        )
-        .map_err(|_| AuthError::Unauthenticated)?;
+        let data =
+            jsonwebtoken::decode::<Claims>(token, &self.key, &Validation::new(Algorithm::RS256))
+                .map_err(|_| AuthError::Unauthenticated)?;
         let c = data.claims;
         Ok(Identity {
             sub: c.sub,
@@ -118,7 +115,9 @@ mod tests {
     fn issue_verify_round_trip() {
         let signer = JwtSigner::from_pem(TEST_KEY.as_bytes()).unwrap();
         let verifier = JwtVerifier::from_pem(TEST_PUB.as_bytes()).unwrap();
-        let token = signer.issue(&identity(), chrono::Duration::hours(1)).unwrap();
+        let token = signer
+            .issue(&identity(), chrono::Duration::hours(1))
+            .unwrap();
         let got = verifier.verify(&token).unwrap();
         assert_eq!(got, identity());
     }
@@ -127,15 +126,22 @@ mod tests {
     fn expired_token_rejected() {
         let signer = JwtSigner::from_pem(TEST_KEY.as_bytes()).unwrap();
         let verifier = JwtVerifier::from_pem(TEST_PUB.as_bytes()).unwrap();
-        let token = signer.issue(&identity(), chrono::Duration::hours(-2)).unwrap();
-        assert!(matches!(verifier.verify(&token), Err(AuthError::Unauthenticated)));
+        let token = signer
+            .issue(&identity(), chrono::Duration::hours(-2))
+            .unwrap();
+        assert!(matches!(
+            verifier.verify(&token),
+            Err(AuthError::Unauthenticated)
+        ));
     }
 
     #[test]
     fn tampered_token_rejected() {
         let signer = JwtSigner::from_pem(TEST_KEY.as_bytes()).unwrap();
         let verifier = JwtVerifier::from_pem(TEST_PUB.as_bytes()).unwrap();
-        let mut token = signer.issue(&identity(), chrono::Duration::hours(1)).unwrap();
+        let mut token = signer
+            .issue(&identity(), chrono::Duration::hours(1))
+            .unwrap();
         token.truncate(token.len() - 4);
         token.push_str("AAAA");
         assert!(verifier.verify(&token).is_err());

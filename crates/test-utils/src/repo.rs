@@ -141,7 +141,11 @@ impl FakeOrigin {
             None,
         )
         .await;
-        git(&origin.path, &["update-ref", "refs/heads/main", commit.trim()]).await;
+        git(
+            &origin.path,
+            &["update-ref", "refs/heads/main", commit.trim()],
+        )
+        .await;
         origin
     }
 
@@ -171,12 +175,26 @@ impl FakeOrigin {
     pub async fn merge_branch_to_main(&self, branch: &str, squash: bool) {
         let clone = clone_branch_from(&self.path, "main").await;
         if squash {
-            git(clone.path(), &["merge", "--squash", &format!("origin/{branch}")]).await;
-            git(clone.path(), &["commit", "-m", &format!("squash-merge {branch}")]).await;
+            git(
+                clone.path(),
+                &["merge", "--squash", &format!("origin/{branch}")],
+            )
+            .await;
+            git(
+                clone.path(),
+                &["commit", "-m", &format!("squash-merge {branch}")],
+            )
+            .await;
         } else {
             git(
                 clone.path(),
-                &["merge", "--no-ff", "-m", &format!("merge {branch}"), &format!("origin/{branch}")],
+                &[
+                    "merge",
+                    "--no-ff",
+                    "-m",
+                    &format!("merge {branch}"),
+                    &format!("origin/{branch}"),
+                ],
             )
             .await;
         }

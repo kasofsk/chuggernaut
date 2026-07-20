@@ -34,7 +34,9 @@ impl JobContext {
             project: project.to_string(),
             seq: var("JOB_ID")?.parse().map_err(|_| "JOB_ID not a number")?,
             role: std::env::var("CHANNEL_ROLE").unwrap_or_else(|_| "work".into()),
-            task_id: std::env::var("JOB_TASK_ID").ok().and_then(|t| t.parse().ok()),
+            task_id: std::env::var("JOB_TASK_ID")
+                .ok()
+                .and_then(|t| t.parse().ok()),
             nats_url: var("NATS_URL")?,
             nats_creds: std::env::var("NATS_CREDS").unwrap_or_default(),
         })
@@ -82,7 +84,10 @@ impl Server {
             "tools/list" => Ok(json!({ "tools": self.tool_definitions() })),
             "tools/call" => {
                 let params = msg.get("params").cloned().unwrap_or(json!({}));
-                let name = params.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+                let name = params
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default();
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
                 match self.call_tool(name, args).await {
                     Ok(text) => Ok(json!({
@@ -105,19 +110,28 @@ impl Server {
 
     fn tool_definitions(&self) -> Vec<Value> {
         let mut tools = vec![
-            tool("update_status", "Report progress; overwrites the previous update.",
+            tool(
+                "update_status",
+                "Report progress; overwrites the previous update.",
                 json!({ "type": "object",
                     "properties": {
                         "message": { "type": "string" },
                         "percent": { "type": "integer", "minimum": 0, "maximum": 100 } },
-                    "required": ["message"] })),
-            tool("channel_check", "Poll the operator inbox; pass the last consumed sequence.",
+                    "required": ["message"] }),
+            ),
+            tool(
+                "channel_check",
+                "Poll the operator inbox; pass the last consumed sequence.",
                 json!({ "type": "object",
-                    "properties": { "since": { "type": "integer" } } })),
-            tool("reply", "Reply to the operator; overwrites the previous reply.",
+                    "properties": { "since": { "type": "integer" } } }),
+            ),
+            tool(
+                "reply",
+                "Reply to the operator; overwrites the previous reply.",
                 json!({ "type": "object",
                     "properties": { "text": { "type": "string" } },
-                    "required": ["text"] })),
+                    "required": ["text"] }),
+            ),
         ];
         match self.ctx.role.as_str() {
             "eval" => tools.push(tool(
@@ -148,8 +162,11 @@ impl Server {
     }
 
     async fn call_tool(&mut self, name: &str, args: Value) -> Result<String, String> {
-        let (owner, project, seq) =
-            (self.ctx.owner.clone(), self.ctx.project.clone(), self.ctx.seq);
+        let (owner, project, seq) = (
+            self.ctx.owner.clone(),
+            self.ctx.project.clone(),
+            self.ctx.seq,
+        );
         match (name, self.ctx.role.as_str()) {
             ("update_status", _) => {
                 let update = ChannelUpdate {
@@ -158,11 +175,17 @@ impl Server {
                         .and_then(|m| m.as_str())
                         .ok_or("message is required")?
                         .to_string(),
-                    percent: args.get("percent").and_then(|p| p.as_u64()).map(|p| p as u8),
+                    percent: args
+                        .get("percent")
+                        .and_then(|p| p.as_u64())
+                        .map(|p| p as u8),
                 };
                 let subject = subjects::channel_update(&owner, &project, seq);
-                self.submit(&subject, &serde_json::to_value(&update).map_err(|e| e.to_string())?)
-                    .await?;
+                self.submit(
+                    &subject,
+                    &serde_json::to_value(&update).map_err(|e| e.to_string())?,
+                )
+                .await?;
                 Ok("status updated".into())
             }
             ("reply", _) => {
@@ -175,8 +198,11 @@ impl Server {
                     sent_at: chrono::Utc::now(),
                 };
                 let subject = subjects::channel_reply(&owner, &project, seq);
-                self.submit(&subject, &serde_json::to_value(&reply).map_err(|e| e.to_string())?)
-                    .await?;
+                self.submit(
+                    &subject,
+                    &serde_json::to_value(&reply).map_err(|e| e.to_string())?,
+                )
+                .await?;
                 Ok("reply sent".into())
             }
             ("channel_check", _) => {
@@ -280,7 +306,10 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["update_status", "channel_check", "reply", "submit_result"]);
+        assert_eq!(
+            names,
+            vec!["update_status", "channel_check", "reply", "submit_result"]
+        );
     }
 
     #[tokio::test]

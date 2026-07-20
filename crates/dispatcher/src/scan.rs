@@ -28,20 +28,22 @@ impl Core {
             // The per-job override is Work-scoped (§1.1, §3.5): Work-phase tasks
             // use it, every other phase uses the type default. Enforcing the
             // split here — at kill time — is what keeps the override work-scoped.
-            let (work_timeout, type_timeout) = match self
-                .active
-                .get(&(owner.clone(), project.clone(), seq))
-            {
-                Some(e) => (e.work_timeout(), task_timeout(&e.job_type)),
-                None => continue,
-            };
+            let (work_timeout, type_timeout) =
+                match self.active.get(&(owner.clone(), project.clone(), seq)) {
+                    Some(e) => (e.work_timeout(), task_timeout(&e.job_type)),
+                    None => continue,
+                };
             let expired: Vec<_> = self
                 .tasks
                 .list_for_job(&owner, &project, seq)
                 .await?
                 .into_iter()
                 .filter(|t| {
-                    let timeout = if t.phase == TaskPhase::Work { work_timeout } else { type_timeout };
+                    let timeout = if t.phase == TaskPhase::Work {
+                        work_timeout
+                    } else {
+                        type_timeout
+                    };
                     t.state == TaskState::Running
                         && !matches!(t.kind, TaskKind::Human { .. })
                         && t.started_at
@@ -49,13 +51,17 @@ impl Core {
                 })
                 .collect();
             for task in expired {
-                let timeout =
-                    if task.phase == TaskPhase::Work { work_timeout } else { type_timeout };
+                let timeout = if task.phase == TaskPhase::Work {
+                    work_timeout
+                } else {
+                    type_timeout
+                };
                 tracing::warn!("task {}#{} timed out after {timeout:?}", seq, task.id);
                 if let Some(cid) = &task.container_id {
                     let _ = self.backend.kill(cid).await;
                 }
-                self.on_task_exited(&owner, &project, seq, task.id, TaskExit::code(-1)).await?;
+                self.on_task_exited(&owner, &project, seq, task.id, TaskExit::code(-1))
+                    .await?;
             }
         }
         Ok(())
@@ -71,8 +77,10 @@ impl Core {
             .flat_map(|(slug, g)| {
                 g.jobs()
                     .filter(|j| {
-                        matches!(j.state, JobState::Ready | JobState::Work | JobState::Evaluation)
-                            && j.ready_at.is_some()
+                        matches!(
+                            j.state,
+                            JobState::Ready | JobState::Work | JobState::Evaluation
+                        ) && j.ready_at.is_some()
                     })
                     .map(|j| (slug.clone(), j.id))
                     .collect::<Vec<_>>()
@@ -90,9 +98,16 @@ impl Core {
             let deadline_str = match self.active.get(&key) {
                 Some(e) => e.job_type.job_deadline.clone(),
                 None => {
-                    let Some(base_ref) = job.base_ref.clone() else { continue };
+                    let Some(base_ref) = job.base_ref.clone() else {
+                        continue;
+                    };
                     match release::load_job_type(
-                        &self.repos, &owner, &project, &base_ref, &job.r#type, Some(seq),
+                        &self.repos,
+                        &owner,
+                        &project,
+                        &base_ref,
+                        &job.r#type,
+                        Some(seq),
                     )
                     .await
                     {
@@ -114,7 +129,13 @@ impl Core {
             let tasks = self.tasks.list_for_job(&owner, &project, seq).await?;
             let already_resolved = tasks.iter().any(|t| {
                 matches!(&t.kind, TaskKind::Human { prompt } if prompt.starts_with(DEADLINE_MARKER))
-                    && matches!(&t.result, Some(TaskResult::Human { action: Some(_), .. }))
+                    && matches!(
+                        &t.result,
+                        Some(TaskResult::Human {
+                            action: Some(_),
+                            ..
+                        })
+                    )
             });
             if already_resolved {
                 continue;
@@ -133,15 +154,29 @@ impl Core {
             // Stalled, resolved Retry/Revoke only. From Work/Evaluation it is
             // post-work: Escalated, where Resolve is also available (§1.2, §3.5).
             if job.state == JobState::Ready {
-                self.stall(&owner, &project, seq, "job_deadline_exceeded",
-                    format!("{DEADLINE_MARKER} Job {seq} exceeded its job_deadline ({dl}) \
-                         before starting. Retry to re-enable pacing under your control."))
-                    .await?;
+                self.stall(
+                    &owner,
+                    &project,
+                    seq,
+                    "job_deadline_exceeded",
+                    format!(
+                        "{DEADLINE_MARKER} Job {seq} exceeded its job_deadline ({dl}) \
+                         before starting. Retry to re-enable pacing under your control."
+                    ),
+                )
+                .await?;
             } else {
-                self.escalate(&owner, &project, seq, "job_deadline_exceeded",
-                    format!("{DEADLINE_MARKER} Job {seq} exceeded its job_deadline ({dl}). \
-                         Resolve to re-enable pacing under your control."))
-                    .await?;
+                self.escalate(
+                    &owner,
+                    &project,
+                    seq,
+                    "job_deadline_exceeded",
+                    format!(
+                        "{DEADLINE_MARKER} Job {seq} exceeded its job_deadline ({dl}). \
+                         Resolve to re-enable pacing under your control."
+                    ),
+                )
+                .await?;
             }
         }
         Ok(())

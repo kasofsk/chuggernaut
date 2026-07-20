@@ -68,7 +68,10 @@ pub fn github_repo_from_url(url: &str) -> Option<String> {
         .strip_prefix("ssh://git@github.com/")
         .or_else(|| url.strip_prefix("git@github.com:"))
         .or_else(|| url.strip_prefix("https://github.com/"))?;
-    let repo = rest.strip_suffix(".git").unwrap_or(rest).trim_end_matches('/');
+    let repo = rest
+        .strip_suffix(".git")
+        .unwrap_or(rest)
+        .trim_end_matches('/');
     let mut parts = repo.split('/');
     match (parts.next(), parts.next(), parts.next()) {
         (Some(owner), Some(name), None) if !owner.is_empty() && !name.is_empty() => {
@@ -90,7 +93,11 @@ mod tests {
             "https://github.com/acme/api",
             "https://github.com/acme/api.git",
         ] {
-            assert_eq!(github_repo_from_url(url).as_deref(), Some("acme/api"), "{url}");
+            assert_eq!(
+                github_repo_from_url(url).as_deref(),
+                Some("acme/api"),
+                "{url}"
+            );
         }
         assert_eq!(github_repo_from_url("file:///tmp/origin.git"), None);
         assert_eq!(github_repo_from_url("ssh://git@github.com/acme"), None);

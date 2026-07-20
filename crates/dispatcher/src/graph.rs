@@ -90,10 +90,11 @@ impl JobGraph {
                     && matches!(
                         job.state,
                         JobState::Frozen | JobState::Blocked | JobState::Ready
-                    ) {
-                        out.push(dep);
-                        stack.push(dep);
-                    }
+                    )
+                {
+                    out.push(dep);
+                    stack.push(dep);
+                }
             }
         }
         out.sort_unstable();

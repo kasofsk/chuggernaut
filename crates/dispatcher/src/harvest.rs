@@ -47,7 +47,9 @@ impl Harvester {
         task_id: u64,
         out: &AgentOutput,
     ) -> Option<TokenUsage> {
-        self.collect_agent(owner, project, seq, task_id, out).await.1
+        self.collect_agent(owner, project, seq, task_id, out)
+            .await
+            .1
     }
 
     /// Full agent-run collection: stores stdout + transcript and returns both

@@ -43,7 +43,9 @@ fn decode_roles(encoded: Option<&str>) -> Result<HashMap<String, ProjectRole>> {
     match encoded {
         None => Ok(HashMap::new()),
         Some(b64) => {
-            let bytes = URL_SAFE_NO_PAD.decode(b64.as_bytes()).context("roles base64")?;
+            let bytes = URL_SAFE_NO_PAD
+                .decode(b64.as_bytes())
+                .context("roles base64")?;
             serde_json::from_slice(&bytes).context("roles json")
         }
     }
@@ -56,8 +58,8 @@ pub async fn run_shell(args: SshShellArgs) -> Result<()> {
         .ok()
         .filter(|c| !c.is_empty())
         .context("interactive access is not allowed (no SSH_ORIGINAL_COMMAND)")?;
-    let (service, owner, project) =
-        parse_git_command(&original).with_context(|| format!("unsupported command {original:?}"))?;
+    let (service, owner, project) = parse_git_command(&original)
+        .with_context(|| format!("unsupported command {original:?}"))?;
 
     let principal = Principal::parse(&args.principal);
     let access = CertAccess::parse(&args.access)
@@ -71,10 +73,14 @@ pub async fn run_shell(args: SshShellArgs) -> Result<()> {
         }
     };
     if !allowed {
-        bail!("access denied: {} may not {} {owner}/{project}", args.principal, match service {
-            GitService::UploadPack => "read",
-            GitService::ReceivePack => "write to",
-        });
+        bail!(
+            "access denied: {} may not {} {owner}/{project}",
+            args.principal,
+            match service {
+                GitService::UploadPack => "read",
+                GitService::ReceivePack => "write to",
+            }
+        );
     }
 
     let repo = args.repos_root.join(&owner).join(format!("{project}.git"));
@@ -106,8 +112,12 @@ pub async fn run_authz() -> Result<()> {
         .ok()
         .and_then(|a| CertAccess::parse(&a))
         .unwrap_or(CertAccess::ReadOnly);
-    let roles =
-        decode_roles(std::env::var(ssh::ENV_ROLES).ok().filter(|r| !r.is_empty()).as_deref())?;
+    let roles = decode_roles(
+        std::env::var(ssh::ENV_ROLES)
+            .ok()
+            .filter(|r| !r.is_empty())
+            .as_deref(),
+    )?;
     let repo = std::env::var(ssh::ENV_REPO).context(ssh::ENV_REPO)?;
     let (owner, project) = repo
         .split_once('/')
@@ -119,13 +129,19 @@ pub async fn run_authz() -> Result<()> {
     let mut lines = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(stdin));
     while let Some(line) = lines.next_line().await? {
         let mut fields = line.split_whitespace();
-        let (Some(_old), Some(_new), Some(refname)) =
-            (fields.next(), fields.next(), fields.next())
+        let (Some(_old), Some(_new), Some(refname)) = (fields.next(), fields.next(), fields.next())
         else {
             bail!("malformed ref update line {line:?}");
         };
-        if !authorize_ref_push(&principal, access, &roles, owner, project, refname, &default_branch)
-        {
+        if !authorize_ref_push(
+            &principal,
+            access,
+            &roles,
+            owner,
+            project,
+            refname,
+            &default_branch,
+        ) {
             bail!("push to {refname} denied for {principal_str}");
         }
     }
@@ -140,7 +156,10 @@ async fn default_branch(repo: &Path) -> Result<String> {
         .await
         .context("running git symbolic-ref")?;
     if !out.status.success() {
-        bail!("git symbolic-ref failed: {}", String::from_utf8_lossy(&out.stderr));
+        bail!(
+            "git symbolic-ref failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }

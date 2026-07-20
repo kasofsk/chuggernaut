@@ -64,7 +64,11 @@ impl CertAccess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Principal {
     /// `job:{owner}/{project}:{seq}`
-    Job { owner: String, project: String, seq: u64 },
+    Job {
+        owner: String,
+        project: String,
+        seq: u64,
+    },
     /// `dispatcher`
     Dispatcher,
     /// Anything else: a user email.
@@ -87,7 +91,9 @@ impl Principal {
                 seq,
             };
         }
-        Principal::User { email: s.to_string() }
+        Principal::User {
+            email: s.to_string(),
+        }
     }
 }
 
@@ -101,7 +107,11 @@ pub fn authorize_pull(
 ) -> bool {
     match principal {
         Principal::Dispatcher => true,
-        Principal::Job { owner: o, project: p, .. } => o == owner && p == project,
+        Principal::Job {
+            owner: o,
+            project: p,
+            ..
+        } => o == owner && p == project,
         Principal::User { .. } => {
             roles.get(&format!("{owner}/{project}")) >= Some(&ProjectRole::Viewer)
         }
@@ -124,9 +134,11 @@ pub fn authorize_ref_push(
     }
     match principal {
         Principal::Dispatcher => true,
-        Principal::Job { owner: o, project: p, seq } => {
-            o == owner && p == project && refname == format!("refs/heads/job/{seq}")
-        }
+        Principal::Job {
+            owner: o,
+            project: p,
+            seq,
+        } => o == owner && p == project && refname == format!("refs/heads/job/{seq}"),
         Principal::User { .. } => {
             roles.get(&format!("{owner}/{project}")) >= Some(&ProjectRole::Member)
                 && is_job_branch(refname)
@@ -150,7 +162,11 @@ pub fn authorize_push_entry(
     }
     match principal {
         Principal::Dispatcher => true,
-        Principal::Job { owner: o, project: p, .. } => o == owner && p == project,
+        Principal::Job {
+            owner: o,
+            project: p,
+            ..
+        } => o == owner && p == project,
         Principal::User { .. } => {
             roles.get(&format!("{owner}/{project}")) >= Some(&ProjectRole::Member)
         }
@@ -186,10 +202,9 @@ pub fn parse_git_command(original: &str) -> Option<(GitService, String, String)>
     let rest = original.trim();
     let (service, path) = if let Some(p) = strip_service(rest, "upload-pack") {
         (GitService::UploadPack, p)
-    } else if let Some(p) = strip_service(rest, "receive-pack") {
-        (GitService::ReceivePack, p)
     } else {
-        return None;
+        let p = strip_service(rest, "receive-pack")?;
+        (GitService::ReceivePack, p)
     };
     let path = path.trim().trim_matches('\'').trim_matches('"');
     let path = path.strip_prefix('/').unwrap_or(path);
@@ -197,10 +212,10 @@ pub fn parse_git_command(original: &str) -> Option<(GitService, String, String)>
     let (owner, project) = path.split_once('/')?;
     let valid = |s: &str| {
         !s.is_empty()
-            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     };
-    (valid(owner) && valid(project))
-        .then(|| (service, owner.to_string(), project.to_string()))
+    (valid(owner) && valid(project)).then(|| (service, owner.to_string(), project.to_string()))
 }
 
 fn strip_service<'a>(command: &'a str, service: &str) -> Option<&'a str> {
@@ -224,7 +239,9 @@ pub struct SshCa {
 
 impl SshCa {
     pub fn new(ca_key_path: impl Into<PathBuf>) -> Self {
-        Self { ca_key_path: ca_key_path.into() }
+        Self {
+            ca_key_path: ca_key_path.into(),
+        }
     }
 
     /// §7.3: sign a user-submitted public key. Principal = email, 24h
@@ -238,13 +255,19 @@ impl SshCa {
         validity: chrono::Duration,
     ) -> Result<String, AuthError> {
         use base64::Engine;
-        let roles_json = serde_json::to_string(roles)
-            .map_err(|e| AuthError::Internal(e.to_string()))?;
+        let roles_json =
+            serde_json::to_string(roles).map_err(|e| AuthError::Internal(e.to_string()))?;
         let roles_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(roles_json);
         let force_command =
             format!("chuggernaut ssh-shell --kind user --principal {email} --roles {roles_b64}");
-        self.sign(public_key_openssh, &format!("user:{email}"), email, validity, &force_command)
-            .await
+        self.sign(
+            public_key_openssh,
+            &format!("user:{email}"),
+            email,
+            validity,
+            &force_command,
+        )
+        .await
     }
 
     /// §7.4: mint an ephemeral keypair and sign it for a job container.
@@ -258,11 +281,20 @@ impl SshCa {
     ) -> Result<JobSshCredential, AuthError> {
         let dir = tempfile::tempdir().map_err(internal)?;
         let key_path = dir.path().join("id_ed25519");
-        run("ssh-keygen", &[
-            "-t", "ed25519", "-N", "", "-q",
-            "-C", &format!("job-{owner}-{project}-{seq}"),
-            "-f", path_str(&key_path)?,
-        ])
+        run(
+            "ssh-keygen",
+            &[
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-q",
+                "-C",
+                &format!("job-{owner}-{project}-{seq}"),
+                "-f",
+                path_str(&key_path)?,
+            ],
+        )
         .await?;
         let public_key = tokio::fs::read_to_string(key_path.with_extension("pub"))
             .await
@@ -274,10 +306,22 @@ impl SshCa {
             access.as_str()
         );
         let certificate = self
-            .sign(&public_key, &principal, &principal, validity, &force_command)
+            .sign(
+                &public_key,
+                &principal,
+                &principal,
+                validity,
+                &force_command,
+            )
             .await?;
-        let private_key = tokio::fs::read_to_string(&key_path).await.map_err(internal)?;
-        Ok(JobSshCredential { private_key, public_key, certificate })
+        let private_key = tokio::fs::read_to_string(&key_path)
+            .await
+            .map_err(internal)?;
+        Ok(JobSshCredential {
+            private_key,
+            public_key,
+            certificate,
+        })
     }
 
     async fn sign(
@@ -293,16 +337,25 @@ impl SshCa {
         tokio::fs::write(&pub_path, public_key_openssh.trim().to_string() + "\n")
             .await
             .map_err(internal)?;
-        run("ssh-keygen", &[
-            "-q",
-            "-s", path_str(&self.ca_key_path)?,
-            "-I", key_id,
-            "-n", &format!("{principal},{SSH_LOGIN_PRINCIPAL}"),
-            "-V", &format!("+{}s", validity.num_seconds().max(1)),
-            "-O", "clear",
-            "-O", &format!("force-command={force_command}"),
-            path_str(&pub_path)?,
-        ])
+        run(
+            "ssh-keygen",
+            &[
+                "-q",
+                "-s",
+                path_str(&self.ca_key_path)?,
+                "-I",
+                key_id,
+                "-n",
+                &format!("{principal},{SSH_LOGIN_PRINCIPAL}"),
+                "-V",
+                &format!("+{}s", validity.num_seconds().max(1)),
+                "-O",
+                "clear",
+                "-O",
+                &format!("force-command={force_command}"),
+                path_str(&pub_path)?,
+            ],
+        )
         .await?;
         tokio::fs::read_to_string(dir.path().join("subject-cert.pub"))
             .await
@@ -346,15 +399,24 @@ mod tests {
     fn principal_parsing() {
         assert_eq!(
             Principal::parse("job:acme/api:42"),
-            Principal::Job { owner: "acme".into(), project: "api".into(), seq: 42 }
+            Principal::Job {
+                owner: "acme".into(),
+                project: "api".into(),
+                seq: 42
+            }
         );
         assert_eq!(Principal::parse("dispatcher"), Principal::Dispatcher);
         assert_eq!(
             Principal::parse("david@example.com"),
-            Principal::User { email: "david@example.com".into() }
+            Principal::User {
+                email: "david@example.com".into()
+            }
         );
         // Malformed job principals fall through to user (deny-by-role).
-        assert!(matches!(Principal::parse("job:acme:nope"), Principal::User { .. }));
+        assert!(matches!(
+            Principal::parse("job:acme:nope"),
+            Principal::User { .. }
+        ));
     }
 
     #[test]
@@ -381,7 +443,10 @@ mod tests {
             "git-receive-pack --evil '/acme/api.git'",
             "",
         ] {
-            assert!(parse_git_command(bad).is_none(), "{bad:?} should be rejected");
+            assert!(
+                parse_git_command(bad).is_none(),
+                "{bad:?} should be rejected"
+            );
         }
     }
 
@@ -393,7 +458,12 @@ mod tests {
         assert!(!authorize_pull(&job, &none, "acme", "web"));
         assert!(authorize_pull(&Principal::Dispatcher, &none, "acme", "web"));
         let user = Principal::parse("d@e.com");
-        assert!(authorize_pull(&user, &roles(ProjectRole::Viewer), "acme", "api"));
+        assert!(authorize_pull(
+            &user,
+            &roles(ProjectRole::Viewer),
+            "acme",
+            "api"
+        ));
         assert!(!authorize_pull(&user, &none, "acme", "api"));
     }
 
@@ -410,39 +480,94 @@ mod tests {
         assert!(!ok(&job, CertAccess::ReadWrite, &none, "refs/heads/main"));
         assert!(!ok(&job, CertAccess::ReadOnly, &none, "refs/heads/job/42"));
         assert!(!authorize_ref_push(
-            &job, CertAccess::ReadWrite, &none, "acme", "web", "refs/heads/job/42", "main"
+            &job,
+            CertAccess::ReadWrite,
+            &none,
+            "acme",
+            "web",
+            "refs/heads/job/42",
+            "main"
         ));
         // Dispatcher: protected refs allowed.
-        assert!(ok(&Principal::Dispatcher, CertAccess::ReadWrite, &none, "refs/heads/main"));
-        assert!(ok(&Principal::Dispatcher, CertAccess::ReadWrite, &none, "refs/tags/v1"));
+        assert!(ok(
+            &Principal::Dispatcher,
+            CertAccess::ReadWrite,
+            &none,
+            "refs/heads/main"
+        ));
+        assert!(ok(
+            &Principal::Dispatcher,
+            CertAccess::ReadWrite,
+            &none,
+            "refs/tags/v1"
+        ));
         // Users: job branches only, Member+ only.
         let user = Principal::parse("d@e.com");
-        assert!(ok(&user, CertAccess::ReadWrite, &roles(ProjectRole::Member), "refs/heads/job/7"));
-        assert!(!ok(&user, CertAccess::ReadWrite, &roles(ProjectRole::Viewer), "refs/heads/job/7"));
-        assert!(!ok(&user, CertAccess::ReadWrite, &roles(ProjectRole::Admin), "refs/heads/main"));
-        assert!(!ok(&user, CertAccess::ReadWrite, &roles(ProjectRole::Admin), "refs/heads/job/x"));
-        assert!(!ok(&user, CertAccess::ReadWrite, &roles(ProjectRole::Admin), "refs/tags/v1"));
+        assert!(ok(
+            &user,
+            CertAccess::ReadWrite,
+            &roles(ProjectRole::Member),
+            "refs/heads/job/7"
+        ));
+        assert!(!ok(
+            &user,
+            CertAccess::ReadWrite,
+            &roles(ProjectRole::Viewer),
+            "refs/heads/job/7"
+        ));
+        assert!(!ok(
+            &user,
+            CertAccess::ReadWrite,
+            &roles(ProjectRole::Admin),
+            "refs/heads/main"
+        ));
+        assert!(!ok(
+            &user,
+            CertAccess::ReadWrite,
+            &roles(ProjectRole::Admin),
+            "refs/heads/job/x"
+        ));
+        assert!(!ok(
+            &user,
+            CertAccess::ReadWrite,
+            &roles(ProjectRole::Admin),
+            "refs/tags/v1"
+        ));
     }
 
     #[tokio::test]
     async fn job_credential_issuance_and_cert_contents() {
         let dir = tempfile::tempdir().unwrap();
         let ca = dir.path().join("ca");
-        run("ssh-keygen", &["-q", "-t", "ed25519", "-N", "", "-f", ca.to_str().unwrap()])
-            .await
-            .unwrap();
+        run(
+            "ssh-keygen",
+            &["-q", "-t", "ed25519", "-N", "", "-f", ca.to_str().unwrap()],
+        )
+        .await
+        .unwrap();
 
         let ssh_ca = SshCa::new(&ca);
         let cred = ssh_ca
-            .issue_job_credential("acme", "api", 42, CertAccess::ReadOnly, chrono::Duration::hours(1))
+            .issue_job_credential(
+                "acme",
+                "api",
+                42,
+                CertAccess::ReadOnly,
+                chrono::Duration::hours(1),
+            )
             .await
             .unwrap();
         assert!(cred.private_key.contains("OPENSSH PRIVATE KEY"));
-        assert!(cred.certificate.starts_with("ssh-ed25519-cert-v01@openssh.com"));
+        assert!(
+            cred.certificate
+                .starts_with("ssh-ed25519-cert-v01@openssh.com")
+        );
 
         // ssh-keygen -L pretty-prints the cert; assert principal + forced command.
         let cert_path = dir.path().join("cert.pub");
-        tokio::fs::write(&cert_path, &cred.certificate).await.unwrap();
+        tokio::fs::write(&cert_path, &cred.certificate)
+            .await
+            .unwrap();
         let out = tokio::process::Command::new("ssh-keygen")
             .args(["-L", "-f", cert_path.to_str().unwrap()])
             .output()
@@ -457,17 +582,38 @@ mod tests {
     async fn user_cert_carries_roles_in_forced_command() {
         let dir = tempfile::tempdir().unwrap();
         let ca = dir.path().join("ca");
-        run("ssh-keygen", &["-q", "-t", "ed25519", "-N", "", "-f", ca.to_str().unwrap()])
-            .await
-            .unwrap();
+        run(
+            "ssh-keygen",
+            &["-q", "-t", "ed25519", "-N", "", "-f", ca.to_str().unwrap()],
+        )
+        .await
+        .unwrap();
         let user_key = dir.path().join("id");
-        run("ssh-keygen", &["-q", "-t", "ed25519", "-N", "", "-f", user_key.to_str().unwrap()])
+        run(
+            "ssh-keygen",
+            &[
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-f",
+                user_key.to_str().unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+        let pubkey = tokio::fs::read_to_string(user_key.with_extension("pub"))
             .await
             .unwrap();
-        let pubkey = tokio::fs::read_to_string(user_key.with_extension("pub")).await.unwrap();
 
         let cert = SshCa::new(&ca)
-            .sign_user_cert(&pubkey, "d@e.com", &roles(ProjectRole::Member), chrono::Duration::hours(24))
+            .sign_user_cert(
+                &pubkey,
+                "d@e.com",
+                &roles(ProjectRole::Member),
+                chrono::Duration::hours(24),
+            )
             .await
             .unwrap();
         let cert_path = dir.path().join("cert.pub");

@@ -66,18 +66,34 @@ async fn rig() -> Option<Rig> {
     clone.push("main").await;
 
     let provider = Arc::new(FakeProvider::new());
-    let repos_root = repo.bare_path().parent().unwrap().parent().unwrap().to_path_buf();
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let core = Core::new(
         store.clone(),
         vcs::RepoManager::new(repos_root),
         Arc::new(FakeBackend::new()),
         provider.clone(),
-        CoreConfig { repo_url_base: "file:///repos".into(), nats_url: server.url().into(), ..Default::default() },
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();
     let handle = spawn(core);
-    Some(Rig { _server: server, store, repo, provider, handle })
+    Some(Rig {
+        _server: server,
+        store,
+        repo,
+        provider,
+        handle,
+    })
 }
 
 fn req(r#type: &str) -> CreateJobRequest {
@@ -114,72 +130,106 @@ async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> Job {
 #[tokio::test]
 async fn restart_recovers_orphaned_running_work_task() {
     // Fresh infra WITHOUT spawning a core yet — the crash state comes first.
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else { return };
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
     let store = NatsStore::connect(server.url()).await.unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
-    clone.commit_file("jobs/flaky.yaml", FLAKY.as_bytes(), "type").await;
-    clone.commit_file("prompts/impl.md", b"implement it", "prompt").await;
+    clone
+        .commit_file("jobs/flaky.yaml", FLAKY.as_bytes(), "type")
+        .await;
+    clone
+        .commit_file("prompts/impl.md", b"implement it", "prompt")
+        .await;
     clone.push("main").await;
     let head = repo.head().await;
     repo.create_job_branch(1, &head).await;
 
-    store.jobs().await.unwrap().put(&Job {
-        id: 1,
-        project: "acme/api".into(),
-        r#type: "flaky".into(),
-        title: String::new(),
-        description: String::new(),
-        deps: vec![],
-        state: JobState::Work,
-        branch: "job/1".into(),
-        base_ref: Some(head),
-        knowledge_tags: vec![],
-        eval: vec![],
-        timeout: None,
-        factory: None,
-        created_at: Utc::now(),
-        ready_at: Some(Utc::now()),
-    })
-    .await
-    .unwrap();
-    store.tasks().await.unwrap().put(&Task {
-        id: 1,
-        job_seq: 1,
-        project: "acme/api".into(),
-        phase: TaskPhase::Work,
-        cycle: 1,
-        kind: TaskKind::Agent { provider: "claude".into(), model: None, prompt: "prompts/impl.md".into() },
-        state: TaskState::Running,
-        attempt: 1,
-        evaluator: None,
-        container_id: None,
-        session_id: None, // gone with the crashed dispatcher
-        result: None,
-        created_at: Utc::now(),
-        started_at: Some(Utc::now()),
-        completed_at: None,
-    })
-    .await
-    .unwrap();
+    store
+        .jobs()
+        .await
+        .unwrap()
+        .put(&Job {
+            id: 1,
+            project: "acme/api".into(),
+            r#type: "flaky".into(),
+            title: String::new(),
+            description: String::new(),
+            deps: vec![],
+            state: JobState::Work,
+            branch: "job/1".into(),
+            base_ref: Some(head),
+            knowledge_tags: vec![],
+            eval: vec![],
+            timeout: None,
+            factory: None,
+            created_at: Utc::now(),
+            ready_at: Some(Utc::now()),
+        })
+        .await
+        .unwrap();
+    store
+        .tasks()
+        .await
+        .unwrap()
+        .put(&Task {
+            id: 1,
+            job_seq: 1,
+            project: "acme/api".into(),
+            phase: TaskPhase::Work,
+            cycle: 1,
+            kind: TaskKind::Agent {
+                provider: "claude".into(),
+                model: None,
+                prompt: "prompts/impl.md".into(),
+            },
+            state: TaskState::Running,
+            attempt: 1,
+            evaluator: None,
+            container_id: None,
+            session_id: None, // gone with the crashed dispatcher
+            result: None,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            completed_at: None,
+        })
+        .await
+        .unwrap();
 
     // "Restart": a fresh core reconciles and finishes the job.
     let provider = Arc::new(FakeProvider::new()); // retry exits 0
-    let repos_root = repo.bare_path().parent().unwrap().parent().unwrap().to_path_buf();
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let core = Core::new(
         store.clone(),
         vcs::RepoManager::new(repos_root),
         Arc::new(FakeBackend::new()),
         provider.clone(),
-        CoreConfig { repo_url_base: "file:///repos".into(), nats_url: server.url().into(), ..Default::default() },
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();
     let _handle = spawn(core);
 
     wait_for_state(&store, 1, JobState::Done).await;
-    let tasks = store.tasks().await.unwrap().list_for_job("acme", "api", 1).await.unwrap();
+    let tasks = store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", 1)
+        .await
+        .unwrap();
     assert_eq!(tasks.len(), 2);
     assert_eq!(tasks[0].state, TaskState::Failed); // the orphan
     assert_eq!((tasks[1].attempt, tasks[1].state), (2, TaskState::Done));
@@ -192,65 +242,97 @@ async fn restart_recovers_orphaned_running_work_task() {
 /// (§2.1 WrapUp; §3.6 step 3). No gate was in flight, so the fast path squashes.
 #[tokio::test]
 async fn restart_lands_job_orphaned_in_wrapup() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else { return };
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
     let store = NatsStore::connect(server.url()).await.unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
-    clone.commit_file("jobs/flaky.yaml", FLAKY.as_bytes(), "type").await;
-    clone.commit_file("prompts/impl.md", b"implement it", "prompt").await;
+    clone
+        .commit_file("jobs/flaky.yaml", FLAKY.as_bytes(), "type")
+        .await;
+    clone
+        .commit_file("prompts/impl.md", b"implement it", "prompt")
+        .await;
     clone.push("main").await;
     let head = repo.head().await;
     // Job branch at HEAD: nothing to merge → squash is a NoOp that still lands.
     repo.create_job_branch(1, &head).await;
 
-    store.jobs().await.unwrap().put(&Job {
-        id: 1,
-        project: "acme/api".into(),
-        r#type: "flaky".into(),
-        title: String::new(),
-        description: String::new(),
-        deps: vec![],
-        state: JobState::WrapUp,
-        branch: "job/1".into(),
-        base_ref: Some(head),
-        knowledge_tags: vec![],
-        eval: vec![],
-        timeout: None,
-        factory: None,
-        created_at: Utc::now(),
-        ready_at: Some(Utc::now()),
-    })
-    .await
-    .unwrap();
+    store
+        .jobs()
+        .await
+        .unwrap()
+        .put(&Job {
+            id: 1,
+            project: "acme/api".into(),
+            r#type: "flaky".into(),
+            title: String::new(),
+            description: String::new(),
+            deps: vec![],
+            state: JobState::WrapUp,
+            branch: "job/1".into(),
+            base_ref: Some(head),
+            knowledge_tags: vec![],
+            eval: vec![],
+            timeout: None,
+            factory: None,
+            created_at: Utc::now(),
+            ready_at: Some(Utc::now()),
+        })
+        .await
+        .unwrap();
     // A completed work task so ensure_exec_state can rebuild cycle/submission.
-    store.tasks().await.unwrap().put(&Task {
-        id: 1,
-        job_seq: 1,
-        project: "acme/api".into(),
-        phase: TaskPhase::Work,
-        cycle: 1,
-        kind: TaskKind::Agent { provider: "claude".into(), model: None, prompt: "prompts/impl.md".into() },
-        state: TaskState::Done,
-        attempt: 1,
-        evaluator: None,
-        container_id: None,
-        session_id: None,
-        result: Some(types::TaskResult::Work { summary: None, structured: None, token_usage: None }),
-        created_at: Utc::now(),
-        started_at: Some(Utc::now()),
-        completed_at: Some(Utc::now()),
-    })
-    .await
-    .unwrap();
+    store
+        .tasks()
+        .await
+        .unwrap()
+        .put(&Task {
+            id: 1,
+            job_seq: 1,
+            project: "acme/api".into(),
+            phase: TaskPhase::Work,
+            cycle: 1,
+            kind: TaskKind::Agent {
+                provider: "claude".into(),
+                model: None,
+                prompt: "prompts/impl.md".into(),
+            },
+            state: TaskState::Done,
+            attempt: 1,
+            evaluator: None,
+            container_id: None,
+            session_id: None,
+            result: Some(types::TaskResult::Work {
+                summary: None,
+                structured: None,
+                token_usage: None,
+            }),
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            completed_at: Some(Utc::now()),
+        })
+        .await
+        .unwrap();
 
-    let repos_root = repo.bare_path().parent().unwrap().parent().unwrap().to_path_buf();
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let core = Core::new(
         store.clone(),
         vcs::RepoManager::new(repos_root),
         Arc::new(FakeBackend::new()),
         Arc::new(FakeProvider::new()),
-        CoreConfig { repo_url_base: "file:///repos".into(), nats_url: server.url().into(), ..Default::default() },
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();
@@ -269,7 +351,10 @@ async fn restart_unblocks_dependent_whose_deps_completed() {
     let up = rig.handle.create_job(req("flaky")).await.unwrap();
     let down = rig
         .handle
-        .create_job(CreateJobRequest { deps: vec![], ..req("flaky") })
+        .create_job(CreateJobRequest {
+            deps: vec![],
+            ..req("flaky")
+        })
         .await
         .unwrap();
     // Wire down ← up by rewriting the record before release (creation API has
@@ -287,13 +372,24 @@ async fn restart_unblocks_dependent_whose_deps_completed() {
     jobs.put(&blocked).await.unwrap();
 
     // Restart against the same store.
-    let repos_root = rig.repo.bare_path().parent().unwrap().parent().unwrap().to_path_buf();
+    let repos_root = rig
+        .repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let core = Core::new(
         rig.store.clone(),
         vcs::RepoManager::new(repos_root),
         Arc::new(FakeBackend::new()),
         rig.provider.clone(),
-        CoreConfig { repo_url_base: "file:///repos".into(), nats_url: rig._server.url().into(), ..Default::default() },
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: rig._server.url().into(),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();
@@ -319,7 +415,14 @@ async fn task_timeout_kills_and_fails_hung_work() {
     rig.handle.trigger_scan().await.unwrap();
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
-    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
     assert_eq!(tasks[0].state, TaskState::Failed);
 }
 
@@ -337,15 +440,32 @@ async fn job_deadline_escalates_once_for_stalled_human_work() {
     rig.handle.trigger_scan().await.unwrap();
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
-    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
     let deadline_task = tasks.last().unwrap();
-    assert!(matches!(&deadline_task.kind, TaskKind::Human { prompt } if prompt.starts_with("[deadline]")));
+    assert!(
+        matches!(&deadline_task.kind, TaskKind::Human { prompt } if prompt.starts_with("[deadline]"))
+    );
 
     // Operator retries; the deadline is now permanently disabled for this job.
     rig.handle
-        .resolve_task("acme", "api", job.id, deadline_task.id,
-            TaskResolution::Escalation { action: EscalationAction::Retry, structured: None },
-            "david")
+        .resolve_task(
+            "acme",
+            "api",
+            job.id,
+            deadline_task.id,
+            TaskResolution::Escalation {
+                action: EscalationAction::Retry,
+                structured: None,
+            },
+            "david",
+        )
         .await
         .unwrap();
     wait_for_state(&rig.store, job.id, JobState::Work).await;
@@ -353,8 +473,20 @@ async fn job_deadline_escalates_once_for_stalled_human_work() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     rig.handle.trigger_scan().await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let after = rig.store.jobs().await.unwrap().get("acme", "api", job.id).await.unwrap().unwrap();
-    assert_eq!(after.state, JobState::Work, "one-shot: no second deadline escalation");
+    let after = rig
+        .store
+        .jobs()
+        .await
+        .unwrap()
+        .get("acme", "api", job.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.state,
+        JobState::Work,
+        "one-shot: no second deadline escalation"
+    );
 }
 
 /// `submit_result` arrives while the container is still running (§4.2
@@ -367,13 +499,19 @@ async fn job_deadline_escalates_once_for_stalled_human_work() {
 /// from the task log on restart.
 #[tokio::test]
 async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else { return };
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
     let store = NatsStore::connect(server.url()).await.unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
-    clone.commit_file("jobs/flaky.yaml", FLAKY.as_bytes(), "type").await;
-    clone.commit_file("prompts/impl.md", b"implement it", "prompt").await;
+    clone
+        .commit_file("jobs/flaky.yaml", FLAKY.as_bytes(), "type")
+        .await;
+    clone
+        .commit_file("prompts/impl.md", b"implement it", "prompt")
+        .await;
     clone.push("main").await;
     let head = repo.head().await;
 
@@ -383,56 +521,70 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
     work.commit_file("src/f.rs", b"fn f() {}", "impl").await;
     work.push("job/1").await;
 
-    store.jobs().await.unwrap().put(&Job {
-        id: 1,
-        project: "acme/api".into(),
-        r#type: "flaky".into(),
-        title: String::new(),
-        description: String::new(),
-        deps: vec![],
-        state: JobState::Work,
-        branch: "job/1".into(),
-        base_ref: Some(head),
-        knowledge_tags: vec![],
-        eval: vec![],
-        timeout: None,
-        factory: None,
-        created_at: Utc::now(),
-        ready_at: Some(Utc::now()),
-    })
-    .await
-    .unwrap();
+    store
+        .jobs()
+        .await
+        .unwrap()
+        .put(&Job {
+            id: 1,
+            project: "acme/api".into(),
+            r#type: "flaky".into(),
+            title: String::new(),
+            description: String::new(),
+            deps: vec![],
+            state: JobState::Work,
+            branch: "job/1".into(),
+            base_ref: Some(head),
+            knowledge_tags: vec![],
+            eval: vec![],
+            timeout: None,
+            factory: None,
+            created_at: Utc::now(),
+            ready_at: Some(Utc::now()),
+        })
+        .await
+        .unwrap();
     // Crash state: the work task finished and its submission was persisted,
     // but the Work→Evaluation transition never happened.
-    store.tasks().await.unwrap().put(&Task {
-        id: 1,
-        job_seq: 1,
-        project: "acme/api".into(),
-        phase: TaskPhase::Work,
-        cycle: 1,
-        kind: TaskKind::Agent {
-            provider: "claude".into(),
-            model: None,
-            prompt: "prompts/impl.md".into(),
-        },
-        state: TaskState::Done,
-        attempt: 1,
-        evaluator: None,
-        container_id: None,
-        session_id: Some("da08d5f3-844e-430e-8363-39b4882f437b".into()),
-        result: Some(types::TaskResult::Work {
-            summary: Some("added f() with tests".into()),
-            structured: None,
-            token_usage: None,
-        }),
-        created_at: Utc::now(),
-        started_at: Some(Utc::now()),
-        completed_at: Some(Utc::now()),
-    })
-    .await
-    .unwrap();
+    store
+        .tasks()
+        .await
+        .unwrap()
+        .put(&Task {
+            id: 1,
+            job_seq: 1,
+            project: "acme/api".into(),
+            phase: TaskPhase::Work,
+            cycle: 1,
+            kind: TaskKind::Agent {
+                provider: "claude".into(),
+                model: None,
+                prompt: "prompts/impl.md".into(),
+            },
+            state: TaskState::Done,
+            attempt: 1,
+            evaluator: None,
+            container_id: None,
+            session_id: Some("da08d5f3-844e-430e-8363-39b4882f437b".into()),
+            result: Some(types::TaskResult::Work {
+                summary: Some("added f() with tests".into()),
+                structured: None,
+                token_usage: None,
+            }),
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            completed_at: Some(Utc::now()),
+        })
+        .await
+        .unwrap();
 
-    let repos_root = repo.bare_path().parent().unwrap().parent().unwrap().to_path_buf();
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let core = Core::new(
         store.clone(),
         vcs::RepoManager::new(repos_root),
@@ -466,7 +618,13 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
     );
 
     // And the session id is still there, so the transcript stays addressable.
-    let tasks = store.tasks().await.unwrap().list_for_job("acme", "api", 1).await.unwrap();
+    let tasks = store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", 1)
+        .await
+        .unwrap();
     assert_eq!(
         tasks[0].session_id.as_deref(),
         Some("da08d5f3-844e-430e-8363-39b4882f437b")

@@ -76,7 +76,11 @@ pub fn wiring_errors(job: &Job, graph: &JobGraph) -> Vec<ValidationError> {
         }
     }
     if graph.creates_cycle(job.id, &job.deps) {
-        errs.push(ValidationError::new(seq, "deps", "dependency cycle detected"));
+        errs.push(ValidationError::new(
+            seq,
+            "deps",
+            "dependency cycle detected",
+        ));
     }
     errs
 }
@@ -117,9 +121,9 @@ pub async fn load_job_type(
                     format!("'jobs/_defaults.yaml' failed to parse: {e}"),
                 )]
             })?;
-            job_type.with_defaults(&defaults).map_err(|e| {
-                vec![ValidationError::new(job_seq, "eval", e.to_string())]
-            })?
+            job_type
+                .with_defaults(&defaults)
+                .map_err(|e| vec![ValidationError::new(job_seq, "eval", e.to_string())])?
         }
         None => job_type,
     };
@@ -152,7 +156,10 @@ pub fn with_job_evaluators(job_type: JobType, job: &Job) -> Result<JobType, Vec<
             errs.push(ValidationError::new(
                 Some(job.id),
                 "eval.name",
-                format!("job evaluator '{}' collides with a declared evaluator", e.name),
+                format!(
+                    "job evaluator '{}' collides with a declared evaluator",
+                    e.name
+                ),
             ));
             continue;
         }
@@ -164,7 +171,11 @@ pub fn with_job_evaluators(job_type: JobType, job: &Job) -> Result<JobType, Vec<
             .into_iter()
             .map(|e| ValidationError::new(Some(job.id), "eval", e.to_string())),
     );
-    if errs.is_empty() { Ok(merged) } else { Err(errs) }
+    if errs.is_empty() {
+        Ok(merged)
+    } else {
+        Err(errs)
+    }
 }
 
 /// Static configuration checks (§2.2): prompt paths exist at `reference`;
@@ -202,12 +213,16 @@ pub async fn static_errors(
     }
     for (i, e) in job_type.eval.iter().enumerate() {
         if matches!(e.r#type, EvaluatorType::Agent | EvaluatorType::Human)
-            && let Some(p) = &e.prompt {
-                require_file.push((format!("eval[{i}].prompt"), p.clone()));
-            }
+            && let Some(p) = &e.prompt
+        {
+            require_file.push((format!("eval[{i}].prompt"), p.clone()));
+        }
     }
     for (field, path) in require_file {
-        if read(repo, owner, project, reference, &path).await?.is_none() {
+        if read(repo, owner, project, reference, &path)
+            .await?
+            .is_none()
+        {
             errs.push(ValidationError::new(
                 seq,
                 field,
@@ -217,11 +232,12 @@ pub async fn static_errors(
     }
 
     if let Some(kv) = kv {
-        let declared_secrets = job_type
-            .work
-            .secrets
-            .iter()
-            .chain(job_type.eval.iter().flat_map(|e: &Evaluator| e.secrets.iter()));
+        let declared_secrets = job_type.work.secrets.iter().chain(
+            job_type
+                .eval
+                .iter()
+                .flat_map(|e: &Evaluator| e.secrets.iter()),
+        );
         for s in declared_secrets {
             // Origin credentials are dispatcher-only: reserved names never
             // reach a container, so declaring one is a static error.
@@ -244,7 +260,11 @@ pub async fn static_errors(
         }
         for v in &job_type.vars {
             if !kv.vars.contains(v) {
-                errs.push(ValidationError::new(seq, "vars", format!("var '{v}' is not set")));
+                errs.push(ValidationError::new(
+                    seq,
+                    "vars",
+                    format!("var '{v}' is not set"),
+                ));
             }
         }
     }

@@ -51,7 +51,9 @@ async fn call(
         .get(header::SET_COOKIE)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.split(';').next().unwrap_or("").to_string());
-    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
     let value = if bytes.is_empty() {
         serde_json::Value::Null
     } else {
@@ -73,12 +75,21 @@ fn gen_jwt_keys(dir: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
         );
     };
     run(&[
-        "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
-        "-out", private.to_str().unwrap(),
+        "genpkey",
+        "-algorithm",
+        "RSA",
+        "-pkeyopt",
+        "rsa_keygen_bits:2048",
+        "-out",
+        private.to_str().unwrap(),
     ]);
     run(&[
-        "pkey", "-in", private.to_str().unwrap(), "-pubout",
-        "-out", public.to_str().unwrap(),
+        "pkey",
+        "-in",
+        private.to_str().unwrap(),
+        "-pubout",
+        "-out",
+        public.to_str().unwrap(),
     ]);
     (
         std::fs::read(&private).unwrap(),
@@ -88,19 +99,35 @@ fn gen_jwt_keys(dir: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
 
 #[tokio::test]
 async fn http_bridge_end_to_end() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else { return };
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
     let store = NatsStore::connect(server.url()).await.unwrap();
     store.ensure_topology().await.unwrap();
 
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
-    clone.commit_file("jobs/manual.yaml", MANUAL.as_bytes(), "type").await;
-    clone.commit_file("prompts/manual.md", b"do the thing", "p").await;
-    clone.commit_file("prompts/approve.md", b"check it", "p").await;
-    clone.commit_file("tags/rust.md", b"# rust\nrust conventions", "tag").await;
+    clone
+        .commit_file("jobs/manual.yaml", MANUAL.as_bytes(), "type")
+        .await;
+    clone
+        .commit_file("prompts/manual.md", b"do the thing", "p")
+        .await;
+    clone
+        .commit_file("prompts/approve.md", b"check it", "p")
+        .await;
+    clone
+        .commit_file("tags/rust.md", b"# rust\nrust conventions", "tag")
+        .await;
     clone.push("main").await;
 
-    let repos_root = repo.bare_path().parent().unwrap().parent().unwrap().to_path_buf();
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let core = Core::new(
         store.clone(),
         vcs::RepoManager::new(&repos_root),
@@ -115,10 +142,17 @@ async fn http_bridge_end_to_end() {
     .await
     .unwrap();
     let handle = spawn(core);
-    spawn_container_handlers(&store, handle.clone()).await.unwrap();
-    spawn_api_handlers(&store, handle, Arc::new(vcs::RepoManager::new(&repos_root)), None)
+    spawn_container_handlers(&store, handle.clone())
         .await
         .unwrap();
+    spawn_api_handlers(
+        &store,
+        handle,
+        Arc::new(vcs::RepoManager::new(&repos_root)),
+        None,
+    )
+    .await
+    .unwrap();
 
     // A Member user in the users bucket, exactly as `admin user create` writes.
     let users = store.raw_bucket(store::buckets::USERS).await.unwrap();
@@ -130,7 +164,10 @@ async fn http_bridge_end_to_end() {
         platform_admin: false,
         created_at: chrono::Utc::now(),
     };
-    users.put_json(&store::keys::user_key(&user.email), &user).await.unwrap();
+    users
+        .put_json(&store::keys::user_key(&user.email), &user)
+        .await
+        .unwrap();
     // A platform admin for the project-creation path.
     let root = User {
         id: "root".into(),
@@ -140,7 +177,10 @@ async fn http_bridge_end_to_end() {
         platform_admin: true,
         created_at: chrono::Utc::now(),
     };
-    users.put_json(&store::keys::user_key(&root.email), &root).await.unwrap();
+    users
+        .put_json(&store::keys::user_key(&root.email), &root)
+        .await
+        .unwrap();
 
     let keys_dir = tempfile::tempdir().unwrap();
     let (private, public) = gen_jwt_keys(keys_dir.path());
@@ -309,7 +349,10 @@ async fn http_bridge_end_to_end() {
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(body["errors"].is_array(), "expected §6.5 errors envelope: {body}");
+    assert!(
+        body["errors"].is_array(),
+        "expected §6.5 errors envelope: {body}"
+    );
 
     // Criteria: a job created with an extra evaluator reports the type's
     // list plus its own, source-annotated, resolved at default HEAD pre-Ready.
@@ -337,11 +380,21 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(criteria["wrap_up"], "merge");
-    assert_eq!(criteria["errors"].as_array().unwrap().len(), 0, "{criteria}");
+    assert_eq!(
+        criteria["errors"].as_array().unwrap().len(),
+        0,
+        "{criteria}"
+    );
     let evs = criteria["evaluators"].as_array().unwrap();
     assert_eq!(evs.len(), 2, "{criteria}");
-    assert_eq!((evs[0]["name"].as_str(), evs[0]["source"].as_str()), (Some("approval"), Some("type")));
-    assert_eq!((evs[1]["name"].as_str(), evs[1]["source"].as_str()), (Some("linkcheck"), Some("job")));
+    assert_eq!(
+        (evs[0]["name"].as_str(), evs[0]["source"].as_str()),
+        (Some("approval"), Some("type"))
+    );
+    assert_eq!(
+        (evs[1]["name"].as_str(), evs[1]["source"].as_str()),
+        (Some("linkcheck"), Some("job"))
+    );
 
     // Library: one job type in full — raw YAML plus the parsed view.
     let (status, jt, _) = call(
@@ -368,8 +421,14 @@ async fn http_bridge_end_to_end() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     // Tag vocabulary: tags/*.md stems at default HEAD.
-    let (status, tags, _) =
-        call(&router, "GET", "/api/v1/projects/acme/api/tags", Some(&cookie), None).await;
+    let (status, tags, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/tags",
+        Some(&cookie),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(tags, serde_json::json!(["rust"]));
 
@@ -406,20 +465,44 @@ async fn http_bridge_end_to_end() {
     let task_id = work_task["id"].as_u64().unwrap();
 
     // Job list/get/graph/diff all serve while the job is in flight.
-    let (status, jobs, _) =
-        call(&router, "GET", "/api/v1/projects/acme/api/jobs", Some(&cookie), None).await;
+    let (status, jobs, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/jobs",
+        Some(&cookie),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(jobs.as_array().unwrap().len(), 3);
-    let (status, graph, _) =
-        call(&router, "GET", "/api/v1/projects/acme/api/graph", Some(&cookie), None).await;
+    let (status, graph, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/graph",
+        Some(&cookie),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(graph.as_array().unwrap().len(), 3);
-    let (status, diff, _) =
-        call(&router, "GET", "/api/v1/projects/acme/api/diff/1", Some(&cookie), None).await;
+    let (status, diff, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/diff/1",
+        Some(&cookie),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(diff["files"].is_array());
-    let (status, _, _) =
-        call(&router, "GET", "/api/v1/projects/acme/api/jobs/99", Some(&cookie), None).await;
+    let (status, _, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/jobs/99",
+        Some(&cookie),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     // Resolve work → approval eval task appears → resolve → Done.
@@ -469,8 +552,14 @@ async fn http_bridge_end_to_end() {
 
     let mut done = false;
     for _ in 0..100 {
-        let (_, job, _) =
-            call(&router, "GET", "/api/v1/projects/acme/api/jobs/1", Some(&cookie), None).await;
+        let (_, job, _) = call(
+            &router,
+            "GET",
+            "/api/v1/projects/acme/api/jobs/1",
+            Some(&cookie),
+            None,
+        )
+        .await;
         if job["state"] == "Done" {
             done = true;
             break;
@@ -513,8 +602,14 @@ async fn http_bridge_end_to_end() {
         .unwrap()
         .unwrap();
     let frame = String::from_utf8_lossy(&first);
-    assert!(frame.contains("id:"), "frame should carry the stream seq: {frame}");
-    assert!(frame.contains("job-created"), "replay starts at the beginning: {frame}");
+    assert!(
+        frame.contains("id:"),
+        "frame should carry the stream seq: {frame}"
+    );
+    assert!(
+        frame.contains("job-created"),
+        "replay starts at the beginning: {frame}"
+    );
 
     // ── Artifacts: the transcript reaches the operator, decrypted ──────────
     //
@@ -544,7 +639,9 @@ async fn http_bridge_end_to_end() {
         res.headers().get(header::CONTENT_TYPE).unwrap(),
         "application/x-ndjson"
     );
-    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
     assert_eq!(&bytes[..], br#"{"type":"user","message":"do it"}"#);
 
     // Absent artifacts and unknown kinds are 404s, not 500s — a human task has

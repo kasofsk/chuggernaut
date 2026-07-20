@@ -32,7 +32,11 @@ impl AgeSecretStore {
     pub fn for_api(bucket: Bucket, public_key: &str) -> crate::Result<Self> {
         let recipient = age::x25519::Recipient::from_str(public_key)
             .map_err(|e| StoreError::Nats(format!("invalid age public key: {e}")))?;
-        Ok(Self { bucket, recipient, identity: None })
+        Ok(Self {
+            bucket,
+            recipient,
+            identity: None,
+        })
     }
 
     /// Encrypt + decrypt: the dispatcher's construction (identity string,
@@ -66,7 +70,9 @@ impl SecretStore for AgeSecretStore {
         let ciphertext = crypt(value).map_err(|e| StoreError::Nats(format!("age encrypt: {e}")))?;
         use base64::Engine;
         let encoded = base64::engine::general_purpose::STANDARD.encode(ciphertext);
-        self.bucket.put_json(&format!("{owner}.{project}.{name}"), &encoded).await
+        self.bucket
+            .put_json(&format!("{owner}.{project}.{name}"), &encoded)
+            .await
     }
 
     async fn get(&self, owner: &str, project: &str, name: &str) -> crate::Result<Option<String>> {
@@ -93,7 +99,9 @@ impl SecretStore for AgeSecretStore {
                 .decrypt(std::iter::once(identity as &dyn age::Identity))
                 .map_err(|e| e.to_string())?;
             let mut plaintext = String::new();
-            reader.read_to_string(&mut plaintext).map_err(|e| e.to_string())?;
+            reader
+                .read_to_string(&mut plaintext)
+                .map_err(|e| e.to_string())?;
             Ok(plaintext)
         };
         decrypt()
@@ -102,7 +110,9 @@ impl SecretStore for AgeSecretStore {
     }
 
     async fn delete(&self, owner: &str, project: &str, name: &str) -> crate::Result<()> {
-        self.bucket.delete(&format!("{owner}.{project}.{name}")).await
+        self.bucket
+            .delete(&format!("{owner}.{project}.{name}"))
+            .await
     }
 
     async fn list(&self, owner: &str, project: &str) -> crate::Result<Vec<String>> {

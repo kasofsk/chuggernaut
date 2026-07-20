@@ -206,17 +206,27 @@ async fn run_secret(store: &NatsStore, keys_dir: &std::path::Path, cmd: SecretCm
         };
         let (fo, fp) = split(from)?;
         let (to_o, to_p) = split(to)?;
-        let Some(value) = bucket.get_json::<String>(&format!("{fo}.{fp}.{name}")).await? else {
+        let Some(value) = bucket
+            .get_json::<String>(&format!("{fo}.{fp}.{name}"))
+            .await?
+        else {
             bail!("secret {from}.{name} not found");
         };
-        bucket.put_json(&format!("{to_o}.{to_p}.{name}"), &value).await?;
+        bucket
+            .put_json(&format!("{to_o}.{to_p}.{name}"), &value)
+            .await?;
         println!("copied secret {from}.{name} -> {to}.{name}");
         return Ok(());
     }
 
     let public_key = tokio::fs::read_to_string(keys_dir.join("age_public.key"))
         .await
-        .with_context(|| format!("reading {}/age_public.key (run init first)", keys_dir.display()))?;
+        .with_context(|| {
+            format!(
+                "reading {}/age_public.key (run init first)",
+                keys_dir.display()
+            )
+        })?;
     let secrets = AgeSecretStore::for_api(bucket, public_key.trim())?;
     match cmd {
         SecretCmd::Set { scoped, value } => {
@@ -256,7 +266,8 @@ async fn run_var(store: &NatsStore, cmd: VarCmd) -> Result<()> {
         VarCmd::Set { scoped, value } => {
             let (owner, project) = scoped.split()?;
             store::keys::validate_name(&scoped.name)?;
-            vars.put_json(&format!("{owner}.{project}.{}", scoped.name), &value).await?;
+            vars.put_json(&format!("{owner}.{project}.{}", scoped.name), &value)
+                .await?;
             println!("set var {owner}/{project}.{}", scoped.name);
         }
         VarCmd::List { project } => {
@@ -272,7 +283,8 @@ async fn run_var(store: &NatsStore, cmd: VarCmd) -> Result<()> {
         }
         VarCmd::Delete { scoped } => {
             let (owner, project) = scoped.split()?;
-            vars.delete(&format!("{owner}.{project}.{}", scoped.name)).await?;
+            vars.delete(&format!("{owner}.{project}.{}", scoped.name))
+                .await?;
             println!("deleted var {owner}/{project}.{}", scoped.name);
         }
     }
@@ -289,9 +301,14 @@ async fn run_user(store: &NatsStore, keys_dir: &std::path::Path, cmd: UserCmd) -
             let ttl = types::parse_duration(&ttl)
                 .map_err(|e| anyhow::anyhow!("--ttl: {e}"))
                 .and_then(|d| chrono::Duration::from_std(d).context("ttl out of range"))?;
-            let pem = tokio::fs::read(keys_dir.join("jwt_private.pem")).await.with_context(
-                || format!("reading {}/jwt_private.pem (run init first)", keys_dir.display()),
-            )?;
+            let pem = tokio::fs::read(keys_dir.join("jwt_private.pem"))
+                .await
+                .with_context(|| {
+                    format!(
+                        "reading {}/jwt_private.pem (run init first)",
+                        keys_dir.display()
+                    )
+                })?;
             let signer = auth::jwt::JwtSigner::from_pem(&pem)?;
             let identity = types::Identity {
                 sub: user.email.clone(),
@@ -302,16 +319,29 @@ async fn run_user(store: &NatsStore, keys_dir: &std::path::Path, cmd: UserCmd) -
             // Token only — stdout is pipeable into a credentials file.
             println!("{}", signer.issue(&identity, ttl)?);
         }
-        UserCmd::Create { email, password, admin } => {
+        UserCmd::Create {
+            email,
+            password,
+            admin,
+        } => {
             if !create_user(store, &email, &password, admin).await? {
                 bail!("user {email} already exists");
             }
-            println!("created {email}{}", if admin { " (platform admin)" } else { "" });
+            println!(
+                "created {email}{}",
+                if admin { " (platform admin)" } else { "" }
+            );
         }
         UserCmd::List => {
             for key in users.keys_with_prefix("").await? {
-                let Some(user) = users.get_json::<User>(&key).await? else { continue };
-                let admin = if user.platform_admin { "  [platform admin]" } else { "" };
+                let Some(user) = users.get_json::<User>(&key).await? else {
+                    continue;
+                };
+                let admin = if user.platform_admin {
+                    "  [platform admin]"
+                } else {
+                    ""
+                };
                 println!("{}{admin}", user.email);
             }
         }
@@ -325,7 +355,12 @@ async fn run_user(store: &NatsStore, keys_dir: &std::path::Path, cmd: UserCmd) -
 
 /// Create a user record if absent; returns false if it already exists.
 /// Safe as check-then-put: the admin CLI is the only writer of `users.*`.
-pub async fn create_user(store: &NatsStore, email: &str, password: &str, admin: bool) -> Result<bool> {
+pub async fn create_user(
+    store: &NatsStore,
+    email: &str,
+    password: &str,
+    admin: bool,
+) -> Result<bool> {
     let users = store.raw_bucket(store::buckets::USERS).await?;
     let key = keys::user_key(email);
     if users.get_json::<User>(&key).await?.is_some() {
@@ -347,7 +382,13 @@ pub async fn create_user(store: &NatsStore, email: &str, password: &str, admin: 
 async fn run_project(store: &NatsStore, cmd: ProjectCmd) -> Result<()> {
     let counters = store.raw_bucket(store::buckets::COUNTERS).await?;
     match cmd {
-        ProjectCmd::Create { owner, name, default_branch, repos_root, hook_bin } => {
+        ProjectCmd::Create {
+            owner,
+            name,
+            default_branch,
+            repos_root,
+            hook_bin,
+        } => {
             // Owner/project become NATS key segments and subject tokens.
             keys::validate_subject_component(&owner)?;
             keys::validate_subject_component(&name)?;
@@ -373,10 +414,18 @@ async fn run_project(store: &NatsStore, cmd: ProjectCmd) -> Result<()> {
             counters.put_json(&key, &0u64).await?;
             println!(
                 "created {owner}/{name} (default branch {default_branch}) at {}",
-                repos_root.join(&owner).join(format!("{name}.git")).display()
+                repos_root
+                    .join(&owner)
+                    .join(format!("{name}.git"))
+                    .display()
             );
         }
-        ProjectCmd::Link { owner, name, origin_url, main_branch } => {
+        ProjectCmd::Link {
+            owner,
+            name,
+            origin_url,
+            main_branch,
+        } => {
             keys::validate_subject_component(&owner)?;
             keys::validate_subject_component(&name)?;
             // Preflight the origin credentials so the failure mode is a clear
@@ -384,9 +433,10 @@ async fn run_project(store: &NatsStore, cmd: ProjectCmd) -> Result<()> {
             let needs_ssh = origin_url.starts_with("ssh://") || origin_url.contains('@');
             let is_github = origin_url.contains("github.com");
             let secrets = store.raw_bucket(store::buckets::SECRETS).await?;
-            for (needed, secret) in
-                [(needs_ssh, "CHUG_ORIGIN_DEPLOY_KEY"), (is_github, "CHUG_ORIGIN_PAT")]
-            {
+            for (needed, secret) in [
+                (needs_ssh, "CHUG_ORIGIN_DEPLOY_KEY"),
+                (is_github, "CHUG_ORIGIN_PAT"),
+            ] {
                 if needed
                     && secrets
                         .get_json::<String>(&format!("{owner}.{name}.{secret}"))

@@ -133,7 +133,12 @@ impl Core {
         let needs_ssh = origin_url.starts_with("ssh://") || origin_url.contains('@');
         let github_repo = types::github_repo_from_url(origin_url);
         let mut missing = Vec::new();
-        if needs_ssh && self.secret_value(owner, name, SECRET_DEPLOY_KEY).await?.is_none() {
+        if needs_ssh
+            && self
+                .secret_value(owner, name, SECRET_DEPLOY_KEY)
+                .await?
+                .is_none()
+        {
             missing.push(SECRET_DEPLOY_KEY);
         }
         if github_repo.is_some() && self.secret_value(owner, name, SECRET_PAT).await?.is_none() {
@@ -194,12 +199,14 @@ impl Core {
     }
 
     /// The project's record + link, or the right 404/409 when absent/classic.
-    async fn linked_record(&self, owner: &str, project: &str) -> Result<(ProjectRecord, OriginLink)> {
-        let record = self
-            .projects
-            .get(owner, project)
-            .await?
-            .ok_or_else(|| CoreError::NotFound(format!("project {owner}/{project} is not linked")))?;
+    async fn linked_record(
+        &self,
+        owner: &str,
+        project: &str,
+    ) -> Result<(ProjectRecord, OriginLink)> {
+        let record = self.projects.get(owner, project).await?.ok_or_else(|| {
+            CoreError::NotFound(format!("project {owner}/{project} is not linked"))
+        })?;
         let link = record.origin.clone().ok_or_else(|| {
             CoreError::Conflict(format!("project {owner}/{project} has no linked origin"))
         })?;
@@ -219,12 +226,16 @@ impl Core {
         let slug = format!("{owner}/{project}");
         if matches!(&record.release, Some(r) if r.status == ReleaseStatus::Open) {
             let n = record.release.as_ref().map(|r| r.number).unwrap_or(0);
-            return Err(CoreError::Conflict(format!("origin release {n} is already open")));
+            return Err(CoreError::Conflict(format!(
+                "origin release {n} is already open"
+            )));
         }
         // A gate in flight would land a commit on integration *after* the
         // snapshot below, and the post-merge reset would silently discard it.
         if self.gating.contains_key(&slug) {
-            return Err(CoreError::Conflict("merge gate in flight — retry shortly".into()));
+            return Err(CoreError::Conflict(
+                "merge gate in flight — retry shortly".into(),
+            ));
         }
 
         let (env, _key_guard) = self.origin_git_env(owner, project, &link.url).await?;
@@ -235,7 +246,9 @@ impl Core {
             .has_commits_beyond(owner, project, &base_main_sha, &integration)
             .await?
         {
-            return Err(CoreError::Conflict("nothing to release — integration is not ahead of origin main".into()));
+            return Err(CoreError::Conflict(
+                "nothing to release — integration is not ahead of origin main".into(),
+            ));
         }
 
         let n = record.release_counter + 1;
@@ -247,7 +260,12 @@ impl Core {
         // Local pin first: after a later squash-merge reset, held jobs'
         // base_refs are only reachable through this ref (gc + provenance).
         self.repos
-            .update_ref(owner, project, &format!("refs/chug/release-{n}"), &integration_sha)
+            .update_ref(
+                owner,
+                project,
+                &format!("refs/chug/release-{n}"),
+                &integration_sha,
+            )
             .await?;
         self.repos
             .push_origin(
@@ -299,9 +317,13 @@ impl Core {
     }
 
     async fn require_pat(&self, owner: &str, project: &str) -> Result<String> {
-        self.secret_value(owner, project, SECRET_PAT).await?.ok_or_else(|| {
-            CoreError::Config(format!("secret {SECRET_PAT} is not set for {owner}/{project}"))
-        })
+        self.secret_value(owner, project, SECRET_PAT)
+            .await?
+            .ok_or_else(|| {
+                CoreError::Config(format!(
+                    "secret {SECRET_PAT} is not set for {owner}/{project}"
+                ))
+            })
     }
 
     /// PR body: the squash subjects that landed on integration since the last
@@ -326,7 +348,11 @@ impl Core {
     /// `req.origin.status`: the record + live git view. When a release is
     /// Open this also runs the sync reconciliation opportunistically, so
     /// polling the status page is enough to land a merged PR.
-    pub async fn origin_status(&mut self, owner: &str, project: &str) -> Result<OriginStatusResponse> {
+    pub async fn origin_status(
+        &mut self,
+        owner: &str,
+        project: &str,
+    ) -> Result<OriginStatusResponse> {
         let (record, _) = self.linked_record(owner, project).await?;
         if matches!(&record.release, Some(r) if r.status == ReleaseStatus::Open) {
             return self.origin_sync(owner, project).await;
@@ -343,7 +369,11 @@ impl Core {
     /// - No open release → fast-forward `integration` to origin main when it
     ///   has nothing unreleased; otherwise leave it (divergence surfaces as PR
     ///   conflicts at the next release — documented v1 limitation).
-    pub async fn origin_sync(&mut self, owner: &str, project: &str) -> Result<OriginStatusResponse> {
+    pub async fn origin_sync(
+        &mut self,
+        owner: &str,
+        project: &str,
+    ) -> Result<OriginStatusResponse> {
         let (mut record, link) = self.linked_record(owner, project).await?;
         let slug = format!("{owner}/{project}");
         let (env, _key_guard) = self.origin_git_env(owner, project, &link.url).await?;
@@ -429,7 +459,11 @@ impl Core {
         // Re-read: sync paths above may have updated the record.
         let record = self.projects.get(owner, project).await?.unwrap_or(record);
         let integration = self.repos.default_branch(owner, project).await?;
-        let integration_sha = self.repos.resolve_ref(owner, project, &integration).await.ok();
+        let integration_sha = self
+            .repos
+            .resolve_ref(owner, project, &integration)
+            .await
+            .ok();
         let origin_main_sha = self.repos.origin_main_sha(owner, project).await.ok();
         let ahead_by = match &origin_main_sha {
             Some(main) => self

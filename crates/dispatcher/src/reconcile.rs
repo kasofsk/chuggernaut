@@ -20,7 +20,10 @@ impl Core {
         for job in &jobs {
             let (owner, project) = split(&job.project);
             if job.state == JobState::Blocked
-                && self.graphs.get(&job.project).is_some_and(|g| g.deps_done(job.id))
+                && self
+                    .graphs
+                    .get(&job.project)
+                    .is_some_and(|g| g.deps_done(job.id))
             {
                 self.try_unblock(&owner, &project, job.id).await?;
             }
@@ -44,7 +47,13 @@ impl Core {
         self.ensure_exec_state(owner, project, seq).await?;
         let key = (owner.to_string(), project.to_string(), seq);
         let cycle = self.active.get(&key).expect("exec state").cycle;
-        let work_type = self.active.get(&key).expect("exec state").job_type.work.r#type;
+        let work_type = self
+            .active
+            .get(&key)
+            .expect("exec state")
+            .job_type
+            .work
+            .r#type;
 
         let latest = self
             .tasks
@@ -66,7 +75,8 @@ impl Core {
             // Crashed between marking Failed and launching the retry: replay
             // the retry logic directly (the exit handler skips Failed tasks).
             (TaskState::Failed, _) => {
-                self.retry_or_escalate_failed_work(owner, project, seq, &task).await
+                self.retry_or_escalate_failed_work(owner, project, seq, &task)
+                    .await
             }
         }
     }
@@ -106,7 +116,13 @@ impl Core {
         let all = self.tasks.list_for_job(owner, project, seq).await?;
 
         // Rebuild the round: one slot per evaluator, latest task per name.
-        let evaluators = self.active.get(&key).expect("exec state").job_type.eval.clone();
+        let evaluators = self
+            .active
+            .get(&key)
+            .expect("exec state")
+            .job_type
+            .eval
+            .clone();
         if evaluators.is_empty() {
             // Auto-pass job caught between Evaluation and Done: re-finalize.
             return self.refinalize(owner, project, seq).await;
@@ -129,11 +145,22 @@ impl Core {
                     let branch = self.must_get(owner, project, seq)?.branch.clone();
                     let task_id = self
                         .launch_evaluator_task(
-                            owner, project, seq, TaskPhase::Evaluation, &branch, cycle,
-                            &evaluator, 1,
+                            owner,
+                            project,
+                            seq,
+                            TaskPhase::Evaluation,
+                            &branch,
+                            cycle,
+                            &evaluator,
+                            1,
                         )
                         .await?;
-                    slots.push(EvalSlot { evaluator, task_id, attempt: 1, outcome: None });
+                    slots.push(EvalSlot {
+                        evaluator,
+                        task_id,
+                        attempt: 1,
+                        outcome: None,
+                    });
                 }
                 Some(task) => {
                     let outcome = match (task.state, &task.result) {
@@ -174,7 +201,13 @@ impl Core {
     /// §3.6 step 2 rules for one Running task: persisted result wins; else ask
     /// the backend; not-found means failure/infra per task type. Resolution is
     /// delivered through the normal exit path.
-    async fn settle_running(&mut self, owner: &str, project: &str, seq: u64, task: Task) -> Result<()> {
+    async fn settle_running(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task: Task,
+    ) -> Result<()> {
         // Persisted result + Running only happens for agent eval tasks whose
         // submit_eval landed but whose exit event was lost — on_eval_exited
         // reads the persisted verdict whatever exit code we synthesize.
@@ -196,10 +229,18 @@ impl Core {
                             .and_then(|b| serde_json::from_slice(&b).ok());
                         let _ = tx
                             .send(Msg::TaskExited {
-                                owner: o, project: p, seq, task_id,
+                                owner: o,
+                                project: p,
+                                seq,
+                                task_id,
                                 // Re-attaching after a restart: the agent
                                 // monitor that would have parsed usage is gone.
-                                exit: TaskExit { exit_code, eval_json, usage: None, assessment: None },
+                                exit: TaskExit {
+                                    exit_code,
+                                    eval_json,
+                                    usage: None,
+                                    assessment: None,
+                                },
                             })
                             .await;
                     });
@@ -213,7 +254,8 @@ impl Core {
             // Provider-run tasks don't record container ids yet: not found.
             None => -1,
         };
-        self.on_task_exited(owner, project, seq, task.id, TaskExit::code(backend_exit)).await
+        self.on_task_exited(owner, project, seq, task.id, TaskExit::code(backend_exit))
+            .await
     }
 
     async fn retry_or_escalate_failed_work(
@@ -232,13 +274,21 @@ impl Core {
         if task.attempt <= work_retries {
             let job = self.must_get(owner, project, seq)?.clone();
             let base_ref = job.base_ref.clone().expect("base_ref set in Work");
-            self.repos.reset_branch(owner, project, &job.branch, &base_ref).await?;
-            self.launch_work_task(owner, project, seq, task.cycle, task.attempt + 1).await
+            self.repos
+                .reset_branch(owner, project, &job.branch, &base_ref)
+                .await?;
+            self.launch_work_task(owner, project, seq, task.cycle, task.attempt + 1)
+                .await
         } else {
             self.active.remove(&key);
-            self.escalate(owner, project, seq, "work_retries_exhausted",
-                format!("Job {seq}: work task failed with no retries left (found on restart)"))
-                .await
+            self.escalate(
+                owner,
+                project,
+                seq,
+                "work_retries_exhausted",
+                format!("Job {seq}: work task failed with no retries left (found on restart)"),
+            )
+            .await
         }
     }
 }

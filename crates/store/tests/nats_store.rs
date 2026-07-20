@@ -134,7 +134,14 @@ async fn artifacts_round_trip_a_blob_larger_than_max_payload() {
         .await
         .unwrap();
     writer
-        .put("acme", "api", 42, 7, store::ArtifactKind::SessionTranscript, &big)
+        .put(
+            "acme",
+            "api",
+            42,
+            7,
+            store::ArtifactKind::SessionTranscript,
+            &big,
+        )
         .await
         .unwrap();
 
@@ -159,18 +166,35 @@ async fn artifacts_round_trip_a_blob_larger_than_max_payload() {
 
     // Listing is scoped to the task.
     writer
-        .put("acme", "api", 42, 7, store::ArtifactKind::Stdout, b"log line")
+        .put(
+            "acme",
+            "api",
+            42,
+            7,
+            store::ArtifactKind::Stdout,
+            b"log line",
+        )
         .await
         .unwrap();
     writer
-        .put("acme", "api", 42, 71, store::ArtifactKind::Stdout, b"other task")
+        .put(
+            "acme",
+            "api",
+            42,
+            71,
+            store::ArtifactKind::Stdout,
+            b"other task",
+        )
         .await
         .unwrap();
     let mut kinds = reader.list_for_task("acme", "api", 42, 7).await.unwrap();
     kinds.sort_by_key(|k| k.as_str());
     assert_eq!(
         kinds,
-        vec![store::ArtifactKind::SessionTranscript, store::ArtifactKind::Stdout]
+        vec![
+            store::ArtifactKind::SessionTranscript,
+            store::ArtifactKind::Stdout
+        ]
     );
 
     // A handle without the identity can fetch bytes but must not read them.

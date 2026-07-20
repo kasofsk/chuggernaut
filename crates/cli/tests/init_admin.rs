@@ -23,16 +23,28 @@ async fn init_bootstraps_and_is_idempotent() {
     let server = require_nats!();
     let dir = tempfile::tempdir().unwrap();
 
-    init::run(init_args(server.url(), dir.path())).await.unwrap();
+    init::run(init_args(server.url(), dir.path()))
+        .await
+        .unwrap();
 
     // Keypairs on disk, private files 0600.
     let keys = dir.path().join("keys");
     for name in [
-        "jwt_private.pem", "jwt_public.pem", "ssh_ca", "ssh_ca.pub",
-        "age_private.key", "age_public.key", "vapid_private.pem", "vapid_public.pem",
-        "age_artifacts.key", "age_artifacts_public.key",
-        "nats_operator.seed", "nats_sys_account.seed", "nats_account.seed",
-        "nats-resolver.conf", "dispatcher.creds",
+        "jwt_private.pem",
+        "jwt_public.pem",
+        "ssh_ca",
+        "ssh_ca.pub",
+        "age_private.key",
+        "age_public.key",
+        "vapid_private.pem",
+        "vapid_public.pem",
+        "age_artifacts.key",
+        "age_artifacts_public.key",
+        "nats_operator.seed",
+        "nats_sys_account.seed",
+        "nats_account.seed",
+        "nats-resolver.conf",
+        "dispatcher.creds",
     ] {
         assert!(keys.join(name).exists(), "missing {name}");
     }
@@ -50,14 +62,19 @@ async fn init_bootstraps_and_is_idempotent() {
         "nats_operator.seed",
         "dispatcher.creds",
     ] {
-        let mode = std::fs::metadata(keys.join(private)).unwrap().permissions().mode();
+        let mode = std::fs::metadata(keys.join(private))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600, "{private} not 0600");
     }
     let resolver = std::fs::read_to_string(keys.join("nats-resolver.conf")).unwrap();
     assert!(resolver.contains("resolver: MEMORY"));
-    assert!(std::fs::read_to_string(keys.join("dispatcher.creds"))
-        .unwrap()
-        .contains("BEGIN NATS USER JWT"));
+    assert!(
+        std::fs::read_to_string(keys.join("dispatcher.creds"))
+            .unwrap()
+            .contains("BEGIN NATS USER JWT")
+    );
 
     // Topology + VAPID public + admin user in KV.
     let store = NatsStore::connect(server.url()).await.unwrap();
@@ -76,8 +93,13 @@ async fn init_bootstraps_and_is_idempotent() {
 
     // Re-run: keys and the existing user survive untouched.
     let age_before = std::fs::read_to_string(keys.join("age_private.key")).unwrap();
-    init::run(init_args(server.url(), dir.path())).await.unwrap();
-    assert_eq!(age_before, std::fs::read_to_string(keys.join("age_private.key")).unwrap());
+    init::run(init_args(server.url(), dir.path()))
+        .await
+        .unwrap();
+    assert_eq!(
+        age_before,
+        std::fs::read_to_string(keys.join("age_private.key")).unwrap()
+    );
     let same: User = users
         .get_json(&store::keys::user_key("root@example.com"))
         .await
@@ -149,12 +171,17 @@ async fn admin_project_and_user_commands() {
         .is_err(),
         "duplicate user create should fail"
     );
-    admin::run(admin_args(AdminCmd::User(UserCmd::Delete { email: "dev@example.com".into() })))
-        .await
-        .unwrap();
+    admin::run(admin_args(AdminCmd::User(UserCmd::Delete {
+        email: "dev@example.com".into(),
+    })))
+    .await
+    .unwrap();
     let users = store.raw_bucket(store::buckets::USERS).await.unwrap();
     assert_eq!(
-        users.get_json::<User>(&store::keys::user_key("dev@example.com")).await.unwrap(),
+        users
+            .get_json::<User>(&store::keys::user_key("dev@example.com"))
+            .await
+            .unwrap(),
         None
     );
 }

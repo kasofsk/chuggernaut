@@ -31,7 +31,9 @@ async fn main() -> anyhow::Result<()> {
             }
         };
         if let Some(response) = server.handle(&msg).await {
-            stdout.write_all(serde_json::to_string(&response)?.as_bytes()).await?;
+            stdout
+                .write_all(serde_json::to_string(&response)?.as_bytes())
+                .await?;
             stdout.write_all(b"\n").await?;
             stdout.flush().await?;
         }

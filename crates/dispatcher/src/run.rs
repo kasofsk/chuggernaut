@@ -71,7 +71,11 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
 /// Write the runtime config snapshot to the `platform` bucket for the api/UI to
 /// read (see `types::DispatcherConfigSnapshot`). Best-effort — logs and returns
 /// on any failure so a missing bucket never blocks startup.
-async fn publish_config_snapshot(store: &NatsStore, config: &DispatcherConfig, secrets_encryption: bool) {
+async fn publish_config_snapshot(
+    store: &NatsStore,
+    config: &DispatcherConfig,
+    secrets_encryption: bool,
+) {
     let snapshot = types::DispatcherConfigSnapshot {
         nodes: config
             .docker_nodes
@@ -89,7 +93,10 @@ async fn publish_config_snapshot(store: &NatsStore, config: &DispatcherConfig, s
         repo_url_base: config.repo_url_base.clone(),
         nats_url: config.nats_url.clone(),
         nats_url_container: config.nats_url_container.clone(),
-        channel_binary: config.channel_binary.as_ref().map(|p| p.display().to_string()),
+        channel_binary: config
+            .channel_binary
+            .as_ref()
+            .map(|p| p.display().to_string()),
         hook_bin: config.hook_bin.as_ref().map(|p| p.display().to_string()),
         secrets_encryption,
     };

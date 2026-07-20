@@ -101,7 +101,11 @@ impl Core {
             project: job.project.clone(),
             phase: TaskPhase::Triage,
             cycle,
-            kind: TaskKind::Agent { provider, model: model.clone(), prompt: prompt.clone() },
+            kind: TaskKind::Agent {
+                provider,
+                model: model.clone(),
+                prompt: prompt.clone(),
+            },
             state: TaskState::Running,
             attempt: 1,
             evaluator: None,
@@ -113,9 +117,15 @@ impl Core {
             completed_at: None,
         };
         self.tasks.put(&task).await?;
-        self.publish(owner, project, seq, "task-created", serde_json::json!({
-            "task_id": task_id, "phase": "Triage", "cycle": cycle,
-        }))
+        self.publish(
+            owner,
+            project,
+            seq,
+            "task-created",
+            serde_json::json!({
+                "task_id": task_id, "phase": "Triage", "cycle": cycle,
+            }),
+        )
         .await?;
 
         // Minimal launch env: clone the default branch (always present — a
@@ -127,13 +137,22 @@ impl Core {
             ("JOB_ID".to_string(), seq.to_string()),
             ("JOB_PROJECT".to_string(), format!("{owner}/{project}")),
             ("JOB_BRANCH".to_string(), default_branch),
-            ("REPO_URL".to_string(), format!("{}/{owner}/{project}.git", self.config.repo_url_base)),
+            (
+                "REPO_URL".to_string(),
+                format!("{}/{owner}/{project}.git", self.config.repo_url_base),
+            ),
         ]);
         self.inject_git_ssh_command(&mut env);
         self.inject_platform_agent_secrets(&mut env).await?;
         // Read-only SSH credential for the clone (empty when no SSH front).
         let files = self
-            .ssh_credential_files(owner, project, seq, ChannelRole::Eval { task_id }, TRIAGE_TIMEOUT)
+            .ssh_credential_files(
+                owner,
+                project,
+                seq,
+                ChannelRole::Eval { task_id },
+                TRIAGE_TIMEOUT,
+            )
             .await?;
 
         let config = AgentRunConfig {
@@ -173,7 +192,12 @@ impl Core {
                     project: p,
                     seq,
                     task_id,
-                    exit: TaskExit { exit_code, eval_json: None, usage, assessment },
+                    exit: TaskExit {
+                        exit_code,
+                        eval_json: None,
+                        usage,
+                        assessment,
+                    },
                 })
                 .await;
         });
@@ -195,11 +219,20 @@ impl Core {
         match exit.assessment {
             Some(assessment) => {
                 task.state = TaskState::Done;
-                task.result = Some(TaskResult::Triage { assessment, token_usage: exit.usage });
+                task.result = Some(TaskResult::Triage {
+                    assessment,
+                    token_usage: exit.usage,
+                });
                 self.tasks.put(&task).await?;
-                self.publish(owner, project, seq, "task-completed", serde_json::json!({
-                    "task_id": task.id, "phase": "Triage",
-                }))
+                self.publish(
+                    owner,
+                    project,
+                    seq,
+                    "task-completed",
+                    serde_json::json!({
+                        "task_id": task.id, "phase": "Triage",
+                    }),
+                )
                 .await?;
             }
             None => {
@@ -214,9 +247,15 @@ impl Core {
                     token_usage: exit.usage,
                 });
                 self.tasks.put(&task).await?;
-                self.publish(owner, project, seq, "task-failed", serde_json::json!({
-                    "task_id": task.id, "phase": "Triage",
-                }))
+                self.publish(
+                    owner,
+                    project,
+                    seq,
+                    "task-failed",
+                    serde_json::json!({
+                        "task_id": task.id, "phase": "Triage",
+                    }),
+                )
                 .await?;
             }
         }
@@ -264,7 +303,11 @@ impl Core {
             if t.phase == TaskPhase::Triage {
                 continue;
             }
-            let evaluator = t.evaluator.as_deref().map(|e| format!(" [{e}]")).unwrap_or_default();
+            let evaluator = t
+                .evaluator
+                .as_deref()
+                .map(|e| format!(" [{e}]"))
+                .unwrap_or_default();
             p.push_str(&format!(
                 "\n### Task {} — {:?}{} (cycle {}, attempt {}) — {:?}\n",
                 t.id, t.phase, evaluator, t.cycle, t.attempt, t.state
@@ -274,11 +317,15 @@ impl Core {
                 p.push_str(&format!("result: {}\n", render_task_result(result)));
             }
             if let Some(artifacts) = &self.artifacts
-                && let Ok(Some(bytes)) =
-                    artifacts.get(owner, project, job.id, t.id, ArtifactKind::Stdout).await
+                && let Ok(Some(bytes)) = artifacts
+                    .get(owner, project, job.id, t.id, ArtifactKind::Stdout)
+                    .await
             {
                 let text = String::from_utf8_lossy(&bytes);
-                p.push_str(&format!("stdout (tail):\n```\n{}\n```\n", tail(&text, STDOUT_TAIL_BYTES)));
+                p.push_str(&format!(
+                    "stdout (tail):\n```\n{}\n```\n",
+                    tail(&text, STDOUT_TAIL_BYTES)
+                ));
             }
         }
         Ok(p)
@@ -297,32 +344,66 @@ fn render_task_result(result: &TaskResult) -> String {
     let compact = |v: &serde_json::Value| serde_json::to_string(v).unwrap_or_else(|_| "…".into());
     let verdict = |pass: bool| if pass { "pass" } else { "fail" };
     match result {
-        TaskResult::Work { summary, structured, .. } => {
-            let mut s = format!("work done; summary: {}", summary.as_deref().unwrap_or("(none)"));
+        TaskResult::Work {
+            summary,
+            structured,
+            ..
+        } => {
+            let mut s = format!(
+                "work done; summary: {}",
+                summary.as_deref().unwrap_or("(none)")
+            );
             if let Some(st) = structured {
                 s.push_str(&format!("; structured: {}", compact(st)));
             }
             s
         }
-        TaskResult::Command { pass, exit_code, output, .. } => format!(
+        TaskResult::Command {
+            pass,
+            exit_code,
+            output,
+            ..
+        } => format!(
             "command {} (exit {}); output tail:\n{}",
             verdict(*pass),
             exit_code,
             tail(output, STDOUT_TAIL_BYTES)
         ),
-        TaskResult::Agent { pass, abort, structured, .. } => format!(
+        TaskResult::Agent {
+            pass,
+            abort,
+            structured,
+            ..
+        } => format!(
             "agent eval {}{}; findings: {}",
             verdict(*pass),
-            if *abort { " [abort: not satisfiable by rework]" } else { "" },
-            structured.as_ref().map(compact).unwrap_or_else(|| "(none)".into())
+            if *abort {
+                " [abort: not satisfiable by rework]"
+            } else {
+                ""
+            },
+            structured
+                .as_ref()
+                .map(compact)
+                .unwrap_or_else(|| "(none)".into())
         ),
-        TaskResult::Human { pass, abort, structured, action, operator, .. } => format!(
+        TaskResult::Human {
+            pass,
+            abort,
+            structured,
+            action,
+            operator,
+            ..
+        } => format!(
             "human {}{}{}; operator {}; notes: {}",
             verdict(*pass),
             if *abort { " [abort]" } else { "" },
             action.map(|a| format!(" [{a:?}]")).unwrap_or_default(),
             operator,
-            structured.as_ref().map(compact).unwrap_or_else(|| "(none)".into())
+            structured
+                .as_ref()
+                .map(compact)
+                .unwrap_or_else(|| "(none)".into())
         ),
         // Skipped from the log above; here only for exhaustiveness.
         TaskResult::Triage { .. } => "(prior triage assessment)".into(),

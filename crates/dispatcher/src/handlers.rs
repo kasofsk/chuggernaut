@@ -31,12 +31,16 @@ pub async fn spawn_container_handlers(store: &NatsStore, handle: CoreHandle) -> 
                 parts.get(4).copied(),
                 parts.get(5).and_then(|s| s.parse::<u64>().ok()),
             ) else {
-                req.respond(br#"{"error":"malformed subject"}"#.to_vec()).await;
+                req.respond(br#"{"error":"malformed subject"}"#.to_vec())
+                    .await;
                 continue;
             };
             let submission: WorkSubmission =
                 serde_json::from_slice(&req.payload).unwrap_or_default();
-            let body = match work_handle.submit_result(owner, project, seq, submission).await {
+            let body = match work_handle
+                .submit_result(owner, project, seq, submission)
+                .await
+            {
                 Ok(()) => r#"{"ok":true}"#.to_string(),
                 Err(e) => format!(r#"{{"error":{}}}"#, serde_json::json!(e.to_string())),
             };
@@ -57,7 +61,8 @@ pub async fn spawn_container_handlers(store: &NatsStore, handle: CoreHandle) -> 
                 parts.get(5).and_then(|s| s.parse::<u64>().ok()),
                 parts.get(6).and_then(|s| s.parse::<u64>().ok()),
             ) else {
-                req.respond(br#"{"error":"malformed subject"}"#.to_vec()).await;
+                req.respond(br#"{"error":"malformed subject"}"#.to_vec())
+                    .await;
                 continue;
             };
             // §4.2: payload must include pass — malformed submissions are
@@ -65,7 +70,10 @@ pub async fn spawn_container_handlers(store: &NatsStore, handle: CoreHandle) -> 
             let body = match serde_json::from_slice::<EvalSubmission>(&req.payload) {
                 Err(e) => format!(r#"{{"error":{}}}"#, serde_json::json!(e.to_string())),
                 Ok(submission) => {
-                    match handle.submit_eval(owner, project, seq, task_id, submission).await {
+                    match handle
+                        .submit_eval(owner, project, seq, task_id, submission)
+                        .await
+                    {
                         Ok(()) => r#"{"ok":true}"#.to_string(),
                         Err(e) => format!(r#"{{"error":{}}}"#, serde_json::json!(e.to_string())),
                     }
@@ -79,7 +87,9 @@ pub async fn spawn_container_handlers(store: &NatsStore, handle: CoreHandle) -> 
     // to write `channels` KV directly; routing through the core restores the
     // single-writer rule and turns each post into durable event history.
     for kind in ["update", "reply"] {
-        let mut sub = store.subscribe_requests(&format!("req.channel.{kind}.>")).await?;
+        let mut sub = store
+            .subscribe_requests(&format!("req.channel.{kind}.>"))
+            .await?;
         let handle = handle.clone();
         tokio::spawn(async move {
             while let Some(req) = sub.next().await {
@@ -89,7 +99,8 @@ pub async fn spawn_container_handlers(store: &NatsStore, handle: CoreHandle) -> 
                     parts.get(4).copied(),
                     parts.get(5).and_then(|s| s.parse::<u64>().ok()),
                 ) else {
-                    req.respond(br#"{"error":"malformed subject"}"#.to_vec()).await;
+                    req.respond(br#"{"error":"malformed subject"}"#.to_vec())
+                        .await;
                     continue;
                 };
                 let post = match kind {
@@ -183,7 +194,9 @@ pub async fn spawn_api_handlers(
     hook_bin: Option<std::path::PathBuf>,
 ) -> store::Result<()> {
     // ── req.projects.create — bare repo + hook + starter template ───────
-    let mut projects_sub = store.subscribe_requests(&store::subjects::projects_create()).await?;
+    let mut projects_sub = store
+        .subscribe_requests(&store::subjects::projects_create())
+        .await?;
     let projects_store = store.clone();
     let projects_repos = repos.clone();
     tokio::spawn(async move {
@@ -196,8 +209,14 @@ pub async fn spawn_api_handlers(
             let body = match serde_json::from_slice::<Body>(&req.payload) {
                 Err(e) => bad_request(&e.to_string()),
                 Ok(b) => {
-                    create_project(&projects_store, &projects_repos, hook_bin.as_deref(), &b.owner, &b.name)
-                        .await
+                    create_project(
+                        &projects_store,
+                        &projects_repos,
+                        hook_bin.as_deref(),
+                        &b.owner,
+                        &b.name,
+                    )
+                    .await
                 }
             };
             req.respond(body).await;
@@ -207,7 +226,9 @@ pub async fn spawn_api_handlers(
     // ── req.projects.link — linked-origin project creation (origin fetch +
     // integration HEAD + config seed). Runs through the core actor: it needs
     // the dispatcher's age identity for the deploy key.
-    let mut link_sub = store.subscribe_requests(&store::subjects::projects_link()).await?;
+    let mut link_sub = store
+        .subscribe_requests(&store::subjects::projects_link())
+        .await?;
     let link_handle = handle.clone();
     tokio::spawn(async move {
         while let Some(req) = link_sub.next().await {
@@ -246,14 +267,17 @@ pub async fn spawn_api_handlers(
     // ── req.origin.{release,status,sync}.{owner}.{project} — the origin
     // release surface (PR-based shipping for linked projects).
     for kind in ["release", "status", "sync"] {
-        let mut sub = store.subscribe_requests(&format!("req.origin.{kind}.>")).await?;
+        let mut sub = store
+            .subscribe_requests(&format!("req.origin.{kind}.>"))
+            .await?;
         let handle = handle.clone();
         tokio::spawn(async move {
             while let Some(req) = sub.next().await {
                 let parts: Vec<&str> = req.subject.split('.').collect();
                 let (Some(owner), Some(project)) = (parts.get(3).copied(), parts.get(4).copied())
                 else {
-                    req.respond(br#"{"error":"malformed subject"}"#.to_vec()).await;
+                    req.respond(br#"{"error":"malformed subject"}"#.to_vec())
+                        .await;
                     continue;
                 };
                 let body = match kind {
@@ -324,8 +348,13 @@ async fn create_project(
         return error_reply(&CoreError::Vcs(e));
     }
     if let Err(e) = repos
-        .seed_files(owner, name, crate::seed::CODE_TEMPLATE,
-            "chuggernaut: seed the Code starter template", false)
+        .seed_files(
+            owner,
+            name,
+            crate::seed::CODE_TEMPLATE,
+            "chuggernaut: seed the Code starter template",
+            false,
+        )
         .await
     {
         return error_reply(&CoreError::Vcs(e));
@@ -351,9 +380,11 @@ async fn spawn_read_handlers(
         while let Some(req) = jobs_sub.next().await {
             let parts: Vec<&str> = req.subject.split('.').collect();
             // req.jobs.{verb}.{owner}.{project}[.{seq}]
-            let (Some(verb), Some(owner), Some(project)) =
-                (parts.get(2).copied(), parts.get(3).copied(), parts.get(4).copied())
-            else {
+            let (Some(verb), Some(owner), Some(project)) = (
+                parts.get(2).copied(),
+                parts.get(3).copied(),
+                parts.get(4).copied(),
+            ) else {
                 req.respond(bad_request("malformed subject")).await;
                 continue;
             };
@@ -487,7 +518,11 @@ async fn spawn_read_handlers(
                                 Err(e) => bad_request(&e.to_string()),
                                 Ok(b) => match tasks_handle
                                     .resolve_task(
-                                        owner, project, job_seq, task_id, b.resolution,
+                                        owner,
+                                        project,
+                                        job_seq,
+                                        task_id,
+                                        b.resolution,
                                         &b.operator,
                                     )
                                     .await
@@ -585,7 +620,8 @@ async fn spawn_read_handlers(
                 req.respond(bad_request("malformed subject")).await;
                 continue;
             };
-            req.respond(read_repo_tree(&tree_repos, owner, project).await).await;
+            req.respond(read_repo_tree(&tree_repos, owner, project).await)
+                .await;
         }
     });
 
@@ -664,15 +700,13 @@ async fn job_criteria(
     };
     let reference = match &job.base_ref {
         Some(r) => r.clone(),
-        None => {
-            match repos.default_branch(owner, project).await {
-                Ok(branch) => match repos.resolve_ref(owner, project, &branch).await {
-                    Ok(head) => head,
-                    Err(e) => return error_reply(&CoreError::Vcs(e)),
-                },
+        None => match repos.default_branch(owner, project).await {
+            Ok(branch) => match repos.resolve_ref(owner, project, &branch).await {
+                Ok(head) => head,
                 Err(e) => return error_reply(&CoreError::Vcs(e)),
-            }
-        }
+            },
+            Err(e) => return error_reply(&CoreError::Vcs(e)),
+        },
     };
 
     let annotate = |evals: &[types::Evaluator], source: &str| -> Vec<serde_json::Value> {
@@ -695,11 +729,17 @@ async fn job_criteria(
             wrap_up = Some(format!("{:?}", jt.wrap_up.r#type).to_lowercase());
             evaluators.extend(annotate(&jt.eval, "type"));
             if let Err(errs) = crate::release::with_job_evaluators(jt, &job) {
-                errors.extend(errs.into_iter().map(|e| format!("{}: {}", e.field, e.message)));
+                errors.extend(
+                    errs.into_iter()
+                        .map(|e| format!("{}: {}", e.field, e.message)),
+                );
             }
         }
         Err(errs) => {
-            errors.extend(errs.into_iter().map(|e| format!("{}: {}", e.field, e.message)));
+            errors.extend(
+                errs.into_iter()
+                    .map(|e| format!("{}: {}", e.field, e.message)),
+            );
         }
     }
     evaluators.extend(annotate(&job.eval, "job"));
@@ -723,7 +763,10 @@ async fn fetch_job(store: &NatsStore, owner: &str, project: &str, seq: u64) -> V
     };
     // Task-log read is best-effort: the job still serializes if it fails.
     let tasks = match store.tasks().await {
-        Ok(t) => t.list_for_job(owner, project, seq).await.unwrap_or_default(),
+        Ok(t) => t
+            .list_for_job(owner, project, seq)
+            .await
+            .unwrap_or_default(),
         Err(_) => Vec::new(),
     };
     job_reply_with_awaiting(&job, &tasks)
@@ -752,7 +795,10 @@ fn job_reply_with_awaiting(job: &types::Job, tasks: &[types::Task]) -> Vec<u8> {
         });
     let mut value = serde_json::to_value(job).unwrap_or_else(|_| serde_json::json!({}));
     if let serde_json::Value::Object(map) = &mut value {
-        map.insert("awaiting_human".into(), awaiting.unwrap_or(serde_json::Value::Null));
+        map.insert(
+            "awaiting_human".into(),
+            awaiting.unwrap_or(serde_json::Value::Null),
+        );
     }
     serde_json::to_vec(&value).unwrap_or_else(|_| br#"{"error":{"status":500}}"#.to_vec())
 }
@@ -774,7 +820,9 @@ async fn get_job_type(repos: &RepoManager, owner: &str, project: &str, name: &st
         Ok(h) => h,
         Err(e) => return error_reply(&CoreError::Vcs(e)),
     };
-    let yaml = match repos.read_file_at(owner, project, &head, &format!("jobs/{name}.yaml")).await
+    let yaml = match repos
+        .read_file_at(owner, project, &head, &format!("jobs/{name}.yaml"))
+        .await
     {
         Ok(Some(y)) => y,
         Ok(None) => return NOT_FOUND.to_vec(),
@@ -785,7 +833,9 @@ async fn get_job_type(repos: &RepoManager, owner: &str, project: &str, name: &st
             Ok(jt) => (serde_json::to_value(&jt).ok(), Vec::new()),
             Err(errs) => (
                 None,
-                errs.into_iter().map(|e| format!("{}: {}", e.field, e.message)).collect(),
+                errs.into_iter()
+                    .map(|e| format!("{}: {}", e.field, e.message))
+                    .collect(),
             ),
         };
     ok_reply(&serde_json::json!({
@@ -951,7 +1001,9 @@ mod tests {
             project: "acme/api".into(),
             phase,
             cycle: 1,
-            kind: TaskKind::Human { prompt: "do it".into() },
+            kind: TaskKind::Human {
+                prompt: "do it".into(),
+            },
             state,
             attempt: 1,
             evaluator: None,
@@ -972,24 +1024,39 @@ mod tests {
     #[test]
     fn awaiting_human_kind_follows_state() {
         // Post-work escalation: kind escalation, carrying the task id.
-        let v = awaiting(&job(JobState::Escalated), &[human_task(3, TaskPhase::Work, TaskState::Pending)]);
+        let v = awaiting(
+            &job(JobState::Escalated),
+            &[human_task(3, TaskPhase::Work, TaskState::Pending)],
+        );
         assert_eq!(v["task_id"], 3);
         assert_eq!(v["kind"], "escalation");
         // Pre-work escalation (Stalled) is escalation too.
-        let v = awaiting(&job(JobState::Stalled), &[human_task(3, TaskPhase::Work, TaskState::Pending)]);
+        let v = awaiting(
+            &job(JobState::Stalled),
+            &[human_task(3, TaskPhase::Work, TaskState::Pending)],
+        );
         assert_eq!(v["kind"], "escalation");
         // Human work task in the Work phase.
-        let v = awaiting(&job(JobState::Work), &[human_task(1, TaskPhase::Work, TaskState::Pending)]);
+        let v = awaiting(
+            &job(JobState::Work),
+            &[human_task(1, TaskPhase::Work, TaskState::Pending)],
+        );
         assert_eq!(v["kind"], "work");
         // Human evaluator task in the Evaluation phase.
-        let v = awaiting(&job(JobState::Evaluation), &[human_task(2, TaskPhase::Evaluation, TaskState::Pending)]);
+        let v = awaiting(
+            &job(JobState::Evaluation),
+            &[human_task(2, TaskPhase::Evaluation, TaskState::Pending)],
+        );
         assert_eq!(v["kind"], "eval");
     }
 
     #[test]
     fn awaiting_human_null_without_pending_human_task() {
         // A resolved (Done) human task does not count.
-        let v = awaiting(&job(JobState::Evaluation), &[human_task(1, TaskPhase::Evaluation, TaskState::Done)]);
+        let v = awaiting(
+            &job(JobState::Evaluation),
+            &[human_task(1, TaskPhase::Evaluation, TaskState::Done)],
+        );
         assert!(v.is_null());
         // No tasks at all.
         let v = awaiting(&job(JobState::Work), &[]);

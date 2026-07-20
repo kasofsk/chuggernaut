@@ -61,7 +61,10 @@ impl ArtifactCrypto {
     pub fn encrypt_only(public_key: &str) -> crate::Result<Self> {
         let recipient = age::x25519::Recipient::from_str(public_key.trim())
             .map_err(|e| StoreError::Nats(format!("invalid artifacts public key: {e}")))?;
-        Ok(Self { recipient, identity: None })
+        Ok(Self {
+            recipient,
+            identity: None,
+        })
     }
 
     /// Encrypt + decrypt (`AGE-SECRET-KEY-1...`).
@@ -77,8 +80,7 @@ impl ArtifactCrypto {
     /// gzip then encrypt.
     pub fn seal(&self, plaintext: &[u8]) -> crate::Result<Vec<u8>> {
         let gz = || -> std::io::Result<Vec<u8>> {
-            let mut enc =
-                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             enc.write_all(plaintext)?;
             enc.finish()
         };
@@ -106,13 +108,14 @@ impl ArtifactCrypto {
             ));
         };
         let unseal = || -> Result<Vec<u8>, String> {
-            let decryptor =
-                age::Decryptor::new_buffered(ciphertext).map_err(|e| e.to_string())?;
+            let decryptor = age::Decryptor::new_buffered(ciphertext).map_err(|e| e.to_string())?;
             let mut reader = decryptor
                 .decrypt(std::iter::once(identity as &dyn age::Identity))
                 .map_err(|e| e.to_string())?;
             let mut compressed = Vec::new();
-            reader.read_to_end(&mut compressed).map_err(|e| e.to_string())?;
+            reader
+                .read_to_end(&mut compressed)
+                .map_err(|e| e.to_string())?;
             Ok(compressed)
         };
         let compressed = unseal().map_err(|e| StoreError::Nats(format!("age decrypt: {e}")))?;
@@ -220,7 +223,13 @@ mod tests {
     /// task prefix must not swallow it.
     #[test]
     fn artifact_key_layout() {
-        let key = keys::artifact_key("acme", "api", 42, 7, ArtifactKind::SessionTranscript.as_str());
+        let key = keys::artifact_key(
+            "acme",
+            "api",
+            42,
+            7,
+            ArtifactKind::SessionTranscript.as_str(),
+        );
         assert_eq!(key, "acme.api.42.7.session.jsonl");
         let prefix = keys::artifact_task_prefix("acme", "api", 42, 7);
         assert_eq!(key.strip_prefix(&prefix), Some("session.jsonl"));

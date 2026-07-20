@@ -180,10 +180,22 @@ mod tests {
         // abort defaults false on the wire; explicit abort round-trips.
         let r: TaskResolution =
             serde_json::from_str(r#"{ "kind": "Fail", "structured": {} }"#).unwrap();
-        assert_eq!(r, TaskResolution::Fail { structured: serde_json::json!({}), abort: false });
+        assert_eq!(
+            r,
+            TaskResolution::Fail {
+                structured: serde_json::json!({}),
+                abort: false
+            }
+        );
         let r: TaskResolution =
             serde_json::from_str(r#"{ "kind": "Fail", "structured": {}, "abort": true }"#).unwrap();
-        assert_eq!(r, TaskResolution::Fail { structured: serde_json::json!({}), abort: true });
+        assert_eq!(
+            r,
+            TaskResolution::Fail {
+                structured: serde_json::json!({}),
+                abort: true
+            }
+        );
 
         let r: TaskResolution = serde_json::from_str(
             r#"{ "kind": "Escalation", "action": "Revoke", "structured": null }"#,
@@ -217,7 +229,10 @@ mod tests {
         };
         let json = serde_json::to_string(&with_usage).unwrap();
         assert!(json.contains(r#""kind":"Triage""#));
-        assert_eq!(serde_json::from_str::<TaskResult>(&json).unwrap(), with_usage);
+        assert_eq!(
+            serde_json::from_str::<TaskResult>(&json).unwrap(),
+            with_usage
+        );
 
         let no_usage: TaskResult = serde_json::from_str(
             r#"{ "kind": "Triage", "assessment": "insufficient signal", "token_usage": null }"#,
@@ -225,7 +240,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             no_usage,
-            TaskResult::Triage { assessment: "insufficient signal".into(), token_usage: None }
+            TaskResult::Triage {
+                assessment: "insufficient signal".into(),
+                token_usage: None
+            }
         );
     }
 }

@@ -86,7 +86,13 @@ async fn rig_with_artifacts(artifacts_identity: Option<String>) -> Option<Rig> {
     } else {
         FakeProvider::new()
     });
-    let repos_root = repo.bare_path().parent().unwrap().parent().unwrap().to_path_buf();
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let core = Core::new(
         store.clone(),
         vcs::RepoManager::new(repos_root),
@@ -104,7 +110,14 @@ async fn rig_with_artifacts(artifacts_identity: Option<String>) -> Option<Rig> {
     .await
     .unwrap();
     let handle = spawn(core);
-    Some(Rig { _server: server, store, repo, backend, provider, handle })
+    Some(Rig {
+        _server: server,
+        store,
+        repo,
+        backend,
+        provider,
+        handle,
+    })
 }
 
 fn req(r#type: &str) -> CreateJobRequest {
@@ -152,11 +165,16 @@ async fn agent_work_commits_eval_passes_squash_merges_to_done() {
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
         let clone = clone_branch_from(&bare, &branch).await;
-        clone.commit_file("src/new.rs", b"pub fn f() {}", "implement").await;
+        clone
+            .commit_file("src/new.rs", b"pub fn f() {}", "implement")
+            .await;
         clone.push(&branch).await;
     });
     // Command evaluator: exit 0 with structured findings.
-    rig.backend.put_file("/workspace/eval-result.json", br#"{"coverage": 91}"#.to_vec());
+    rig.backend.put_file(
+        "/workspace/eval-result.json",
+        br#"{"coverage": 91}"#.to_vec(),
+    );
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
@@ -172,13 +190,24 @@ async fn agent_work_commits_eval_passes_squash_merges_to_done() {
     assert_eq!(merged.as_deref(), Some("pub fn f() {}"));
 
     // Task log: work Done, eval Done with structured result.
-    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
     assert_eq!(tasks.len(), 2);
     assert_eq!(tasks[0].phase, TaskPhase::Work);
     assert_eq!(tasks[0].state, TaskState::Done);
     assert_eq!(tasks[1].phase, TaskPhase::Evaluation);
     match &tasks[1].result {
-        Some(types::TaskResult::Command { pass: true, structured: Some(s), .. }) => {
+        Some(types::TaskResult::Command {
+            pass: true,
+            structured: Some(s),
+            ..
+        }) => {
             assert_eq!(s["coverage"], 91);
         }
         other => panic!("unexpected eval result: {other:?}"),
@@ -199,7 +228,14 @@ async fn work_failure_retries_with_reset_then_escalates() {
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
-    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
     // attempt 1 Failed, attempt 2 Failed, Human escalation task Pending
     assert_eq!(tasks.len(), 3);
     assert_eq!((tasks[0].attempt, tasks[0].state), (1, TaskState::Failed));
@@ -219,24 +255,36 @@ async fn eval_failure_reworks_with_context_then_passes() {
     rig.provider.on_run(|_| async {}); // work cycle 1
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
-        h.submit_eval("acme", "api", 1, 2, EvalSubmission {
-            pass: false,
-            abort: false,
-            structured: Some(serde_json::json!({"issues": ["missing tests"]})),
-            token_usage: None,
-        })
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: false,
+                abort: false,
+                structured: Some(serde_json::json!({"issues": ["missing tests"]})),
+                token_usage: None,
+            },
+        )
         .await
         .unwrap();
     });
     rig.provider.on_run(|_| async {}); // work cycle 2
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
-        h.submit_eval("acme", "api", 1, 4, EvalSubmission {
-            pass: true,
-            abort: false,
-            structured: None,
-            token_usage: None,
-        })
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            4,
+            EvalSubmission {
+                pass: true,
+                abort: false,
+                structured: None,
+                token_usage: None,
+            },
+        )
         .await
         .unwrap();
     });
@@ -264,7 +312,14 @@ async fn eval_failure_reworks_with_context_then_passes() {
     assert!(rework.prompt.contains("Rework Context"));
     assert!(rework.prompt.contains("missing tests"));
 
-    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
     assert_eq!(tasks.len(), 4);
     assert_eq!(tasks[2].cycle, 2);
     let events = event_types(&rig.store).await;
@@ -297,13 +352,19 @@ work:
 /// its config entry, and declared secrets arrive age-decrypted in the env.
 #[tokio::test]
 async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else { return };
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
     let store = NatsStore::connect(server.url()).await.unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
-    clone.commit_file("jobs/impl-secret.yaml", IMPL_SECRET.as_bytes(), "t").await;
-    clone.commit_file("prompts/impl.md", b"implement", "p").await;
+    clone
+        .commit_file("jobs/impl-secret.yaml", IMPL_SECRET.as_bytes(), "t")
+        .await;
+    clone
+        .commit_file("prompts/impl.md", b"implement", "p")
+        .await;
     clone.push("main").await;
 
     // Encrypted write with the public key (the API layer's path)…
@@ -311,27 +372,54 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
     let secrets_bucket = store.raw_bucket(store::buckets::SECRETS).await.unwrap();
     {
         use store::secrets::SecretStore;
-        let api_side = store::secrets::AgeSecretStore::for_api(secrets_bucket, &public_key).unwrap();
-        api_side.set("acme", "api", "DEPLOY_KEY", "s3cret-value").await.unwrap();
+        let api_side =
+            store::secrets::AgeSecretStore::for_api(secrets_bucket, &public_key).unwrap();
+        api_side
+            .set("acme", "api", "DEPLOY_KEY", "s3cret-value")
+            .await
+            .unwrap();
         // Platform agent credential (reserved global/agents scope): reaches
         // every agent container without any declaration in the job type.
-        api_side.set("global", "agents", "PROVIDER_TOKEN", "tok-123").await.unwrap();
+        api_side
+            .set("global", "agents", "PROVIDER_TOKEN", "tok-123")
+            .await
+            .unwrap();
     }
 
-    let fake_binary = repo.bare_path().parent().unwrap().join("chuggernaut-channel");
-    tokio::fs::write(&fake_binary, b"#!/bin/sh\nexit 0\n").await.unwrap();
+    let fake_binary = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .join("chuggernaut-channel");
+    tokio::fs::write(&fake_binary, b"#!/bin/sh\nexit 0\n")
+        .await
+        .unwrap();
 
     // SSH front enabled: generate a CA so launches carry a job cert (§5.2).
     let ssh_ca = repo.bare_path().parent().unwrap().join("ssh_ca");
     let status = tokio::process::Command::new("ssh-keygen")
-        .args(["-q", "-t", "ed25519", "-N", "", "-f", ssh_ca.to_str().unwrap()])
+        .args([
+            "-q",
+            "-t",
+            "ed25519",
+            "-N",
+            "",
+            "-f",
+            ssh_ca.to_str().unwrap(),
+        ])
         .status()
         .await
         .unwrap();
     assert!(status.success());
 
     let provider = Arc::new(FakeProvider::new());
-    let repos_root = repo.bare_path().parent().unwrap().parent().unwrap().to_path_buf();
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let core = Core::new(
         store.clone(),
         vcs::RepoManager::new(repos_root),
@@ -358,29 +446,56 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
     let runs = provider.runs();
     assert_eq!(runs.len(), 1);
     // …decrypted read at launch (the dispatcher's path).
-    assert_eq!(runs[0].env.get("DEPLOY_KEY").map(String::as_str), Some("s3cret-value"));
+    assert_eq!(
+        runs[0].env.get("DEPLOY_KEY").map(String::as_str),
+        Some("s3cret-value")
+    );
     // Platform agent credential injected without being declared anywhere.
-    assert_eq!(runs[0].env.get("PROVIDER_TOKEN").map(String::as_str), Some("tok-123"));
+    assert_eq!(
+        runs[0].env.get("PROVIDER_TOKEN").map(String::as_str),
+        Some("tok-123")
+    );
     assert_eq!(runs[0].mcp_servers.len(), 1);
-    assert_eq!(runs[0].mcp_servers[0].command, "/usr/local/bin/chuggernaut-channel");
+    assert_eq!(
+        runs[0].mcp_servers[0].command,
+        "/usr/local/bin/chuggernaut-channel"
+    );
     assert!(runs[0].mcp_servers[0].env.contains_key("NATS_URL"));
     // §7.4: per-launch scoped credentials, forwarded to the channel binary.
-    let creds = runs[0].env.get("NATS_CREDS").expect("NATS_CREDS in container env");
+    let creds = runs[0]
+        .env
+        .get("NATS_CREDS")
+        .expect("NATS_CREDS in container env");
     assert!(creds.contains("BEGIN NATS USER JWT"));
     assert_eq!(runs[0].mcp_servers[0].env.get("NATS_CREDS"), Some(creds));
-    assert_eq!(runs[0].env.get("CHANNEL_ROLE").map(String::as_str), Some("work"));
+    assert_eq!(
+        runs[0].env.get("CHANNEL_ROLE").map(String::as_str),
+        Some("work")
+    );
     // Channel binary + §5.2 job SSH credential (key 0600 + cert).
-    let paths: Vec<&str> = runs[0].files.iter().map(|f| f.container_path.as_str()).collect();
+    let paths: Vec<&str> = runs[0]
+        .files
+        .iter()
+        .map(|f| f.container_path.as_str())
+        .collect();
     assert_eq!(
         paths,
-        ["/usr/local/bin/chuggernaut-channel", "/chuggernaut/ssh/id", "/chuggernaut/ssh/id-cert.pub"]
+        [
+            "/usr/local/bin/chuggernaut-channel",
+            "/chuggernaut/ssh/id",
+            "/chuggernaut/ssh/id-cert.pub"
+        ]
     );
     assert_eq!(runs[0].files[0].mode, 0o755);
     assert_eq!(runs[0].files[1].mode, 0o600);
     let cert = String::from_utf8(runs[0].files[2].contents.clone()).unwrap();
     assert!(cert.starts_with("ssh-ed25519-cert-v01@openssh.com"));
     assert!(
-        runs[0].env.get("GIT_SSH_COMMAND").unwrap().contains("/chuggernaut/ssh/id"),
+        runs[0]
+            .env
+            .get("GIT_SSH_COMMAND")
+            .unwrap()
+            .contains("/chuggernaut/ssh/id"),
         "GIT_SSH_COMMAND must reference the injected key"
     );
 }
@@ -391,7 +506,9 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
 #[tokio::test]
 async fn agent_run_captures_transcript_logs_and_measured_usage() {
     let (identity, _public) = store::secrets::generate_age_keypair();
-    let Some(rig) = rig_with_artifacts(Some(identity.clone())).await else { return };
+    let Some(rig) = rig_with_artifacts(Some(identity.clone())).await else {
+        return;
+    };
 
     // stdout as the real CLI emits it under `--output-format json`: the result
     // object carries the authoritative usage.
@@ -412,10 +529,13 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
         );
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
         let clone = clone_branch_from(&bare, &branch).await;
-        clone.commit_file("src/new.rs", b"pub fn f() {}", "implement").await;
+        clone
+            .commit_file("src/new.rs", b"pub fn f() {}", "implement")
+            .await;
         clone.push(&branch).await;
     });
-    rig.backend.put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
+    rig.backend
+        .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
@@ -427,7 +547,10 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
 
     // The session id is persisted, so the transcript stays addressable after a
     // restart rather than being lost with the process.
-    let session_id = work.session_id.clone().expect("work task records a session id");
+    let session_id = work
+        .session_id
+        .clone()
+        .expect("work task records a session id");
 
     let artifacts = rig
         .store
@@ -436,7 +559,13 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
         .unwrap();
 
     let transcript = artifacts
-        .get("acme", "api", job.id, work.id, store::ArtifactKind::SessionTranscript)
+        .get(
+            "acme",
+            "api",
+            job.id,
+            work.id,
+            store::ArtifactKind::SessionTranscript,
+        )
         .await
         .unwrap()
         .expect("transcript captured");
@@ -464,7 +593,10 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
 
     // The command evaluator's container logs are captured too — TaskResult
     // carries no output, so this is the only record of what it printed.
-    let eval = log.iter().find(|t| t.phase == TaskPhase::Evaluation).unwrap();
+    let eval = log
+        .iter()
+        .find(|t| t.phase == TaskPhase::Evaluation)
+        .unwrap();
     assert!(
         artifacts
             .get("acme", "api", job.id, eval.id, store::ArtifactKind::Stdout)
@@ -500,7 +632,9 @@ eval:
 async fn finalize_none_completes_without_merging() {
     let Some(rig) = rig().await else { return };
     let clone = rig.repo.clone_branch("main").await;
-    clone.commit_file("jobs/deploy-none.yaml", DEPLOY_NONE.as_bytes(), "type").await;
+    clone
+        .commit_file("jobs/deploy-none.yaml", DEPLOY_NONE.as_bytes(), "type")
+        .await;
     clone.push("main").await;
 
     // The "agent" commits scratch to its branch, like a deploy that jots notes.
@@ -508,7 +642,9 @@ async fn finalize_none_completes_without_merging() {
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
         let clone = clone_branch_from(&bare, &branch).await;
-        clone.commit_file("deploy.log", b"deployed v1", "scratch").await;
+        clone
+            .commit_file("deploy.log", b"deployed v1", "scratch")
+            .await;
         clone.push(&branch).await;
     });
 
@@ -517,7 +653,14 @@ async fn finalize_none_completes_without_merging() {
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     // The evaluator still ran; nothing landed on main; the branch is gone.
-    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
     assert_eq!(tasks.len(), 2);
     assert_eq!(tasks[1].phase, TaskPhase::Evaluation);
     assert_eq!(tasks[1].state, TaskState::Done);
@@ -529,7 +672,11 @@ async fn finalize_none_completes_without_merging() {
         .unwrap();
     assert_eq!(scratch, None, "scratch branch content must not merge");
     assert!(
-        rig.repo.manager.resolve_ref("acme", "api", &job.branch).await.is_err(),
+        rig.repo
+            .manager
+            .resolve_ref("acme", "api", &job.branch)
+            .await
+            .is_err(),
         "job branch deleted at Done"
     );
 }
@@ -544,12 +691,20 @@ async fn eval_abort_escalates_without_consuming_rework_budget() {
     rig.provider.on_run(|_| async {}); // work cycle 1
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
-        h.submit_eval("acme", "api", 1, 2, EvalSubmission {
-            pass: false,
-            abort: true,
-            structured: Some(serde_json::json!({"reason": "endpoint spec references a retired API"})),
-            token_usage: None,
-        })
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: false,
+                abort: true,
+                structured: Some(
+                    serde_json::json!({"reason": "endpoint spec references a retired API"}),
+                ),
+                token_usage: None,
+            },
+        )
         .await
         .unwrap();
     });
@@ -560,16 +715,30 @@ async fn eval_abort_escalates_without_consuming_rework_budget() {
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     assert_eq!(rig.provider.runs().len(), 2, "no cycle-2 work after abort");
-    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
     assert_eq!(tasks.len(), 3);
     match &tasks[1].result {
-        Some(types::TaskResult::Agent { pass: false, abort: true, .. }) => {}
+        Some(types::TaskResult::Agent {
+            pass: false,
+            abort: true,
+            ..
+        }) => {}
         other => panic!("unexpected eval result: {other:?}"),
     }
     match &tasks[2].kind {
         types::TaskKind::Human { prompt } => {
             assert!(prompt.contains("not satisfiable by rework"), "{prompt}");
-            assert!(prompt.contains("retired API"), "findings forwarded: {prompt}");
+            assert!(
+                prompt.contains("retired API"),
+                "findings forwarded: {prompt}"
+            );
         }
         other => panic!("expected escalation task, got {other:?}"),
     }
@@ -597,8 +766,18 @@ async fn job_level_evaluators_run_alongside_type_evaluators() {
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
-    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
-    let eval = tasks.iter().find(|t| t.phase == TaskPhase::Evaluation).expect("eval task");
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let eval = tasks
+        .iter()
+        .find(|t| t.phase == TaskPhase::Evaluation)
+        .expect("eval task");
     assert_eq!(eval.evaluator.as_deref(), Some("extra-ci"));
     assert_eq!(eval.state, TaskState::Done);
 }
@@ -619,9 +798,15 @@ async fn knowledge_tags_inject_into_work_system_prompt() {
     let runs = rig.provider.runs();
     let system = runs[0].system_prompt.as_deref().expect("knowledge block");
     assert!(system.contains("Project Knowledge"), "{system}");
-    assert!(system.contains("rust conventions here"), "type default: {system}");
+    assert!(
+        system.contains("rust conventions here"),
+        "type default: {system}"
+    );
     assert!(system.contains("house style here"), "job tag: {system}");
-    assert!(!system.contains("no-such-tag"), "missing tags are skipped: {system}");
+    assert!(
+        !system.contains("no-such-tag"),
+        "missing tags are skipped: {system}"
+    );
 }
 
 /// The type's evaluators are a floor: a job evaluator colliding with a
@@ -643,7 +828,11 @@ async fn job_evaluator_name_collision_fails_release() {
         required: None,
     }];
     let job = rig.handle.create_job(r).await.unwrap(); // creation always lands Frozen
-    let err = rig.handle.release_job("acme", "api", job.id).await.unwrap_err();
+    let err = rig
+        .handle
+        .release_job("acme", "api", job.id)
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("collides"), "{err}");
 }
 
@@ -661,17 +850,29 @@ async fn finalize_hard_failure_escalates_instead_of_wedging() {
     rig.provider.on_run(move |_| async move {
         // Sabotage wrap-up: the branch vanishes before the squash-merge.
         let out = tokio::process::Command::new("git")
-            .args(["-C", bare.to_str().unwrap(), "update-ref", "-d", "refs/heads/job/1"])
+            .args([
+                "-C",
+                bare.to_str().unwrap(),
+                "update-ref",
+                "-d",
+                "refs/heads/job/1",
+            ])
             .output()
             .await
             .unwrap();
         assert!(out.status.success(), "{out:?}");
-        h.submit_eval("acme", "api", 1, 2, EvalSubmission {
-            pass: true,
-            abort: false,
-            structured: None,
-            token_usage: None,
-        })
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: true,
+                abort: false,
+                structured: None,
+                token_usage: None,
+            },
+        )
         .await
         .unwrap();
     });
@@ -680,7 +881,14 @@ async fn finalize_hard_failure_escalates_instead_of_wedging() {
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
-    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
     match &tasks.last().unwrap().kind {
         types::TaskKind::Human { prompt } => {
             assert!(prompt.contains("wrap-up failed unexpectedly"), "{prompt}");
@@ -704,9 +912,18 @@ async fn work_timeout_override_applies_to_work_not_eval() {
     rig.provider.on_run(|_| async {}); // work c1
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
-        h.submit_eval("acme", "api", 1, 2, EvalSubmission {
-            pass: true, abort: false, structured: None, token_usage: None,
-        })
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: true,
+                abort: false,
+                structured: None,
+                token_usage: None,
+            },
+        )
         .await
         .unwrap();
     });
@@ -730,7 +947,8 @@ async fn work_timeout_override_applies_to_work_not_eval() {
 async fn work_timeout_override_times_out_running_work_task() {
     let Some(rig) = rig().await else { return };
     // The work "container" never exits on its own — the scan must end it.
-    rig.provider.on_run(|_| async { tokio::time::sleep(Duration::from_secs(30)).await });
+    rig.provider
+        .on_run(|_| async { tokio::time::sleep(Duration::from_secs(30)).await });
 
     let mut create = req("impl-agent"); // no work_retries → escalates on first fail
     create.timeout = Some("1s".into());
@@ -743,9 +961,20 @@ async fn work_timeout_override_times_out_running_work_task() {
     rig.handle.trigger_scan().await.unwrap();
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
-    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
     let work = tasks.iter().find(|t| t.phase == TaskPhase::Work).unwrap();
-    assert_eq!(work.state, TaskState::Failed, "the override should have timed out the work task");
+    assert_eq!(
+        work.state,
+        TaskState::Failed,
+        "the override should have timed out the work task"
+    );
 }
 
 /// The evaluator keeps the type default even when the job carries a short work
@@ -756,7 +985,8 @@ async fn eval_task_ignores_work_timeout_override() {
     let Some(rig) = rig().await else { return };
     rig.provider.on_run(|_| async {}); // work c1: exits immediately
     // Eval "container" blocks so it is Running when the scan fires.
-    rig.provider.on_run(|_| async { tokio::time::sleep(Duration::from_secs(30)).await });
+    rig.provider
+        .on_run(|_| async { tokio::time::sleep(Duration::from_secs(30)).await });
 
     let mut create = req("impl-agent");
     create.timeout = Some("1s".into());
@@ -768,11 +998,37 @@ async fn eval_task_ignores_work_timeout_override() {
     tokio::time::sleep(Duration::from_millis(1200)).await;
     rig.handle.trigger_scan().await.unwrap();
 
-    let job_now = rig.store.jobs().await.unwrap().get("acme", "api", job.id).await.unwrap().unwrap();
-    assert_eq!(job_now.state, JobState::Evaluation, "eval must survive the work override");
-    let tasks = rig.store.tasks().await.unwrap().list_for_job("acme", "api", job.id).await.unwrap();
-    let eval = tasks.iter().find(|t| t.phase == TaskPhase::Evaluation).unwrap();
-    assert_eq!(eval.state, TaskState::Running, "the work override must not time out the eval task");
+    let job_now = rig
+        .store
+        .jobs()
+        .await
+        .unwrap()
+        .get("acme", "api", job.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        job_now.state,
+        JobState::Evaluation,
+        "eval must survive the work override"
+    );
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let eval = tasks
+        .iter()
+        .find(|t| t.phase == TaskPhase::Evaluation)
+        .unwrap();
+    assert_eq!(
+        eval.state,
+        TaskState::Running,
+        "the work override must not time out the eval task"
+    );
 }
 
 /// A malformed `Job.timeout` is rejected at release (§1.1: parseability
@@ -783,7 +1039,11 @@ async fn malformed_timeout_override_rejected_at_release() {
     let mut create = req("impl-agent");
     create.timeout = Some("2 hours".into()); // not a valid duration string
     let job = rig.handle.create_job(create).await.unwrap(); // creation is permissive
-    let err = rig.handle.release_job("acme", "api", job.id).await.unwrap_err();
+    let err = rig
+        .handle
+        .release_job("acme", "api", job.id)
+        .await
+        .unwrap_err();
     match err {
         dispatcher::core::CoreError::Validation(errs) => {
             assert!(errs.iter().any(|e| e.field == "timeout"), "{errs:?}");
@@ -798,7 +1058,9 @@ async fn malformed_timeout_override_rejected_at_release() {
 #[tokio::test]
 async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
     let (identity, _public) = store::secrets::generate_age_keypair();
-    let Some(rig) = rig_with_artifacts(Some(identity)).await else { return };
+    let Some(rig) = rig_with_artifacts(Some(identity)).await else {
+        return;
+    };
 
     // Drive the job to Escalated: both work attempts fail (flaky: work_retries 1).
     rig.provider.script_exits([2, 3]);
@@ -819,7 +1081,10 @@ async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
     let mut triage = None;
     for _ in 0..100 {
         let log = tasks.list_for_job("acme", "api", job.id).await.unwrap();
-        if let Some(t) = log.iter().find(|t| t.phase == TaskPhase::Triage && t.result.is_some()) {
+        if let Some(t) = log
+            .iter()
+            .find(|t| t.phase == TaskPhase::Triage && t.result.is_some())
+        {
             triage = Some(t.clone());
             break;
         }
@@ -835,13 +1100,24 @@ async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
     }
 
     // Advisory: the job state is untouched.
-    let job_now = rig.store.jobs().await.unwrap().get("acme", "api", job.id).await.unwrap().unwrap();
+    let job_now = rig
+        .store
+        .jobs()
+        .await
+        .unwrap()
+        .get("acme", "api", job.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(job_now.state, JobState::Escalated);
 
     // The run used the platform triage image and carried no channel MCP.
     let last = rig.provider.runs().pop().unwrap();
     assert_eq!(last.image, "triage:latest");
-    assert!(last.mcp_servers.is_empty(), "triage runs without the channel MCP");
+    assert!(
+        last.mcp_servers.is_empty(),
+        "triage runs without the channel MCP"
+    );
 }
 
 /// Triage is rejected unless the job is Escalated or Stalled (§1.2).
@@ -850,6 +1126,13 @@ async fn triage_rejected_on_non_intervention_state() {
     let Some(rig) = rig().await else { return };
     // A freshly created job is Frozen.
     let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
-    let err = rig.handle.triage_job("acme", "api", job.id).await.unwrap_err();
-    assert!(matches!(err, dispatcher::core::CoreError::Conflict(_)), "{err:?}");
+    let err = rig
+        .handle
+        .triage_job("acme", "api", job.id)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, dispatcher::core::CoreError::Conflict(_)),
+        "{err:?}"
+    );
 }

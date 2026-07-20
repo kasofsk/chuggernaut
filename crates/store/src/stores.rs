@@ -71,7 +71,9 @@ pub struct JobStore(pub(crate) Bucket);
 impl JobStore {
     pub async fn put(&self, job: &Job) -> Result<()> {
         let (owner, project) = split_project(&job.project)?;
-        self.0.put_json(&keys::job_key(owner, project, job.id), job).await
+        self.0
+            .put_json(&keys::job_key(owner, project, job.id), job)
+            .await
     }
 
     pub async fn get(&self, owner: &str, project: &str, seq: u64) -> Result<Option<Job>> {
@@ -113,7 +115,12 @@ impl TaskStore {
             .await
     }
 
-    pub async fn list_for_job(&self, owner: &str, project: &str, job_seq: u64) -> Result<Vec<Task>> {
+    pub async fn list_for_job(
+        &self,
+        owner: &str,
+        project: &str,
+        job_seq: u64,
+    ) -> Result<Vec<Task>> {
         let mut tasks: Vec<Task> = self
             .0
             .list_prefix(&format!("{owner}.{project}.{job_seq}."))
@@ -263,5 +270,7 @@ pub fn split_project(project: &str) -> Result<(&str, &str)> {
     project
         .split_once('/')
         .filter(|(o, p)| !o.is_empty() && !p.is_empty())
-        .ok_or_else(|| StoreError::InvalidKey(format!("project slug {project:?} is not owner/repo")))
+        .ok_or_else(|| {
+            StoreError::InvalidKey(format!("project slug {project:?} is not owner/repo"))
+        })
 }

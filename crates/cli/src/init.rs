@@ -63,7 +63,10 @@ pub async fn run(args: InitArgs) -> Result<()> {
     }
 
     println!("init complete");
-    println!("private keys in {} — mount them into the dispatcher/API per §12.1", args.keys_dir.display());
+    println!(
+        "private keys in {} — mount them into the dispatcher/API per §12.1",
+        args.keys_dir.display()
+    );
     println!(
         "to enforce per-job credentials (§7.4), start nats-server with {}",
         args.keys_dir.join("nats-resolver.conf").display()

@@ -382,9 +382,18 @@ pub async fn projects_create(
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<Response> {
     if !identity.platform_admin {
-        return Err(ApiError::new(StatusCode::FORBIDDEN, "platform admin required"));
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "platform admin required",
+        ));
     }
-    forward(&state, &store::subjects::projects_create(), body, StatusCode::CREATED).await
+    forward(
+        &state,
+        &store::subjects::projects_create(),
+        body,
+        StatusCode::CREATED,
+    )
+    .await
 }
 
 /// Link an existing external repo as a new project (linked-origin mode).
@@ -397,9 +406,18 @@ pub async fn projects_link(
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<Response> {
     if !identity.platform_admin {
-        return Err(ApiError::new(StatusCode::FORBIDDEN, "platform admin required"));
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "platform admin required",
+        ));
     }
-    forward(&state, &store::subjects::projects_link(), body, StatusCode::CREATED).await
+    forward(
+        &state,
+        &store::subjects::projects_link(),
+        body,
+        StatusCode::CREATED,
+    )
+    .await
 }
 
 // ── Origin (linked projects) ─────────────────────────────────────────────
@@ -769,10 +787,9 @@ pub async fn artifact_get(
     read_project(&identity, &owner, &project)?;
     let kind = store::ArtifactKind::parse(&kind)
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "unknown artifact kind"))?;
-    let artifacts = state
-        .artifacts
-        .as_ref()
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "artifact capture is not configured"))?;
+    let artifacts = state.artifacts.as_ref().ok_or_else(|| {
+        ApiError::new(StatusCode::NOT_FOUND, "artifact capture is not configured")
+    })?;
     let bytes = artifacts
         .get(&owner, &project, seq, task_id, kind)
         .await

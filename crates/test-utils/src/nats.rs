@@ -99,7 +99,9 @@ impl NatsTestServer {
                         )
                     })
                     .unwrap_or_default();
-                let _ = Command::new("docker").args(["rm", "-f", &container_id]).output();
+                let _ = Command::new("docker")
+                    .args(["rm", "-f", &container_id])
+                    .output();
                 panic!("no port mapping for {container_id}; container logs:\n{logs}");
             })
             .trim()

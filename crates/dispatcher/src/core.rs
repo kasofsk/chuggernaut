@@ -127,7 +127,10 @@ pub struct TaskExit {
 impl TaskExit {
     /// An exit with nothing harvested — command containers, scans, reconcile.
     pub fn code(exit_code: i32) -> Self {
-        Self { exit_code, ..Default::default() }
+        Self {
+            exit_code,
+            ..Default::default()
+        }
     }
 }
 
@@ -231,7 +234,9 @@ pub enum Msg {
     },
     /// §3.5 scans; fired by the internal ticker, or with a reply from
     /// [`CoreHandle::trigger_scan`] (tests).
-    Scan { reply: Option<Reply<()>> },
+    Scan {
+        reply: Option<Reply<()>>,
+    },
     /// Posted by container monitor tasks — never by anything outside the crate.
     TaskExited {
         owner: String,
@@ -252,7 +257,10 @@ pub struct CoreHandle {
 impl CoreHandle {
     async fn call<T>(&self, build: impl FnOnce(Reply<T>) -> Msg) -> Result<T> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(build(tx)).await.map_err(|_| CoreError::Stopped)?;
+        self.tx
+            .send(build(tx))
+            .await
+            .map_err(|_| CoreError::Stopped)?;
         rx.await.map_err(|_| CoreError::Stopped)?
     }
 
@@ -262,17 +270,35 @@ impl CoreHandle {
 
     pub async fn release_job(&self, owner: &str, project: &str, seq: u64) -> Result<JobState> {
         let (owner, project) = (owner.to_string(), project.to_string());
-        self.call(|reply| Msg::ReleaseJob { owner, project, seq, reply }).await
+        self.call(|reply| Msg::ReleaseJob {
+            owner,
+            project,
+            seq,
+            reply,
+        })
+        .await
     }
 
     pub async fn revoke_job(&self, owner: &str, project: &str, seq: u64) -> Result<Vec<u64>> {
         let (owner, project) = (owner.to_string(), project.to_string());
-        self.call(|reply| Msg::RevokeJob { owner, project, seq, reply }).await
+        self.call(|reply| Msg::RevokeJob {
+            owner,
+            project,
+            seq,
+            reply,
+        })
+        .await
     }
 
     pub async fn triage_job(&self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let (owner, project) = (owner.to_string(), project.to_string());
-        self.call(|reply| Msg::TriageJob { owner, project, seq, reply }).await
+        self.call(|reply| Msg::TriageJob {
+            owner,
+            project,
+            seq,
+            reply,
+        })
+        .await
     }
 
     pub async fn submit_result(
@@ -283,8 +309,14 @@ impl CoreHandle {
         submission: WorkSubmission,
     ) -> Result<()> {
         let (owner, project) = (owner.to_string(), project.to_string());
-        self.call(|reply| Msg::SubmitResult { owner, project, seq, submission, reply })
-            .await
+        self.call(|reply| Msg::SubmitResult {
+            owner,
+            project,
+            seq,
+            submission,
+            reply,
+        })
+        .await
     }
 
     pub async fn submit_eval(
@@ -296,8 +328,15 @@ impl CoreHandle {
         submission: EvalSubmission,
     ) -> Result<()> {
         let (owner, project) = (owner.to_string(), project.to_string());
-        self.call(|reply| Msg::SubmitEval { owner, project, seq, task_id, submission, reply })
-            .await
+        self.call(|reply| Msg::SubmitEval {
+            owner,
+            project,
+            seq,
+            task_id,
+            submission,
+            reply,
+        })
+        .await
     }
 
     pub async fn channel_post(
@@ -308,8 +347,14 @@ impl CoreHandle {
         post: ChannelPost,
     ) -> Result<()> {
         let (owner, project) = (owner.to_string(), project.to_string());
-        self.call(|reply| Msg::ChannelPost { owner, project, seq, post, reply })
-            .await
+        self.call(|reply| Msg::ChannelPost {
+            owner,
+            project,
+            seq,
+            post,
+            reply,
+        })
+        .await
     }
 
     /// Run the §3.5 scans now and wait for them to finish. Production relies
@@ -327,23 +372,44 @@ impl CoreHandle {
     ) -> Result<types::ProjectRecord> {
         let (owner, name, origin_url) =
             (owner.to_string(), name.to_string(), origin_url.to_string());
-        self.call(|reply| Msg::LinkProject { owner, name, origin_url, main_branch, reply })
-            .await
+        self.call(|reply| Msg::LinkProject {
+            owner,
+            name,
+            origin_url,
+            main_branch,
+            reply,
+        })
+        .await
     }
 
     pub async fn origin_release(&self, owner: &str, project: &str) -> Result<types::ProjectRecord> {
         let (owner, project) = (owner.to_string(), project.to_string());
-        self.call(|reply| Msg::OriginRelease { owner, project, reply }).await
+        self.call(|reply| Msg::OriginRelease {
+            owner,
+            project,
+            reply,
+        })
+        .await
     }
 
     pub async fn origin_status(&self, owner: &str, project: &str) -> Result<OriginStatusResponse> {
         let (owner, project) = (owner.to_string(), project.to_string());
-        self.call(|reply| Msg::OriginStatus { owner, project, reply }).await
+        self.call(|reply| Msg::OriginStatus {
+            owner,
+            project,
+            reply,
+        })
+        .await
     }
 
     pub async fn origin_sync(&self, owner: &str, project: &str) -> Result<OriginStatusResponse> {
         let (owner, project) = (owner.to_string(), project.to_string());
-        self.call(|reply| Msg::OriginSync { owner, project, reply }).await
+        self.call(|reply| Msg::OriginSync {
+            owner,
+            project,
+            reply,
+        })
+        .await
     }
 
     pub async fn resolve_task(
@@ -358,7 +424,13 @@ impl CoreHandle {
         let (owner, project, operator) =
             (owner.to_string(), project.to_string(), operator.to_string());
         self.call(|reply| Msg::ResolveTask {
-            owner, project, seq, task_id, resolution, operator, reply,
+            owner,
+            project,
+            seq,
+            task_id,
+            resolution,
+            operator,
+            reply,
         })
         .await
     }
@@ -497,9 +569,11 @@ impl Core {
         let projects = store.projects().await?;
 
         let channel_binary = match &config.channel_binary {
-            Some(path) => Some(tokio::fs::read(path).await.map_err(|e| {
-                CoreError::NotFound(format!("channel binary {path:?}: {e}"))
-            })?),
+            Some(path) => Some(
+                tokio::fs::read(path)
+                    .await
+                    .map_err(|e| CoreError::NotFound(format!("channel binary {path:?}: {e}")))?,
+            ),
             None => None,
         };
         let secrets = match &config.age_identity {
@@ -550,7 +624,9 @@ impl Core {
         for job in all {
             let (owner, project) = split_slug(&job.project)?;
             for &upstream in &job.deps {
-                core.rdeps.append(&owner, &project, upstream, job.id).await?;
+                core.rdeps
+                    .append(&owner, &project, upstream, job.id)
+                    .await?;
             }
             if job.state == JobState::Ready {
                 core.queue.enqueue(QueuedJob {
@@ -559,7 +635,10 @@ impl Core {
                     seq: job.id,
                 });
             }
-            core.graphs.entry(job.project.clone()).or_default().insert(job);
+            core.graphs
+                .entry(job.project.clone())
+                .or_default()
+                .insert(job);
         }
         Ok(core)
     }
@@ -584,40 +663,100 @@ impl Core {
             Msg::CreateJob(req, reply) => {
                 let _ = reply.send(self.create_job(req).await);
             }
-            Msg::ReleaseJob { owner, project, seq, reply } => {
+            Msg::ReleaseJob {
+                owner,
+                project,
+                seq,
+                reply,
+            } => {
                 let _ = reply.send(self.release_job(&owner, &project, seq).await);
             }
-            Msg::RevokeJob { owner, project, seq, reply } => {
+            Msg::RevokeJob {
+                owner,
+                project,
+                seq,
+                reply,
+            } => {
                 let _ = reply.send(self.revoke_job(&owner, &project, seq).await);
             }
-            Msg::TriageJob { owner, project, seq, reply } => {
+            Msg::TriageJob {
+                owner,
+                project,
+                seq,
+                reply,
+            } => {
                 let _ = reply.send(self.triage_job(&owner, &project, seq).await);
             }
-            Msg::SubmitResult { owner, project, seq, submission, reply } => {
-                let _ = reply.send(self.handle_submit_result(&owner, &project, seq, submission).await);
+            Msg::SubmitResult {
+                owner,
+                project,
+                seq,
+                submission,
+                reply,
+            } => {
+                let _ = reply.send(
+                    self.handle_submit_result(&owner, &project, seq, submission)
+                        .await,
+                );
             }
-            Msg::SubmitEval { owner, project, seq, task_id, submission, reply } => {
-                let _ = reply
-                    .send(self.handle_submit_eval(&owner, &project, seq, task_id, submission).await);
+            Msg::SubmitEval {
+                owner,
+                project,
+                seq,
+                task_id,
+                submission,
+                reply,
+            } => {
+                let _ = reply.send(
+                    self.handle_submit_eval(&owner, &project, seq, task_id, submission)
+                        .await,
+                );
             }
-            Msg::ResolveTask { owner, project, seq, task_id, resolution, operator, reply } => {
+            Msg::ResolveTask {
+                owner,
+                project,
+                seq,
+                task_id,
+                resolution,
+                operator,
+                reply,
+            } => {
                 let _ = reply.send(
                     self.handle_resolve_task(&owner, &project, seq, task_id, resolution, &operator)
                         .await,
                 );
             }
-            Msg::LinkProject { owner, name, origin_url, main_branch, reply } => {
+            Msg::LinkProject {
+                owner,
+                name,
+                origin_url,
+                main_branch,
+                reply,
+            } => {
                 let _ = reply.send(
-                    self.link_project(&owner, &name, &origin_url, main_branch.as_deref()).await,
+                    self.link_project(&owner, &name, &origin_url, main_branch.as_deref())
+                        .await,
                 );
             }
-            Msg::OriginRelease { owner, project, reply } => {
+            Msg::OriginRelease {
+                owner,
+                project,
+                reply,
+            } => {
                 let _ = reply.send(self.origin_release(&owner, &project).await);
             }
-            Msg::OriginStatus { owner, project, reply } => {
+            Msg::OriginStatus {
+                owner,
+                project,
+                reply,
+            } => {
                 let _ = reply.send(self.origin_status(&owner, &project).await);
             }
-            Msg::OriginSync { owner, project, reply } => {
+            Msg::OriginSync {
+                owner,
+                project,
+                reply,
+            } => {
                 let _ = reply.send(self.origin_sync(&owner, &project).await);
             }
             Msg::Scan { reply } => {
@@ -633,10 +772,22 @@ impl Core {
                     }
                 }
             }
-            Msg::ChannelPost { owner, project, seq, post, reply } => {
+            Msg::ChannelPost {
+                owner,
+                project,
+                seq,
+                post,
+                reply,
+            } => {
                 let _ = reply.send(self.on_channel_post(&owner, &project, seq, post).await);
             }
-            Msg::TaskExited { owner, project, seq, task_id, exit } => {
+            Msg::TaskExited {
+                owner,
+                project,
+                seq,
+                task_id,
+                exit,
+            } => {
                 if let Err(e) = self
                     .on_task_exited(&owner, &project, seq, task_id, exit)
                     .await
@@ -680,14 +831,23 @@ impl Core {
         self.jobs.put(&job).await?;
         for &upstream in &job.deps {
             // Non-fatal by spec §2.3 — the index is rebuilt on startup.
-            let _ = self.rdeps.append(&req.owner, &req.project, upstream, seq).await;
+            let _ = self
+                .rdeps
+                .append(&req.owner, &req.project, upstream, seq)
+                .await;
         }
         self.graphs
             .entry(job.project.clone())
             .or_default()
             .insert(job.clone());
-        self.publish(&req.owner, &req.project, seq, "job-created", serde_json::json!({}))
-            .await?;
+        self.publish(
+            &req.owner,
+            &req.project,
+            seq,
+            "job-created",
+            serde_json::json!({}),
+        )
+        .await?;
         Ok(job)
     }
 
@@ -704,7 +864,10 @@ impl Core {
         }
 
         let default_branch = self.repos.default_branch(owner, project).await?;
-        let head = self.repos.resolve_ref(owner, project, &default_branch).await?;
+        let head = self
+            .repos
+            .resolve_ref(owner, project, &default_branch)
+            .await?;
 
         let job_type =
             release::load_job_type(&self.repos, owner, project, &head, &job.r#type, Some(seq))
@@ -714,8 +877,16 @@ impl Core {
         let mut errs = release::wiring_errors(&job, graph);
         let kv = self.kv_names(owner, project).await?;
         errs.extend(
-            release::static_errors(&self.repos, owner, project, &head, &job, &job_type, Some(&kv))
-                .await?,
+            release::static_errors(
+                &self.repos,
+                owner,
+                project,
+                &head,
+                &job,
+                &job_type,
+                Some(&kv),
+            )
+            .await?,
         );
         if !errs.is_empty() {
             return Err(errs.into());
@@ -784,7 +955,10 @@ impl Core {
         let mut dep = dep.clone();
 
         let default_branch = self.repos.default_branch(owner, project).await?;
-        let head = self.repos.resolve_ref(owner, project, &default_branch).await?;
+        let head = self
+            .repos
+            .resolve_ref(owner, project, &default_branch)
+            .await?;
 
         let revalidation = match release::load_job_type(
             &self.repos,
@@ -824,7 +998,8 @@ impl Core {
                     .join("\n");
                 let prompt =
                     format!("Job {seq} failed Ready-transition re-validation at {head}:\n{detail}");
-                self.stall(owner, project, seq, "revalidation_failed", prompt).await?;
+                self.stall(owner, project, seq, "revalidation_failed", prompt)
+                    .await?;
             }
         }
         Ok(())
@@ -847,11 +1022,15 @@ impl Core {
         for &target in std::iter::once(&seq).chain(cascaded.iter()) {
             let mut j = self.must_get(owner, project, target)?.clone();
             self.kill_running_containers(owner, project, target).await;
-            self.active.remove(&(owner.to_string(), project.to_string(), target));
+            self.active
+                .remove(&(owner.to_string(), project.to_string(), target));
             self.set_state(&mut j, JobState::Revoked).await?;
             // Delete job/{seq} and any parked candidate; missing refs are fine.
             let _ = self.repos.delete_branch(owner, project, &j.branch).await;
-            let _ = self.repos.delete_branch(owner, project, &format!("merge-gate/{target}")).await;
+            let _ = self
+                .repos
+                .delete_branch(owner, project, &format!("merge-gate/{target}"))
+                .await;
             self.queue.remove(&queue::QueuedJob {
                 owner: owner.into(),
                 project: project.into(),
@@ -883,9 +1062,10 @@ impl Core {
         };
         for t in tasks {
             if t.state == types::TaskState::Running
-                && let Some(cid) = &t.container_id {
-                    let _ = self.backend.kill(cid).await;
-                }
+                && let Some(cid) = &t.container_id
+            {
+                let _ = self.backend.kill(cid).await;
+            }
         }
     }
 
@@ -972,9 +1152,19 @@ impl Core {
         Ok(())
     }
 
-    pub(crate) async fn next_task_id(&self, owner: &str, project: &str, job_seq: u64) -> Result<u64> {
+    pub(crate) async fn next_task_id(
+        &self,
+        owner: &str,
+        project: &str,
+        job_seq: u64,
+    ) -> Result<u64> {
         // Sequential within job (§1.2); safe as read-then-write: single writer.
-        Ok(self.tasks.list_for_job(owner, project, job_seq).await?.len() as u64 + 1)
+        Ok(self
+            .tasks
+            .list_for_job(owner, project, job_seq)
+            .await?
+            .len() as u64
+            + 1)
     }
 
     pub(crate) async fn kv_names(&self, owner: &str, project: &str) -> Result<KvNames> {

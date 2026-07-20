@@ -19,11 +19,21 @@ struct Front {
 impl Front {
     async fn setup() -> Self {
         let repo = TempRepo::create("acme", "api").await;
-        let repos_root = repo.bare_path().parent().unwrap().parent().unwrap().to_path_buf();
+        let repos_root = repo
+            .bare_path()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         cli::sshfront::install_pre_receive_hook(&repos_root, "acme", "api", Path::new(BIN))
             .await
             .unwrap();
-        Self { _repo: repo, repos_root, scripts: tempfile::tempdir().unwrap() }
+        Self {
+            _repo: repo,
+            repos_root,
+            scripts: tempfile::tempdir().unwrap(),
+        }
     }
 
     /// An `ext::` remote URL that runs ssh-shell exactly as sshd would:
@@ -53,7 +63,10 @@ fn git(cwd: &Path, args: &[&str]) -> (bool, String) {
         .current_dir(cwd)
         .output()
         .expect("running git");
-    (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
 }
 
 fn roles_b64(role: &str) -> String {
@@ -71,8 +84,8 @@ fn roles_b64(role: &str) -> String {
 /// regardless of sshd. Verified against the real sshd container by hand.
 #[test]
 fn dev_sshd_accepts_git_protocol_v2() {
-    let sshd_config = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../deploy/dev/sshd_config");
+    let sshd_config =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/dev/sshd_config");
     let text = std::fs::read_to_string(&sshd_config)
         .unwrap_or_else(|e| panic!("reading {}: {e}", sshd_config.display()));
     assert!(
@@ -99,7 +112,15 @@ async fn single_branch_clone_works_over_the_ssh_front() {
     git(&seed, &["add", "."]);
     git(
         &seed,
-        &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "c"],
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "c",
+        ],
     );
     let push = front.remote("sb-push.sh", "git-receive-pack", job_args);
     let (ok, err) = git(&seed, &["push", &push, "HEAD:refs/heads/job/1"]);
@@ -111,7 +132,10 @@ async fn single_branch_clone_works_over_the_ssh_front() {
     );
     assert!(ok, "single-branch clone: {err}");
     let co = work.path().join("co");
-    assert_eq!(std::fs::read_to_string(co.join("f.txt")).unwrap(), "content");
+    assert_eq!(
+        std::fs::read_to_string(co.join("f.txt")).unwrap(),
+        "content"
+    );
 
     // Only the job branch came across, not main.
     let listed = std::process::Command::new("git")
@@ -139,7 +163,18 @@ async fn job_certs_clone_and_push_only_their_branch() {
 
     std::fs::write(co.join("w.txt"), "work output").unwrap();
     git(&co, &["add", "."]);
-    git(&co, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "w"]);
+    git(
+        &co,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "w",
+        ],
+    );
 
     let push = front.remote("job-push.sh", "git-receive-pack", job_args);
     // Own branch: allowed.
@@ -181,14 +216,28 @@ async fn user_and_dispatcher_rules() {
     let work = tempfile::tempdir().unwrap();
 
     // Viewer: clone yes, push refused at entry.
-    let viewer = format!("--kind user --principal d@e.com --roles {}", roles_b64("viewer"));
+    let viewer = format!(
+        "--kind user --principal d@e.com --roles {}",
+        roles_b64("viewer")
+    );
     let pull = front.remote("viewer-pull.sh", "git-upload-pack", &viewer);
     let (ok, err) = git(work.path(), &["clone", &pull, "co"]);
     assert!(ok, "viewer clone: {err}");
     let co = work.path().join("co");
     std::fs::write(co.join("u.txt"), "user change").unwrap();
     git(&co, &["add", "."]);
-    git(&co, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "u"]);
+    git(
+        &co,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "u",
+        ],
+    );
 
     let viewer_push = front.remote("viewer-push.sh", "git-receive-pack", &viewer);
     let (ok, err) = git(&co, &["push", &viewer_push, "HEAD:refs/heads/job/7"]);
@@ -196,7 +245,10 @@ async fn user_and_dispatcher_rules() {
     assert!(err.contains("access denied"), "{err}");
 
     // Member: job branches yes, default branch and tags no.
-    let member = format!("--kind user --principal d@e.com --roles {}", roles_b64("member"));
+    let member = format!(
+        "--kind user --principal d@e.com --roles {}",
+        roles_b64("member")
+    );
     let member_push = front.remote("member-push.sh", "git-receive-pack", &member);
     let (ok, err) = git(&co, &["push", &member_push, "HEAD:refs/heads/job/7"]);
     assert!(ok, "member push to job branch: {err}");
@@ -219,7 +271,8 @@ async fn user_and_dispatcher_rules() {
 
     // No identity env (local file:// access, the dispatcher's own path):
     // the hook passes through even though it is installed.
-    let clone = test_utils::repo::clone_branch_from(&front.repos_root.join("acme/api.git"), "main").await;
+    let clone =
+        test_utils::repo::clone_branch_from(&front.repos_root.join("acme/api.git"), "main").await;
     clone.commit_file("local.txt", b"local", "local").await;
     clone.push("main").await;
 }
@@ -231,9 +284,13 @@ async fn ssh_shell_rejects_garbage() {
     for cmd in ["rm -rf /", "", "git-upload-archive '/acme/api.git'"] {
         let out = std::process::Command::new(BIN)
             .args([
-                "ssh-shell", "--repos-root",
+                "ssh-shell",
+                "--repos-root",
                 front.repos_root.to_str().unwrap(),
-                "--kind", "job", "--principal", "job:acme/api:1",
+                "--kind",
+                "job",
+                "--principal",
+                "job:acme/api:1",
             ])
             .env("SSH_ORIGINAL_COMMAND", cmd)
             .output()
@@ -243,9 +300,13 @@ async fn ssh_shell_rejects_garbage() {
     // Unknown repository.
     let out = std::process::Command::new(BIN)
         .args([
-            "ssh-shell", "--repos-root",
+            "ssh-shell",
+            "--repos-root",
             front.repos_root.to_str().unwrap(),
-            "--kind", "job", "--principal", "job:acme/nope:1",
+            "--kind",
+            "job",
+            "--principal",
+            "job:acme/nope:1",
         ])
         .env("SSH_ORIGINAL_COMMAND", "git-upload-pack '/acme/nope.git'")
         .output()

@@ -203,7 +203,10 @@ impl RepoManager {
         project: &str,
         body: &str,
     ) -> Result<()> {
-        let hook = self.repo_path(owner, project).join("hooks").join("pre-receive");
+        let hook = self
+            .repo_path(owner, project)
+            .join("hooks")
+            .join("pre-receive");
         tokio::fs::create_dir_all(hook.parent().unwrap()).await?;
         tokio::fs::write(&hook, body).await?;
         use std::os::unix::fs::PermissionsExt;
@@ -232,7 +235,8 @@ impl RepoManager {
         let tmp = tempfile::tempdir()?;
         let wt = tmp.path().join("wt");
         let wt_str = wt.to_string_lossy().to_string();
-        self.run(&repo, &["worktree", "add", &wt_str, &branch]).await?;
+        self.run(&repo, &["worktree", "add", &wt_str, &branch])
+            .await?;
         let result: Result<()> = async {
             for (path, contents) in files {
                 let dest = wt.join(path);
@@ -250,7 +254,9 @@ impl RepoManager {
                 }
             }
             self.run(&wt, &["add", "-A"]).await?;
-            let staged = self.exec(&wt, &["diff", "--cached", "--quiet"], None).await?;
+            let staged = self
+                .exec(&wt, &["diff", "--cached", "--quiet"], None)
+                .await?;
             if !staged.status.success() {
                 self.run(&wt, &["commit", "-m", message]).await?;
             }
@@ -259,7 +265,9 @@ impl RepoManager {
         .await;
         // Always detach the worktree — a stale registration would block the
         // next seed. The temp dir itself is cleaned by its guard.
-        let _ = self.run(&repo, &["worktree", "remove", "--force", &wt_str]).await;
+        let _ = self
+            .run(&repo, &["worktree", "remove", "--force", &wt_str])
+            .await;
         result
     }
 
@@ -290,7 +298,8 @@ impl RepoManager {
         self.run(&repo, &["init", "--bare", "."]).await?;
 
         let result: Result<String> = async {
-            self.run(&repo, &["remote", "add", "origin", origin_url]).await?;
+            self.run(&repo, &["remote", "add", "origin", origin_url])
+                .await?;
             let main = match main_branch {
                 Some(m) => m.to_string(),
                 None => self.detect_origin_head(&repo, env).await?,
@@ -304,13 +313,23 @@ impl RepoManager {
                 ],
             )
             .await?;
-            self.run(&repo, &["config", "chuggernaut.originMain", &main]).await?;
+            self.run(&repo, &["config", "chuggernaut.originMain", &main])
+                .await?;
             self.run_origin(&repo, &["fetch", "origin"], env).await?;
             let sha = self
-                .run(&repo, &["rev-parse", "--verify", &format!("refs/remotes/origin/{main}^{{commit}}")])
+                .run(
+                    &repo,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        &format!("refs/remotes/origin/{main}^{{commit}}"),
+                    ],
+                )
                 .await?;
-            self.run(&repo, &["update-ref", "refs/heads/integration", sha.trim()]).await?;
-            self.run(&repo, &["symbolic-ref", "HEAD", "refs/heads/integration"]).await?;
+            self.run(&repo, &["update-ref", "refs/heads/integration", sha.trim()])
+                .await?;
+            self.run(&repo, &["symbolic-ref", "HEAD", "refs/heads/integration"])
+                .await?;
             self.ensure_upload_filter(owner, project).await?;
             Ok(main)
         }
@@ -324,7 +343,9 @@ impl RepoManager {
 
     /// `ls-remote --symref origin HEAD` → the origin's default branch name.
     async fn detect_origin_head(&self, repo: &Path, env: &OriginEnv) -> Result<String> {
-        let out = self.run_origin(repo, &["ls-remote", "--symref", "origin", "HEAD"], env).await?;
+        let out = self
+            .run_origin(repo, &["ls-remote", "--symref", "origin", "HEAD"], env)
+            .await?;
         // First line: "ref: refs/heads/{main}\tHEAD"
         out.lines()
             .find_map(|l| {
@@ -342,22 +363,35 @@ impl RepoManager {
     /// The origin's default branch name, recorded at link time.
     pub async fn origin_main_branch(&self, owner: &str, project: &str) -> Result<String> {
         let repo = self.repo_path(owner, project);
-        Ok(self.run(&repo, &["config", "--get", "chuggernaut.originMain"]).await?.trim().to_string())
+        Ok(self
+            .run(&repo, &["config", "--get", "chuggernaut.originMain"])
+            .await?
+            .trim()
+            .to_string())
     }
 
     /// `remote.origin.url`, `None` when the project has no origin (classic).
     pub async fn origin_url(&self, owner: &str, project: &str) -> Result<Option<String>> {
         let repo = self.repo_path(owner, project);
-        let out = self.exec(&repo, &["config", "--get", "remote.origin.url"], None).await?;
+        let out = self
+            .exec(&repo, &["config", "--get", "remote.origin.url"], None)
+            .await?;
         if !out.status.success() {
             return Ok(None);
         }
-        Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()))
+        Ok(Some(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        ))
     }
 
     /// Fetch the origin's default branch; returns the new
     /// `refs/remotes/origin/{main}` commit.
-    pub async fn fetch_origin(&self, owner: &str, project: &str, env: &OriginEnv) -> Result<String> {
+    pub async fn fetch_origin(
+        &self,
+        owner: &str,
+        project: &str,
+        env: &OriginEnv,
+    ) -> Result<String> {
         let repo = self.repo_path(owner, project);
         self.run_origin(&repo, &["fetch", "origin"], env).await?;
         self.origin_main_sha(owner, project).await
@@ -366,7 +400,8 @@ impl RepoManager {
     /// Resolve `refs/remotes/origin/{main}` as last fetched (no network).
     pub async fn origin_main_sha(&self, owner: &str, project: &str) -> Result<String> {
         let main = self.origin_main_branch(owner, project).await?;
-        self.resolve_ref(owner, project, &format!("refs/remotes/origin/{main}")).await
+        self.resolve_ref(owner, project, &format!("refs/remotes/origin/{main}"))
+            .await
     }
 
     /// Push `local_ref` to the origin as `remote_ref`.
@@ -393,7 +428,13 @@ impl RepoManager {
     /// Point an arbitrary fully-qualified ref (e.g. the `refs/chug/release-{n}`
     /// history pins) at a commit. [`Self::create_branch`]/[`Self::reset_branch`]
     /// only speak `refs/heads/`.
-    pub async fn update_ref(&self, owner: &str, project: &str, full_ref: &str, sha: &str) -> Result<()> {
+    pub async fn update_ref(
+        &self,
+        owner: &str,
+        project: &str,
+        full_ref: &str,
+        sha: &str,
+    ) -> Result<()> {
         let repo = self.repo_path(owner, project);
         self.run(&repo, &["update-ref", full_ref, sha]).await?;
         Ok(())
@@ -613,7 +654,10 @@ impl RepoManager {
         base_ref: &str,
         branch: &str,
     ) -> Result<bool> {
-        Ok(self.count_commits_beyond(owner, project, base_ref, branch).await? != 0)
+        Ok(self
+            .count_commits_beyond(owner, project, base_ref, branch)
+            .await?
+            != 0)
     }
 
     /// `rev-list --count {base_ref}..{branch}` — ahead-by counts for the
@@ -730,7 +774,8 @@ impl RepoManager {
             SquashBuild::NoOp => Ok(MergeOutcome::NoOp),
             SquashBuild::Conflict { files } => Ok(MergeOutcome::Conflict { files }),
             SquashBuild::Commit { commit, old_head } => {
-                self.advance_default(owner, project, &commit, &old_head).await?;
+                self.advance_default(owner, project, &commit, &old_head)
+                    .await?;
                 Ok(MergeOutcome::Merged { commit })
             }
         }

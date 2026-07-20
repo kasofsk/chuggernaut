@@ -13,8 +13,8 @@ use agent::AgentRunConfig;
 use chrono::Utc;
 use container::{ContainerLaunchConfig, bootstrap_cmd};
 use types::{
-    EvalResult, Evaluator, EvaluatorType, JobState, Task, TaskKind, TaskPhase,
-    TaskResult, TaskState, WorkType, WrapUpMode,
+    EvalResult, Evaluator, EvaluatorType, JobState, Task, TaskKind, TaskPhase, TaskResult,
+    TaskState, WorkType, WrapUpMode,
 };
 use vcs::MergeOutcome;
 
@@ -60,7 +60,12 @@ enum FinalizeStep {
 impl Core {
     /// Work→Evaluation (§3.2 steps 9–10): one task per evaluator, fanned out.
     /// No evaluators → auto-pass straight to finalization.
-    pub(crate) async fn enter_evaluation(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+    pub(crate) async fn enter_evaluation(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+    ) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
         let (evaluators, cycle) = {
             let exec = self.active.get(&key).expect("exec state");
@@ -68,9 +73,14 @@ impl Core {
         };
         let mut job = self.must_get(owner, project, seq)?.clone();
         self.set_state(&mut job, JobState::Evaluation).await?;
-        self.publish(owner, project, seq, "job-evaluation-started",
-            serde_json::json!({ "cycle": cycle }))
-            .await?;
+        self.publish(
+            owner,
+            project,
+            seq,
+            "job-evaluation-started",
+            serde_json::json!({ "cycle": cycle }),
+        )
+        .await?;
 
         if evaluators.is_empty() {
             return self.finalize_pass(owner, project, seq).await;
@@ -80,9 +90,23 @@ impl Core {
         let mut slots = Vec::new();
         for evaluator in evaluators {
             let task_id = self
-                .launch_evaluator_task(owner, project, seq, TaskPhase::Evaluation, &branch, cycle, &evaluator, 1)
+                .launch_evaluator_task(
+                    owner,
+                    project,
+                    seq,
+                    TaskPhase::Evaluation,
+                    &branch,
+                    cycle,
+                    &evaluator,
+                    1,
+                )
                 .await?;
-            slots.push(EvalSlot { evaluator, task_id, attempt: 1, outcome: None });
+            slots.push(EvalSlot {
+                evaluator,
+                task_id,
+                attempt: 1,
+                outcome: None,
+            });
         }
         self.active.get_mut(&key).expect("exec state").round = Some(EvalRound { slots });
         Ok(())
@@ -110,9 +134,12 @@ impl Core {
         let phase_name = format!("{phase:?}");
 
         let (kind, pending_human) = match evaluator.r#type {
-            EvaluatorType::Command => {
-                (TaskKind::Command { run: evaluator.run.clone().unwrap_or_default() }, false)
-            }
+            EvaluatorType::Command => (
+                TaskKind::Command {
+                    run: evaluator.run.clone().unwrap_or_default(),
+                },
+                false,
+            ),
             EvaluatorType::Agent => (
                 TaskKind::Agent {
                     provider: crate::exec::provider_name(
@@ -149,7 +176,11 @@ impl Core {
             phase,
             cycle,
             kind,
-            state: if pending_human { TaskState::Pending } else { TaskState::Running },
+            state: if pending_human {
+                TaskState::Pending
+            } else {
+                TaskState::Running
+            },
             attempt,
             evaluator: Some(evaluator.name.clone()),
             container_id: None,
@@ -160,10 +191,16 @@ impl Core {
             completed_at: None,
         };
         self.tasks.put(&task).await?;
-        self.publish(owner, project, seq, "task-created", serde_json::json!({
-            "task_id": task_id, "phase": phase_name, "cycle": cycle,
-            "attempt": attempt, "evaluator": evaluator.name,
-        }))
+        self.publish(
+            owner,
+            project,
+            seq,
+            "task-created",
+            serde_json::json!({
+                "task_id": task_id, "phase": phase_name, "cycle": cycle,
+                "attempt": attempt, "evaluator": evaluator.name,
+            }),
+        )
         .await?;
         if pending_human {
             return Ok(task_id); // operator inbox (§3.3 human)
@@ -175,8 +212,14 @@ impl Core {
         let eval_timeout = task_timeout(&job_type);
         let env = self
             .container_env(
-                owner, project, seq, branch, &job_type, &evaluator.secrets,
-                ChannelRole::Eval { task_id }, eval_timeout,
+                owner,
+                project,
+                seq,
+                branch,
+                &job_type,
+                &evaluator.secrets,
+                ChannelRole::Eval { task_id },
+                eval_timeout,
             )
             .await?;
         let tx = self.self_tx.clone().expect("spawned core");
@@ -191,13 +234,20 @@ impl Core {
                     env,
                     files: self
                         .ssh_credential_files(
-                            owner, project, seq, ChannelRole::Eval { task_id }, eval_timeout,
+                            owner,
+                            project,
+                            seq,
+                            ChannelRole::Eval { task_id },
+                            eval_timeout,
                         )
                         .await?,
                     cpu_limit: job_type.resources.as_ref().and_then(|r| r.cpu),
                     memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
                 };
-                let id = self.backend.launch(launch).await
+                let id = self
+                    .backend
+                    .launch(launch)
+                    .await
                     .map_err(|e| CoreError::NotFound(format!("launch failed: {e}")))?;
                 task.container_id = Some(id.clone());
                 self.tasks.put(&task).await?;
@@ -215,8 +265,16 @@ impl Core {
                     harvest.collect_logs(&o, &p, seq, task_id, &id).await;
                     let _ = tx
                         .send(Msg::TaskExited {
-                            owner: o, project: p, seq, task_id,
-                            exit: TaskExit { exit_code, eval_json, usage: None, assessment: None },
+                            owner: o,
+                            project: p,
+                            seq,
+                            task_id,
+                            exit: TaskExit {
+                                exit_code,
+                                eval_json,
+                                usage: None,
+                                assessment: None,
+                            },
                         })
                         .await;
                 });
@@ -228,8 +286,12 @@ impl Core {
                 let prompt = format!(
                     "{}{}",
                     self.repos
-                        .read_file_at(owner, project, &base_ref,
-                            evaluator.prompt.as_deref().unwrap_or_default())
+                        .read_file_at(
+                            owner,
+                            project,
+                            &base_ref,
+                            evaluator.prompt.as_deref().unwrap_or_default()
+                        )
                         .await?
                         .unwrap_or_default(),
                     crate::exec::job_brief_block(&job)
@@ -237,7 +299,11 @@ impl Core {
                 let (mcp_servers, mut files) = self.channel_mcp(&env);
                 files.extend(
                     self.ssh_credential_files(
-                        owner, project, seq, ChannelRole::Eval { task_id }, eval_timeout,
+                        owner,
+                        project,
+                        seq,
+                        ChannelRole::Eval { task_id },
+                        eval_timeout,
                     )
                     .await?,
                 );
@@ -272,8 +338,16 @@ impl Core {
                     };
                     let _ = tx
                         .send(Msg::TaskExited {
-                            owner: o, project: p, seq, task_id,
-                            exit: TaskExit { exit_code, eval_json: None, usage, assessment: None },
+                            owner: o,
+                            project: p,
+                            seq,
+                            task_id,
+                            exit: TaskExit {
+                                exit_code,
+                                eval_json: None,
+                                usage,
+                                assessment: None,
+                            },
                         })
                         .await;
                 });
@@ -310,9 +384,15 @@ impl Core {
         task.state = TaskState::Done;
         task.completed_at = Some(Utc::now());
         self.tasks.put(&task).await?;
-        self.publish(owner, project, seq, "task-completed", serde_json::json!({
-            "task_id": task_id, "phase": "Evaluation", "pass": submission.pass,
-        }))
+        self.publish(
+            owner,
+            project,
+            seq,
+            "task-completed",
+            serde_json::json!({
+                "task_id": task_id, "phase": "Evaluation", "pass": submission.pass,
+            }),
+        )
         .await?;
         Ok(())
     }
@@ -335,14 +415,22 @@ impl Core {
             .active
             .get(&key)
             .and_then(|e| e.round.as_ref())
-            .and_then(|r| r.slots.iter().position(|s| s.task_id == task_id && s.outcome.is_none()))
+            .and_then(|r| {
+                r.slots
+                    .iter()
+                    .position(|s| s.task_id == task_id && s.outcome.is_none())
+            })
         else {
             return Err(CoreError::InvalidResolution(format!(
                 "task {task_id} is not an open evaluator slot"
             )));
         };
         let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
-        round.slots[slot_idx].outcome = Some(SlotOutcome::Product { pass, abort, structured });
+        round.slots[slot_idx].outcome = Some(SlotOutcome::Product {
+            pass,
+            abort,
+            structured,
+        });
         if round.slots.iter().all(|s| s.outcome.is_some()) {
             return self.reduce(owner, project, seq).await;
         }
@@ -360,7 +448,12 @@ impl Core {
         mut task: Task,
         exit: TaskExit,
     ) -> Result<()> {
-        let TaskExit { exit_code, eval_json, usage, .. } = exit;
+        let TaskExit {
+            exit_code,
+            eval_json,
+            usage,
+            ..
+        } = exit;
         let key = (owner.to_string(), project.to_string(), seq);
         let Some(slot_idx) = self
             .active
@@ -387,18 +480,31 @@ impl Core {
                 task.state = TaskState::Done;
                 task.completed_at = Some(Utc::now());
                 self.tasks.put(&task).await?;
-                self.publish(owner, project, seq, "task-completed", serde_json::json!({
-                    "task_id": task.id, "phase": "Evaluation", "pass": pass,
-                }))
+                self.publish(
+                    owner,
+                    project,
+                    seq,
+                    "task-completed",
+                    serde_json::json!({
+                        "task_id": task.id, "phase": "Evaluation", "pass": pass,
+                    }),
+                )
                 .await?;
                 // Command evaluators can't judge fixability: no abort verdict.
-                Some(SlotOutcome::Product { pass, abort: false, structured: eval_json })
+                Some(SlotOutcome::Product {
+                    pass,
+                    abort: false,
+                    structured: eval_json,
+                })
             }
             TaskKind::Agent { .. } => {
                 // handle_submit_eval marks the task Done before the container
                 // exits; the record we were passed is the pre-exit snapshot.
-                let mut current =
-                    self.tasks.get(owner, project, seq, task.id).await?.unwrap_or(task);
+                let mut current = self
+                    .tasks
+                    .get(owner, project, seq, task.id)
+                    .await?
+                    .unwrap_or(task);
                 // submit_eval could only self-report usage. Now that the
                 // container is gone we have the CLI's measured figure — prefer
                 // it, the same way the work path does.
@@ -409,13 +515,16 @@ impl Core {
                     self.tasks.put(&current).await?;
                 }
                 match &current.result {
-                    Some(TaskResult::Agent { pass, abort, structured, .. }) => {
-                        Some(SlotOutcome::Product {
-                            pass: *pass,
-                            abort: *abort,
-                            structured: structured.clone(),
-                        })
-                    }
+                    Some(TaskResult::Agent {
+                        pass,
+                        abort,
+                        structured,
+                        ..
+                    }) => Some(SlotOutcome::Product {
+                        pass: *pass,
+                        abort: *abort,
+                        structured: structured.clone(),
+                    }),
                     _ => {
                         // Infra error: no verdict recorded (§3.3).
                         let mut failed = current;
@@ -440,8 +549,14 @@ impl Core {
                             let branch = self.must_get(owner, project, seq)?.branch.clone();
                             let new_id = self
                                 .launch_evaluator_task(
-                                    owner, project, seq, TaskPhase::Evaluation, &branch, cycle,
-                                    &evaluator, failed.attempt + 1,
+                                    owner,
+                                    project,
+                                    seq,
+                                    TaskPhase::Evaluation,
+                                    &branch,
+                                    cycle,
+                                    &evaluator,
+                                    failed.attempt + 1,
                                 )
                                 .await?;
                             let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
@@ -469,7 +584,16 @@ impl Core {
     /// §3.3 reduce, applied once all eval tasks resolved.
     async fn reduce(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
-        let (results, required_infra_failure, overall_pass, aborted, cycle, reworks_used, work_type, budget) = {
+        let (
+            results,
+            required_infra_failure,
+            overall_pass,
+            aborted,
+            cycle,
+            reworks_used,
+            work_type,
+            budget,
+        ) = {
             let exec = self.active.get(&key).expect("exec state");
             let round = exec.round.as_ref().expect("round");
             let mut results = Vec::new();
@@ -482,7 +606,11 @@ impl Core {
             for slot in &round.slots {
                 let required = slot.evaluator.required.unwrap_or(true);
                 match slot.outcome.as_ref().expect("complete") {
-                    SlotOutcome::Product { pass: p, abort, structured } => {
+                    SlotOutcome::Product {
+                        pass: p,
+                        abort,
+                        structured,
+                    } => {
                         results.push(EvalResult {
                             evaluator: slot.evaluator.name.clone(),
                             pass: *p,
@@ -521,8 +649,14 @@ impl Core {
 
         if required_infra_failure {
             self.active.remove(&key);
-            return self.escalate(owner, project, seq, "eval_infra_failure",
-                format!("Job {seq}: a required evaluator exhausted eval_retries"))
+            return self
+                .escalate(
+                    owner,
+                    project,
+                    seq,
+                    "eval_infra_failure",
+                    format!("Job {seq}: a required evaluator exhausted eval_retries"),
+                )
                 .await;
         }
         if overall_pass {
@@ -558,16 +692,28 @@ impl Core {
         if work_type != WorkType::Command && reworks_used < budget {
             // enter_work preserves reworks_used from the existing state.
             self.active.get_mut(&key).unwrap().reworks_used = reworks_used + 1;
-            self.publish(owner, project, seq, "job-rework-started", serde_json::json!({
-                "cycle": cycle + 1, "reason": "eval_failure", "eval_context": results,
-            }))
+            self.publish(
+                owner,
+                project,
+                seq,
+                "job-rework-started",
+                serde_json::json!({
+                    "cycle": cycle + 1, "reason": "eval_failure", "eval_context": results,
+                }),
+            )
             .await?;
-            self.enter_work(owner, project, seq, cycle + 1, results, None).await
+            self.enter_work(owner, project, seq, cycle + 1, results, None)
+                .await
         } else {
             self.active.remove(&key);
-            self.escalate(owner, project, seq, "rework_budget_exhausted",
-                format!("Job {seq}: evaluation failed in cycle {cycle} with no rework budget left"))
-                .await
+            self.escalate(
+                owner,
+                project,
+                seq,
+                "rework_budget_exhausted",
+                format!("Job {seq}: evaluation failed in cycle {cycle} with no rework budget left"),
+            )
+            .await
         }
     }
 
@@ -597,8 +743,14 @@ impl Core {
         let mut job = self.must_get(owner, project, seq)?.clone();
         if job.state == JobState::Evaluation {
             self.set_state(&mut job, JobState::WrapUp).await?;
-            self.publish(owner, project, seq, "job-wrapup-started", serde_json::json!({}))
-                .await?;
+            self.publish(
+                owner,
+                project,
+                seq,
+                "job-wrapup-started",
+                serde_json::json!({}),
+            )
+            .await?;
         }
         let slug = format!("{owner}/{project}");
         let q = self.merge_queue.entry(slug).or_default();
@@ -634,7 +786,8 @@ impl Core {
                 }
                 Err(e) => {
                     tracing::error!("finalizing {owner}/{project}#{seq}: {e}");
-                    self.escalate_finalize_failure(owner, project, seq, &e).await;
+                    self.escalate_finalize_failure(owner, project, seq, &e)
+                        .await;
                     continue;
                 }
             }
@@ -652,10 +805,16 @@ impl Core {
         seq: u64,
         error: &CoreError,
     ) {
-        self.active.remove(&(owner.to_string(), project.to_string(), seq));
+        self.active
+            .remove(&(owner.to_string(), project.to_string(), seq));
         if let Err(e2) = self
-            .escalate(owner, project, seq, "finalize_failed",
-                format!("Job {seq}: wrap-up failed unexpectedly: {error}"))
+            .escalate(
+                owner,
+                project,
+                seq,
+                "finalize_failed",
+                format!("Job {seq}: wrap-up failed unexpectedly: {error}"),
+            )
             .await
         {
             tracing::error!("escalating finalize failure for {owner}/{project}#{seq}: {e2}");
@@ -677,13 +836,23 @@ impl Core {
             .and_then(|s| s.summary.clone());
 
         let default_branch = self.repos.default_branch(owner, project).await?;
-        let head = self.repos.resolve_ref(owner, project, &default_branch).await?;
+        let head = self
+            .repos
+            .resolve_ref(owner, project, &default_branch)
+            .await?;
 
         if head == base_ref {
             // Fast path: evaluators already ran against exactly what lands.
             return match self
                 .repos
-                .squash_merge(owner, project, seq, &base_ref, &job.r#type, summary.as_deref())
+                .squash_merge(
+                    owner,
+                    project,
+                    seq,
+                    &base_ref,
+                    &job.r#type,
+                    summary.as_deref(),
+                )
                 .await?
             {
                 MergeOutcome::Merged { .. } | MergeOutcome::NoOp => {
@@ -693,7 +862,8 @@ impl Core {
                 // head == base_ref makes a conflict impossible by construction;
                 // treat one as the conflict path anyway rather than crash.
                 MergeOutcome::Conflict { files } => {
-                    self.conflict_rework(owner, project, seq, &base_ref, &head, files).await?;
+                    self.conflict_rework(owner, project, seq, &base_ref, &head, files)
+                        .await?;
                     Ok(FinalizeStep::Completed)
                 }
             };
@@ -702,7 +872,14 @@ impl Core {
         // HEAD moved: build the candidate and open the gate (§3.3 Merge Gate).
         match self
             .repos
-            .create_squash_candidate(owner, project, seq, &base_ref, &job.r#type, summary.as_deref())
+            .create_squash_candidate(
+                owner,
+                project,
+                seq,
+                &base_ref,
+                &job.r#type,
+                summary.as_deref(),
+            )
             .await?
         {
             MergeOutcome::NoOp => {
@@ -710,7 +887,8 @@ impl Core {
                 Ok(FinalizeStep::Completed)
             }
             MergeOutcome::Conflict { files } => {
-                self.conflict_rework(owner, project, seq, &base_ref, &head, files).await?;
+                self.conflict_rework(owner, project, seq, &base_ref, &head, files)
+                    .await?;
                 Ok(FinalizeStep::Completed)
             }
             MergeOutcome::Merged { commit } => {
@@ -731,7 +909,9 @@ impl Core {
 
                 if gate_evaluators.is_empty() {
                     // Nothing to re-run; the candidate promotes directly.
-                    self.repos.advance_default(owner, project, &commit, &head).await?;
+                    self.repos
+                        .advance_default(owner, project, &commit, &head)
+                        .await?;
                     let _ = self
                         .repos
                         .delete_branch(owner, project, &format!("merge-gate/{seq}"))
@@ -741,19 +921,35 @@ impl Core {
                 }
 
                 let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
-                self.publish(owner, project, seq, "job-merge-gate-started",
-                    serde_json::json!({ "cycle": cycle }))
-                    .await?;
+                self.publish(
+                    owner,
+                    project,
+                    seq,
+                    "job-merge-gate-started",
+                    serde_json::json!({ "cycle": cycle }),
+                )
+                .await?;
                 let gate_branch = format!("merge-gate/{seq}");
                 let mut slots = Vec::new();
                 for evaluator in gate_evaluators {
                     let task_id = self
                         .launch_evaluator_task(
-                            owner, project, seq, TaskPhase::MergeGate, &gate_branch, cycle,
-                            &evaluator, 1,
+                            owner,
+                            project,
+                            seq,
+                            TaskPhase::MergeGate,
+                            &gate_branch,
+                            cycle,
+                            &evaluator,
+                            1,
                         )
                         .await?;
-                    slots.push(EvalSlot { evaluator, task_id, attempt: 1, outcome: None });
+                    slots.push(EvalSlot {
+                        evaluator,
+                        task_id,
+                        attempt: 1,
+                        outcome: None,
+                    });
                 }
                 self.active.get_mut(&key).expect("exec state").gate = Some(GateState {
                     commit,
@@ -801,14 +997,23 @@ impl Core {
         task.state = TaskState::Done;
         task.completed_at = Some(Utc::now());
         self.tasks.put(&task).await?;
-        self.publish(owner, project, seq, "task-completed", serde_json::json!({
-            "task_id": task.id, "phase": "MergeGate", "pass": pass,
-        }))
+        self.publish(
+            owner,
+            project,
+            seq,
+            "task-completed",
+            serde_json::json!({
+                "task_id": task.id, "phase": "MergeGate", "pass": pass,
+            }),
+        )
         .await?;
 
         let gate = self.active.get_mut(&key).unwrap().gate.as_mut().unwrap();
-        gate.round.slots[slot_idx].outcome =
-            Some(SlotOutcome::Product { pass, abort: false, structured: eval_json });
+        gate.round.slots[slot_idx].outcome = Some(SlotOutcome::Product {
+            pass,
+            abort: false,
+            structured: eval_json,
+        });
         if gate.round.slots.iter().any(|s| s.outcome.is_none()) {
             return Ok(());
         }
@@ -817,7 +1022,8 @@ impl Core {
         if let Err(e) = self.gate_reduce(owner, project, seq).await {
             tracing::error!("gate reduce for {owner}/{project}#{seq}: {e}");
             self.gating.remove(&format!("{owner}/{project}"));
-            self.escalate_finalize_failure(owner, project, seq, &e).await;
+            self.escalate_finalize_failure(owner, project, seq, &e)
+                .await;
             return self.pump_merges(owner, project).await;
         }
         Ok(())
@@ -826,13 +1032,23 @@ impl Core {
     async fn gate_reduce(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
         let slug = format!("{owner}/{project}");
-        let gate = self.active.get_mut(&key).unwrap().gate.take().expect("gate state");
+        let gate = self
+            .active
+            .get_mut(&key)
+            .unwrap()
+            .gate
+            .take()
+            .expect("gate state");
         let failures: Vec<EvalResult> = gate
             .round
             .slots
             .iter()
             .filter_map(|s| match s.outcome.as_ref() {
-                Some(SlotOutcome::Product { pass: false, structured, .. }) => Some(EvalResult {
+                Some(SlotOutcome::Product {
+                    pass: false,
+                    structured,
+                    ..
+                }) => Some(EvalResult {
                     evaluator: s.evaluator.name.clone(),
                     pass: false,
                     structured: structured.clone(),
@@ -849,7 +1065,11 @@ impl Core {
             // means HEAD moved under the parked candidate (an origin-release
             // reset, or restart-race leftovers) — re-enqueue for finalization
             // against the new HEAD instead of escalating.
-            if let Err(e) = self.repos.advance_default(owner, project, &gate.commit, &gate.old_head).await {
+            if let Err(e) = self
+                .repos
+                .advance_default(owner, project, &gate.commit, &gate.old_head)
+                .await
+            {
                 tracing::warn!(
                     "gate promote for {owner}/{project}#{seq}: HEAD moved under candidate ({e}); refinalizing"
                 );
@@ -873,12 +1093,22 @@ impl Core {
             let mut job = job;
             job.base_ref = Some(gate.old_head.clone());
             self.jobs.put(&job).await?;
-            self.graphs.entry(job.project.clone()).or_default().insert(job.clone());
-            self.publish(owner, project, seq, "job-rework-started", serde_json::json!({
-                "cycle": cycle + 1, "reason": "merge_gate_failure", "eval_context": failures,
-            }))
+            self.graphs
+                .entry(job.project.clone())
+                .or_default()
+                .insert(job.clone());
+            self.publish(
+                owner,
+                project,
+                seq,
+                "job-rework-started",
+                serde_json::json!({
+                    "cycle": cycle + 1, "reason": "merge_gate_failure", "eval_context": failures,
+                }),
+            )
             .await?;
-            self.enter_work(owner, project, seq, cycle + 1, failures, Some(context)).await?;
+            self.enter_work(owner, project, seq, cycle + 1, failures, Some(context))
+                .await?;
         }
         self.pump_merges(owner, project).await
     }
@@ -890,7 +1120,8 @@ impl Core {
         let _ = self.repos.delete_branch(owner, project, &job.branch).await;
         self.set_state(&mut job, JobState::Done).await?;
         self.active.remove(&key);
-        self.publish(owner, project, seq, "job-done", serde_json::json!({})).await?;
+        self.publish(owner, project, seq, "job-done", serde_json::json!({}))
+            .await?;
         self.on_job_done(owner, project, seq).await
     }
 
@@ -913,11 +1144,21 @@ impl Core {
             .await?;
         job.base_ref = Some(head.to_string());
         self.jobs.put(&job).await?;
-        self.graphs.entry(job.project.clone()).or_default().insert(job.clone());
-        self.publish(owner, project, seq, "job-rework-started", serde_json::json!({
-            "cycle": cycle + 1, "reason": "merge_conflict", "eval_context": [],
-        }))
+        self.graphs
+            .entry(job.project.clone())
+            .or_default()
+            .insert(job.clone());
+        self.publish(
+            owner,
+            project,
+            seq,
+            "job-rework-started",
+            serde_json::json!({
+                "cycle": cycle + 1, "reason": "merge_conflict", "eval_context": [],
+            }),
+        )
         .await?;
-        self.enter_work(owner, project, seq, cycle + 1, Vec::new(), Some(context)).await
+        self.enter_work(owner, project, seq, cycle + 1, Vec::new(), Some(context))
+            .await
     }
 }

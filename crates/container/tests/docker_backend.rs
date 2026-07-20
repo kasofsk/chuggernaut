@@ -56,7 +56,9 @@ fn rm(id: &str) {
 async fn logs_capture_both_streams_after_exit() {
     let Some(be) = docker() else { return };
     let id = be
-        .launch(cfg("echo to-stdout; echo after; echo to-stderr >&2; exit 3"))
+        .launch(cfg(
+            "echo to-stdout; echo after; echo to-stderr >&2; exit 3",
+        ))
         .await
         .unwrap();
     assert_eq!(be.wait(&id).await.unwrap(), 3);
@@ -113,7 +115,11 @@ async fn env_file_injection_and_copy_out() {
         },
     ];
     let id = be.launch(config).await.unwrap();
-    assert_eq!(be.wait(&id).await.unwrap(), 0, "injected binary must be executable");
+    assert_eq!(
+        be.wait(&id).await.unwrap(),
+        0,
+        "injected binary must be executable"
+    );
     let out = be.copy_file(&id, "/out.txt").await.unwrap().unwrap();
     assert_eq!(out, b"hello+bar");
     assert!(be.copy_file(&id, "/no/such/file").await.unwrap().is_none());
@@ -124,7 +130,10 @@ async fn env_file_injection_and_copy_out() {
 async fn inspect_kill_and_not_found() {
     let Some(be) = docker() else { return };
     let id = be.launch(cfg("sleep 30")).await.unwrap();
-    assert_eq!(be.inspect(&id).await.unwrap(), Some(ContainerStatus::Running));
+    assert_eq!(
+        be.inspect(&id).await.unwrap(),
+        Some(ContainerStatus::Running)
+    );
     be.kill(&id).await.unwrap();
     let exit = be.wait(&id).await.unwrap();
     assert_ne!(exit, 0); // SIGKILL → 137

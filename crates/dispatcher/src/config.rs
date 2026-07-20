@@ -55,8 +55,8 @@ impl DispatcherConfig {
     pub fn from_env() -> Result<Self> {
         let repos_root =
             PathBuf::from(env_opt("REPOS_ROOT").unwrap_or_else(|| "/data/repos".into()));
-        let repo_url_base = env_opt("REPO_URL_BASE")
-            .unwrap_or_else(|| format!("file://{}", repos_root.display()));
+        let repo_url_base =
+            env_opt("REPO_URL_BASE").unwrap_or_else(|| format!("file://{}", repos_root.display()));
 
         let agent_provider_default = env_opt("AGENT_PROVIDER_DEFAULT").ok_or_else(|| {
             CoreError::Config(
@@ -108,7 +108,10 @@ impl DispatcherConfig {
         match tokio::fs::read_to_string(&path).await {
             Ok(s) => Ok(Some(s.trim().to_string())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(CoreError::Config(format!("reading {}: {e}", path.display()))),
+            Err(e) => Err(CoreError::Config(format!(
+                "reading {}: {e}",
+                path.display()
+            ))),
         }
     }
 
@@ -121,7 +124,10 @@ impl DispatcherConfig {
         match tokio::fs::read_to_string(&path).await {
             Ok(s) => Ok(Some(s.trim().to_string())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(CoreError::Config(format!("reading {}: {e}", path.display()))),
+            Err(e) => Err(CoreError::Config(format!(
+                "reading {}: {e}",
+                path.display()
+            ))),
         }
     }
 
@@ -133,7 +139,10 @@ impl DispatcherConfig {
         match tokio::fs::read_to_string(&path).await {
             Ok(s) => Ok(Some(s.trim().to_string())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(CoreError::Config(format!("reading {}: {e}", path.display()))),
+            Err(e) => Err(CoreError::Config(format!(
+                "reading {}: {e}",
+                path.display()
+            ))),
         }
     }
 
@@ -143,7 +152,10 @@ impl DispatcherConfig {
         match tokio::fs::read_to_string(&path).await {
             Ok(s) => Ok(Some(s)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(CoreError::Config(format!("reading {}: {e}", path.display()))),
+            Err(e) => Err(CoreError::Config(format!(
+                "reading {}: {e}",
+                path.display()
+            ))),
         }
     }
 
@@ -152,7 +164,10 @@ impl DispatcherConfig {
         Ok(CoreConfig {
             ssh_ca: ssh_ca.is_file().then_some(ssh_ca),
             repo_url_base: self.repo_url_base.clone(),
-            nats_url: self.nats_url_container.clone().unwrap_or_else(|| self.nats_url.clone()),
+            nats_url: self
+                .nats_url_container
+                .clone()
+                .unwrap_or_else(|| self.nats_url.clone()),
             channel_binary: self.channel_binary.clone(),
             age_identity: self.age_identity().await?,
             artifacts_identity: self.artifacts_identity().await?,

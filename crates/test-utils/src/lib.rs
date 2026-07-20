@@ -10,8 +10,8 @@ use container::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
 };
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Deterministic, scriptable [`ContainerBackend`]: every launch records its config
 /// and "exits" with the next scripted exit code (default 0).
@@ -138,8 +138,7 @@ pub struct FakeProvider {
 /// Async so a hook can drive the dispatcher (e.g. submit_eval) and await the
 /// ack before the "container" exits — exactly the ordering the channel MCP
 /// server guarantees (spec §4.2 bounded-retry-until-ack).
-type RunHook =
-    Box<dyn FnOnce(AgentRunConfig) -> futures::future::BoxFuture<'static, ()> + Send>;
+type RunHook = Box<dyn FnOnce(AgentRunConfig) -> futures::future::BoxFuture<'static, ()> + Send>;
 
 #[derive(Default)]
 struct FakeProviderState {
@@ -170,7 +169,10 @@ impl FakeProvider {
     /// capture can be exercised. Without this a run has no container, like a
     /// provider stub.
     pub fn with_backend(backend: Arc<dyn ContainerBackend>) -> Self {
-        Self { backend: Some(backend), ..Self::new() }
+        Self {
+            backend: Some(backend),
+            ..Self::new()
+        }
     }
 
     pub fn script_exits(&self, codes: impl IntoIterator<Item = i32>) {

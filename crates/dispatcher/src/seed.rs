@@ -8,7 +8,10 @@
 /// (command task = script, agent task = markdown).
 pub const CODE_TEMPLATE: &[(&str, &str)] = &[
     ("README.md", include_str!("../templates/code/README.md")),
-    ("jobs/code.yaml", include_str!("../templates/code/jobs/code.yaml")),
+    (
+        "jobs/code.yaml",
+        include_str!("../templates/code/jobs/code.yaml"),
+    ),
     (
         "prompts/work/code.md",
         include_str!("../templates/code/prompts/work/code.md"),
@@ -25,7 +28,10 @@ pub const CODE_TEMPLATE: &[(&str, &str)] = &[
 /// the existing repo already has its own identity. Seeded with skip-existing,
 /// so a repo that already carries chuggernaut config keeps its own files.
 pub const CONFIG_TEMPLATE: &[(&str, &str)] = &[
-    ("jobs/code.yaml", include_str!("../templates/code/jobs/code.yaml")),
+    (
+        "jobs/code.yaml",
+        include_str!("../templates/code/jobs/code.yaml"),
+    ),
     (
         "prompts/work/code.md",
         include_str!("../templates/code/prompts/work/code.md"),
@@ -56,7 +62,10 @@ mod tests {
         assert_eq!(jt.validate(), vec![]);
         // Every repo path the type references ships in the template.
         for path in ["prompts/work/code.md", "tasks/review-code.md"] {
-            assert!(CODE_TEMPLATE.iter().any(|(p, _)| *p == path), "missing {path}");
+            assert!(
+                CODE_TEMPLATE.iter().any(|(p, _)| *p == path),
+                "missing {path}"
+            );
         }
     }
 }

@@ -29,20 +29,29 @@ fn gen_jwt_keys(dir: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
         );
     };
     run(&[
-        "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out",
+        "genpkey",
+        "-algorithm",
+        "RSA",
+        "-pkeyopt",
+        "rsa_keygen_bits:2048",
+        "-out",
         private.to_str().unwrap(),
     ]);
     run(&[
-        "pkey", "-in", private.to_str().unwrap(), "-pubout", "-out", public.to_str().unwrap(),
+        "pkey",
+        "-in",
+        private.to_str().unwrap(),
+        "-pubout",
+        "-out",
+        public.to_str().unwrap(),
     ]);
-    (std::fs::read(&private).unwrap(), std::fs::read(&public).unwrap())
+    (
+        std::fs::read(&private).unwrap(),
+        std::fs::read(&public).unwrap(),
+    )
 }
 
-async fn get(
-    router: &axum::Router,
-    path: &str,
-    bearer: &str,
-) -> (StatusCode, serde_json::Value) {
+async fn get(router: &axum::Router, path: &str, bearer: &str) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .method("GET")
         .uri(path)
@@ -51,7 +60,9 @@ async fn get(
         .unwrap();
     let res = router.clone().oneshot(req).await.unwrap();
     let status = res.status();
-    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
     let value = if bytes.is_empty() {
         serde_json::Value::Null
     } else {
@@ -71,9 +82,18 @@ async fn config_endpoints() {
     // Seed KV directly. Secret VALUES here are arbitrary — the api lists names
     // and never decrypts, so their content must never surface.
     let secrets = store.raw_bucket(store::buckets::SECRETS).await.unwrap();
-    secrets.put_json("acme.api.STRIPE_KEY", &"sk_live_TOPSECRET").await.unwrap();
-    secrets.put_json("acme.api.CHUG_ORIGIN_DEPLOY_KEY", &"ssh-key-material").await.unwrap();
-    secrets.put_json("global.agents.ANTHROPIC_API_KEY", &"ANTHROPIC_TOPSECRET").await.unwrap();
+    secrets
+        .put_json("acme.api.STRIPE_KEY", &"sk_live_TOPSECRET")
+        .await
+        .unwrap();
+    secrets
+        .put_json("acme.api.CHUG_ORIGIN_DEPLOY_KEY", &"ssh-key-material")
+        .await
+        .unwrap();
+    secrets
+        .put_json("global.agents.ANTHROPIC_API_KEY", &"ANTHROPIC_TOPSECRET")
+        .await
+        .unwrap();
 
     let vars = store.raw_bucket(store::buckets::VARS).await.unwrap();
     vars.put_json("acme.api.RUST_LOG", &"debug").await.unwrap();
@@ -146,7 +166,11 @@ async fn config_endpoints() {
             )
             .unwrap()
     };
-    let member = token("op@example.com", &[("acme/api", ProjectRole::Member)], false);
+    let member = token(
+        "op@example.com",
+        &[("acme/api", ProjectRole::Member)],
+        false,
+    );
     let admin = token("root@example.com", &[], true);
 
     // ── Project config (Viewer+) ────────────────────────────────────────────
@@ -154,7 +178,10 @@ async fn config_endpoints() {
     assert_eq!(status, StatusCode::OK, "{cfg}");
 
     // vars: name + value.
-    assert_eq!(cfg["vars"], serde_json::json!([{ "name": "RUST_LOG", "value": "debug" }]));
+    assert_eq!(
+        cfg["vars"],
+        serde_json::json!([{ "name": "RUST_LOG", "value": "debug" }])
+    );
 
     // secrets: NAMES only, and the origin credential is NOT among them.
     assert_eq!(cfg["secrets"], serde_json::json!(["STRIPE_KEY"]));
@@ -176,14 +203,24 @@ async fn config_endpoints() {
 
     // ── Platform config (admin only) ────────────────────────────────────────
     let (status, _) = get(&router, "/api/v1/platform/config", &member).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "members must not see platform config");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "members must not see platform config"
+    );
 
     let (status, pc) = get(&router, "/api/v1/platform/config", &admin).await;
     assert_eq!(status, StatusCode::OK, "{pc}");
     assert_eq!(pc["dispatcher"]["nodes"][0]["name"], "local");
     assert_eq!(pc["dispatcher"]["agent_provider_default"], "claude");
-    assert_eq!(pc["dispatcher"]["triage_image"], "registry.acme.com/triage:latest");
-    assert_eq!(pc["agent_secrets"], serde_json::json!(["ANTHROPIC_API_KEY"]));
+    assert_eq!(
+        pc["dispatcher"]["triage_image"],
+        "registry.acme.com/triage:latest"
+    );
+    assert_eq!(
+        pc["agent_secrets"],
+        serde_json::json!(["ANTHROPIC_API_KEY"])
+    );
     assert_eq!(pc["vapid_public"], false);
     assert!(
         !pc.to_string().contains("TOPSECRET"),

@@ -37,10 +37,10 @@ impl Core {
 
         let key = keys::channel_key(owner, project, seq);
         let bucket = self.store.raw_bucket(buckets::CHANNELS).await?;
-        let mut entry: ChannelEntry = bucket
-            .get_json(&key)
-            .await?
-            .unwrap_or(ChannelEntry { update: None, last_reply: None });
+        let mut entry: ChannelEntry = bucket.get_json(&key).await?.unwrap_or(ChannelEntry {
+            update: None,
+            last_reply: None,
+        });
 
         let (event_type, payload) = match &post {
             ChannelPost::Update(update) => {

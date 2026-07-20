@@ -43,7 +43,8 @@ impl ExecState {
     /// The timeout governing this job's Work-phase tasks: the per-job override
     /// if set, else the job type's `resources.task_timeout` (§1.1, §3.5).
     pub(crate) fn work_timeout(&self) -> Duration {
-        self.work_timeout.unwrap_or_else(|| task_timeout(&self.job_type))
+        self.work_timeout
+            .unwrap_or_else(|| task_timeout(&self.job_type))
     }
 }
 
@@ -54,7 +55,8 @@ impl Core {
         if job.state != JobState::Ready {
             return Ok(()); // revoked or escalated while queued
         }
-        self.enter_work(&q.owner, &q.project, q.seq, 1, Vec::new(), None).await
+        self.enter_work(&q.owner, &q.project, q.seq, 1, Vec::new(), None)
+            .await
     }
 
     /// Shared Work entry for cycle 1, retries, rework, and conflict re-entry.
@@ -76,7 +78,12 @@ impl Core {
 
         // Load the contract at base_ref; failure here is a launch-time problem.
         let job_type = match release::load_job_type(
-            &self.repos, owner, project, &base_ref, &job.r#type, Some(seq),
+            &self.repos,
+            owner,
+            project,
+            &base_ref,
+            &job.r#type,
+            Some(seq),
         )
         .await
         .and_then(|jt| release::with_job_evaluators(jt, &job))
@@ -89,8 +96,13 @@ impl Core {
                     .collect::<Vec<_>>()
                     .join("\n");
                 return self
-                    .escalate(owner, project, seq, "launch_validation_failed",
-                        format!("Job {seq} failed launch-time validation:\n{detail}"))
+                    .escalate(
+                        owner,
+                        project,
+                        seq,
+                        "launch_validation_failed",
+                        format!("Job {seq} failed launch-time validation:\n{detail}"),
+                    )
                     .await;
             }
         };
@@ -103,28 +115,54 @@ impl Core {
             .iter()
             .filter(|s| !kv.secrets.contains(*s))
             .map(|s| format!("secret '{s}'"))
-            .chain(job_type.vars.iter().filter(|v| !kv.vars.contains(*v)).map(|v| format!("var '{v}'")))
+            .chain(
+                job_type
+                    .vars
+                    .iter()
+                    .filter(|v| !kv.vars.contains(*v))
+                    .map(|v| format!("var '{v}'")),
+            )
             .collect();
         if !missing.is_empty() {
             return self
-                .escalate(owner, project, seq, "launch_validation_failed",
-                    format!("Job {seq}: missing at launch: {}", missing.join(", ")))
+                .escalate(
+                    owner,
+                    project,
+                    seq,
+                    "launch_validation_failed",
+                    format!("Job {seq}: missing at launch: {}", missing.join(", ")),
+                )
                 .await;
         }
 
         // Create the branch on first entry; reset it on re-entry.
-        if self.repos.resolve_ref(owner, project, &job.branch).await.is_ok() {
-            self.repos.reset_branch(owner, project, &job.branch, &base_ref).await?;
+        if self
+            .repos
+            .resolve_ref(owner, project, &job.branch)
+            .await
+            .is_ok()
+        {
+            self.repos
+                .reset_branch(owner, project, &job.branch, &base_ref)
+                .await?;
         } else {
-            self.repos.create_branch(owner, project, &job.branch, &base_ref).await?;
+            self.repos
+                .create_branch(owner, project, &job.branch, &base_ref)
+                .await?;
         }
 
         if job.state != JobState::Work {
             self.set_state(&mut job, JobState::Work).await?;
         }
         if cycle == 1 {
-            self.publish(owner, project, seq, "job-started", serde_json::json!({ "cycle": cycle }))
-                .await?;
+            self.publish(
+                owner,
+                project,
+                seq,
+                "job-started",
+                serde_json::json!({ "cycle": cycle }),
+            )
+            .await?;
         }
 
         // §1.1 per-job override: parseability is validated at release, so a
@@ -168,7 +206,8 @@ impl Core {
         // the agent run timeout and the §7.4 credential TTLs so creds outlive a
         // longer override.
         let work_timeout = exec.work_timeout();
-        let (eval_context, merge_conflict) = (exec.eval_context.clone(), exec.merge_conflict.clone());
+        let (eval_context, merge_conflict) =
+            (exec.eval_context.clone(), exec.merge_conflict.clone());
         let job = self.must_get(owner, project, seq)?.clone();
         let base_ref = job.base_ref.clone().expect("base_ref set in Work");
 
@@ -190,7 +229,9 @@ impl Core {
                 false,
             ),
             WorkType::Command => (
-                TaskKind::Command { run: job_type.work.run.clone().unwrap_or_default() },
+                TaskKind::Command {
+                    run: job_type.work.run.clone().unwrap_or_default(),
+                },
                 false,
             ),
             WorkType::Human => (
@@ -215,7 +256,11 @@ impl Core {
             phase: TaskPhase::Work,
             cycle,
             kind,
-            state: if pending_human { TaskState::Pending } else { TaskState::Running },
+            state: if pending_human {
+                TaskState::Pending
+            } else {
+                TaskState::Running
+            },
             attempt,
             evaluator: None,
             container_id: None,
@@ -226,9 +271,15 @@ impl Core {
             completed_at: None,
         };
         self.tasks.put(&task).await?;
-        self.publish(owner, project, seq, "task-created", serde_json::json!({
-            "task_id": task_id, "phase": "Work", "cycle": cycle, "attempt": attempt,
-        }))
+        self.publish(
+            owner,
+            project,
+            seq,
+            "task-created",
+            serde_json::json!({
+                "task_id": task_id, "phase": "Work", "cycle": cycle, "attempt": attempt,
+            }),
+        )
         .await?;
         if pending_human {
             return Ok(()); // operator inbox drives it from here (§1.2)
@@ -236,8 +287,14 @@ impl Core {
 
         let env = self
             .container_env(
-                owner, project, seq, &job.branch, &job_type, &job_type.work.secrets,
-                ChannelRole::Work, work_timeout,
+                owner,
+                project,
+                seq,
+                &job.branch,
+                &job_type,
+                &job_type.work.secrets,
+                ChannelRole::Work,
+                work_timeout,
             )
             .await?;
         match job_type.work.r#type {
@@ -245,9 +302,15 @@ impl Core {
                 let mut env = env;
                 self.inject_platform_agent_secrets(&mut env).await?;
                 let prompt = self
-                    .build_prompt(owner, project, &base_ref,
+                    .build_prompt(
+                        owner,
+                        project,
+                        &base_ref,
                         job_type.work.prompt.as_deref().unwrap_or_default(),
-                        &job_brief_block(&job), &eval_context, merge_conflict.as_deref())
+                        &job_brief_block(&job),
+                        &eval_context,
+                        merge_conflict.as_deref(),
+                    )
                     .await?;
                 let (mcp_servers, mut files) = self.channel_mcp(&env);
                 files.extend(
@@ -295,8 +358,16 @@ impl Core {
                     };
                     let _ = tx
                         .send(Msg::TaskExited {
-                            owner: o, project: p, seq, task_id,
-                            exit: TaskExit { exit_code, eval_json: None, usage, assessment: None },
+                            owner: o,
+                            project: p,
+                            seq,
+                            task_id,
+                            exit: TaskExit {
+                                exit_code,
+                                eval_json: None,
+                                usage,
+                                assessment: None,
+                            },
                         })
                         .await;
                 });
@@ -313,7 +384,10 @@ impl Core {
                     cpu_limit: job_type.resources.as_ref().and_then(|r| r.cpu),
                     memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
                 };
-                let id = self.backend.launch(launch).await
+                let id = self
+                    .backend
+                    .launch(launch)
+                    .await
                     .map_err(|e| CoreError::NotFound(format!("launch failed: {e}")))?;
                 task.container_id = Some(id.clone());
                 self.tasks.put(&task).await?;
@@ -328,7 +402,10 @@ impl Core {
                     harvest.collect_logs(&o, &p, seq, task_id, &id).await;
                     let _ = tx
                         .send(Msg::TaskExited {
-                            owner: o, project: p, seq, task_id,
+                            owner: o,
+                            project: p,
+                            seq,
+                            task_id,
                             exit: TaskExit::code(exit_code),
                         })
                         .await;
@@ -369,11 +446,10 @@ impl Core {
             // Eval tasks can legitimately be Done already — submit_eval lands
             // before the container exits, and the exit completes the slot.
             // on_eval_exited drops anything not in the current round.
-            TaskPhase::Evaluation => {
-                self.on_eval_exited(owner, project, seq, task, exit).await
-            }
+            TaskPhase::Evaluation => self.on_eval_exited(owner, project, seq, task, exit).await,
             TaskPhase::MergeGate => {
-                self.on_gate_exited(owner, project, seq, task, exit.exit_code, exit.eval_json).await
+                self.on_gate_exited(owner, project, seq, task, exit.exit_code, exit.eval_json)
+                    .await
             }
             // Advisory triage (§1.2): record the assessment; never touch job state.
             TaskPhase::Triage => {
@@ -393,7 +469,9 @@ impl Core {
         mut task: Task,
         exit: TaskExit,
     ) -> Result<()> {
-        let TaskExit { exit_code, usage, .. } = exit;
+        let TaskExit {
+            exit_code, usage, ..
+        } = exit;
         let key = (owner.to_string(), project.to_string(), seq);
         task.completed_at = Some(Utc::now());
         if exit_code == 0 {
@@ -401,7 +479,10 @@ impl Core {
             // Normally already written by handle_submit_result; this covers an
             // agent that exited 0 without submitting.
             if task.result.is_none() {
-                let sub = self.active.get(&key).and_then(|e| e.work_submission.clone());
+                let sub = self
+                    .active
+                    .get(&key)
+                    .and_then(|e| e.work_submission.clone());
                 task.result = Some(TaskResult::Work {
                     summary: sub.as_ref().and_then(|s| s.summary.clone()),
                     structured: sub.as_ref().and_then(|s| s.structured.clone()),
@@ -416,18 +497,30 @@ impl Core {
                 *token_usage = Some(measured);
             }
             self.tasks.put(&task).await?;
-            self.publish(owner, project, seq, "task-completed", serde_json::json!({
-                "task_id": task.id, "phase": "Work",
-            }))
+            self.publish(
+                owner,
+                project,
+                seq,
+                "task-completed",
+                serde_json::json!({
+                    "task_id": task.id, "phase": "Work",
+                }),
+            )
             .await?;
             return self.enter_evaluation(owner, project, seq).await;
         }
 
         task.state = TaskState::Failed;
         self.tasks.put(&task).await?;
-        self.publish(owner, project, seq, "task-failed", serde_json::json!({
-            "task_id": task.id, "phase": "Work", "exit_code": exit_code,
-        }))
+        self.publish(
+            owner,
+            project,
+            seq,
+            "task-failed",
+            serde_json::json!({
+                "task_id": task.id, "phase": "Work", "exit_code": exit_code,
+            }),
+        )
         .await?;
 
         let work_retries = self
@@ -439,13 +532,21 @@ impl Core {
             // §2.1: hard-reset to base_ref, new task record, attempt++.
             let job = self.must_get(owner, project, seq)?.clone();
             let base_ref = job.base_ref.clone().expect("base_ref set in Work");
-            self.repos.reset_branch(owner, project, &job.branch, &base_ref).await?;
-            self.launch_work_task(owner, project, seq, task.cycle, task.attempt + 1).await
+            self.repos
+                .reset_branch(owner, project, &job.branch, &base_ref)
+                .await?;
+            self.launch_work_task(owner, project, seq, task.cycle, task.attempt + 1)
+                .await
         } else {
             self.active.remove(&key);
-            self.escalate(owner, project, seq, "work_retries_exhausted",
-                format!("Job {seq}: work task failed (exit {exit_code}) with no retries left"))
-                .await
+            self.escalate(
+                owner,
+                project,
+                seq,
+                "work_retries_exhausted",
+                format!("Job {seq}: work task failed (exit {exit_code}) with no retries left"),
+            )
+            .await
         }
     }
 
@@ -525,19 +626,22 @@ impl Core {
         }
         let job = self.must_get(owner, project, seq)?.clone();
 
-        let complete_task =
-            |task: &mut Task, pass: bool, abort: bool, structured: Option<serde_json::Value>, action| {
-                task.result = Some(TaskResult::Human {
-                    pass,
-                    abort,
-                    structured,
-                    action,
-                    operator: operator.to_string(),
-                    resolved_at: Utc::now(),
-                });
-                task.state = TaskState::Done;
-                task.completed_at = Some(Utc::now());
-            };
+        let complete_task = |task: &mut Task,
+                             pass: bool,
+                             abort: bool,
+                             structured: Option<serde_json::Value>,
+                             action| {
+            task.result = Some(TaskResult::Human {
+                pass,
+                abort,
+                structured,
+                action,
+                operator: operator.to_string(),
+                resolved_at: Utc::now(),
+            });
+            task.state = TaskState::Done;
+            task.completed_at = Some(Utc::now());
+        };
 
         match (job.state, resolution) {
             // Post-work escalation task (§1.2): work executed, automation ran
@@ -545,9 +649,14 @@ impl Core {
             (JobState::Escalated, TaskResolution::Escalation { action, structured }) => {
                 complete_task(&mut task, true, false, structured, Some(action));
                 self.tasks.put(&task).await?;
-                self.publish(owner, project, seq, "job-escalation-resolved",
-                    serde_json::json!({ "action": format!("{action:?}") }))
-                    .await?;
+                self.publish(
+                    owner,
+                    project,
+                    seq,
+                    "job-escalation-resolved",
+                    serde_json::json!({ "action": format!("{action:?}") }),
+                )
+                .await?;
                 match action {
                     EscalationAction::Retry => self.escalation_retry(owner, project, seq).await,
                     EscalationAction::Resolve => {
@@ -572,9 +681,14 @@ impl Core {
                 }
                 complete_task(&mut task, true, false, structured, Some(action));
                 self.tasks.put(&task).await?;
-                self.publish(owner, project, seq, "job-escalation-resolved",
-                    serde_json::json!({ "action": format!("{action:?}") }))
-                    .await?;
+                self.publish(
+                    owner,
+                    project,
+                    seq,
+                    "job-escalation-resolved",
+                    serde_json::json!({ "action": format!("{action:?}") }),
+                )
+                .await?;
                 match action {
                     EscalationAction::Retry => self.prework_retry(owner, project, seq).await,
                     EscalationAction::Revoke => {
@@ -601,17 +715,24 @@ impl Core {
             (JobState::Work, TaskResolution::Fail { structured, .. }) => {
                 complete_task(&mut task, false, false, Some(structured), None);
                 self.tasks.put(&task).await?;
-                self.active.remove(&(owner.to_string(), project.to_string(), seq));
-                self.escalate(owner, project, seq, "human_work_failed",
-                    format!("Job {seq}: operator declined the human work task"))
-                    .await
+                self.active
+                    .remove(&(owner.to_string(), project.to_string(), seq));
+                self.escalate(
+                    owner,
+                    project,
+                    seq,
+                    "human_work_failed",
+                    format!("Job {seq}: operator declined the human work task"),
+                )
+                .await
             }
 
             // Human evaluator task (§3.3 human).
             (JobState::Evaluation, TaskResolution::Pass { structured }) => {
                 complete_task(&mut task, true, false, structured.clone(), None);
                 self.tasks.put(&task).await?;
-                self.resolve_eval_slot(owner, project, seq, task_id, true, false, structured).await
+                self.resolve_eval_slot(owner, project, seq, task_id, true, false, structured)
+                    .await
             }
             (JobState::Evaluation, TaskResolution::Fail { structured, abort }) => {
                 complete_task(&mut task, false, abort, Some(structured.clone()), None);
@@ -633,7 +754,13 @@ impl Core {
         self.ensure_exec_state(owner, project, seq).await?;
         let key = (owner.to_string(), project.to_string(), seq);
         let cycle = self.active.get(&key).expect("exec state").cycle;
-        let work_type = self.active.get(&key).expect("exec state").job_type.work.r#type;
+        let work_type = self
+            .active
+            .get(&key)
+            .expect("exec state")
+            .job_type
+            .work
+            .r#type;
         let last_attempt = self
             .tasks
             .list_for_job(owner, project, seq)
@@ -649,7 +776,8 @@ impl Core {
             .unwrap_or(0);
         let mut job = self.must_get(owner, project, seq)?.clone();
         self.set_state(&mut job, JobState::Work).await?;
-        self.launch_work_task(owner, project, seq, cycle, last_attempt + 1).await
+        self.launch_work_task(owner, project, seq, cycle, last_attempt + 1)
+            .await
     }
 
     /// §1.2 pre-work escalation Retry: re-run Ready-transition re-validation
@@ -658,10 +786,18 @@ impl Core {
     async fn prework_retry(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let mut job = self.must_get(owner, project, seq)?.clone();
         let default_branch = self.repos.default_branch(owner, project).await?;
-        let head = self.repos.resolve_ref(owner, project, &default_branch).await?;
+        let head = self
+            .repos
+            .resolve_ref(owner, project, &default_branch)
+            .await?;
 
         let revalidation = match release::load_job_type(
-            &self.repos, owner, project, &head, &job.r#type, Some(seq),
+            &self.repos,
+            owner,
+            project,
+            &head,
+            &job.r#type,
+            Some(seq),
         )
         .await
         .and_then(|jt| release::with_job_evaluators(jt, &job))
@@ -681,7 +817,8 @@ impl Core {
                     project: project.into(),
                     seq,
                 });
-                self.publish(owner, project, seq, "job-unblocked", serde_json::json!({})).await
+                self.publish(owner, project, seq, "job-unblocked", serde_json::json!({}))
+                    .await
             }
             Err(errs) => {
                 let detail = errs
@@ -690,8 +827,13 @@ impl Core {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let task_id = self.next_task_id(owner, project, seq).await?;
-                let task = escalation::escalation_task(task_id, seq, &job.project, 1,
-                    format!("Job {seq} still fails re-validation at {head}:\n{detail}"));
+                let task = escalation::escalation_task(
+                    task_id,
+                    seq,
+                    &job.project,
+                    1,
+                    format!("Job {seq} still fails re-validation at {head}:\n{detail}"),
+                );
                 self.tasks.put(&task).await?;
                 Ok(())
             }
@@ -702,7 +844,12 @@ impl Core {
     /// escalation resume; dispatcher restart is the reconcile slice).
     /// `reworks_used` restarts at 0 — after a human owned the escalation, the
     /// budget question is theirs (TODO: derive from the event stream instead).
-    pub(crate) async fn ensure_exec_state(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+    pub(crate) async fn ensure_exec_state(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+    ) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
         if self.active.contains_key(&key) {
             return Ok(());
@@ -712,7 +859,12 @@ impl Core {
             CoreError::InvalidResolution(format!("job {seq} has not entered execution"))
         })?;
         let job_type = release::load_job_type(
-            &self.repos, owner, project, &base_ref, &job.r#type, Some(seq),
+            &self.repos,
+            owner,
+            project,
+            &base_ref,
+            &job.r#type,
+            Some(seq),
         )
         .await?;
         let job_type = release::with_job_evaluators(job_type, &job)?;
@@ -734,26 +886,31 @@ impl Core {
             .filter(|t| t.phase == TaskPhase::Work && t.cycle == cycle && t.evaluator.is_none())
             .max_by_key(|t| t.id)
             .and_then(|t| match &t.result {
-                Some(TaskResult::Work { summary, structured, token_usage }) => {
-                    Some(WorkSubmission {
-                        summary: summary.clone(),
-                        structured: structured.clone(),
-                        token_usage: *token_usage,
-                    })
-                }
+                Some(TaskResult::Work {
+                    summary,
+                    structured,
+                    token_usage,
+                }) => Some(WorkSubmission {
+                    summary: summary.clone(),
+                    structured: structured.clone(),
+                    token_usage: *token_usage,
+                }),
                 _ => None,
             });
-        self.active.insert(key, ExecState {
-            job_type,
-            cycle,
-            reworks_used: 0,
-            work_submission,
-            round: None,
-            gate: None,
-            eval_context: vec![],
-            merge_conflict: None,
-            work_timeout: job.timeout.as_deref().and_then(|s| parse_duration(s).ok()),
-        });
+        self.active.insert(
+            key,
+            ExecState {
+                job_type,
+                cycle,
+                reworks_used: 0,
+                work_submission,
+                round: None,
+                gate: None,
+                eval_context: vec![],
+                merge_conflict: None,
+                work_timeout: job.timeout.as_deref().and_then(|s| parse_duration(s).ok()),
+            },
+        );
         Ok(())
     }
 
@@ -799,8 +956,14 @@ impl Core {
             ("JOB_ID".into(), seq.to_string()),
             ("JOB_PROJECT".into(), format!("{owner}/{project}")),
             ("JOB_BRANCH".into(), branch.to_string()),
-            ("BASE_BRANCH".into(), self.repos.default_branch(owner, project).await?),
-            ("REPO_URL".into(), format!("{}/{owner}/{project}.git", self.config.repo_url_base)),
+            (
+                "BASE_BRANCH".into(),
+                self.repos.default_branch(owner, project).await?,
+            ),
+            (
+                "REPO_URL".into(),
+                format!("{}/{owner}/{project}.git", self.config.repo_url_base),
+            ),
             ("NATS_URL".into(), self.config.nats_url.clone()),
         ]);
         match role {
@@ -827,10 +990,13 @@ impl Core {
                 .unwrap_or_else(|_| chrono::Duration::hours(1));
             let creds = signer
                 .mint_creds(
-                    &format!("{owner}-{project}-{seq}-{}", match role {
-                        ChannelRole::Work => "work".to_string(),
-                        ChannelRole::Eval { task_id } => format!("eval-{task_id}"),
-                    }),
+                    &format!(
+                        "{owner}-{project}-{seq}-{}",
+                        match role {
+                            ChannelRole::Work => "work".to_string(),
+                            ChannelRole::Eval { task_id } => format!("eval-{task_id}"),
+                        }
+                    ),
                     &perms,
                     Some(ttl),
                 )
@@ -839,7 +1005,10 @@ impl Core {
         }
         let vars = self.store.raw_bucket(store::buckets::VARS).await?;
         for name in &job_type.vars {
-            if let Some(value) = vars.get_json::<String>(&format!("{owner}.{project}.{name}")).await? {
+            if let Some(value) = vars
+                .get_json::<String>(&format!("{owner}.{project}.{name}"))
+                .await?
+            {
                 env.insert(name.clone(), value);
             }
         }
@@ -863,8 +1032,9 @@ impl Core {
             None => {
                 let secrets = self.store.raw_bucket(store::buckets::SECRETS).await?;
                 for name in injectable {
-                    if let Some(value) =
-                        secrets.get_json::<String>(&format!("{owner}.{project}.{name}")).await?
+                    if let Some(value) = secrets
+                        .get_json::<String>(&format!("{owner}.{project}.{name}"))
+                        .await?
                     {
                         env.insert(name.clone(), value);
                     }
@@ -887,8 +1057,12 @@ impl Core {
         job_type: &JobType,
         job: &types::Job,
     ) -> Result<Option<String>> {
-        let mut tags: Vec<&str> =
-            job_type.knowledge.iter().chain(job.knowledge_tags.iter()).map(String::as_str).collect();
+        let mut tags: Vec<&str> = job_type
+            .knowledge
+            .iter()
+            .chain(job.knowledge_tags.iter())
+            .map(String::as_str)
+            .collect();
         tags.dedup_by(|a, b| a == b);
         let mut seen = std::collections::HashSet::new();
         let mut block = String::new();
@@ -896,7 +1070,11 @@ impl Core {
             if !seen.insert(tag) {
                 continue;
             }
-            match self.repos.read_file_at(owner, project, base_ref, &format!("tags/{tag}.md")).await? {
+            match self
+                .repos
+                .read_file_at(owner, project, base_ref, &format!("tags/{tag}.md"))
+                .await?
+            {
                 Some(content) => {
                     block.push_str(&format!("\n### {tag}\n{content}\n"));
                 }
@@ -938,9 +1116,10 @@ impl Core {
                 let bucket = self.store.raw_bucket(store::buckets::SECRETS).await?;
                 let prefix = format!("{owner}.{SCOPE}.");
                 for key in bucket.keys_with_prefix(&prefix).await? {
-                    if let (Some(name), Some(value)) =
-                        (key.strip_prefix(&prefix), bucket.get_json::<String>(&key).await?)
-                        && !name.starts_with(crate::origin::RESERVED_SECRET_PREFIX)
+                    if let (Some(name), Some(value)) = (
+                        key.strip_prefix(&prefix),
+                        bucket.get_json::<String>(&key).await?,
+                    ) && !name.starts_with(crate::origin::RESERVED_SECRET_PREFIX)
                     {
                         env.entry(name.to_string()).or_insert(value);
                     }
@@ -992,8 +1171,8 @@ impl Core {
             ChannelRole::Work => auth::ssh::CertAccess::ReadWrite,
             ChannelRole::Eval { .. } => auth::ssh::CertAccess::ReadOnly,
         };
-        let ttl = chrono::Duration::from_std(creds_ttl)
-            .unwrap_or_else(|_| chrono::Duration::hours(1));
+        let ttl =
+            chrono::Duration::from_std(creds_ttl).unwrap_or_else(|_| chrono::Duration::hours(1));
         let cred = ca
             .issue_job_credential(owner, project, seq, access, ttl)
             .await
@@ -1118,7 +1297,10 @@ pub(crate) fn rework_context_block(
                 .as_ref()
                 .and_then(|v| serde_json::to_string_pretty(v).ok())
                 .unwrap_or_else(|| "(no structured findings)".into());
-            block.push_str(&format!("**{}** (pass: {}):\n{findings}\n\n", r.evaluator, r.pass));
+            block.push_str(&format!(
+                "**{}** (pass: {}):\n{findings}\n\n",
+                r.evaluator, r.pass
+            ));
         }
     }
     if let Some(conflict) = merge_conflict {

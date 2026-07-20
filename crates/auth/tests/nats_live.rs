@@ -5,8 +5,8 @@
 //! exactly what the spec allows — and nothing more.
 
 use auth::nats::{
-    NatsUserSigner, Permissions, account_jwt, operator_jwt, resolver_config,
-    system_account_jwt, work_container_permissions,
+    NatsUserSigner, Permissions, account_jwt, operator_jwt, resolver_config, system_account_jwt,
+    work_container_permissions,
 };
 use futures::StreamExt;
 use nkeys::KeyPair;
@@ -35,7 +35,9 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
     let signer = NatsUserSigner::from_account_seed(&chug.seed().unwrap()).unwrap();
 
     // Dispatcher identity: unrestricted user in the platform account.
-    let dispatcher_creds = signer.mint_creds("dispatcher", &Permissions::default(), None).unwrap();
+    let dispatcher_creds = signer
+        .mint_creds("dispatcher", &Permissions::default(), None)
+        .unwrap();
     let dispatcher = NatsStore::connect_with_creds(server.url(), &dispatcher_creds)
         .await
         .expect("dispatcher connect");
@@ -43,10 +45,15 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
 
     // Seed state: a job record and one operator inbox message.
     let jobs = dispatcher.raw_bucket(buckets::JOBS).await.unwrap();
-    jobs.put_json(&keys::job_key("acme", "api", 1), &json!({ "seq": 1 })).await.unwrap();
+    jobs.put_json(&keys::job_key("acme", "api", 1), &json!({ "seq": 1 }))
+        .await
+        .unwrap();
     dispatcher
         .jetstream()
-        .publish(subjects::channel_inbox("acme", "api", 1), r#"{"text":"hi"}"#.into())
+        .publish(
+            subjects::channel_inbox("acme", "api", 1),
+            r#"{"text":"hi"}"#.into(),
+        )
         .await
         .unwrap()
         .await
@@ -85,7 +92,10 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
         .expect("channel read");
     let denied = tokio::time::timeout(
         Duration::from_secs(3),
-        channels.put_json(&keys::channel_key("acme", "api", 1), &json!({ "update": null })),
+        channels.put_json(
+            &keys::channel_key("acme", "api", 1),
+            &json!({ "update": null }),
+        ),
     )
     .await;
     assert!(
@@ -128,9 +138,10 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
     // Denied: another job's record — the direct-get publish is dropped.
     let denied = tokio::time::timeout(
         Duration::from_secs(3),
-        work.raw_bucket(buckets::JOBS).await.unwrap().get_json::<Value>(&keys::job_key(
-            "acme", "web", 9,
-        )),
+        work.raw_bucket(buckets::JOBS)
+            .await
+            .unwrap()
+            .get_json::<Value>(&keys::job_key("acme", "web", 9)),
     )
     .await;
     assert!(

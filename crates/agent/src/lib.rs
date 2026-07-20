@@ -78,7 +78,11 @@ pub struct AgentOutput {
 impl AgentOutput {
     /// An outcome with no container to harvest — the fake/stub path.
     pub fn bare(exit_code: i32) -> Self {
-        Self { exit_code, container_id: None, session_id: None }
+        Self {
+            exit_code,
+            container_id: None,
+            session_id: None,
+        }
     }
 }
 

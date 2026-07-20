@@ -9,7 +9,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::test]
 async fn binary_speaks_mcp_and_submits_over_nats() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else { return };
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
     let store = NatsStore::connect(server.url()).await.unwrap();
     store.ensure_topology().await.unwrap();
 
@@ -18,7 +20,10 @@ async fn binary_speaks_mcp_and_submits_over_nats() {
     // itself — the dispatcher owns that bucket — so what we assert here is the
     // wire message the binary emits.
     let responder = NatsStore::connect(server.url()).await.unwrap();
-    let mut sub = responder.subscribe_requests("req.work.submit.acme.api.42").await.unwrap();
+    let mut sub = responder
+        .subscribe_requests("req.work.submit.acme.api.42")
+        .await
+        .unwrap();
     let seen = std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let seen2 = seen.clone();
     tokio::spawn(async move {
@@ -60,7 +65,11 @@ async fn binary_speaks_mcp_and_submits_over_nats() {
         stdin.flush().await.unwrap();
     }
 
-    send(&mut stdin, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#).await;
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+    )
+    .await;
     let init: serde_json::Value =
         serde_json::from_str(&stdout.next_line().await.unwrap().unwrap()).unwrap();
     assert_eq!(init["result"]["serverInfo"]["name"], "chuggernaut-channel");
@@ -90,7 +99,13 @@ async fn binary_speaks_mcp_and_submits_over_nats() {
     assert_ne!(submit["result"]["isError"], true, "{submit}");
 
     // The dispatcher-side responder saw the work payload…
-    assert!(seen.lock().await.as_deref().unwrap_or_default().contains("did the thing"));
+    assert!(
+        seen.lock()
+            .await
+            .as_deref()
+            .unwrap_or_default()
+            .contains("did the thing")
+    );
 
     // …and update_status arrived as a ChannelUpdate on req.channel.update,
     // rather than as a direct KV write.
@@ -108,7 +123,10 @@ async fn binary_speaks_mcp_and_submits_over_nats() {
         .get_json(&store::keys::channel_key("acme", "api", 42))
         .await
         .unwrap();
-    assert!(entry.is_none(), "the binary must not write channels KV itself");
+    assert!(
+        entry.is_none(),
+        "the binary must not write channels KV itself"
+    );
 
     drop(stdin);
     let _ = child.wait().await;

@@ -58,7 +58,11 @@ impl DockerBackend {
                 )));
             }
             .map_err(|e| BackendError::Unavailable(e.to_string()))?;
-            nodes.push(Node { name: c.name, slots: c.slots, docker });
+            nodes.push(Node {
+                name: c.name,
+                slots: c.slots,
+                docker,
+            });
         }
         if nodes.is_empty() {
             return Err(BackendError::Unavailable("empty node list".into()));
@@ -71,7 +75,11 @@ impl DockerBackend {
         let docker = Docker::connect_with_unix_defaults()
             .map_err(|e| BackendError::Unavailable(e.to_string()))?;
         Ok(Self {
-            nodes: vec![Node { name: "local".into(), slots, docker }],
+            nodes: vec![Node {
+                name: "local".into(),
+                slots,
+                docker,
+            }],
         })
     }
 
@@ -142,7 +150,10 @@ impl ContainerBackend for DockerBackend {
             image: Some(config.image.clone()),
             cmd: Some(config.cmd.clone()),
             env: Some(config.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
-            labels: Some(HashMap::from([(MANAGED_LABEL.to_string(), "true".to_string())])),
+            labels: Some(HashMap::from([(
+                MANAGED_LABEL.to_string(),
+                "true".to_string(),
+            )])),
             host_config: Some(HostConfig {
                 nano_cpus: config.cpu_limit.map(|c| (c * 1e9) as i64),
                 memory: config
@@ -157,7 +168,10 @@ impl ContainerBackend for DockerBackend {
         };
         let created = node
             .docker
-            .create_container(None::<bollard::query_parameters::CreateContainerOptions>, body)
+            .create_container(
+                None::<bollard::query_parameters::CreateContainerOptions>,
+                body,
+            )
             .await
             .map_err(|e| BackendError::Launch(e.to_string()))?;
 
@@ -196,7 +210,9 @@ impl ContainerBackend for DockerBackend {
                 Ok(code as i32)
             }
             Some(Err(e)) => Err(map_err(id, e)),
-            None => Err(BackendError::Other(format!("wait stream ended early for {id}"))),
+            None => Err(BackendError::Other(format!(
+                "wait stream ended early for {id}"
+            ))),
         }
     }
 
@@ -209,9 +225,9 @@ impl ContainerBackend for DockerBackend {
         {
             Ok(()) => Ok(()),
             // Already exited: kill is idempotent from the dispatcher's view.
-            Err(bollard::errors::Error::DockerResponseServerError { status_code: 409, .. }) => {
-                Ok(())
-            }
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 409, ..
+            }) => Ok(()),
             Err(e) => Err(map_err(id, e)),
         }
     }
@@ -220,7 +236,10 @@ impl ContainerBackend for DockerBackend {
         let (node, cid) = self.route(id)?;
         match node
             .docker
-            .inspect_container(cid, None::<bollard::query_parameters::InspectContainerOptions>)
+            .inspect_container(
+                cid,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
             .await
         {
             Ok(resp) => {
@@ -233,9 +252,9 @@ impl ContainerBackend for DockerBackend {
                     }))
                 }
             }
-            Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. }) => {
-                Ok(None)
-            }
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(None),
             Err(e) => Err(map_err(id, e)),
         }
     }
@@ -246,7 +265,9 @@ impl ContainerBackend for DockerBackend {
         path: &str,
     ) -> Result<Option<Vec<u8>>, BackendError> {
         let (node, cid) = self.route(id)?;
-        let opts = DownloadFromContainerOptionsBuilder::default().path(path).build();
+        let opts = DownloadFromContainerOptionsBuilder::default()
+            .path(path)
+            .build();
         let mut stream = node.docker.download_from_container(cid, Some(opts));
         let mut archive = Vec::new();
         while let Some(chunk) = stream.next().await {
@@ -263,7 +284,10 @@ impl ContainerBackend for DockerBackend {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
         let mut ar = tar::Archive::new(archive.as_slice());
-        for entry in ar.entries().map_err(|e| BackendError::Other(e.to_string()))? {
+        for entry in ar
+            .entries()
+            .map_err(|e| BackendError::Other(e.to_string()))?
+        {
             let mut entry = entry.map_err(|e| BackendError::Other(e.to_string()))?;
             let name = entry
                 .path()
@@ -306,9 +330,9 @@ impl ContainerBackend for DockerBackend {
 
 fn map_err(id: &ContainerId, e: bollard::errors::Error) -> BackendError {
     match e {
-        bollard::errors::Error::DockerResponseServerError { status_code: 404, .. } => {
-            BackendError::NotFound(id.clone())
-        }
+        bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        } => BackendError::NotFound(id.clone()),
         other => BackendError::Other(other.to_string()),
     }
 }
@@ -334,7 +358,9 @@ fn build_tar(files: &[InjectedFile]) -> Result<Vec<u8>, String> {
                 header.set_mode(0o755);
                 header.set_size(0);
                 header.set_cksum();
-                builder.append(&header, std::io::empty()).map_err(|e| e.to_string())?;
+                builder
+                    .append(&header, std::io::empty())
+                    .map_err(|e| e.to_string())?;
             }
         }
         let mut header = tar::Header::new_gnu();
