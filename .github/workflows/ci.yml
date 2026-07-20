@@ -2,6 +2,10 @@ name: CI
 
 on:
   pull_request:
+  push:
+    # Also run on main so the Deploy workflow (workflow_run) has a green CI to
+    # gate on for auto-deploy to the Mini.
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always

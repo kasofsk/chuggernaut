@@ -6,3 +6,10 @@ target/
 # web
 web/node_modules/
 web/dist/
+
+# prod deploy — local secrets, rendered artifacts, deploy marker
+deploy/prod/chuggernaut.env
+deploy/prod/out/
+deploy/prod/rclone.conf
+deploy/prod/*.local
+.deployed-sha

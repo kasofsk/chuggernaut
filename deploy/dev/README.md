@@ -1,5 +1,8 @@
 # Dev stack — full platform on one machine (Docker Desktop)
 
+> For the always-on Mac Mini deployment (launchd services, auto-deploy on green
+> `main`, hourly R2 backups), see [`deploy/prod/README.md`](../prod/README.md).
+
 Layout: NATS (operator mode) and the SSH front run in containers; the
 dispatcher and api run on the host; agent containers are launched by the
 dispatcher as siblings and reach NATS/SSH via `host.docker.internal`.

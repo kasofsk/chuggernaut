@@ -1,0 +1,42 @@
+# Prod stack: operator-mode NATS + the SSH front, same shape as deploy/dev but
+# pointed at the external data dir (${KEYS_DIR}/${REPOS_ROOT}) and a fixed
+# project name so the network is predictable (chuggernaut_default). The
+# dispatcher + api run on the host under launchd (see README); agent containers
+# are launched by the dispatcher as siblings and reach both services via
+# host.docker.internal.
+#
+# All ${VARS} are substituted from the environment — boot.sh sources
+# deploy/prod/chuggernaut.env (set -a) before invoking compose.
+name: chuggernaut
+
+services:
+  nats:
+    image: nats:2-alpine
+    restart: unless-stopped
+    command: ["-c", "/keys/nats-resolver.conf", "-js", "-sd", "/data"]
+    ports:
+      - "4222:4222"
+    volumes:
+      - ${KEYS_DIR}:/keys:ro
+      - nats-data:/data
+
+  ssh:
+    build:
+      context: ../..
+      dockerfile: deploy/dev/Dockerfile.ssh
+      args:
+        # Match the host uid that owns the bind-mounted bare repos so the
+        # container's git user can write them (Colima maps host uid through).
+        GIT_UID: ${GIT_UID:-501}
+    image: chuggernaut/ssh:${CHUG_IMAGE_TAG:-prod}
+    restart: unless-stopped
+    ports:
+      - "2222:22"
+    volumes:
+      - ${REPOS_ROOT}:/data/repos
+      - ${KEYS_DIR}/ssh_ca.pub:/etc/chuggernaut/ssh_ca.pub:ro
+      - ssh-hostkeys:/etc/ssh/hostkeys
+
+volumes:
+  nats-data:
+  ssh-hostkeys:
