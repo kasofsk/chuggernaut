@@ -514,6 +514,51 @@ td.actions button {
   background: rgba(110, 168, 254, 0.08);
 }
 
+/* ── PWA chrome (Part 11) ────────────────────────────────────────────────
+   Reconnecting banner: shown while offline or an SSE stream is erroring.
+   <html data-degraded> (stamped by ConnectionBanner) disables the buttons
+   whose mutations would fail or land on state the operator can't see. */
+.conn-banner {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: rgba(224, 164, 88, 0.14);
+  border-bottom: 1px solid var(--orange);
+  color: var(--orange);
+  text-align: center;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.85rem;
+}
+[data-degraded] .resolve button,
+[data-degraded] td.actions button,
+[data-degraded] .actions button {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.tab-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0 0.45rem;
+  border-radius: 99px;
+  background: var(--orange);
+  color: #12141a;
+  font-size: 0.75rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  vertical-align: 1px;
+}
+
+/* Home-screen installs: keep content clear of notches and rounded corners. */
+@media (display-mode: standalone) {
+  body {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+}
+
 /* ── Responsive (mobile) ─────────────────────────────────────────────────
    Wide content (tables, diffs) scrolls inside its card rather than the
    page; controls wrap instead of overflowing; inputs stay ≥16px on small
@@ -533,6 +578,35 @@ td.actions button {
   }
   .topbar h1 {
     font-size: 1.05rem;
+  }
+  /* Thumb targets: 44px minimum on every actionable control. */
+  button,
+  .tabs a {
+    min-height: 44px;
+  }
+  button {
+    padding: 0.5rem 1rem;
+  }
+  .tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar {
+    display: none;
+  }
+  .tabs a {
+    display: flex;
+    align-items: center;
+    padding: 0.4rem 0.8rem;
+    white-space: nowrap;
+  }
+  .resolve button {
+    flex: 1 1 auto;
+  }
+  .diff {
+    -webkit-overflow-scrolling: touch;
   }
   input,
   select,

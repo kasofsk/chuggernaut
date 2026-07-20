@@ -4,21 +4,25 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Login } from './pages/Login'
 import { Home } from './pages/Home'
 import { ProjectPage } from './pages/Project'
+import { InboxPage } from './pages/Inbox'
 import { LibraryPage, JobTypePage } from './pages/Library'
 import { NewJobPage } from './pages/NewJob'
 import { FileViewPage } from './pages/FileView'
 import { TagsPage } from './pages/Tags'
 import { PromptsPage } from './pages/Prompts'
 import { JobDetail } from './pages/JobDetail'
+import { ConnectionBanner } from './components/ConnectionBanner'
 import './styles.css'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
+    <ConnectionBanner />
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<Home />} />
         <Route path="/p/:owner/:project" element={<ProjectPage />} />
+        <Route path="/p/:owner/:project/inbox" element={<InboxPage />} />
         <Route path="/p/:owner/:project/job-types" element={<LibraryPage />} />
         <Route path="/p/:owner/:project/job-types/:name" element={<JobTypePage />} />
         {/* legacy alias */}

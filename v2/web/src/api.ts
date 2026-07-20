@@ -144,6 +144,12 @@ export type TaskResolution =
   | { kind: 'Fail'; structured: unknown; abort?: boolean }
   | { kind: 'Escalation'; action: 'Retry' | 'Resolve' | 'Revoke'; structured: unknown | null }
 
+/** Where to bounce on a 401: login, with the interrupted path preserved. */
+export function loginPath(): string {
+  const here = location.pathname + location.search
+  return here === '/' ? '/login' : `/login?next=${encodeURIComponent(here)}`
+}
+
 export class ApiError extends Error {
   status: number
   body: unknown

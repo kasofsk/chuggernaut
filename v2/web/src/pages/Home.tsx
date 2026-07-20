@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { api, type Identity } from '../api'
+import { api, loginPath, type Identity } from '../api'
 
 // Project chooser: lists the projects visible to the caller (platform
 // admins see the whole registry), plus a free-form owner/project field.
@@ -14,7 +14,7 @@ export function Home() {
     api
       .me()
       .then(setIdentity)
-      .catch(() => navigate('/login'))
+      .catch(() => navigate(loginPath()))
     api
       .projects()
       .then(setProjects)

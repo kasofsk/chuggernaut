@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ApiError, api, type DiffResponse, type Job, type JobCriteria, type Task } from '../api'
+import { ApiError, api, loginPath, type DiffResponse, type Job, type JobCriteria, type Task } from '../api'
 import { useProjectEvents, type JobEvent } from '../useEvents'
 import { StateBadge, TaskBadge } from '../components/StateBadge'
 import { ResolveForm } from '../components/ResolveForm'
@@ -32,7 +32,7 @@ export function JobDetail() {
       })
       .then(() => api.criteria(owner, project, jobSeq).then(setCriteria, () => setCriteria(null)))
       .catch((e) => {
-        if (e instanceof ApiError && e.status === 401) navigate('/login')
+        if (e instanceof ApiError && e.status === 401) navigate(loginPath())
         else setError(e instanceof Error ? e.message : 'load failed')
       })
   }, [owner, project, jobSeq, navigate])

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 
 export function Login() {
@@ -8,6 +8,7 @@ export function Login() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const navigate = useNavigate()
+  const [params] = useSearchParams()
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -15,7 +16,9 @@ export function Login() {
     setError(null)
     try {
       await api.login(email, password)
-      navigate('/')
+      // ?next= carries the path a 401 interrupted; only same-app paths.
+      const next = params.get('next')
+      navigate(next && next.startsWith('/') && !next.startsWith('//') ? next : '/')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'login failed')
     } finally {

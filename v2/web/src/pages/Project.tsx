@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ApiError, api, type Job, type Task } from '../api'
+import { ApiError, api, loginPath, type Job, type Task } from '../api'
 import { useProjectEvents } from '../useEvents'
 import { StateBadge } from '../components/StateBadge'
-import { ResolveForm } from '../components/ResolveForm'
+import { InboxList } from '../components/InboxList'
 import { ProjectTabs } from '../components/ProjectTabs'
 
 export function ProjectPage() {
@@ -13,6 +13,20 @@ export function ProjectPage() {
   const [pending, setPending] = useState<Task[]>([])
   const [error, setError] = useState<string | null>(null)
 
+  // Phone-first default (Part 11): on small viewports the inbox is the
+  // landing surface. Redirect once per project per session so the Jobs tab
+  // stays reachable by an explicit tap.
+  useEffect(() => {
+    const key = `inbox-landed:${owner}/${project}`
+    if (
+      window.matchMedia('(max-width: 640px)').matches &&
+      !sessionStorage.getItem(key)
+    ) {
+      sessionStorage.setItem(key, '1')
+      navigate(`/p/${owner}/${project}/inbox`, { replace: true })
+    }
+  }, [owner, project, navigate])
+
   const refresh = useCallback(() => {
     Promise.all([api.jobs(owner, project), api.pendingTasks(owner, project)])
       .then(([js, ts]) => {
@@ -21,7 +35,7 @@ export function ProjectPage() {
         setError(null)
       })
       .catch((e) => {
-        if (e instanceof ApiError && e.status === 401) navigate('/login')
+        if (e instanceof ApiError && e.status === 401) navigate(loginPath())
         else setError(e instanceof Error ? e.message : 'load failed')
       })
   }, [owner, project, navigate])
@@ -29,8 +43,6 @@ export function ProjectPage() {
   useEffect(refresh, [refresh])
   // The SSE stream is the source of truth (Part 11): any event → refetch.
   useProjectEvents(owner, project, refresh)
-
-  const jobBySeq = new Map(jobs.map((j) => [j.id, j]))
 
   async function act(fn: () => Promise<unknown>) {
     try {
@@ -49,32 +61,19 @@ export function ProjectPage() {
           {owner}/{project}
         </h1>
       </header>
-      <ProjectTabs owner={owner} project={project} />
+      <ProjectTabs owner={owner} project={project} inboxCount={pending.length} />
       {error && <div className="error banner">{error}</div>}
 
       {pending.length > 0 && (
         <section className="card inbox">
           <h2>Inbox — {pending.length} pending</h2>
-          {pending.map((t) => (
-            <div className="inbox-task" key={`${t.job_seq}:${t.id}`}>
-              <div className="inbox-head">
-                <Link to={`/p/${owner}/${project}/jobs/${t.job_seq}`}>
-                  #{t.job_seq}
-                </Link>
-                <span className="dim">
-                  {' '}
-                  · task {t.id} · {t.phase}
-                  {t.evaluator ? ` · ${t.evaluator}` : ''}
-                </span>
-              </div>
-              {t.kind.kind === 'Human' && <pre className="prompt">{t.kind.prompt}</pre>}
-              <ResolveForm
-                escalation={jobBySeq.get(t.job_seq)?.state === 'Escalated'}
-                evaluator={t.phase === 'Evaluation'}
-                onResolve={(r) => act(() => api.resolve(owner, project, t.job_seq, t.id, r))}
-              />
-            </div>
-          ))}
+          <InboxList
+            owner={owner}
+            project={project}
+            jobs={jobs}
+            pending={pending}
+            onResolve={(t, r) => act(() => api.resolve(owner, project, t.job_seq, t.id, r))}
+          />
         </section>
       )}
 
