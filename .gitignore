@@ -13,3 +13,7 @@ deploy/prod/out/
 deploy/prod/rclone.conf
 deploy/prod/*.local
 .deployed-sha
+
+# infra/ — orphaned terraform experiment with LIVE plaintext secrets
+# (terraform.tfvars, .tokens/*). Never commit.
+infra/
