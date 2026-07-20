@@ -4,7 +4,7 @@ Companion to `spec.md` (normative behavior) and `design.md` (rationale). This do
 
 ## Workspace location
 
-v2 is developed as a fresh workspace under `v2/` (`v2/Cargo.toml`, `v2/crates/*`) so the working v1 system at the repo root stays intact during the build-out. When v2 replaces v1, the workspace moves to the root and the v1 crates are deleted.
+The Cargo workspace lives at the repo root (`Cargo.toml`, `crates/*`).
 
 ## Binary strategy
 
@@ -152,5 +152,5 @@ Invariants worth enforcing (e.g. via CI lint): only `store` depends on `async-na
 
 ## Not crates
 
-- **PWA** (Part 11) — frontend workspace at `v2/web/`: React + TypeScript + Vite (React Flow, `react-diff-view`, `vite-plugin-pwa`); built assets embedded into or served by `api`.
+- **PWA** (Part 11) — frontend workspace at `web/`: React + TypeScript + Vite (React Flow, `react-diff-view`, `vite-plugin-pwa`); built assets embedded into or served by `api`.
 - **SSH server** — stock `sshd` with `TrustedUserCAKeys` and an `AuthorizedPrincipalsCommand`/forced-command hook calling the `auth` ref-authorization helper; configuration, not code.

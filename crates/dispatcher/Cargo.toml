@@ -1,39 +1,29 @@
 [package]
-name = "chuggernaut-dispatcher"
+name = "dispatcher"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
-chuggernaut-types = { workspace = true }
-chuggernaut-git-provider = { workspace = true }
-chuggernaut-nats = { workspace = true }
-chuggernaut-forgejo-api = { workspace = true }
-chuggernaut-github-api = { workspace = true }
-anyhow = { workspace = true }
-async-nats = { workspace = true }
-async-stream = { workspace = true }
-axum = { workspace = true }
-bytes = { workspace = true }
-chrono = { workspace = true }
-dashmap = { workspace = true }
-futures = { workspace = true }
-petgraph = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }
-schemars = { version = "1.2.1", features = ["chrono04"] }
-tower-http = { version = "0.6.8", features = ["fs"] }
+async-trait.workspace = true
+reqwest.workspace = true
+types.workspace = true
+store.workspace = true
+auth.workspace = true
+vcs.workspace = true
+container.workspace = true
+agent.workspace = true
+chrono.workspace = true
+petgraph.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-axum.workspace = true
-chuggernaut-test-utils = { path = "../test-utils" }
-ntest = "0.9.5"
-reqwest = { workspace = true }
-testcontainers = "0.27.2"
-testcontainers-modules = { version = "0.15.0", features = ["nats"] }
-tokio-test = "0.4.5"
-uuid = { workspace = true, features = ["v4"] }
+test-utils.workspace = true
+futures.workspace = true
+nkeys.workspace = true

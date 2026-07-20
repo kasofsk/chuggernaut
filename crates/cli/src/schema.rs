@@ -55,7 +55,7 @@ pub fn run(args: SchemaArgs) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// The committed schemas (v2/schemas/) must match what the current types
+    /// The committed schemas (schemas/) must match what the current types
     /// generate. Regenerate with:
     ///   cargo run -p chuggernaut -- schema job-type > schemas/job-type.schema.json
     ///   cargo run -p chuggernaut -- schema defaults > schemas/defaults.schema.json

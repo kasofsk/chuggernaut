@@ -1,16 +1,27 @@
-pub mod action_dispatch;
-pub mod assignment;
-pub mod claims;
+//! The core orchestrator (spec Parts 2, 3, 13).
+//!
+//! Single-writer by construction: `core` owns all mutable state inside one tokio
+//! task; handlers, container monitors, and scan timers communicate with it only
+//! via an mpsc channel. There is no lock to misuse because there is no shared
+//! mutable state.
+
+pub mod channel;
 pub mod config;
-pub mod deps;
-pub mod error;
+pub mod core;
+pub mod escalation;
+pub mod eval;
+pub mod exec;
+pub mod factory;
+pub mod graph;
 pub mod handlers;
-pub mod http;
-pub mod issue_sync;
-pub mod jobs;
-pub mod monitor;
-pub use chuggernaut_nats::NatsClient;
-pub mod nats_init;
-pub mod provider;
-pub mod recovery;
+pub(crate) mod harvest;
+pub mod github;
+pub mod launch;
+pub mod origin;
+pub mod queue;
+pub mod reconcile;
+pub mod release;
+pub mod run;
+pub mod scan;
+pub mod seed;
 pub mod state;

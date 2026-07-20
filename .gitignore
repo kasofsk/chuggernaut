@@ -3,10 +3,6 @@ target/
 .envrc
 .DS_Store
 
-# Terraform
-infra/terraform/.terraform/
-infra/terraform/*.tfstate
-infra/terraform/*.tfstate.backup
-infra/terraform/terraform.tfvars
-infra/terraform/.terraform.lock.hcl
-infra/terraform/.tokens/
+# web
+web/node_modules/
+web/dist/

@@ -156,7 +156,7 @@ Job types live in the project repo (`jobs/*.yaml` on the default branch).
 Seed the repo through the SSH front or clone the bare repo directly:
 
 ```sh
-DEV=~/chuggernaut/v2/deploy/dev
+DEV=~/chuggernaut/deploy/dev
 git clone $DEV/data/repos/acme/demo.git /tmp/demo && cd /tmp/demo
 mkdir -p jobs prompts/work
 cp $DEV/jobs-hello.yaml jobs/hello.yaml

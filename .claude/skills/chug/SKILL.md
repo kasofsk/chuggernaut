@@ -13,7 +13,7 @@ results clearly.
 
 You authenticate **as a user, not as the platform**: a dedicated machine user
 (`claude@dev.local`) whose bearer token lives at
-`~/chuggernaut/v2/deploy/dev/data/keys/claude.token`. Every action you take
+`~/chuggernaut/deploy/dev/data/keys/claude.token`. Every action you take
 is attributed to that user and bounded by its roles — never use
 `dispatcher.creds` (the platform identity) for API work. On 401 the token
 has expired; re-mint it:
@@ -28,7 +28,7 @@ Every call:
 
 ```sh
 BASE=http://localhost:8081
-TOK=$(cat ~/chuggernaut/v2/deploy/dev/data/keys/claude.token)
+TOK=$(cat ~/chuggernaut/deploy/dev/data/keys/claude.token)
 curl -s -H "Authorization: Bearer $TOK" $BASE/api/v1/projects | jq
 ```
 
@@ -84,6 +84,6 @@ tasks).
 - Presenting: job lists as compact tables (#, title, state, type); job detail
   as state + title + tasks summary; don't dump raw JSON unless asked.
 - If the API is unreachable, say so and suggest checking that the dispatcher
-  and api processes are up (see `v2/deploy/dev/README.md` "Run").
-- For dispatcher internals beyond the API, read `~/chuggernaut/v2/spec.md`
+  and api processes are up (see `deploy/dev/README.md` "Run").
+- For dispatcher internals beyond the API, read `~/chuggernaut/spec.md`
   and `progress.md` rather than guessing.

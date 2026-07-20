@@ -1,402 +1,287 @@
-//! Shared test infrastructure for chuggernaut integration tests.
-//!
-//! Provides standardized container images, versions, and setup helpers
-//! for NATS, Forgejo, and Forgejo Actions runner.
-//!
-//! # Container lifecycle
-//!
-//! Test containers are cleaned up via two mechanisms:
-//! - **watchdog** (testcontainers feature): cleans up on SIGTERM/SIGINT/SIGQUIT
-//! - **atexit hook**: cleans up on normal process exit
-//!
-//! Tests that share a container across the process should use `Box::leak` to
-//! keep the container alive, then call [`register_container_cleanup`] with the
-//! container ID so it gets removed when the process exits.
+//! Test harness: fake container backend / agent provider, NATS harness,
+//! temp-repo builder, fixture seeding (testing.md tiers 1–2).
 
-use std::sync::Mutex;
-use std::time::Duration;
+pub mod nats;
+pub mod repo;
 
-use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort, Mount, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage, ImageExt};
-use testcontainers_modules::nats::{Nats, NatsServerCmd};
+use agent::{AgentError, AgentOutput, AgentProvider, AgentRunConfig};
+use async_trait::async_trait;
+use container::{
+    BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
+};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-// ---------------------------------------------------------------------------
-// Pinned container versions
-// ---------------------------------------------------------------------------
+/// Deterministic, scriptable [`ContainerBackend`]: every launch records its config
+/// and "exits" with the next scripted exit code (default 0).
+pub struct FakeBackend {
+    next_id: AtomicU64,
+    state: Mutex<FakeBackendState>,
+}
 
-pub const FORGEJO_IMAGE: &str = "codeberg.org/forgejo/forgejo";
-pub const FORGEJO_TAG: &str = "14";
+#[derive(Default)]
+struct FakeBackendState {
+    /// Exit codes handed out in launch order; empty → exit 0.
+    scripted_exits: Vec<i32>,
+    launches: Vec<ContainerLaunchConfig>,
+    exits: HashMap<ContainerId, i32>,
+    /// Files retrievable via copy_file, keyed by (container path).
+    files: HashMap<String, Vec<u8>>,
+    /// Returned by `logs` for every container.
+    logs: Vec<u8>,
+}
 
-pub const RUNNER_IMAGE: &str = "data.forgejo.org/forgejo/runner";
-pub const RUNNER_TAG: &str = "11";
-
-pub const RUNNER_ENV_IMAGE: &str = "chuggernaut-runner-env:latest";
-
-pub const ADMIN_USER: &str = "chuggernaut-admin";
-pub const ADMIN_PASS: &str = "chuggernaut-admin";
-pub const REVIEWER_USER: &str = "chuggernaut-reviewer";
-pub const REVIEWER_PASS: &str = "chuggernaut-reviewer";
-
-// ---------------------------------------------------------------------------
-// Container cleanup (atexit hook)
-// ---------------------------------------------------------------------------
-
-static CONTAINER_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-static ATEXIT_REGISTERED: std::sync::Once = std::sync::Once::new();
-
-extern "C" fn cleanup_containers() {
-    let ids = CONTAINER_IDS.lock().unwrap();
-    if ids.is_empty() {
-        return;
+impl Default for FakeBackend {
+    fn default() -> Self {
+        Self::new()
     }
-    eprintln!("test cleanup: removing {} container(s)", ids.len());
-    let _ = std::process::Command::new("docker")
-        .args(["rm", "-f"])
-        .args(ids.iter().map(|s| s.as_str()))
-        .stderr(std::process::Stdio::null())
-        .output();
 }
 
-/// Register a container ID for removal when the process exits.
-///
-/// Use this after `Box::leak`-ing a shared container so it gets cleaned up
-/// on normal exit. Signal-based cleanup is handled by the testcontainers
-/// `watchdog` feature.
-pub fn register_container_cleanup(container_id: &str) {
-    ATEXIT_REGISTERED.call_once(|| unsafe {
-        libc::atexit(cleanup_containers);
-    });
-    CONTAINER_IDS.lock().unwrap().push(container_id.to_string());
-}
-
-// ---------------------------------------------------------------------------
-// NATS
-// ---------------------------------------------------------------------------
-
-/// Start a shared NATS container with JetStream. Call once per process via OnceLock.
-pub async fn start_nats() -> ContainerAsync<Nats> {
-    let nats_cmd = NatsServerCmd::default().with_jetstream();
-    Nats::default().with_cmd(&nats_cmd).start().await.unwrap()
-}
-
-/// Get the host port for a NATS container.
-pub async fn nats_port(container: &ContainerAsync<Nats>) -> u16 {
-    container.get_host_port_ipv4(4222).await.unwrap()
-}
-
-// ---------------------------------------------------------------------------
-// Forgejo
-// ---------------------------------------------------------------------------
-
-/// Start a Forgejo container with Actions enabled and INSTALL_LOCK.
-pub async fn start_forgejo() -> ContainerAsync<GenericImage> {
-    let container = GenericImage::new(FORGEJO_IMAGE, FORGEJO_TAG)
-        .with_exposed_port(3000.tcp())
-        .with_wait_for(WaitFor::seconds(5))
-        .with_env_var("FORGEJO__database__DB_TYPE", "sqlite3")
-        .with_env_var("FORGEJO__security__INSTALL_LOCK", "true")
-        .with_env_var("FORGEJO__service__DISABLE_REGISTRATION", "true")
-        .with_env_var("FORGEJO__actions__ENABLED", "true")
-        .with_env_var("FORGEJO__log__LEVEL", "Warn")
-        .with_startup_timeout(Duration::from_secs(120))
-        .start()
-        .await
-        .unwrap();
-
-    let port = container.get_host_port_ipv4(3000.tcp()).await.unwrap();
-    wait_for_forgejo_api(port).await;
-
-    container
-}
-
-/// Get the host port for a Forgejo container.
-pub async fn forgejo_port(container: &ContainerAsync<GenericImage>) -> u16 {
-    container.get_host_port_ipv4(3000.tcp()).await.unwrap()
-}
-
-/// The URL to reach Forgejo from the host.
-pub fn forgejo_host_url(port: u16) -> String {
-    format!("http://127.0.0.1:{port}")
-}
-
-/// The URL to reach Forgejo from inside a Docker container (e.g., the runner).
-pub fn forgejo_internal_url(port: u16) -> String {
-    format!("http://host.docker.internal:{port}")
-}
-
-/// Wait for the Forgejo API to be ready.
-pub async fn wait_for_forgejo_api(port: u16) {
-    let client = reqwest::Client::new();
-    let url = format!("http://127.0.0.1:{port}/api/v1/version");
-    for _ in 0..60 {
-        if client
-            .get(&url)
-            .send()
-            .await
-            .map(|r| r.status().is_success())
-            .unwrap_or(false)
-        {
-            return;
+impl FakeBackend {
+    pub fn new() -> Self {
+        Self {
+            next_id: AtomicU64::new(1),
+            state: Mutex::new(FakeBackendState::default()),
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    panic!("Forgejo API not ready after 120s");
+
+    /// Queue exit codes for upcoming launches (consumed in order).
+    pub fn script_exits(&self, codes: impl IntoIterator<Item = i32>) {
+        self.state.lock().unwrap().scripted_exits.extend(codes);
+    }
+
+    /// Make a file available to `copy_file` (e.g. `/workspace/eval-result.json`).
+    pub fn put_file(&self, path: &str, contents: impl Into<Vec<u8>>) {
+        self.state
+            .lock()
+            .unwrap()
+            .files
+            .insert(path.to_string(), contents.into());
+    }
+
+    /// Script what `logs` returns for every container.
+    pub fn put_logs(&self, contents: impl Into<Vec<u8>>) {
+        self.state.lock().unwrap().logs = contents.into();
+    }
+
+    pub fn launches(&self) -> Vec<ContainerLaunchConfig> {
+        self.state.lock().unwrap().launches.clone()
+    }
 }
 
-/// Create admin user(s) in Forgejo and return an API token.
-/// Optionally creates a separate reviewer user.
-pub async fn setup_forgejo_users(
-    container: &ContainerAsync<GenericImage>,
-    port: u16,
-    create_reviewer: bool,
-) -> ForgejoCredentials {
-    let url = forgejo_host_url(port);
+#[async_trait]
+impl ContainerBackend for FakeBackend {
+    async fn launch(&self, config: ContainerLaunchConfig) -> Result<ContainerId, BackendError> {
+        let id = format!("fake-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
+        let mut st = self.state.lock().unwrap();
+        let exit = if st.scripted_exits.is_empty() {
+            0
+        } else {
+            st.scripted_exits.remove(0)
+        };
+        st.launches.push(config);
+        st.exits.insert(id.clone(), exit);
+        Ok(id)
+    }
 
-    // Create admin user
-    container
-        .exec(
-            ExecCommand::new([
-                "su-exec",
-                "git",
-                "forgejo",
-                "admin",
-                "user",
-                "create",
-                "--admin",
-                "--username",
-                ADMIN_USER,
-                "--password",
-                ADMIN_PASS,
-                "--email",
-                "admin@chuggernaut.test",
-                "--must-change-password=false",
-            ])
-            .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
-        )
-        .await
-        .expect("failed to create admin user");
-
-    // Create admin token
-    let http = reqwest::Client::new();
-    let token_resp: serde_json::Value = http
-        .post(format!("{url}/api/v1/users/{ADMIN_USER}/tokens"))
-        .basic_auth(ADMIN_USER, Some(ADMIN_PASS))
-        .json(&serde_json::json!({
-            "name": "test-token",
-            "scopes": ["all"]
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let admin_token = token_resp["sha1"].as_str().unwrap().to_string();
-
-    let reviewer_token = if create_reviewer {
-        // Create reviewer user
-        container
-            .exec(
-                ExecCommand::new([
-                    "su-exec",
-                    "git",
-                    "forgejo",
-                    "admin",
-                    "user",
-                    "create",
-                    "--admin",
-                    "--username",
-                    REVIEWER_USER,
-                    "--password",
-                    REVIEWER_PASS,
-                    "--email",
-                    "reviewer@chuggernaut.test",
-                    "--must-change-password=false",
-                ])
-                .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
-            )
-            .await
-            .expect("failed to create reviewer user");
-
-        let token_resp: serde_json::Value = http
-            .post(format!("{url}/api/v1/users/{REVIEWER_USER}/tokens"))
-            .basic_auth(REVIEWER_USER, Some(REVIEWER_PASS))
-            .json(&serde_json::json!({
-                "name": "reviewer-token",
-                "scopes": ["all"]
-            }))
-            .send()
-            .await
+    async fn wait(&self, id: &ContainerId) -> Result<i32, BackendError> {
+        self.state
+            .lock()
             .unwrap()
-            .json()
+            .exits
+            .get(id)
+            .copied()
+            .ok_or_else(|| BackendError::NotFound(id.clone()))
+    }
+
+    async fn kill(&self, _id: &ContainerId) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn inspect(&self, id: &ContainerId) -> Result<Option<ContainerStatus>, BackendError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .exits
+            .get(id)
+            .map(|&exit_code| ContainerStatus::Exited { exit_code }))
+    }
+
+    async fn copy_file(
+        &self,
+        _id: &ContainerId,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>, BackendError> {
+        Ok(self.state.lock().unwrap().files.get(path).cloned())
+    }
+
+    async fn logs(&self, _id: &ContainerId) -> Result<Vec<u8>, BackendError> {
+        Ok(self.state.lock().unwrap().logs.clone())
+    }
+}
+
+/// Deterministic, scriptable [`AgentProvider`]: every run records its config
+/// and returns the next scripted exit code (default 0). Side effects a real
+/// agent would have (commits, submit_eval calls) are scripted per run via
+/// [`FakeProvider::on_run`].
+pub struct FakeProvider {
+    state: Mutex<FakeProviderState>,
+    push_notifications: bool,
+    /// When set, runs launch a real (fake) container so the run reports a
+    /// container id — the handle the dispatcher needs to harvest transcripts
+    /// and logs. Mirrors ClaudeProvider, which launches via the backend.
+    backend: Option<Arc<dyn ContainerBackend>>,
+}
+
+/// Async so a hook can drive the dispatcher (e.g. submit_eval) and await the
+/// ack before the "container" exits — exactly the ordering the channel MCP
+/// server guarantees (spec §4.2 bounded-retry-until-ack).
+type RunHook =
+    Box<dyn FnOnce(AgentRunConfig) -> futures::future::BoxFuture<'static, ()> + Send>;
+
+#[derive(Default)]
+struct FakeProviderState {
+    /// Exit codes handed out in run order; empty → exit 0.
+    scripted_exits: Vec<i32>,
+    /// Hooks consumed in run order, invoked with the run's config before it
+    /// "exits" — the place to simulate submit_result/submit_eval side effects.
+    hooks: Vec<Option<RunHook>>,
+    runs: Vec<AgentRunConfig>,
+}
+
+impl Default for FakeProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FakeProvider {
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(FakeProviderState::default()),
+            push_notifications: true,
+            backend: None,
+        }
+    }
+
+    /// Launch through `backend`, so runs report a container id and artifact
+    /// capture can be exercised. Without this a run has no container, like a
+    /// provider stub.
+    pub fn with_backend(backend: Arc<dyn ContainerBackend>) -> Self {
+        Self { backend: Some(backend), ..Self::new() }
+    }
+
+    pub fn script_exits(&self, codes: impl IntoIterator<Item = i32>) {
+        self.state.lock().unwrap().scripted_exits.extend(codes);
+    }
+
+    /// Queue a side-effect hook for the next un-hooked run. The hook is awaited
+    /// before the run returns its exit code.
+    pub fn on_run<F, Fut>(&self, hook: F)
+    where
+        F: FnOnce(AgentRunConfig) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.state
+            .lock()
+            .unwrap()
+            .hooks
+            .push(Some(Box::new(move |cfg| Box::pin(hook(cfg)))));
+    }
+
+    pub fn runs(&self) -> Vec<AgentRunConfig> {
+        self.state.lock().unwrap().runs.clone()
+    }
+}
+
+#[async_trait]
+impl AgentProvider for FakeProvider {
+    async fn run(&self, config: AgentRunConfig) -> Result<AgentOutput, AgentError> {
+        let (exit_code, hook) = {
+            let mut st = self.state.lock().unwrap();
+            let exit = if st.scripted_exits.is_empty() {
+                0
+            } else {
+                st.scripted_exits.remove(0)
+            };
+            let idx = st.runs.len();
+            let hook = st.hooks.get_mut(idx).and_then(Option::take);
+            st.runs.push(config.clone());
+            (exit, hook)
+        };
+        // Launch before the hook so the container exists for the whole run,
+        // as it would for a real provider.
+        let container_id = match &self.backend {
+            Some(backend) => Some(
+                backend
+                    .launch(ContainerLaunchConfig {
+                        image: config.image.clone(),
+                        cmd: vec!["agent".into()],
+                        env: config.env.clone(),
+                        files: config.files.clone(),
+                        cpu_limit: None,
+                        memory_limit: None,
+                    })
+                    .await?,
+            ),
+            None => None,
+        };
+        if let Some(hook) = hook {
+            hook(config.clone()).await;
+        }
+        Ok(AgentOutput {
+            exit_code,
+            container_id,
+            session_id: Some(config.session_id),
+        })
+    }
+
+    fn supports_push_notifications(&self) -> bool {
+        self.push_notifications
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn cfg() -> ContainerLaunchConfig {
+        ContainerLaunchConfig {
+            image: "test:latest".into(),
+            cmd: vec!["true".into()],
+            env: HashMap::new(),
+            files: vec![],
+            cpu_limit: None,
+            memory_limit: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn fake_backend_scripts_exits_in_order() {
+        let be = FakeBackend::new();
+        be.script_exits([1, 0]);
+        let a = be.launch(cfg()).await.unwrap();
+        let b = be.launch(cfg()).await.unwrap();
+        let c = be.launch(cfg()).await.unwrap();
+        assert_eq!(be.wait(&a).await.unwrap(), 1);
+        assert_eq!(be.wait(&b).await.unwrap(), 0);
+        assert_eq!(be.wait(&c).await.unwrap(), 0); // default
+        assert_eq!(be.launches().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn fake_backend_serves_files() {
+        let be = FakeBackend::new();
+        be.put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
+        let id = be.launch(cfg()).await.unwrap();
+        let f = be
+            .copy_file(&id, "/workspace/eval-result.json")
             .await
             .unwrap();
-        Some(token_resp["sha1"].as_str().unwrap().to_string())
-    } else {
-        None
-    };
-
-    ForgejoCredentials {
-        admin_token,
-        reviewer_token,
+        assert_eq!(f.unwrap(), br#"{"ok":true}"#);
+        assert!(be.copy_file(&id, "/missing").await.unwrap().is_none());
     }
-}
-
-pub struct ForgejoCredentials {
-    pub admin_token: String,
-    pub reviewer_token: Option<String>,
-}
-
-/// Get a runner registration token from Forgejo.
-pub async fn get_runner_registration_token(port: u16, admin_token: &str) -> String {
-    let url = forgejo_host_url(port);
-    let http = reqwest::Client::new();
-    let resp: serde_json::Value = http
-        .get(format!("{url}/api/v1/admin/runners/registration-token"))
-        .header("Authorization", format!("token {admin_token}"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    resp["token"].as_str().unwrap().to_string()
-}
-
-// ---------------------------------------------------------------------------
-// Runner
-// ---------------------------------------------------------------------------
-
-/// Start a Forgejo Actions runner with Docker socket passthrough.
-/// Uses the official Forgejo runner image with register + daemon.
-pub async fn start_runner(
-    forgejo_port: u16,
-    runner_reg_token: &str,
-    runner_config_path: &str,
-) -> ContainerAsync<GenericImage> {
-    let internal_url = forgejo_internal_url(forgejo_port);
-    let labels = format!("ubuntu-latest:docker://{RUNNER_ENV_IMAGE}");
-    let register_and_run = format!(
-        "cd /data && forgejo-runner register --no-interactive --instance '{internal_url}' --token '{runner_reg_token}' --name runner --labels '{labels}' -c /data/config.yaml && forgejo-runner daemon -c /data/config.yaml"
-    );
-
-    GenericImage::new(RUNNER_IMAGE, RUNNER_TAG)
-        .with_user("root")
-        .with_mount(Mount::bind_mount(
-            "/var/run/docker.sock",
-            "/var/run/docker.sock",
-        ))
-        .with_mount(Mount::bind_mount(runner_config_path, "/data/config.yaml"))
-        .with_cmd(["sh", "-c", &register_and_run])
-        .with_startup_timeout(Duration::from_secs(60))
-        .start()
-        .await
-        .unwrap()
-}
-
-// ---------------------------------------------------------------------------
-// Repo setup helpers
-// ---------------------------------------------------------------------------
-
-/// Create an org and repo in Forgejo. Returns (org_name, repo_name).
-pub async fn create_test_repo(port: u16, token: &str, org: &str, repo: &str) {
-    let url = forgejo_host_url(port);
-    let http = reqwest::Client::new();
-
-    http.post(format!("{url}/api/v1/orgs"))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({"username": org, "visibility": "public"}))
-        .send()
-        .await
-        .unwrap();
-
-    http.post(format!("{url}/api/v1/orgs/{org}/repos"))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({
-            "name": repo,
-            "default_branch": "main",
-            "auto_init": true
-        }))
-        .send()
-        .await
-        .unwrap();
-}
-
-/// Push a file to a repo via the Forgejo API.
-pub async fn push_file(
-    port: u16,
-    token: &str,
-    org: &str,
-    repo: &str,
-    path: &str,
-    content: &str,
-    message: &str,
-) {
-    let url = forgejo_host_url(port);
-    let http = reqwest::Client::new();
-    http.post(format!("{url}/api/v1/repos/{org}/{repo}/contents/{path}"))
-        .header("Authorization", format!("token {token}"))
-        .json(&serde_json::json!({
-            "message": message,
-            "content": base64_encode(content)
-        }))
-        .send()
-        .await
-        .unwrap();
-}
-
-/// Set a repo action secret.
-pub async fn set_repo_secret(
-    port: u16,
-    token: &str,
-    org: &str,
-    repo: &str,
-    name: &str,
-    value: &str,
-) {
-    let url = forgejo_host_url(port);
-    let http = reqwest::Client::new();
-    http.put(format!(
-        "{url}/api/v1/repos/{org}/{repo}/actions/secrets/{name}"
-    ))
-    .header("Authorization", format!("token {token}"))
-    .json(&serde_json::json!({"data": value}))
-    .send()
-    .await
-    .unwrap();
-}
-
-// ---------------------------------------------------------------------------
-// Utilities
-// ---------------------------------------------------------------------------
-
-pub fn base64_encode(s: &str) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = s.as_bytes();
-    let mut result = String::new();
-    let mut i = 0;
-    while i + 2 < bytes.len() {
-        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | bytes[i + 2] as u32;
-        result.push(CHARS[(n >> 18 & 63) as usize] as char);
-        result.push(CHARS[(n >> 12 & 63) as usize] as char);
-        result.push(CHARS[(n >> 6 & 63) as usize] as char);
-        result.push(CHARS[(n & 63) as usize] as char);
-        i += 3;
-    }
-    let rem = bytes.len() - i;
-    if rem == 2 {
-        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
-        result.push(CHARS[(n >> 18 & 63) as usize] as char);
-        result.push(CHARS[(n >> 12 & 63) as usize] as char);
-        result.push(CHARS[(n >> 6 & 63) as usize] as char);
-        result.push('=');
-    } else if rem == 1 {
-        let n = (bytes[i] as u32) << 16;
-        result.push(CHARS[(n >> 18 & 63) as usize] as char);
-        result.push(CHARS[(n >> 12 & 63) as usize] as char);
-        result.push('=');
-        result.push('=');
-    }
-    result
 }
