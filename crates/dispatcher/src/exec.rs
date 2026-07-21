@@ -1183,11 +1183,13 @@ impl Core {
                 container_path: SSH_ID_PATH.into(),
                 contents: cred.private_key.into_bytes(),
                 mode: 0o600,
+                artifact: None,
             },
             container::InjectedFile {
                 container_path: SSH_CERT_PATH.into(),
                 contents: cred.certificate.into_bytes(),
                 mode: 0o644,
+                artifact: None,
             },
         ])
     }
@@ -1219,6 +1221,9 @@ impl Core {
                 container_path: path.into(),
                 contents: bytes.clone(),
                 mode: 0o755,
+                // Worker nodes hold their own (worker-arch) channel binary;
+                // the fleet backend sends this name instead of the bytes.
+                artifact: Some(types::worker::ARTIFACT_CHANNEL.into()),
             }],
         )
     }

@@ -25,8 +25,19 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
     let repos = RepoManager::new(&config.repos_root);
     repos.check_git_version().await?;
 
-    let backend = Arc::new(DockerBackend::new(config.docker_nodes.clone())?);
-    backend.ping_all().await?; // §3.6: refuse to start if any node is unreachable
+    // Worker nodes (spec §3.1) are NATS-proxied and soft-fail at startup (an
+    // unreachable worker is out-of-service, not fatal); plain Docker fleets
+    // keep the strict §3.6 rule and the exact single-backend path.
+    let backend: Arc<dyn container::ContainerBackend> =
+        if worker::backend::has_worker_nodes(&config.docker_nodes) {
+            let fleet = worker::FleetBackend::new(config.docker_nodes.clone(), store.clone())?;
+            fleet.startup_check().await?; // hard-fails only on docker-endpoint nodes
+            Arc::new(fleet)
+        } else {
+            let docker = DockerBackend::new(config.docker_nodes.clone())?;
+            docker.ping_all().await?; // §3.6: refuse to start if any node is unreachable
+            Arc::new(docker)
+        };
 
     let provider: Arc<dyn AgentProvider> = match config.agent_provider_default.as_str() {
         "claude" => Arc::new(ClaudeProvider::new(backend.clone())),

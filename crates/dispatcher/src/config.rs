@@ -189,6 +189,28 @@ fn parse_docker_nodes(spec: &str) -> Result<Vec<DockerNodeConfig>> {
                     "DOCKER_NODES entry {entry:?}: expected name|endpoint|slots"
                 )));
             };
+            // Node names ride in container ids and (for worker nodes) NATS
+            // subjects — keep them to a safe token either way.
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(CoreError::Config(format!(
+                    "DOCKER_NODES entry {entry:?}: node name must be [A-Za-z0-9_-]+"
+                )));
+            }
+            // `worker` = NATS-proxied `chuggernaut worker` daemon (spec §3.1);
+            // unix/tcp/http = a Docker daemon driven directly.
+            if *endpoint != "worker"
+                && !endpoint.starts_with("unix://")
+                && !endpoint.starts_with("tcp://")
+                && !endpoint.starts_with("http://")
+            {
+                return Err(CoreError::Config(format!(
+                    "DOCKER_NODES entry {entry:?}: endpoint must be unix://…, tcp://…, or `worker`"
+                )));
+            }
             Ok(DockerNodeConfig {
                 name: name.to_string(),
                 endpoint: endpoint.to_string(),
@@ -214,5 +236,18 @@ mod tests {
         assert_eq!(nodes[1].slots, 8);
         assert!(parse_docker_nodes("bad-entry").is_err());
         assert!(parse_docker_nodes("a|tcp://x|lots").is_err());
+    }
+
+    #[test]
+    fn docker_nodes_worker_form() {
+        let nodes =
+            parse_docker_nodes("local|unix:///var/run/docker.sock|0, nuc|worker|4").unwrap();
+        assert_eq!(nodes[1].endpoint, "worker");
+        assert_eq!(nodes[1].slots, 4);
+        // Worker node names ride in NATS subjects; bad tokens rejected at parse.
+        assert!(parse_docker_nodes("nuc.0|worker|4").is_err());
+        assert!(parse_docker_nodes("|worker|4").is_err());
+        // Unknown endpoint schemes rejected at parse, not at backend construction.
+        assert!(parse_docker_nodes("a|ssh://host|4").is_err());
     }
 }

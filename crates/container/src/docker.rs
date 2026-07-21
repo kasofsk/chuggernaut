@@ -107,6 +107,26 @@ impl DockerBackend {
         Ok((node, cid))
     }
 
+    /// `(name, free_slots)` per node — placement input, and the worker
+    /// daemon's slot report (it runs a single-node instance of this backend).
+    pub async fn free_slots_by_node(&self) -> Result<Vec<(String, i64)>, BackendError> {
+        let mut out = Vec::with_capacity(self.nodes.len());
+        for node in &self.nodes {
+            let free = node.slots as i64 - self.managed_running(node).await? as i64;
+            out.push((node.name.clone(), free));
+        }
+        Ok(out)
+    }
+
+    /// Running `chuggernaut.managed` containers across all nodes.
+    pub async fn managed_running_total(&self) -> Result<u32, BackendError> {
+        let mut total = 0;
+        for node in &self.nodes {
+            total += self.managed_running(node).await?;
+        }
+        Ok(total)
+    }
+
     async fn managed_running(&self, node: &Node) -> Result<u32, BackendError> {
         let opts = ListContainersOptionsBuilder::default()
             .filters(&HashMap::from([
@@ -418,6 +438,7 @@ mod tests {
             container_path: "/chuggernaut/prompt.md".into(),
             contents: b"hello".to_vec(),
             mode: 0o644,
+            artifact: None,
         }])
         .unwrap();
         let mut ar = tar::Archive::new(tar_bytes.as_slice());

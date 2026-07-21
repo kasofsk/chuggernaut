@@ -262,6 +262,16 @@ fn common_container(perms: &mut Permissions, owner: &str, project: &str, seq: u6
         .push(format!("$JS.API.CONSUMER.MSG.NEXT.{stream}.>"));
 }
 
+/// Worker-daemon allow-list (spec §3.1): serve its own node's op subjects and
+/// answer request-reply inboxes — nothing else. No KV, no JetStream: the
+/// node-local-artifact design keeps bulk data off NATS entirely.
+pub fn worker_permissions(node: &str) -> Permissions {
+    Permissions {
+        publish: vec!["_INBOX.>".into()],
+        subscribe: vec![format!("req.worker.{node}.>")],
+    }
+}
+
 /// §7.4 work-container allow-list.
 pub fn work_container_permissions(owner: &str, project: &str, seq: u64) -> Permissions {
     let mut perms = Permissions::default();

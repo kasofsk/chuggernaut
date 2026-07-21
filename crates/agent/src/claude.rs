@@ -57,6 +57,7 @@ impl AgentProvider for ClaudeProvider {
             container_path: PROMPT_PATH.to_string(),
             contents: config.prompt.clone().into_bytes(),
             mode: 0o644,
+            artifact: None,
         }];
         files.extend(config.files.iter().cloned());
 

@@ -30,6 +30,18 @@ pub enum AdminCmd {
     Secret(SecretCmd),
     #[command(subcommand)]
     Var(VarCmd),
+    /// Mint NATS credentials for a `chuggernaut worker` node daemon
+    /// (spec §3.1): allowed only its own `req.worker.{node}.>` subjects.
+    /// Local-only — reads the account seed, no NATS connection.
+    WorkerCreds {
+        /// Node name — must match its DOCKER_NODES entry (`{node}|worker|N`)
+        /// and be subject-safe ([A-Za-z0-9_-]+).
+        #[arg(long)]
+        node: String,
+        /// Output path; defaults to `worker-{node}.creds` in the keys dir.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(clap::Args, Debug)]
@@ -175,6 +187,10 @@ pub enum ProjectCmd {
 }
 
 pub async fn run(args: AdminArgs) -> Result<()> {
+    // Local-only commands first — no NATS connection.
+    if let AdminCmd::WorkerCreds { node, out } = &args.cmd {
+        return mint_worker_creds(&args.keys_dir, node, out.as_deref()).await;
+    }
     // Operator-mode NATS requires the dispatcher credentials from init
     // (§12.1); without them (open dev server) connect plain.
     let store = match tokio::fs::read_to_string(args.keys_dir.join("dispatcher.creds")).await {
@@ -189,7 +205,40 @@ pub async fn run(args: AdminArgs) -> Result<()> {
         AdminCmd::Project(cmd) => run_project(&store, cmd).await,
         AdminCmd::Secret(cmd) => run_secret(&store, &args.keys_dir, cmd).await,
         AdminCmd::Var(cmd) => run_var(&store, cmd).await,
+        AdminCmd::WorkerCreds { .. } => unreachable!("handled before connect"),
     }
+}
+
+/// Mint a worker daemon's `.creds` from the platform account seed. Non-expiring
+/// like `dispatcher.creds` — rotation is re-mint + restart.
+async fn mint_worker_creds(
+    keys_dir: &std::path::Path,
+    node: &str,
+    out: Option<&std::path::Path>,
+) -> Result<()> {
+    if node.is_empty()
+        || !node
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        bail!("--node {node:?} must be [A-Za-z0-9_-]+ (rides in NATS subjects)");
+    }
+    let seed_path = keys_dir.join("nats_account.seed");
+    let seed = tokio::fs::read_to_string(&seed_path)
+        .await
+        .with_context(|| format!("reading {}", seed_path.display()))?;
+    let signer = auth::nats::NatsUserSigner::from_account_seed(seed.trim())?;
+    let creds = signer.mint_creds(
+        &format!("worker.{node}"),
+        &auth::nats::worker_permissions(node),
+        None,
+    )?;
+    let path = out
+        .map(PathBuf::from)
+        .unwrap_or_else(|| keys_dir.join(format!("worker-{node}.creds")));
+    crate::keygen::write_key(&path, &creds, true).await?;
+    println!("wrote {} (user worker.{node})", path.display());
+    Ok(())
 }
 
 async fn run_secret(store: &NatsStore, keys_dir: &std::path::Path, cmd: SecretCmd) -> Result<()> {

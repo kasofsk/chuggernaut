@@ -137,7 +137,6 @@ Create projects with `chug admin project create --owner <o> --name <n> --repos-r
 |---|---|---|
 | `com.chuggernaut.boot` | RunAtLoad | `boot.sh`: colima + compose (nats/ssh/api) + wait-for-NATS |
 | `com.chuggernaut.dispatcher` | KeepAlive | `run-dispatcher.sh` (the only host service) |
-| `com.chuggernaut.nuc-tunnel` | KeepAlive | SSH tunnel to the worker's Docker socket (see "Worker nodes") |
 | `com.chuggernaut.backup-hourly` | :00 hourly | `backup-r2.sh` |
 | `com.chuggernaut.backup-daily` | 03:20 | `backup-r2.sh promote daily` |
 | `com.chuggernaut.backup-monthly` | 1st 03:40 | `backup-r2.sh promote monthly` |
@@ -288,35 +287,49 @@ registered at **0 slots** (placement never picks it; failback = bump the slots
 and restart the dispatcher), and all work/eval containers land on
 **gumbo-nuc-0** (12-core/31GiB, x86_64, NixOS, Docker preinstalled).
 
-**How it hangs together** (all pieces ship in this repo):
+The node runs a **`chuggernaut worker` daemon** (spec §3.1): it dials OUT to
+the Mini's NATS and executes container ops against its local Docker socket —
+**no Docker endpoint, tunnel, or listening port on the node**. Launches are
+small NATS messages; static artifacts (the channel binary, agent images) are
+built on the node at deploy time, and the daemon injects its own channel-binary
+copy into job containers. An unreachable worker is *out of service* (placement
+skips it, dispatcher starts fine, no restart needed when it returns).
 
-- **Tunnel** — `com.chuggernaut.nuc-tunnel` (launchd, KeepAlive) forwards
-  `127.0.0.1:23751` → the nuc's `/run/docker.sock` over SSH, using the
-  dedicated key `~/.ssh/nuc_tunnel` (public half in the nuc's
-  `~/.ssh/authorized_keys`; on NixOS consider pinning it in configuration.nix).
-  bollard only speaks `unix://`/plaintext `tcp://` — the tunnel keeps the
-  daemon off the network (no mTLS yet, spec §3.1 TODO).
-- **Fleet** — in `chuggernaut.env`:
-  `DOCKER_NODES="local|unix:///…/colima/…/docker.sock|0, nuc|tcp://127.0.0.1:23751|4"`
-  plus `WORKER_DOCKER_HOST=tcp://127.0.0.1:23751`.
-- **Cross-node addressing** — containers on the nuc reach the Mini's NATS and
-  git front via the Mini's **tailnet IP**, not `host.docker.internal`:
+**Setup (one-time):**
+
+```sh
+# 1. Mini: mint the daemon's scoped NATS creds (subscribe req.worker.nuc.> only)
+chug admin --keys-dir "$KEYS_DIR" worker-creds --node nuc
+# 2. copy to the node (the worker container mounts this dir read-only)
+ssh worksalot@gumbo-nuc-0 mkdir -p chuggernaut-worker/keys
+scp "$KEYS_DIR/worker-nuc.creds" worksalot@gumbo-nuc-0:chuggernaut-worker/keys/worker.creds
+# 3. env (chuggernaut.env): see env.example — worker fleet form
+#    DOCKER_NODES="local|unix:///…/docker.sock|0, nuc|worker|4"
+#    WORKER_SSH=worksalot@gumbo-nuc-0
+#    WORKER_NATS_URL=nats://100.116.243.42:4222     # Mini's tailnet IP
+# 4. build + start the daemon on the node (also runs on every CD deploy)
+set -a; . deploy/prod/chuggernaut.env; set +a
+deploy/prod/build-worker.sh
+# 5. restart the dispatcher to pick up the fleet
+launchctl kickstart -k gui/$(id -u)/com.chuggernaut.dispatcher
+```
+
+Notes:
+
+- **Cross-node addressing** — job containers on the nuc reach the Mini's NATS
+  and git front via the Mini's **tailnet IP**, not `host.docker.internal`:
   `NATS_URL_CONTAINER=nats://100.116.243.42:4222`,
   `REPO_URL_BASE=ssh://git@100.116.243.42:2222` (ports 4222/2222 are published
   on all interfaces by compose).
-- **Arch split** — the Mini is arm64, the nuc x86_64. `build-worker.sh`
-  (called by `update.sh`; no-op when `WORKER_DOCKER_HOST` is unset) builds
-  `chuggernaut/agent{,-rust}:prod` natively on the nuc's daemon and extracts a
-  **worker-arch** channel binary to `deploy/prod/out-nuc/`;
-  `run-dispatcher.sh` injects that one instead of `out/` when a worker is
-  configured.
-- **Boot coupling** — the dispatcher's startup `ping_all` hard-fails if any
-  fleet node is unreachable, so the tunnel is boot-critical (KeepAlive
-  mitigates; graceful degradation is filed as a dogfood job). CD deploys also
-  need the tunnel up for the worker builds.
+- **CD** — `update.sh` calls `build-worker.sh`: worker+agent images build
+  natively on the node (context streamed over ssh from the deployed SHA) and
+  the daemon restarts on the new image. Safe mid-job: containers survive and
+  the dispatcher's poll-based wait re-attaches.
 - **Verify placement** — during a job: `ssh worksalot@gumbo-nuc-0 docker ps`
   shows the work/eval containers; the Mini's colima shows none
   (`docker ps --filter label=chuggernaut.managed`).
+- The daemon's version is reported in its ping; the dispatcher logs a warning
+  when it drifts from the dispatcher's own (stale node artifacts).
 
 ---
 

@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 dispatcher.workspace = true
+worker.workspace = true
 api.workspace = true
 webhooks.workspace = true
 cli.workspace = true

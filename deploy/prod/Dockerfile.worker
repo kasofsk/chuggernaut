@@ -1,0 +1,28 @@
+# Worker-node daemon image (spec §3.1) — built ON the worker node (its native
+# arch) with the repo root as context, so the chuggernaut binary and the
+# channel binary it injects into job containers come from the same git SHA.
+# Run with the local Docker socket mounted; the daemon dials OUT to NATS and
+# exposes nothing.
+#
+#   docker run -d --restart=always --name chug-worker \
+#     -v /var/run/docker.sock:/var/run/docker.sock \
+#     -v <keys-dir>:/data/keys:ro \
+#     -e WORKER_NODE=nuc -e NATS_URL=nats://<dispatcher-host>:4222 \
+#     chuggernaut/worker:prod
+
+FROM rust:1.96-bookworm AS build
+ARG CHUG_GIT_SHA=
+ENV CHUG_GIT_SHA=$CHUG_GIT_SHA
+WORKDIR /src
+COPY . .
+RUN cargo build --release --bin chuggernaut --bin chuggernaut-channel
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/chuggernaut /usr/local/bin/chuggernaut
+# The worker substitutes this node-local copy into launches that reference the
+# "channel" artifact — the dispatcher never ships the bytes (spec §3.1).
+COPY --from=build /src/target/release/chuggernaut-channel /usr/local/lib/chuggernaut/chuggernaut-channel
+ENTRYPOINT ["/usr/local/bin/chuggernaut", "worker"]

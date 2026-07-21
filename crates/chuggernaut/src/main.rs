@@ -23,6 +23,11 @@ enum Command {
     /// CHANNEL_BINARY, AGENT_PROVIDER_DEFAULT (required), AGENT_MODEL_DEFAULT,
     /// DOCKER_NODES | DOCKER_SLOTS (spec §12.4).
     Dispatcher,
+    /// Run a worker-node daemon: executes container ops for this node against
+    /// the local Docker socket, dialing OUT to NATS (spec §3.1). Configured
+    /// via env: WORKER_NODE (required), NATS_URL (required), NATS_CREDS,
+    /// WORKER_DOCKER_ENDPOINT, WORKER_CHANNEL_BINARY.
+    Worker,
     /// Run the HTTP↔NATS API bridge (serves the PWA).
     /// Configured via env: NATS_URL, KEYS_DIR, BIND_ADDR, UI_DIST,
     /// SESSION_TTL (spec §6, §7.1).
@@ -58,6 +63,12 @@ async fn main() -> anyhow::Result<()> {
             let _handle = dispatcher::run::run(config).await?;
             tokio::signal::ctrl_c().await?;
             eprintln!("shutting down");
+            Ok(())
+        }
+        Command::Worker => {
+            let config = worker::WorkerConfig::from_env()?;
+            worker::run(config).await?;
+            eprintln!("worker shut down");
             Ok(())
         }
         Command::Api => {

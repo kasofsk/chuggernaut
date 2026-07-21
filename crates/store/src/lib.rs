@@ -7,6 +7,7 @@ pub mod secrets;
 pub mod stores;
 pub mod subjects;
 pub mod vars;
+pub mod worker;
 
 pub use artifacts::{ArtifactCrypto, ArtifactKind, ArtifactStore};
 pub use stores::{
@@ -280,6 +281,30 @@ impl NatsStore {
             sub,
             client: self.client.clone(),
         })
+    }
+
+    /// Single request-reply bounded by a deadline — worker-node ops, where the
+    /// caller (not NATS) owns timeout policy. A no-responder error surfaces
+    /// immediately as `Nats`, not after the timeout.
+    pub async fn request_timeout(
+        &self,
+        subject: &str,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> Result<async_nats::Message> {
+        match tokio::time::timeout(
+            timeout,
+            self.client
+                .request(subject.to_string(), payload.to_vec().into()),
+        )
+        .await
+        {
+            Ok(Ok(msg)) => Ok(msg),
+            Ok(Err(e)) => Err(nats_err(e)),
+            Err(_) => Err(StoreError::Nats(format!(
+                "request to {subject} timed out after {timeout:?}"
+            ))),
+        }
     }
 
     /// Request-reply with bounded retry (spec §4.2 reliability): retries until

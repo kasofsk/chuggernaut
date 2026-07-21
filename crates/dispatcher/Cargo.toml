@@ -12,6 +12,7 @@ store.workspace = true
 auth.workspace = true
 vcs.workspace = true
 container.workspace = true
+worker.workspace = true
 agent.workspace = true
 chrono.workspace = true
 petgraph.workspace = true
