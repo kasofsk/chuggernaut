@@ -1,0 +1,28 @@
+# Front-end-only changes on the operator UI (web/). Built for fast iteration:
+# the reviewer (stage 0) judges the change and decides for itself whether the
+# built UI needs to be exercised; the project ci gate (stage 1, appended from
+# jobs/_defaults.yaml) self-skips its cargo work on web-only diffs via the
+# tasks/ci.sh glob matcher, so it costs seconds, not a cold workspace build.
+# Shipping the merged result to the served UI is jobs/web-publish.yaml —
+# static-content swap, no redeploy.
+name: web
+display_name: Web UI
+description: Front-end-only change in web/; agent-reviewed, cheap CI, published instantly via web-publish.
+image: chuggernaut/agent-rust:prod   # node 22 + claude CLI ride along in the rust agent image
+work:
+  type: agent
+  prompt: prompts/work/web.md
+eval:
+  - name: review-web
+    type: agent
+    prompt: tasks/review-web.md
+    stage: 0
+resources:
+  cpu: 2
+  memory: 2Gi
+  # npm ci + tsc + vite build, possibly twice (work + reviewer) — nowhere near
+  # the Rust hour.
+  task_timeout: 30m
+work_retries: 1
+eval_retries: 1
+rework_budget: 2

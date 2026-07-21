@@ -18,6 +18,13 @@ if ! colima status >/dev/null 2>&1; then
 fi
 
 # 2. NATS (operator mode, JetStream) + the SSH front.
+# Served-UI host dir (compose mounts it over the api's /srv/web); must exist
+# or compose creates it root-owned. Seeded by update.sh — empty only before
+# the first deploy.
+UI_ROOT="${UI_ROOT:-$HOME/chuggernaut-data/ui}"
+export UI_ROOT
+mkdir -p "$UI_ROOT"
+
 echo "boot: docker compose up"
 docker compose -f "$HERE/compose.yaml" up -d
 

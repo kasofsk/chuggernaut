@@ -66,6 +66,21 @@ set -a
 . deploy/prod/chuggernaut.env
 set +a
 
+# 2b. Seed/refresh the served UI dir from the freshly built api image. The api
+#     container mounts UI_ROOT over /srv/web (compose.yaml) so web-publish jobs
+#     can swap static content instantly; a full deploy must land the same
+#     content a from-scratch image would serve. Contents are replaced in place
+#     (never the directory — it is a live bind mount).
+UI_ROOT="${UI_ROOT:-$HOME/chuggernaut-data/ui}"
+export UI_ROOT
+mkdir -p "$UI_ROOT"
+seed_ctr="$(docker create "chuggernaut/api:${CHUG_IMAGE_TAG:-prod}")"
+rm -rf "$UI_ROOT.new"
+docker cp "$seed_ctr:/srv/web" "$UI_ROOT.new"
+docker rm -f "$seed_ctr" >/dev/null
+rsync -a --delete "$UI_ROOT.new/" "$UI_ROOT/"
+rm -rf "$UI_ROOT.new"
+
 # 3. Worker node: daemon + agent images built on the node over ssh, daemon
 #    restarted (no-op when WORKER_SSH is unset — see build-worker.sh).
 CHUG_IMAGE_TAG="${CHUG_IMAGE_TAG:-prod}" deploy/prod/build-worker.sh

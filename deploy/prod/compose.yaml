@@ -57,6 +57,11 @@ services:
     # not the whole keys dir. dispatcher.creds = NATS auth; jwt_* = session
     # tokens; age_artifacts.key = transcript/log decryption for display.
     volumes:
+      # Served UI: a HOST directory mounted over the image's baked-in copy so
+      # static content can be replaced without rebuilding or restarting the
+      # container (web-publish job / update.sh seeding — README §7). UI_ROOT
+      # is exported by update.sh/boot.sh (default ~/chuggernaut-data/ui).
+      - ${UI_ROOT}:/srv/web
       - ${KEYS_DIR}/dispatcher.creds:/keys/dispatcher.creds:ro
       - ${KEYS_DIR}/jwt_private.pem:/keys/jwt_private.pem:ro
       - ${KEYS_DIR}/jwt_public.pem:/keys/jwt_public.pem:ro

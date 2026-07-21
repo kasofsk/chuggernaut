@@ -65,7 +65,7 @@ Also:
   (§3), not a GitHub key.
 - **Colima has no `/var/run/docker.sock`** — the dispatcher (a native host process)
   reaches Docker via `DOCKER_NODES`, which **must** point at the colima socket, or
-  it dies with `Socket not found: /var/run/docker.sock`. See §7 and `env.example`.
+  it dies with `Socket not found: /var/run/docker.sock`. See §8 and `env.example`.
 
 ---
 
@@ -372,7 +372,29 @@ Notes:
 
 ---
 
-## 7. Colima notes & gotchas
+## 7. Instant web UI publish (`web-publish` job)
+
+Front-end-only changes skip the full deploy. The api container mounts a host
+directory (`UI_ROOT`, default `~/chuggernaut-data/ui`) over its baked-in
+`/srv/web`, so replacing that directory's **contents** changes what the SPA
+serves immediately — refresh the page, no rebuild, no restarts.
+
+- **Normal deploys stay authoritative**: `update.sh` seeds `UI_ROOT` from the
+  freshly built api image on every deploy, so a full deploy and a from-scratch
+  image always serve the same content.
+- **Fast path**: after a `web` job (jobs/web.yaml) merges, release a
+  `web-publish` job (jobs/web-publish.yaml). It builds `web/dist` at main and
+  tar-pipes it to the Mini, staging in `UI_ROOT.new` and rsyncing contents
+  into place (~30s end to end). Same `MINI_DEPLOY_KEY` ssh path as deploy.
+- **Never replace the directory itself** (`mv`/`rm -rf` of `UI_ROOT`): it is a
+  live bind mount — swap contents (`rsync -a --delete`), or the running
+  container keeps serving the detached old inode.
+- **One-time migration on an existing Mini**: add `UI_ROOT` to
+  `chuggernaut.env` (see env.example), then run a deploy (seeds the dir and
+  recreates the api container with the mount). Until that deploy runs, the
+  compose file's `${UI_ROOT}` falls back via update.sh/boot.sh exports.
+
+## 8. Colima notes & gotchas
 
 - **No `/var/run/docker.sock`; the dispatcher needs `DOCKER_NODES`.** bollard's
   default socket path doesn't exist under colima, so the dispatcher exits with
