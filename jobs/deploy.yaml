@@ -14,6 +14,20 @@ work:
   # (spec §1.1 — secrets are scoped under work for command jobs). deploy.sh
   # writes it to a 0600 tempfile for `ssh -i` (§8.2).
   secrets: [MINI_DEPLOY_KEY]
+eval:
+  # The real deploy gate (spec §3.3 staged evaluation). stage 0 runs first and
+  # alone decides whether the release is healthy: deploy-health.sh curls the
+  # live platform over the tailnet from an eval container on the worker node.
+  # It needs curl, so it rides the agent:prod image.
+  - name: health
+    type: command
+    image: chuggernaut/agent:prod
+    run: ./tasks/deploy-health.sh
+    stage: 0
+  # The appended project ci default (jobs/_defaults.yaml) stays at stage 1 and
+  # only runs once health passes. A deploy job carries no commits, so ci sees an
+  # empty diff and glob-skips its cargo build in seconds (tasks/ci.sh) — it
+  # verifies nothing relevant here, but it's cheap and harmless, so it stays.
 wrap_up:
   type: none                        # external effect; the branch is discarded unmerged
 resources:
