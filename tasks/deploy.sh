@@ -17,7 +17,11 @@
 # file path in MINI_DEPLOY_KEY_FILE instead, honour it directly.
 set -eu
 
-MINI_HOST="worksalot@100.116.243.42"      # the Mini's tailnet IP
+# The Mini's LAN address, NOT its tailnet IP: Tailscale SSH owns port 22 on
+# the tailnet interface and rejects tagged->tagged connections (the container
+# egresses as the worker node). Real sshd + key auth answer on the LAN.
+# DHCP-fragile — give the Mini a static lease; revisit if this ever times out.
+MINI_HOST="worksalot@192.168.129.128"
 REMOTE_UPDATE="~/chuggernaut/deploy/prod/update.sh"
 
 # A deploy job has no commits of its own: HEAD == the released main.
