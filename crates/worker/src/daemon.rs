@@ -149,6 +149,8 @@ async fn handle(state: &WorkerState, subject: &str, payload: &[u8]) -> Vec<u8> {
         Some("copy_file") => encode_reply(&copy_file(state, payload).await),
         Some("logs") => encode_reply(&logs(state, payload).await),
         Some("ping") => encode_reply(&ping(state).await),
+        Some("remove") => encode_reply(&remove(state, payload).await),
+        Some("list_exited") => encode_reply(&list_exited(state).await),
         other => encode_reply::<()>(&WorkerReply::Err {
             error: WorkerError::Other {
                 message: format!("unknown op {other:?} on {subject}"),
@@ -283,6 +285,31 @@ async fn logs(state: &WorkerState, payload: &[u8]) -> WorkerReply<LogsOk> {
                 data_b64: b64_encode(&data),
                 truncated,
             })
+        }
+        .await,
+    )
+}
+
+async fn remove(state: &WorkerState, payload: &[u8]) -> WorkerReply<serde_json::Value> {
+    reply(
+        async {
+            let req: ContainerRef = parse(payload)?;
+            state.backend.remove(&req.id).await.map_err(backend_err)?;
+            Ok(serde_json::json!({}))
+        }
+        .await,
+    )
+}
+
+async fn list_exited(state: &WorkerState) -> WorkerReply<types::worker::ListExitedOk> {
+    reply(
+        async {
+            let ids = state
+                .backend
+                .list_managed_exited()
+                .await
+                .map_err(backend_err)?;
+            Ok(types::worker::ListExitedOk { ids })
         }
         .await,
     )

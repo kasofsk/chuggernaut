@@ -138,6 +138,25 @@ async fn local_artifact_substitution_and_unknown_artifact() {
 }
 
 #[tokio::test]
+async fn remove_and_exited_sweep_through_the_proxy() {
+    let server = require_nats!();
+    let Some((fleet, daemon)) = setup(&server, b"#!/bin/sh\nexit 0\n").await else {
+        return;
+    };
+    let id = fleet.launch(suite::cfg("exit 0")).await.unwrap();
+    assert_eq!(fleet.wait(&id).await.unwrap(), 0);
+    assert!(
+        fleet.list_managed_exited().await.unwrap().contains(&id),
+        "exited container visible to the sweep through the proxy"
+    );
+    fleet.remove(&id).await.unwrap();
+    assert!(!fleet.list_managed_exited().await.unwrap().contains(&id));
+    // Idempotent, like the direct backend.
+    fleet.remove(&id).await.unwrap();
+    daemon.abort();
+}
+
+#[tokio::test]
 async fn out_of_service_worker_fails_placement_not_startup() {
     let server = require_nats!();
     // No daemon at all: startup succeeds (soft-fail), launch reports no slots.
