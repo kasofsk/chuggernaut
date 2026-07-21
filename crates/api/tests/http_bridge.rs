@@ -150,6 +150,7 @@ async fn http_bridge_end_to_end() {
         handle,
         Arc::new(vcs::RepoManager::new(&repos_root)),
         None,
+        None,
     )
     .await
     .unwrap();

@@ -12,6 +12,7 @@
 use crate::core::{
     ChannelPost, CoreError, CoreHandle, CreateJobRequest, EvalSubmission, WorkSubmission,
 };
+use crate::wizard::{self, JobLine, WizardConfig, WizardError, WizardRequest};
 use std::sync::Arc;
 use store::NatsStore;
 use types::TaskResolution;
@@ -149,6 +150,20 @@ fn bad_request(message: &str) -> Vec<u8> {
     .unwrap()
 }
 
+fn service_unavailable(message: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "error": { "status": 503, "message": message }
+    }))
+    .unwrap()
+}
+
+fn bad_gateway(message: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "error": { "status": 502, "message": message }
+    }))
+    .unwrap()
+}
+
 const NOT_FOUND: &[u8] = br#"{"error":{"status":404,"message":"not found"}}"#;
 
 /// Wire body for `req.jobs.create` (spec §6.2 POST .../jobs).
@@ -192,6 +207,8 @@ pub async fn spawn_api_handlers(
     // Binary path baked into new repos' pre-receive hooks (§5.2) — the path
     // the binary has on the SSH host (`HOOK_BIN`); None → this process's own.
     hook_bin: Option<std::path::PathBuf>,
+    // The New Job job-wizard LLM config; None → the wizard subject replies 503.
+    wizard: Option<Arc<WizardConfig>>,
 ) -> store::Result<()> {
     // ── req.projects.create — bare repo + hook + starter template ───────
     let mut projects_sub = store
@@ -298,7 +315,7 @@ pub async fn spawn_api_handlers(
             }
         });
     }
-    spawn_read_handlers(store, handle, repos).await
+    spawn_read_handlers(store, handle, repos, wizard).await
 }
 
 /// §12.2 project creation, dispatcher-side (the API path; `admin project
@@ -370,6 +387,7 @@ async fn spawn_read_handlers(
     store: &NatsStore,
     handle: CoreHandle,
     repos: Arc<RepoManager>,
+    wizard: Option<Arc<WizardConfig>>,
 ) -> store::Result<()> {
     // ── req.jobs.{create,get,list,release,revoke,criteria} ──────────────
     let mut jobs_sub = store.subscribe_requests("req.jobs.>").await?;
@@ -647,6 +665,7 @@ async fn spawn_read_handlers(
     // ── req.vcs.diff.{owner}.{project}.{seq} ────────────────────────────
     let mut diff_sub = store.subscribe_requests("req.vcs.diff.>").await?;
     let diff_store = store.clone();
+    let diff_repos = repos.clone();
     tokio::spawn(async move {
         while let Some(req) = diff_sub.next().await {
             let parts: Vec<&str> = req.subject.split('.').collect();
@@ -660,7 +679,7 @@ async fn spawn_read_handlers(
             };
             let body = match diff_store.jobs().await {
                 Ok(jobs) => match jobs.get(owner, project, seq).await {
-                    Ok(Some(job)) => match repos.diff_for_job(&job).await {
+                    Ok(Some(job)) => match diff_repos.diff_for_job(&job).await {
                         Ok(diff) => ok_reply(&diff),
                         Err(e) => error_reply(&e.into()),
                     },
@@ -673,7 +692,110 @@ async fn spawn_read_handlers(
         }
     });
 
+    // ── req.wizard.chat.{owner}.{project} — one turn of the New Job job-wizard
+    // chat. Read-only: grounds the conversation in repo/job context and calls
+    // the LLM; never touches job state.
+    let mut wizard_sub = store.subscribe_requests("req.wizard.chat.>").await?;
+    let wizard_store = store.clone();
+    let wizard_repos = repos.clone();
+    tokio::spawn(async move {
+        while let Some(req) = wizard_sub.next().await {
+            let parts: Vec<&str> = req.subject.split('.').collect();
+            let (Some(owner), Some(project)) = (parts.get(3).copied(), parts.get(4).copied())
+            else {
+                req.respond(bad_request("malformed subject")).await;
+                continue;
+            };
+            let Some(config) = wizard.as_deref() else {
+                req.respond(service_unavailable("job wizard is not configured"))
+                    .await;
+                continue;
+            };
+            let body = match serde_json::from_slice::<WizardRequest>(&req.payload) {
+                Err(e) => bad_request(&e.to_string()),
+                Ok(request) => {
+                    wizard_reply(
+                        config,
+                        &wizard_store,
+                        &wizard_repos,
+                        owner,
+                        project,
+                        request,
+                    )
+                    .await
+                }
+            };
+            req.respond(body).await;
+        }
+    });
+
     Ok(())
+}
+
+/// Gather grounding context (recent jobs + repo file layout), run one wizard
+/// turn, and encode the reply envelope.
+async fn wizard_reply(
+    config: &WizardConfig,
+    store: &NatsStore,
+    repos: &RepoManager,
+    owner: &str,
+    project: &str,
+    request: WizardRequest,
+) -> Vec<u8> {
+    // Recent jobs (newest first) so the wizard matches house style and avoids
+    // proposing duplicates. Best-effort: an empty list is still useful context.
+    let jobs: Vec<JobLine> = match store.jobs().await {
+        Ok(js) => match js.list(owner, project).await {
+            Ok(mut list) => {
+                list.sort_by_key(|j| std::cmp::Reverse(j.id));
+                list.into_iter()
+                    .map(|j| JobLine {
+                        id: j.id,
+                        r#type: j.r#type,
+                        title: j.title,
+                        state: format!("{:?}", j.state),
+                    })
+                    .collect()
+            }
+            Err(_) => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    };
+    // The repo file layout (blob paths at default HEAD), so the wizard can cite
+    // real files. Best-effort — a fresh repo may not resolve yet.
+    let files: Vec<String> = repo_file_paths(repos, owner, project)
+        .await
+        .unwrap_or_default();
+
+    let context = wizard::build_context(&format!("{owner}/{project}"), &files, &jobs);
+    match wizard::run(config, &context, &request.messages).await {
+        Ok(turn) => ok_reply(&turn),
+        Err(WizardError::EmptyConversation) => {
+            bad_request(&WizardError::EmptyConversation.to_string())
+        }
+        Err(WizardError::Unconfigured) => {
+            service_unavailable(&WizardError::Unconfigured.to_string())
+        }
+        // Upstream model failures surface as 502 — the request was well-formed,
+        // the dependency failed.
+        Err(e) => bad_gateway(&e.to_string()),
+    }
+}
+
+/// Blob paths in the repo at default-branch HEAD (files only, no tree entries).
+async fn repo_file_paths(
+    repos: &RepoManager,
+    owner: &str,
+    project: &str,
+) -> Result<Vec<String>, vcs::VcsError> {
+    let branch = repos.default_branch(owner, project).await?;
+    let head = repos.resolve_ref(owner, project, &branch).await?;
+    let entries = repos.tree(owner, project, &head).await?;
+    Ok(entries
+        .into_iter()
+        .filter(|e| e.r#type == "blob")
+        .map(|e| e.path)
+        .collect())
 }
 
 /// Resolved evaluation criteria for one job: the type's evaluators (with

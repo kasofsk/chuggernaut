@@ -50,4 +50,9 @@ pub struct DispatcherConfigSnapshot {
     /// Whether the dispatcher loaded the age identity — i.e. secrets are
     /// encrypted at rest rather than injected raw (§8.2 dev mode).
     pub secrets_encryption: bool,
+    /// Whether the New Job "job wizard" LLM chat is configured (`WIZARD_API_KEY`
+    /// / `ANTHROPIC_API_KEY`). False → the UI falls back to manual title/
+    /// description entry.
+    #[serde(default)]
+    pub wizard_available: bool,
 }

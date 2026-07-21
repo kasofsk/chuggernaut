@@ -135,6 +135,7 @@ async fn config_endpoints() {
                 channel_binary: None,
                 hook_bin: None,
                 secrets_encryption: true,
+                wizard_available: true,
             },
         )
         .await

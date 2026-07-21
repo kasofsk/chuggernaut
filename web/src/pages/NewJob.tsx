@@ -1,6 +1,14 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { ApiError, api, type Evaluator, type Job, type JobTypeDetail, type JobTypeSummary } from '../api'
+import {
+  ApiError,
+  api,
+  type Evaluator,
+  type Job,
+  type JobTypeDetail,
+  type JobTypeSummary,
+  type WizardMessage,
+} from '../api'
 import { ProjectTabs } from '../components/ProjectTabs'
 import { RichSelect } from '../components/RichSelect'
 
@@ -70,6 +78,127 @@ export function NewJobPage() {
           }
         />
       </section>
+    </div>
+  )
+}
+
+/**
+ * The "job wizard": a short chat that turns a rough goal into a high-quality
+ * ticket. Each turn posts the whole conversation to the dispatcher, which
+ * grounds it in repo/job context and calls the LLM. When the wizard produces a
+ * draft it lifts the title + description up (`onDraft`) to pre-fill the ticket
+ * fields below, which stay fully editable. If the platform hasn't configured
+ * the wizard (503), it steps aside so the operator writes the ticket manually.
+ */
+function JobWizard({
+  owner,
+  project,
+  onDraft,
+}: {
+  owner: string
+  project: string
+  onDraft: (title: string, description: string) => void
+}) {
+  const [messages, setMessages] = useState<WizardMessage[]>([])
+  const [input, setInput] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [unavailable, setUnavailable] = useState(false)
+  const [drafted, setDrafted] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const logRef = useRef<HTMLDivElement>(null)
+
+  // Keep the latest message in view as the conversation grows.
+  useEffect(() => {
+    logRef.current?.scrollTo({ top: logRef.current.scrollHeight })
+  }, [messages, busy])
+
+  async function send(e: FormEvent) {
+    e.preventDefault()
+    const text = input.trim()
+    if (!text || busy) return
+    const next: WizardMessage[] = [...messages, { role: 'user', content: text }]
+    setMessages(next)
+    setInput('')
+    setBusy(true)
+    setError(null)
+    try {
+      const turn = await api.wizard(owner, project, next)
+      setMessages([...next, { role: 'assistant', content: turn.reply }])
+      if (turn.draft) {
+        onDraft(turn.draft.title, turn.draft.description)
+        setDrafted(true)
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 503) setUnavailable(true)
+      else setError(err instanceof Error ? err.message : 'wizard request failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (unavailable) {
+    return (
+      <div className="field">
+        <span>
+          Job wizard <span className="dim">(unavailable — write the ticket below)</span>
+        </span>
+        <div className="dim wizard-note">
+          The job wizard isn't configured on this platform. Fill in the title and description
+          yourself.
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="field">
+      <span>
+        Job wizard{' '}
+        <span className="dim">(describe the goal; the wizard drafts the ticket for you)</span>
+      </span>
+      <div className="wizard">
+        <div className="wizard-log" ref={logRef}>
+          {messages.length === 0 && (
+            <div className="wizard-hello dim">
+              Tell me what you want done — a feature, a bug, a chore. I'll ask a couple of
+              questions and write a thorough ticket with a good title.
+            </div>
+          )}
+          {messages.map((m, i) => (
+            <div key={i} className={`wizard-msg wizard-${m.role}`}>
+              {m.content}
+            </div>
+          ))}
+          {busy && <div className="wizard-msg wizard-assistant dim">thinking…</div>}
+        </div>
+        <form className="wizard-input" onSubmit={send}>
+          <textarea
+            rows={2}
+            autoFocus
+            placeholder={
+              messages.length ? 'reply to the wizard…' : 'e.g. make the job list load faster'
+            }
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter sends; Shift+Enter inserts a newline.
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                send(e)
+              }
+            }}
+          />
+          <button type="submit" disabled={busy || !input.trim()}>
+            send
+          </button>
+        </form>
+      </div>
+      {drafted && (
+        <div className="dim wizard-note">
+          Drafted below — edit the title and description freely, then create the job.
+        </div>
+      )}
+      {error && <div className="error">{error}</div>}
     </div>
   )
 }
@@ -197,9 +326,18 @@ function CreateJob({
 
   return (
     <form className="create-job" onSubmit={submit}>
+      <JobWizard
+        owner={owner}
+        project={project}
+        onDraft={(t, d) => {
+          setTitle(t)
+          setDescription(d)
+        }}
+      />
+
       <label className="field">
         <span>Title <span className="dim">(what this run is for)</span></span>
-        <input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus />
+        <input value={title} onChange={(e) => setTitle(e.target.value)} />
       </label>
 
       <label className="field">

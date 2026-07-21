@@ -73,6 +73,7 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
         handle.clone(),
         Arc::new(RepoManager::new(&config.repos_root)),
         config.hook_bin.clone(),
+        config.wizard.clone().map(Arc::new),
     )
     .await?;
     tracing::info!(nats = %config.nats_url, repos = %config.repos_root.display(), "dispatcher up");
@@ -110,6 +111,7 @@ async fn publish_config_snapshot(
             .map(|p| p.display().to_string()),
         hook_bin: config.hook_bin.as_ref().map(|p| p.display().to_string()),
         secrets_encryption,
+        wizard_available: config.wizard.is_some(),
     };
     match store.raw_bucket(store::buckets::PLATFORM).await {
         Ok(bucket) => {

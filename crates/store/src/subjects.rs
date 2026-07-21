@@ -159,6 +159,12 @@ pub fn vcs_diff(owner: &str, project: &str, seq: u64) -> String {
     format!("req.vcs.diff.{owner}.{project}.{seq}")
 }
 
+/// One turn of the New Job "job wizard" chat: the conversation rides in the
+/// payload, the dispatcher grounds it in repo/job context and calls the LLM.
+pub fn wizard_chat(owner: &str, project: &str) -> String {
+    format!("req.wizard.chat.{owner}.{project}")
+}
+
 // ── Worker-node protocol (spec §3.1) ────────────────────────────────────────
 // Published by the dispatcher's fleet backend, served by the `chuggernaut
 // worker` daemon on the node. Node names are validated subject-safe at

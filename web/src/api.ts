@@ -208,6 +208,29 @@ export interface DispatcherSnapshot {
   channel_binary: string | null
   hook_bin: string | null
   secrets_encryption: boolean
+  /** Whether the New Job "job wizard" LLM chat is configured; false → the UI
+   *  falls back to manual title/description entry. */
+  wizard_available?: boolean
+}
+
+/** One message in the job-wizard conversation. */
+export interface WizardMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+/** A ticket draft the wizard proposes once it has enough to go on. */
+export interface TicketDraft {
+  title: string
+  description: string
+}
+
+/** POST .../wizard — one wizard turn: the chat reply, and (once ready) the
+ *  drafted ticket to pre-fill the form. */
+export interface WizardTurn {
+  reply: string
+  draft: TicketDraft | null
+  done: boolean
 }
 
 /** GET /platform/config — read-only platform settings (admins only). */
@@ -287,6 +310,10 @@ export const api = {
     req<Job>('GET', `/api/v1/projects/${owner}/${project}/jobs/${seq}`),
   createJob: (owner: string, project: string, body: { type: string; title?: string; description?: string; deps?: number[]; knowledge_tags?: string[]; eval?: Evaluator[]; timeout?: string }) =>
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs`, body),
+  /** One turn of the New Job job-wizard chat: send the conversation so far,
+   *  get the assistant's reply and (once ready) a ticket draft. */
+  wizard: (owner: string, project: string, messages: WizardMessage[]) =>
+    req<WizardTurn>('POST', `/api/v1/projects/${owner}/${project}/wizard`, { messages }),
   criteria: (owner: string, project: string, seq: number) =>
     req<JobCriteria>('GET', `/api/v1/projects/${owner}/${project}/jobs/${seq}/criteria`),
   release: (owner: string, project: string, seq: number) =>
