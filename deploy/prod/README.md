@@ -8,7 +8,12 @@ agent containers as siblings. Deployed **automatically on every green `main`** v
 the Mini's GitHub self-hosted runner, and **backed up hourly to Cloudflare R2**.
 
 Chuggernaut itself is still developed on the laptop and pushed to GitHub; the Mini
-only *consumes* `main`.
+only *consumes* `main`. Since the dogfood project link (`kasofsk/chuggernaut`),
+finished agent work also flows *back* to GitHub as `chug/release-{n}` PRs.
+
+- **Deploy user**: the launchd services and all state run under the Mini's local
+  account **`worksalot`** — that's the `<you>`/`$CHUG_DATA` user throughout this
+  runbook, and the username for Tailscale SSH (`ssh worksalot@gumbo-mini-0`).
 
 - **State lives outside the checkout** at `~/chuggernaut-data/{keys,repos,backups}`
   (+ the `nats-data` Docker volume), so a `git checkout`/deploy never touches it.
