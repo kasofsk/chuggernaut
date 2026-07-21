@@ -237,6 +237,135 @@ async fn restart_recovers_orphaned_running_work_task() {
     assert_eq!(provider.runs().len(), 1); // only the retry ran here
 }
 
+/// §3.6 startup sweep: exited `chuggernaut.managed` containers left behind by
+/// a crash/restart are reclaimed at boot — but only when their task is terminal
+/// (or gone entirely). A container a live task may still resume is kept.
+/// This is the other half of the disk-leak fix: task-exit removal covers the
+/// happy path, the sweep covers containers orphaned by a crash before that ran.
+#[tokio::test]
+async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/flaky.yaml", FLAKY.as_bytes(), "type")
+        .await;
+    clone
+        .commit_file("prompts/impl.md", b"implement it", "prompt")
+        .await;
+    clone.push("main").await;
+    let head = repo.head().await;
+
+    // An escalated job (recovery leaves it alone) with two tasks: one already
+    // terminal, one still live. Their containers exited when the process died.
+    store
+        .jobs()
+        .await
+        .unwrap()
+        .put(&Job {
+            id: 1,
+            project: "acme/api".into(),
+            r#type: "flaky".into(),
+            title: String::new(),
+            description: String::new(),
+            deps: vec![],
+            state: JobState::Escalated,
+            branch: "job/1".into(),
+            base_ref: Some(head),
+            knowledge_tags: vec![],
+            eval: vec![],
+            timeout: None,
+            factory: None,
+            created_at: Utc::now(),
+            ready_at: Some(Utc::now()),
+        })
+        .await
+        .unwrap();
+    let mk_task = |id: u64, state: TaskState, container: &str| Task {
+        id,
+        job_seq: 1,
+        project: "acme/api".into(),
+        phase: TaskPhase::Work,
+        cycle: 1,
+        kind: TaskKind::Agent {
+            provider: "claude".into(),
+            model: None,
+            prompt: "prompts/impl.md".into(),
+        },
+        state,
+        attempt: 1,
+        evaluator: None,
+        stage: 0,
+        container_id: Some(container.into()),
+        session_id: None,
+        result: None,
+        created_at: Utc::now(),
+        started_at: Some(Utc::now()),
+        completed_at: None,
+    };
+    let tasks = store.tasks().await.unwrap();
+    tasks
+        .put(&mk_task(1, TaskState::Done, "local/c-terminal"))
+        .await
+        .unwrap();
+    tasks
+        .put(&mk_task(2, TaskState::Pending, "local/c-live"))
+        .await
+        .unwrap();
+
+    // The daemon reports three exited managed containers: the two above plus a
+    // pure orphan with no task record at all (a crash before the task write).
+    let backend = Arc::new(FakeBackend::new());
+    backend.seed_managed_exited([
+        "local/c-terminal".to_string(),
+        "local/c-live".to_string(),
+        "local/c-orphan".to_string(),
+    ]);
+
+    let provider = Arc::new(FakeProvider::new());
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        backend.clone(),
+        provider.clone(),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _handle = spawn(core);
+
+    // Reconciliation runs once at startup; wait for the sweep to settle.
+    let mut removed = Vec::new();
+    for _ in 0..100 {
+        removed = backend.removed();
+        if removed.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    removed.sort();
+    assert_eq!(
+        removed,
+        vec!["local/c-orphan".to_string(), "local/c-terminal".to_string()],
+        "terminal-task and orphan containers reclaimed; live-task container kept"
+    );
+}
+
 /// A dispatcher died mid-wrap-up: the job record says WrapUp (eval already
 /// passed) and the job was parked in the in-memory merge queue, which is lost
 /// on restart. Reconciliation re-enters it into the queue and it lands

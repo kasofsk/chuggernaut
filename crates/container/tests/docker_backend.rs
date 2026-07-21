@@ -37,3 +37,25 @@ async fn inspect_kill_and_not_found() {
     let Some(be) = docker() else { return };
     suite::inspect_kill_and_not_found(&be, "local").await;
 }
+
+/// The leak fix: after harvesting, `remove` reclaims the overlay and the
+/// startup sweep sees the exited container until then. `remove` is idempotent.
+#[tokio::test]
+async fn remove_reclaims_exited_container_and_is_idempotent() {
+    let Some(be) = docker() else { return };
+    let id = be.launch(cfg("exit 0")).await.unwrap();
+    assert_eq!(be.wait(&id).await.unwrap(), 0);
+
+    // While exited-but-present it is a sweep candidate.
+    assert!(
+        be.list_managed_exited().await.unwrap().contains(&id),
+        "exited managed container should show up for the startup sweep"
+    );
+
+    be.remove(&id).await.unwrap();
+    // Gone: inspect no longer finds it, and it drops out of the sweep list.
+    assert!(be.inspect(&id).await.unwrap().is_none());
+    assert!(!be.list_managed_exited().await.unwrap().contains(&id));
+    // Removing an already-gone container is a no-op, not an error.
+    be.remove(&id).await.unwrap();
+}

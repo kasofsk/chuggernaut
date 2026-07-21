@@ -180,6 +180,9 @@ impl Core {
                     // harvest it before reporting the exit.
                     let (assessment, usage) =
                         harvest.collect_agent(&o, &p, seq, task_id, &out).await;
+                    if let Some(id) = &out.container_id {
+                        harvest.dispose(seq, task_id, id).await;
+                    }
                     (out.exit_code, assessment, usage)
                 }
                 Err(e) => {
