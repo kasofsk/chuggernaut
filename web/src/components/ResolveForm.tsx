@@ -9,6 +9,7 @@ export function ResolveForm({
   escalation,
   preWork = false,
   evaluator = false,
+  work = false,
   onResolve,
 }: {
   escalation: boolean
@@ -16,9 +17,13 @@ export function ResolveForm({
   preWork?: boolean
   /** human evaluator task: failing offers the abort verdict (design-lifecycle.md) */
   evaluator?: boolean
+  /** human-performed work attempt: Pass offers a summary — it becomes the
+   *  squash-merge commit body, like an agent's submit_result (§1.2 claims) */
+  work?: boolean
   onResolve: (r: TaskResolution) => void
 }) {
   const [notes, setNotes] = useState('')
+  const [summary, setSummary] = useState('')
   const [abort, setAbort] = useState(false)
   const structured = notes.trim() ? { notes: notes.trim() } : null
 
@@ -48,7 +53,20 @@ export function ResolveForm({
         </>
       ) : (
         <>
-          <button onClick={() => onResolve({ kind: 'Pass', structured })}>pass</button>
+          {work && (
+            <input
+              placeholder="summary (optional; becomes the merge commit body)"
+              value={summary}
+              onChange={(e) => setSummary(e.target.value)}
+            />
+          )}
+          <button
+            onClick={() =>
+              onResolve({ kind: 'Pass', structured, summary: summary.trim() || undefined })
+            }
+          >
+            pass
+          </button>
           <button
             className="danger"
             disabled={!structured}

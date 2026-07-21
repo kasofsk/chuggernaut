@@ -56,8 +56,10 @@ export function JobDetail() {
     )
   }
 
+  // Human-kind tasks AND claimed attempts of any kind (§1.2 claims) — both
+  // resolve through the inbox.
   const pendingHuman = tasks.filter(
-    (t) => t.kind.kind === 'Human' && t.state === 'Pending',
+    (t) => (t.kind.kind === 'Human' || t.performed_by === 'human') && t.state === 'Pending',
   )
   // Advisory triage runs (§1.2), newest first.
   const triageTasks = tasks
@@ -73,11 +75,16 @@ export function JobDetail() {
         </Link>
         <h1>
           #{job.id} <StateBadge state={job.state} />
-          {job.awaiting_human && (
-            <span className="badge badge-orange" title="a human task is pending in the inbox below">
-              action needed
-            </span>
-          )}
+          {job.awaiting_human &&
+            (job.awaiting_human.claimed ? (
+              <span className="badge badge-purple" title="a claimed attempt is in progress — a human is doing the work">
+                human working
+              </span>
+            ) : (
+              <span className="badge badge-orange" title="a human task is pending in the inbox below">
+                action needed
+              </span>
+            ))}
         </h1>
       </header>
       {error && <div className="error banner">{error}</div>}
@@ -137,6 +144,23 @@ export function JobDetail() {
               ▶ run
             </button>
           )}
+          {!job.claim_next &&
+            (job.state === 'Frozen' || job.state === 'Blocked' || job.state === 'Ready') && (
+              <button
+                title="claim the next work attempt: it parks for you instead of launching (§1.2 claims)"
+                onClick={() => api.claim(owner, project, job.id).then(refresh, setActionError(setError))}
+              >
+                claim
+              </button>
+            )}
+          {job.claim_next && (
+            <button
+              title="clear the pending claim; the attempt will launch normally"
+              onClick={() => api.unclaim(owner, project, job.id).then(refresh, setActionError(setError))}
+            >
+              unclaim
+            </button>
+          )}
           {(job.state === 'Escalated' || job.state === 'Stalled') && (
             <button
               title="run an advisory triage agent over the job state — assessment + recommendation, no change to the job"
@@ -168,10 +192,17 @@ export function JobDetail() {
                 {t.evaluator ? ` · ${t.evaluator}` : ''}
               </div>
               {t.kind.kind === 'Human' && <pre className="prompt">{t.kind.prompt}</pre>}
+              {t.performed_by === 'human' && (
+                <div className="dim">
+                  you claimed this attempt — push to {job.branch}, then pass to submit
+                  (or fail to hand it back; the next attempt runs per the declared kind)
+                </div>
+              )}
               <ResolveForm
                 escalation={job.state === 'Escalated' || job.state === 'Stalled'}
                 preWork={job.state === 'Stalled'}
                 evaluator={t.phase === 'Evaluation'}
+                work={t.phase === 'Work' && job.state === 'Work'}
                 onResolve={(r) =>
                   api.resolve(owner, project, job.id, t.id, r).then(refresh, setActionError(setError))
                 }
@@ -230,6 +261,7 @@ export function JobDetail() {
                 <td>
                   {t.kind.kind}
                   {t.evaluator ? ` · ${t.evaluator}` : ''}
+                  {t.performed_by === 'human' && <span className="dim"> · by human</span>}
                 </td>
                 <td>
                   <TaskBadge state={t.state} />

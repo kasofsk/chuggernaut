@@ -17,6 +17,9 @@ export type JobState =
 export interface AwaitingHuman {
   task_id: number
   kind: 'work' | 'eval' | 'escalation'
+  /** the pending item is a claimed attempt — a human is actively working it,
+   *  not passively awaited (spec §1.2 claims) */
+  claimed?: boolean
 }
 
 export interface Evaluator {
@@ -108,6 +111,9 @@ export interface Job {
   /** per-job Work agent model override; wins over the job type, project
    *  (jobs/_defaults.yaml) and platform defaults; null → those apply */
   model: string | null
+  /** a human has claimed the next work attempt (spec §1.2 claims);
+   *  cleared when the attempt parks */
+  claim_next?: boolean
   factory: string | null
   created_at: string
   ready_at: string | null
@@ -130,6 +136,8 @@ export interface Task {
   state: 'Pending' | 'Running' | 'Done' | 'Failed'
   attempt: number
   evaluator: string | null
+  /** set on claimed attempts: the declared kind stays, a human performed it */
+  performed_by?: 'human' | null
   container_id: string | null
   /// Agent tasks only: names the captured session transcript.
   session_id: string | null
@@ -154,7 +162,9 @@ export interface DiffResponse {
 }
 
 export type TaskResolution =
-  | { kind: 'Pass'; structured: unknown | null }
+  // summary (work tasks only): the human's completion summary — flows into
+  // the squash-merge commit body like an agent's submit_result.
+  | { kind: 'Pass'; structured: unknown | null; summary?: string | null }
   // abort (evaluator tasks only): "not satisfiable by rework" — skips the
   // remaining rework budget and escalates.
   | { kind: 'Fail'; structured: unknown; abort?: boolean }
@@ -323,6 +333,12 @@ export const api = {
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/release`),
   revoke: (owner: string, project: string, seq: number) =>
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/revoke`),
+  /** Claim the next work attempt for a human (spec §1.2 claims); 409 while an attempt is in flight. */
+  claim: (owner: string, project: string, seq: number) =>
+    req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/claim`),
+  /** Clear a pending claim that has not materialized into a parked task yet. */
+  unclaim: (owner: string, project: string, seq: number) =>
+    req<Job>('DELETE', `/api/v1/projects/${owner}/${project}/jobs/${seq}/claim`),
   /** Dispatch an advisory triage agent over an Escalated/Stalled job (§1.2). */
   triage: (owner: string, project: string, seq: number) =>
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/triage`),

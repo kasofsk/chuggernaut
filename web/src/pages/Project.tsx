@@ -47,6 +47,7 @@ export function ProjectPage() {
     const state = jobBySeq.get(t.job_seq)?.state
     if (state === 'Escalated' || state === 'Stalled') return 'escalation'
     if (t.phase === 'Evaluation') return 'review'
+    if (t.performed_by === 'human') return `claimed ${t.kind.kind.toLowerCase()} work`
     return 'human work'
   }
 
@@ -87,6 +88,12 @@ export function ProjectPage() {
                 </span>
               </div>
               {t.kind.kind === 'Human' && <pre className="prompt">{t.kind.prompt}</pre>}
+              {t.performed_by === 'human' && (
+                <div className="dim">
+                  you claimed this attempt — push to job/{t.job_seq}, then pass to submit
+                  (or fail to hand it back; the next attempt runs per the declared kind)
+                </div>
+              )}
               <ResolveForm
                 escalation={
                   jobBySeq.get(t.job_seq)?.state === 'Escalated' ||
@@ -94,6 +101,10 @@ export function ProjectPage() {
                 }
                 preWork={jobBySeq.get(t.job_seq)?.state === 'Stalled'}
                 evaluator={t.phase === 'Evaluation'}
+                work={
+                  t.phase === 'Work' &&
+                  jobBySeq.get(t.job_seq)?.state === 'Work'
+                }
                 onResolve={(r) => act(() => api.resolve(owner, project, t.job_seq, t.id, r))}
               />
             </div>
@@ -139,6 +150,16 @@ export function ProjectPage() {
                 </td>
                 <td>
                   <StateBadge state={j.state} />
+                  {j.awaiting_human?.claimed && (
+                    <span className="badge badge-purple" title="a claimed attempt is in progress — a human is doing the work">
+                      human working
+                    </span>
+                  )}
+                  {j.claim_next && (
+                    <span className="badge badge-purple" title="the next work attempt will park for a human instead of launching">
+                      claimed
+                    </span>
+                  )}
                 </td>
                 <td className="dim">
                   {j.deps.map((d) => `#${d}`).join(', ')}
@@ -151,6 +172,23 @@ export function ProjectPage() {
                       onClick={() => act(() => api.release(owner, project, j.id))}
                     >
                       ▶ run
+                    </button>
+                  )}
+                  {!j.claim_next &&
+                    (j.state === 'Frozen' || j.state === 'Blocked' || j.state === 'Ready') && (
+                      <button
+                        title="claim the next work attempt: it parks for you instead of launching (§1.2 claims)"
+                        onClick={() => act(() => api.claim(owner, project, j.id))}
+                      >
+                        claim
+                      </button>
+                    )}
+                  {j.claim_next && (
+                    <button
+                      title="clear the pending claim; the attempt will launch normally"
+                      onClick={() => act(() => api.unclaim(owner, project, j.id))}
+                    >
+                      unclaim
                     </button>
                   )}
                   {j.state !== 'Done' && j.state !== 'Revoked' && (
