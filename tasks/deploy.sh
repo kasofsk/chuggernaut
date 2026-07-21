@@ -17,11 +17,12 @@
 # file path in MINI_DEPLOY_KEY_FILE instead, honour it directly.
 set -eu
 
-# The Mini's LAN address, NOT its tailnet IP: Tailscale SSH owns port 22 on
-# the tailnet interface and rejects tagged->tagged connections (the container
-# egresses as the worker node). Real sshd + key auth answer on the LAN.
-# DHCP-fragile — give the Mini a static lease; revisit if this ever times out.
-MINI_HOST="worksalot@192.168.129.200"
+# Tailnet IP on the dedicated :2200 sshd (LaunchDaemon com.chuggernaut.sshd2200,
+# key-auth only, bound to the tailnet interface). Not the LAN: worker containers
+# behind colima user-mode NAT (macOS hosts) cannot reach LAN addresses. Not
+# tailnet :22: Tailscale SSH owns it and rejects tagged->tagged connections.
+MINI_HOST="worksalot@100.116.243.42"
+MINI_PORT=2200
 REMOTE_UPDATE="~/chuggernaut/deploy/prod/update.sh"
 
 # A deploy job has no commits of its own: HEAD == the released main.
@@ -42,7 +43,7 @@ else
 fi
 
 echo "deploy: shipping $SHA to $MINI_HOST"
-ssh -i "$KEY_FILE" \
+ssh -i "$KEY_FILE" -p "$MINI_PORT" \
   -o IdentitiesOnly=yes \
   -o StrictHostKeyChecking=accept-new \
   "$MINI_HOST" "$REMOTE_UPDATE $SHA"

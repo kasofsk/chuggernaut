@@ -10,9 +10,11 @@
 # index.html and its hashed assets disagree to a minimum.
 set -eu
 
-# LAN address, not tailnet (same reasoning as tasks/deploy.sh: Tailscale SSH
-# owns :22 on the tailnet interface and rejects tagged->tagged).
-MINI_HOST="worksalot@192.168.129.200"
+# Tailnet address on the dedicated :2200 sshd (LaunchDaemon
+# com.chuggernaut.sshd2200): worker containers behind colima NAT cannot reach
+# the LAN, and Tailscale SSH owns tailnet :22 (rejects tagged->tagged).
+MINI_HOST="worksalot@100.116.243.42"
+MINI_PORT=2200
 UI_ROOT="\$HOME/chuggernaut-data/ui"   # expanded remotely
 
 SHA="$(git rev-parse HEAD)"
@@ -29,7 +31,7 @@ else
   echo "web-publish: MINI_DEPLOY_KEY (or MINI_DEPLOY_KEY_FILE) not set — cannot ssh" >&2
   exit 1
 fi
-SSH="ssh -i $KEY_FILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+SSH="ssh -i $KEY_FILE -p $MINI_PORT -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
 
 echo "web-publish: building web/dist at $SHA"
 cd web
