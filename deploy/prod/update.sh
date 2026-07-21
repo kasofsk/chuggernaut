@@ -1,21 +1,24 @@
 #!/bin/sh
-# Chuggernaut CD workhorse — build the target commit natively and restart the
-# host services, idempotently. Called by .github/workflows/deploy.yml on the
-# Mini's self-hosted runner (after CI is green on main), and runnable by hand.
+# Chuggernaut deploy workhorse — build the target commit natively and restart
+# the host services, idempotently. Invoked over ssh by a `deploy` job's
+# tasks/deploy.sh (which passes the released SHA), and runnable by hand.
 #
 # It operates on the DEPLOYED checkout ($CHUG_REPO), NOT on wherever this script
-# happens to be invoked from — the GitHub runner's ephemeral workspace is a
-# different directory from the checkout launchd runs the binary out of.
+# happens to be invoked from — the deploy job's container/checkout is a
+# different directory from the one launchd runs the binary out of.
 #
-# Usage: update.sh [ref]        (ref defaults to $GITHUB_SHA, else origin/main)
+# The checkout's `origin` is now the local bare repo (HEAD == main), so with no
+# explicit ref we deploy whatever `origin/main` points at.
+#
+# Usage: update.sh [ref]        (ref defaults to origin/main)
 set -eu
 
 CHUG_REPO="${CHUG_REPO:-$HOME/chuggernaut}"   # the deployed checkout
-TARGET_REF="${1:-${GITHUB_SHA:-origin/main}}"
+TARGET_REF="${1:-origin/main}"
 
 # Pre-bootstrap guard: before the Mini has been set up (README §1) there is no
 # deployed checkout / config to act on. Skip cleanly (exit 0) rather than fail
-# the Actions job — the first real deploy takes over once bootstrap is done.
+# the deploy — the first real deploy takes over once bootstrap is done.
 if [ ! -d "$CHUG_REPO/.git" ]; then
   echo "update: $CHUG_REPO not bootstrapped yet — see deploy/prod/README.md §1; skipping"
   exit 0
@@ -73,7 +76,7 @@ GIT_UID="$(id -u)" docker compose -f deploy/prod/compose.yaml up -d --build ssh 
 #    reconciles in-memory state from KV).
 launchctl kickstart -k "gui/$(id -u)/com.chuggernaut.dispatcher"
 
-# 7. Health check — non-zero exit here fails the Actions job. The api container
+# 7. Health check — non-zero exit here fails the deploy job. The api container
 #    publishes to loopback :8080.
 HEALTH_URL="http://127.0.0.1:8080/"
 ok=""

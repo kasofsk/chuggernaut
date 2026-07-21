@@ -4,14 +4,16 @@ This is the canonical runbook for the always-on instance we use to drive **other
 projects. NATS, the SSH front, and the **api** (HTTP↔NATS bridge + web UI) run as
 **compose containers**; only the **dispatcher** runs as a native host process
 under **launchd** (it needs the Docker socket and the repos filesystem), launching
-agent containers as siblings. Deployed **automatically on every push to `main`** via
-the Mini's GitHub self-hosted runner, and **backed up hourly to Cloudflare R2**.
-There is no GitHub-side CI — fmt/clippy/test run as the Chuggernaut `ci`
-evaluator on the platform itself before work can merge and release.
+agent containers as siblings. Deployed by an **explicit `deploy` job** on the
+platform itself (§3), and **backed up hourly to Cloudflare R2**. There is no
+GitHub-side CI — fmt/clippy/test run as the Chuggernaut `ci` evaluator on the
+platform itself before any work can merge.
 
-Chuggernaut itself is still developed on the laptop and pushed to GitHub; the Mini
-only *consumes* `main`. Since the dogfood project link (`kasofsk/chuggernaut`),
-finished agent work also flows *back* to GitHub as `chug/release-{n}` PRs.
+**The platform owns its own repo.** `kasofsk/chuggernaut` is now a *classic*
+project: the bare repo's `main` (HEAD) is the source of truth, agents merge job
+branches straight into it, and **GitHub is a read-only mirror** force-pushed from
+the Mini (§3). Chuggernaut is developed *on the platform* — create a `code` or
+`manual` job, land it on `main`, then ship it with a `deploy` job.
 
 - **Deploy user**: the launchd services and all state run under the Mini's local
   account **`worksalot`** — that's the `<you>`/`$CHUG_DATA` user throughout this
@@ -55,22 +57,12 @@ Also:
   as **user LaunchAgents** in the GUI session (Colima + the sibling agent
   containers share the user's Docker socket), so the Mini must reach a logged-in
   session on boot.
-- **Runner label** — the Mini is already a self-hosted runner in the **Kasofsk
-  org**. Add the dedicated label **`chug`** to it (Settings → Actions →
-  Runners → the Mini → Labels, or re-run its `config.sh --labels chug`)
-  so `deploy.yml` lands only here. Confirm the runner's user has
-  `cargo`/`npm`/`colima`/`launchctl` on PATH.
-- **Repo access** — `deploy.yml` runs only if `Kasofsk/chuggernaut` is granted to
-  the org runner group. Transfer/keep the repo under the org, and **make it
-  private** (self-hosted runners + public repos = fork PRs running on your box).
-- **Deploy key** — the deployed checkout (`$CHUG_REPO`) fetches `main` over SSH in
-  `update.sh`, independently of the Actions runner's token. Give the Mini a
-  **read-only** GitHub deploy key and register the public half under the repo's
-  **Settings → Deploy keys** (leave write access off):
-  ```sh
-  ssh-keygen -t ed25519 -N "" -f ~/.ssh/chuggernaut_deploy   # add the .pub to Deploy keys
-  printf '\nHost github.com\n  IdentityFile ~/.ssh/chuggernaut_deploy\n  IdentitiesOnly yes\n' >> ~/.ssh/config
-  ```
+- **GitHub Actions runner / GitHub deploy key** — *no longer needed for deploys.*
+  Deploys are now `deploy` jobs (§3) and `origin` is the local bare repo, so the
+  self-hosted runner and the GitHub read-only deploy key are out of the deploy
+  path. The runner config on the Mini is harmless if left; removing it is a
+  separate operator cleanup. The `deploy` job's own ssh key is `MINI_DEPLOY_KEY`
+  (§3), not a GitHub key.
 - **Colima has no `/var/run/docker.sock`** — the dispatcher (a native host process)
   reaches Docker via `DOCKER_NODES`, which **must** point at the colima socket, or
   it dies with `Socket not found: /var/run/docker.sock`. See §7 and `env.example`.
@@ -115,7 +107,7 @@ deploy/prod/install-launchd.sh
 claude setup-token | tail -1 | \
   chug admin --keys-dir "$KEYS_DIR" secret set --project global/agents --name CLAUDE_CODE_OAUTH_TOKEN
 
-# 8. mark the deployed commit so auto-deploy no-ops until the next push
+# 8. mark the deployed commit so update.sh no-ops until the next deploy job
 git rev-parse HEAD > .deployed-sha
 ```
 
@@ -140,6 +132,7 @@ Create projects with `chug admin project create --owner <o> --name <n> --repos-r
 | `com.chuggernaut.backup-hourly` | :00 hourly | `backup-r2.sh` |
 | `com.chuggernaut.backup-daily` | 03:20 | `backup-r2.sh promote daily` |
 | `com.chuggernaut.backup-monthly` | 1st 03:40 | `backup-r2.sh promote monthly` |
+| `com.chuggernaut.mirror` | :05 interval | `git push origin main:main --force-with-lease` (GitHub mirror; §3) |
 
 ```sh
 docker compose -f deploy/prod/compose.yaml ps          # container status (nats/ssh/api)
@@ -152,24 +145,47 @@ tail -f ~/Library/Logs/chuggernaut/*.log
 
 ---
 
-## 3. Continuous deployment (auto on push to `main`)
+## 3. Deployment (a `deploy` job) + the GitHub mirror
 
-`.github/workflows/deploy.yml` fires on every push to `main` (no GitHub CI —
-the platform's `ci` evaluator is the gate), runs on the `[self-hosted, chug]`
-runner, and executes `deploy/prod/update.sh <sha>`. `update.sh`:
+**GitHub Actions CD is gone.** There is no `.github/workflows/deploy.yml`, no
+self-hosted runner in the deploy path, and no push-triggered deploy. Deploying is
+now an **explicit chuggernaut `deploy` job** (`jobs/deploy.yaml`) — you create it
+and release it, exactly like any other job.
+
+### Shipping a build
+
+`main` is the source of truth on the platform. Once your change is on `main`
+(via a merged `code`/`manual` job), ship it:
+
+1. **Create** a `deploy` job (API `POST .../jobs` with `{type: "deploy"}`, or the
+   UI create-form → type *Deploy*).
+2. **Release** it. A deploy job carries no commits, so its `job/N` branch sits at
+   `main`'s HEAD — that SHA is what ships. Its work step, `tasks/deploy.sh`,
+   ssh's into the Mini and runs `deploy/prod/update.sh <sha>`. `wrap_up: none`,
+   so on eval-pass the job goes straight to Done and its scratch branch is dropped.
+
+`update.sh` itself is unchanged in spirit:
 
 1. no-ops if `.deployed-sha` already matches the target,
 2. else checks the SHA out in `$CHUG_REPO`, snapshots the old dispatcher binary
    to `chuggernaut.prev`, `cargo build --release` (host dispatcher), `build.sh`
    (ssh/agent/api images — the api image builds the web UI itself), idempotent
    `chug init`, rebuilds + restarts the `ssh` and `api` containers, `kickstart`s
-   the dispatcher, then health-checks `http://127.0.0.1:8080/` (non-zero → the
-   Actions job fails).
+   the dispatcher, then health-checks `http://127.0.0.1:8080/` (non-zero fails
+   the deploy job).
 
-CI now also runs on `push: [main]` (see `.github/workflows/ci.yml`) so there is a
-green run for `deploy.yml` to gate on.
+**Self-restart is by design.** `update.sh` `kickstart`s the dispatcher that
+supervises the very `deploy` job running it. The restart drops in-memory state;
+§3.6 reconciliation re-attaches to the still-running work container on the next
+tick and processes its exit normally. Don't "fix" this.
 
-**Manual deploy / rollback:**
+**The deploy key.** `tasks/deploy.sh` ssh's in with the `MINI_DEPLOY_KEY` project
+secret (injected as an env var — the private-key value; the script writes it to a
+0600 tempfile for `ssh -i`). Provision it once before the first deploy job:
+`chug admin ... secret set --project kasofsk/chuggernaut --name MINI_DEPLOY_KEY`
+(register the public half in the Mini's `~/.ssh/authorized_keys`).
+
+**Manual deploy / rollback** (still available by hand, from the checkout):
 ```sh
 CHUG_REPO=~/chuggernaut deploy/prod/update.sh              # deploy origin/main now
 CHUG_REPO=~/chuggernaut deploy/prod/update.sh <good-sha>   # roll back to a known-good commit
@@ -178,6 +194,29 @@ cp ~/chuggernaut/target/release/chuggernaut.prev ~/chuggernaut/target/release/ch
 launchctl kickstart -k gui/$(id -u)/com.chuggernaut.dispatcher
 # the api is a container — roll it back by rebuilding at the good SHA (update.sh)
 ```
+
+### GitHub mirror (`com.chuggernaut.mirror`, stopgap)
+
+GitHub is a **read-only mirror**. The `com.chuggernaut.mirror` launchd agent
+(§2) runs every 5 min:
+
+```sh
+git -C /Users/worksalot/chuggernaut-data/repos/kasofsk/chuggernaut.git \
+  push origin main:main --force-with-lease
+```
+
+⚠️ **Direct pushes to GitHub `main` will be overwritten.** The bare repo on the
+Mini owns `main`; the mirror force-pushes over whatever is on GitHub (the lease
+only guards against a mid-push race, not against you pushing your own commits).
+Never treat GitHub as writable for this repo — land changes as jobs on the
+platform. This launchd mirror is a stopgap until mirroring becomes a dispatcher
+feature (separate job).
+
+> The old `CHUG_ORIGIN_DEPLOY_KEY` / `CHUG_ORIGIN_PAT` project secrets (from the
+> linked-origin era) are **dead** — nothing reads them. There's no delete command
+> yet, but they're harmless; leave them. The §12/§5.3 linked-origin flow
+> (`chug/release-{n}` PRs, `origin/release`, `origin/sync`) **no longer applies to
+> this project** — it's a classic project now, mirrored one-way to GitHub.
 
 ---
 

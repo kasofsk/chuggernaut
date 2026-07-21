@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Rendered by install-launchd.sh: @REPO@ -> checkout, @HOME@ -> $HOME.
+     Stopgap GitHub mirror: the platform's bare repo owns `main`; every 5 min we
+     force-push it to the GitHub `origin` remote (read-only mirror), with lease
+     so a concurrent GitHub-side write is detected rather than silently clobbered.
+     Superseded once mirroring is a dispatcher feature (separate job). -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.chuggernaut.mirror</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/git</string>
+    <string>-C</string>
+    <string>/Users/worksalot/chuggernaut-data/repos/kasofsk/chuggernaut.git</string>
+    <string>push</string>
+    <string>origin</string>
+    <string>main:main</string>
+    <string>--force-with-lease</string>
+  </array>
+  <key>StartInterval</key><integer>300</integer>
+  <key>WorkingDirectory</key><string>@REPO@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>@HOME@</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:@HOME@/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key><string>@HOME@/Library/Logs/chuggernaut/mirror.log</string>
+  <key>StandardErrorPath</key><string>@HOME@/Library/Logs/chuggernaut/mirror.log</string>
+</dict>
+</plist>

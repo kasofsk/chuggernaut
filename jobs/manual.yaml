@@ -1,0 +1,11 @@
+# A human-driven change on the platform repo: the operator pushes commits to
+# this job's job/N branch over the SSH front, then resolves the Work task Pass.
+# No image at top level — human work launches no container (spec §1.1); the
+# `ci` default evaluator (jobs/_defaults.yaml) carries its own image and gates
+# the merge just like any other job.
+name: manual
+display_name: Manual
+description: Operator pushes commits to the job branch by hand; CI gates the merge.
+work:
+  type: human
+  prompt: prompts/work/manual.md

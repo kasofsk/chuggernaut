@@ -21,8 +21,11 @@ curl -s -H "Authorization: Bearer $TOK" $BASE/api/v1/projects | jq
 ```
 
 The dogfood project — chuggernaut developing itself — is
-**`kasofsk/chuggernaut`** (linked-origin: GitHub owns `main`, agents merge to
-`integration`, work ships as release PRs).
+**`kasofsk/chuggernaut`**. It is a **classic, platform-owned** project: the
+platform's bare repo owns `main`, agents merge job branches straight into it,
+and GitHub is a **read-only mirror**. To ship a change, **create + release a
+`deploy` job** (see "Shipping this repo" below). Pull `main` via the SSH front
+(`ssh://git@100.116.243.42:2222/kasofsk/chuggernaut.git`) or the GitHub mirror.
 
 If the user explicitly says **dev** (the local stack from `deploy/dev`):
 `BASE=http://localhost:8081`, token at `deploy/dev/data/keys/claude.token`.
@@ -83,8 +86,7 @@ tasks).
 | `POST .../jobs/{seq}/release` | — | ▶ run the job |
 | `POST .../jobs/{seq}/revoke` | — | revoke (cascades to Frozen/Blocked/Ready dependents) |
 | `POST .../jobs/{seq}/tasks/{id}/resolve` | `{kind: "Pass"\|"Fail"\|"Escalation", structured, abort?, action?}` | resolve a human task; `abort: true` on an evaluator Fail = unfixable, escalate |
-| `POST /api/v1/projects/{o}/{p}/origin/release` | — | push integration → `chug/release-{n}` on the origin + open the PR; holds the merge queue (409: release open / gate in flight / nothing to release) |
-| `POST /api/v1/projects/{o}/{p}/origin/sync` | — | fetch origin + reconcile (merged PR → reset integration onto new main, clear hold) |
+| **Shipping this repo** — `kasofsk/chuggernaut` is platform-owned; there is no origin release/sync. To ship, **create + release a `deploy` job** (`POST .../jobs {type:"deploy"}` then `.../release`): it ssh's into the Mini and runs `update.sh` at the released `main`. (`origin/release`, `origin/sync` still apply to *linked-origin* projects, not this one.) |
 
 ## Conventions
 
@@ -98,10 +100,14 @@ tasks).
   with `curl -N --max-time 30`. `channel-update` events are the agent
   narrating its own progress.
 - Revoke kills running containers — confirm with the user first.
-- **Origin release/merge**: `origin/release` opens a GitHub PR the user
-  reviews and merges; merging redeploys the platform (CD on green main), so
-  don't trigger a release while jobs are mid-Work, and confirm before
-  calling it.
+- **Shipping this repo (`kasofsk/chuggernaut`)**: it's platform-owned — deploy
+  is a **`deploy` job**, not an origin release. Create + release a `deploy` job
+  to push the current `main` to prod (it ssh's the Mini and runs `update.sh`).
+  Releasing it restarts the dispatcher that supervises it — that's by design
+  (§3.6 reconciles); confirm before releasing, especially while jobs are
+  mid-Work. GitHub is a read-only mirror; direct pushes to GitHub `main` get
+  overwritten. (`origin/release`/`origin/sync` above are for linked-origin
+  projects only.)
 - Presenting: job lists as compact tables (#, title, state, type); job detail
   as state + title + tasks summary; don't dump raw JSON unless asked.
 - If the API is unreachable: for prod check Tailscale is up and the Mini's

@@ -1,0 +1,26 @@
+# Ship the platform to prod. A `deploy` job carries no commits — releasing it
+# from `main` runs tasks/deploy.sh, which ssh's into the Mini and kicks
+# update.sh at HEAD (== the released main). The effect is external, so the job
+# branch is scratch: wrap_up: none takes an eval-pass straight to Done with
+# nothing merged. See deploy/prod/README.md §3.
+name: deploy
+display_name: Deploy
+description: Ship the current main to prod (ssh → Mini update.sh). Effect is external; branch is scratch.
+image: chuggernaut/agent:prod       # has ssh + git (tasks/deploy.sh needs both)
+work:
+  type: command
+  run: ./tasks/deploy.sh
+  # Injected as an env var (the private-key value) into the work container only
+  # (spec §1.1 — secrets are scoped under work for command jobs). deploy.sh
+  # writes it to a 0600 tempfile for `ssh -i` (§8.2).
+  secrets: [MINI_DEPLOY_KEY]
+wrap_up:
+  type: none                        # external effect; the branch is discarded unmerged
+resources:
+  # An ssh shell, not a build — but task_timeout must cover the Mini-side cargo
+  # build kicked by update.sh, which blocks until the deploy finishes.
+  cpu: 1
+  memory: 512Mi
+  task_timeout: 30m
+# work_retries stays at 0 (default): update.sh is idempotent, but a half-applied
+# deploy is the operator's call to re-run, not the dispatcher's.
