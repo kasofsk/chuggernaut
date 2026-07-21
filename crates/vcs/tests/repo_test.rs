@@ -3,7 +3,20 @@
 
 use test_utils::repo::TempRepo;
 use types::{Job, JobState};
-use vcs::{BlobEncoding, MergeOutcome};
+use vcs::{BlobEncoding, MergeOutcome, RebaseOutcome};
+
+/// `(author, committer)` display names of `rev` in the bare repo.
+fn identity(repo: &TempRepo, rev: &str) -> (String, String) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo.bare_path())
+        .args(["show", "-s", "--format=%an\x1f%cn", rev])
+        .output()
+        .expect("git show");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (an, cn) = text.trim().split_once('\x1f').expect("format");
+    (an.to_string(), cn.to_string())
+}
 
 fn job(repo: &TempRepo, id: u64, state: JobState, base_ref: Option<String>) -> Job {
     Job {
@@ -277,6 +290,204 @@ async fn conflicting_merge_reports_files_and_builds_context() {
     )));
     assert!(ctx.contains("job/3: add-routes"));
     assert!(ctx.contains("src/routes.rs"));
+}
+
+#[tokio::test]
+async fn rebase_replays_onto_advanced_base_preserving_identity() {
+    let repo = TempRepo::create("acme", "api").await;
+    let old_base = repo.head().await;
+    repo.create_job_branch(5, &old_base).await;
+
+    // Agent commits its change on the old base.
+    let clone = repo.clone_branch("job/5").await;
+    clone
+        .commit_file("src/a.rs", b"job change\n", "job commit")
+        .await;
+    clone.push("job/5").await;
+    let branch_tip_before = repo
+        .manager
+        .resolve_ref("acme", "api", "job/5")
+        .await
+        .unwrap();
+
+    // An unrelated commit lands on main afterwards.
+    let landed = repo.clone_branch("main").await;
+    landed
+        .commit_file("docs/other.md", b"landed\n", "other job")
+        .await;
+    landed.push("main").await;
+    let new_base = repo.head().await;
+
+    let out = repo
+        .manager
+        .rebase_branch("acme", "api", "job/5", &old_base, &new_base)
+        .await
+        .unwrap();
+    let RebaseOutcome::Rebased { new_head } = out else {
+        panic!("expected Rebased, got {out:?}")
+    };
+    assert_ne!(new_head, branch_tip_before, "branch tip must have moved");
+
+    // The branch now descends from the new base: exactly the replayed commit
+    // sits beyond it, and the concurrently-landed file is visible on it.
+    assert_eq!(
+        repo.manager
+            .count_commits_beyond("acme", "api", &new_base, "job/5")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        repo.manager
+            .read_file_at("acme", "api", "job/5", "docs/other.md")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("landed\n")
+    );
+    assert_eq!(
+        repo.manager
+            .read_file_at("acme", "api", "job/5", "src/a.rs")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("job change\n")
+    );
+
+    // The agent's author AND committer survive the replay — not the dispatcher.
+    assert_eq!(
+        identity(&repo, "job/5"),
+        ("fake-agent".to_string(), "fake-agent".to_string())
+    );
+
+    // Squash onto the new base is now a clean fast-forward-style merge.
+    let merged = repo
+        .manager
+        .squash_merge("acme", "api", 5, &new_base, "implement-endpoint", None)
+        .await
+        .unwrap();
+    assert!(matches!(merged, MergeOutcome::Merged { .. }));
+}
+
+#[tokio::test]
+async fn rebase_conflict_leaves_branch_untouched() {
+    let repo = TempRepo::create("acme", "api").await;
+    let old_base = repo.head().await;
+    repo.create_job_branch(6, &old_base).await;
+
+    let clone = repo.clone_branch("job/6").await;
+    clone
+        .commit_file("src/a.rs", b"branch version\n", "job commit")
+        .await;
+    clone.push("job/6").await;
+    let tip_before = repo
+        .manager
+        .resolve_ref("acme", "api", "job/6")
+        .await
+        .unwrap();
+
+    // A conflicting change to the same path lands on main.
+    let landed = repo.clone_branch("main").await;
+    landed
+        .commit_file("src/a.rs", b"main version\n", "other job")
+        .await;
+    landed.push("main").await;
+    let new_base = repo.head().await;
+
+    let out = repo
+        .manager
+        .rebase_branch("acme", "api", "job/6", &old_base, &new_base)
+        .await
+        .unwrap();
+    let RebaseOutcome::Conflict { files } = out else {
+        panic!("expected Conflict, got {out:?}")
+    };
+    assert_eq!(files, vec!["src/a.rs".to_string()]);
+    // The branch is byte-for-byte as pushed — no commits lost, no partial state.
+    assert_eq!(
+        repo.manager
+            .resolve_ref("acme", "api", "job/6")
+            .await
+            .unwrap(),
+        tip_before
+    );
+    // No leftover scratch worktree registration.
+    let wts = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo.bare_path())
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&wts.stdout)
+            .matches("worktree ")
+            .count(),
+        1,
+        "scratch worktree must be removed"
+    );
+}
+
+/// Regression: a commit whose change already landed on the new base is
+/// *redundant*, not a conflict. `--keep-redundant-commits` keeps it as an empty
+/// commit; without it, cherry-pick stops empty and the branch would be
+/// misclassified as a conflict (empty file list).
+#[tokio::test]
+async fn rebase_keeps_redundant_commit_as_empty_not_conflict() {
+    let repo = TempRepo::create("acme", "api").await;
+    let old_base = repo.head().await;
+    repo.create_job_branch(7, &old_base).await;
+
+    // The job and a concurrent land make the *same* change to the same file.
+    let clone = repo.clone_branch("job/7").await;
+    clone
+        .commit_file("src/a.rs", b"identical change\n", "job commit")
+        .await;
+    clone.push("job/7").await;
+
+    let landed = repo.clone_branch("main").await;
+    landed
+        .commit_file("src/a.rs", b"identical change\n", "other job")
+        .await;
+    landed.push("main").await;
+    let new_base = repo.head().await;
+
+    let out = repo
+        .manager
+        .rebase_branch("acme", "api", "job/7", &old_base, &new_base)
+        .await
+        .unwrap();
+    // Redundant, not a conflict.
+    assert!(
+        matches!(out, RebaseOutcome::Rebased { .. }),
+        "redundant commit must rebase clean, got {out:?}"
+    );
+    assert_eq!(
+        repo.manager
+            .read_file_at("acme", "api", "job/7", "src/a.rs")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("identical change\n")
+    );
+    // The redundant commit is kept (as an empty commit), so exactly one commit
+    // sits beyond the caught-up base and it carries no tree change.
+    assert_eq!(
+        repo.manager
+            .count_commits_beyond("acme", "api", &new_base, "job/7")
+            .await
+            .unwrap(),
+        1
+    );
+    let diff = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo.bare_path())
+        .args(["diff", "--name-only", &format!("{new_base}..job/7")])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&diff.stdout).trim().is_empty(),
+        "redundant commit changes nothing"
+    );
 }
 
 #[tokio::test]

@@ -21,11 +21,20 @@ pub struct FakeBackend {
     state: Mutex<FakeBackendState>,
 }
 
+/// A side-effect hook awaited when a container launches — the place to
+/// simulate the outside world moving (e.g. another job landing on `main`
+/// while an evaluation container runs). Consumed in launch order like
+/// [`FakeProvider`]'s run hooks.
+type LaunchHook =
+    Box<dyn FnOnce(ContainerLaunchConfig) -> futures::future::BoxFuture<'static, ()> + Send>;
+
 #[derive(Default)]
 struct FakeBackendState {
     /// Exit codes handed out in launch order; empty → exit 0.
     scripted_exits: Vec<i32>,
     launches: Vec<ContainerLaunchConfig>,
+    /// Hooks consumed in launch order, awaited before `launch` returns.
+    launch_hooks: Vec<Option<LaunchHook>>,
     exits: HashMap<ContainerId, i32>,
     /// Files retrievable via copy_file, keyed by (container path).
     files: HashMap<String, Vec<u8>>,
@@ -74,6 +83,22 @@ impl FakeBackend {
         self.state.lock().unwrap().launches.clone()
     }
 
+    /// Queue a side-effect hook for the next un-hooked launch. The hook is
+    /// awaited before `launch` returns the container id — the window during
+    /// which the "container" is running (e.g. move `main` while an evaluation
+    /// container runs, so the wrap-up merge gate fires).
+    pub fn on_launch<F, Fut>(&self, hook: F)
+    where
+        F: FnOnce(ContainerLaunchConfig) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.state
+            .lock()
+            .unwrap()
+            .launch_hooks
+            .push(Some(Box::new(move |cfg| Box::pin(hook(cfg)))));
+    }
+
     /// Seed the ids that `list_managed_exited` reports — the exited managed
     /// containers a startup sweep should consider.
     pub fn seed_managed_exited(&self, ids: impl IntoIterator<Item = ContainerId>) {
@@ -90,14 +115,24 @@ impl FakeBackend {
 impl ContainerBackend for FakeBackend {
     async fn launch(&self, config: ContainerLaunchConfig) -> Result<ContainerId, BackendError> {
         let id = format!("fake-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
-        let mut st = self.state.lock().unwrap();
-        let exit = if st.scripted_exits.is_empty() {
-            0
-        } else {
-            st.scripted_exits.remove(0)
+        let hook = {
+            let mut st = self.state.lock().unwrap();
+            let exit = if st.scripted_exits.is_empty() {
+                0
+            } else {
+                st.scripted_exits.remove(0)
+            };
+            let idx = st.launches.len();
+            let hook = st.launch_hooks.get_mut(idx).and_then(Option::take);
+            st.launches.push(config.clone());
+            st.exits.insert(id.clone(), exit);
+            hook
         };
-        st.launches.push(config);
-        st.exits.insert(id.clone(), exit);
+        // Awaited outside the lock so the hook can drive the dispatcher, as a
+        // real container's lifetime would overlap other work.
+        if let Some(hook) = hook {
+            hook(config).await;
+        }
         Ok(id)
     }
 

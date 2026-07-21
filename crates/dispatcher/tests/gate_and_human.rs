@@ -146,8 +146,21 @@ async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::J
     panic!("timed out waiting for {want:?}");
 }
 
-/// The work hook commits to the job branch and, before finishing, lands an
-/// unrelated commit on main — the concurrent-job scenario the gate exists for.
+/// Work hook: commit `file` to the job branch, nothing else. `main` stays put,
+/// so any later movement is the test's to schedule.
+fn commit_branch(rig: &Rig, file: &'static str) {
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone.commit_file(file, b"job change", "implement").await;
+        clone.push(&branch).await;
+    });
+}
+
+/// Work hook that commits to the job branch AND lands an unrelated commit on
+/// main before finishing — the concurrent-job scenario, resolved at Evaluation
+/// entry by a rebase rather than a wrap-up gate (§3.2).
 fn commit_and_move_main(rig: &Rig, file: &'static str) {
     let bare = rig.repo.bare_path();
     rig.provider.on_run(move |cfg| async move {
@@ -163,8 +176,24 @@ fn commit_and_move_main(rig: &Rig, file: &'static str) {
     });
 }
 
+/// Land an unrelated commit on main while the first evaluation container runs —
+/// main moving *during* evaluation is the only case the wrap-up gate still
+/// fires for (§3.3).
+fn move_main_during_eval(rig: &Rig) {
+    let bare = rig.repo.bare_path();
+    rig.backend.on_launch(move |_cfg| async move {
+        let main = clone_branch_from(&bare, "main").await;
+        main.commit_file("docs/other.md", b"landed during eval", "other job")
+            .await;
+        main.push("main").await;
+    });
+}
+
+/// Main moves past `base_ref` during WORK → the branch is rebased onto the new
+/// HEAD at Evaluation entry, evaluated as it will land, and squashed straight
+/// in at wrap-up with NO merge gate (§3.2 pre-eval rebase).
 #[tokio::test]
-async fn merge_gate_reruns_ci_against_candidate_and_promotes() {
+async fn main_moves_during_work_rebases_and_skips_gate() {
     let Some(rig) = rig().await else { return };
     commit_and_move_main(&rig, "src/a.rs");
     rig.backend
@@ -172,9 +201,68 @@ async fn merge_gate_reruns_ci_against_candidate_and_promotes() {
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
-    wait_for_state(&rig.store, job.id, JobState::Done).await;
+    let done = wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     // Both the concurrent land and the job's change are on main.
+    let m = &rig.repo.manager;
+    assert!(
+        m.read_file_at("acme", "api", "main", "docs/other.md")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        m.read_file_at("acme", "api", "main", "src/a.rs")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // Only work + eval; the rebase means no MergeGate task ever exists.
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 2);
+    assert!(tasks.iter().all(|t| t.phase != TaskPhase::MergeGate));
+    // Evaluation ran against the rebased job branch (not a gate candidate).
+    let launches = rig.backend.launches();
+    assert_eq!(launches.len(), 1);
+    assert_eq!(launches[0].env["JOB_BRANCH"], format!("job/{}", job.id));
+
+    let events = event_types(&rig.store).await;
+    assert!(events.contains(&"job-rebased".to_string()));
+    assert!(!events.contains(&"job-merge-gate-started".to_string()));
+    // base_ref advanced to the HEAD it was evaluated (and merged) against.
+    let head = done.base_ref.unwrap();
+    assert_eq!(
+        m.read_file_at("acme", "api", &head, "docs/other.md")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("landed concurrently")
+    );
+}
+
+/// Main moves *during evaluation* → the tested stacking is stale, so the
+/// wrap-up merge gate re-runs the required command evaluator against the
+/// candidate and promotes it (§3.3), exactly as before the pre-eval rebase.
+#[tokio::test]
+async fn main_moves_during_eval_fires_merge_gate() {
+    let Some(rig) = rig().await else { return };
+    commit_branch(&rig, "src/a.rs");
+    move_main_during_eval(&rig);
+    rig.backend
+        .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
     let m = &rig.repo.manager;
     assert!(
         m.read_file_at("acme", "api", "main", "docs/other.md")
@@ -212,6 +300,8 @@ async fn merge_gate_reruns_ci_against_candidate_and_promotes() {
 
     let events = event_types(&rig.store).await;
     assert!(events.contains(&"job-merge-gate-started".to_string()));
+    // Main did not move during work, so there was no pre-eval rebase.
+    assert!(!events.contains(&"job-rebased".to_string()));
     // The candidate ref is cleaned up after promotion.
     assert!(
         m.resolve_ref("acme", "api", &format!("merge-gate/{}", job.id))
@@ -220,12 +310,131 @@ async fn merge_gate_reruns_ci_against_candidate_and_promotes() {
     );
 }
 
+/// Main untouched throughout → no rebase, no gate: byte-identical to the
+/// pre-feature fast path (§3.2 / §3.3).
+#[tokio::test]
+async fn no_movement_evaluates_and_merges_without_rebase_or_gate() {
+    let Some(rig) = rig().await else { return };
+    commit_branch(&rig, "src/a.rs");
+    rig.backend
+        .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let m = &rig.repo.manager;
+    assert!(
+        m.read_file_at("acme", "api", "main", "src/a.rs")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 2);
+    assert!(tasks.iter().all(|t| t.phase != TaskPhase::MergeGate));
+    assert_eq!(rig.backend.launches().len(), 1);
+
+    let events = event_types(&rig.store).await;
+    assert!(!events.contains(&"job-rebased".to_string()));
+    assert!(!events.contains(&"job-rebase-conflict".to_string()));
+    assert!(!events.contains(&"job-merge-gate-started".to_string()));
+}
+
+/// A concurrent land during WORK that *conflicts* with the job's change → the
+/// pre-eval rebase aborts cleanly (commits kept as pushed), evaluation runs on
+/// the old base, and the wrap-up conflict machinery reworks it onto the new
+/// base — no commits lost (§3.2 rebase-conflict fall-through).
+#[tokio::test]
+async fn rebase_conflict_falls_through_to_wrapup_conflict_path() {
+    let Some(rig) = rig().await else { return };
+    rig.backend
+        .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
+    let bare = rig.repo.bare_path();
+    // Work c1: commit src/a.rs on the branch AND land a conflicting src/a.rs on
+    // main, so the rebase at eval entry cannot replay cleanly.
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone
+            .commit_file("src/a.rs", b"job change", "implement")
+            .await;
+        clone.push(&branch).await;
+
+        let main = clone_branch_from(&bare, "main").await;
+        main.commit_file("src/a.rs", b"conflicting land", "other job")
+            .await;
+        main.push("main").await;
+    });
+    // Work c2 (conflict rework): re-commit on the freshly pinned base.
+    let bare2 = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        assert!(
+            cfg.merge_conflict.is_some(),
+            "conflict-style context must be injected on the rework"
+        );
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare2, &branch).await;
+        clone
+            .commit_file("src/a.rs", b"job change v2", "implement again")
+            .await;
+        clone.push(&branch).await;
+    });
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let events = event_types(&rig.store).await;
+    // The rebase reported a conflict and left the branch as pushed…
+    assert!(events.contains(&"job-rebase-conflict".to_string()));
+    // …and the wrap-up conflict path (not the gate) drove the single rework.
+    let reworks: Vec<&String> = events
+        .iter()
+        .filter(|e| *e == "job-rework-started")
+        .collect();
+    assert_eq!(reworks.len(), 1);
+    assert!(!events.contains(&"job-merge-gate-started".to_string()));
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    // work c1, eval c1 (old base), work c2, eval c2 — no gate task.
+    assert_eq!(tasks.len(), 4);
+    assert_eq!(tasks[2].cycle, 2);
+    assert!(tasks.iter().all(|t| t.phase != TaskPhase::MergeGate));
+    // The reworked change is what landed.
+    assert_eq!(
+        rig.repo
+            .manager
+            .read_file_at("acme", "api", "main", "src/a.rs")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("job change v2")
+    );
+}
+
 #[tokio::test]
 async fn merge_gate_failure_reworks_on_new_base_without_budget() {
     let Some(rig) = rig().await else { return };
     // eval c1 pass, gate c1 FAIL, eval c2 pass (no second gate: base caught up).
     rig.backend.script_exits([0, 1, 0]);
-    commit_and_move_main(&rig, "src/a.rs");
+    commit_branch(&rig, "src/a.rs");
+    move_main_during_eval(&rig);
     // Rework hook: re-commit on the new base.
     let bare = rig.repo.bare_path();
     rig.provider.on_run(move |cfg| async move {

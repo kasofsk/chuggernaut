@@ -17,7 +17,7 @@ use types::{
     EvalResult, Evaluator, EvaluatorType, JobState, Task, TaskKind, TaskPhase, TaskResult,
     TaskState, WorkType, WrapUpMode,
 };
-use vcs::MergeOutcome;
+use vcs::{MergeOutcome, RebaseOutcome};
 
 /// One cycle's evaluation, run as an ascending sequence of stages (spec §3.3
 /// staged evaluation). Only the current stage has live tasks: `slots` is the
@@ -122,6 +122,14 @@ impl Core {
             (exec.job_type.eval.clone(), exec.cycle)
         };
         let mut job = self.must_get(owner, project, seq)?.clone();
+        // §3.2: rebase `job/{seq}` onto current default HEAD before evaluating,
+        // so the evaluators test exactly the stack that would merge. `base_ref`
+        // advances to what we tested against, which lets the wrap-up merge gate
+        // fire only if main moves *again* during evaluation. Bookkeeping, not
+        // rework: no cycle bump, no rework budget consumed (a conflict falls
+        // through to old-base evaluation + the wrap-up gate).
+        self.rebase_for_evaluation(owner, project, seq, &mut job)
+            .await?;
         self.set_state(&mut job, JobState::Evaluation).await?;
         self.publish(
             owner,
@@ -149,6 +157,70 @@ impl Core {
             pending,
             done: Vec::new(),
         });
+        Ok(())
+    }
+
+    /// Rebase `job/{seq}` onto current default HEAD at Evaluation entry so the
+    /// evaluators run against the exact stack that would merge (spec §3.2). On
+    /// success `base_ref` advances to HEAD (persisted by the caller's
+    /// `set_state`); the wrap-up gate-skip condition (`HEAD == base_ref`) then
+    /// covers the common case with no gate rebuild. A conflict (or any git
+    /// failure) leaves the branch exactly as pushed and keeps the old base_ref —
+    /// evaluation proceeds on the stale stacking and the wrap-up merge
+    /// gate/conflict machinery handles it, so no commits are ever lost. This is
+    /// bookkeeping, not rework: cycle and rework budget are untouched.
+    async fn rebase_for_evaluation(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        job: &mut types::Job,
+    ) -> Result<()> {
+        let Some(base_ref) = job.base_ref.clone() else {
+            return Ok(());
+        };
+        let default_branch = self.repos.default_branch(owner, project).await?;
+        let head = self
+            .repos
+            .resolve_ref(owner, project, &default_branch)
+            .await?;
+        // No movement since base_ref was pinned: byte-identical to no rebase.
+        if head == base_ref {
+            return Ok(());
+        }
+        match self
+            .repos
+            .rebase_branch(owner, project, &job.branch, &base_ref, &head)
+            .await
+        {
+            Ok(RebaseOutcome::Rebased { .. }) => {
+                job.base_ref = Some(head.clone());
+                self.publish(
+                    owner,
+                    project,
+                    seq,
+                    "job-rebased",
+                    serde_json::json!({ "base_ref": head }),
+                )
+                .await?;
+            }
+            Ok(RebaseOutcome::Conflict { files }) => {
+                self.publish(
+                    owner,
+                    project,
+                    seq,
+                    "job-rebase-conflict",
+                    serde_json::json!({ "files": files }),
+                )
+                .await?;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "pre-eval rebase for {owner}/{project}#{seq} failed: {e}; \
+                     evaluating on old base"
+                );
+            }
+        }
         Ok(())
     }
 

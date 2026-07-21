@@ -56,6 +56,17 @@ enum SquashBuild {
     Conflict { files: Vec<String> },
 }
 
+/// Outcome of replaying `job/{seq}` onto a fresh base (spec §3.2 pre-eval
+/// rebase). A `Conflict` leaves the branch exactly as pushed — the caller
+/// evaluates on the old base and lets the wrap-up merge gate handle it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RebaseOutcome {
+    /// Branch replayed onto the new base; its tip is now `new_head`.
+    Rebased { new_head: String },
+    /// A real merge conflict replaying some commit; branch untouched.
+    Conflict { files: Vec<String> },
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct DiffResponse {
     pub files: Vec<FileStat>,
@@ -515,6 +526,128 @@ impl RepoManager {
         Ok(())
     }
 
+    /// Replay `branch`'s commits (`old_base..branch`) onto `new_base` so the
+    /// stack tests exactly what would merge (spec §3.2 pre-eval rebase). Runs in
+    /// a throwaway detached worktree — no ref moves until the whole replay
+    /// succeeds, so a conflict leaves the branch byte-for-byte as pushed.
+    ///
+    /// Each commit is cherry-picked individually to preserve its author
+    /// (cherry-pick keeps it automatically) and committer (overridden per commit
+    /// via `GIT_COMMITTER_*`). `--keep-redundant-commits` (git ≥ 2.39) keeps a
+    /// commit whose change already landed on `new_base` as an empty commit
+    /// rather than stopping — that is not a conflict. Only a real content
+    /// conflict (`--diff-filter=U`) yields [`RebaseOutcome::Conflict`].
+    pub async fn rebase_branch(
+        &self,
+        owner: &str,
+        project: &str,
+        branch: &str,
+        old_base: &str,
+        new_base: &str,
+    ) -> Result<RebaseOutcome> {
+        let repo = self.repo_path(owner, project);
+        let list = self
+            .run(
+                &repo,
+                &["rev-list", "--reverse", &format!("{old_base}..{branch}")],
+            )
+            .await?;
+        let commits: Vec<String> = list
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect();
+        // No commits of our own: the branch collapses onto the new base.
+        if commits.is_empty() {
+            self.create_branch(owner, project, branch, new_base).await?;
+            return Ok(RebaseOutcome::Rebased {
+                new_head: new_base.to_string(),
+            });
+        }
+        let branch_tip = self.resolve_ref(owner, project, branch).await?;
+
+        let tmp = tempfile::tempdir()?;
+        let wt = tmp.path().join("wt");
+        let wt_str = wt.to_string_lossy().to_string();
+        self.run(&repo, &["worktree", "add", "--detach", &wt_str, new_base])
+            .await?;
+
+        let result: Result<RebaseOutcome> = async {
+            for sha in &commits {
+                let meta = self
+                    .run(&wt, &["show", "-s", "--format=%cn%x1f%ce%x1f%cI", sha])
+                    .await?;
+                let fields: Vec<&str> = meta.trim().splitn(3, '\x1f').collect();
+                let [cn, ce, cd] = fields[..] else {
+                    return Err(VcsError::Parse {
+                        context: "rebase committer",
+                        detail: meta.clone(),
+                    });
+                };
+                let out = self
+                    .exec_env(
+                        &wt,
+                        &["cherry-pick", "--keep-redundant-commits", sha],
+                        None,
+                        &[
+                            ("GIT_COMMITTER_NAME", cn),
+                            ("GIT_COMMITTER_EMAIL", ce),
+                            ("GIT_COMMITTER_DATE", cd),
+                        ],
+                    )
+                    .await?;
+                if !out.status.success() {
+                    // A real conflict leaves unmerged (`U`) paths; anything else
+                    // (e.g. a merge commit) is a genuine git error, not a
+                    // conflict to route through rework.
+                    let conflicted = self
+                        .run(&wt, &["diff", "--name-only", "--diff-filter=U"])
+                        .await?;
+                    let files: Vec<String> = conflicted
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .map(String::from)
+                        .collect();
+                    let _ = self.exec(&wt, &["cherry-pick", "--abort"], None).await;
+                    if files.is_empty() {
+                        return Err(VcsError::Git {
+                            args: format!("cherry-pick {sha}"),
+                            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+                        });
+                    }
+                    return Ok(RebaseOutcome::Conflict { files });
+                }
+            }
+            let new_head = self
+                .run(&wt, &["rev-parse", "HEAD"])
+                .await?
+                .trim()
+                .to_string();
+            // CAS on the branch tip: the single-writer dispatcher makes a race
+            // impossible, so a surprise is a logic bug, not a silent stomp.
+            self.run(
+                &repo,
+                &[
+                    "update-ref",
+                    &format!("refs/heads/{branch}"),
+                    &new_head,
+                    &branch_tip,
+                ],
+            )
+            .await?;
+            Ok(RebaseOutcome::Rebased { new_head })
+        }
+        .await;
+
+        // Always detach the worktree — a stale registration would block reuse.
+        let _ = self
+            .run(&repo, &["worktree", "remove", "--force", &wt_str])
+            .await;
+        result
+    }
+
     // ── Content reads (spec §2.2, §3.2, §6.2) ───────────────────────────────
 
     /// Job type and prompt resolution at `base_ref`. None if the path does not
@@ -949,7 +1082,7 @@ impl RepoManager {
     /// a hung remote fails the operation instead of wedging the single-writer
     /// dispatcher (the process is killed on drop via `kill_on_drop`).
     async fn run_origin(&self, repo: &Path, args: &[&str], env: &OriginEnv) -> Result<String> {
-        let fut = self.exec_with(repo, args, None, env.ssh_command.as_deref());
+        let fut = self.exec_with(repo, args, None, env.ssh_command.as_deref(), &[]);
         match tokio::time::timeout(ORIGIN_TIMEOUT, fut).await {
             Ok(out) => expect_success(out?, &args.join(" ")),
             Err(_) => Err(VcsError::Timeout {
@@ -965,7 +1098,19 @@ impl RepoManager {
     }
 
     async fn exec(&self, repo: &Path, args: &[&str], stdin: Option<&[u8]>) -> Result<Output> {
-        self.exec_with(repo, args, stdin, None).await
+        self.exec_with(repo, args, stdin, None, &[]).await
+    }
+
+    /// `exec` with per-call env overrides layered over [`GIT_IDENTITY`] — used
+    /// by the rebase replay to preserve each commit's committer identity.
+    async fn exec_env(
+        &self,
+        repo: &Path,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+        env: &[(&str, &str)],
+    ) -> Result<Output> {
+        self.exec_with(repo, args, stdin, None, env).await
     }
 
     async fn exec_with(
@@ -974,6 +1119,7 @@ impl RepoManager {
         args: &[&str],
         stdin: Option<&[u8]>,
         ssh_command: Option<&str>,
+        extra_env: &[(&str, &str)],
     ) -> Result<Output> {
         let mut cmd = Command::new("git");
         cmd.arg("-C").arg(repo).args(args);
@@ -982,6 +1128,10 @@ impl RepoManager {
         cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null");
         for (k, v) in GIT_IDENTITY {
+            cmd.env(k, v);
+        }
+        // Layered last so callers can override the default identity per commit.
+        for (k, v) in extra_env {
             cmd.env(k, v);
         }
         if let Some(ssh) = ssh_command {
