@@ -58,6 +58,10 @@ set -a
 . deploy/prod/chuggernaut.env
 set +a
 
+# 3. Worker-node images + worker-arch channel binary (no-op when
+#    WORKER_DOCKER_HOST is unset — see deploy/prod/build-worker.sh).
+CHUG_IMAGE_TAG="${CHUG_IMAGE_TAG:-prod}" deploy/prod/build-worker.sh
+
 # 4. Idempotent init — creates only missing keys (e.g. a newly-added age key).
 target/release/chuggernaut init --keys-dir "$KEYS_DIR" --repos-root "$REPOS_ROOT"
 

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Rendered by install-launchd.sh: @REPO@ -> checkout, @HOME@ -> $HOME. -->
+<!-- SSH tunnel exposing the gumbo-nuc-0 worker's Docker socket on
+     127.0.0.1:23751 (the tcp:// endpoint in DOCKER_NODES). KeepAlive: the
+     dispatcher refuses to start if any fleet node is unreachable, so this
+     tunnel is boot-critical (see README "Worker nodes"). -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.chuggernaut.nuc-tunnel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/ssh</string>
+    <string>-N</string>
+    <string>-i</string><string>@HOME@/.ssh/nuc_tunnel</string>
+    <string>-o</string><string>IdentitiesOnly=yes</string>
+    <string>-o</string><string>BatchMode=yes</string>
+    <string>-o</string><string>ExitOnForwardFailure=yes</string>
+    <string>-o</string><string>ServerAliveInterval=30</string>
+    <string>-o</string><string>ServerAliveCountMax=3</string>
+    <string>-o</string><string>StrictHostKeyChecking=accept-new</string>
+    <string>-L</string><string>127.0.0.1:23751:/run/docker.sock</string>
+    <string>worksalot@gumbo-nuc-0</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>@HOME@/Library/Logs/chuggernaut/nuc-tunnel.log</string>
+  <key>StandardErrorPath</key><string>@HOME@/Library/Logs/chuggernaut/nuc-tunnel.log</string>
+</dict>
+</plist>

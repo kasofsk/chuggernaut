@@ -10,6 +10,7 @@ web/dist/
 # prod deploy — local secrets, rendered artifacts, deploy marker
 deploy/prod/chuggernaut.env
 deploy/prod/out/
+deploy/prod/out-nuc/
 deploy/prod/rclone.conf
 deploy/prod/*.local
 .deployed-sha
