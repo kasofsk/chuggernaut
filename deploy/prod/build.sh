@@ -32,7 +32,11 @@ docker build -f "$DEV/Dockerfile.ssh" --build-arg "GIT_UID=$GIT_UID" \
 # Agent image the job types run in.
 docker build -f "$DEV/Dockerfile.agent" -t "chuggernaut/agent:$TAG" "$DEV"
 
+# Rust agent image for the chuggernaut dogfood project (repo-root context —
+# it bakes a cargo prefetch of the workspace deps).
+docker build -f Dockerfile.agent-rust -t "chuggernaut/agent-rust:$TAG" "$CTX"
+
 # API service image (HTTP↔NATS bridge + web UI baked in).
 docker build -f Dockerfile.api -t "chuggernaut/api:$TAG" "$CTX"
 
-echo "built chuggernaut/{ssh,agent,api}:$TAG; channel -> $(pwd)/out/chuggernaut-channel"
+echo "built chuggernaut/{ssh,agent,agent-rust,api}:$TAG; channel -> $(pwd)/out/chuggernaut-channel"

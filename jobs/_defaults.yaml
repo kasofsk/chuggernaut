@@ -1,0 +1,6 @@
+# Appended to every job type's eval list (spec §1.1) — the evergreen CI gate.
+eval:
+  - name: ci
+    type: command
+    image: chuggernaut/agent-rust:prod
+    run: ./tasks/ci.sh
