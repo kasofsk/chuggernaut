@@ -4,8 +4,10 @@ This is the canonical runbook for the always-on instance we use to drive **other
 projects. NATS, the SSH front, and the **api** (HTTP↔NATS bridge + web UI) run as
 **compose containers**; only the **dispatcher** runs as a native host process
 under **launchd** (it needs the Docker socket and the repos filesystem), launching
-agent containers as siblings. Deployed **automatically on every green `main`** via
+agent containers as siblings. Deployed **automatically on every push to `main`** via
 the Mini's GitHub self-hosted runner, and **backed up hourly to Cloudflare R2**.
+There is no GitHub-side CI — fmt/clippy/test run as the Chuggernaut `ci`
+evaluator on the platform itself before work can merge and release.
 
 Chuggernaut itself is still developed on the laptop and pushed to GitHub; the Mini
 only *consumes* `main`. Since the dogfood project link (`kasofsk/chuggernaut`),
@@ -144,11 +146,11 @@ tail -f ~/Library/Logs/chuggernaut/*.log
 
 ---
 
-## 3. Continuous deployment (auto on green `main`)
+## 3. Continuous deployment (auto on push to `main`)
 
-`.github/workflows/deploy.yml` fires on `workflow_run` after **CI** succeeds on
-`main`, runs on the `[self-hosted, chug]` runner, and executes
-`deploy/prod/update.sh <head_sha>`. `update.sh`:
+`.github/workflows/deploy.yml` fires on every push to `main` (no GitHub CI —
+the platform's `ci` evaluator is the gate), runs on the `[self-hosted, chug]`
+runner, and executes `deploy/prod/update.sh <sha>`. `update.sh`:
 
 1. no-ops if `.deployed-sha` already matches the target,
 2. else checks the SHA out in `$CHUG_REPO`, snapshots the old dispatcher binary

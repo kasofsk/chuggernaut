@@ -1,22 +1,20 @@
 name: Deploy
 
-# Auto-deploy to the Mac Mini after CI passes on main. Runs on the Mini's
+# Auto-deploy to the Mac Mini on every push to main. Runs on the Mini's
 # self-hosted runner (Kasofsk org), targeted by the dedicated `chug`
 # label so no other org runner can pick it up. See deploy/prod/README.md.
 #
-# Triggering on workflow_run (not push) means only commits that passed
-# fmt/clippy/test deploy. Never trigger on pull_request — with a self-hosted
-# runner that would run fork PR code on the Mini.
+# There is no GitHub-side CI: fmt/clippy/test run on the Chuggernaut
+# platform itself (the `ci` evaluator gates every job before its work can
+# merge to integration and ship as a release PR), so a commit reaching main
+# has already passed them. Never trigger on pull_request — with a
+# self-hosted runner that would run fork PR code on the Mini.
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  push:
+    branches: [main]
 
 jobs:
   deploy:
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_branch == 'main'
     runs-on: [self-hosted, chug]
     concurrency:
       group: deploy-mini
@@ -24,4 +22,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build the target commit and restart services
-        run: deploy/prod/update.sh "${{ github.event.workflow_run.head_sha }}"
+        run: deploy/prod/update.sh "${{ github.sha }}"
