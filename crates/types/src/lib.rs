@@ -14,6 +14,7 @@ pub mod resources;
 pub mod step;
 pub mod task;
 pub mod user;
+pub mod worker;
 
 pub use channel::{AgentReply, ChannelEntry, ChannelStatus, ChannelUpdate, OperatorMessage};
 pub use duration::{DurationParseError, parse_duration};

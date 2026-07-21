@@ -1,6 +1,7 @@
 //! Test harness: fake container backend / agent provider, NATS harness,
 //! temp-repo builder, fixture seeding (testing.md tiers 1–2).
 
+pub mod backend_suite;
 pub mod nats;
 pub mod repo;
 

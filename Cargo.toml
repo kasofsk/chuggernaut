@@ -5,6 +5,7 @@ members = [
     "crates/store",
     "crates/auth",
     "crates/container",
+    "crates/worker",
     "crates/agent",
     "crates/vcs",
     "crates/dispatcher",
@@ -29,6 +30,7 @@ types = { path = "crates/types" }
 store = { path = "crates/store" }
 auth = { path = "crates/auth" }
 container = { path = "crates/container" }
+worker = { path = "crates/worker" }
 agent = { path = "crates/agent" }
 vcs = { path = "crates/vcs" }
 dispatcher = { path = "crates/dispatcher" }

@@ -158,3 +158,17 @@ pub fn tasks_resolve(owner: &str, project: &str, job_seq: u64, task_id: u64) -> 
 pub fn vcs_diff(owner: &str, project: &str, seq: u64) -> String {
     format!("req.vcs.diff.{owner}.{project}.{seq}")
 }
+
+// ── Worker-node protocol (spec §3.1) ────────────────────────────────────────
+// Published by the dispatcher's fleet backend, served by the `chuggernaut
+// worker` daemon on the node. Node names are validated subject-safe at
+// DOCKER_NODES parse time.
+
+pub fn worker_op(node: &str, op: &str) -> String {
+    format!("req.worker.{node}.{op}")
+}
+
+/// The daemon's wildcard subscription for its node.
+pub fn worker_all(node: &str) -> String {
+    format!("req.worker.{node}.>")
+}

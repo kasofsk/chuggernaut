@@ -74,6 +74,11 @@ pub struct InjectedFile {
     pub contents: Vec<u8>,
     /// e.g. 0o755 for the MCP binaries.
     pub mode: u32,
+    /// Static-artifact name (e.g. `"channel"`) when this file is provisioned
+    /// node-locally on worker nodes (spec §3.1): a worker-proxying backend
+    /// sends the name instead of `contents` and the worker substitutes its
+    /// local copy. Docker/k8s backends ignore it and inject `contents`.
+    pub artifact: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -22,6 +22,7 @@ One fat binary plus three tiny ones:
 | `store` | lib | §1.4–1.5, §8, §9 | NATS KV/stream access; the only crate that talks to NATS |
 | `auth` | lib | §7 | JWT, SSH CA, per-job credentials, permission rules |
 | `container` | lib | §3.1 | `ContainerBackend` trait + Docker and k8s implementations |
+| `worker` | lib | §3.1 | Worker-node daemon (`chuggernaut worker`) + NATS-proxying `FleetBackend` for mixed fleets |
 | `agent` | lib | §4 | `AgentProvider` trait + Claude/Codex impls, prompt assembly, KO injection |
 | `vcs` | lib | §5 | Bare repo management, git CLI shell-out, diff/tree/blob/log |
 | `dispatcher` | lib | §2, §3 | State machine, DAG, work queue, scans, reconciliation |

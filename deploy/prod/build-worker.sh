@@ -1,34 +1,49 @@
 #!/bin/sh
-# Build the agent images + channel binary for a REMOTE worker node, via its
-# (SSH-tunneled) Docker endpoint. The worker may be a different architecture
-# than the Mini — images build natively on its daemon, and the channel binary
-# artifacts stage writes a worker-arch binary back to deploy/prod/out-nuc/
-# (the dispatcher injects those bytes into every container it launches there;
-# run-dispatcher.sh prefers out-nuc when it exists).
+# Build + deploy the worker-node pieces ON the worker over plain SSH (no
+# Docker endpoint on any network, no tunnel): the worker daemon image (which
+# bakes the worker-arch chuggernaut + channel binaries at this git SHA) and
+# the agent images job types reference. Build context streams over ssh via
+# `git archive`, so the node needs nothing but Docker and an authorized key.
 #
-# No-ops cleanly when WORKER_DOCKER_HOST is unset (single-node deploys).
+# No-ops cleanly when WORKER_SSH is unset (single-node deploys).
 # Called from update.sh after the env is loaded; runnable by hand:
-#   WORKER_DOCKER_HOST=tcp://127.0.0.1:23751 deploy/prod/build-worker.sh
+#   WORKER_SSH=worksalot@gumbo-nuc-0 deploy/prod/build-worker.sh
 set -eu
 
-if [ -z "${WORKER_DOCKER_HOST:-}" ]; then
-  echo "build-worker: WORKER_DOCKER_HOST unset — no worker node; skipping"
+if [ -z "${WORKER_SSH:-}" ]; then
+  echo "build-worker: WORKER_SSH unset — no worker node; skipping"
   exit 0
 fi
 
-cd "$(dirname "$0")"                 # deploy/prod
-DEV="../dev"
-CTX="../.."                          # build context = workspace root
+cd "$(dirname "$0")/../.."             # workspace root
 TAG="${CHUG_IMAGE_TAG:-prod}"
+SHA="$(git rev-parse HEAD)"
 
-export DOCKER_HOST="$WORKER_DOCKER_HOST"
+# Worker daemon image (repo-root context; bakes chuggernaut + channel binary).
+git archive --format=tar HEAD \
+  | ssh "$WORKER_SSH" "docker build -q -t chuggernaut/worker:$TAG \
+      -f deploy/prod/Dockerfile.worker --build-arg CHUG_GIT_SHA=$SHA -"
 
-# Worker-arch channel binary, written back through the tunnel to the Mini.
-docker build -f "$DEV/Dockerfile.ssh" --target artifacts \
-  --output type=local,dest=out-nuc "$CTX"
+# Agent images the job types run in, native on the node.
+git archive --format=tar HEAD:deploy/dev \
+  | ssh "$WORKER_SSH" "docker build -q -t chuggernaut/agent:$TAG -f Dockerfile.agent -"
+git archive --format=tar HEAD \
+  | ssh "$WORKER_SSH" "docker build -q -t chuggernaut/agent-rust:$TAG \
+      -f deploy/prod/Dockerfile.agent-rust -"
 
-# Agent images the job types run in, native on the worker's daemon.
-docker build -f "$DEV/Dockerfile.agent" -t "chuggernaut/agent:$TAG" "$DEV"
-docker build -f Dockerfile.agent-rust -t "chuggernaut/agent-rust:$TAG" "$CTX"
+# (Re)start the worker daemon on the new image. Safe mid-job: containers
+# survive, the dispatcher's poll-based wait re-attaches (spec §3.1).
+# NODE/NATS URL expand HERE (from chuggernaut.env); \$HOME expands on the node.
+NODE="${CHUG_WORKER_NODE:-nuc}"
+NATS="${WORKER_NATS_URL:?set WORKER_NATS_URL (tailnet NATS URL of the dispatcher host)}"
+REMOTE="docker rm -f chug-worker >/dev/null 2>&1 || true
+docker run -d --restart=always --name chug-worker \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v \$HOME/chuggernaut-worker/keys:/data/keys:ro \
+  -e WORKER_NODE=$NODE \
+  -e NATS_URL=$NATS \
+  -e NATS_CREDS=/data/keys/worker.creds \
+  chuggernaut/worker:$TAG >/dev/null"
+ssh "$WORKER_SSH" "$REMOTE"
 
-echo "build-worker: chuggernaut/{agent,agent-rust}:$TAG on $WORKER_DOCKER_HOST; channel -> $(pwd)/out-nuc/chuggernaut-channel"
+echo "build-worker: chuggernaut/{worker,agent,agent-rust}:$TAG deployed on $WORKER_SSH ($SHA)"

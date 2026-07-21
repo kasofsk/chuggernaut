@@ -275,7 +275,7 @@ async fn run(program: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-async fn write_key(path: &Path, contents: &str, private: bool) -> Result<String> {
+pub(crate) async fn write_key(path: &Path, contents: &str, private: bool) -> Result<String> {
     tokio::fs::write(path, contents).await?;
     if private {
         restrict(path).await?;
