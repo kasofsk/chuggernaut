@@ -7,6 +7,14 @@
 # in the image tag. Idempotent; safe to re-run from update.sh.
 set -eu
 
+# Preflight: the first build below uses BuildKit (`docker build --output`), which
+# needs the buildx CLI plugin. Fail with a pointer instead of a cryptic
+# "unknown flag: --output" (see deploy/prod/README.md §0 for the plugin symlink).
+if ! docker buildx version >/dev/null 2>&1; then
+  echo "build.sh: 'docker buildx' not found — link the buildx CLI plugin (README §0)" >&2
+  exit 1
+fi
+
 cd "$(dirname "$0")"                 # deploy/prod
 DEV="../dev"                          # dev Dockerfiles + sshd_config live here
 CTX="../.."                          # build context = workspace root
