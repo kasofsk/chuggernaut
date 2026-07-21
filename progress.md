@@ -549,3 +549,12 @@ Priority (user): iterate from the UI on a test project.
 - `chuggernaut/tests/ssh_front.rs` (git + the compiled binary, no Docker):
   the §5.2 matrix over git's `ext::` transport.
 - Run everything: `cargo test --workspace` (from repo root; needs Docker up).
+
+## Self-hosting
+
+As of July 2026, the chuggernaut repo is itself installed as a linked-origin
+project on its own production deployment — the platform now hosts the code that
+builds it. From here on, chuggernaut jobs develop chuggernaut itself: tickets
+filed against the repo run through the same create → work → evaluation →
+wrap-up loop as any other project, so the orchestrator dogfoods its own
+lifecycle and every improvement lands through the machinery it describes.
