@@ -3,6 +3,7 @@
 //! `test_utils::backend_suite` — shared with the worker fleet backend, which
 //! must satisfy the identical contract (spec §3.1).
 
+use container::ContainerBackend;
 use container::docker::DockerBackend;
 use test_utils::backend_suite as suite;
 
@@ -43,7 +44,7 @@ async fn inspect_kill_and_not_found() {
 #[tokio::test]
 async fn remove_reclaims_exited_container_and_is_idempotent() {
     let Some(be) = docker() else { return };
-    let id = be.launch(cfg("exit 0")).await.unwrap();
+    let id = be.launch(suite::cfg("exit 0")).await.unwrap();
     assert_eq!(be.wait(&id).await.unwrap(), 0);
 
     // While exited-but-present it is a sweep candidate.

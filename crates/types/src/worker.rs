@@ -120,6 +120,12 @@ pub struct LogsOk {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListExitedOk {
+    /// `{node}/{docker_id}` ids of exited managed containers on the node.
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PingOk {
     /// Running `chuggernaut.managed` containers on the node (slot accounting).
     pub running: u32,

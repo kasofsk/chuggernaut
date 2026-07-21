@@ -320,6 +320,34 @@ impl ContainerBackend for FleetBackend {
             }
         }
     }
+
+    async fn remove(&self, id: &ContainerId) -> Result<(), BackendError> {
+        let node = self.route(id)?;
+        match &node.handle {
+            NodeHandle::Docker { backend } => backend.remove(id).await,
+            NodeHandle::Worker { rpc, .. } => {
+                rpc.remove(id).await.map_err(|e| rpc_err(Some(id), e))
+            }
+        }
+    }
+
+    async fn list_managed_exited(&self) -> Result<Vec<ContainerId>, BackendError> {
+        let mut ids = Vec::new();
+        for node in &self.nodes {
+            match &node.handle {
+                NodeHandle::Docker { backend } => ids.extend(backend.list_managed_exited().await?),
+                NodeHandle::Worker { rpc, .. } => match rpc.list_exited().await {
+                    Ok(ok) => ids.extend(ok.ids),
+                    // An unreachable worker must not fail the whole sweep —
+                    // its exited containers get reclaimed on a later pass.
+                    Err(e) => {
+                        tracing::warn!(node = %node.name, "list_exited skipped: {e}");
+                    }
+                },
+            }
+        }
+        Ok(ids)
+    }
 }
 
 /// Convenience for `run.rs`: does this fleet contain any worker nodes?

@@ -5,8 +5,8 @@
 use crate::{NatsStore, StoreError, subjects};
 use std::time::Duration;
 use types::worker::{
-    ContainerRef, CopyFileOk, CopyFileRequest, InspectOk, LaunchOk, LogsOk, PingOk, WorkerError,
-    WorkerLaunchRequest, WorkerReply,
+    ContainerRef, CopyFileOk, CopyFileRequest, InspectOk, LaunchOk, ListExitedOk, LogsOk, PingOk,
+    WorkerError, WorkerLaunchRequest, WorkerReply,
 };
 
 /// Requests must fit NATS's default 1MB max_payload with headroom. Launch
@@ -128,6 +128,18 @@ impl WorkerRpc {
 
     pub async fn ping(&self) -> std::result::Result<PingOk, WorkerRpcError> {
         self.call("ping", &serde_json::json!({}), PING_TIMEOUT)
+            .await
+    }
+
+    pub async fn remove(&self, id: &str) -> std::result::Result<(), WorkerRpcError> {
+        let _: serde_json::Value = self
+            .call("remove", &ContainerRef { id: id.into() }, OP_TIMEOUT)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_exited(&self) -> std::result::Result<ListExitedOk, WorkerRpcError> {
+        self.call("list_exited", &serde_json::json!({}), OP_TIMEOUT)
             .await
     }
 }
