@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 
 export interface JobEvent {
   job_seq: number
@@ -32,4 +32,19 @@ export function useProjectEvents(
     }
     return () => source.close()
   }, [owner, project, jobSeq])
+}
+
+// Trailing-edge debounce. On page load the SSE stream replays the full event
+// history (no Last-Event-ID), so a naive per-event refetch fires hundreds of
+// GETs in a burst; wrapping the refetch here collapses each burst into a single
+// call ~delayMs after the last event.
+export function useDebouncedCallback(fn: () => void, delayMs: number) {
+  const cb = useRef(fn)
+  cb.current = fn
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => clearTimeout(timer.current), [])
+  return useCallback(() => {
+    clearTimeout(timer.current)
+    timer.current = setTimeout(() => cb.current(), delayMs)
+  }, [delayMs])
 }

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, type Job, type Task } from '../api'
-import { useProjectEvents } from '../useEvents'
+import { useDebouncedCallback, useProjectEvents } from '../useEvents'
 import { StateBadge } from '../components/StateBadge'
 import { ResolveForm } from '../components/ResolveForm'
 import { ProjectTabs } from '../components/ProjectTabs'
@@ -28,8 +28,11 @@ export function ProjectPage() {
   }, [owner, project, navigate])
 
   useEffect(refresh, [refresh])
-  // The SSE stream is the source of truth (Part 11): any event → refetch.
-  useProjectEvents(owner, project, refresh)
+  // The SSE stream is the source of truth (Part 11): any event → refetch. On
+  // page load the stream replays the full history, so debounce to collapse that
+  // burst (and any live burst) into a single refetch.
+  const debouncedRefresh = useDebouncedCallback(refresh, 250)
+  useProjectEvents(owner, project, debouncedRefresh)
 
   const jobBySeq = new Map(jobs.map((j) => [j.id, j]))
 

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, type DiffResponse, type Job, type JobCriteria, type Task } from '../api'
-import { useProjectEvents, type JobEvent } from '../useEvents'
+import { useDebouncedCallback, useProjectEvents, type JobEvent } from '../useEvents'
 import { StateBadge, TaskBadge } from '../components/StateBadge'
 import { ResolveForm } from '../components/ResolveForm'
 import { TaskArtifacts } from '../components/TaskArtifacts'
@@ -38,12 +38,16 @@ export function JobDetail() {
   }, [owner, project, jobSeq, navigate])
 
   useEffect(refresh, [refresh])
+  // Keep the per-event log immediate, but debounce the refetch: the SSE stream
+  // replays the full history on load, so a naive refresh() per event fires a
+  // storm of GETs. Coalesce that (and any live burst) into one refetch.
+  const debouncedRefresh = useDebouncedCallback(refresh, 250)
   useProjectEvents(
     owner,
     project,
     (e) => {
       setEvents((prev) => [...prev.slice(-199), e])
-      refresh()
+      debouncedRefresh()
     },
     jobSeq,
   )
