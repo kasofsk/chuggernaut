@@ -1,0 +1,31 @@
+# Rust agent image for the chuggernaut-on-chuggernaut dogfood project
+# (jobs/code.yaml `image:`): full Rust toolchain + the claude CLI. Built with
+# the repo root as context so the workspace's crate dependencies can be baked
+# in — spec §11 defers per-project build caches to future work; the v1 answer
+# is to bake toolchain and dependencies into the declared image.
+FROM rust:1.96-bookworm
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git openssh-client ripgrep jq ca-certificates curl \
+ && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN rustup component add rustfmt clippy \
+ && npm install -g @anthropic-ai/claude-code
+
+# Pre-warm the crates.io index + .crate downloads into CARGO_HOME so per-job
+# builds skip the network fetch. The layer invalidates when sources change;
+# the compile itself is still cold per container (no cross-job cache in v1).
+COPY Cargo.toml Cargo.lock /prewarm/
+COPY crates /prewarm/crates
+RUN cd /prewarm && cargo fetch --locked && rm -rf /prewarm
+
+# Headless agents run as root inside a disposable container; IS_SANDBOX lets
+# `--dangerously-skip-permissions` through the CLI's root check.
+ENV IS_SANDBOX=1
+
+# The clone happens as root at /workspace; commits need an identity.
+RUN git config --system user.name "Chuggernaut Agent" \
+ && git config --system user.email "agent@chuggernaut.local" \
+ && git config --system --add safe.directory '*'
