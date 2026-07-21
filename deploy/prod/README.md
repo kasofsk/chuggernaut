@@ -40,8 +40,14 @@ mkdir -p ~/.docker/cli-plugins
 ln -sfn "$(brew --prefix)/opt/docker-buildx/bin/docker-buildx"  ~/.docker/cli-plugins/docker-buildx
 ln -sfn "$(brew --prefix)/opt/docker-compose/bin/docker-compose" ~/.docker/cli-plugins/docker-compose
 
-# Give Colima room for cargo builds + agent containers
-colima start --cpu 4 --memory 8 --disk 100
+# Give Colima room for cargo builds + agent containers. On the 8-core/8GiB
+# Mini we run 6/6 (leaves ~2GiB for macOS + the native dispatcher); anything
+# smaller than ~4/5 can't hold a cold cargo build plus nats/ssh/api. NOTE:
+# `colima start` with no flags on a fresh machine defaults to 2 CPU/2GiB and
+# a job whose resources.cpu exceeds the VM's CPUs fails at container launch
+# ("range of CPUs is from 0.01 to N"). Verify with `colima list`; resize an
+# existing VM with `colima stop && colima start --cpu 6 --memory 6`.
+colima start --cpu 6 --memory 6 --disk 100
 ```
 
 Also:
