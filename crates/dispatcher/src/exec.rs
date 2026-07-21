@@ -350,6 +350,11 @@ impl Core {
                             // completes the job may advance, and the artifacts
                             // are the only record of how it got here.
                             let usage = harvest.collect(&o, &p, seq, task_id, &out).await;
+                            // Reclaim the overlay now that logs/transcript are
+                            // captured — otherwise every task leaks its build.
+                            if let Some(id) = &out.container_id {
+                                harvest.dispose(seq, task_id, id).await;
+                            }
                             (out.exit_code, usage)
                         }
                         Err(e) => {
@@ -401,6 +406,7 @@ impl Core {
                     // Logs are the only record of what a command task printed —
                     // TaskResult::Command.output has never carried it.
                     harvest.collect_logs(&o, &p, seq, task_id, &id).await;
+                    harvest.dispose(seq, task_id, &id).await;
                     let _ = tx
                         .send(Msg::TaskExited {
                             owner: o,

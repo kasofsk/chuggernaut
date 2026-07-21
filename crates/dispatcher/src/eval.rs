@@ -339,6 +339,8 @@ impl Core {
                         .flatten()
                         .and_then(|bytes| serde_json::from_slice(&bytes).ok());
                     harvest.collect_logs(&o, &p, seq, task_id, &id).await;
+                    // eval-result.json and logs are out — reclaim the overlay.
+                    harvest.dispose(seq, task_id, &id).await;
                     let _ = tx
                         .send(Msg::TaskExited {
                             owner: o,
@@ -405,6 +407,9 @@ impl Core {
                     let (exit_code, usage) = match provider.run(config).await {
                         Ok(out) => {
                             let usage = harvest.collect(&o, &p, seq, task_id, &out).await;
+                            if let Some(id) = &out.container_id {
+                                harvest.dispose(seq, task_id, id).await;
+                            }
                             (out.exit_code, usage)
                         }
                         Err(e) => {

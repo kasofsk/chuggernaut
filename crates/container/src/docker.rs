@@ -15,7 +15,7 @@ use bollard::Docker;
 use bollard::models::{ContainerCreateBody, HostConfig};
 use bollard::query_parameters::{
     DownloadFromContainerOptionsBuilder, ListContainersOptionsBuilder, LogsOptionsBuilder,
-    UploadToContainerOptionsBuilder,
+    RemoveContainerOptionsBuilder, UploadToContainerOptionsBuilder,
 };
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -120,6 +120,29 @@ impl DockerBackend {
             .await
             .map_err(|e| BackendError::Other(e.to_string()))?;
         Ok(list.len() as u32)
+    }
+
+    /// Exited managed containers on one node, as `{node}/{docker_id}` ids —
+    /// the same encoding as launch, so the sweep can match against task records.
+    async fn managed_exited(&self, node: &Node) -> Result<Vec<ContainerId>, BackendError> {
+        let opts = ListContainersOptionsBuilder::default()
+            // `all(true)` is required to see anything but running containers.
+            .all(true)
+            .filters(&HashMap::from([
+                ("label".to_string(), vec![format!("{MANAGED_LABEL}=true")]),
+                ("status".to_string(), vec!["exited".to_string()]),
+            ]))
+            .build();
+        let list = node
+            .docker
+            .list_containers(Some(opts))
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))?;
+        Ok(list
+            .into_iter()
+            .filter_map(|c| c.id)
+            .map(|id| format!("{}/{}", node.name, id))
+            .collect())
     }
 
     /// §3.1 placement: most free slots, ties broken by name.
@@ -325,6 +348,33 @@ impl ContainerBackend for DockerBackend {
             }
         }
         Ok(out)
+    }
+
+    async fn remove(&self, id: &ContainerId) -> Result<(), BackendError> {
+        let (node, cid) = self.route(id)?;
+        // force=false — the caller only removes after the container has exited
+        // and its artifacts are harvested.
+        let opts = RemoveContainerOptionsBuilder::default()
+            .force(false)
+            .build();
+        match node.docker.remove_container(cid, Some(opts)).await {
+            Ok(()) => Ok(()),
+            // Already gone (404) or a removal already in flight (409): the
+            // overlay is reclaimed either way, so removal is idempotent.
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404 | 409,
+                ..
+            }) => Ok(()),
+            Err(e) => Err(map_err(id, e)),
+        }
+    }
+
+    async fn list_managed_exited(&self) -> Result<Vec<ContainerId>, BackendError> {
+        let mut ids = Vec::new();
+        for node in &self.nodes {
+            ids.extend(self.managed_exited(node).await?);
+        }
+        Ok(ids)
     }
 }
 

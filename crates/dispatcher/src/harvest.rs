@@ -1,9 +1,11 @@
 //! Pulling artifacts out of a container after it exits.
 //!
-//! Containers are never removed, so their filesystem and logs survive — but
-//! only while something remembers the container id. Historically the agent path
-//! threw that id away, which is why session transcripts were unrecoverable in
-//! practice despite still sitting on the node.
+//! Everything a finished task leaves behind — container logs (carrying the
+//! CLI's JSON result), the session transcript, an evaluator's
+//! `eval-result.json` — must be copied out *before* the container is removed;
+//! [`dispose`](Harvester::dispose) reclaims its overlay layer once that's done.
+//! A cargo-building job's overlay is 5–10 GB, so leaving exited containers
+//! around fills the host disk (the 2026-07-21 outage).
 //!
 //! Runs on a clone of the handles rather than `&Core` because collection
 //! happens inside the per-task `tokio::spawn`, off the actor thread. Nothing
@@ -134,6 +136,17 @@ impl Harvester {
                     .await
             }
             Err(e) => tracing::warn!("job {seq} task {task_id}: no container logs: {e}"),
+        }
+    }
+
+    /// Remove a finished container after its artifacts are captured (spec §3.1:
+    /// the container lifecycle ends in removal). This is the disk-leak fix —
+    /// each work/eval overlay holds a full `/workspace/target` build. Called
+    /// last, once every `logs`/`copy_file` read is done. Best-effort: a failed
+    /// removal leaks disk but must never fail a job, so it only warns.
+    pub(crate) async fn dispose(&self, seq: u64, task_id: u64, id: &container::ContainerId) {
+        if let Err(e) = self.backend.remove(id).await {
+            tracing::warn!("job {seq} task {task_id}: removing container {id} failed: {e}");
         }
     }
 

@@ -30,6 +30,10 @@ struct FakeBackendState {
     files: HashMap<String, Vec<u8>>,
     /// Returned by `logs` for every container.
     logs: Vec<u8>,
+    /// Containers removed via `remove`, in call order.
+    removed: Vec<ContainerId>,
+    /// Ids returned by `list_managed_exited` (the startup-sweep candidates).
+    managed_exited: Vec<ContainerId>,
 }
 
 impl Default for FakeBackend {
@@ -67,6 +71,17 @@ impl FakeBackend {
 
     pub fn launches(&self) -> Vec<ContainerLaunchConfig> {
         self.state.lock().unwrap().launches.clone()
+    }
+
+    /// Seed the ids that `list_managed_exited` reports — the exited managed
+    /// containers a startup sweep should consider.
+    pub fn seed_managed_exited(&self, ids: impl IntoIterator<Item = ContainerId>) {
+        self.state.lock().unwrap().managed_exited.extend(ids);
+    }
+
+    /// Container ids passed to `remove`, in call order.
+    pub fn removed(&self) -> Vec<ContainerId> {
+        self.state.lock().unwrap().removed.clone()
     }
 }
 
@@ -119,6 +134,20 @@ impl ContainerBackend for FakeBackend {
 
     async fn logs(&self, _id: &ContainerId) -> Result<Vec<u8>, BackendError> {
         Ok(self.state.lock().unwrap().logs.clone())
+    }
+
+    async fn remove(&self, id: &ContainerId) -> Result<(), BackendError> {
+        let mut st = self.state.lock().unwrap();
+        // Drop it from the launch bookkeeping so `inspect`/`wait` afterward
+        // report it as gone, mirroring a real removed container. Idempotent.
+        st.exits.remove(id);
+        st.managed_exited.retain(|c| c != id);
+        st.removed.push(id.clone());
+        Ok(())
+    }
+
+    async fn list_managed_exited(&self) -> Result<Vec<ContainerId>, BackendError> {
+        Ok(self.state.lock().unwrap().managed_exited.clone())
     }
 }
 

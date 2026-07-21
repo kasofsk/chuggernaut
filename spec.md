@@ -720,6 +720,11 @@ pub trait ContainerBackend: Send + Sync {
     async fn inspect(&self, id: &ContainerId) -> Result<Option<ContainerStatus>, BackendError>;
     /// Copy a single file out of the container filesystem; None if not found.
     async fn copy_file(&self, id: &ContainerId, path: &str) -> Result<Option<Vec<u8>>, BackendError>;
+    /// Remove an exited container, reclaiming its writable overlay layer.
+    /// Idempotent; force=false — callers remove only after harvesting.
+    async fn remove(&self, id: &ContainerId) -> Result<(), BackendError>;
+    /// IDs of exited managed containers across every node — the §3.6 sweep set.
+    async fn list_managed_exited(&self) -> Result<Vec<ContainerId>, BackendError>;
 }
 
 pub struct ContainerLaunchConfig {
@@ -744,6 +749,8 @@ pub enum ContainerStatus { Running, Exited { exit_code: i32 } }
 ```
 
 `copy_file` is used by the dispatcher to extract `/workspace/eval-result.json` after a command eval container exits.
+
+**Container lifecycle ends in removal.** A container's writable overlay holds a full `/workspace` checkout plus whatever the task built (a cargo `target/` is 5–10 GB), so an exited container that is never removed leaks that overlay to the host disk — enough to fill a node in a day and take the platform down (the 2026-07-21 outage). The dispatcher therefore removes each container in its task-exit handling, *after* it has harvested everything it needs from the exited container: logs (artifacts), the session transcript, and `eval-result.json`. Removal is best-effort and idempotent (`remove`, force=false) — a failed removal leaks disk but must never fail a job. Containers orphaned by a crash before that handling runs are reclaimed by the startup sweep (§3.6).
 
 ---
 
@@ -865,6 +872,7 @@ On dispatcher startup, apply in order:
 3. For each job in `WrapUp` (the merge queue is in-memory and lost on restart), re-enter it into the merge queue — with or without a gate in flight — so landing resumes
 4. Transition any Blocked job whose dependencies are all Done to Ready
 5. Enqueue all jobs currently in Ready state (including those that were Ready before the crash and any newly-Ready jobs from step 4) into the in-memory work queue
+6. **Sweep exited containers**: list exited `chuggernaut.managed` containers (`list_managed_exited`) and `remove` each one whose task is already terminal in KV — or which has no owning task record at all. A container still bound to a live (`Running`/`Pending`) task is kept, since step 2 may re-attach to it. This reclaims overlays orphaned by a crash between a container's exit and the task-exit removal that normally frees it (§3.1). Runs after the in-flight recovery above so any container a live task will resume has been settled and protected first; best-effort, so a Docker error here only warns and never blocks startup.
 
 The task log in `tasks.*` KV is the source of truth for execution state. The configured backend must be reachable at startup; the dispatcher will not start if the backend is unavailable.
 

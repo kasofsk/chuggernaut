@@ -40,7 +40,72 @@ impl Core {
                 _ => {}
             }
         }
+
+        // §3.6: reclaim exited containers orphaned by the crash/restart. Runs
+        // last so any container in-flight recovery still needs (Running tasks,
+        // re-attached monitors) has been settled and protected first.
+        self.sweep_exited_containers(&jobs).await;
         Ok(())
+    }
+
+    /// §3.6 startup sweep: remove exited `chuggernaut.managed` containers whose
+    /// task is already terminal — the overlay is dead weight once its result is
+    /// recorded. A container still bound to a live (Running/Pending) task is
+    /// kept: recovery re-attaches to it. Orphans with no owning task are removed
+    /// too — they are exactly the crash leftovers this catches.
+    ///
+    /// Best-effort: a Docker hiccup here must not block the dispatcher from
+    /// starting, so every failure only warns.
+    async fn sweep_exited_containers(&self, jobs: &[Job]) {
+        let exited = match self.backend.list_managed_exited().await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!("startup container sweep: listing exited containers failed: {e}");
+                return;
+            }
+        };
+        if exited.is_empty() {
+            return;
+        }
+
+        // Container ids we must not touch: those a live task may still resume.
+        // Only active (non-terminal) jobs can hold live tasks, and those are
+        // exactly the jobs in the graphs.
+        let mut live = std::collections::HashSet::new();
+        for job in jobs {
+            let (owner, project) = split(&job.project);
+            let tasks = match self.tasks.list_for_job(&owner, &project, job.id).await {
+                Ok(tasks) => tasks,
+                Err(e) => {
+                    // Can't prove these containers are disposable — skip the
+                    // whole sweep rather than risk removing a live one.
+                    tracing::warn!(
+                        "startup container sweep: listing tasks for job {} failed: {e}; skipping sweep",
+                        job.id
+                    );
+                    return;
+                }
+            };
+            for task in tasks {
+                if matches!(task.state, TaskState::Running | TaskState::Pending)
+                    && let Some(cid) = task.container_id
+                {
+                    live.insert(cid);
+                }
+            }
+        }
+
+        for id in exited {
+            if live.contains(&id) {
+                continue;
+            }
+            match self.backend.remove(&id).await {
+                Ok(()) => tracing::info!("startup container sweep: removed exited container {id}"),
+                Err(e) => {
+                    tracing::warn!("startup container sweep: removing container {id} failed: {e}")
+                }
+            }
+        }
     }
 
     async fn recover_work(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
@@ -278,6 +343,13 @@ impl Core {
                             .ok()
                             .flatten()
                             .and_then(|b| serde_json::from_slice(&b).ok());
+                        // Re-attached after a restart: reclaim the overlay once
+                        // the verdict is out, same as the normal exit path.
+                        if let Err(e) = backend.remove(&cid).await {
+                            tracing::warn!(
+                                "job {seq} task {task_id}: removing container failed: {e}"
+                            );
+                        }
                         let _ = tx
                             .send(Msg::TaskExited {
                                 owner: o,

@@ -650,6 +650,16 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
     // Command evals run no agent, so they have no session.
     assert!(eval.session_id.is_none());
     assert!(!session_id.is_empty());
+
+    // The leak fix (spec §3.1): every container the job ran is removed once its
+    // result is recorded. The artifacts above were all read out first, so this
+    // proves capture-happens-before-removal — a job leaves nothing on the node.
+    let removed = rig.backend.removed();
+    assert_eq!(
+        removed.len(),
+        rig.backend.launches().len(),
+        "every launched container should be removed after its task exits"
+    );
 }
 
 // ── Lifecycle generalization (design-lifecycle.md) ───────────────────────

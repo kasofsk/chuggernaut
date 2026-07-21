@@ -42,13 +42,25 @@ pub trait ContainerBackend: Send + Sync {
         path: &str,
     ) -> Result<Option<Vec<u8>>, BackendError>;
     /// Captured stdout and stderr. Read after exit; this does not follow.
-    /// Containers are never removed, so this stays available until the node is
-    /// pruned.
+    /// Call before [`remove`](ContainerBackend::remove): the container's logs
+    /// and filesystem vanish with it.
     ///
     /// Order is preserved *within* each stream, but not across them: Docker
     /// orders frames by timestamp, so writes to stdout and stderr in the same
     /// millisecond can come back either way round (measured, not assumed).
     async fn logs(&self, id: &ContainerId) -> Result<Vec<u8>, BackendError>;
+    /// Remove an exited container, reclaiming its writable overlay layer (spec
+    /// §3.1: the container lifecycle ends in removal). `force=false` — callers
+    /// remove only after `wait`/`logs`/`copy_file` have captured everything the
+    /// dispatcher needs. Idempotent: an already-removed container is `Ok(())`.
+    ///
+    /// This is the leak fix — a cargo-building job leaves 5–10 GB per task in
+    /// its overlay, so leaving exited containers around fills the host disk.
+    async fn remove(&self, id: &ContainerId) -> Result<(), BackendError>;
+    /// IDs of managed containers that have exited, across every node. Used by
+    /// the dispatcher's startup sweep (spec §3.6) to reclaim overlays orphaned
+    /// by crashes or restarts, which never went through the exit path.
+    async fn list_managed_exited(&self) -> Result<Vec<ContainerId>, BackendError>;
 }
 
 #[derive(Debug, Clone)]
