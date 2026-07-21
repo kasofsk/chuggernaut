@@ -14,7 +14,7 @@ work:
     iterations: 3
 resources:
   cpu: 3
-  memory: 5g
+  memory: 5Gi
   # Covers the whole inline loop — all author/review iterations in one
   # container — plus a cold cargo build of the workspace.
   task_timeout: 1h
