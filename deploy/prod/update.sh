@@ -13,6 +13,11 @@
 # Usage: update.sh [ref]        (ref defaults to origin/main)
 set -eu
 
+# Deploy jobs reach this script over non-interactive ssh, whose PATH lacks
+# homebrew (docker/colima) and cargo. Set it explicitly so the script behaves
+# identically from any caller: runner, ssh, or an interactive shell.
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
 CHUG_REPO="${CHUG_REPO:-$HOME/chuggernaut}"   # the deployed checkout
 TARGET_REF="${1:-origin/main}"
 
