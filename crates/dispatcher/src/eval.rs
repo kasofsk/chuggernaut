@@ -12,14 +12,64 @@ use crate::exec::{ChannelRole, eval_image, task_timeout};
 use agent::AgentRunConfig;
 use chrono::Utc;
 use container::{ContainerLaunchConfig, bootstrap_cmd};
+use std::collections::VecDeque;
 use types::{
     EvalResult, Evaluator, EvaluatorType, JobState, Task, TaskKind, TaskPhase, TaskResult,
     TaskState, WorkType, WrapUpMode,
 };
 use vcs::MergeOutcome;
 
+/// One cycle's evaluation, run as an ascending sequence of stages (spec §3.3
+/// staged evaluation). Only the current stage has live tasks: `slots` is the
+/// stage in flight, `pending` the stages not yet created, `done` the outcomes
+/// of stages that already completed and passed. The reduce folds `done` and
+/// `slots` together. A single-stage round leaves `pending`/`done` empty and is
+/// byte-for-byte the unstaged behavior; the merge gate always builds one.
 pub struct EvalRound {
     pub slots: Vec<EvalSlot>,
+    /// Evaluators for stages not yet launched, grouped ascending by `stage`.
+    pub pending: VecDeque<Vec<Evaluator>>,
+    /// Slots from earlier stages that completed and let the round advance.
+    pub done: Vec<EvalSlot>,
+}
+
+impl EvalRound {
+    /// A single-stage round: the merge gate, and the compatibility shape for a
+    /// job whose evaluators all share one stage.
+    pub fn single(slots: Vec<EvalSlot>) -> Self {
+        EvalRound {
+            slots,
+            pending: VecDeque::new(),
+            done: Vec::new(),
+        }
+    }
+}
+
+/// Partition evaluators into stages in ascending `stage` order, preserving the
+/// declared order within a stage (stable sort). One distinct stage → one group,
+/// which is exactly today's single fan-out.
+pub(crate) fn group_stages(mut evaluators: Vec<Evaluator>) -> VecDeque<Vec<Evaluator>> {
+    evaluators.sort_by_key(|e| e.stage);
+    let mut stages: VecDeque<Vec<Evaluator>> = VecDeque::new();
+    for e in evaluators {
+        match stages.back_mut() {
+            Some(last) if last[0].stage == e.stage => last.push(e),
+            _ => stages.push_back(vec![e]),
+        }
+    }
+    stages
+}
+
+/// Whether a completed stage lets the next stage start: every *required*
+/// evaluator resolved to a product `pass: true`. A required product fail, an
+/// abort (which implies `pass: false`), or an infra failure closes the round —
+/// later stages are not created. Advisory (`required: false`) outcomes never
+/// block progression.
+pub(crate) fn stage_passed(slots: &[EvalSlot]) -> bool {
+    slots.iter().all(|s| {
+        !s.evaluator.required.unwrap_or(true)
+            || matches!(s.outcome, Some(SlotOutcome::Product { pass: true, .. }))
+    })
 }
 
 pub struct EvalSlot {
@@ -86,7 +136,33 @@ impl Core {
             return self.finalize_pass(owner, project, seq).await;
         }
 
+        // Staged fan-out (§3.3): launch stage 0 now, hold the rest until each
+        // prior stage passes. A single-stage job launches everything at once.
         let branch = job.branch.clone();
+        let mut pending = group_stages(evaluators);
+        let first = pending.pop_front().expect("non-empty evaluators");
+        let slots = self
+            .launch_eval_stage(owner, project, seq, &branch, cycle, first)
+            .await?;
+        self.active.get_mut(&key).expect("exec state").round = Some(EvalRound {
+            slots,
+            pending,
+            done: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Fan out one stage's evaluators against the job branch (§3.3). Returns the
+    /// live slots; the caller installs them on the round.
+    pub(crate) async fn launch_eval_stage(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        branch: &str,
+        cycle: u32,
+        evaluators: Vec<Evaluator>,
+    ) -> Result<Vec<EvalSlot>> {
         let mut slots = Vec::new();
         for evaluator in evaluators {
             let task_id = self
@@ -95,7 +171,7 @@ impl Core {
                     project,
                     seq,
                     TaskPhase::Evaluation,
-                    &branch,
+                    branch,
                     cycle,
                     &evaluator,
                     1,
@@ -108,8 +184,7 @@ impl Core {
                 outcome: None,
             });
         }
-        self.active.get_mut(&key).expect("exec state").round = Some(EvalRound { slots });
-        Ok(())
+        Ok(slots)
     }
 
     /// Create + launch one evaluator task (§3.3 evaluator types). Shared by the
@@ -183,6 +258,7 @@ impl Core {
             },
             attempt,
             evaluator: Some(evaluator.name.clone()),
+            stage: evaluator.stage,
             container_id: None,
             session_id: session_id.clone(),
             result: None,
@@ -198,7 +274,7 @@ impl Core {
             "task-created",
             serde_json::json!({
                 "task_id": task_id, "phase": phase_name, "cycle": cycle,
-                "attempt": attempt, "evaluator": evaluator.name,
+                "attempt": attempt, "evaluator": evaluator.name, "stage": evaluator.stage,
             }),
         )
         .await?;
@@ -431,10 +507,7 @@ impl Core {
             abort,
             structured,
         });
-        if round.slots.iter().all(|s| s.outcome.is_some()) {
-            return self.reduce(owner, project, seq).await;
-        }
-        Ok(())
+        self.stage_complete(owner, project, seq).await
     }
 
     /// Eval container exited. The verdict source depends on the type: command
@@ -574,10 +647,59 @@ impl Core {
         if let Some(outcome) = outcome {
             let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
             round.slots[slot_idx].outcome = Some(outcome);
-            if round.slots.iter().all(|s| s.outcome.is_some()) {
-                return self.reduce(owner, project, seq).await;
-            }
+            return self.stage_complete(owner, project, seq).await;
         }
+        Ok(())
+    }
+
+    /// Called whenever a slot in the current stage resolves. A no-op while the
+    /// stage is still in flight. Once every slot in the stage is terminal:
+    /// advance to the next stage when every *required* evaluator passed and a
+    /// later stage remains (§3.3 staged evaluation); otherwise run the reduce
+    /// over every stage that ran. A short-circuited stage leaves the pending
+    /// stages uncreated — they simply have no task records for this cycle.
+    pub(crate) async fn stage_complete(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+    ) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        let (complete, advance) = {
+            let Some(round) = self.active.get(&key).and_then(|e| e.round.as_ref()) else {
+                return Ok(());
+            };
+            let complete = round.slots.iter().all(|s| s.outcome.is_some());
+            (
+                complete,
+                complete && stage_passed(&round.slots) && !round.pending.is_empty(),
+            )
+        };
+        if !complete {
+            return Ok(());
+        }
+        if !advance {
+            return self.reduce(owner, project, seq).await;
+        }
+        // Fold the finished stage into `done` and fan out the next one.
+        let branch = self.must_get(owner, project, seq)?.branch.clone();
+        let cycle = self.active.get(&key).expect("exec state").cycle;
+        let next = self
+            .active
+            .get_mut(&key)
+            .unwrap()
+            .round
+            .as_mut()
+            .unwrap()
+            .pending
+            .pop_front()
+            .expect("advance implies a pending stage");
+        let new_slots = self
+            .launch_eval_stage(owner, project, seq, &branch, cycle, next)
+            .await?;
+        let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
+        let finished = std::mem::replace(&mut round.slots, new_slots);
+        round.done.extend(finished);
         Ok(())
     }
 
@@ -603,7 +725,10 @@ impl Core {
             // (design-lifecycle.md abort verdict). Advisory aborts are plain
             // advisory fails.
             let mut aborted: Vec<String> = Vec::new();
-            for slot in &round.slots {
+            // Every stage that ran: earlier stages that passed (`done`) plus the
+            // final stage (`slots`). Stages that were never created — skipped by
+            // a short-circuit — contribute nothing, exactly as intended.
+            for slot in round.done.iter().chain(round.slots.iter()) {
                 let required = slot.evaluator.required.unwrap_or(true);
                 match slot.outcome.as_ref().expect("complete") {
                     SlotOutcome::Product {
@@ -954,7 +1079,7 @@ impl Core {
                 self.active.get_mut(&key).expect("exec state").gate = Some(GateState {
                     commit,
                     old_head: head,
-                    round: EvalRound { slots },
+                    round: EvalRound::single(slots),
                 });
                 Ok(FinalizeStep::Gating)
             }
@@ -1160,5 +1285,130 @@ impl Core {
         .await?;
         self.enter_work(owner, project, seq, cycle + 1, Vec::new(), Some(context))
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit coverage for the staged-evaluation decision core (spec §3.3): how
+    //! evaluators partition into stages, and whether a completed stage lets the
+    //! next one start. These are the pure fragments of the reduce path; the
+    //! stateful reduce/advance flow is exercised end-to-end in Tier-2
+    //! (`tests/execution.rs`).
+    use super::*;
+    use types::EvaluatorType;
+
+    fn evaluator(name: &str, stage: u32, required: Option<bool>) -> Evaluator {
+        Evaluator {
+            name: name.into(),
+            r#type: EvaluatorType::Command,
+            image: None,
+            run: Some("true".into()),
+            prompt: None,
+            provider: None,
+            model: None,
+            secrets: vec![],
+            required,
+            stage,
+        }
+    }
+
+    fn slot(name: &str, stage: u32, required: Option<bool>, outcome: SlotOutcome) -> EvalSlot {
+        EvalSlot {
+            evaluator: evaluator(name, stage, required),
+            task_id: 0,
+            attempt: 1,
+            outcome: Some(outcome),
+        }
+    }
+
+    fn product(pass: bool, abort: bool) -> SlotOutcome {
+        SlotOutcome::Product {
+            pass,
+            abort,
+            structured: None,
+        }
+    }
+
+    #[test]
+    fn group_stages_single_stage_is_one_group() {
+        // The compatibility story: every evaluator at the default stage 0 →
+        // exactly one stage, in declared order.
+        let evs = vec![
+            evaluator("a", 0, None),
+            evaluator("b", 0, None),
+            evaluator("c", 0, None),
+        ];
+        let stages = group_stages(evs);
+        assert_eq!(stages.len(), 1);
+        let names: Vec<_> = stages[0].iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn group_stages_orders_by_stage_stable_within() {
+        // Out-of-order, multi-stage input sorts ascending; declared order is
+        // preserved within a stage (stable).
+        let evs = vec![
+            evaluator("ci", 1, None),
+            evaluator("review", 0, None),
+            evaluator("lint", 1, None),
+            evaluator("gate", 2, None),
+        ];
+        let stages: Vec<Vec<_>> = group_stages(evs)
+            .into_iter()
+            .map(|s| s.into_iter().map(|e| e.name).collect())
+            .collect();
+        assert_eq!(
+            stages,
+            vec![
+                vec!["review".to_string()],
+                vec!["ci".to_string(), "lint".to_string()],
+                vec!["gate".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn stage_passed_all_required_pass() {
+        let slots = vec![
+            slot("a", 0, None, product(true, false)),
+            slot("b", 0, Some(true), product(true, false)),
+        ];
+        assert!(stage_passed(&slots));
+    }
+
+    #[test]
+    fn stage_passed_required_fail_blocks() {
+        let slots = vec![
+            slot("a", 0, None, product(true, false)),
+            slot("b", 0, None, product(false, false)),
+        ];
+        assert!(!stage_passed(&slots));
+    }
+
+    #[test]
+    fn stage_passed_required_abort_blocks() {
+        let slots = vec![slot("a", 0, None, product(false, true))];
+        assert!(!stage_passed(&slots));
+    }
+
+    #[test]
+    fn stage_passed_required_infra_blocks() {
+        let slots = vec![slot("a", 0, None, SlotOutcome::Infra)];
+        assert!(!stage_passed(&slots));
+    }
+
+    #[test]
+    fn stage_passed_advisory_failures_never_block() {
+        // Advisory fail, advisory abort, advisory infra — none stop the next
+        // stage from starting.
+        let slots = vec![
+            slot("pass", 0, None, product(true, false)),
+            slot("adv-fail", 0, Some(false), product(false, false)),
+            slot("adv-abort", 0, Some(false), product(false, true)),
+            slot("adv-infra", 0, Some(false), SlotOutcome::Infra),
+        ];
+        assert!(stage_passed(&slots));
     }
 }

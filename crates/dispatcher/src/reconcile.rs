@@ -115,7 +115,6 @@ impl Core {
         let cycle = self.active.get(&key).expect("exec state").cycle;
         let all = self.tasks.list_for_job(owner, project, seq).await?;
 
-        // Rebuild the round: one slot per evaluator, latest task per name.
         let evaluators = self
             .active
             .get(&key)
@@ -127,21 +126,66 @@ impl Core {
             // Auto-pass job caught between Evaluation and Done: re-finalize.
             return self.refinalize(owner, project, seq).await;
         }
-        let mut slots = Vec::new();
-        let mut running: Vec<Task> = Vec::new();
-        for evaluator in evaluators {
-            let latest = all
-                .iter()
+
+        // Rebuild the staged round from the task log (§3.3). Stages are launched
+        // in order, so the started stages form a prefix: the last stage with any
+        // task this cycle is the one in flight (`slots`), earlier stages are
+        // `done`, later stages `pending` (no tasks yet). A single-stage job
+        // collapses to one group — identical to the pre-staging rebuild.
+        let stages: Vec<Vec<types::Evaluator>> =
+            crate::eval::group_stages(evaluators).into_iter().collect();
+        let latest = |ev: &types::Evaluator| -> Option<Task> {
+            all.iter()
                 .filter(|t| {
                     t.phase == TaskPhase::Evaluation
                         && t.cycle == cycle
-                        && t.evaluator.as_deref() == Some(evaluator.name.as_str())
+                        && t.evaluator.as_deref() == Some(ev.name.as_str())
                 })
                 .max_by_key(|t| t.id)
-                .cloned();
-            match latest {
+                .cloned()
+        };
+        let current_idx = stages
+            .iter()
+            .rposition(|stage| stage.iter().any(|ev| latest(ev).is_some()))
+            .unwrap_or(0);
+
+        // Earlier stages passed before we advanced: rebuild their terminal
+        // outcomes so the reduce sees the whole run. A non-terminal task here is
+        // structurally impossible; treat one as infra rather than panic.
+        let mut done: Vec<EvalSlot> = Vec::new();
+        for stage in &stages[..current_idx] {
+            for evaluator in stage {
+                let (task_id, attempt, outcome) = match latest(evaluator) {
+                    Some(task) => (
+                        task.id,
+                        task.attempt,
+                        match (task.state, &task.result) {
+                            (TaskState::Done, Some(r)) => SlotOutcome::Product {
+                                pass: result_pass(r),
+                                abort: result_abort(r),
+                                structured: result_structured(r),
+                            },
+                            _ => SlotOutcome::Infra,
+                        },
+                    ),
+                    None => (0, 1, SlotOutcome::Infra),
+                };
+                done.push(EvalSlot {
+                    evaluator: evaluator.clone(),
+                    task_id,
+                    attempt,
+                    outcome: Some(outcome),
+                });
+            }
+        }
+
+        // The stage in flight: rebuild each slot, relaunching any evaluator that
+        // never got a task (crashed mid-fan-out).
+        let mut slots = Vec::new();
+        let mut running: Vec<Task> = Vec::new();
+        for evaluator in stages[current_idx].clone() {
+            match latest(&evaluator) {
                 None => {
-                    // Crashed mid-fan-out: this evaluator never got a task.
                     let branch = self.must_get(owner, project, seq)?.branch.clone();
                     let task_id = self
                         .launch_evaluator_task(
@@ -185,15 +229,22 @@ impl Core {
             }
         }
         let complete = slots.iter().all(|s| s.outcome.is_some());
-        self.active.get_mut(&key).expect("exec state").round = Some(EvalRound { slots });
+        let pending: std::collections::VecDeque<Vec<types::Evaluator>> =
+            stages[current_idx + 1..].to_vec().into();
+        self.active.get_mut(&key).expect("exec state").round = Some(EvalRound {
+            slots,
+            pending,
+            done,
+        });
 
         for task in running {
             self.settle_running(owner, project, seq, task).await?;
         }
         if complete {
-            // No Running tasks and every slot resolved before the crash: the
-            // reduce (and possibly the merge) was lost — replay it.
-            return self.refinalize(owner, project, seq).await;
+            // No Running tasks and every slot in the stage resolved before the
+            // crash: replay the advance-or-reduce decision — it may launch the
+            // next stage or run the (lost) reduce and merge.
+            return self.stage_complete(owner, project, seq).await;
         }
         Ok(())
     }

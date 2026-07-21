@@ -99,7 +99,7 @@ work:                          # required
 
 resources:                     # optional; disallowed for work.type: human
   cpu: number
-  memory: string               # e.g. "4Gi"
+  memory: string               # positive integer, optionally suffixed with a binary unit (Ki|Mi|Gi), or plain bytes: "512Mi", "4Gi", "1048576". No other suffixes ("5g", "4GB" are rejected). Format validated at parse time (release + `chuggernaut validate`), not deferred to container launch
   task_timeout: duration       # per-container execution limit; default 1h
 
 wrap_up:                       # optional; the job's third step (work → evaluation → wrap-up); see design-lifecycle.md
@@ -130,6 +130,7 @@ eval:                          # optional; omit or leave empty for auto-pass
     model: string
 
     required: bool             # optional; default true; false = advisory
+    stage: int                 # optional; default 0; staged-evaluation ordering (§3.3). Non-negative. Evaluators run in ascending stage order; within a stage they fan out in parallel. A later stage's tasks are created only after every required evaluator in the prior stage passes
 
 knowledge: [string]            # default knowledge tags for KO injection at launch
 vars: [string]                 # injected into work container and all eval containers
@@ -166,6 +167,7 @@ vars: [string]                 # injected into work container and all eval conta
 | `model` | disallowed | optional | disallowed |
 | `secrets` | optional | optional | disallowed |
 | `required` | optional | optional | optional |
+| `stage` | optional | optional | optional |
 
 ² Falls back to the job's top-level `image`. Required per-evaluator when the job declares no top-level image (`work.type: human`).
 
@@ -386,7 +388,7 @@ pub enum TaskResolution {
 | Human work task: operator resolves `Fail` | Human escalation task → job → Escalated |
 | Operator grants `Retry` on escalation | New work task (same cycle, attempt++); `work_retries` budget NOT reset |
 | Eval reduce passes, squash-merge conflict | Update `base_ref` to current default HEAD; cycle++ (rework_budget NOT consumed); re-enter Work with conflict context injected |
-| Job enters Evaluation | One task (attempt=1) per evaluator declared in job type |
+| Job enters Evaluation | One task (attempt=1) per evaluator in the lowest `stage` (§3.3); later stages' tasks are created only as each prior stage passes |
 | Agent eval task: container exits with no prior `submit_eval`, `eval_retries` available | Infra error; new task record (same cycle, attempt++) |
 | Agent eval task: `eval_retries` exhausted | Final task marked Failed (infra error); reduce proceeds |
 | Eval reduce fails (`work.type: agent \| human`), under rework budget | Job re-enters Work (cycle++); all eval results feed into next work task |
@@ -581,7 +583,8 @@ The authoritative definition of all valid job state transitions. No transition e
 | `Work` | `Escalated` | Work task fails, no retries left | `attempt > work_retries` | Create Human escalation task; publish `job-escalated` |
 | `Work` | `Escalated` | Human work task resolved `Fail` | — | Create Human escalation task; publish `job-escalated` |
 | `Work` | `Escalated` | Launch-time validation fails (declared secret or var missing from KV) | — | Create Human escalation task; publish `job-escalated` |
-| `Work` | `Evaluation` | Work task succeeds | — | Create one task per declared evaluator (attempt=1); publish `job-evaluation-started` |
+| `Work` | `Evaluation` | Work task succeeds | — | Create one task per evaluator in the lowest `stage` (§3.3 staged evaluation; attempt=1); publish `job-evaluation-started` |
+| `Evaluation` | `Evaluation` | A stage completes with every required evaluator passing and a later stage remains | — | Create the next stage's evaluator tasks (attempt=1); a short-circuited stage creates none |
 | `Evaluation` | `Evaluation` | Agent eval container exits without `submit_eval`, retries remain | `attempt ≤ eval_retries` | Create new eval task (same cycle, attempt++) |
 | `Evaluation` | `Escalated` | Any required eval task exhausts `eval_retries` (infra error) | — | Create Human escalation task; publish `job-escalated` |
 | `Evaluation` | `Work` | Eval reduce: product failure, under rework budget | evaluated cycle N ≤ `rework_budget` | cycle++; collect eval findings into rework context; reset `job/{seq}` to `base_ref`; publish `job-rework-started` (reason: `eval_failure`) |
@@ -771,7 +774,9 @@ For each Ready job, the dispatcher executes the following sequence:
 
 ### 3.3 Evaluation
 
-After a work task succeeds, the dispatcher creates one task per evaluator and fans them out in parallel. For task creation rules see §1.2. For MCP tool contracts see §4.2.
+After a work task succeeds, the dispatcher runs the job's evaluators as an ascending sequence of **stages** (evaluator `stage:`, default 0). When a job enters Evaluation, the dispatcher creates one task per evaluator **in the lowest stage** and fans them out in parallel. Within a stage the evaluators run concurrently exactly as an unstaged fan-out does — a job whose evaluators all share one stage (the default) is byte-for-byte the single-fan-out behavior, and that is the compatibility story. For task creation rules see §1.2. For MCP tool contracts see §4.2.
+
+**Staged progression.** A stage completes when all its tasks reach a terminal state (Done or Failed). If every **required** evaluator in the stage passed, the dispatcher creates the next stage's tasks (one per evaluator, fanned out). If any required evaluator failed or aborted, the later stages are **not created** — they are skipped, not failed, so no task records exist for them — and the eval reduce proceeds immediately over the stages that ran. Advisory (`required: false`) failures never block stage progression. Rework/escalation semantics, abort handling, agent-evaluator retries (`eval_retries`), and human-evaluator pending states are all unchanged **within** a stage; the ordering only governs whether the next stage's tasks are created. A rework cycle re-enters Work and, on the next Evaluation, **restarts from the lowest stage** — stages are recomputed per cycle, never resumed mid-sequence. The per-job additive `eval` entries (§1.1) default to stage 0 unless the creator declares otherwise; the `_defaults.yaml` append (§1.1 Project Default Evaluators) keeps whatever `stage` each default declares and never reorders the list.
 
 **Three evaluator types:**
 
@@ -781,7 +786,7 @@ After a work task succeeds, the dispatcher creates one task per evaluator and fa
 
 **`human`** — dispatcher creates a Human task in `Pending` state. No process launched. Operator submits a `TaskResolution` via the task inbox; the dispatcher writes `TaskResult::Human` to `tasks.*` KV and drives the next state transition.
 
-**Reduce** — applied once all eval tasks are Done or Failed:
+**Reduce** — applied once the evaluation completes: either the final stage's tasks are all Done or Failed, or a stage short-circuited (a required evaluator failed/aborted, so no later stage was created). The reduce considers every evaluator that ran across all stages; skipped stages contribute nothing.
 
 - If any `required` task is Failed (infra error) → skip rework, escalate immediately
 - If a `required: false` task is Failed (infra error) → failure recorded; reduce proceeds; does not trigger escalation (same treatment as a product `pass=false` from an advisory evaluator)
@@ -815,7 +820,7 @@ Applied after the eval reduce passes, before squash-merge — the job is in the 
 
 1. **Skip fast-path** — if the default branch HEAD still equals `base_ref`, or `job/{seq}` has no commits beyond `base_ref`, the evaluators already ran against exactly what will land. Skip the gate; squash-merge directly. Solo jobs pay nothing.
 2. **Candidate construction** — if HEAD moved: build the candidate squash commit (the job branch's changes squashed onto current default HEAD) via `git merge-tree --write-tree` + `git commit-tree`, and point a temp ref `merge-gate/{seq}` at it. If the merge conflicts, this is the existing squash-merge-conflict path (§3.2 step 12) — the gate never runs.
-3. **Gate tasks** — create one `MergeGate` task (attempt=1, current cycle) per **required command evaluator** (job type's own plus project defaults). Each runs exactly like a command eval container (§3.3 `command` semantics: bootstrap clone, exit code is the verdict, `eval-result.json` extraction, no retries) except `JOB_BRANCH=merge-gate/{seq}`. Agent and human evaluators do not re-run — their verdict is about the change; command evaluators verify the integration.
+3. **Gate tasks** — create one `MergeGate` task (attempt=1, current cycle) per **required command evaluator** (job type's own plus project defaults). Each runs exactly like a command eval container (§3.3 `command` semantics: bootstrap clone, exit code is the verdict, `eval-result.json` extraction, no retries) except `JOB_BRANCH=merge-gate/{seq}`. Agent and human evaluators do not re-run — their verdict is about the change; command evaluators verify the integration. The gate **ignores `stage`**: it re-runs the required command evaluators as a single flat fan-out regardless of which stages they were declared in — staging orders only the Evaluation-phase gate on the job branch, not the integration re-check.
 4. **Reduce** — all gate tasks pass → advance the default branch to the candidate commit (this *is* the squash-merge; do not re-merge), delete `job/{seq}` and `merge-gate/{seq}`, transition to Done. Any gate task fails → delete `merge-gate/{seq}`; update `base_ref` to current default HEAD; cycle++ (**rework_budget NOT consumed** — an integration failure is not the author's product failure; same treatment as a merge conflict); reset `job/{seq}` to new `base_ref`; inject the failing command output as `EvalResult` findings plus the conflict-style context block (§4.3: commits and diffstat of what landed since the old base); publish `job-rework-started` (reason: `merge_gate_failure`); re-enter Work.
 
 **Serialization** — the gate is a merge queue of depth 1: at most one job per project is in the gate at a time. Jobs whose eval reduce passes while the gate is occupied queue FIFO; each dequeued job re-checks the skip fast-path against the then-current HEAD. Since the dispatcher already merges sequentially, this adds no new coordination — just a queue in dispatcher memory.

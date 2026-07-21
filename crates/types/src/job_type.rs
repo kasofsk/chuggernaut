@@ -134,6 +134,11 @@ pub enum Provider {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Resources {
     pub cpu: Option<f64>,
+    /// Memory limit: a positive integer, optionally suffixed with a binary
+    /// unit (`Ki`/`Mi`/`Gi`), or plain bytes — e.g. `512Mi`, `4Gi`, `1048576`.
+    /// No other suffixes (`5g`, `4GB` are rejected). Validated at parse time so
+    /// a bad value fails offline instead of at container launch.
+    #[cfg_attr(feature = "schema", schemars(extend("pattern" = crate::resources::MEMORY_PATTERN)))]
     pub memory: Option<String>,
     pub task_timeout: Option<String>,
 }
@@ -154,6 +159,13 @@ pub struct Evaluator {
     pub secrets: Vec<String>,
     /// Default true; false = advisory.
     pub required: Option<bool>,
+    /// Staged evaluation ordering (spec §3.3): evaluators run in ascending
+    /// `stage` order; within a stage they fan out in parallel. A later stage's
+    /// tasks are created only after every *required* evaluator in the prior
+    /// stage passes. Default 0 — a single-stage job is byte-for-byte the
+    /// unstaged behavior. Non-negative (`u32`, enforced at parse).
+    #[serde(default)]
+    pub stage: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,6 +375,22 @@ impl JobType {
             }
         }
 
+        // `resources.memory` is an opaque string until the container backend
+        // parses it at launch; validate the format here so `chuggernaut
+        // validate` and release validation reject a bad limit (e.g. "5g")
+        // offline instead of wedging the job when the eval container fails to
+        // launch. `resources.cpu` needs no such check — serde already enforces
+        // it is a float, and it is never re-parsed from a string downstream.
+        if let Some(mem) = self.resources.as_ref().and_then(|r| r.memory.as_deref())
+            && let Err(e) = crate::resources::parse_memory(mem)
+        {
+            errs.push(FieldRuleError::Invalid {
+                field: "resources.memory",
+                context: format!("job type '{}'", self.name),
+                reason: e.to_string(),
+            });
+        }
+
         let durations = [
             (
                 self.resources
@@ -554,6 +582,53 @@ job_deadline: 24h
     }
 
     #[test]
+    fn memory_format_validated() {
+        let jt_with_mem = |mem: &str| {
+            JobType::parse(&format!(
+                r#"
+name: impl
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+resources:
+  memory: "{mem}"
+"#
+            ))
+            .unwrap()
+        };
+
+        // The dogfood bug: "5g" passed validate but failed at launch.
+        let errs = jt_with_mem("5g").validate();
+        assert_eq!(errs.len(), 1);
+        assert!(matches!(
+            &errs[0],
+            FieldRuleError::Invalid {
+                field: "resources.memory",
+                ..
+            }
+        ));
+        // The accepted form validates cleanly.
+        assert_eq!(jt_with_mem("5Gi").validate(), vec![]);
+        assert_eq!(jt_with_mem("512Mi").validate(), vec![]);
+        assert_eq!(jt_with_mem("1048576").validate(), vec![]);
+
+        // Other malformed forms are all rejected offline.
+        for bad in ["4GB", "-5", "0", "1.5Gi"] {
+            assert!(
+                jt_with_mem(bad).validate().iter().any(|e| matches!(
+                    e,
+                    FieldRuleError::Invalid {
+                        field: "resources.memory",
+                        ..
+                    }
+                )),
+                "should reject memory: {bad}"
+            );
+        }
+    }
+
+    #[test]
     fn project_defaults_append_and_collide() {
         let jt = JobType::parse(SPEC_EXAMPLE).unwrap();
         let defaults = ProjectDefaults::parse(
@@ -619,6 +694,87 @@ wrap_up:
         let jt = JobType::parse(yaml).unwrap();
         assert_eq!(jt.wrap_up.r#type, WrapUpMode::None);
         assert_eq!(jt.validate(), vec![]);
+    }
+
+    #[test]
+    fn evaluator_stage_defaults_zero_parses_and_validates() {
+        // Omitted `stage` defaults to 0 across all evaluator kinds; an explicit
+        // non-negative value parses. A negative value is rejected at parse
+        // (serde into u32), so it can never reach validate().
+        let jt = JobType::parse(SPEC_EXAMPLE).unwrap();
+        assert!(jt.eval.iter().all(|e| e.stage == 0));
+
+        let yaml = r#"
+name: impl
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+eval:
+  - name: review
+    type: agent
+    prompt: r.md
+    stage: 0
+  - name: ci
+    type: command
+    run: ./ci.sh
+    stage: 2
+"#;
+        let jt = JobType::parse(yaml).unwrap();
+        assert_eq!(jt.eval[0].stage, 0);
+        assert_eq!(jt.eval[1].stage, 2);
+        assert_eq!(jt.validate(), vec![]);
+
+        let negative = r#"
+name: impl
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+eval:
+  - name: review
+    type: agent
+    prompt: r.md
+    stage: -1
+"#;
+        assert!(JobType::parse(negative).is_err());
+    }
+
+    #[test]
+    fn project_defaults_preserve_declared_stage_after_append() {
+        // The append does not reorder; the default keeps whatever `stage` it
+        // declares, so a job type's stage-0 review sits ahead of a stage-1 CI
+        // default in the merged list.
+        let yaml = r#"
+name: code
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+eval:
+  - name: review
+    type: agent
+    prompt: r.md
+    stage: 0
+"#;
+        let jt = JobType::parse(yaml).unwrap();
+        let defaults = ProjectDefaults::parse(
+            r#"
+eval:
+  - name: ci
+    type: command
+    run: ./tasks/ci.sh
+    stage: 1
+"#,
+        )
+        .unwrap();
+        let merged = jt.with_defaults(&defaults).unwrap();
+        assert_eq!(merged.eval.len(), 2);
+        assert_eq!(merged.eval[0].name, "review");
+        assert_eq!(merged.eval[0].stage, 0);
+        assert_eq!(merged.eval[1].name, "ci");
+        assert_eq!(merged.eval[1].stage, 1);
+        assert_eq!(merged.validate(), vec![]);
     }
 
     #[test]

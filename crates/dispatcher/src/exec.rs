@@ -263,6 +263,7 @@ impl Core {
             },
             attempt,
             evaluator: None,
+            stage: 0,
             container_id: None,
             session_id: session_id.clone(),
             result: None,

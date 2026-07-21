@@ -375,22 +375,11 @@ fn build_tar(files: &[InjectedFile]) -> Result<Vec<u8>, String> {
     builder.into_inner().map_err(|e| e.to_string())
 }
 
-/// Parse "512Mi" / "4Gi" / plain bytes into bytes.
+/// Parse "512Mi" / "4Gi" / plain bytes into bytes. The accepted grammar is
+/// owned by `types` so field-rules validation rejects a bad limit offline
+/// (`chuggernaut validate`) before it ever reaches this launch-time parse.
 fn parse_memory(s: &str) -> Result<i64, String> {
-    let s = s.trim();
-    let (num, mult) = if let Some(n) = s.strip_suffix("Ki") {
-        (n, 1024i64)
-    } else if let Some(n) = s.strip_suffix("Mi") {
-        (n, 1024 * 1024)
-    } else if let Some(n) = s.strip_suffix("Gi") {
-        (n, 1024 * 1024 * 1024)
-    } else {
-        (s, 1)
-    };
-    num.trim()
-        .parse::<i64>()
-        .map(|v| v * mult)
-        .map_err(|_| format!("invalid memory limit {s:?}"))
+    types::parse_memory(s).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -403,6 +392,24 @@ mod tests {
         assert_eq!(parse_memory("512Mi").unwrap(), 512 * 1024 * 1024);
         assert_eq!(parse_memory("1048576").unwrap(), 1_048_576);
         assert!(parse_memory("4GB").is_err());
+    }
+
+    /// Pin the launch-time parse to the `types` field-rules grammar: every case
+    /// must resolve identically (ok→same bytes, err→err) in both crates, so a
+    /// limit that passes `chuggernaut validate` can never be rejected at launch
+    /// (the dogfood `5g` bug) and vice-versa.
+    #[test]
+    fn parse_memory_agrees_with_types_grammar() {
+        for case in [
+            "5Gi", "512Mi", "4Ki", "1048576", // legal
+            "5g", "4GB", "", "  ", "-5", "0", "1.5Gi", "Gi", "5gi", // illegal
+        ] {
+            assert_eq!(
+                parse_memory(case).ok(),
+                types::parse_memory(case).ok(),
+                "launch-time parse and types validation disagree on {case:?}"
+            );
+        }
     }
 
     #[test]

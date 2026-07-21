@@ -188,6 +188,7 @@ async fn restart_recovers_orphaned_running_work_task() {
             state: TaskState::Running,
             attempt: 1,
             evaluator: None,
+            stage: 0,
             container_id: None,
             session_id: None, // gone with the crashed dispatcher
             result: None,
@@ -302,6 +303,7 @@ async fn restart_lands_job_orphaned_in_wrapup() {
             state: TaskState::Done,
             attempt: 1,
             evaluator: None,
+            stage: 0,
             container_id: None,
             session_id: None,
             result: Some(types::TaskResult::Work {
@@ -564,6 +566,7 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
             state: TaskState::Done,
             attempt: 1,
             evaluator: None,
+            stage: 0,
             container_id: None,
             session_id: Some("da08d5f3-844e-430e-8363-39b4882f437b".into()),
             result: Some(types::TaskResult::Work {

@@ -12,6 +12,16 @@ work:
   review:
     prompt: prompts/review/code.md
     iterations: 3
+# Staged evaluation (spec §3.3): an authoritative agentic review gates the CI
+# command evaluator. CI on this project is a cold cargo build — slow, and it
+# loads the shared Docker host — so there is no point spending it on a change
+# the reviewer will reject. Review runs in stage 0; the appended `ci` default
+# (jobs/_defaults.yaml) is stage 1 and only runs if review passes.
+eval:
+  - name: review
+    type: agent
+    prompt: tasks/review-code.md
+    stage: 0
 resources:
   cpu: 3
   memory: 5Gi
