@@ -20,15 +20,24 @@ run_full_ci() {
 # (candidate commit) — both sit ahead of the default branch.
 #
 # FAIL SAFE: if the changed set cannot be determined for any reason (missing
-# BASE_BRANCH, fetch failure, missing merge-base, empty/absent diff), run the
-# FULL CI — never skip on uncertainty.
+# BASE_BRANCH, fetch failure, missing merge-base, diff error), run the FULL
+# CI — never skip on uncertainty. A successfully computed EMPTY diff is not
+# uncertainty: HEAD is content-identical to the already-gated default branch
+# (the no-commit case — web-publish/deploy jobs), so there is nothing to gate.
 changed=""
+diff_ok=0
 if [ -n "${BASE_BRANCH:-}" ] \
 	&& git fetch origin "$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" >/dev/null 2>&1 \
 	&& base="$(git merge-base HEAD "origin/$BASE_BRANCH" 2>/dev/null)" \
 	&& [ -n "$base" ] \
-	&& changed="$(git diff --name-only "$base"...HEAD 2>/dev/null)" \
-	&& [ -n "$changed" ]; then
+	&& changed="$(git diff --name-only "$base"...HEAD 2>/dev/null)"; then
+	diff_ok=1
+fi
+if [ "$diff_ok" -eq 1 ] && [ -z "$changed" ]; then
+	echo "ci: HEAD identical to origin/$BASE_BRANCH — nothing to gate, skipping"
+	exit 0
+fi
+if [ "$diff_ok" -eq 1 ]; then
 	rust_changed=0
 	# Split the changed list on newlines so paths with spaces stay intact.
 	IFS='
