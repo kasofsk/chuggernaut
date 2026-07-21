@@ -114,6 +114,10 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
             "/api/v1/projects/{owner}/{project}/jobs/{seq}/triage",
             post(routes::jobs_triage),
         )
+        .route(
+            "/api/v1/projects/{owner}/{project}/jobs/{seq}/claim",
+            post(routes::jobs_claim).delete(routes::jobs_unclaim),
+        )
         // Graph
         .route(
             "/api/v1/projects/{owner}/{project}/graph",

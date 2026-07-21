@@ -50,6 +50,13 @@ pub struct Job {
     /// creation". None means the type default applies.
     #[serde(default)]
     pub timeout: Option<String>,
+    /// A human has claimed the job's NEXT work attempt (spec §1.2 claims):
+    /// instead of launching a container, the dispatcher parks that attempt as
+    /// a Pending task with the declared kind and `performed_by: human`, then
+    /// clears this flag — a claim covers exactly one attempt. Defaults false
+    /// so records that predate claims deserialize.
+    #[serde(default)]
+    pub claim_next: bool,
     /// Factory name when created by a factory triage agent (spec §13); None for
     /// operator-created jobs.
     pub factory: Option<String>,
@@ -112,6 +119,8 @@ mod tests {
         assert_eq!(job.deps, vec![11, 22]);
         // `timeout` is optional and defaults to None on records that predate it.
         assert_eq!(job.timeout, None);
+        // `claim_next` defaults false on records that predate claims.
+        assert!(!job.claim_next);
         let back = serde_json::to_string(&job).unwrap();
         let again: Job = serde_json::from_str(&back).unwrap();
         assert_eq!(job, again);

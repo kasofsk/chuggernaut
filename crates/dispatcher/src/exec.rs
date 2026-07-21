@@ -245,9 +245,17 @@ impl Core {
                 true,
             ),
         };
+        // §1.2 claims: a pending claim parks this attempt for the human
+        // instead of launching. Consulted here — inside the single serialized
+        // launch path — so an attempt is either launched or parked, never
+        // both. The task keeps its DECLARED kind; the claim is recorded as
+        // the performer.
+        let claimed = job.claim_next;
+        let parked = pending_human || claimed;
         // Minted before launch and persisted with the task, so the transcript
-        // stays addressable even if the dispatcher restarts mid-run.
-        let session_id = matches!(job_type.work.r#type, WorkType::Agent)
+        // stays addressable even if the dispatcher restarts mid-run. A claimed
+        // attempt runs no agent, so it gets no session.
+        let session_id = (matches!(job_type.work.r#type, WorkType::Agent) && !claimed)
             .then(|| uuid::Uuid::new_v4().to_string());
         let mut task = Task {
             id: task_id,
@@ -256,7 +264,7 @@ impl Core {
             phase: TaskPhase::Work,
             cycle,
             kind,
-            state: if pending_human {
+            state: if parked {
                 TaskState::Pending
             } else {
                 TaskState::Running
@@ -264,10 +272,14 @@ impl Core {
             attempt,
             evaluator: None,
             stage: 0,
+            performed_by: claimed.then_some(types::Performer::Human),
             container_id: None,
             session_id: session_id.clone(),
             result: None,
             created_at: Utc::now(),
+            // A claimed attempt starts now, humanly: the claim was the "I'm
+            // starting" declaration (§1.2), so the parked task reads as
+            // in-progress-by-human, not idle.
             started_at: (!pending_human).then(Utc::now),
             completed_at: None,
         };
@@ -279,9 +291,23 @@ impl Core {
             "task-created",
             serde_json::json!({
                 "task_id": task_id, "phase": "Work", "cycle": cycle, "attempt": attempt,
+                "performed_by": claimed.then_some("human"),
             }),
         )
         .await?;
+        if claimed {
+            // Consume the claim — it covers exactly this one attempt. The next
+            // attempt (retry, rework) launches per the declared kind unless
+            // the human claims again.
+            let mut job = self.must_get(owner, project, seq)?.clone();
+            job.claim_next = false;
+            self.jobs.put(&job).await?;
+            self.graphs
+                .entry(job.project.clone())
+                .or_default()
+                .insert(job);
+            return Ok(()); // operator resolves it via the inbox, like human work
+        }
         if pending_human {
             return Ok(()); // operator inbox drives it from here (§1.2)
         }
@@ -626,9 +652,15 @@ impl Core {
         let Some(mut task) = self.tasks.get(owner, project, seq, task_id).await? else {
             return Err(CoreError::NotFound(format!("task {task_id}")));
         };
-        if task.state != TaskState::Pending || !matches!(task.kind, TaskKind::Human { .. }) {
+        // Resolvable: Pending Human-kind tasks (declared human work, human
+        // evaluators, escalations) and Pending claimed attempts of ANY kind —
+        // the claim made the human the performer without changing the kind
+        // (§1.2 claims).
+        let human_performed = matches!(task.kind, TaskKind::Human { .. })
+            || task.performed_by == Some(types::Performer::Human);
+        if task.state != TaskState::Pending || !human_performed {
             return Err(CoreError::InvalidResolution(
-                "only Pending Human tasks can be resolved".into(),
+                "only Pending Human or claimed tasks can be resolved".into(),
             ));
         }
         let job = self.must_get(owner, project, seq)?.clone();
@@ -711,31 +743,86 @@ impl Core {
                 "kind: Escalation is only valid on escalation tasks".into(),
             )),
 
-            // Human work task (§1.1 work.type: human). `abort` on Fail is an
-            // evaluator concept — a declined work task escalates regardless.
-            (JobState::Work, TaskResolution::Pass { structured }) => {
-                complete_task(&mut task, true, false, structured, None);
+            // Human-performed work attempt: declared human work (§1.1
+            // work.type: human) or a claimed attempt of any kind (§1.2
+            // claims). `abort` on Fail is an evaluator concept — ignored here.
+            (
+                JobState::Work,
+                TaskResolution::Pass {
+                    structured,
+                    summary,
+                },
+            ) => {
+                complete_task(&mut task, true, false, structured.clone(), None);
                 self.tasks.put(&task).await?;
                 self.ensure_exec_state(owner, project, seq).await?;
+                // The human's summary is this attempt's submit_result (§1.2
+                // claims): it flows into the squash-merge commit body exactly
+                // like an agent's submission.
+                if summary.is_some() || structured.is_some() {
+                    let key = (owner.to_string(), project.to_string(), seq);
+                    if let Some(exec) = self.active.get_mut(&key) {
+                        exec.work_submission = Some(WorkSubmission {
+                            summary,
+                            structured,
+                            token_usage: None,
+                        });
+                    }
+                }
                 self.enter_evaluation(owner, project, seq).await
             }
+            // Fail consumes the attempt through the normal work-failure path
+            // (§1.2 claims): retries remaining → the next attempt launches per
+            // the DECLARED kind (an agent picks the work right back up — no
+            // un-conversion), else escalation.
             (JobState::Work, TaskResolution::Fail { structured, .. }) => {
                 complete_task(&mut task, false, false, Some(structured), None);
+                task.state = TaskState::Failed;
                 self.tasks.put(&task).await?;
-                self.active
-                    .remove(&(owner.to_string(), project.to_string(), seq));
-                self.escalate(
+                self.publish(
                     owner,
                     project,
                     seq,
-                    "human_work_failed",
-                    format!("Job {seq}: operator declined the human work task"),
+                    "task-failed",
+                    serde_json::json!({
+                        "task_id": task.id, "phase": "Work", "declined_by": operator,
+                    }),
                 )
-                .await
+                .await?;
+                self.ensure_exec_state(owner, project, seq).await?;
+                let key = (owner.to_string(), project.to_string(), seq);
+                let work_retries = self
+                    .active
+                    .get(&key)
+                    .and_then(|e| e.job_type.work_retries)
+                    .unwrap_or(0);
+                if task.attempt <= work_retries {
+                    // §2.1: hard-reset to base_ref, new task record, attempt++.
+                    let job = self.must_get(owner, project, seq)?.clone();
+                    let base_ref = job.base_ref.clone().expect("base_ref set in Work");
+                    self.repos
+                        .reset_branch(owner, project, &job.branch, &base_ref)
+                        .await?;
+                    self.launch_work_task(owner, project, seq, task.cycle, task.attempt + 1)
+                        .await
+                } else {
+                    self.active.remove(&key);
+                    self.escalate(
+                        owner,
+                        project,
+                        seq,
+                        "work_retries_exhausted",
+                        format!(
+                            "Job {seq}: work attempt failed (declined by operator) \
+                             with no retries left"
+                        ),
+                    )
+                    .await
+                }
             }
 
             // Human evaluator task (§3.3 human).
-            (JobState::Evaluation, TaskResolution::Pass { structured }) => {
+            (JobState::Evaluation, TaskResolution::Pass { structured, .. }) => {
                 complete_task(&mut task, true, false, structured.clone(), None);
                 self.tasks.put(&task).await?;
                 self.resolve_eval_slot(owner, project, seq, task_id, true, false, structured)

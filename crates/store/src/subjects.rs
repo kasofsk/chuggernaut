@@ -92,6 +92,16 @@ pub fn jobs_revoke(owner: &str, project: &str, seq: u64) -> String {
     format!("req.jobs.revoke.{owner}.{project}.{seq}")
 }
 
+/// Claim the job's next work attempt for a human (spec §1.2 claims).
+pub fn jobs_claim(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.jobs.claim.{owner}.{project}.{seq}")
+}
+
+/// Clear a pending claim that has not materialized into a parked task yet.
+pub fn jobs_unclaim(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.jobs.unclaim.{owner}.{project}.{seq}")
+}
+
 /// Operator-dispatched advisory triage (spec §1.2).
 pub fn jobs_triage(owner: &str, project: &str, seq: u64) -> String {
     format!("req.jobs.triage.{owner}.{project}.{seq}")

@@ -21,6 +21,7 @@ pub struct Job {
     pub base_ref: Option<String>,          // exact HEAD of default branch; set/updated at every Ready-transition (Frozen→Ready and Blocked→Ready) and on squash-merge conflict; None until job first enters Ready
     pub knowledge_tags: Vec<String>,       // union of job type defaults and operator-supplied tags at creation
     pub eval: Vec<Evaluator>,              // additive per-job evaluators, layered on top of the type's eval list at execution; the type's evaluators are a floor — creation can add criteria, never remove or override them; name collisions are a release-time error (see design-lifecycle.md)
+    pub claim_next: bool,                  // a human has claimed the job's NEXT work attempt (§1.2 claims): instead of launching, the dispatcher parks that attempt as a Pending task with the declared kind and performed_by: human, then clears the flag — a claim covers exactly one attempt. Defaults false on old records
     pub timeout: Option<String>,           // optional per-job work-task timeout override (duration string, e.g. "45m"), layering over the type's resources.task_timeout exactly like `eval` layers over the type's evaluators — but Work-phase tasks only; evaluators keep the type default. Any valid duration. Parseability validated at release. None → the type default applies
     pub factory: Option<String>,           // factory name when created by a factory triage agent (see §13); None for operator-created jobs
     pub created_at: DateTime<Utc>,
@@ -50,6 +51,7 @@ Example record:
   "knowledge_tags": ["rust", "rest-api", "payments/stripe-integration"],
   "eval": [],
   "timeout": null,
+  "claim_next": false,
   "factory": null,
   "created_at": "2026-04-05T10:00:00Z",
   "ready_at": null
@@ -309,6 +311,7 @@ pub struct Task {
     pub state: TaskState,
     pub attempt: u32,                     // 1-indexed; each retry is a new task record with attempt+1
     pub evaluator: Option<String>,        // evaluator name for Evaluation/MergeGate tasks; None for work and escalation tasks
+    pub performed_by: Option<Performer>,  // who actually performed a claimed attempt (claims, below): the declared kind stays immutable; a claim records the human performer here. None for every normally-executed attempt and for old records
     pub container_id: Option<String>,     // backend-assigned container ID (Docker or k8s); None for Human tasks
     pub result: Option<TaskResult>,
     pub created_at: DateTime<Utc>,
@@ -323,6 +326,8 @@ pub enum TaskKind {
     Agent   { provider: String, model: Option<String>, prompt: String },
     Human   { prompt: String },
 }
+
+pub enum Performer { Human }  // absence of performed_by = executed per the declared kind
 
 pub enum TaskState { Pending, Running, Done, Failed }
 
@@ -344,7 +349,7 @@ pub struct TokenUsage {
 }
 
 pub enum TaskResolution {
-    Pass       { structured: Option<serde_json::Value> },
+    Pass       { structured: Option<serde_json::Value>, summary: Option<String> },  // summary: work-task Pass only — the human's completion summary, flowing into the squash-merge commit body like an agent's submit_result; ignored elsewhere
     Fail       { structured: serde_json::Value, abort: bool },  // structured required on fail; abort defaults false
     Escalation { action: EscalationAction, structured: Option<serde_json::Value> },  // only valid on escalation Human tasks
 }
@@ -367,6 +372,7 @@ pub enum TaskResolution {
 | Task context | Valid `kind` values | Invalid → |
 |---|---|---|
 | Human work task (Work phase, `work.type: human`) | `Pass`, `Fail` | 400 if `Escalation` submitted |
+| Claimed work attempt (Work phase, any declared kind, `performed_by: human`) | `Pass`, `Fail` | 400 if `Escalation` submitted |
 | Human evaluator task (Evaluation phase) | `Pass`, `Fail` | 400 if `Escalation` submitted |
 | Post-work escalation task (Escalated state) | `Escalation` (`Retry`/`Resolve`/`Revoke`) | 400 if `Pass` or `Fail` submitted |
 | Pre-work escalation task (Stalled state) | `Escalation` (`Retry`/`Revoke`) | 400 if `Pass`/`Fail` submitted, or `Escalation` with `action: Resolve` |
@@ -385,7 +391,8 @@ pub enum TaskResolution {
 | Job enters Work (new cycle), `work.type: human` | One `Human` work task (attempt=1); no container launched |
 | Work task fails, `work_retries` available | New task record (same cycle, attempt++); `job/{seq}` hard-reset to `base_ref` before re-launch |
 | Work retries exhausted | Human escalation task → job → Escalated |
-| Human work task: operator resolves `Fail` | Human escalation task → job → Escalated |
+| Human-performed work attempt (declared human, or claimed): operator resolves `Fail` | Normal work-attempt failure: task marked Failed; `work_retries` available → new task record (same cycle, attempt++, launched per the DECLARED kind); else Human escalation task → job → Escalated |
+| Job enters Work (any cycle/attempt) with `claim_next` set | The attempt parks as a Pending task with the declared kind and `performed_by: human`; no container; claim consumed (`claim_next` cleared) |
 | Operator grants `Retry` on escalation | New work task (same cycle, attempt++); `work_retries` budget NOT reset |
 | Eval reduce passes, squash-merge conflict | Update `base_ref` to current default HEAD; cycle++ (rework_budget NOT consumed); re-enter Work with conflict context injected |
 | Job enters Evaluation | One task (attempt=1) per evaluator in the lowest `stage` (§3.3); later stages' tasks are created only as each prior stage passes |
@@ -400,6 +407,12 @@ pub enum TaskResolution {
 `work_retries` counts container failures within a single Work phase. `eval_retries` counts the same for individual agent eval containers. `rework_budget` counts evaluation-driven rework cycles and is entirely separate from both.
 
 **Human tasks** surface in the operator task inbox regardless of phase or cycle. The job stays in its current state (`Evaluation` for human evaluators in the eval phase) while the human task is pending.
+
+**Claims — human-performed attempts of any kind** — a human may **claim** a job's next work attempt (`POST .../jobs/{seq}/claim`, §6.2): "I've got this one locally." The claim does NOT change the task's kind — kind is the job type's declared *requirement* and stays immutable; the claim is an execution annotation (`performed_by: human`) covering **exactly one attempt**. Any kind is human-performable: an agent-typed code task (the human writes the code on `job/{seq}` and pushes over the §5.2 SSH front), a command-typed deploy task (the human runs the deploy by hand), and human-typed tasks trivially.
+
+The claim is recorded on the job (`claim_next`) and consumed inside `launch_work_task` — the same serialized single-writer code path that would launch the container — so an attempt is either launched or parked, never both, with no race window. While pending (job Frozen/Blocked/Ready, or awaiting a rework/retry launch) the claim rides until launch; `DELETE .../claim` clears it. Claiming conflicts (409) while an attempt is in flight: a Running work task, or an already-parked Pending one. Once parked, the way out is resolving the task — `Pass` (with optional `summary`/`structured`, flowing into the squash-merge commit exactly like an agent's `submit_result`) proceeds to Evaluation with the branch as-is; `Fail` consumes the attempt through the normal failure path, so the NEXT attempt launches per the **declared** kind — an agent picks the work right back up, nothing to "convert back". Rework cycles likewise launch unclaimed; the human re-claims if they want the rework too.
+
+A parked claimed attempt is visibly *in progress by a human*: it appears in the pending inbox alongside Human-kind waits (distinguished by `performed_by`), the job payload's `awaiting_human` carries `"claimed": true`, and `started_at` is set at park time — the claim is the "I'm starting" declaration. Parked attempts are exempt from the §3.5 task-timeout scan (they are Pending, not Running) and survive dispatcher restarts (§3.6 recovery leaves Pending work tasks waiting on the inbox).
 
 **Escalation resolution** — when the operator completes an escalation Human task, `action` drives the next transition:
 - `Retry` — re-enters Work in the same cycle (no cycle increment; no rework budget consumed). Branch is used as-is — not reset to `base_ref`, since the operator may have modified it.
@@ -763,6 +776,7 @@ pub enum ContainerStatus { Running, Exited { exit_code: i32 } }
 For each Ready job, the dispatcher executes the following sequence:
 
 1. Transition job Ready → Work; create work task (cycle=1, attempt=1)
+   - **Claims (§1.2):** every work-task launch (this step, retries, escalation Retry, rework re-entry) first consults `claim_next` inside the serialized launch path: when set, the attempt is parked as a Pending task with the declared kind and `performed_by: human` instead of launching a container, and the claim is consumed. Steps 3–7 are skipped for the parked attempt; resolution (Pass/Fail, §1.2) drives it from there.
 2. **For `work.type: agent | command`**: create branch `job/{seq}` from `base_ref`; load job type and prompt files from `base_ref`. **For `work.type: human`**: create branch `job/{seq}` from `base_ref`; surface the Human task in the operator inbox; await operator resolution (skip to step 8). `base_ref` is locked from this point — no external actor or event changes it except a squash-merge conflict (step 12), which updates it under dispatcher control before re-entering this step.
    - **Rework/conflict context (cycle > 1):** if `eval_context` is non-empty or `merge_conflict` is set, the dispatcher reads the prompt file content from the repo at `base_ref`, appends a structured context block (see §4.3 for format), and passes the combined string as the prompt to the provider. Human rework tasks have the same block appended to their inbox prompt. On cycle 1 the prompt is the file content alone. Prompt content is always resolved by the dispatcher and delivered to containers via a mounted file — never passed as a path (see §4.3).
 3. Inject secrets (decrypted from `secrets.*` KV using age private key) and vars as env vars
@@ -1207,6 +1221,8 @@ req.jobs.get.{owner}.{project}.{seq}
 req.jobs.list.{owner}.{project}
 req.jobs.release.{owner}.{project}.{seq}
 req.jobs.revoke.{owner}.{project}.{seq}
+req.jobs.claim.{owner}.{project}.{seq}
+req.jobs.unclaim.{owner}.{project}.{seq}
 req.jobs.criteria.{owner}.{project}.{seq}                    response: { ref, wrap_up, evaluators: [Evaluator + source: "type"|"job"], errors: [string] } — resolved eval criteria at the job's pinned ref
 req.jobtypes.get.{owner}.{project}                           payload: { name }; response: { name, ref, yaml, job_type: JobType|null, errors } — one type in full (raw + parsed, defaults merged) for the library UI
 req.tags.list.{owner}.{project}                              response: string[] — available knowledge tags (`tags/*.md` stems at default HEAD; a tag's meaning lives in its repo-versioned markdown file)
@@ -1308,6 +1324,8 @@ GET    /api/v1/projects/{owner}/{project}/jobs/{seq}                → 200 OK; 
 GET    /api/v1/projects/{owner}/{project}/jobs/{seq}/criteria       → 200 OK; body: { ref, wrap_up, evaluators: [Evaluator + source], errors } — the criteria the job will be (or was) judged against, resolved at base_ref (or default HEAD before Ready)
 POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/release        → 200 OK; body: Job (updated state); 422 with error list if validation fails
 POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/revoke         → 200 OK; body: Job (updated state); 409 if already Done or Revoked
+POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/claim          → 200 OK; body: Job; Member+; 409 while a work attempt is in flight or the job is terminal (§1.2 claims)
+DELETE /api/v1/projects/{owner}/{project}/jobs/{seq}/claim          → 200 OK; body: Job; Member+; 409 if no pending claim (a materialized claim is resolved via its task)
 POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/triage         → 200 OK; body: Job (unchanged); dispatches an advisory triage agent (§1.2). 409 unless the job is Escalated or Stalled; 422 if TRIAGE_IMAGE is unconfigured. Member+. Never changes job state
 
 # Graph

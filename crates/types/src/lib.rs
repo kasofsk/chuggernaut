@@ -30,7 +30,7 @@ pub use project::{OriginLink, ProjectRecord, ReleaseState, ReleaseStatus, github
 pub use resources::{MEMORY_PATTERN, MemoryParseError, parse_memory};
 pub use step::{StepKind, StepRecord, StepStatus};
 pub use task::{
-    EscalationAction, EvalResult, Task, TaskKind, TaskPhase, TaskResolution, TaskResult, TaskState,
-    TokenUsage,
+    EscalationAction, EvalResult, Performer, Task, TaskKind, TaskPhase, TaskResolution, TaskResult,
+    TaskState, TokenUsage,
 };
 pub use user::{Identity, IdentityKind, ProjectRole, User};

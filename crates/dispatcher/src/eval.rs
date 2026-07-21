@@ -259,6 +259,7 @@ impl Core {
             attempt,
             evaluator: Some(evaluator.name.clone()),
             stage: evaluator.stage,
+            performed_by: None,
             container_id: None,
             session_id: session_id.clone(),
             result: None,

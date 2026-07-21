@@ -28,6 +28,13 @@ pub struct Task {
     /// tasks, which have no stage. Defaulted for records written before staging.
     #[serde(default)]
     pub stage: u32,
+    /// Who actually performed this attempt when it differs from what `kind`
+    /// declares (spec §1.2 claims): a claimed attempt keeps its declared kind
+    /// — the job type's immutable requirement — and records the human
+    /// performer here. Absent (None) for every normally-executed attempt and
+    /// for records written before claims existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performed_by: Option<Performer>,
     /// Backend-assigned container ID (Docker or k8s); None for Human tasks.
     pub container_id: Option<String>,
     /// Agent tasks only: the session id handed to the agent CLI, which names
@@ -71,6 +78,14 @@ pub enum TaskKind {
     Human {
         prompt: String,
     },
+}
+
+/// The actual performer of a claimed attempt (spec §1.2). Only `Human` exists:
+/// normal execution is implied by absence, so the field never restates `kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Performer {
+    Human,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +162,12 @@ pub struct TokenUsage {
 pub enum TaskResolution {
     Pass {
         structured: Option<serde_json::Value>,
+        /// Work-task Pass only: the human's completion summary, flowing into
+        /// the squash-merge commit body exactly like an agent's
+        /// `submit_result` summary (spec §1.2 claims). Ignored on evaluator
+        /// and escalation resolutions.
+        #[serde(default)]
+        summary: Option<String>,
     },
     Fail {
         structured: serde_json::Value,
@@ -203,6 +224,28 @@ mod tests {
             }
         );
 
+        // summary defaults None on Pass; explicit summary round-trips.
+        let r: TaskResolution =
+            serde_json::from_str(r#"{ "kind": "Pass", "structured": null }"#).unwrap();
+        assert_eq!(
+            r,
+            TaskResolution::Pass {
+                structured: None,
+                summary: None
+            }
+        );
+        let r: TaskResolution = serde_json::from_str(
+            r#"{ "kind": "Pass", "structured": null, "summary": "did the thing" }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            TaskResolution::Pass {
+                structured: None,
+                summary: Some("did the thing".into())
+            }
+        );
+
         let r: TaskResolution = serde_json::from_str(
             r#"{ "kind": "Escalation", "action": "Revoke", "structured": null }"#,
         )
@@ -214,6 +257,34 @@ mod tests {
                 structured: None
             }
         );
+    }
+
+    #[test]
+    fn performed_by_defaults_absent_and_round_trips() {
+        // Old task records (no performed_by key) deserialize to None.
+        let json = r#"{
+          "id": 1, "job_seq": 7, "project": "acme/api",
+          "phase": "Work", "cycle": 1,
+          "kind": { "kind": "Agent", "provider": "claude", "model": null, "prompt": "p.md" },
+          "state": "Pending", "attempt": 1,
+          "container_id": null, "result": null,
+          "created_at": "2026-07-21T10:00:00Z", "started_at": null, "completed_at": null
+        }"#;
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert_eq!(task.performed_by, None);
+        // Absent stays absent on the wire (skip_serializing_if).
+        assert!(
+            !serde_json::to_string(&task)
+                .unwrap()
+                .contains("performed_by")
+        );
+
+        // A claimed attempt round-trips as "human".
+        let mut claimed = task.clone();
+        claimed.performed_by = Some(Performer::Human);
+        let json = serde_json::to_string(&claimed).unwrap();
+        assert!(json.contains(r#""performed_by":"human""#));
+        assert_eq!(serde_json::from_str::<Task>(&json).unwrap(), claimed);
     }
 
     #[test]

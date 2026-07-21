@@ -158,6 +158,22 @@ pub enum Msg {
         seq: u64,
         reply: Reply<Vec<u64>>,
     },
+    /// `req.jobs.claim.*` (spec §1.2 claims): a human claims the job's next
+    /// work attempt. 409 while an attempt is in flight.
+    ClaimJob {
+        owner: String,
+        project: String,
+        seq: u64,
+        reply: Reply<()>,
+    },
+    /// `req.jobs.unclaim.*`: clear a pending claim that has not materialized
+    /// into a parked task yet.
+    UnclaimJob {
+        owner: String,
+        project: String,
+        seq: u64,
+        reply: Reply<()>,
+    },
     /// `req.jobs.triage.*` (spec §1.2): dispatch an advisory triage agent over
     /// an Escalated/Stalled job. Never changes job state.
     TriageJob {
@@ -282,6 +298,28 @@ impl CoreHandle {
     pub async fn revoke_job(&self, owner: &str, project: &str, seq: u64) -> Result<Vec<u64>> {
         let (owner, project) = (owner.to_string(), project.to_string());
         self.call(|reply| Msg::RevokeJob {
+            owner,
+            project,
+            seq,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn claim_job(&self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::ClaimJob {
+            owner,
+            project,
+            seq,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn unclaim_job(&self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::UnclaimJob {
             owner,
             project,
             seq,
@@ -687,6 +725,22 @@ impl Core {
             } => {
                 let _ = reply.send(self.triage_job(&owner, &project, seq).await);
             }
+            Msg::ClaimJob {
+                owner,
+                project,
+                seq,
+                reply,
+            } => {
+                let _ = reply.send(self.claim_job(&owner, &project, seq).await);
+            }
+            Msg::UnclaimJob {
+                owner,
+                project,
+                seq,
+                reply,
+            } => {
+                let _ = reply.send(self.unclaim_job(&owner, &project, seq).await);
+            }
             Msg::SubmitResult {
                 owner,
                 project,
@@ -824,6 +878,7 @@ impl Core {
             knowledge_tags: req.knowledge_tags,
             eval: req.eval,
             timeout: req.timeout,
+            claim_next: false,
             factory: req.factory,
             created_at: Utc::now(),
             ready_at: None,
@@ -1054,6 +1109,70 @@ impl Core {
         )
         .await?;
         Ok(cascaded)
+    }
+
+    /// Handle `req.jobs.claim.*` (spec §1.2 claims): mark the job's next work
+    /// attempt as human-performed. The claim rides on the job record until
+    /// `launch_work_task` consumes it — the same serialized code path that
+    /// would launch the container — so an attempt is either launched or
+    /// parked, never both. 409 while an attempt is in flight: a Running work
+    /// task, or (job in Work) an already-parked Pending one. Idempotent on an
+    /// already-claimed job.
+    pub async fn claim_job(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        let mut job = self.must_get(owner, project, seq)?.clone();
+        if job.state.is_terminal() {
+            return Err(CoreError::Conflict(format!(
+                "job {seq} is {:?}; nothing left to claim",
+                job.state
+            )));
+        }
+        let in_flight = self
+            .tasks
+            .list_for_job(owner, project, seq)
+            .await?
+            .iter()
+            .any(|t| {
+                t.phase == types::TaskPhase::Work
+                    && t.evaluator.is_none()
+                    && (t.state == types::TaskState::Running
+                        || (t.state == types::TaskState::Pending && job.state == JobState::Work))
+            });
+        if in_flight {
+            return Err(CoreError::Conflict(format!(
+                "job {seq} has a work attempt in flight; resolve or revoke it first"
+            )));
+        }
+        if job.claim_next {
+            return Ok(());
+        }
+        job.claim_next = true;
+        self.jobs.put(&job).await?;
+        self.graphs
+            .entry(job.project.clone())
+            .or_default()
+            .insert(job);
+        self.publish(owner, project, seq, "job-claimed", serde_json::json!({}))
+            .await
+    }
+
+    /// Handle `req.jobs.unclaim.*`: clear a claim that has not materialized
+    /// into a parked task. Once parked, the way out is resolving the task
+    /// (Pass or Fail) — one attempt, one human decision.
+    pub async fn unclaim_job(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        let mut job = self.must_get(owner, project, seq)?.clone();
+        if !job.claim_next {
+            return Err(CoreError::Conflict(format!(
+                "job {seq} has no pending claim (a materialized claim is resolved via its task)"
+            )));
+        }
+        job.claim_next = false;
+        self.jobs.put(&job).await?;
+        self.graphs
+            .entry(job.project.clone())
+            .or_default()
+            .insert(job);
+        self.publish(owner, project, seq, "job-unclaimed", serde_json::json!({}))
+            .await
     }
 
     pub(crate) async fn kill_running_containers(&self, owner: &str, project: &str, seq: u64) {

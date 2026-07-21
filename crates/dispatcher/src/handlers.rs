@@ -447,6 +447,18 @@ async fn spawn_read_handlers(
                     Err(e) => error_reply(&e),
                     Ok(_) => fetch_job(&jobs_store, owner, project, seq).await,
                 },
+                // §1.2 claims: park the next work attempt for a human /
+                // clear a pending claim. Reply is the updated job.
+                ("claim", Some(seq)) => match jobs_handle.claim_job(owner, project, seq).await {
+                    Err(e) => error_reply(&e),
+                    Ok(_) => fetch_job(&jobs_store, owner, project, seq).await,
+                },
+                ("unclaim", Some(seq)) => {
+                    match jobs_handle.unclaim_job(owner, project, seq).await {
+                        Err(e) => error_reply(&e),
+                        Ok(_) => fetch_job(&jobs_store, owner, project, seq).await,
+                    }
+                }
                 // Operator-dispatched advisory triage (§1.2): launches a triage
                 // agent over the job state; never changes job state. Reply is
                 // the job as-is (unchanged), like revoke's re-fetch.
@@ -905,7 +917,9 @@ fn job_reply_with_awaiting(job: &types::Job, tasks: &[types::Task]) -> Vec<u8> {
     let awaiting = tasks
         .iter()
         .find(|t| {
-            t.state == types::TaskState::Pending && matches!(t.kind, types::TaskKind::Human { .. })
+            t.state == types::TaskState::Pending
+                && (matches!(t.kind, types::TaskKind::Human { .. })
+                    || t.performed_by == Some(types::Performer::Human))
         })
         .map(|t| {
             let kind = match job.state {
@@ -913,7 +927,13 @@ fn job_reply_with_awaiting(job: &types::Job, tasks: &[types::Task]) -> Vec<u8> {
                 JobState::Evaluation => "eval",
                 _ => "escalation", // Escalated | Stalled
             };
-            serde_json::json!({ "task_id": t.id, "kind": kind })
+            // `claimed` marks a parked claimed attempt: a human is actively
+            // working it (§1.2 claims), vs. passively awaited human input.
+            serde_json::json!({
+                "task_id": t.id,
+                "kind": kind,
+                "claimed": t.performed_by == Some(types::Performer::Human),
+            })
         });
     let mut value = serde_json::to_value(job).unwrap_or_else(|_| serde_json::json!({}));
     if let serde_json::Value::Object(map) = &mut value {
@@ -1078,8 +1098,12 @@ async fn list_pending(store: &NatsStore, owner: &str, project: &str) -> Vec<u8> 
                 let pending: Vec<_> = all
                     .into_iter()
                     .filter(|t| {
-                        matches!(t.kind, types::TaskKind::Human { .. })
-                            && t.state == types::TaskState::Pending
+                        // Human-kind waits AND claimed attempts of any kind
+                        // (§1.2 claims) — the latter are in-progress-by-human,
+                        // not passive waits; performed_by distinguishes them.
+                        t.state == types::TaskState::Pending
+                            && (matches!(t.kind, types::TaskKind::Human { .. })
+                                || t.performed_by == Some(types::Performer::Human))
                     })
                     .collect();
                 ok_reply(&pending)
@@ -1110,6 +1134,7 @@ mod tests {
             knowledge_tags: vec![],
             eval: vec![],
             timeout: None,
+            claim_next: false,
             factory: None,
             created_at: Utc::now(),
             ready_at: None,
@@ -1130,6 +1155,7 @@ mod tests {
             attempt: 1,
             evaluator: None,
             stage: 0,
+            performed_by: None,
             container_id: None,
             session_id: None,
             result: None,

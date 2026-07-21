@@ -313,7 +313,10 @@ async fn human_evaluator_and_human_work_resolve_via_inbox() {
             "api",
             gated.id,
             2,
-            TaskResolution::Pass { structured: None },
+            TaskResolution::Pass {
+                structured: None,
+                summary: None,
+            },
             "david",
         )
         .await
@@ -334,7 +337,10 @@ async fn human_evaluator_and_human_work_resolve_via_inbox() {
             "api",
             manual.id,
             1,
-            TaskResolution::Pass { structured: None },
+            TaskResolution::Pass {
+                structured: None,
+                summary: None,
+            },
             "david",
         )
         .await

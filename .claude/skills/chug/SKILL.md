@@ -85,8 +85,37 @@ tasks).
 | `POST /api/v1/projects/{o}/{p}/jobs` | `{type, title?, description?, deps?: [id], knowledge_tags?, eval?: [Evaluator]}` | create job (lands Frozen). description = the ticket; injected into work AND eval prompts |
 | `POST .../jobs/{seq}/release` | — | ▶ run the job |
 | `POST .../jobs/{seq}/revoke` | — | revoke (cascades to Frozen/Blocked/Ready dependents) |
+| `POST .../jobs/{seq}/claim` | — | claim the next work attempt for a human (§1.2 claims); 409 while an attempt is in flight |
+| `DELETE .../jobs/{seq}/claim` | — | clear a pending claim that has not materialized into a parked task |
 | `POST .../jobs/{seq}/tasks/{id}/resolve` | `{kind: "Pass"\|"Fail"\|"Escalation", structured, abort?, action?}` | resolve a human task; `abort: true` on an evaluator Fail = unfixable, escalate |
 | **Shipping this repo** — `kasofsk/chuggernaut` is platform-owned; there is no origin release/sync. To ship, **create + release a `deploy` job** (`POST .../jobs {type:"deploy"}` then `.../release`): it ssh's into the Mini and runs `update.sh` at the released `main`. (`origin/release`, `origin/sync` still apply to *linked-origin* projects, not this one.) |
+
+## Working a job locally (claims)
+
+Any job's work attempt can be **claimed** by a human without changing its
+declared kind — an agent-typed job stays agent-typed; the claim parks the
+attempt as a Pending task with `performed_by: human` instead of launching a
+container. Verbs to support conversationally:
+
+- **"claim job N"** — `POST .../jobs/{N}/claim`; then `POST .../jobs/{N}/release`
+  if it is still Frozen. When the job enters Work the attempt parks (visible
+  as `awaiting_human: { kind: "work", claimed: true }` on the job).
+- **"start working"** — set up a worktree on the job branch:
+  `git fetch chug && git worktree add ../job-N -b job/N chug/job/N`
+  (the branch exists once the job enters Work; push access per the user's cert).
+- **"submit job N"** — after pushing the work to `job/N`, resolve the parked
+  task Pass with a summary (it becomes the squash-merge commit body):
+  `POST .../jobs/{N}/tasks/{task_id}/resolve` with
+  `{"kind":"Pass","structured":null,"summary":"what was done"}`.
+  Evaluation then proceeds exactly as if an agent had done the work.
+- **"fail it out" / "let an agent take over"** — resolve Fail with structured
+  notes: `{"kind":"Fail","structured":{"notes":"..."}}`. The next attempt
+  launches per the DECLARED kind (an agent picks it back up); no un-conversion.
+- **"unclaim job N"** — `DELETE .../jobs/{N}/claim` (only before the attempt
+  parks; afterwards resolve the task instead).
+
+The parked task id comes from `GET .../jobs/{N}/tasks` (the Pending Work-phase
+task) or `GET .../tasks/pending`.
 
 ## Conventions
 

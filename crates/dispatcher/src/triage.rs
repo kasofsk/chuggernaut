@@ -110,6 +110,7 @@ impl Core {
             attempt: 1,
             evaluator: None,
             stage: 0,
+            performed_by: None,
             container_id: None,
             session_id: Some(session_id.clone()),
             result: None,

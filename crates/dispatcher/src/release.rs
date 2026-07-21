@@ -334,6 +334,7 @@ resources:
                 stage: 0,
             }],
             timeout: None,
+            claim_next: false,
             factory: None,
             created_at: Utc::now(),
             ready_at: None,

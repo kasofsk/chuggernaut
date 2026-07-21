@@ -699,6 +699,41 @@ pub async fn jobs_revoke(
     .await
 }
 
+/// Claim the job's next work attempt for a human (§1.2 claims): the attempt
+/// parks as a Pending task with the declared kind instead of launching.
+/// Member+; the dispatcher enforces the in-flight guard (409).
+pub async fn jobs_claim(
+    State(state): State<SharedState>,
+    Path((owner, project, seq)): Path<(String, String, u64)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    member_on(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::jobs_claim(&owner, &project, seq),
+        serde_json::json!({}),
+        StatusCode::OK,
+    )
+    .await
+}
+
+/// Clear a pending claim that has not materialized into a parked task (409
+/// otherwise — a parked attempt is resolved via its task).
+pub async fn jobs_unclaim(
+    State(state): State<SharedState>,
+    Path((owner, project, seq)): Path<(String, String, u64)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    member_on(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::jobs_unclaim(&owner, &project, seq),
+        serde_json::json!({}),
+        StatusCode::OK,
+    )
+    .await
+}
+
 /// Dispatch an advisory triage agent over an Escalated/Stalled job (§1.2).
 /// Member+ like the other job mutations; the dispatcher enforces the state
 /// guard (409) and TRIAGE_IMAGE availability (422).
