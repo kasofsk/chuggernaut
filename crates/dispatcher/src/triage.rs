@@ -109,6 +109,7 @@ impl Core {
             state: TaskState::Running,
             attempt: 1,
             evaluator: None,
+            stage: 0,
             container_id: None,
             session_id: Some(session_id.clone()),
             result: None,

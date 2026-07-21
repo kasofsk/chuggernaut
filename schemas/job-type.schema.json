@@ -160,6 +160,13 @@
             "type": "string"
           }
         },
+        "stage": {
+          "description": "Staged evaluation ordering (spec §3.3): evaluators run in ascending\n`stage` order; within a stage they fan out in parallel. A later stage's\ntasks are created only after every *required* evaluator in the prior\nstage passes. Default 0 — a single-stage job is byte-for-byte the\nunstaged behavior. Non-negative (`u32`, enforced at parse).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
         "type": {
           "$ref": "#/$defs/EvaluatorType"
         }

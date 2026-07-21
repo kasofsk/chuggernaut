@@ -46,6 +46,46 @@ work_retries: 1
 knowledge: [rust]
 "#;
 
+// Staged evaluation (spec §3.3): a required stage-0 agent review gates a
+// stage-1 command evaluator. review runs first; ci only after it passes.
+const STAGED: &str = r#"
+name: staged
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+rework_budget: 1
+eval:
+  - name: review
+    type: agent
+    prompt: prompts/eval.md
+    stage: 0
+  - name: ci
+    type: command
+    run: ./ci.sh
+    stage: 1
+"#;
+
+// Same shape but the stage-0 review is advisory: its failure must not stop the
+// stage-1 evaluator from running.
+const STAGED_ADVISORY: &str = r#"
+name: staged-advisory
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+eval:
+  - name: review
+    type: agent
+    prompt: prompts/eval.md
+    required: false
+    stage: 0
+  - name: ci
+    type: command
+    run: ./ci.sh
+    stage: 1
+"#;
+
 struct Rig {
     _server: test_utils::nats::NatsTestServer,
     store: NatsStore,
@@ -71,6 +111,8 @@ async fn rig_with_artifacts(artifacts_identity: Option<String>) -> Option<Rig> {
         ("jobs/impl-cmd.yaml", IMPL_CMD_EVAL),
         ("jobs/impl-agent.yaml", IMPL_AGENT_EVAL),
         ("jobs/flaky.yaml", FLAKY),
+        ("jobs/staged.yaml", STAGED),
+        ("jobs/staged-advisory.yaml", STAGED_ADVISORY),
         ("prompts/impl.md", "implement it"),
         ("prompts/eval.md", "review it"),
         ("tags/rust.md", "# rust\nrust conventions here"),
@@ -744,6 +786,244 @@ async fn eval_abort_escalates_without_consuming_rework_budget() {
     }
 }
 
+/// Staged evaluation happy path (spec §3.3): the stage-0 review runs first and
+/// the stage-1 `ci` command evaluator is created only after it passes. Both
+/// tasks carry their `stage`, and only two agent runs happen (work + review).
+#[tokio::test]
+async fn staged_eval_review_passes_then_ci_runs_and_merges() {
+    let Some(rig) = rig().await else { return };
+    let handle = rig.handle.clone();
+    let bare = rig.repo.bare_path();
+
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone
+            .commit_file("src/new.rs", b"pub fn f() {}", "implement")
+            .await;
+        clone.push(&branch).await;
+    });
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        // Stage-0 review verdict (task 2).
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: true,
+                abort: false,
+                structured: None,
+                token_usage: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let job = rig.handle.create_job(req("staged")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    // work(1), review(2, stage 0), ci(3, stage 1) — nothing else.
+    assert_eq!(tasks.len(), 3);
+    assert_eq!(tasks[1].evaluator.as_deref(), Some("review"));
+    assert_eq!(tasks[1].stage, 0);
+    assert_eq!(tasks[2].evaluator.as_deref(), Some("ci"));
+    assert_eq!(tasks[2].stage, 1);
+    // The gate is ordered: ci is created only after review completes.
+    assert!(tasks[2].created_at >= tasks[1].completed_at.unwrap());
+    assert_eq!(
+        rig.provider.runs().len(),
+        2,
+        "only work + review run agents"
+    );
+}
+
+/// Required stage-0 failure short-circuits: the stage-1 `ci` task is never
+/// created for that cycle, and the rework cycle restarts from stage 0 (review
+/// again). Directly the acceptance case — a review-rejected change spends no CI.
+#[tokio::test]
+async fn staged_eval_required_review_fail_skips_ci_and_reworks_from_stage0() {
+    let Some(rig) = rig().await else { return };
+    let handle = rig.handle.clone();
+
+    rig.provider.on_run(|_| async {}); // work cycle 1
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        // Stage-0 review fails (task 2) → short-circuit; no ci this cycle.
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: false,
+                abort: false,
+                structured: Some(serde_json::json!({"issues": ["needs tests"]})),
+                token_usage: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+    rig.provider.on_run(|_| async {}); // work cycle 2
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        // Rework restarts at stage 0: review again (task 4), now passing.
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            4,
+            EvalSubmission {
+                pass: true,
+                abort: false,
+                structured: None,
+                token_usage: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let job = rig.handle.create_job(req("staged")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let ci = |cycle: u32| {
+        tasks.iter().any(|t| {
+            t.phase == TaskPhase::Evaluation
+                && t.cycle == cycle
+                && t.evaluator.as_deref() == Some("ci")
+        })
+    };
+    // Cycle 1's failed review created no ci task; cycle 2's passing review did.
+    assert!(!ci(1), "stage-1 ci must not run when stage-0 review fails");
+    assert!(ci(2), "ci runs once review passes on the rework cycle");
+    // The rework cycle re-opened at stage 0 with a fresh review task.
+    assert!(tasks.iter().any(|t| {
+        t.phase == TaskPhase::Evaluation
+            && t.cycle == 2
+            && t.evaluator.as_deref() == Some("review")
+            && t.stage == 0
+    }));
+}
+
+/// Advisory stage-0 failure does not block: a `required: false` review that
+/// fails still lets the stage-1 `ci` evaluator run, and the required ci pass
+/// carries the job to Done.
+#[tokio::test]
+async fn staged_eval_advisory_review_fail_still_runs_ci() {
+    let Some(rig) = rig().await else { return };
+    let handle = rig.handle.clone();
+
+    rig.provider.on_run(|_| async {}); // work
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: false, // advisory fail
+                abort: false,
+                structured: None,
+                token_usage: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let job = rig.handle.create_job(req("staged-advisory")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    // work(1), advisory review(2, failed), ci(3, passed) → merged.
+    assert_eq!(tasks.len(), 3);
+    assert!(matches!(
+        tasks[1].result,
+        Some(types::TaskResult::Agent { pass: false, .. })
+    ));
+    assert_eq!(tasks[2].evaluator.as_deref(), Some("ci"));
+    assert_eq!(tasks[2].state, TaskState::Done);
+}
+
+/// An abort from a required stage-0 evaluator escalates immediately: no later
+/// stage is created, and (like any abort) the rework budget is not consumed.
+#[tokio::test]
+async fn staged_eval_stage0_abort_escalates_without_ci() {
+    let Some(rig) = rig().await else { return };
+    let handle = rig.handle.clone();
+
+    rig.provider.on_run(|_| async {}); // work
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: false,
+                abort: true,
+                structured: Some(serde_json::json!({"reason": "wrong premise"})),
+                token_usage: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let job = rig.handle.create_job(req("staged")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    assert_eq!(rig.provider.runs().len(), 2, "no rework after abort");
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    // work(1), review abort(2), Human escalation(3) — no ci ever.
+    assert_eq!(tasks.len(), 3);
+    assert!(
+        !tasks.iter().any(|t| t.evaluator.as_deref() == Some("ci")),
+        "the stage-1 ci evaluator must never be created after a stage-0 abort"
+    );
+    assert!(matches!(tasks[2].kind, types::TaskKind::Human { .. }));
+}
+
 /// Additive per-job evaluators: layered on top of the type's list and executed
 /// like declared ones.
 #[tokio::test]
@@ -761,6 +1041,7 @@ async fn job_level_evaluators_run_alongside_type_evaluators() {
         model: None,
         secrets: vec![],
         required: None,
+        stage: 0,
     }];
     let job = rig.handle.create_job(r).await.unwrap();
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
@@ -826,6 +1107,7 @@ async fn job_evaluator_name_collision_fails_release() {
         model: None,
         secrets: vec![],
         required: None,
+        stage: 0,
     }];
     let job = rig.handle.create_job(r).await.unwrap(); // creation always lands Frozen
     let err = rig

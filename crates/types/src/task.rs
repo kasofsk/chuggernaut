@@ -22,6 +22,12 @@ pub struct Task {
     /// reconciliation and the UI both need the mapping.
     #[serde(default)]
     pub evaluator: Option<String>,
+    /// Evaluation stage this task belongs to (spec §3.3 staged evaluation).
+    /// Carries the evaluator's `stage:` for Evaluation/MergeGate tasks so the
+    /// UI can group a cycle's tasks by stage; 0 for work/escalation/triage
+    /// tasks, which have no stage. Defaulted for records written before staging.
+    #[serde(default)]
+    pub stage: u32,
     /// Backend-assigned container ID (Docker or k8s); None for Human tasks.
     pub container_id: Option<String>,
     /// Agent tasks only: the session id handed to the agent CLI, which names

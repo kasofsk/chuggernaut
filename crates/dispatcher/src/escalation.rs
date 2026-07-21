@@ -26,6 +26,7 @@ pub fn escalation_task(
         session_id: None,
         attempt: 1,
         evaluator: None,
+        stage: 0,
         container_id: None,
         result: None,
         created_at: Utc::now(),

@@ -43,6 +43,7 @@ fn task(job_seq: u64, id: u64) -> Task {
         state: TaskState::Pending,
         attempt: 1,
         evaluator: None,
+        stage: 0,
         container_id: None,
         session_id: None,
         result: None,

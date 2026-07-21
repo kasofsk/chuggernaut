@@ -331,6 +331,7 @@ resources:
                 model: None,
                 secrets: vec![],
                 required: None,
+                stage: 0,
             }],
             timeout: None,
             factory: None,

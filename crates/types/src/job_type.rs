@@ -159,6 +159,13 @@ pub struct Evaluator {
     pub secrets: Vec<String>,
     /// Default true; false = advisory.
     pub required: Option<bool>,
+    /// Staged evaluation ordering (spec §3.3): evaluators run in ascending
+    /// `stage` order; within a stage they fan out in parallel. A later stage's
+    /// tasks are created only after every *required* evaluator in the prior
+    /// stage passes. Default 0 — a single-stage job is byte-for-byte the
+    /// unstaged behavior. Non-negative (`u32`, enforced at parse).
+    #[serde(default)]
+    pub stage: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -687,6 +694,87 @@ wrap_up:
         let jt = JobType::parse(yaml).unwrap();
         assert_eq!(jt.wrap_up.r#type, WrapUpMode::None);
         assert_eq!(jt.validate(), vec![]);
+    }
+
+    #[test]
+    fn evaluator_stage_defaults_zero_parses_and_validates() {
+        // Omitted `stage` defaults to 0 across all evaluator kinds; an explicit
+        // non-negative value parses. A negative value is rejected at parse
+        // (serde into u32), so it can never reach validate().
+        let jt = JobType::parse(SPEC_EXAMPLE).unwrap();
+        assert!(jt.eval.iter().all(|e| e.stage == 0));
+
+        let yaml = r#"
+name: impl
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+eval:
+  - name: review
+    type: agent
+    prompt: r.md
+    stage: 0
+  - name: ci
+    type: command
+    run: ./ci.sh
+    stage: 2
+"#;
+        let jt = JobType::parse(yaml).unwrap();
+        assert_eq!(jt.eval[0].stage, 0);
+        assert_eq!(jt.eval[1].stage, 2);
+        assert_eq!(jt.validate(), vec![]);
+
+        let negative = r#"
+name: impl
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+eval:
+  - name: review
+    type: agent
+    prompt: r.md
+    stage: -1
+"#;
+        assert!(JobType::parse(negative).is_err());
+    }
+
+    #[test]
+    fn project_defaults_preserve_declared_stage_after_append() {
+        // The append does not reorder; the default keeps whatever `stage` it
+        // declares, so a job type's stage-0 review sits ahead of a stage-1 CI
+        // default in the merged list.
+        let yaml = r#"
+name: code
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+eval:
+  - name: review
+    type: agent
+    prompt: r.md
+    stage: 0
+"#;
+        let jt = JobType::parse(yaml).unwrap();
+        let defaults = ProjectDefaults::parse(
+            r#"
+eval:
+  - name: ci
+    type: command
+    run: ./tasks/ci.sh
+    stage: 1
+"#,
+        )
+        .unwrap();
+        let merged = jt.with_defaults(&defaults).unwrap();
+        assert_eq!(merged.eval.len(), 2);
+        assert_eq!(merged.eval[0].name, "review");
+        assert_eq!(merged.eval[0].stage, 0);
+        assert_eq!(merged.eval[1].name, "ci");
+        assert_eq!(merged.eval[1].stage, 1);
+        assert_eq!(merged.validate(), vec![]);
     }
 
     #[test]
