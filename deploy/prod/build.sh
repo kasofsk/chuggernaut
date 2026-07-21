@@ -1,8 +1,12 @@
 #!/bin/sh
-# Build the prod images and extract the linux chuggernaut-channel binary to
-# deploy/prod/out/chuggernaut-channel (the dispatcher's CHANNEL_BINARY).
+# Build the Mini's container substrate: the SSH front image and the linux
+# chuggernaut-channel binary extracted to deploy/prod/out/chuggernaut-channel
+# (the dispatcher's CHANNEL_BINARY). That's ALL the Mini builds now — the api
+# runs natively (README §2), and job containers run only on worker nodes, which
+# build their own agent images (build-worker.sh). No cargo compile runs in the
+# VM here.
 #
-# Reuses the dev Dockerfiles (they compile chuggernaut + chuggernaut-channel
+# Reuses the dev Dockerfile.ssh (it compiles chuggernaut + chuggernaut-channel
 # for the Docker platform — arm64 linux on an M-series Mini) and only differs
 # in the image tag. Idempotent; safe to re-run from update.sh.
 set -eu
@@ -29,14 +33,4 @@ docker build -f "$DEV/Dockerfile.ssh" --target artifacts \
 docker build -f "$DEV/Dockerfile.ssh" --build-arg "GIT_UID=$GIT_UID" \
   -t "chuggernaut/ssh:$TAG" "$CTX"
 
-# Agent image the job types run in.
-docker build -f "$DEV/Dockerfile.agent" -t "chuggernaut/agent:$TAG" "$DEV"
-
-# Rust agent image for the chuggernaut dogfood project (repo-root context —
-# it bakes a cargo prefetch of the workspace deps).
-docker build -f Dockerfile.agent-rust -t "chuggernaut/agent-rust:$TAG" "$CTX"
-
-# API service image (HTTP↔NATS bridge + web UI baked in).
-docker build -f Dockerfile.api -t "chuggernaut/api:$TAG" "$CTX"
-
-echo "built chuggernaut/{ssh,agent,agent-rust,api}:$TAG; channel -> $(pwd)/out/chuggernaut-channel"
+echo "built chuggernaut/ssh:$TAG; channel -> $(pwd)/out/chuggernaut-channel"

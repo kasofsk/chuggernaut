@@ -1,11 +1,14 @@
 # Production stack — standing Chuggernaut instance on a Mac Mini
 
 This is the canonical runbook for the always-on instance we use to drive **other**
-projects. NATS, the SSH front, and the **api** (HTTP↔NATS bridge + web UI) run as
-**compose containers**; only the **dispatcher** runs as a native host process
-under **launchd** (it needs the Docker socket and the repos filesystem), launching
-agent containers as siblings. Deployed by an **explicit `deploy` job** on the
-platform itself (§3), and **backed up hourly to Cloudflare R2**. There is no
+projects. NATS and the SSH front run as **compose containers**; the **dispatcher**
+and the **api** (HTTP↔NATS bridge + web UI) run as **native host processes** under
+**launchd** — the dispatcher needs the Docker socket and the repos filesystem, and
+the api is the same `chuggernaut` binary the host already builds every deploy, so
+containerizing it only forced a redundant Rust compile inside the VM (§2). The
+colima VM is left holding just NATS + the ssh front and can run at **2 GiB**.
+Deployed by an **explicit `deploy` job** on the platform itself (§3), and
+**backed up hourly to Cloudflare R2**. There is no
 GitHub-side CI — fmt/clippy/test run as the Chuggernaut `ci` evaluator on the
 platform itself before any work can merge.
 
@@ -42,14 +45,12 @@ mkdir -p ~/.docker/cli-plugins
 ln -sfn "$(brew --prefix)/opt/docker-buildx/bin/docker-buildx"  ~/.docker/cli-plugins/docker-buildx
 ln -sfn "$(brew --prefix)/opt/docker-compose/bin/docker-compose" ~/.docker/cli-plugins/docker-compose
 
-# Give Colima room for cargo builds + agent containers. On the 8-core/8GiB
-# Mini we run 6/6 (leaves ~2GiB for macOS + the native dispatcher); anything
-# smaller than ~4/5 can't hold a cold cargo build plus nats/ssh/api. NOTE:
-# `colima start` with no flags on a fresh machine defaults to 2 CPU/2GiB and
-# a job whose resources.cpu exceeds the VM's CPUs fails at container launch
-# ("range of CPUs is from 0.01 to N"). Verify with `colima list`; resize an
-# existing VM with `colima stop && colima start --cpu 6 --memory 6`.
-colima start --cpu 6 --memory 6 --disk 100
+# The VM now runs ONLY nats + the ssh front — the api runs natively (§2) and job
+# containers run on worker nodes (§6), so no cargo build and no agent containers
+# live in the VM. 2 CPU/2GiB is plenty. (Existing Mini on 6/6 for the old
+# containerized api? shrink it in the §7 migration.) Verify with `colima list`;
+# resize with `colima stop && colima start --cpu 2 --memory 2`.
+colima start --cpu 2 --memory 2 --disk 100
 ```
 
 Also:
@@ -88,19 +89,25 @@ set -a; . deploy/prod/chuggernaut.env; set +a
 # 1. keys — the NATS step fails on this first run (server not up yet); expected.
 chug init --keys-dir "$KEYS_DIR" --repos-root "$REPOS_ROOT" || true
 
-# 2. images + linux channel binary
+# 2. ssh-front image + linux channel binary (build.sh no longer builds the api
+#    or agent images — the api is native, worker nodes build their own agents)
 GIT_UID=$(id -u) deploy/prod/build.sh
 
-# 3. boot the substrate (colima + NATS + sshd + api, waits for NATS). The api
-#    container mounts the jwt/creds/artifacts keys generated in step 1.
+# 2b. build the web SPA and seed the served UI dir the native api reads (§7)
+( cd web && npm ci && npm run build )
+mkdir -p "$UI_ROOT" && rsync -a --delete web/dist/ "$UI_ROOT/"
+
+# 3. boot the substrate (colima + NATS + sshd, waits for NATS). The api is not a
+#    container anymore — it starts as a launchd service in step 5.
 deploy/prod/boot.sh
 
 # 4. finish init (topology, VAPID, admin user) — idempotent
 chug init --keys-dir "$KEYS_DIR" --repos-root "$REPOS_ROOT" \
   --admin-email you@kasofsk.xyz --admin-password 'CHANGE-ME'
 
-# 5. install + start the launchd services (boot, dispatcher, backups). The api
-#    is a compose container (step 3), not a launchd service.
+# 5. install + start the launchd services (boot, dispatcher, api, backups). The
+#    api (com.chuggernaut.api / run-api.sh) reads the jwt/creds/artifacts keys
+#    from step 1 and serves the UI seeded in step 2b; RunAtLoad starts it now.
 deploy/prod/install-launchd.sh
 
 # 7. agent provider credentials (injected into every agent container)
@@ -119,24 +126,29 @@ Create projects with `chug admin project create --owner <o> --name <n> --repos-r
 
 ## 2. Services & operations
 
-**Containers** (compose; `docker compose -f deploy/prod/compose.yaml ps`): `nats`,
-`ssh`, and `api` — the api publishes the UI to `127.0.0.1:8080`.
+**Containers** (compose; `docker compose -f deploy/prod/compose.yaml ps`): just
+`nats` and `ssh`. The **api runs natively** now (launchd, below), not in a
+container — it is the same `chuggernaut` binary the host builds each deploy, so
+containerizing it only forced a redundant in-VM Rust compile (2026-07-21 502
+incident). That let the colima VM shrink to 2 GiB (§0).
 
 **launchd agents** installed by `install-launchd.sh` (logs in
 `~/Library/Logs/chuggernaut/`):
 
 | Label | Kind | What |
 |---|---|---|
-| `com.chuggernaut.boot` | RunAtLoad | `boot.sh`: colima + compose (nats/ssh/api) + wait-for-NATS |
-| `com.chuggernaut.dispatcher` | KeepAlive | `run-dispatcher.sh` (the only host service) |
+| `com.chuggernaut.boot` | RunAtLoad | `boot.sh`: colima + compose (nats/ssh) + wait-for-NATS |
+| `com.chuggernaut.dispatcher` | KeepAlive | `run-dispatcher.sh` (Docker socket + repos filesystem) |
+| `com.chuggernaut.api` | KeepAlive | `run-api.sh`: `chuggernaut api` on `127.0.0.1:8080` (HTTP↔NATS bridge + web UI) |
 | `com.chuggernaut.backup-hourly` | :00 hourly | `backup-r2.sh` |
 | `com.chuggernaut.backup-daily` | 03:20 | `backup-r2.sh promote daily` |
 | `com.chuggernaut.backup-monthly` | 1st 03:40 | `backup-r2.sh promote monthly` |
 | `com.chuggernaut.mirror` | :05 interval | `git push origin main:main --force-with-lease` (GitHub mirror; §3) |
 
 ```sh
-docker compose -f deploy/prod/compose.yaml ps          # container status (nats/ssh/api)
-docker compose -f deploy/prod/compose.yaml logs -f api  # api logs
+docker compose -f deploy/prod/compose.yaml ps          # container status (nats/ssh)
+tail -f ~/Library/Logs/chuggernaut/api.log             # native api logs
+launchctl kickstart -k gui/$(id -u)/com.chuggernaut.api          # restart api
 launchctl kickstart -k gui/$(id -u)/com.chuggernaut.dispatcher   # restart dispatcher (safe; §3.6 reconciles)
 deploy/prod/install-launchd.sh            # reload after editing a plist template
 deploy/prod/install-launchd.sh uninstall  # remove all agents
@@ -168,11 +180,12 @@ and release it, exactly like any other job.
 
 1. no-ops if `.deployed-sha` already matches the target,
 2. else checks the SHA out in `$CHUG_REPO`, snapshots the old dispatcher binary
-   to `chuggernaut.prev`, `cargo build --release` (host dispatcher), `build.sh`
-   (ssh/agent/api images — the api image builds the web UI itself), idempotent
-   `chug init`, rebuilds + restarts the `ssh` and `api` containers, `kickstart`s
-   the dispatcher, then health-checks `http://127.0.0.1:8080/` (non-zero fails
-   the deploy job).
+   to `chuggernaut.prev`, `cargo build --release` (host dispatcher **and** api —
+   one binary), `build.sh` (ssh-front image + channel binary only), builds `web/`
+   and seeds `UI_ROOT`, idempotent `chug init`, rebuilds + restarts the `ssh`
+   container, `kickstart`s the dispatcher **and** the native api, then
+   health-checks `http://127.0.0.1:8080/` (non-zero fails the deploy job). No
+   cargo build runs inside the VM.
 
 **Self-restart is by design.** `update.sh` `kickstart`s the dispatcher that
 supervises the very `deploy` job running it. The restart drops in-memory state;
@@ -189,10 +202,10 @@ secret (injected as an env var — the private-key value; the script writes it t
 ```sh
 CHUG_REPO=~/chuggernaut deploy/prod/update.sh              # deploy origin/main now
 CHUG_REPO=~/chuggernaut deploy/prod/update.sh <good-sha>   # roll back to a known-good commit
-# fast dispatcher-only rollback (host binary):
+# fast host-binary rollback (dispatcher AND api are the same binary):
 cp ~/chuggernaut/target/release/chuggernaut.prev ~/chuggernaut/target/release/chuggernaut
 launchctl kickstart -k gui/$(id -u)/com.chuggernaut.dispatcher
-# the api is a container — roll it back by rebuilding at the good SHA (update.sh)
+launchctl kickstart -k gui/$(id -u)/com.chuggernaut.api
 ```
 
 ### GitHub mirror (`com.chuggernaut.mirror`, stopgap)
@@ -274,8 +287,8 @@ mkdir /tmp/restore && tar xzf /tmp/restore.tgz -C /tmp/restore
 
 ## 5. Remote access
 
-The api container publishes to `127.0.0.1:8080` (loopback only), so nothing is
-exposed except through one of the paths below.
+The native api binds `127.0.0.1:8080` (loopback only — `run-api.sh`), so nothing
+is exposed except through one of the paths below.
 
 ### 5a. Tailscale Serve — private, tailnet-only (default)
 
@@ -374,25 +387,69 @@ Notes:
 
 ## 7. Instant web UI publish (`web-publish` job)
 
-Front-end-only changes skip the full deploy. The api container mounts a host
-directory (`UI_ROOT`, default `~/chuggernaut-data/ui`) over its baked-in
-`/srv/web`, so replacing that directory's **contents** changes what the SPA
-serves immediately — refresh the page, no rebuild, no restarts.
+Front-end-only changes skip the full deploy. The **native api** serves the SPA
+straight from a host directory (`UI_ROOT`, default `~/chuggernaut-data/ui`; set
+as `UI_DIST` by `run-api.sh`), reading it live off disk per request — so
+replacing that directory's **contents** changes what the SPA serves immediately.
+No bind mount, no baked-in image copy, no container to restart: refresh the page.
 
-- **Normal deploys stay authoritative**: `update.sh` seeds `UI_ROOT` from the
-  freshly built api image on every deploy, so a full deploy and a from-scratch
-  image always serve the same content.
+- **Normal deploys stay authoritative**: `update.sh` builds `web/` on the host
+  and rsyncs it into `UI_ROOT` on every deploy, so a full deploy and a
+  web-publish always land the same content.
 - **Fast path**: after a `web` job (jobs/web.yaml) merges, release a
   `web-publish` job (jobs/web-publish.yaml). It builds `web/dist` at main and
   tar-pipes it to the Mini, staging in `UI_ROOT.new` and rsyncing contents
-  into place (~30s end to end). Same `MINI_DEPLOY_KEY` ssh path as deploy.
-- **Never replace the directory itself** (`mv`/`rm -rf` of `UI_ROOT`): it is a
-  live bind mount — swap contents (`rsync -a --delete`), or the running
-  container keeps serving the detached old inode.
-- **One-time migration on an existing Mini**: add `UI_ROOT` to
-  `chuggernaut.env` (see env.example), then run a deploy (seeds the dir and
-  recreates the api container with the mount). Until that deploy runs, the
-  compose file's `${UI_ROOT}` falls back via update.sh/boot.sh exports.
+  into place (~30s end to end). Same `MINI_DEPLOY_KEY` ssh path as deploy. The
+  native api picks the new files up on the next request — no reload needed.
+- **Swap contents, not the directory** — `rsync -a --delete web/dist/
+  "$UI_ROOT/"`, not `rm -rf`/`mv` of `UI_ROOT` itself. (With the native reader
+  a directory swap would actually be picked up too, since it opens by path each
+  request; keeping the in-place rsync just matches web-publish and avoids a
+  window where the dir is missing.)
+
+### One-time migration on an existing Mini (containerized api → native)
+
+Do this **once** on the running Mini to switch from the api container to the
+native launchd service. It depends on the #36 `update.sh` re-exec already being
+deployed (the old updater must never run against a compose.yaml with the `api`
+service removed). Run it by hand on the Mini, `cd ~/chuggernaut`:
+
+```sh
+git fetch origin && git checkout --force origin/main   # or the deployed SHA
+
+# 1. Build the api binary + UI FIRST, so the service has something to bind and
+#    serve the instant it loads. node is a prerequisite (§0).
+cargo build --release
+set -a; . deploy/prod/chuggernaut.env; set +a
+UI_ROOT="${UI_ROOT:-$HOME/chuggernaut-data/ui}"; mkdir -p "$UI_ROOT"
+( cd web && npm ci && npm run build ) && rsync -a --delete web/dist/ "$UI_ROOT/"
+
+# 2. Free :8080 BEFORE the native api is expected to bind — retire the old
+#    container. Its compose service is gone in this checkout, so remove it by
+#    name (compose rm can't target a service the file no longer defines).
+docker rm -f chuggernaut-api-1 2>/dev/null || true
+
+# 3. Render + load the launchd services (com.chuggernaut.api included; RunAtLoad
+#    starts it now, on the freed port and the binary/UI from step 1).
+deploy/prod/install-launchd.sh
+
+# 4. Confirm the native api is running (not crash-looping on a taken port).
+launchctl print gui/$(id -u)/com.chuggernaut.api | grep -E 'state|program'
+
+# 5. Health check — retry, since a KeepAlive (re)bind can lag a second or two.
+for _ in $(seq 1 30); do
+  curl -fsS http://127.0.0.1:8080/ >/dev/null 2>&1 && { echo "api OK"; break; }
+  sleep 2
+done
+
+# 6. Shrink the VM — it now runs only nats + ssh (§0). boot.sh brings the stack
+#    back up (colima start is a no-op; compose up recreates nats/ssh).
+colima stop && colima start --cpu 2 --memory 2 --disk 100
+deploy/prod/boot.sh
+```
+
+After this, normal `deploy` jobs manage the native api (kickstart, step 6b of
+`update.sh`); no further manual steps.
 
 ## 8. Colima notes & gotchas
 
