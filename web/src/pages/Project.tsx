@@ -33,6 +33,23 @@ export function ProjectPage() {
 
   const jobBySeq = new Map(jobs.map((j) => [j.id, j]))
 
+  // A terminal job's pending tasks are zombies — revoke doesn't (yet) close
+  // them out server-side, and there is nothing valid to resolve. Hide them so
+  // the inbox never offers actions the dispatcher will reject.
+  const inbox = pending.filter((t) => {
+    const state = jobBySeq.get(t.job_seq)?.state
+    return state !== 'Revoked' && state !== 'Done'
+  })
+
+  // What the card is asking of the operator — the resolution vocabulary
+  // differs (escalations take retry/resolve/revoke, the rest pass/fail).
+  const askKind = (t: Task): string => {
+    const state = jobBySeq.get(t.job_seq)?.state
+    if (state === 'Escalated' || state === 'Stalled') return 'escalation'
+    if (t.phase === 'Evaluation') return 'review'
+    return 'human work'
+  }
+
   async function act(fn: () => Promise<unknown>) {
     try {
       await fn()
@@ -54,10 +71,10 @@ export function ProjectPage() {
       {error && <div className="error banner">{error}</div>}
       <OriginPanel owner={owner} project={project} />
 
-      {pending.length > 0 && (
+      {inbox.length > 0 && (
         <section className="card inbox">
-          <h2>Inbox — {pending.length} pending</h2>
-          {pending.map((t) => (
+          <h2>Inbox — {inbox.length} pending</h2>
+          {inbox.map((t) => (
             <div className="inbox-task" key={`${t.job_seq}:${t.id}`}>
               <div className="inbox-head">
                 <Link to={`/p/${owner}/${project}/jobs/${t.job_seq}`}>
@@ -66,7 +83,7 @@ export function ProjectPage() {
                 <span className="dim">
                   {' '}
                   · task {t.id} · {t.phase}
-                  {t.evaluator ? ` · ${t.evaluator}` : ''}
+                  {t.evaluator ? ` · ${t.evaluator}` : ''} · {askKind(t)}
                 </span>
               </div>
               {t.kind.kind === 'Human' && <pre className="prompt">{t.kind.prompt}</pre>}
