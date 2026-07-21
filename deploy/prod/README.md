@@ -20,9 +20,18 @@ only *consumes* `main`.
 ## 0. Prerequisites (one-time, on the Mini)
 
 ```sh
-# Toolchain + runtime
-brew install colima docker docker-compose node age rclone cloudflared
+# Toolchain + runtime. buildx + compose are required (build.sh uses `docker build
+# --output`; boot.sh/update.sh use `docker compose`). cloudflared is OPTIONAL —
+# only for a public tunnel (§5); the default Tailscale Serve path needs no install.
+brew install colima docker docker-buildx docker-compose node age rclone
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust (edition 2024 needs =>1.85)
+
+# Homebrew ships buildx/compose as standalone binaries; link them as docker CLI
+# plugins so `docker build --output` and `docker compose` resolve (else build.sh
+# fails "unknown flag: --output" and boot.sh fails "unknown shorthand flag: 'f'").
+mkdir -p ~/.docker/cli-plugins
+ln -sfn "$(brew --prefix)/opt/docker-buildx/bin/docker-buildx"  ~/.docker/cli-plugins/docker-buildx
+ln -sfn "$(brew --prefix)/opt/docker-compose/bin/docker-compose" ~/.docker/cli-plugins/docker-compose
 
 # Give Colima room for cargo builds + agent containers
 colima start --cpu 4 --memory 8 --disk 100
@@ -41,6 +50,17 @@ Also:
 - **Repo access** — `deploy.yml` runs only if `Kasofsk/chuggernaut` is granted to
   the org runner group. Transfer/keep the repo under the org, and **make it
   private** (self-hosted runners + public repos = fork PRs running on your box).
+- **Deploy key** — the deployed checkout (`$CHUG_REPO`) fetches `main` over SSH in
+  `update.sh`, independently of the Actions runner's token. Give the Mini a
+  **read-only** GitHub deploy key and register the public half under the repo's
+  **Settings → Deploy keys** (leave write access off):
+  ```sh
+  ssh-keygen -t ed25519 -N "" -f ~/.ssh/chuggernaut_deploy   # add the .pub to Deploy keys
+  printf '\nHost github.com\n  IdentityFile ~/.ssh/chuggernaut_deploy\n  IdentitiesOnly yes\n' >> ~/.ssh/config
+  ```
+- **Colima has no `/var/run/docker.sock`** — the dispatcher (a native host process)
+  reaches Docker via `DOCKER_NODES`, which **must** point at the colima socket, or
+  it dies with `Socket not found: /var/run/docker.sock`. See §6 and `env.example`.
 
 ---
 
@@ -200,10 +220,28 @@ mkdir /tmp/restore && tar xzf /tmp/restore.tgz -C /tmp/restore
 
 ---
 
-## 5. Remote access — Cloudflare Tunnel
+## 5. Remote access
 
 The api container publishes to `127.0.0.1:8080` (loopback only), so nothing is
-exposed except through the tunnel.
+exposed except through one of the paths below.
+
+### 5a. Tailscale Serve — private, tailnet-only (default)
+
+If the Mini is on your tailnet, this is the simplest path and keeps the UI off the
+public internet entirely. One-time: enable **HTTPS Certificates** for the tailnet
+(admin console → DNS), then:
+
+```sh
+tailscale serve --bg http://127.0.0.1:8080     # serves https://<host>.<tailnet>.ts.net (tailnet only)
+tailscale serve status                          # confirm the proxy
+```
+
+The api's own JWT sessions sit behind Tailscale device identity. Use **`serve`**
+(private); **`funnel`** would expose it publicly — do not use it here.
+
+### 5b. Cloudflare Tunnel — public hostname (optional)
+
+Only if you need access from outside the tailnet. Requires `cloudflared` (§0):
 
 ```sh
 cloudflared tunnel login
@@ -230,6 +268,19 @@ the project's linked GitHub origin, or reach `:2222` over LAN/Tailscale.
 
 ## 6. Colima notes & gotchas
 
+- **No `/var/run/docker.sock`; the dispatcher needs `DOCKER_NODES`.** bollard's
+  default socket path doesn't exist under colima, so the dispatcher exits with
+  `backend unavailable: Socket not found: /var/run/docker.sock`. Point it at the
+  colima socket in `chuggernaut.env` — and **quote the value**, because the env
+  file is `.`-sourced and the unquoted `|` separators are parsed as shell pipes
+  (`line NN: unix:///…: No such file or directory`):
+  ```sh
+  DOCKER_NODES="local|unix:///Users/<you>/.colima/default/docker.sock|4"
+  ```
+  Find the exact path with `colima status` (“docker socket: …”).
+- **`docker build --output` / `docker compose` errors** (`unknown flag: --output`,
+  `unknown shorthand flag: 'f'`) mean the buildx/compose CLI plugins aren't linked
+  — see the `~/.docker/cli-plugins` symlinks in §0.
 - **`host.docker.internal`** — agent containers reach NATS/sshd on the host via
   it. Smoke-test after first boot:
   `docker run --rm alpine sh -c 'nc -zv host.docker.internal 4222'`.
