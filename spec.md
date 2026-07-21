@@ -23,6 +23,7 @@ pub struct Job {
     pub eval: Vec<Evaluator>,              // additive per-job evaluators, layered on top of the type's eval list at execution; the type's evaluators are a floor — creation can add criteria, never remove or override them; name collisions are a release-time error (see design-lifecycle.md)
     pub claim_next: bool,                  // a human has claimed the job's NEXT work attempt (§1.2 claims): instead of launching, the dispatcher parks that attempt as a Pending task with the declared kind and performed_by: human, then clears the flag — a claim covers exactly one attempt. Defaults false on old records
     pub timeout: Option<String>,           // optional per-job work-task timeout override (duration string, e.g. "45m"), layering over the type's resources.task_timeout exactly like `eval` layers over the type's evaluators — but Work-phase tasks only; evaluators keep the type default. Any valid duration. Parseability validated at release. None → the type default applies
+    pub model: Option<String>,             // optional per-job model override for the Work agent (§12.4). The most specific choice, so it wins over every other layer: the job type's work.model, the project default (jobs/_defaults.yaml), and the platform default. Work-phase agent tasks only — evaluators keep the type/project/platform resolution, exactly as `timeout` scopes to Work. None → the resolution chain applies. Defaults None on old records
     pub factory: Option<String>,           // factory name when created by a factory triage agent (see §13); None for operator-created jobs
     pub created_at: DateTime<Utc>,
     pub ready_at: Option<DateTime<Utc>>,   // set once (immutably) when job first enters Ready; anchor for job_deadline; None until then
@@ -271,12 +272,13 @@ The YAML schema above is machine-derived from the platform's own parse types
   for contributors and CI. Repo-dependent checks (prompt files exist,
   secrets/vars set) still run at release (§2.2).
 
-#### Project Default Evaluators
+#### Project Defaults
 
-An optional file `jobs/_defaults.yaml` declares evaluators appended to **every** job type's `eval` list. This is how a project gates all changes on an evergreen test suite without each job type author remembering to declare it:
+An optional file `jobs/_defaults.yaml` declares project-wide defaults applied to **every** job type. It carries two things: `eval` (evaluators appended to every type's `eval` list — how a project gates all changes on an evergreen test suite without each job type author remembering to declare it) and `model` (a project-level default agent model, §12.4):
 
 ```yaml
 # jobs/_defaults.yaml
+model: claude-opus-4-8            # optional; project-level default agent model (§12.4)
 eval:
   - name: ci
     type: command
@@ -289,6 +291,7 @@ Semantics:
 - Default evaluators are appended after the job type's own evaluators. An evaluator name collision between `_defaults.yaml` and a job type is a release-time validation error.
 - A default evaluator with no `image` falls back to the job's top-level `image`; for `work.type: human` jobs (no top-level image) the default evaluator's `image` is required — validated at release.
 - Required `command` default evaluators participate in the merge gate (see §3.3) like any other required command evaluator.
+- `model` is folded in as a fallback for every agent that does not declare its own `model` — the work agent and each agent evaluator (the same reach as the platform default, §12.4). It sits **below** a job type's own `model` and **above** the platform default. Command/human work and evaluators take no model and are untouched.
 
 ---
 
@@ -1042,7 +1045,7 @@ pub struct AgentOutput {
 
 `AgentProvider.run()` is responsible for launching the container using the dispatcher's backend, injecting the provider-specific agent CLI invocation as the container CMD, monitoring the container until it exits, and returning the result. The declared job `image` provides the full development environment including the agent CLI binary and all runtime tooling.
 
-Provider and model are configured at platform level (see §12.4) with per-job-type overrides at `work:` level or per eval step. In v1, the fallback chain is: job-type declaration → platform default. Project-level and team-level defaults are deferred.
+Provider and model are configured at platform level (see §12.4) with per-job-type overrides at `work:` level or per eval step. The model resolution chain is: per-job override → job-type declaration → project default (`jobs/_defaults.yaml`) → platform default (§12.4). Provider resolution is job-type declaration → platform default; per-project provider defaults and team-level defaults are deferred.
 
 **`ClaudeProvider`** — container CMD: `claude -p "$(cat /chuggernaut/prompt.md)" --model {model} --append-system-prompt {system_prompt} --mcp-config {json}`. The `{json}` is the serialized `Vec<McpServerConfig>` passed inline on the command line.
 
@@ -1823,17 +1826,19 @@ chuggernaut admin secret rotate-key
 
 ### 12.4 Provider and Model Defaults
 
-Platform-level agent provider and model defaults are supplied as dispatcher configuration at startup — not stored in NATS KV. In v1, the fallback chain is: job-type declaration → platform config default. Per-project and per-team defaults are deferred.
+Platform-level agent provider and model defaults are supplied as dispatcher configuration at startup — not stored in NATS KV.
+
+**Model resolution chain** (most specific wins): per-job override (`Job.model`, §1.1) → job-type declaration (`work.model` / evaluator `model:`) → project default (`jobs/_defaults.yaml` `model:`, §1.1) → platform config default (`AGENT_MODEL_DEFAULT`). The per-job override applies to the **Work agent only** (evaluators keep the type/project/platform resolution, exactly as `Job.timeout` scopes to Work); every other layer applies to the work agent and agent evaluators alike. **Provider** resolution is unchanged: job-type declaration → platform config default (per-project provider defaults and per-job provider overrides remain deferred).
 
 Dispatcher configuration (environment variables or config file):
 
 ```
 AGENT_PROVIDER_DEFAULT   claude | codex      Required. No built-in default — dispatcher refuses to start without this.
-AGENT_MODEL_DEFAULT      string              Optional. If unset, the provider's built-in default model is used.
+AGENT_MODEL_DEFAULT      string              Optional. Bottom of the model resolution chain. If unset, the provider's built-in default model is used.
 TRIAGE_IMAGE             string              Optional. Platform image for operator-dispatched triage agents (§1.2). Provider/model reuse AGENT_PROVIDER_DEFAULT / AGENT_MODEL_DEFAULT. Unset → the triage action is unavailable (422). A platform-level image (rather than the failing job's own type image) so triage works uniformly across agent/command/human job types.
 ```
 
-If a job type declares `provider` and/or `model` at the `work:` level or per evaluator, those override the platform defaults for that job or evaluator. If neither the job type nor the platform config specifies a provider, the dispatcher fails to start with a configuration error.
+If a job type declares `provider` and/or `model` at the `work:` level or per evaluator, those override the project/platform defaults for that job or evaluator. If neither the job type, the project default, nor the platform config specifies a provider, the dispatcher fails to start with a configuration error. Triage runs at the platform defaults (§1.2) — it is not tied to a job type and does not consult the project or per-job model.
 
 ---
 
@@ -1951,7 +1956,7 @@ Platform init generates: JWT RS256 keypair, SSH CA keypair, age keypair, VAPID k
 - **Commit signing**: GPG-signed squash-merges. Deferred.
 - **Schema registry**: available as a platform service for applications to use; not a platform primitive.
 - **User git CLI (`chuggernaut` client)**: a wrapper CLI that transparently refreshes SSH certificates (via `POST /auth/ssh-cert`) before invoking `git`. In v1, users refresh SSH certs manually via the API or their own tooling and use `git` directly with the certificate.
-- **Project/team-level provider defaults**: in v1 the fallback chain is job-type declaration → platform config. Per-project and per-team agent provider/model overrides are deferred.
+- **Project/team-level provider defaults**: a project-level default **model** (`jobs/_defaults.yaml` `model:`) and a per-job model override (`Job.model`) are supported (§12.4). Per-project/per-team **provider** defaults and all team-level defaults remain deferred.
 - **Dependency caching for agent containers**: per-project build/dependency caches (cargo registry, node_modules) via persistent volumes or a pull-through registry cache. v1 mitigation: bake toolchains and dependencies into the declared `image`.
 - **k8s-Secret-based secret injection**: dispatcher writes a Kubernetes Secret referenced by the Job spec instead of decrypting secrets into env vars it assembles itself, keeping plaintext out of the dispatcher's launch path. v1 injects env vars directly.
 - **Direct-mode factories**: event → job templating without a triage agent (payload→job-fields mapping mini-language). v1 factories are triage-only (§13.1); a trivial triage prompt covers the direct case at the cost of agent tokens.

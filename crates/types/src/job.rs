@@ -50,6 +50,16 @@ pub struct Job {
     /// creation". None means the type default applies.
     #[serde(default)]
     pub timeout: Option<String>,
+    /// Optional per-job model override for the Work agent (spec §1.1, §12.4).
+    /// The most specific choice an operator can make, so it wins over every
+    /// other layer: the job type's `work.model`, the project default
+    /// (`jobs/_defaults.yaml`), and the platform default (`AGENT_MODEL_DEFAULT`).
+    /// Applies to Work-phase agent tasks only — evaluators keep the
+    /// type/project/platform resolution, exactly as [`Job::timeout`] scopes to
+    /// Work. None → the resolution chain applies. Defaulted for records written
+    /// before per-job model selection existed.
+    #[serde(default)]
+    pub model: Option<String>,
     /// A human has claimed the job's NEXT work attempt (spec §1.2 claims):
     /// instead of launching a container, the dispatcher parks that attempt as
     /// a Pending task with the declared kind and `performed_by: human`, then
@@ -119,6 +129,8 @@ mod tests {
         assert_eq!(job.deps, vec![11, 22]);
         // `timeout` is optional and defaults to None on records that predate it.
         assert_eq!(job.timeout, None);
+        // `model` defaults to None on records that predate per-job model selection.
+        assert_eq!(job.model, None);
         // `claim_next` defaults false on records that predate claims.
         assert!(!job.claim_next);
         let back = serde_json::to_string(&job).unwrap();
@@ -144,6 +156,29 @@ mod tests {
         }"#;
         let job: Job = serde_json::from_str(json).unwrap();
         assert_eq!(job.timeout.as_deref(), Some("45m"));
+        let back = serde_json::to_string(&job).unwrap();
+        let again: Job = serde_json::from_str(&back).unwrap();
+        assert_eq!(job, again);
+    }
+
+    #[test]
+    fn job_round_trips_with_model_override() {
+        let json = r#"{
+          "id": 8,
+          "project": "acme/api",
+          "type": "implement-endpoint",
+          "deps": [],
+          "state": "Frozen",
+          "branch": "job/8",
+          "base_ref": null,
+          "knowledge_tags": [],
+          "model": "claude-fable-5",
+          "factory": null,
+          "created_at": "2026-07-21T10:00:00Z",
+          "ready_at": null
+        }"#;
+        let job: Job = serde_json::from_str(json).unwrap();
+        assert_eq!(job.model.as_deref(), Some("claude-fable-5"));
         let back = serde_json::to_string(&job).unwrap();
         let again: Job = serde_json::from_str(&back).unwrap();
         assert_eq!(job, again);

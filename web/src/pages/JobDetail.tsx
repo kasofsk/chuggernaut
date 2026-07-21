@@ -113,6 +113,14 @@ export function JobDetail() {
               </dd>
             </>
           )}
+          {job.model && (
+            <>
+              <dt>model</dt>
+              <dd title="per-job Work agent model override (evaluators keep the type/project/platform resolution)">
+                <code>{job.model}</code> <span className="dim">override</span>
+              </dd>
+            </>
+          )}
           {criteria?.wrap_up && (
             <>
               <dt>wrap-up</dt>

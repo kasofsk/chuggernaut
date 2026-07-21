@@ -415,10 +415,19 @@ impl JobType {
         errs
     }
 
-    /// Append project default evaluators (`jobs/_defaults.yaml`, spec §1.1).
-    /// An evaluator name collision between the defaults and this job type is an
-    /// error. Validate the merged result with [`JobType::validate`] — image
-    /// fallback rules apply against this job type's top-level image.
+    /// Append project default evaluators (`jobs/_defaults.yaml`, spec §1.1) and
+    /// apply the project-level default `model` (spec §12.4). An evaluator name
+    /// collision between the defaults and this job type is an error. Validate
+    /// the merged result with [`JobType::validate`] — image fallback rules apply
+    /// against this job type's top-level image.
+    ///
+    /// The project `model` is folded in as a fallback for every agent that does
+    /// not already declare one — the work agent and each agent evaluator (the
+    /// same reach as the platform default, spec §12.4). It sits *below* the job
+    /// type's own `model` (a type that names a model keeps it) and *above* the
+    /// platform default, giving the resolution chain `job type → project default
+    /// → platform default`. Command/human work and command/human evaluators take
+    /// no model, so they are left untouched.
     pub fn with_defaults(&self, defaults: &ProjectDefaults) -> Result<JobType, FieldRuleError> {
         let mut merged = self.clone();
         for d in &defaults.eval {
@@ -434,19 +443,35 @@ impl JobType {
             }
             merged.eval.push(d.clone());
         }
+        if let Some(model) = &defaults.model {
+            if merged.work.r#type == WorkType::Agent && merged.work.model.is_none() {
+                merged.work.model = Some(model.clone());
+            }
+            for e in merged.eval.iter_mut() {
+                if e.r#type == EvaluatorType::Agent && e.model.is_none() {
+                    e.model = Some(model.clone());
+                }
+            }
+        }
         Ok(merged)
     }
 }
 
-/// Project-wide default evaluators, `jobs/_defaults.yaml` (spec §1.1). Appended
-/// to every job type's eval list at load; this is how a project gates all
-/// changes on an evergreen test suite without per-job-type declarations.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Project-wide defaults, `jobs/_defaults.yaml` (spec §1.1, §12.4). The `eval`
+/// list is appended to every job type's evaluators — how a project gates all
+/// changes on an evergreen suite without per-job-type declarations. `model`
+/// sets a project-level default agent model layered between the platform
+/// default and job-type declarations (spec §12.4).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProjectDefaults {
     #[serde(default)]
     pub eval: Vec<Evaluator>,
+    /// Project-level default agent model (spec §12.4). Applied to the work
+    /// agent and agent evaluators that do not declare their own `model`.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl ProjectDefaults {
@@ -655,6 +680,58 @@ eval:
         )
         .unwrap();
         assert!(jt.with_defaults(&colliding).is_err());
+    }
+
+    #[test]
+    fn project_default_model_fills_undeclared_agents_only() {
+        // A job type whose work agent and one evaluator declare no model, plus
+        // an evaluator and a command evaluator that do.
+        let yaml = r#"
+name: code
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+eval:
+  - name: review
+    type: agent
+    prompt: r.md
+  - name: security
+    type: agent
+    prompt: s.md
+    model: claude-opus-4-8
+  - name: ci
+    type: command
+    run: ./ci.sh
+"#;
+        let jt = JobType::parse(yaml).unwrap();
+        let defaults = ProjectDefaults::parse("model: claude-sonnet-5\n").unwrap();
+        let merged = jt.with_defaults(&defaults).unwrap();
+        // Work agent: undeclared → gets the project default.
+        assert_eq!(merged.work.model.as_deref(), Some("claude-sonnet-5"));
+        // Agent evaluator without a model → gets the project default.
+        assert_eq!(merged.eval[0].model.as_deref(), Some("claude-sonnet-5"));
+        // Agent evaluator that declared one → keeps it (type wins over project).
+        assert_eq!(merged.eval[1].model.as_deref(), Some("claude-opus-4-8"));
+        // Command evaluator → left untouched (takes no model).
+        assert_eq!(merged.eval[2].model, None);
+        assert_eq!(merged.validate(), vec![]);
+    }
+
+    #[test]
+    fn project_default_model_does_not_override_declared_work_model() {
+        let jt = JobType::parse(SPEC_EXAMPLE).unwrap();
+        assert_eq!(jt.work.model.as_deref(), Some("claude-sonnet-4-6"));
+        let defaults = ProjectDefaults::parse("model: claude-sonnet-5\n").unwrap();
+        let merged = jt.with_defaults(&defaults).unwrap();
+        // The type's own work.model wins over the project default.
+        assert_eq!(merged.work.model.as_deref(), Some("claude-sonnet-4-6"));
+        // The type's undeclared-model agent evaluators pick up the default;
+        // the ones that declared a model keep it.
+        let arch = merged.eval.iter().find(|e| e.name == "architecture-review");
+        assert_eq!(arch.unwrap().model.as_deref(), Some("claude-sonnet-5"));
+        let sec = merged.eval.iter().find(|e| e.name == "security-review");
+        assert_eq!(sec.unwrap().model.as_deref(), Some("claude-opus-4-6"));
     }
 
     #[test]

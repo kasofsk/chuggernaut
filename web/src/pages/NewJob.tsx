@@ -60,7 +60,7 @@ export function NewJobPage() {
           availableTags={availableTags}
           jobs={jobs}
           initialType={params.get('type') ?? ''}
-          onCreate={(type, title, description, deps, knowledgeTags, evals, timeout) =>
+          onCreate={(type, title, description, deps, knowledgeTags, evals, timeout, model) =>
             api
               .createJob(owner, project, {
                 type,
@@ -70,6 +70,7 @@ export function NewJobPage() {
                 knowledge_tags: knowledgeTags.length ? knowledgeTags : undefined,
                 eval: evals.length ? evals : undefined,
                 timeout: timeout || undefined,
+                model: model || undefined,
               })
               .then(
                 (job) => navigate(`/p/${owner}/${project}/jobs/${job.id}`),
@@ -234,6 +235,7 @@ function CreateJob({
     knowledgeTags: string[],
     evals: Evaluator[],
     timeout: string,
+    model: string,
   ) => void
 }) {
   const [type, setType] = useState(initialType)
@@ -267,6 +269,10 @@ function CreateJob({
   const [timeout, setTimeout] = useState('')
   // The type's default work-task timeout, shown as the input placeholder.
   const typeTimeout = typeDetail?.job_type?.resources?.task_timeout ?? null
+  const [model, setModel] = useState('')
+  // The resolved default work model (the type's own or the project default,
+  // folded in by the library view), shown as the input placeholder.
+  const typeModel = typeDetail?.job_type?.work?.model ?? null
 
   function toggleTag(tag: string) {
     setSelectedTags((ts) => (ts.includes(tag) ? ts.filter((t) => t !== tag) : [...ts, tag]))
@@ -321,7 +327,7 @@ function CreateJob({
       return
     }
     setError(null)
-    onCreate(type, title.trim(), description.trim(), deps, knowledgeTags, evals, timeout.trim())
+    onCreate(type, title.trim(), description.trim(), deps, knowledgeTags, evals, timeout.trim(), model.trim())
   }
 
   return (
@@ -558,6 +564,20 @@ function CreateJob({
           value={timeout}
           onChange={(e) => setTimeout(e.target.value)}
           placeholder={typeTimeout ? `${typeTimeout} (type default)` : 'e.g. 45m, 2h, 1h30m'}
+        />
+      </label>
+
+      <label className="field">
+        <span>
+          Work model{' '}
+          <span className="dim">
+            (optional; overrides the type, project and platform defaults for this job's work agent)
+          </span>
+        </span>
+        <input
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+          placeholder={typeModel ? `${typeModel} (default)` : 'e.g. claude-opus-4-8, claude-fable-5'}
         />
       </label>
 

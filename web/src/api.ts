@@ -105,6 +105,9 @@ export interface Job {
   /** per-job work-task timeout override (duration string), layering over the
    *  type's resources.task_timeout; null → the type default applies */
   timeout: string | null
+  /** per-job Work agent model override; wins over the job type, project
+   *  (jobs/_defaults.yaml) and platform defaults; null → those apply */
+  model: string | null
   factory: string | null
   created_at: string
   ready_at: string | null
@@ -308,7 +311,7 @@ export const api = {
     req<Job[]>('GET', `/api/v1/projects/${owner}/${project}/jobs`),
   job: (owner: string, project: string, seq: number) =>
     req<Job>('GET', `/api/v1/projects/${owner}/${project}/jobs/${seq}`),
-  createJob: (owner: string, project: string, body: { type: string; title?: string; description?: string; deps?: number[]; knowledge_tags?: string[]; eval?: Evaluator[]; timeout?: string }) =>
+  createJob: (owner: string, project: string, body: { type: string; title?: string; description?: string; deps?: number[]; knowledge_tags?: string[]; eval?: Evaluator[]; timeout?: string; model?: string }) =>
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs`, body),
   /** One turn of the New Job job-wizard chat: send the conversation so far,
    *  get the assistant's reply and (once ready) a ticket draft. */

@@ -219,10 +219,13 @@ impl Core {
                         job_type.work.provider,
                         self.config.agent_provider_default.as_deref(),
                     ),
-                    model: job_type
-                        .work
+                    // §12.4 model resolution for the Work agent: per-job
+                    // override → job type → project default (folded into
+                    // work.model by `with_defaults`) → platform default.
+                    model: job
                         .model
                         .clone()
+                        .or_else(|| job_type.work.model.clone())
                         .or_else(|| self.config.agent_model_default.clone()),
                     prompt: job_type.work.prompt.clone().unwrap_or_default(),
                 },
@@ -347,10 +350,13 @@ impl Core {
                 let config = AgentRunConfig {
                     image: job_type.image.clone().unwrap_or_default(),
                     prompt,
-                    model: job_type
-                        .work
+                    // §12.4 model resolution for the Work agent: per-job
+                    // override → job type → project default (folded into
+                    // work.model by `with_defaults`) → platform default.
+                    model: job
                         .model
                         .clone()
+                        .or_else(|| job_type.work.model.clone())
                         .or_else(|| self.config.agent_model_default.clone()),
                     // §4.4 upfront injection: tagged knowledge (tags/{tag}.md
                     // at base_ref) rides the system prompt, work agents only.

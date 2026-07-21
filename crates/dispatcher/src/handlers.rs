@@ -187,6 +187,10 @@ struct CreateJobBody {
     /// Parseability validated at release. Absent → the type default applies.
     #[serde(default)]
     timeout: Option<String>,
+    /// Optional per-job Work agent model override (§12.4); wins over the job
+    /// type, project, and platform defaults. Absent → the resolution chain applies.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// Wire body for `req.tasks.resolve`: the §6.2 `TaskResolution` plus the
@@ -421,6 +425,7 @@ async fn spawn_read_handlers(
                             knowledge_tags: b.knowledge_tags,
                             eval: b.eval,
                             timeout: b.timeout,
+                            model: b.model,
                             factory: None,
                         };
                         match jobs_handle.create_job(create).await {
@@ -1134,6 +1139,7 @@ mod tests {
             knowledge_tags: vec![],
             eval: vec![],
             timeout: None,
+            model: None,
             claim_next: false,
             factory: None,
             created_at: Utc::now(),

@@ -115,6 +115,7 @@ fn req(r#type: &str) -> CreateJobRequest {
         knowledge_tags: vec![],
         eval: vec![],
         timeout: None,
+        model: None,
         factory: None,
     }
 }

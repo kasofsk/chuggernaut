@@ -173,6 +173,7 @@ fn req(r#type: &str) -> CreateJobRequest {
         knowledge_tags: vec![],
         eval: vec![],
         timeout: None,
+        model: None,
         factory: None,
     }
 }
@@ -1427,4 +1428,55 @@ async fn triage_rejected_on_non_intervention_state() {
         matches!(err, dispatcher::core::CoreError::Conflict(_)),
         "{err:?}"
     );
+}
+
+/// Poll the task log until the job's Work-phase task exists, then return it.
+/// The record is written at launch with its resolved kind, so it is readable
+/// even after the job advances past Work.
+async fn wait_for_work_task(store: &NatsStore, seq: u64) -> types::Task {
+    let tasks = store.tasks().await.unwrap();
+    for _ in 0..100 {
+        let log = tasks.list_for_job("acme", "api", seq).await.unwrap();
+        if let Some(t) = log.into_iter().find(|t| t.phase == TaskPhase::Work) {
+            return t;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for a work task for #{seq}");
+}
+
+// §12.4 model resolution: a per-job `Job.model` override lands on the Work
+// agent task. `impl-cmd` declares no `work.model`, this rig has no
+// `jobs/_defaults.yaml` and no platform `agent_model_default`, so the override
+// is the only source — proving it flows create → launch → the task's kind.
+#[tokio::test]
+async fn per_job_model_override_reaches_work_task() {
+    let Some(rig) = rig().await else { return };
+    let mut r = req("impl-cmd");
+    r.model = Some("claude-fable-5".into());
+    let job = rig.handle.create_job(r).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+
+    let work = wait_for_work_task(&rig.store, job.id).await;
+    match work.kind {
+        types::TaskKind::Agent { model, .. } => {
+            assert_eq!(model.as_deref(), Some("claude-fable-5"));
+        }
+        other => panic!("expected an agent work task, got {other:?}"),
+    }
+}
+
+// The baseline: with no override, no project default, and no platform default,
+// the Work agent's model resolves to None (the provider's built-in default).
+#[tokio::test]
+async fn work_task_model_none_without_any_default() {
+    let Some(rig) = rig().await else { return };
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+
+    let work = wait_for_work_task(&rig.store, job.id).await;
+    match work.kind {
+        types::TaskKind::Agent { model, .. } => assert_eq!(model, None),
+        other => panic!("expected an agent work task, got {other:?}"),
+    }
 }

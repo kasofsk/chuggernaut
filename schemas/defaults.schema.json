@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ProjectDefaults",
-  "description": "Project-wide default evaluators, `jobs/_defaults.yaml` (spec §1.1). Appended\nto every job type's eval list at load; this is how a project gates all\nchanges on an evergreen test suite without per-job-type declarations.",
+  "description": "Project-wide defaults, `jobs/_defaults.yaml` (spec §1.1, §12.4). The `eval`\nlist is appended to every job type's evaluators — how a project gates all\nchanges on an evergreen suite without per-job-type declarations. `model`\nsets a project-level default agent model layered between the platform\ndefault and job-type declarations (spec §12.4).",
   "type": "object",
   "properties": {
     "eval": {
@@ -10,6 +10,14 @@
       "items": {
         "$ref": "#/$defs/Evaluator"
       }
+    },
+    "model": {
+      "description": "Project-level default agent model (spec §12.4). Applied to the work\nagent and agent evaluators that do not declare their own `model`.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
     }
   },
   "additionalProperties": false,

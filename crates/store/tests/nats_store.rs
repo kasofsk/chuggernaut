@@ -22,6 +22,7 @@ fn job(seq: u64) -> Job {
         knowledge_tags: vec![],
         eval: vec![],
         timeout: None,
+        model: None,
         claim_next: false,
         factory: None,
         created_at: Utc::now(),

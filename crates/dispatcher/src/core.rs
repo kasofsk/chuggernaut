@@ -83,6 +83,9 @@ pub struct CreateJobRequest {
     /// Optional per-job work-task timeout override (duration string, §1.1);
     /// parseability validated at release. None → the type default applies.
     pub timeout: Option<String>,
+    /// Optional per-job Work agent model override (§12.4); wins over the job
+    /// type, project, and platform defaults. None → the resolution chain applies.
+    pub model: Option<String>,
     pub factory: Option<String>,
 }
 
@@ -498,7 +501,9 @@ pub struct CoreConfig {
     /// §12.4 platform provider default. None (tests) falls back to `claude`;
     /// the production path always sets it — `DispatcherConfig` requires it.
     pub agent_provider_default: Option<String>,
-    /// §12.4 platform model default; job-type/evaluator `model:` overrides it.
+    /// §12.4 platform model default — the bottom of the resolution chain. Any
+    /// more specific layer overrides it: per-job `Job::model`, job-type/evaluator
+    /// `model:`, and the project default (`jobs/_defaults.yaml`).
     pub agent_model_default: Option<String>,
     /// `TRIAGE_IMAGE` (§1.2): platform image for operator-dispatched triage
     /// agents. None → the triage action is unavailable.
@@ -878,6 +883,7 @@ impl Core {
             knowledge_tags: req.knowledge_tags,
             eval: req.eval,
             timeout: req.timeout,
+            model: req.model,
             claim_next: false,
             factory: req.factory,
             created_at: Utc::now(),
