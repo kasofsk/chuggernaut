@@ -21,7 +21,7 @@ set -eu
 # the tailnet interface and rejects tagged->tagged connections (the container
 # egresses as the worker node). Real sshd + key auth answer on the LAN.
 # DHCP-fragile — give the Mini a static lease; revisit if this ever times out.
-MINI_HOST="worksalot@192.168.129.128"
+MINI_HOST="worksalot@192.168.129.200"
 REMOTE_UPDATE="~/chuggernaut/deploy/prod/update.sh"
 
 # A deploy job has no commits of its own: HEAD == the released main.

@@ -12,7 +12,7 @@ set -eu
 
 # LAN address, not tailnet (same reasoning as tasks/deploy.sh: Tailscale SSH
 # owns :22 on the tailnet interface and rejects tagged->tagged).
-MINI_HOST="worksalot@192.168.129.128"
+MINI_HOST="worksalot@192.168.129.200"
 UI_ROOT="\$HOME/chuggernaut-data/ui"   # expanded remotely
 
 SHA="$(git rev-parse HEAD)"
