@@ -73,7 +73,7 @@ Also:
   ```
 - **Colima has no `/var/run/docker.sock`** — the dispatcher (a native host process)
   reaches Docker via `DOCKER_NODES`, which **must** point at the colima socket, or
-  it dies with `Socket not found: /var/run/docker.sock`. See §6 and `env.example`.
+  it dies with `Socket not found: /var/run/docker.sock`. See §7 and `env.example`.
 
 ---
 
@@ -137,6 +137,7 @@ Create projects with `chug admin project create --owner <o> --name <n> --repos-r
 |---|---|---|
 | `com.chuggernaut.boot` | RunAtLoad | `boot.sh`: colima + compose (nats/ssh/api) + wait-for-NATS |
 | `com.chuggernaut.dispatcher` | KeepAlive | `run-dispatcher.sh` (the only host service) |
+| `com.chuggernaut.nuc-tunnel` | KeepAlive | SSH tunnel to the worker's Docker socket (see "Worker nodes") |
 | `com.chuggernaut.backup-hourly` | :00 hourly | `backup-r2.sh` |
 | `com.chuggernaut.backup-daily` | 03:20 | `backup-r2.sh promote daily` |
 | `com.chuggernaut.backup-monthly` | 1st 03:40 | `backup-r2.sh promote monthly` |
@@ -279,7 +280,47 @@ the project's linked GitHub origin, or reach `:2222` over LAN/Tailscale.
 
 ---
 
-## 6. Colima notes & gotchas
+## 6. Worker nodes (gumbo-nuc-0)
+
+Job containers run on a dedicated worker so heavy cargo builds never starve the
+dispatcher node. The prod fleet is **worker-only**: the Mini's colima node is
+registered at **0 slots** (placement never picks it; failback = bump the slots
+and restart the dispatcher), and all work/eval containers land on
+**gumbo-nuc-0** (12-core/31GiB, x86_64, NixOS, Docker preinstalled).
+
+**How it hangs together** (all pieces ship in this repo):
+
+- **Tunnel** — `com.chuggernaut.nuc-tunnel` (launchd, KeepAlive) forwards
+  `127.0.0.1:23751` → the nuc's `/run/docker.sock` over SSH, using the
+  dedicated key `~/.ssh/nuc_tunnel` (public half in the nuc's
+  `~/.ssh/authorized_keys`; on NixOS consider pinning it in configuration.nix).
+  bollard only speaks `unix://`/plaintext `tcp://` — the tunnel keeps the
+  daemon off the network (no mTLS yet, spec §3.1 TODO).
+- **Fleet** — in `chuggernaut.env`:
+  `DOCKER_NODES="local|unix:///…/colima/…/docker.sock|0, nuc|tcp://127.0.0.1:23751|4"`
+  plus `WORKER_DOCKER_HOST=tcp://127.0.0.1:23751`.
+- **Cross-node addressing** — containers on the nuc reach the Mini's NATS and
+  git front via the Mini's **tailnet IP**, not `host.docker.internal`:
+  `NATS_URL_CONTAINER=nats://100.116.243.42:4222`,
+  `REPO_URL_BASE=ssh://git@100.116.243.42:2222` (ports 4222/2222 are published
+  on all interfaces by compose).
+- **Arch split** — the Mini is arm64, the nuc x86_64. `build-worker.sh`
+  (called by `update.sh`; no-op when `WORKER_DOCKER_HOST` is unset) builds
+  `chuggernaut/agent{,-rust}:prod` natively on the nuc's daemon and extracts a
+  **worker-arch** channel binary to `deploy/prod/out-nuc/`;
+  `run-dispatcher.sh` injects that one instead of `out/` when a worker is
+  configured.
+- **Boot coupling** — the dispatcher's startup `ping_all` hard-fails if any
+  fleet node is unreachable, so the tunnel is boot-critical (KeepAlive
+  mitigates; graceful degradation is filed as a dogfood job). CD deploys also
+  need the tunnel up for the worker builds.
+- **Verify placement** — during a job: `ssh worksalot@gumbo-nuc-0 docker ps`
+  shows the work/eval containers; the Mini's colima shows none
+  (`docker ps --filter label=chuggernaut.managed`).
+
+---
+
+## 7. Colima notes & gotchas
 
 - **No `/var/run/docker.sock`; the dispatcher needs `DOCKER_NODES`.** bollard's
   default socket path doesn't exist under colima, so the dispatcher exits with
