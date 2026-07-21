@@ -54,6 +54,23 @@ if [ -f target/release/chuggernaut ]; then
   cp -f target/release/chuggernaut target/release/chuggernaut.prev
 fi
 
+# Re-exec the freshly checked-out script so the rest of the deploy runs the code
+# being deployed, not the stale copy this shell started with. `git checkout
+# --force` above swapped this file (and everything around it) out from under the
+# running process — without this the old logic runs against the new tree.
+# Bitten three times on 2026-07-21: (1) the PATH-fix deploys #23/#25 ran the
+# pre-fix script; (2) deploy #35 ran the pre-UI_ROOT script against the new
+# compose.yaml — ${UI_ROOT} unset → `invalid spec: :/srv/web` → deploy failed.
+# Each time the retry silently worked, the worst kind of flake. Everything above
+# (bootstrap guards, fetch, SHA resolution, already-deployed short-circuit,
+# rollback snapshot) belongs to this first pass; everything below runs in the
+# re-exec'd second pass. The guard var makes the re-exec happen exactly once, and
+# we pass the RESOLVED SHA (not the original ref) so the second pass is
+# deterministic.
+if [ -z "${CHUG_UPDATE_REEXEC:-}" ]; then
+  CHUG_UPDATE_REEXEC=1 exec "$CHUG_REPO/deploy/prod/update.sh" "$TARGET_SHA"
+fi
+
 # 1. Native build of the host dispatcher binary.
 cargo build --release
 
