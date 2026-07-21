@@ -196,10 +196,12 @@
           "format": "double"
         },
         "memory": {
+          "description": "Memory limit: a positive integer, optionally suffixed with a binary\nunit (`Ki`/`Mi`/`Gi`), or plain bytes — e.g. `512Mi`, `4Gi`, `1048576`.\nNo other suffixes (`5g`, `4GB` are rejected). Validated at parse time so\na bad value fails offline instead of at container launch.",
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[0-9]+(Ki|Mi|Gi)?$"
         },
         "task_timeout": {
           "type": [

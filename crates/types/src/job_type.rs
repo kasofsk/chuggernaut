@@ -134,6 +134,11 @@ pub enum Provider {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Resources {
     pub cpu: Option<f64>,
+    /// Memory limit: a positive integer, optionally suffixed with a binary
+    /// unit (`Ki`/`Mi`/`Gi`), or plain bytes — e.g. `512Mi`, `4Gi`, `1048576`.
+    /// No other suffixes (`5g`, `4GB` are rejected). Validated at parse time so
+    /// a bad value fails offline instead of at container launch.
+    #[cfg_attr(feature = "schema", schemars(extend("pattern" = crate::resources::MEMORY_PATTERN)))]
     pub memory: Option<String>,
     pub task_timeout: Option<String>,
 }
@@ -363,6 +368,22 @@ impl JobType {
             }
         }
 
+        // `resources.memory` is an opaque string until the container backend
+        // parses it at launch; validate the format here so `chuggernaut
+        // validate` and release validation reject a bad limit (e.g. "5g")
+        // offline instead of wedging the job when the eval container fails to
+        // launch. `resources.cpu` needs no such check — serde already enforces
+        // it is a float, and it is never re-parsed from a string downstream.
+        if let Some(mem) = self.resources.as_ref().and_then(|r| r.memory.as_deref())
+            && let Err(e) = crate::resources::parse_memory(mem)
+        {
+            errs.push(FieldRuleError::Invalid {
+                field: "resources.memory",
+                context: format!("job type '{}'", self.name),
+                reason: e.to_string(),
+            });
+        }
+
         let durations = [
             (
                 self.resources
@@ -551,6 +572,53 @@ job_deadline: 24h
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn memory_format_validated() {
+        let jt_with_mem = |mem: &str| {
+            JobType::parse(&format!(
+                r#"
+name: impl
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+resources:
+  memory: "{mem}"
+"#
+            ))
+            .unwrap()
+        };
+
+        // The dogfood bug: "5g" passed validate but failed at launch.
+        let errs = jt_with_mem("5g").validate();
+        assert_eq!(errs.len(), 1);
+        assert!(matches!(
+            &errs[0],
+            FieldRuleError::Invalid {
+                field: "resources.memory",
+                ..
+            }
+        ));
+        // The accepted form validates cleanly.
+        assert_eq!(jt_with_mem("5Gi").validate(), vec![]);
+        assert_eq!(jt_with_mem("512Mi").validate(), vec![]);
+        assert_eq!(jt_with_mem("1048576").validate(), vec![]);
+
+        // Other malformed forms are all rejected offline.
+        for bad in ["4GB", "-5", "0", "1.5Gi"] {
+            assert!(
+                jt_with_mem(bad).validate().iter().any(|e| matches!(
+                    e,
+                    FieldRuleError::Invalid {
+                        field: "resources.memory",
+                        ..
+                    }
+                )),
+                "should reject memory: {bad}"
+            );
+        }
     }
 
     #[test]

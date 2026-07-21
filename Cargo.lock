@@ -675,6 +675,7 @@ dependencies = [
  "tar",
  "thiserror 2.0.18",
  "tokio",
+ "types",
 ]
 
 [[package]]

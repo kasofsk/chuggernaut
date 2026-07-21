@@ -99,7 +99,7 @@ work:                          # required
 
 resources:                     # optional; disallowed for work.type: human
   cpu: number
-  memory: string               # e.g. "4Gi"
+  memory: string               # positive integer, optionally suffixed with a binary unit (Ki|Mi|Gi), or plain bytes: "512Mi", "4Gi", "1048576". No other suffixes ("5g", "4GB" are rejected). Format validated at parse time (release + `chuggernaut validate`), not deferred to container launch
   task_timeout: duration       # per-container execution limit; default 1h
 
 wrap_up:                       # optional; the job's third step (work → evaluation → wrap-up); see design-lifecycle.md

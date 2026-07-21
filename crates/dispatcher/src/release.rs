@@ -288,3 +288,73 @@ async fn read(
             )]
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn agent_type_with_memory(mem: &str) -> JobType {
+        JobType::parse(&format!(
+            r#"
+name: code
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+resources:
+  memory: "{mem}"
+"#
+        ))
+        .unwrap()
+    }
+
+    fn job_with_extra_eval() -> Job {
+        Job {
+            id: 1,
+            project: "acme/api".into(),
+            r#type: "code".into(),
+            title: String::new(),
+            description: String::new(),
+            deps: vec![],
+            state: types::JobState::Ready,
+            branch: "job/1".into(),
+            base_ref: None,
+            knowledge_tags: vec![],
+            eval: vec![Evaluator {
+                name: "extra-ci".into(),
+                r#type: EvaluatorType::Command,
+                image: None,
+                run: Some("./ci.sh".into()),
+                prompt: None,
+                provider: None,
+                model: None,
+                secrets: vec![],
+                required: None,
+            }],
+            timeout: None,
+            factory: None,
+            created_at: Utc::now(),
+            ready_at: None,
+        }
+    }
+
+    /// Release validation reuses `types::JobType::validate`, so a malformed
+    /// `resources.memory` (the dogfood `5g` bug) surfaces as a
+    /// `ValidationError` at release time instead of wedging at container
+    /// launch. Good limits pass clean.
+    #[test]
+    fn release_validation_rejects_bad_memory() {
+        let errs = with_job_evaluators(agent_type_with_memory("5g"), &job_with_extra_eval())
+            .expect_err("5g must fail release validation");
+        assert!(
+            errs.iter().any(|e| e.message.contains("resources.memory")),
+            "expected a resources.memory error, got {errs:?}"
+        );
+
+        assert!(
+            with_job_evaluators(agent_type_with_memory("5Gi"), &job_with_extra_eval()).is_ok(),
+            "5Gi must pass release validation"
+        );
+    }
+}

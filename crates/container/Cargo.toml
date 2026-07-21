@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+types.workspace = true
 async-trait.workspace = true
 bollard = "0.19"
 futures.workspace = true
