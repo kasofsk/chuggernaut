@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ApiError, api, type Task } from '../api'
+import { Transcript } from './Transcript'
 
 // Poll cadence while a container runs, and the ceiling a network-error backoff
 // climbs to. The buffer is capped so a multi-hundred-megabyte cargo build log
@@ -65,8 +66,11 @@ export function TaskLogPane({
   const [status, setStatus] = useState<LogStatus>('loading')
   const [truncated, setTruncated] = useState(false)
   const [pinned, setPinned] = useState(true)
+  // Default to the formatted claude transcript; `raw` is the debugging escape
+  // hatch that shows the untouched byte stream.
+  const [view, setView] = useState<'transcript' | 'raw'>('transcript')
 
-  const bodyRef = useRef<HTMLPreElement>(null)
+  const bodyRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
   useEffect(() => {
     pinnedRef.current = pinned
@@ -155,12 +159,13 @@ export function TaskLogPane({
     }
   }, [owner, project, seq, task.id, task.state])
 
-  // Stick to the bottom on append while pinned.
+  // Stick to the bottom on append while pinned (and when the view mode flips,
+  // since the two renderings have different heights).
   useLayoutEffect(() => {
     if (pinnedRef.current && bodyRef.current) {
       bodyRef.current.scrollTop = bodyRef.current.scrollHeight
     }
-  }, [text])
+  }, [text, view])
 
   const onScroll = () => {
     const el = bodyRef.current
@@ -196,14 +201,33 @@ export function TaskLogPane({
             download
           </a>
         )}
+        <button
+          className="linklike"
+          onClick={() => setView((v) => (v === 'transcript' ? 'raw' : 'transcript'))}
+          title={view === 'transcript' ? 'show the raw log stream' : 'show the formatted transcript'}
+        >
+          {view === 'transcript' ? 'raw' : 'transcript'}
+        </button>
         <button className="linklike" onClick={onClose}>
           close
         </button>
       </div>
       {truncated && <div className="log-truncated dim">… earlier output truncated</div>}
-      <pre className="log-body" ref={bodyRef} onScroll={onScroll}>
-        {text || <span className="dim">{placeholder}</span>}
-      </pre>
+      <div
+        className={`log-body${view === 'transcript' ? ' log-transcript' : ''}`}
+        ref={bodyRef}
+        onScroll={onScroll}
+      >
+        {text ? (
+          view === 'transcript' ? (
+            <Transcript text={text} />
+          ) : (
+            text
+          )
+        ) : (
+          <span className="dim">{placeholder}</span>
+        )}
+      </div>
       {!pinned && (
         <button className="log-jump" onClick={jump}>
           jump to bottom ↓

@@ -897,6 +897,124 @@ td.actions button {
   font-size: var(--fs-xs);
 }
 
+/* Formatted claude transcript: the scroll box drops the raw pre-wrap/mono so
+   markdown prose reads normally; wide sub-blocks (tool input, results, shell
+   output) scroll inside their own boxes so the page never moves sideways
+   (web/CLAUDE.md mobile rule). */
+.log-transcript {
+  white-space: normal;
+  overflow-wrap: normal;
+  font-family: var(--font);
+  font-size: var(--fs-sm);
+}
+.transcript {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+/* Shared monospace pre for every expandable body and for inline shell output. */
+.tx-pre,
+.tx-shell {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+.tx-shell {
+  color: var(--dim);
+}
+.tx-pre {
+  margin-top: var(--sp-1);
+  padding: var(--sp-2);
+  background: var(--inset);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--r-sm);
+  max-height: 40vh;
+  overflow: auto;
+}
+.tx-note {
+  font-size: var(--fs-xs);
+}
+/* Assistant prose reads as the primary voice: full text colour, a soft accent
+   rail like a channel post. */
+.tx-assistant {
+  border-left: 2px solid var(--accent);
+  padding-left: var(--sp-2);
+}
+/* Collapsible blocks (tool_use, tool_result, thinking, system, unknown). */
+.tx-block > summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  cursor: pointer;
+  list-style: none;
+  font-size: var(--fs-xs);
+  padding: 0.15rem 0;
+}
+.tx-block > summary::-webkit-details-marker {
+  display: none;
+}
+.tx-block > summary::before {
+  content: '▸';
+  color: var(--dim);
+  flex: none;
+}
+.tx-block[open] > summary::before {
+  content: '▾';
+}
+.tx-kind {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  flex: none;
+}
+.tx-arg {
+  font-family: var(--font-mono);
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.tx-thinking .tx-kind,
+.tx-system .tx-kind,
+.tx-unknown .tx-kind {
+  color: var(--dim);
+}
+.tx-error .tx-kind {
+  color: var(--danger);
+}
+/* Final result event: highlighted completion banner with cost/timing. */
+.tx-final {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--green);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--green) 7%, var(--inset));
+  padding: var(--sp-2) var(--sp-3);
+}
+.tx-final.tx-error {
+  border-left-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, var(--inset));
+}
+.tx-final-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  font-size: var(--fs-xs);
+}
+.tx-final .tx-kind {
+  color: var(--green);
+}
+.tx-final.tx-error .tx-kind {
+  color: var(--danger);
+}
+.tx-final-meta {
+  font-variant-numeric: tabular-nums;
+}
+
 /* Channel: the agent's narrative, from the event stream. Each post is its own
    card-row: a header (timestamp + origination + optional percent) over the
    rendered markdown body. Replies (operator/platform → agent) are set off with
