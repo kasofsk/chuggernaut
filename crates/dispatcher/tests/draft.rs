@@ -27,6 +27,11 @@ work:
 
 struct Rig {
     _server: test_utils::nats::NatsTestServer,
+    // Owns the temp dir backing the bare repo — must outlive the Core, whose
+    // RepoManager resolves owner/project to a path under it. Dropping this
+    // deletes the repo on disk, so any repo-touching path (release, unblock)
+    // would fail with "No such file or directory".
+    _repo: TempRepo,
     store: NatsStore,
     provider: Arc<FakeProvider>,
     handle: CoreHandle,
@@ -71,6 +76,7 @@ async fn rig() -> Option<Rig> {
     let handle = spawn(core);
     Some(Rig {
         _server: server,
+        _repo: repo,
         store,
         provider,
         handle,
