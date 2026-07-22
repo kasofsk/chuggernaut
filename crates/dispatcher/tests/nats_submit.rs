@@ -129,6 +129,7 @@ async fn submits_flow_over_nats_to_the_core() {
             timeout: None,
             model: None,
             factory: None,
+            draft: false,
         })
         .await
         .unwrap();
@@ -248,6 +249,7 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
             timeout: None,
             model: None,
             factory: None,
+            draft: false,
         })
         .await
         .unwrap();

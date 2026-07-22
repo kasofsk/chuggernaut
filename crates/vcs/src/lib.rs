@@ -1200,8 +1200,9 @@ impl RepoManager {
             });
         };
         match job.state {
-            // Stalled is pre-work: no branch commits to diff (§1.2).
-            JobState::Frozen
+            // Draft/Stalled are pre-work: no branch commits to diff (§1.2, §2.1).
+            JobState::Draft
+            | JobState::Frozen
             | JobState::Blocked
             | JobState::Ready
             | JobState::Stalled

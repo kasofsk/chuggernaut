@@ -235,6 +235,20 @@ impl RdepsStore {
             .put_json(&keys::job_key(owner, project, seq), &deps)
             .await
     }
+
+    /// Drop `dependent` from `seq`'s reverse-dependency list — the inverse of
+    /// [`RdepsStore::append`], used when a Draft edit removes an upstream so the
+    /// KV index does not keep a stale edge (spec §2.1, §2.3).
+    pub async fn remove(&self, owner: &str, project: &str, seq: u64, dependent: u64) -> Result<()> {
+        let mut deps = self.get(owner, project, seq).await?;
+        if let Some(pos) = deps.iter().position(|&d| d == dependent) {
+            deps.remove(pos);
+            self.0
+                .put_json(&keys::job_key(owner, project, seq), &deps)
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 /// Platform-level project records (linked-origin projects). Absence of a

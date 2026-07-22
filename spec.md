@@ -29,7 +29,7 @@ pub struct Job {
     pub ready_at: Option<DateTime<Utc>>,   // set once (immutably) when job first enters Ready; anchor for job_deadline; None until then
 }
 
-pub enum JobState { Frozen, Blocked, Ready, Work, Evaluation, WrapUp, Escalated, Stalled, Done, Revoked }
+pub enum JobState { Draft, Frozen, Blocked, Ready, Work, Evaluation, WrapUp, Escalated, Stalled, Done, Revoked }
 ```
 
 `retry_count` and `rework_count` are not stored on the job record — they are derived from the task log (`attempt` on work tasks and `cycle` on tasks respectively). `ready_at` is set once, immutably, when the job first transitions to Ready (Frozen→Ready or Blocked→Ready); it anchors `job_deadline` enforcement.
@@ -597,6 +597,11 @@ The authoritative definition of all valid job state transitions. No transition e
 | From | To | Trigger | Guard | Effect |
 |---|---|---|---|---|
 | _(creation)_ | `Frozen` | Dispatcher handles `req.jobs.create.*` | — | Write job record to KV; publish `job-created`; update `rdeps` index |
+| _(creation)_ | `Draft` | Dispatcher handles `req.jobs.create.*` with `draft: true` | — | Write job record to KV; publish `job-created`; update `rdeps` index |
+| `Draft` | `Draft` | `PATCH .../jobs/{seq}` accepted (full-field replace) | Job is Draft | Rewrite the creation-payload fields (type, title, description, deps, knowledge_tags, eval, timeout, model); validation identical to create (deferred to release); publish `job-updated` with the changed field names |
+| `Draft` | `Ready` | `POST .../release` accepted | All deps Done | Finalize the edited definition; record `base_ref` = current default HEAD; set `ready_at`; publish `job-finalized` then `job-released` |
+| `Draft` | `Blocked` | `POST .../release` accepted | At least one dep not Done | Finalize the edited definition; publish `job-finalized` then `job-released` |
+| `Frozen` | `Draft` | `POST .../jobs/{seq}/draft` accepted | Job is Frozen (never released) | Reopen for editing; publish `job-drafted` |
 | `Frozen` | `Ready` | `POST .../release` accepted | All deps Done | Record `base_ref` = current default HEAD; set `ready_at`; publish `job-released` |
 | `Frozen` | `Blocked` | `POST .../release` accepted | At least one dep not Done | Publish `job-released` |
 | `Blocked` | `Ready` | Last upstream dep reaches Done | All deps Done; re-validation of static config at `base_ref` passes | Record `base_ref` = current default HEAD; set `ready_at`; publish `job-unblocked` |
@@ -628,9 +633,10 @@ The authoritative definition of all valid job state transitions. No transition e
 | `Stalled` | `Ready` | Operator resolves a pre-Work escalation with `action: Retry`; the failed step succeeds (re-validation passes / re-enqueue) — see §1.2 pre-Work escalations | — | Record `base_ref` = current default HEAD; set `ready_at` if unset; enqueue; publish `job-escalation-resolved` then `job-unblocked` |
 | `Stalled` | `Stalled` | Operator resolves a pre-Work escalation with `action: Retry`; the failed step still fails | — | Create a new Human task describing the failure; job remains Stalled |
 | `Stalled` | `Revoked` | Operator resolves a pre-Work escalation with `action: Revoke` | — | See Revoked transition below; publish `job-escalation-resolved` then `job-revoked` |
-| any non-terminal | `Revoked` | `POST .../revoke` | Job not already Done or Revoked | Kill Running tasks; **close Pending human/escalation tasks** (mark `Done` with a synthetic `TaskResult::Human` — `operator: "system"`, `action: Revoke` — see §1.2 revoke-closes-tasks) so none linger in the operator inbox; cascade Revoked to Frozen/Blocked/Ready dependents (transitively); dependents in Work/Evaluation/WrapUp/Escalated/Stalled left in current state; delete branch `job/{seq}` if it exists; publish `job-revoked` |
+| any non-terminal | `Revoked` | `POST .../revoke` | Job not already Done or Revoked | Kill Running tasks; **close Pending human/escalation tasks** (mark `Done` with a synthetic `TaskResult::Human` — `operator: "system"`, `action: Revoke` — see §1.2 revoke-closes-tasks) so none linger in the operator inbox; cascade Revoked to Frozen/Blocked/Ready dependents (transitively); dependents in Draft/Work/Evaluation/WrapUp/Escalated/Stalled left in current state (a Draft dependent is not yet committed to the graph — its dep-on-a-Revoked-job surfaces as a release-time validation error instead); delete branch `job/{seq}` if it exists; publish `job-revoked` |
 
 **State descriptions:**
+- **Draft** — created with `draft: true`, or a Frozen job reopened via `POST .../draft`; its definition is editable (full-field replace via `PATCH .../jobs/{seq}`) before it enters the DAG for real. Invisible to scheduling, holds no branch, cannot be claimed. Leaves via `release` (→ Ready/Blocked, which finalizes the edited definition) or `revoke`. Other jobs may declare deps on a Draft — they simply stay Blocked/Frozen until it is released and completes. Only a Frozen never-released job may return here; once released, a job is never editable again
 - **Frozen** — created, awaiting operator approval; no execution begins
 - **Blocked** — waiting on upstream dependencies
 - **Ready** — queued for execution; `base_ref` is set
@@ -691,7 +697,7 @@ Two primary modes:
 1. **New feature / project**: graph is statically known and operator-approved before any work begins.
 2. **Ongoing development**: jobs are added only; to remove work, revoke jobs. Large new features are planned and reviewed statically before launching.
 
-Operators submit job creation requests via `POST /jobs`; the dispatcher creates the job record in KV and publishes `job-created`. All jobs start in Frozen state.
+Operators submit job creation requests via `POST /jobs`; the dispatcher creates the job record in KV and publishes `job-created`. Jobs start in Frozen state by default; with `draft: true` they start in Draft (§2.1) so their definition can be iterated on (`PATCH .../jobs/{seq}`) before release. A Frozen never-released job can be reopened to Draft via `POST .../jobs/{seq}/draft`.
 
 **Graph-level operations:**
 - `POST .../graph/validate` — validate all Frozen jobs in the project; returns all wiring and static config errors across all jobs
@@ -1341,8 +1347,10 @@ POST   /api/v1/projects/{owner}/{project}/jobs
        title/description optional; the instance's ticket — injected into work and eval prompts as the §4.3 job brief
        knowledge_tags optional; merged with job type's default tags
        eval optional; additive per-job evaluators layered on top of the type's list (§1.1 evaluator schema); validated at release — name collisions with the type's evaluators are a 422
+       draft optional (default false); with draft:true the job lands in Draft (§2.1) so its definition can be edited before release, instead of Frozen
        → 201 Created; body: Job record
 GET    /api/v1/projects/{owner}/{project}/jobs                      → 200 OK; body: Job[]
+PATCH  /api/v1/projects/{owner}/{project}/jobs/{seq}                → 200 OK; body: Job; Member+. Full-field replace of a Draft job's definition (same body shape as create, minus draft); 409 unless the job is Draft (§2.1). Validation identical to create (deferred to release)
 POST   /api/v1/projects                                             body: { owner, name } → 201; platform admins only. Creates repo + hook + Code starter template + counter (§12.2); 409 if it exists.
 POST   /api/v1/projects/link                                        body: { owner, name, origin_url, main_branch? } → 201; platform admins only. Linked-origin creation (§5.3); 422 when the CHUG_ORIGIN_* secrets are missing; 409 if it exists.
 
@@ -1357,7 +1365,8 @@ GET    /api/v1/projects/{owner}/{project}/file?path={path}          → 200 OK; 
 GET    /api/v1/projects/{owner}/{project}/tree                      → 200 OK; body: { branch, ref, entries } — full recursive tree at default HEAD (Files tab)
 GET    /api/v1/projects/{owner}/{project}/jobs/{seq}                → 200 OK; body: Job
 GET    /api/v1/projects/{owner}/{project}/jobs/{seq}/criteria       → 200 OK; body: { ref, wrap_up, evaluators: [Evaluator + source], errors } — the criteria the job will be (or was) judged against, resolved at base_ref (or default HEAD before Ready)
-POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/release        → 200 OK; body: Job (updated state); 422 with error list if validation fails
+POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/release        → 200 OK; body: Job (updated state); 422 with error list if validation fails. Accepted from Frozen or Draft (a Draft is finalized in the same step, §2.1)
+POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/draft          → 200 OK; body: Job (updated state); Member+; reopens a Frozen (never-released) job for editing → Draft; 409 unless the job is Frozen (§2.1)
 POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/revoke         → 200 OK; body: Job (updated state); 409 if already Done or Revoked
 POST   /api/v1/projects/{owner}/{project}/jobs/{seq}/claim          → 200 OK; body: Job; Member+; 409 while a work attempt is in flight or the job is terminal (§1.2 claims)
 DELETE /api/v1/projects/{owner}/{project}/jobs/{seq}/claim          → 200 OK; body: Job; Member+; 409 if no pending claim (a materialized claim is resolved via its task)
@@ -1443,8 +1452,11 @@ All events are published exclusively by the dispatcher to `job.events.{owner}.{p
 
 | Event type | Trigger |
 |---|---|
-| `job-created` | Dispatcher creates job in KV in response to `req.jobs.create.*` |
-| `job-released` | `POST .../release` accepted; Frozen → Ready or Blocked |
+| `job-created` | Dispatcher creates job in KV in response to `req.jobs.create.*` (Frozen, or Draft with `draft: true`) |
+| `job-updated` | `PATCH .../jobs/{seq}` accepted; a Draft job's definition was edited; includes `fields` (the changed creation-payload field names, not the full payload) |
+| `job-drafted` | Frozen → Draft; a never-released job was reopened for editing (`POST .../draft`) |
+| `job-finalized` | Draft → Ready or Blocked; the edited definition was finalized as part of `POST .../release` (fires alongside `job-released`) |
+| `job-released` | `POST .../release` accepted; Frozen/Draft → Ready or Blocked |
 | `job-unblocked` | Blocked → Ready (last upstream dep reached Done) |
 | `job-started` | Ready → Work; includes `cycle` |
 | `job-evaluation-started` | Work → Evaluation; includes `cycle` |

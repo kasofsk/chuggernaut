@@ -98,7 +98,7 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
         )
         .route(
             "/api/v1/projects/{owner}/{project}/jobs/{seq}",
-            get(routes::jobs_get),
+            get(routes::jobs_get).patch(routes::jobs_update),
         )
         .route(
             "/api/v1/projects/{owner}/{project}/jobs/{seq}/criteria",
@@ -111,6 +111,10 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
         .route(
             "/api/v1/projects/{owner}/{project}/jobs/{seq}/revoke",
             post(routes::jobs_revoke),
+        )
+        .route(
+            "/api/v1/projects/{owner}/{project}/jobs/{seq}/draft",
+            post(routes::jobs_draft),
         )
         .route(
             "/api/v1/projects/{owner}/{project}/jobs/{seq}/triage",

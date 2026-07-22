@@ -14,6 +14,12 @@ pub struct InvalidTransition {
 pub fn assert_transition(from: JobState, to: JobState) -> Result<(), InvalidTransition> {
     use JobState::*;
     let valid = match (from, to) {
+        // Draft→Ready|Blocked: release finalizes the edited definition in one
+        // step (same as a Frozen release). Frozen→Draft: a never-released job
+        // moves back to Draft for editing (§2.1). Draft→Revoked is covered by
+        // the generic Revoked row below (Draft is non-terminal).
+        (Draft, Ready | Blocked) => true,
+        (Frozen, Draft) => true,
         (Frozen, Ready | Blocked) => true,
         // Blocked→Stalled: Ready-transition re-validation failed (pre-work).
         (Blocked, Ready | Stalled) => true,
@@ -55,6 +61,10 @@ mod tests {
     #[test]
     fn table_edges() {
         for (from, to) in [
+            (Draft, Ready),
+            (Draft, Blocked),
+            (Draft, Revoked),
+            (Frozen, Draft),
             (Frozen, Ready),
             (Frozen, Blocked),
             (Blocked, Ready),
@@ -81,6 +91,12 @@ mod tests {
             assert!(assert_transition(from, to).is_ok(), "{from:?}→{to:?}");
         }
         for (from, to) in [
+            // Draft leaves only via release (Ready/Blocked) or revoke — never
+            // straight into execution, and Frozen is a one-way door out of it
+            // (release, not un-draft, is the only forward path once finalized).
+            (Draft, Work),
+            (Draft, Evaluation),
+            (Draft, Frozen),
             (Frozen, Work),
             (Frozen, Done),
             (Blocked, Work),

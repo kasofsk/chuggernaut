@@ -107,6 +107,11 @@ async fn topology_and_typed_stores_round_trip() {
     rdeps.append("acme", "api", 1, 77).await.unwrap();
     rdeps.append("acme", "api", 1, 43).await.unwrap();
     assert_eq!(rdeps.get("acme", "api", 1).await.unwrap(), vec![43, 77]);
+    // remove drops the given dependent (a Draft edit dropping an upstream);
+    // removing an absent one is a no-op.
+    rdeps.remove("acme", "api", 1, 43).await.unwrap();
+    rdeps.remove("acme", "api", 1, 999).await.unwrap();
+    assert_eq!(rdeps.get("acme", "api", 1).await.unwrap(), vec![77]);
 }
 
 /// The reason artifacts use an object store rather than KV or a req/reply

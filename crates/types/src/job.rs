@@ -77,6 +77,12 @@ pub struct Job {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum JobState {
+    /// Editable pre-release draft (spec §2.1): the job's definition can be
+    /// iterated on (PATCH .../jobs/{seq}) before it enters the DAG for real.
+    /// Invisible to scheduling, holds no branch, cannot be claimed. Leaves via
+    /// release (→ Ready/Blocked) or revoke; a Frozen never-released job may be
+    /// moved back here (`POST .../draft`). Once released, never editable again.
+    Draft,
     Frozen,
     Blocked,
     Ready,
@@ -157,6 +163,31 @@ mod tests {
         let job: Job = serde_json::from_str(json).unwrap();
         assert_eq!(job.timeout.as_deref(), Some("45m"));
         let back = serde_json::to_string(&job).unwrap();
+        let again: Job = serde_json::from_str(&back).unwrap();
+        assert_eq!(job, again);
+    }
+
+    #[test]
+    fn job_round_trips_in_draft_state() {
+        // Draft is a first-class serde variant, distinct from Frozen.
+        let json = r#"{
+          "id": 9,
+          "project": "acme/api",
+          "type": "implement-endpoint",
+          "deps": [],
+          "state": "Draft",
+          "branch": "job/9",
+          "base_ref": null,
+          "knowledge_tags": [],
+          "factory": null,
+          "created_at": "2026-07-22T10:00:00Z",
+          "ready_at": null
+        }"#;
+        let job: Job = serde_json::from_str(json).unwrap();
+        assert_eq!(job.state, JobState::Draft);
+        assert!(!job.state.is_terminal());
+        let back = serde_json::to_string(&job).unwrap();
+        assert!(back.contains(r#""state":"Draft""#));
         let again: Job = serde_json::from_str(&back).unwrap();
         assert_eq!(job, again);
     }

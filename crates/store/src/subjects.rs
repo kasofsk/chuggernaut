@@ -92,6 +92,17 @@ pub fn jobs_revoke(owner: &str, project: &str, seq: u64) -> String {
     format!("req.jobs.revoke.{owner}.{project}.{seq}")
 }
 
+/// Full-field replace of a Draft job's definition (spec §2.1). 409 in any
+/// non-Draft state.
+pub fn jobs_update(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.jobs.update.{owner}.{project}.{seq}")
+}
+
+/// Move a Frozen (never-released) job back to Draft for editing (spec §2.1).
+pub fn jobs_draft(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.jobs.draft.{owner}.{project}.{seq}")
+}
+
 /// Claim the job's next work attempt for a human (spec §1.2 claims).
 pub fn jobs_claim(owner: &str, project: &str, seq: u64) -> String {
     format!("req.jobs.claim.{owner}.{project}.{seq}")

@@ -15,6 +15,20 @@ pub struct JobGraph {
 
 impl JobGraph {
     pub fn insert(&mut self, job: Job) {
+        // Re-insert is idempotent on the reverse index: a Draft edit (spec §2.1)
+        // can drop or change a job's deps, so prune this job's id from every old
+        // upstream no longer in the new deps. Without this a stale edge would
+        // misdirect a later revoke cascade (§2.1 Revoked row), which trusts the
+        // reverse edges by state alone and does not re-check the dependent's deps.
+        if let Some(old) = self.jobs.get(&job.id) {
+            for &upstream in &old.deps {
+                if !job.deps.contains(&upstream)
+                    && let Some(rd) = self.rdeps.get_mut(&upstream)
+                {
+                    rd.retain(|&d| d != job.id);
+                }
+            }
+        }
         for &upstream in &job.deps {
             let deps = self.rdeps.entry(upstream).or_default();
             if !deps.contains(&job.id) {
@@ -152,6 +166,19 @@ mod tests {
         assert!(!g.creates_cycle(4, &[3]));
         // Self-edge is a cycle of length one.
         assert!(g.creates_cycle(2, &[2]));
+    }
+
+    #[test]
+    fn reinsert_prunes_stale_reverse_edges() {
+        let mut g = JobGraph::default();
+        g.insert(job(1, &[], JobState::Frozen)); // upstream U
+        g.insert(job(2, &[1], JobState::Draft)); // dependent, deps=[U]
+        assert_eq!(g.dependents(1), &[2]);
+        // Edit the draft to drop U (deps=[]) and re-insert: the reverse edge
+        // U→2 must disappear so a later revoke of U does not cascade to 2.
+        g.insert(job(2, &[], JobState::Draft));
+        assert!(g.dependents(1).is_empty());
+        assert!(g.cascade_targets(1).is_empty());
     }
 
     #[test]

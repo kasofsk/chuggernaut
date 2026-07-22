@@ -10,7 +10,8 @@
 //! the HTTP bridge can map straight to §6.5 responses.
 
 use crate::core::{
-    ChannelPost, CoreError, CoreHandle, CreateJobRequest, EvalSubmission, WorkSubmission,
+    ChannelPost, CoreError, CoreHandle, CreateJobRequest, EvalSubmission, UpdateJobRequest,
+    WorkSubmission,
 };
 use crate::wizard::{self, JobLine, WizardConfig, WizardError, WizardRequest};
 use container::ContainerBackend;
@@ -190,6 +191,31 @@ struct CreateJobBody {
     timeout: Option<String>,
     /// Optional per-job Work agent model override (§12.4); wins over the job
     /// type, project, and platform defaults. Absent → the resolution chain applies.
+    #[serde(default)]
+    model: Option<String>,
+    /// Land the job in Draft instead of Frozen (§2.1) so it can be edited
+    /// before release. Absent/false preserves today's create-lands-Frozen path.
+    #[serde(default)]
+    draft: bool,
+}
+
+/// Wire body for `req.jobs.update` (spec §6.2 PATCH .../jobs/{seq}): the same
+/// shape as create, minus the `draft` flag (an update never changes the state).
+#[derive(serde::Deserialize)]
+struct UpdateJobBody {
+    r#type: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    deps: Vec<u64>,
+    #[serde(default)]
+    knowledge_tags: Vec<String>,
+    #[serde(default)]
+    eval: Vec<types::Evaluator>,
+    #[serde(default)]
+    timeout: Option<String>,
     #[serde(default)]
     model: Option<String>,
 }
@@ -673,12 +699,44 @@ async fn spawn_read_handlers(
                             timeout: b.timeout,
                             model: b.model,
                             factory: None,
+                            draft: b.draft,
                         };
                         match jobs_handle.create_job(create).await {
                             Ok(job) => ok_reply(&job),
                             Err(e) => error_reply(&e),
                         }
                     }
+                },
+                // §2.1 draft edit: full-field replace of a Draft job (409 in
+                // any other state). Same body shape as create.
+                ("update", Some(seq)) => {
+                    match serde_json::from_slice::<UpdateJobBody>(&req.payload) {
+                        Err(e) => bad_request(&e.to_string()),
+                        Ok(b) => {
+                            let update = UpdateJobRequest {
+                                owner: owner.to_string(),
+                                project: project.to_string(),
+                                seq,
+                                r#type: b.r#type,
+                                title: b.title,
+                                description: b.description,
+                                deps: b.deps,
+                                knowledge_tags: b.knowledge_tags,
+                                eval: b.eval,
+                                timeout: b.timeout,
+                                model: b.model,
+                            };
+                            match jobs_handle.update_job(update).await {
+                                Err(e) => error_reply(&e),
+                                Ok(_) => fetch_job(&jobs_store, owner, project, seq).await,
+                            }
+                        }
+                    }
+                }
+                // §2.1 Frozen → Draft: reopen a never-released job for editing.
+                ("draft", Some(seq)) => match jobs_handle.draft_job(owner, project, seq).await {
+                    Err(e) => error_reply(&e),
+                    Ok(_) => fetch_job(&jobs_store, owner, project, seq).await,
                 },
                 ("get", Some(seq)) => fetch_job(&jobs_store, owner, project, seq).await,
                 ("list", None) => match jobs_store.jobs().await {

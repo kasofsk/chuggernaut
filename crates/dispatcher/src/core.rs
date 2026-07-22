@@ -87,6 +87,27 @@ pub struct CreateJobRequest {
     /// type, project, and platform defaults. None → the resolution chain applies.
     pub model: Option<String>,
     pub factory: Option<String>,
+    /// Land the job in [`JobState::Draft`] instead of Frozen (spec §2.1): its
+    /// definition can be edited (via [`Core::update_job`]) before release.
+    /// Default false preserves today's behavior (created jobs land Frozen).
+    pub draft: bool,
+}
+
+/// Full-field replacement of a Draft job's definition (spec §2.1). The same
+/// shape as [`CreateJobRequest`] minus the immutable identity: only a job in
+/// Draft accepts it. Validation is identical to create — deferred to release.
+pub struct UpdateJobRequest {
+    pub owner: String,
+    pub project: String,
+    pub seq: u64,
+    pub r#type: String,
+    pub title: String,
+    pub description: String,
+    pub deps: Vec<u64>,
+    pub knowledge_tags: Vec<String>,
+    pub eval: Vec<types::Evaluator>,
+    pub timeout: Option<String>,
+    pub model: Option<String>,
 }
 
 /// `req.work.submit.*` payload (spec §4.2).
@@ -179,6 +200,17 @@ pub enum Msg {
         project: String,
         seq: u64,
         reply: Reply<Vec<u64>>,
+    },
+    /// `req.jobs.update.*` (spec §2.1): full-field replace of a Draft job's
+    /// definition. 409 in any non-Draft state.
+    UpdateJob(UpdateJobRequest, Reply<Job>),
+    /// `req.jobs.draft.*` (spec §2.1): move a Frozen (never-released) job back
+    /// to Draft for editing. Only Frozen → Draft.
+    DraftJob {
+        owner: String,
+        project: String,
+        seq: u64,
+        reply: Reply<()>,
     },
     /// `req.jobs.claim.*` (spec §1.2 claims): a human claims the job's next
     /// work attempt. 409 while an attempt is in flight.
@@ -320,6 +352,21 @@ impl CoreHandle {
     pub async fn revoke_job(&self, owner: &str, project: &str, seq: u64) -> Result<Vec<u64>> {
         let (owner, project) = (owner.to_string(), project.to_string());
         self.call(|reply| Msg::RevokeJob {
+            owner,
+            project,
+            seq,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn update_job(&self, req: UpdateJobRequest) -> Result<Job> {
+        self.call(|reply| Msg::UpdateJob(req, reply)).await
+    }
+
+    pub async fn draft_job(&self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::DraftJob {
             owner,
             project,
             seq,
@@ -741,6 +788,17 @@ impl Core {
             } => {
                 let _ = reply.send(self.revoke_job(&owner, &project, seq).await);
             }
+            Msg::UpdateJob(req, reply) => {
+                let _ = reply.send(self.update_job(req).await);
+            }
+            Msg::DraftJob {
+                owner,
+                project,
+                seq,
+                reply,
+            } => {
+                let _ = reply.send(self.draft_job(&owner, &project, seq).await);
+            }
             Msg::TriageJob {
                 owner,
                 project,
@@ -885,8 +943,9 @@ impl Core {
         Ok(())
     }
 
-    /// Handle `req.jobs.create.*` (spec §3.1 step 1). Jobs always land Frozen;
-    /// wiring is validated at release, not creation.
+    /// Handle `req.jobs.create.*` (spec §3.1 step 1). Jobs land Frozen by
+    /// default; with `draft: true` they land in [`JobState::Draft`] for
+    /// editing (§2.1). Either way, wiring is validated at release, not creation.
     pub async fn create_job(&mut self, req: CreateJobRequest) -> Result<Job> {
         let seq = self.counters.next(&req.owner, &req.project).await?;
         let job = Job {
@@ -896,7 +955,11 @@ impl Core {
             title: req.title,
             description: req.description,
             deps: req.deps,
-            state: JobState::Frozen,
+            state: if req.draft {
+                JobState::Draft
+            } else {
+                JobState::Frozen
+            },
             branch: format!("job/{seq}"),
             base_ref: None,
             knowledge_tags: req.knowledge_tags,
@@ -935,13 +998,16 @@ impl Core {
     /// Frozen→Ready|Blocked). Returns the resulting state.
     pub async fn release_job(&mut self, owner: &str, project: &str, seq: u64) -> Result<JobState> {
         let job = self.must_get(owner, project, seq)?.clone();
-        if job.state != JobState::Frozen {
+        // Frozen and Draft both release; a Draft is finalized (its edited
+        // definition locked in) in the same step (§2.1). Any other state rejects.
+        if !matches!(job.state, JobState::Frozen | JobState::Draft) {
             return Err(InvalidTransition {
                 from: job.state,
                 to: JobState::Ready,
             }
             .into());
         }
+        let from_draft = job.state == JobState::Draft;
 
         let default_branch = self.repos.default_branch(owner, project).await?;
         let head = self
@@ -990,6 +1056,12 @@ impl Core {
                 project: project.into(),
                 seq,
             });
+        }
+        // Leaving Draft finalizes the edited definition: emit job-finalized so
+        // the UI/SSE can distinguish it from a plain Frozen release (§2.1).
+        if from_draft {
+            self.publish(owner, project, seq, "job-finalized", serde_json::json!({}))
+                .await?;
         }
         self.publish(
             owner,
@@ -1137,6 +1209,116 @@ impl Core {
         Ok(cascaded)
     }
 
+    /// Handle `req.jobs.update.*` (spec §2.1): full-field replace of a Draft
+    /// job's definition. Only a job in Draft is editable — any other state is a
+    /// 409 (`Conflict`), so a released job is never mutated. Validation is
+    /// identical to create (deferred to release), so the edit just rewrites the
+    /// record and publishes `job-updated` naming the fields that changed.
+    pub async fn update_job(&mut self, req: UpdateJobRequest) -> Result<Job> {
+        let UpdateJobRequest {
+            owner,
+            project,
+            seq,
+            r#type,
+            title,
+            description,
+            deps,
+            knowledge_tags,
+            eval,
+            timeout,
+            model,
+        } = req;
+        let mut job = self.must_get(&owner, &project, seq)?.clone();
+        if job.state != JobState::Draft {
+            return Err(CoreError::Conflict(format!(
+                "job {seq} is {:?}; only a Draft job can be edited",
+                job.state
+            )));
+        }
+
+        // Name every field whose new value differs from the old, so the event
+        // carries changed field names rather than a full payload (§2.1 events).
+        let mut changed: Vec<&str> = Vec::new();
+        if job.r#type != r#type {
+            changed.push("type");
+        }
+        if job.title != title {
+            changed.push("title");
+        }
+        if job.description != description {
+            changed.push("description");
+        }
+        if job.deps != deps {
+            changed.push("deps");
+        }
+        if job.knowledge_tags != knowledge_tags {
+            changed.push("knowledge_tags");
+        }
+        if job.eval != eval {
+            changed.push("eval");
+        }
+        if job.timeout != timeout {
+            changed.push("timeout");
+        }
+        if job.model != model {
+            changed.push("model");
+        }
+
+        // Upstreams this edit drops — used to prune both the KV rdeps index
+        // (below) and, implicitly, the in-memory reverse edges when the graph
+        // re-inserts the job (see `JobGraph::insert`). Without pruning, a later
+        // revoke of a dropped upstream would cascade to this job by a stale edge.
+        let old_deps = job.deps.clone();
+
+        // Full-field replace; identity (id/branch/created_at) and lifecycle
+        // fields (state/base_ref/ready_at/claim_next) are untouched — a Draft
+        // holds no branch or base_ref, exactly like a Frozen job.
+        job.r#type = r#type;
+        job.title = title;
+        job.description = description;
+        job.deps = deps;
+        job.knowledge_tags = knowledge_tags;
+        job.eval = eval;
+        job.timeout = timeout;
+        job.model = model;
+
+        self.jobs.put(&job).await?;
+        for &upstream in &job.deps {
+            // Mirror create: best-effort rdeps append (§2.3, rebuilt on startup).
+            let _ = self.rdeps.append(&owner, &project, upstream, seq).await;
+        }
+        for &upstream in &old_deps {
+            // Prune the reverse edge for any upstream this edit dropped, so the
+            // KV index stays consistent (best-effort, §2.3 — rebuilt on startup).
+            if !job.deps.contains(&upstream) {
+                let _ = self.rdeps.remove(&owner, &project, upstream, seq).await;
+            }
+        }
+        self.graphs
+            .entry(job.project.clone())
+            .or_default()
+            .insert(job.clone());
+        self.publish(
+            &owner,
+            &project,
+            seq,
+            "job-updated",
+            serde_json::json!({ "fields": changed }),
+        )
+        .await?;
+        Ok(job)
+    }
+
+    /// Handle `req.jobs.draft.*` (spec §2.1): move a Frozen (never-released)
+    /// job back to Draft for editing. Only Frozen → Draft — `set_state`'s guard
+    /// rejects any other origin as an invalid transition (409).
+    pub async fn draft_job(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        let mut job = self.must_get(owner, project, seq)?.clone();
+        self.set_state(&mut job, JobState::Draft).await?;
+        self.publish(owner, project, seq, "job-drafted", serde_json::json!({}))
+            .await
+    }
+
     /// Handle `req.jobs.claim.*` (spec §1.2 claims): mark the job's next work
     /// attempt as human-performed. The claim rides on the job record until
     /// `launch_work_task` consumes it — the same serialized code path that
@@ -1150,6 +1332,13 @@ impl Core {
             return Err(CoreError::Conflict(format!(
                 "job {seq} is {:?}; nothing left to claim",
                 job.state
+            )));
+        }
+        // A Draft job has no work attempt to claim — it is invisible to
+        // scheduling until released (§2.1). Claim it after release, not before.
+        if job.state == JobState::Draft {
+            return Err(CoreError::Conflict(format!(
+                "job {seq} is Draft; release it before claiming a work attempt"
             )));
         }
         let in_flight = self
