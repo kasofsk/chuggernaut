@@ -18,11 +18,30 @@ const COLORS: Record<JobState, string> = {
 export function StateBadge({ state }: { state: JobState }) {
   // Draft is pre-release and editable: a dashed pill sets it apart from the
   // solid Frozen/terminal badges so a work-in-progress ticket reads at a glance.
-  if (state === 'Draft') return <span className="badge badge-draft">Draft</span>
+  if (state === 'Draft')
+    return (
+      <span className="badge badge-draft">
+        <span className="badge-dot" />
+        Draft
+      </span>
+    )
   // Batched: inert member absorbed into a batch — a dashed gray pill sets it
   // apart from a solid Frozen, mirroring the Draft treatment for pre-scheduling.
-  if (state === 'Batched') return <span className="badge badge-batched">Batched</span>
-  return <span className={`badge badge-${COLORS[state]}`}>{state}</span>
+  if (state === 'Batched')
+    return (
+      <span className="badge badge-batched">
+        <span className="badge-dot" />
+        Batched
+      </span>
+    )
+  // Redesign (#161): a colored status dot leads the pill, keeping the existing
+  // per-state hues.
+  return (
+    <span className={`badge badge-${COLORS[state]}`}>
+      <span className="badge-dot" />
+      {state}
+    </span>
+  )
 }
 
 export function TaskBadge({ state }: { state: 'Pending' | 'Running' | 'Done' | 'Failed' }) {

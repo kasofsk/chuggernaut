@@ -10,8 +10,8 @@
       // Apply the saved theme before first paint to avoid a flash of the
       // default look. Mirrors the storage key in src/theme.tsx.
       try {
-        var t = localStorage.getItem('chug-theme')
-        if (t) document.documentElement.dataset.theme = t
+        var t = localStorage.getItem('chug-theme') || 'cosmos'
+        document.documentElement.dataset.theme = t
       } catch (e) {}
     </script>
   </head>

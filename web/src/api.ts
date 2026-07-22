@@ -472,7 +472,19 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   return json as T
 }
 
+/** GET /api/v1/health — unauthenticated dispatcher liveness probe (spec §6.x).
+ *  200 → `{dispatcher:'ok', version}`; 503 → `{dispatcher:'error'|…, error}`. The
+ *  status vote source for the system-status footer (#163). */
+export interface HealthStatus {
+  dispatcher: string
+  version?: string
+  error?: string
+}
+
 export const api = {
+  /** Dispatcher liveness (unauthenticated). Resolves the parsed body on 200;
+   *  throws ApiError on 503 so the footer can name the failing component. */
+  health: () => req<HealthStatus>('GET', '/api/v1/health'),
   login: (email: string, password: string) =>
     req<Identity>('POST', '/auth/login', { email, password }),
   logout: () => req<unknown>('POST', '/auth/logout'),

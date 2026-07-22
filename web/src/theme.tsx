@@ -1,14 +1,15 @@
 import { useState } from 'react'
 
-// Names must match the [data-theme='...'] blocks in styles.css.
-export const THEMES = ['tokyo', 'midnight', 'gruvbox', 'nord'] as const
+// Names must match the [data-theme='...'] blocks in styles.css. 'cosmos' is the
+// snazzy-redesign dark-first identity (#161); 'aurora' its light sibling.
+export const THEMES = ['cosmos', 'aurora', 'tokyo', 'midnight', 'gruvbox', 'nord'] as const
 export type Theme = (typeof THEMES)[number]
 
 const STORAGE_KEY = 'chug-theme'
 
 function currentTheme(): Theme {
   const saved = localStorage.getItem(STORAGE_KEY)
-  return THEMES.includes(saved as Theme) ? (saved as Theme) : 'tokyo'
+  return THEMES.includes(saved as Theme) ? (saved as Theme) : 'cosmos'
 }
 
 export function applySavedTheme() {

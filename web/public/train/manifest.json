@@ -1,0 +1,10 @@
+{
+  "_readme": "Train header scenes (#164). The header is pure content: add a scene by dropping background art into web/public/train/<scene>/ and appending an entry here — no code change. A scene either lists `layers` (real art: far -> near, each {src, speed, y}) or names a `builtin` code-generated backdrop (space | sourcecode | matrix) so the header is alive before art lands. `tint` (0..1) is the legibility-scrim strength the project title overlays with; `duration` overrides the global scene dwell in ms. `locomotive.src` may point at a sprite; null falls back to the built-in SVG loco.",
+  "locomotive": { "src": null },
+  "sceneDurationMs": 78000,
+  "scenes": [
+    { "name": "deep space", "builtin": "space", "tint": 0.55 },
+    { "name": "source dimension", "builtin": "sourcecode", "tint": 0.5 },
+    { "name": "the matrix", "builtin": "matrix", "tint": 0.6 }
+  ]
+}

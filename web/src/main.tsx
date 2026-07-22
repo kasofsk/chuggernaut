@@ -13,6 +13,7 @@ import { SettingsPage } from './pages/Settings'
 import { PlatformSettingsPage } from './pages/PlatformSettings'
 import { JobDetail } from './pages/JobDetail'
 import { ClusterPage } from './pages/Cluster'
+import { AppShell } from './components/AppShell'
 import { ThemePicker, applySavedTheme } from './theme'
 import './styles.css'
 
@@ -22,6 +23,7 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ThemePicker />
     <BrowserRouter>
+      <AppShell>
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<Home />} />
@@ -41,6 +43,7 @@ createRoot(document.getElementById('root')!).render(
         <Route path="/p/:owner/:project/jobs/:seq" element={<JobDetail />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      </AppShell>
     </BrowserRouter>
   </StrictMode>,
 )

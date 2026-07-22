@@ -29,6 +29,12 @@
   --shadow-card:
     0 1px 2px rgba(0, 0, 0, 0.15),
     0 4px 16px rgba(0, 0, 0, 0.1);
+
+  /* redesign chrome (#161): shared across themes; colour tokens below may
+     override --accent-2 / --glow for a richer gradient/halo. */
+  --rail-w: 60px;
+  --accent-2: var(--purple);
+  --glow: color-mix(in srgb, var(--accent) 42%, transparent);
 }
 
 /* ── Themes ──────────────────────────────────────────────────────────────
@@ -36,7 +42,60 @@
    add a [data-theme='...'] block and register the name in src/theme.tsx.
    --inset: recessed surfaces (inputs, code blocks); --btn-bg: buttons and
    hover fills; --border-faint: subtle row separators. */
+/* ── Cosmos: the snazzy-redesign dark-first identity (#161) ──────────────────
+   Near-black blue-tinted surfaces, a glowing-blue accent into violet, a subtle
+   planetary halo behind the page header (see body / .proj-header). Default. */
 :root,
+[data-theme='cosmos'] {
+  color-scheme: dark;
+  --bg: #060912;
+  --card: #0f1626;
+  --inset: #0a1020;
+  --btn-bg: #18213a;
+  --border: #253350;
+  --border-faint: #172034;
+  --text: #dce6ff;
+  --dim: #7f8cb3;
+  --accent: #5b8cff;
+  --accent-2: #a06bff;
+  --danger: #ff6b83;
+  --green: #3fd894;
+  --orange: #ffb45c;
+  --purple: #a98bff;
+  --red: #ff6b83;
+  --blue: #5b8cff;
+  --gray: #667299;
+  --stripe: color-mix(in srgb, var(--text) 3%, transparent);
+  --backdrop-opacity: 0.05;
+  --glow: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+/* ── Aurora: the light sibling — same structure (rail, cards, accents), inverted
+   surfaces (#161: dark-first but the toggle stays, both themes supported). */
+[data-theme='aurora'] {
+  color-scheme: light;
+  --bg: #eef2fb;
+  --card: #ffffff;
+  --inset: #f3f6fd;
+  --btn-bg: #e9eefa;
+  --border: #d3ddf0;
+  --border-faint: #e7ecf7;
+  --text: #131b30;
+  --dim: #5a6785;
+  --accent: #3564e6;
+  --accent-2: #7c4dff;
+  --danger: #dc3a54;
+  --green: #17a06b;
+  --orange: #d9832a;
+  --purple: #7c4dff;
+  --red: #dc3a54;
+  --blue: #3564e6;
+  --gray: #7a86a3;
+  --stripe: color-mix(in srgb, var(--text) 3%, transparent);
+  --backdrop-opacity: 0.04;
+  --glow: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
 [data-theme='tokyo'] {
   color-scheme: dark;
   --bg: #1a1b26;
@@ -2314,4 +2373,1409 @@ table.jobs tbody tr.row-draft td:first-child {
 }
 .cl-empty {
   padding: var(--sp-4);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   SNAZZY REDESIGN (#161–#164, #171): cosmic identity, icon rail, page chrome,
+   overview sidebar, status footer, train header, ticket-stub New Job.
+   Both themes come from the tokens above — no hard-coded colours here.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+/* ── App shell + icon nav rail (#161) ──────────────────────────────────────── */
+.shell {
+  min-height: 100vh;
+}
+.shell-main {
+  padding-left: var(--rail-w);
+}
+.rail {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--rail-w);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
+  background: color-mix(in srgb, var(--card) 75%, var(--bg));
+  border-right: 1px solid var(--border-faint);
+  backdrop-filter: blur(6px);
+}
+.rail-logo {
+  display: grid;
+  place-items: center;
+  margin-bottom: var(--sp-2);
+  border-radius: var(--r-md);
+}
+.rail-logo img {
+  border-radius: 7px;
+  display: block;
+}
+.rail-icons {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 1;
+}
+.rail-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: var(--r-md);
+  color: var(--dim);
+}
+.rail-icon:hover {
+  color: var(--text);
+  background: var(--btn-bg);
+  text-decoration: none;
+}
+.rail-icon.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.rail-tip {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  white-space: nowrap;
+  padding: 0.2rem 0.5rem;
+  border-radius: var(--r-sm);
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: var(--fs-xs);
+  box-shadow: var(--shadow-card);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  z-index: 70;
+}
+.rail-icon:hover .rail-tip {
+  opacity: 1;
+}
+.rail-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--r-full);
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-weight: 700;
+  font-size: var(--fs-sm);
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+.rail-avatar:hover {
+  text-decoration: none;
+  filter: brightness(1.1);
+}
+
+/* ── Project header masthead + train band (#161/#164) ──────────────────────── */
+.proj-header {
+  position: relative;
+  overflow: hidden;
+  min-height: 138px;
+  border: 1px solid var(--border-faint);
+  border-radius: var(--r-lg);
+  background: var(--inset);
+  margin-bottom: var(--sp-3);
+}
+.proj-header-body {
+  position: relative;
+  z-index: 3;
+  padding: var(--sp-5) var(--sp-6);
+}
+.proj-eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  color: var(--dim);
+}
+.proj-titleline {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  margin-top: 0.3rem;
+}
+.proj-title {
+  margin: 0;
+  font-size: 2rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  background: none;
+  -webkit-text-fill-color: initial;
+}
+.proj-owner {
+  color: var(--text);
+}
+.proj-owner:hover {
+  text-decoration: none;
+  color: var(--text);
+}
+.proj-sep {
+  color: var(--dim);
+  font-weight: 400;
+}
+.proj-name {
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.proj-name:hover {
+  text-decoration: none;
+}
+.repo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: var(--r-full);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card) 70%, transparent);
+  color: var(--dim);
+  font-size: var(--fs-sm);
+}
+.repo-chip svg {
+  color: var(--dim);
+}
+.repo-chip-linked {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.repo-chip-linked svg {
+  color: var(--accent);
+}
+
+/* Active-tab glow underline (#161), layered over the base .tabs rules above. */
+.tabs a.active {
+  text-shadow: 0 0 14px var(--glow);
+}
+.tabs a.active {
+  position: relative;
+}
+.tabs a.active::after {
+  content: '';
+  position: absolute;
+  left: 0.6rem;
+  right: 0.6rem;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 10px 1px var(--glow);
+}
+
+/* ── Jobs page layout: overview sidebar + main column (#162) ────────────────── */
+.jobs-layout {
+  display: grid;
+  grid-template-columns: 264px minmax(0, 1fr);
+  gap: var(--sp-4);
+  align-items: start;
+}
+.jobs-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.side-card h2 {
+  margin-bottom: var(--sp-2);
+}
+.side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.side-head svg {
+  color: var(--dim);
+}
+
+/* Jobs overview card */
+.ov-spark {
+  color: var(--accent);
+  margin: 0.1rem 0 0.5rem;
+}
+.ov-total {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: var(--sp-3);
+}
+.ov-total-n {
+  font-size: 2rem;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.ov-total-label {
+  color: var(--dim);
+  font-size: var(--fs-sm);
+}
+.ov-states {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.ov-state {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  padding: 0.32rem 0.4rem;
+  color: var(--text);
+  text-align: left;
+}
+.ov-state:hover {
+  background: var(--btn-bg);
+}
+.ov-state-on {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.ov-state-label {
+  flex: 1;
+  font-size: var(--fs-sm);
+}
+.ov-state-n {
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+  font-size: var(--fs-sm);
+}
+.state-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--r-full);
+  flex: none;
+  background: var(--gray);
+}
+.dot-blue {
+  background: var(--blue);
+}
+.dot-green {
+  background: var(--green);
+}
+.dot-orange {
+  background: var(--orange);
+}
+.dot-purple {
+  background: var(--purple);
+}
+.dot-red {
+  background: var(--red);
+}
+.dot-gray {
+  background: var(--gray);
+}
+
+/* Quick filters card */
+.qf-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin: 0.3rem 0 var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--dim);
+}
+.qf-toggle select {
+  padding: 0.2rem 0.45rem;
+}
+.qf-list,
+.qf-saved {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.qf-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  padding: 0.32rem 0.4rem;
+  color: var(--text);
+  text-align: left;
+  font-size: var(--fs-sm);
+}
+.qf-item:hover {
+  background: var(--btn-bg);
+}
+.qf-item-on {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+}
+.qf-n {
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+.qf-item-on .qf-n {
+  color: var(--accent);
+}
+.qf-saved {
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border-faint);
+}
+.qf-saved li {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+.qf-saved-item {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: var(--accent);
+  padding: 0.25rem 0.4rem;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.qf-saved-item:hover {
+  background: var(--btn-bg);
+}
+.qf-saved-del {
+  background: none;
+  border: 0;
+  color: var(--dim);
+  cursor: pointer;
+  padding: 0 0.3rem;
+  line-height: 1;
+}
+.qf-saved-del:hover {
+  color: var(--danger);
+}
+.qf-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+.qf-save {
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--text);
+  border-radius: var(--r-sm);
+  padding: 0.4rem 0.6rem;
+  font-size: var(--fs-sm);
+}
+.qf-save:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.qf-clear {
+  font-size: var(--fs-sm);
+}
+
+/* ── Jobs toolbar: title + search + state filter + New job (#161) ───────────── */
+.jobs-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-4);
+  flex-wrap: wrap;
+}
+.card h2.jobs-h1 {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--text);
+}
+.jobs-sub {
+  margin: 0.15rem 0 0;
+  color: var(--dim);
+  font-size: var(--fs-sm);
+}
+.jobs-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.search-field {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 0.15rem 0.55rem;
+}
+.search-field svg {
+  color: var(--dim);
+  flex: none;
+}
+.search-field input {
+  border: 0;
+  background: none;
+  padding: 0.3rem 0.1rem;
+  min-width: 150px;
+}
+.search-field input:focus {
+  outline: none;
+  box-shadow: none;
+  border: 0;
+}
+.search-field:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.kbd-hint {
+  font-size: var(--fs-xs);
+  color: var(--dim);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 0.3rem;
+  white-space: nowrap;
+}
+.state-filter {
+  padding: 0.45rem 0.6rem;
+}
+.btn-newjob-link {
+  text-decoration: none;
+}
+.btn-newjob-link:hover {
+  text-decoration: none;
+}
+.btn-primary-glow {
+  background: linear-gradient(120deg, var(--accent), var(--accent-2));
+  border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  color: #fff;
+  font-weight: 600;
+  padding: 0.5rem 0.95rem;
+  border-radius: var(--r-sm);
+  box-shadow: 0 6px 20px -6px var(--glow);
+}
+.btn-primary-glow:hover:not(:disabled) {
+  filter: brightness(1.08);
+  border-color: var(--accent);
+  background: linear-gradient(120deg, var(--accent), var(--accent-2));
+}
+
+/* ── Jobs table restyle: spark column, per-state accent bar, dot pills (#161) ── */
+.spark-col {
+  width: 22px;
+}
+.spark-cell {
+  width: 22px;
+  text-align: center;
+  padding-left: 0.3rem !important;
+  padding-right: 0 !important;
+}
+.row-spark {
+  color: var(--gray);
+  font-size: 0.68rem;
+  opacity: 0.4;
+}
+tr[data-state='Work'] .row-spark,
+tr[data-state='Evaluation'] .row-spark,
+tr[data-state='WrapUp'] .row-spark {
+  color: var(--orange);
+  opacity: 0.95;
+}
+tr[data-state='Escalated'] .row-spark,
+tr[data-state='Stalled'] .row-spark {
+  color: var(--orange);
+  opacity: 0.85;
+}
+table.jobs tbody tr.row-accent td:first-child {
+  box-shadow: inset 3px 0 0 var(--row-accent, transparent);
+}
+tr[data-state='Work'],
+tr[data-state='Ready'],
+tr[data-state='Blocked'] {
+  --row-accent: var(--blue);
+}
+tr[data-state='WrapUp'] {
+  --row-accent: var(--blue);
+}
+tr[data-state='Evaluation'] {
+  --row-accent: var(--purple);
+}
+tr[data-state='Escalated'],
+tr[data-state='Stalled'] {
+  --row-accent: var(--orange);
+}
+tr[data-state='Done'] {
+  --row-accent: var(--green);
+}
+tr[data-state='Revoked'] {
+  --row-accent: var(--red);
+}
+tr[data-state='Draft'],
+tr[data-state='Frozen'],
+tr[data-state='Batched'] {
+  --row-accent: var(--gray);
+}
+/* Colored status dot leading every state pill (StateBadge). */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-full);
+  background: currentColor;
+  flex: none;
+}
+
+/* ── System status footer (#163) ───────────────────────────────────────────── */
+.status-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  flex-wrap: wrap;
+  padding: var(--sp-3) var(--sp-5);
+  margin-top: var(--sp-4);
+}
+.sf-seg {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.sf-label {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.sf-health-body {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: var(--fs-sm);
+}
+.sf-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--r-full);
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+  flex: none;
+}
+.sf-h-degraded .sf-dot {
+  background: var(--orange);
+  box-shadow: 0 0 8px var(--orange);
+}
+.sf-h-down {
+  color: var(--danger);
+}
+.sf-h-down .sf-dot {
+  background: var(--danger);
+  box-shadow: 0 0 8px var(--danger);
+}
+.sf-fleet {
+  flex: 1 1 220px;
+}
+.sf-fleet-body {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex: 1;
+  min-width: 0;
+}
+.sf-bar {
+  flex: 1;
+  min-width: 80px;
+  height: 8px;
+  border-radius: var(--r-full);
+  background: var(--inset);
+  border: 1px solid var(--border-faint);
+  overflow: hidden;
+}
+.sf-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--r-full);
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.4s ease;
+}
+.sf-fleet[data-band='full'] .sf-bar-fill {
+  background: linear-gradient(90deg, var(--orange), var(--danger));
+}
+.sf-fleet-read {
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.sf-queue {
+  color: var(--orange);
+}
+.sf-active {
+  margin-left: auto;
+}
+.sf-active-body {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.sf-active-n {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.sf-spark {
+  color: var(--accent);
+}
+
+/* ── Sparkline (#162/#163) ─────────────────────────────────────────────────── */
+.sparkline {
+  display: block;
+  overflow: visible;
+}
+.sparkline-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  vector-effect: non-scaling-stroke;
+}
+.sparkline-area {
+  fill: color-mix(in srgb, currentColor 16%, transparent);
+  stroke: none;
+}
+
+/* ── Train header scenes + locomotive (#164) ───────────────────────────────── */
+.train {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border: 0;
+  background: #05070f;
+}
+.train-worlds {
+  position: absolute;
+  inset: 0;
+}
+.train-scene {
+  position: absolute;
+  inset: 0;
+}
+.train-scene-in {
+  animation: train-fade-in 1.3s ease;
+}
+.train-scene-out {
+  animation: train-fade-out 1.4s ease forwards;
+}
+@keyframes train-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes train-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.sc-space {
+  background: radial-gradient(130% 150% at 72% -30%, #1a2650 0%, #0a1128 42%, #05070f 100%);
+}
+.sc-sourcecode {
+  background: linear-gradient(120deg, #0a1024, #120a24);
+}
+.sc-matrix {
+  background: linear-gradient(#00070a, #001410);
+}
+.train-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+.train-strip {
+  position: absolute;
+  inset: 0 auto 0 0;
+  height: 100%;
+  width: 200%;
+  background-repeat: repeat-x;
+}
+.train-scroll .train-strip {
+  animation-name: train-scroll-x;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  animation-duration: var(--dur, 60s);
+  will-change: transform;
+}
+@keyframes train-scroll-x {
+  to {
+    transform: translateX(-50%);
+  }
+}
+/* Built-in starfields (far -> near). */
+.train-space-0 .train-strip {
+  background-image:
+    radial-gradient(1.4px 1.4px at 24px 30px, #ffffff88, transparent),
+    radial-gradient(1px 1px at 120px 80px, #ffffff55, transparent),
+    radial-gradient(1.2px 1.2px at 200px 140px, #cdd8ff66, transparent);
+  background-size: 260px 200px;
+}
+.train-space-1 .train-strip {
+  background-image:
+    radial-gradient(1px 1px at 60px 50px, #ffffff66, transparent),
+    radial-gradient(1.6px 1.6px at 160px 120px, #a9c4ff77, transparent);
+  background-size: 200px 180px;
+}
+.train-space-2 .train-strip {
+  background-image:
+    radial-gradient(2px 2px at 40px 90px, #ffffffaa, transparent),
+    radial-gradient(1.4px 1.4px at 140px 40px, #dfe8ff88, transparent);
+  background-size: 160px 160px;
+}
+/* Built-in source dimension: drifting data-lines in accent/violet. */
+.train-sourcecode-0 .train-strip {
+  background-image: repeating-linear-gradient(
+    90deg,
+    transparent 0 44px,
+    color-mix(in srgb, var(--accent) 10%, transparent) 44px 45px
+  );
+  background-size: 200px 100%;
+}
+.train-sourcecode-1 .train-strip {
+  background-image: repeating-linear-gradient(
+    90deg,
+    transparent 0 26px,
+    color-mix(in srgb, var(--purple) 12%, transparent) 26px 27px
+  );
+  background-size: 160px 100%;
+}
+.train-sourcecode-2 .train-strip {
+  background-image:
+    radial-gradient(1.4px 1.4px at 30px 40px, color-mix(in srgb, var(--accent) 50%, transparent), transparent),
+    radial-gradient(1.4px 1.4px at 120px 110px, color-mix(in srgb, var(--purple) 50%, transparent), transparent);
+  background-size: 180px 160px;
+}
+/* Built-in Matrix rain: THE green glyph rain. */
+.mx-rain {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+}
+.mx-col {
+  position: absolute;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+  line-height: 1.05;
+  color: #35ff9a;
+  text-shadow: 0 0 6px #17c47a;
+  transform: translateY(-100%);
+  animation-name: mx-fall;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  will-change: transform;
+}
+.mx-col span {
+  opacity: 0.7;
+}
+.mx-col span:first-child {
+  color: #e6ffee;
+  opacity: 1;
+}
+@keyframes mx-fall {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(110%);
+  }
+}
+/* Legibility scrim: always-strong on the left (title) + a manifest-tint wash. */
+.train-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, var(--bg) 0%, color-mix(in srgb, var(--bg) 55%, transparent) 42%, transparent 80%),
+    linear-gradient(0deg, color-mix(in srgb, var(--bg) 72%, transparent), transparent 58%);
+}
+.train-scrim::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+  opacity: calc(var(--scrim, 0.5) * 0.5);
+}
+.train-scene-name {
+  position: absolute;
+  right: 0.7rem;
+  bottom: 0.5rem;
+  z-index: 3;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim);
+  opacity: 0.65;
+  pointer-events: none;
+}
+/* Locomotive */
+.loco {
+  position: absolute;
+  left: 7%;
+  bottom: 12px;
+  z-index: 3;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  line-height: 0;
+}
+.loco:hover {
+  filter: brightness(1.06);
+}
+.loco-svg {
+  display: block;
+  filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.55));
+}
+.loco-body {
+  fill: color-mix(in srgb, var(--accent) 26%, #131b30);
+  stroke: var(--accent);
+  stroke-width: 1.4;
+}
+.loco-cab,
+.loco-chimney {
+  fill: #0e1526;
+  stroke: var(--accent);
+  stroke-width: 1.2;
+}
+.loco-lamp {
+  fill: #ffe08a;
+  filter: drop-shadow(0 0 5px #ffe08a);
+}
+.loco-wheel {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: loco-spin 3.2s linear infinite;
+}
+.loco-wheel-rim {
+  fill: #0a1020;
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+.loco-spoke {
+  stroke: color-mix(in srgb, var(--accent) 70%, #fff);
+  stroke-width: 1.3;
+}
+.loco-rod {
+  stroke: var(--orange);
+  stroke-width: 2;
+  opacity: 0.7;
+}
+@keyframes loco-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.loco-smoke {
+  position: absolute;
+  left: calc(7% + 22px);
+  bottom: 70px;
+  width: 11px;
+  height: 11px;
+  border-radius: var(--r-full);
+  background: color-mix(in srgb, var(--text) 42%, transparent);
+  filter: blur(1px);
+  opacity: 0;
+  z-index: 3;
+  animation: loco-smoke 4.2s ease-in infinite;
+}
+.loco-smoke-2 {
+  animation-delay: 1.4s;
+}
+.loco-smoke-3 {
+  animation-delay: 2.8s;
+}
+@keyframes loco-smoke {
+  0% {
+    transform: translate(0, 0) scale(0.5);
+    opacity: 0.5;
+  }
+  100% {
+    transform: translate(-34px, -48px) scale(1.7);
+    opacity: 0;
+  }
+}
+/* Restraint: freeze everything when paused (hidden tab / offscreen) or under
+   prefers-reduced-motion — the header becomes a still scene. */
+.train-paused .train-scroll .train-strip,
+.train-paused .mx-col,
+.train-paused .loco-wheel,
+.train-paused .loco-smoke,
+.train-paused .train-scene-in,
+.train-paused .train-scene-out {
+  animation-play-state: paused;
+}
+@media (prefers-reduced-motion: reduce) {
+  .train-scroll .train-strip,
+  .mx-col,
+  .loco-wheel,
+  .loco-smoke {
+    animation: none;
+  }
+  .loco-smoke {
+    display: none;
+  }
+  .train-scene-in,
+  .train-scene-out {
+    animation: none;
+  }
+}
+
+/* ── New Job as a departure: ticket stub, type cards, coupled cars (#171) ───── */
+.newjob-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: var(--sp-4);
+  align-items: start;
+}
+.ticket-col {
+  position: sticky;
+  top: var(--sp-4);
+}
+.ticket {
+  position: relative;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border);
+  background: linear-gradient(165deg, var(--card), color-mix(in srgb, var(--accent) 7%, var(--card)));
+  box-shadow: var(--shadow-card);
+  padding: var(--sp-4) var(--sp-5);
+  overflow: hidden;
+}
+.ticket-eyebrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: var(--fs-xs);
+  color: var(--dim);
+  font-weight: 700;
+}
+.ticket-headline {
+  margin: var(--sp-2) 0 var(--sp-1);
+  font-size: var(--fs-lg);
+  font-weight: 800;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.ticket-headline.dim {
+  font-weight: 600;
+}
+.ticket-type-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: var(--r-full);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.ticket-route {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: var(--sp-3) 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--dim);
+}
+.ticket-route b {
+  color: var(--text);
+}
+.ticket-perf {
+  border: none;
+  border-top: 1px dashed var(--border);
+  margin: var(--sp-3) 0;
+}
+.ticket-section-label {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: var(--fs-xs);
+  color: var(--dim);
+  font-weight: 600;
+  margin-bottom: 0.3rem;
+}
+.ticket-conns,
+.ticket-stamps,
+.ticket-stickers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: var(--sp-2);
+}
+.ticket-conn {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  padding: 0.1rem 0.45rem;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--inset);
+}
+.ticket-stamp {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.15rem 0.45rem;
+  border-radius: var(--r-sm);
+  border: 1px dashed color-mix(in srgb, var(--green) 50%, transparent);
+  color: var(--green);
+  transform: rotate(-2deg);
+}
+.ticket-sticker {
+  font-size: var(--fs-xs);
+  padding: 0.1rem 0.45rem;
+  border-radius: var(--r-full);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--purple) 10%, transparent);
+  color: var(--purple);
+}
+.ticket-error {
+  display: inline-block;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.15rem 0.5rem;
+  margin: 0.15rem 0.35rem 0.15rem 0;
+  border: 2px solid var(--orange);
+  color: var(--orange);
+  border-radius: var(--r-sm);
+  transform: rotate(-3deg);
+}
+.ticket-barcode {
+  margin-top: var(--sp-3);
+  height: 30px;
+  border-radius: 3px;
+  background-image: repeating-linear-gradient(
+    90deg,
+    var(--text) 0 2px,
+    transparent 2px 4px,
+    var(--text) 4px 5px,
+    transparent 5px 9px
+  );
+  opacity: 0.5;
+}
+/* Punch-on-create: a hole + spark burst, then the stub departs the frame. */
+.ticket-punched::after {
+  content: '';
+  position: absolute;
+  top: 18px;
+  right: 22px;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--r-full);
+  background: var(--bg);
+  box-shadow: 0 0 0 2px var(--border) inset;
+  animation: ticket-punch 0.3s ease;
+}
+@keyframes ticket-punch {
+  from {
+    transform: scale(0);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+.ticket-depart {
+  animation: ticket-depart 0.6s ease forwards;
+}
+@keyframes ticket-depart {
+  to {
+    transform: translateX(60px) rotate(2.5deg);
+    opacity: 0;
+  }
+}
+.ticket-siding {
+  animation: ticket-siding 0.6s ease forwards;
+}
+@keyframes ticket-siding {
+  to {
+    transform: translateX(-40px) translateY(10px) rotate(-2deg);
+    opacity: 0;
+  }
+}
+
+/* Type cards */
+.type-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--sp-2);
+}
+.type-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  text-align: left;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--inset);
+  color: var(--text);
+}
+.type-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+.type-card-on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--inset));
+  box-shadow: 0 0 0 1px var(--accent), 0 8px 22px -10px var(--glow);
+}
+.type-card-glyph {
+  font-size: 1.15rem;
+  line-height: 1;
+}
+.type-card-name {
+  font-weight: 600;
+}
+.type-card-desc {
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.type-list-fallback {
+  margin-top: var(--sp-2);
+}
+.type-list-fallback summary {
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  color: var(--dim);
+}
+
+/* Coupled-car deps */
+.coupled {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+  margin-bottom: 0.35rem;
+}
+.coupled-loco {
+  font-size: 1.15rem;
+  margin-right: 0.2rem;
+}
+.car-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.car {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--btn-bg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  color: var(--text);
+}
+.car:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.car-coupler {
+  color: var(--dim);
+}
+
+/* Departure switch */
+.departure {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.switch {
+  position: relative;
+  display: flex;
+  width: 190px;
+  height: 38px;
+  padding: 3px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--border);
+  background: var(--inset);
+  cursor: pointer;
+}
+.switch-opt {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  z-index: 1;
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  white-space: nowrap;
+}
+.switch-knob {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc(50% - 3px);
+  border-radius: var(--r-full);
+  background: var(--btn-bg);
+  transition: transform 0.25s ease, background 0.25s ease;
+}
+.switch[data-mode='release'] .switch-knob {
+  transform: translateX(100%);
+  background: linear-gradient(120deg, var(--accent), var(--accent-2));
+}
+.switch[data-mode='draft'] .switch-opt:first-child,
+.switch[data-mode='release'] .switch-opt:last-child {
+  color: var(--text);
+  font-weight: 600;
+}
+@media (prefers-reduced-motion: reduce) {
+  .switch-knob {
+    transition: none;
+  }
+  .ticket-punched::after,
+  .ticket-depart,
+  .ticket-siding {
+    animation: none;
+  }
+  .ticket-depart,
+  .ticket-siding {
+    opacity: 0;
+  }
+}
+
+/* ── Responsive: rail -> bottom bar, sidebars stack, header shrinks ─────────── */
+@media (max-width: 900px) {
+  .jobs-layout,
+  .newjob-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ticket-col {
+    position: static;
+    order: -1;
+  }
+}
+@media (max-width: 640px) {
+  .shell-main {
+    padding-left: 0;
+    padding-bottom: 54px;
+  }
+  .rail {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    height: 52px;
+    flex-direction: row;
+    padding: 0 var(--sp-2);
+    border-right: 0;
+    border-top: 1px solid var(--border-faint);
+    gap: 0.15rem;
+  }
+  /* Keep the floating widgets clear of the bottom rail. */
+  .capacity-widget,
+  .theme-picker {
+    bottom: 62px;
+  }
+  .rail-logo {
+    margin-bottom: 0;
+    margin-right: var(--sp-1);
+  }
+  .rail-icons {
+    flex-direction: row;
+    flex: 1;
+    justify-content: space-around;
+  }
+  .rail-icon {
+    width: 40px;
+    height: 40px;
+  }
+  /* Tooltips would sit under the fold on a bottom bar — drop them on mobile. */
+  .rail-tip {
+    display: none;
+  }
+  .proj-header {
+    min-height: 108px;
+  }
+  .proj-header-body {
+    padding: var(--sp-4);
+  }
+  .proj-title {
+    font-size: 1.5rem;
+  }
+  .jobs-toolbar {
+    gap: var(--sp-2);
+  }
+  .jobs-controls {
+    width: 100%;
+  }
+  .search-field {
+    flex: 1;
+  }
+  .search-field input {
+    min-width: 0;
+  }
+  .status-footer {
+    gap: var(--sp-3);
+  }
+  .sf-active {
+    margin-left: 0;
+  }
+  .loco {
+    transform: scale(0.8);
+    transform-origin: left bottom;
+  }
+  .switch {
+    width: 100%;
+  }
 }

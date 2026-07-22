@@ -1,13 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ApiError, api, type Job, type Task } from '../api'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { ApiError, api, type Job, type JobState, type Task } from '../api'
 import { useDebouncedCallback, useProjectEvents, type JobEvent } from '../useEvents'
 import { StateBadge } from '../components/StateBadge'
 import { ResolveForm } from '../components/ResolveForm'
-import { ProjectTabs } from '../components/ProjectTabs'
+import { ProjectHeader } from '../components/ProjectHeader'
 import { OriginPanel } from '../components/OriginPanel'
 import { CapacityWidget } from '../components/CapacityWidget'
+import { JobsSidebar } from '../components/JobsSidebar'
+import { StatusFooter } from '../components/StatusFooter'
+import { IconSearch } from '../components/icons'
 import { useFleet } from '../useFleet'
+import {
+  filtersFromParams,
+  filtersToParams,
+  matchesFilters,
+  type JobFilters,
+} from '../jobFilters'
+
+// The states the "All states" dropdown offers, lifecycle-ordered.
+const FILTER_STATES: JobState[] = [
+  'Draft', 'Frozen', 'Batched', 'Blocked', 'Ready', 'Work',
+  'Evaluation', 'WrapUp', 'Escalated', 'Stalled', 'Done', 'Revoked',
+]
 
 type SortKey = 'id' | 'state' | 'type' | 'completed'
 
@@ -100,10 +115,15 @@ export function ProjectPage() {
   // Job seqs with a capacity-deferred launch waiting for a fleet slot (§3.5).
   const [queuedSeqs, setQueuedSeqs] = useState<Set<number>>(new Set())
   const [error, setError] = useState<string | null>(null)
-  // Jobs table controls: column sort (default newest-first) and a filter that
-  // hides finished jobs by default.
+  // Jobs table controls: column sort (default newest-first). The filter model
+  // (#162) lives in the URL so a filtered view is shareable.
   const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'id', dir: 'desc' })
-  const [showFinished, setShowFinished] = useState(false)
+  const [params, setParams] = useSearchParams()
+  const filters = filtersFromParams(params)
+  const setFilters = useCallback(
+    (f: JobFilters) => setParams(filtersToParams(f), { replace: true }),
+    [setParams],
+  )
 
   const refresh = useCallback(() => {
     Promise.all([api.jobs(owner, project), api.pendingTasks(owner, project)])
@@ -247,13 +267,14 @@ export function ProjectPage() {
   // with the filter result on the next refresh, so a live transition stays put;
   // a job that is already finished the first time we see it is filtered out as
   // usual. Changing the filter resets the pins (finished rows then disappear).
+  const filterKey = filtersToParams(filters).toString()
   const pinnedRef = useRef<Set<number>>(new Set())
-  const filterKeyRef = useRef(showFinished)
-  if (filterKeyRef.current !== showFinished) {
-    filterKeyRef.current = showFinished
+  const filterKeyRef = useRef(filterKey)
+  if (filterKeyRef.current !== filterKey) {
+    filterKeyRef.current = filterKey
     pinnedRef.current = new Set()
   }
-  const passesFilter = (j: Job) => showFinished || (j.state !== 'Done' && j.state !== 'Revoked')
+  const passesFilter = (j: Job) => matchesFilters(j, filters, claimedInWork)
   const visible = jobs.filter((j) => passesFilter(j) || pinnedRef.current.has(j.id))
   pinnedRef.current = new Set(visible.map((j) => j.id))
 
@@ -280,15 +301,12 @@ export function ProjectPage() {
     return sort.dir === 'asc' ? r : -r
   })
 
+  const stateDropdownValue =
+    filters.states.length === 1 ? filters.states[0] : filters.states.length ? '__multi' : ''
+
   return (
     <div className="page">
-      <header className="topbar">
-        <Link to="/">Chuggernaut</Link>
-        <h1>
-          {owner}/{project}
-        </h1>
-      </header>
-      <ProjectTabs owner={owner} project={project} />
+      <ProjectHeader owner={owner} project={project} />
       {error && <div className="error banner">{error}</div>}
       <OriginPanel owner={owner} project={project} />
 
@@ -332,27 +350,53 @@ export function ProjectPage() {
         </section>
       )}
 
-      <section className="card">
-        <div className="row-head">
-          <h2>Jobs</h2>
-          <Link to={`/p/${owner}/${project}/jobs/new`}>
-            <button>new job</button>
-          </Link>
-        </div>
-        <div className="tag-row">
-          <button
-            type="button"
-            className={`tag ${showFinished ? 'tag-on' : ''}`}
-            onClick={() => setShowFinished((v) => !v)}
-            title="include Done and Revoked jobs in the list"
-          >
-            show finished
-          </button>
-        </div>
-        <div className="table-scroll">
-          <table className="jobs">
-          <thead>
+      <div className="jobs-layout">
+        <JobsSidebar jobs={jobs} claimed={claimedInWork} filters={filters} setFilters={setFilters} />
+        <section className="card jobs-main">
+          <div className="jobs-toolbar">
+            <div className="jobs-toolbar-title">
+              <h2 className="jobs-h1">Jobs</h2>
+              <p className="jobs-sub">Monitor and manage background work across your repository.</p>
+            </div>
+            <div className="jobs-controls">
+              <div className="search-field">
+                <IconSearch />
+                <input
+                  type="search"
+                  placeholder="Search jobs…"
+                  value={filters.q}
+                  onChange={(e) => setFilters({ ...filters, q: e.target.value })}
+                  aria-label="Search jobs"
+                />
+                <span className="kbd-hint">⌘K</span>
+              </div>
+              <select
+                className="state-filter"
+                value={stateDropdownValue}
+                onChange={(e) => {
+                  const v = e.target.value
+                  setFilters({ ...filters, states: v && v !== '__multi' ? [v as JobState] : [] })
+                }}
+                aria-label="Filter by state"
+              >
+                <option value="">All states</option>
+                {stateDropdownValue === '__multi' && <option value="__multi">Filtered…</option>}
+                {FILTER_STATES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+              <Link to={`/p/${owner}/${project}/jobs/new`} className="btn-newjob-link">
+                <button className="btn-primary-glow">+ New job</button>
+              </Link>
+            </div>
+          </div>
+          <div className="table-scroll">
+            <table className="jobs">
+            <thead>
             <tr>
+              <th className="spark-col" aria-label="starred"></th>
               <th className="sortable" onClick={() => toggleSort('id')}>
                 #{sortIndicator('id')}
               </th>
@@ -377,10 +421,14 @@ export function ProjectPage() {
               return (
               <tr
                 key={j.id}
-                className={[i % 2 ? 'row-stripe' : '', j.state === 'Draft' ? 'row-draft' : '']
+                data-state={j.state}
+                className={['row-accent', i % 2 ? 'row-stripe' : '', j.state === 'Draft' ? 'row-draft' : '']
                   .filter(Boolean)
-                  .join(' ') || undefined}
+                  .join(' ')}
               >
+                <td className="spark-cell">
+                  <span className="row-spark" aria-hidden="true">✦</span>
+                </td>
                 <td>
                   <Link to={`/p/${owner}/${project}/jobs/${j.id}`}>{j.id}</Link>
                 </td>
@@ -504,15 +552,17 @@ export function ProjectPage() {
             })}
             {sorted.length === 0 && (
               <tr>
-                <td colSpan={7} className="dim">
-                  {jobs.length === 0 ? 'no jobs yet' : 'no jobs match — try “show finished”'}
+                <td colSpan={9} className="dim">
+                  {jobs.length === 0 ? 'no jobs yet' : 'no jobs match — adjust filters'}
                 </td>
               </tr>
             )}
           </tbody>
-          </table>
-        </div>
-      </section>
+            </table>
+          </div>
+        </section>
+      </div>
+      <StatusFooter jobs={jobs} fleet={fleet.fleet} fleetUnavailable={fleet.unavailable} />
       <CapacityWidget fleet={fleet.fleet} unavailable={fleet.unavailable} />
     </div>
   )
