@@ -919,13 +919,18 @@ async fn fetch_job(store: &NatsStore, owner: &str, project: &str, seq: u64) -> V
 /// read, never stored, like the retry/rework counts (§1.1).
 fn job_reply_with_awaiting(job: &types::Job, tasks: &[types::Task]) -> Vec<u8> {
     use types::JobState;
-    let awaiting = tasks
-        .iter()
-        .find(|t| {
-            t.state == types::TaskState::Pending
-                && (matches!(t.kind, types::TaskKind::Human { .. })
-                    || t.performed_by == Some(types::Performer::Human))
+    // A terminal job (Done/Revoked) asks nothing of a human, even if a stale
+    // Pending task record lingers in its log (a pre-fix zombie). Guard here so
+    // the derived field agrees with list_pending's terminal-job filter.
+    let awaiting = (!job.state.is_terminal())
+        .then(|| {
+            tasks.iter().find(|t| {
+                t.state == types::TaskState::Pending
+                    && (matches!(t.kind, types::TaskKind::Human { .. })
+                        || t.performed_by == Some(types::Performer::Human))
+            })
         })
+        .flatten()
         .map(|t| {
             let kind = match job.state {
                 JobState::Work => "work",
@@ -1097,26 +1102,42 @@ async fn list_tags(repos: &RepoManager, owner: &str, project: &str) -> vcs::Resu
 }
 
 async fn list_pending(store: &NatsStore, owner: &str, project: &str) -> Vec<u8> {
-    match store.tasks().await {
+    let all = match store.tasks().await {
         Ok(tasks) => match tasks.list_for_project(owner, project).await {
-            Ok(all) => {
-                let pending: Vec<_> = all
-                    .into_iter()
-                    .filter(|t| {
-                        // Human-kind waits AND claimed attempts of any kind
-                        // (§1.2 claims) — the latter are in-progress-by-human,
-                        // not passive waits; performed_by distinguishes them.
-                        t.state == types::TaskState::Pending
-                            && (matches!(t.kind, types::TaskKind::Human { .. })
-                                || t.performed_by == Some(types::Performer::Human))
-                    })
-                    .collect();
-                ok_reply(&pending)
-            }
-            Err(e) => error_reply(&e.into()),
+            Ok(all) => all,
+            Err(e) => return error_reply(&e.into()),
         },
-        Err(e) => error_reply(&e.into()),
-    }
+        Err(e) => return error_reply(&e.into()),
+    };
+    // A Pending task whose owning job is terminal (revoked/done) is a zombie:
+    // resolving it is pointless because the job no longer exists to advance.
+    // Revoke now closes its own tasks (§2.1), but records predating that fix
+    // must still disappear from the inbox without a migration, so join against
+    // the job records already in KV and drop any terminal-job task here.
+    let terminal: std::collections::HashSet<u64> = match store.jobs().await {
+        Ok(jobs) => match jobs.list(owner, project).await {
+            Ok(jobs) => jobs
+                .into_iter()
+                .filter(|j| j.state.is_terminal())
+                .map(|j| j.id)
+                .collect(),
+            Err(e) => return error_reply(&e.into()),
+        },
+        Err(e) => return error_reply(&e.into()),
+    };
+    let pending: Vec<_> = all
+        .into_iter()
+        .filter(|t| {
+            // Human-kind waits AND claimed attempts of any kind (§1.2 claims)
+            // — the latter are in-progress-by-human, not passive waits;
+            // performed_by distinguishes them.
+            t.state == types::TaskState::Pending
+                && (matches!(t.kind, types::TaskKind::Human { .. })
+                    || t.performed_by == Some(types::Performer::Human))
+                && !terminal.contains(&t.job_seq)
+        })
+        .collect();
+    ok_reply(&pending)
 }
 
 #[cfg(test)]
@@ -1216,5 +1237,18 @@ mod tests {
         // No tasks at all.
         let v = awaiting(&job(JobState::Work), &[]);
         assert!(v.is_null());
+    }
+
+    #[test]
+    fn awaiting_human_null_on_terminal_job() {
+        // A terminal job asks nothing of a human even if a stale Pending human
+        // task lingers in its log (a pre-fix zombie): the derived field is null.
+        for state in [JobState::Revoked, JobState::Done] {
+            let v = awaiting(
+                &job(state),
+                &[human_task(3, TaskPhase::Work, TaskState::Pending)],
+            );
+            assert!(v.is_null(), "{state:?} should not await a human");
+        }
     }
 }

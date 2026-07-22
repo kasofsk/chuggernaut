@@ -382,6 +382,8 @@ pub enum TaskResolution {
 
 `action` is only meaningful on escalation tasks. `structured` is required (non-null) on `Fail`; optional on all others.
 
+**Revoke closes tasks.** Revoking a job (§2.1 Revoked transition) force-closes every Pending human/escalation task it owns, the same way it kills the job's Running containers — a terminal job asks nothing of a human, so no zombie should survive in the operator inbox. Each such task is marked `Done` with a synthetic `TaskResult::Human` carrying `pass: false`, `action: Revoke`, and `operator: "system"`, recording that the revoke — not an operator resolution — retired it. As a second line of defense, the operator inbox (`req.tasks.list.pending`, §6.1) and the derived `awaiting_human` job field both filter out any Pending task whose owning job is already terminal, so records predating this rule disappear from the inbox without a migration.
+
 **Token usage:** agent work tasks (`TaskResult::Work`) and agent eval tasks (`TaskResult::Agent`) carry optional `token_usage` populated at submit time. `token_usage` is `None` when a container crashes before submitting — this is expected and does not affect retry logic. Command and human tasks never carry token usage.
 
 **NATS KV key:** `tasks.{owner}.{project}.{job_seq}.{task_id}`
@@ -619,7 +621,7 @@ The authoritative definition of all valid job state transitions. No transition e
 | `Stalled` | `Ready` | Operator resolves a pre-Work escalation with `action: Retry`; the failed step succeeds (re-validation passes / re-enqueue) — see §1.2 pre-Work escalations | — | Record `base_ref` = current default HEAD; set `ready_at` if unset; enqueue; publish `job-escalation-resolved` then `job-unblocked` |
 | `Stalled` | `Stalled` | Operator resolves a pre-Work escalation with `action: Retry`; the failed step still fails | — | Create a new Human task describing the failure; job remains Stalled |
 | `Stalled` | `Revoked` | Operator resolves a pre-Work escalation with `action: Revoke` | — | See Revoked transition below; publish `job-escalation-resolved` then `job-revoked` |
-| any non-terminal | `Revoked` | `POST .../revoke` | Job not already Done or Revoked | Kill Running tasks; cancel Pending tasks; cascade Revoked to Frozen/Blocked/Ready dependents (transitively); dependents in Work/Evaluation/WrapUp/Escalated/Stalled left in current state; delete branch `job/{seq}` if it exists; publish `job-revoked` |
+| any non-terminal | `Revoked` | `POST .../revoke` | Job not already Done or Revoked | Kill Running tasks; **close Pending human/escalation tasks** (mark `Done` with a synthetic `TaskResult::Human` — `operator: "system"`, `action: Revoke` — see §1.2 revoke-closes-tasks) so none linger in the operator inbox; cascade Revoked to Frozen/Blocked/Ready dependents (transitively); dependents in Work/Evaluation/WrapUp/Escalated/Stalled left in current state; delete branch `job/{seq}` if it exists; publish `job-revoked` |
 
 **State descriptions:**
 - **Frozen** — created, awaiting operator approval; no execution begins
@@ -701,7 +703,7 @@ The dispatcher is the sole writer of all job and task state. A single process dr
 Responsibilities:
 1. On `req.jobs.create.*`: write job record to `jobs.*` KV; publish `job-created`; update `rdeps` index
 2. On job `Done`: read `rdeps` index; for each newly-unblocked job, record `base_ref` = current HEAD of default branch; transition Blocked → Ready; enqueue each newly-Ready job for execution
-3. On job `Revoked`: kill Running tasks; cancel Pending tasks; cascade Revoked to Frozen/Blocked/Ready dependents (transitively); leave Work/Evaluation/Escalated dependents in current state
+3. On job `Revoked`: kill Running tasks; close Pending human/escalation tasks (§1.2 revoke-closes-tasks); cascade Revoked to Frozen/Blocked/Ready dependents (transitively); leave Work/Evaluation/Escalated dependents in current state
 4. On `req.jobs.release.*`: run release validation (see §2.2); if valid and all deps Done, record `base_ref` and transition Frozen → Ready and enqueue for execution; else transition Frozen → Blocked
 5. Execute Ready jobs from the work queue (see §3.2). The dispatcher maintains an in-memory FIFO queue of Ready job IDs. A job is enqueued when it enters Ready state (via steps 2 or 4 above, or after restart reconciliation). The execution loop dequeues one job at a time and drives it through §3.2; container monitoring runs concurrently so multiple containers may run simultaneously, but state transitions remain sequential.
 6. On `req.vcs.*`: serve VCS queries by shelling out to `git` against the bare repo on disk

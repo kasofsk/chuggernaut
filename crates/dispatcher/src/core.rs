@@ -1083,6 +1083,7 @@ impl Core {
         for &target in std::iter::once(&seq).chain(cascaded.iter()) {
             let mut j = self.must_get(owner, project, target)?.clone();
             self.kill_running_containers(owner, project, target).await;
+            self.close_pending_tasks(owner, project, target).await;
             self.active
                 .remove(&(owner.to_string(), project.to_string(), target));
             self.set_state(&mut j, JobState::Revoked).await?;
@@ -1191,6 +1192,39 @@ impl Core {
             {
                 let _ = self.backend.kill(cid).await;
             }
+        }
+    }
+
+    /// Force-close a revoked job's Pending human/escalation tasks (spec §1.2,
+    /// §2.1 Revoked transition): a terminal job keeps no live inbox item, the
+    /// same way its Running containers are killed. Each is marked `Done` with a
+    /// synthetic `TaskResult::Human` (`operator: "system"`, `action: Revoke`)
+    /// so the task log stays truthful and nothing left in the inbox resolves to
+    /// a job that no longer exists.
+    pub(crate) async fn close_pending_tasks(&self, owner: &str, project: &str, seq: u64) {
+        let Ok(tasks) = self.tasks.list_for_job(owner, project, seq).await else {
+            return;
+        };
+        for t in tasks {
+            let human_pending = t.state == types::TaskState::Pending
+                && (matches!(t.kind, types::TaskKind::Human { .. })
+                    || t.performed_by == Some(types::Performer::Human));
+            if !human_pending {
+                continue;
+            }
+            let now = Utc::now();
+            let mut closed = t;
+            closed.result = Some(types::TaskResult::Human {
+                pass: false,
+                abort: false,
+                structured: Some(serde_json::json!({ "closed_by": "revoke" })),
+                action: Some(types::EscalationAction::Revoke),
+                operator: "system".into(),
+                resolved_at: now,
+            });
+            closed.state = types::TaskState::Done;
+            closed.completed_at = Some(now);
+            let _ = self.tasks.put(&closed).await;
         }
     }
 

@@ -615,6 +615,119 @@ async fn escalation_retry_relaunches_work_without_branch_reset() {
     assert!(events.contains(&"job-escalation-resolved".to_string()));
 }
 
+/// Hit the real `req.tasks.list.pending` request path — the operator inbox as
+/// the API forwards it — and decode the reply into the task list.
+async fn pending_inbox(store: &NatsStore) -> Vec<types::Task> {
+    let msg = store
+        .request_timeout(
+            &store::subjects::tasks_list_pending("acme", "api"),
+            b"{}",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    serde_json::from_slice(&msg.payload).unwrap()
+}
+
+/// Revoking a job with a Pending escalation empties the inbox and leaves the
+/// escalation task terminal, recording that the revoke — not an operator —
+/// retired it (spec §1.2 revoke-closes-tasks, §2.1 Revoked transition).
+#[tokio::test]
+async fn revoke_closes_pending_escalation_task() {
+    let Some(rig) = rig().await else { return };
+    rig.provider.script_exits([1, 1]); // exhaust work_retries: 1 → escalate
+
+    let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The escalation task sits in the inbox as a Pending Human task.
+    let inbox = pending_inbox(&rig.store).await;
+    assert_eq!(inbox.len(), 1);
+    let esc_id = inbox[0].id;
+    assert_eq!(inbox[0].state, TaskState::Pending);
+
+    rig.handle.revoke_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Revoked).await;
+
+    // No zombie remains in the inbox.
+    assert!(pending_inbox(&rig.store).await.is_empty());
+
+    // The task record is terminal, closed by a synthetic system revoke.
+    let task = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .get("acme", "api", job.id, esc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(task.state, TaskState::Done);
+    match task.result {
+        Some(types::TaskResult::Human {
+            operator,
+            action,
+            pass,
+            ..
+        }) => {
+            assert_eq!(operator, "system");
+            assert_eq!(action, Some(EscalationAction::Revoke));
+            assert!(!pass);
+        }
+        other => panic!("expected synthetic Human result, got {other:?}"),
+    }
+}
+
+/// A zombie predating the revoke-closes-tasks fix — a Pending task whose job is
+/// already terminal in KV — must vanish from the inbox with no migration
+/// (spec §1.2 revoke-closes-tasks, second line of defense).
+#[tokio::test]
+async fn list_pending_hides_terminal_job_zombie() {
+    let Some(rig) = rig().await else { return };
+    let jobs = rig.store.jobs().await.unwrap();
+    let tasks = rig.store.tasks().await.unwrap();
+
+    // Seed a Revoked job with a leftover Pending Human escalation task.
+    let mut job = rig.handle.create_job(req("flaky")).await.unwrap();
+    job.state = JobState::Revoked;
+    jobs.put(&job).await.unwrap();
+    let zombie = types::Task {
+        id: 1,
+        job_seq: job.id,
+        project: "acme/api".into(),
+        phase: TaskPhase::Work,
+        cycle: 1,
+        kind: types::TaskKind::Human {
+            prompt: "resolve me".into(),
+        },
+        state: TaskState::Pending,
+        attempt: 1,
+        evaluator: None,
+        stage: 0,
+        performed_by: None,
+        container_id: None,
+        session_id: None,
+        result: None,
+        created_at: job.created_at,
+        started_at: None,
+        completed_at: None,
+    };
+    tasks.put(&zombie).await.unwrap();
+
+    // The pending task exists in KV, but the inbox filters it out.
+    assert_eq!(
+        tasks
+            .list_for_job("acme", "api", job.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(pending_inbox(&rig.store).await.is_empty());
+}
+
 async fn event_types(store: &NatsStore) -> Vec<String> {
     store
         .read_stream("job-events", 100)
