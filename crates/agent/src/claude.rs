@@ -1,18 +1,37 @@
 //! ClaudeProvider (spec §4.3).
 //!
 //! CMD (inside the workspace bootstrap): `claude -p "$(cat /chuggernaut/prompt.md)"
-//! --model {model} --append-system-prompt {system_prompt} --mcp-config {json}`.
+//! --model {model} --append-system-prompt {system_prompt}
+//! --mcp-config /chuggernaut/mcp-config.json`.
 //! Prompt content is injected at `/chuggernaut/prompt.md` — never a path, never
-//! inline in the shell command. Supports push notifications (`claude/channel`
-//! experimental capability).
+//! inline in the shell command. The `--mcp-config` payload carries NATS
+//! credentials (the channel MCP server's `NATS_CREDS` env), so it is injected
+//! as a mode-0600 file rather than passed inline in argv: argv leaks into `ps`,
+//! `/proc/*/cmdline`, and crash reports (spec §4.3). Supports push notifications
+//! (`claude/channel` experimental capability).
 
 use crate::{AgentError, AgentOutput, AgentProvider, AgentRunConfig, McpServerConfig, PROMPT_PATH};
 use async_trait::async_trait;
 use container::{ContainerBackend, ContainerLaunchConfig, InjectedFile, bootstrap_cmd};
 use std::sync::Arc;
 
+/// Where the `--mcp-config` payload is injected. Kept out of argv because it
+/// carries the job-scoped NATS credential (spec §4.3); mode 0600 so only the
+/// container's own root can read it.
+pub const MCP_CONFIG_PATH: &str = "/chuggernaut/mcp-config.json";
+
 pub struct ClaudeProvider {
     backend: Arc<dyn ContainerBackend>,
+}
+
+/// A composed agent invocation: the shell line plus any provider-owned files it
+/// references. Every credential-bearing payload rides in `files` (mode 0600),
+/// never in `command` — so `ps`/`cmdline` never sees a secret. Work,
+/// agent-evaluator, and inline-review author/reviewer commands all compose
+/// through here and inherit that property.
+pub(crate) struct Invocation {
+    pub command: String,
+    pub files: Vec<InjectedFile>,
 }
 
 impl ClaudeProvider {
@@ -20,7 +39,9 @@ impl ClaudeProvider {
         Self { backend }
     }
 
-    /// The shell line executed after the workspace bootstrap's clone+cd.
+    /// The shell line executed after the workspace bootstrap's clone+cd, plus
+    /// the provider-owned files it references.
+    ///
     /// `--dangerously-skip-permissions`: headless agents cannot answer
     /// permission prompts; the container is the sandbox (the agent image
     /// sets IS_SANDBOX=1 so the flag is accepted under root).
@@ -30,35 +51,49 @@ impl ClaudeProvider {
     /// result object carrying real `usage` and the session id — the CLI's
     /// documented interface, as opposed to the transcript, whose format is
     /// internal and version-unstable. Nothing read agent stdout before this.
-    fn claude_invocation(config: &AgentRunConfig) -> String {
-        let mut cmd = format!(
+    ///
+    /// The MCP config is written to [`MCP_CONFIG_PATH`] (mode 0600) and passed
+    /// by path: the CLI accepts a file for `--mcp-config`, and the payload
+    /// carries the NATS credential, which must never enter argv.
+    fn claude_invocation(config: &AgentRunConfig) -> Invocation {
+        let mut command = format!(
             "claude -p \"$(cat {PROMPT_PATH})\" --dangerously-skip-permissions \
              --output-format json --session-id {}",
             shell_quote(&config.session_id)
         );
         if let Some(model) = &config.model {
-            cmd.push_str(&format!(" --model {}", shell_quote(model)));
+            command.push_str(&format!(" --model {}", shell_quote(model)));
         }
         if let Some(system) = &config.system_prompt {
-            cmd.push_str(&format!(" --append-system-prompt {}", shell_quote(system)));
+            command.push_str(&format!(" --append-system-prompt {}", shell_quote(system)));
         }
+        let mut files = vec![];
         if !config.mcp_servers.is_empty() {
             let json = mcp_config_json(&config.mcp_servers);
-            cmd.push_str(&format!(" --mcp-config {}", shell_quote(&json)));
+            command.push_str(&format!(" --mcp-config {MCP_CONFIG_PATH}"));
+            files.push(InjectedFile {
+                container_path: MCP_CONFIG_PATH.to_string(),
+                contents: json.into_bytes(),
+                mode: 0o600,
+                artifact: None,
+            });
         }
-        cmd
+        Invocation { command, files }
     }
 }
 
 #[async_trait]
 impl AgentProvider for ClaudeProvider {
     async fn run(&self, config: AgentRunConfig) -> Result<AgentOutput, AgentError> {
+        let invocation = Self::claude_invocation(&config);
+
         let mut files = vec![InjectedFile {
             container_path: PROMPT_PATH.to_string(),
             contents: config.prompt.clone().into_bytes(),
             mode: 0o644,
             artifact: None,
         }];
+        files.extend(invocation.files);
         files.extend(config.files.iter().cloned());
 
         let mut env = config.env.clone();
@@ -66,7 +101,7 @@ impl AgentProvider for ClaudeProvider {
 
         let launch = ContainerLaunchConfig {
             image: config.image.clone(),
-            cmd: bootstrap_cmd(&["sh".into(), "-c".into(), Self::claude_invocation(&config)]),
+            cmd: bootstrap_cmd(&["sh".into(), "-c".into(), invocation.command]),
             env,
             files,
             cpu_limit: None,    // resource limits ride on the dispatcher's
@@ -205,23 +240,71 @@ mod tests {
     /// fixture is where it should break.
     const RESULT_JSON: &str = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"duration_ms":499,"duration_api_ms":0,"num_turns":1,"result":"Invalid API key","stop_reason":"stop_sequence","session_id":"6f1db8aa-e7a0-465c-ad2c-492d6ef2cd86","total_cost_usd":0,"usage":{"input_tokens":12,"cache_creation_input_tokens":34,"cache_read_input_tokens":56,"output_tokens":78,"service_tier":"standard"},"modelUsage":{},"permission_denials":[],"terminal_reason":"api_error","uuid":"c5596749-3e8f-4175-8a7a-be175d506a9e"}"#;
 
+    /// A realistic job-scoped NATS credential — user JWT + NKEY seed — as it
+    /// arrives in the channel MCP server's `env`. The whole point of the change
+    /// is that no fragment of this ever reaches argv.
+    const NATS_CREDS: &str = "-----BEGIN NATS USER JWT-----\n\
+        eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.PAYLOAD.SIG\n\
+        ------END NATS USER JWT------\n\n\
+        -----BEGIN USER NKEY SEED-----\n\
+        SUAGC3DCT7DHY6TQKEPNXKVHTHULNVR7KE5G6QYWQ2Q4JW3AB2LG5UGXNU\n\
+        ------END USER NKEY SEED------\n";
+
+    /// A config whose channel MCP server carries the live NATS credential in
+    /// its env — the shape the dispatcher hands every real work/eval run.
+    fn config_with_creds() -> AgentRunConfig {
+        let mut c = config();
+        c.mcp_servers = vec![McpServerConfig {
+            name: "chuggernaut-channel".into(),
+            command: "/usr/local/bin/chuggernaut-channel".into(),
+            args: vec![],
+            env: HashMap::from([
+                ("NATS_URL".into(), "nats://x".into()),
+                ("NATS_CREDS".into(), NATS_CREDS.into()),
+            ]),
+        }];
+        c
+    }
+
+    /// Assert the composed argv leaks no credential material, and — when the run
+    /// has MCP servers — that the credential instead rides in a mode-0600 file.
+    fn assert_no_creds_in_argv(inv: &Invocation) {
+        for needle in [
+            NATS_CREDS,
+            "NATS USER JWT",
+            "USER NKEY SEED",
+            "SUAGC3DCT7DHY6TQKEPNXKVHTHULNVR7KE5G6QYWQ2Q4JW3AB2LG5UGXNU",
+            "NATS_CREDS",
+        ] {
+            assert!(
+                !inv.command.contains(needle),
+                "credential fragment {needle:?} leaked into argv: {}",
+                inv.command
+            );
+        }
+    }
+
     #[test]
     fn invocation_composes_all_flags() {
-        let cmd = ClaudeProvider::claude_invocation(&config());
-        assert!(cmd.starts_with(
+        let inv = ClaudeProvider::claude_invocation(&config());
+        assert!(inv.command.starts_with(
             "claude -p \"$(cat /chuggernaut/prompt.md)\" --dangerously-skip-permissions"
         ));
-        assert!(cmd.contains("--model 'claude-sonnet-4-6'"));
-        assert!(cmd.contains("--append-system-prompt 'KO facts'"));
-        assert!(cmd.contains("--mcp-config"));
-        assert!(cmd.contains("chuggernaut-channel"));
+        assert!(inv.command.contains("--model 'claude-sonnet-4-6'"));
+        assert!(inv.command.contains("--append-system-prompt 'KO facts'"));
+        // The MCP config travels by path, never inline.
+        assert!(
+            inv.command
+                .contains("--mcp-config /chuggernaut/mcp-config.json")
+        );
+        assert!(!inv.command.contains("chuggernaut-channel"));
     }
 
     /// Without these two the transcript is unaddressable and usage unmeasurable
     /// — the whole point of capture.
     #[test]
     fn invocation_pins_session_and_json_output() {
-        let cmd = ClaudeProvider::claude_invocation(&config());
+        let cmd = ClaudeProvider::claude_invocation(&config()).command;
         assert!(
             cmd.contains("--session-id 'da08d5f3-844e-430e-8363-39b4882f437b'"),
             "{cmd}"
@@ -235,12 +318,64 @@ mod tests {
         c.model = None;
         c.system_prompt = None;
         c.mcp_servers = vec![];
-        let cmd = ClaudeProvider::claude_invocation(&c);
+        let inv = ClaudeProvider::claude_invocation(&c);
         assert_eq!(
-            cmd,
+            inv.command,
             "claude -p \"$(cat /chuggernaut/prompt.md)\" --dangerously-skip-permissions \
              --output-format json --session-id 'da08d5f3-844e-430e-8363-39b4882f437b'"
         );
+        assert!(inv.files.is_empty());
+    }
+
+    /// The credential leak that motivated this change: a plain work task's argv
+    /// must carry no JWT/NKEY material.
+    #[test]
+    fn plain_work_argv_carries_no_credentials() {
+        assert_no_creds_in_argv(&ClaudeProvider::claude_invocation(&config_with_creds()));
+    }
+
+    /// An agent-evaluator run composes through the same primitive — same
+    /// credential-out-of-argv guarantee.
+    #[test]
+    fn agent_evaluator_argv_carries_no_credentials() {
+        let mut c = config_with_creds();
+        c.system_prompt = Some("evaluate the change against the brief".into());
+        c.eval_context = vec![];
+        assert_no_creds_in_argv(&ClaudeProvider::claude_invocation(&c));
+    }
+
+    /// The inline-review author/reviewer commands are composed the same way
+    /// (spec §4.5); assert the shape once here.
+    #[test]
+    fn inline_review_argv_carries_no_credentials() {
+        let mut c = config_with_creds();
+        c.merge_conflict = Some("crates/store/src/lib.rs".into());
+        assert_no_creds_in_argv(&ClaudeProvider::claude_invocation(&c));
+    }
+
+    /// The credential must land in the injected file — mode 0600, at the
+    /// documented path — and nowhere else.
+    #[test]
+    fn mcp_config_file_is_private_and_carries_the_creds() {
+        let inv = ClaudeProvider::claude_invocation(&config_with_creds());
+        let file = inv
+            .files
+            .iter()
+            .find(|f| f.container_path == MCP_CONFIG_PATH)
+            .expect("mcp config file injected");
+        assert_eq!(
+            file.mode, 0o600,
+            "credential file must not be world/group readable"
+        );
+        // The payload is JSON, so newlines are escaped — assert on the NKEY seed
+        // and JWT marker, which survive serialization verbatim.
+        let contents = String::from_utf8(file.contents.clone()).unwrap();
+        assert!(
+            contents.contains("SUAGC3DCT7DHY6TQKEPNXKVHTHULNVR7KE5G6QYWQ2Q4JW3AB2LG5UGXNU"),
+            "creds must ride in the file"
+        );
+        assert!(contents.contains("NATS USER JWT"));
+        assert!(file.artifact.is_none());
     }
 
     #[test]

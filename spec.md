@@ -1064,7 +1064,7 @@ pub struct AgentOutput {
 
 Provider and model are configured at platform level (see §12.4) with per-job-type overrides at `work:` level or per eval step. The model resolution chain is: per-job override → job-type declaration → project default (`jobs/_defaults.yaml`) → platform default (§12.4). Provider resolution is job-type declaration → platform default; per-project provider defaults and team-level defaults are deferred.
 
-**`ClaudeProvider`** — container CMD: `claude -p "$(cat /chuggernaut/prompt.md)" --model {model} --append-system-prompt {system_prompt} --mcp-config {json}`. The `{json}` is the serialized `Vec<McpServerConfig>` passed inline on the command line.
+**`ClaudeProvider`** — container CMD: `claude -p "$(cat /chuggernaut/prompt.md)" --model {model} --append-system-prompt {system_prompt} --mcp-config /chuggernaut/mcp-config.json`. The serialized `Vec<McpServerConfig>` (`{"mcpServers": …}`) carries the channel server's `NATS_CREDS`, so it is **not** passed inline on argv — inline argv leaks into `ps`, `/proc/*/cmdline`, and crash reports. Instead the dispatcher-composed payload is injected as a mode-0600 file at `/chuggernaut/mcp-config.json` (the CLI accepts a path for `--mcp-config`); credentials travel via injected files or container env, never argv.
 
 **`CodexProvider`** — before launch, the dispatcher serializes `AgentRunConfig.mcp_servers` into Codex's MCP config format and injects it into the container at `/repo/.codex/config.toml` (same mechanism as the prompt file). Container CMD: `codex exec "$(cat /chuggernaut/prompt.md)" --model {model}` (system prompt prepended to the prompt file content, no native flag).
 
