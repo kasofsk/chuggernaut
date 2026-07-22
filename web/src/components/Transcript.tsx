@@ -78,6 +78,12 @@ function fmtBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`
 }
 
+// Character count for a thinking run's summary — '812 chars', '~2.1k chars'.
+function fmtChars(n: number): string {
+  if (n < 1000) return `${n} chars`
+  return `~${(n / 1000).toFixed(1)}k chars`
+}
+
 // Huge tool results would bloat the DOM; render a bounded head with a note.
 const RESULT_CAP = 20_000
 function capText(s: string): { text: string; capped: boolean } {
@@ -215,54 +221,131 @@ function ResultBlock({ event }: { event: Json }) {
   )
 }
 
-function EventBlock({ event, raw }: { event: Json; raw: string }) {
-  switch (event.type) {
-    case 'assistant':
-    case 'user': {
-      const blocks = messageBlocks(event)
-      if (!blocks) return <RawJson raw={raw} label={String(event.type)} />
-      return (
-        <>
-          {blocks.map((b, i) => (
-            <ContentBlock key={i} block={b} />
+function SystemBlock({ event, raw }: { event: Json; raw: string }) {
+  const subtype = typeof event.subtype === 'string' ? event.subtype : ''
+  const model = typeof event.model === 'string' ? ` · ${event.model}` : ''
+  return (
+    <details className="tx-block tx-system">
+      <summary>
+        <span className="tx-kind">{`system${subtype ? ' · ' + subtype : ''}`}</span>
+        {model && <span className="tx-arg dim">{model.slice(3)}</span>}
+      </summary>
+      <TruncatedPre text={raw} />
+    </details>
+  )
+}
+
+// A run of one or more consecutive thinking segments, rendered as a single
+// collapsed entry so a long stream of thinking doesn't drown the readable
+// content. The summary carries the segment count and total size; expanding
+// reveals the segments in order, each in its own bordered box so they stay
+// distinguishable. A lone segment renders like an ordinary thinking block.
+function ThinkingRun({ segments }: { segments: string[] }) {
+  const total = segments.reduce((n, s) => n + s.length, 0)
+  const label =
+    segments.length > 1
+      ? `thinking (${segments.length} segments, ${fmtChars(total)})`
+      : 'thinking'
+  return (
+    <details className="tx-block tx-thinking">
+      <summary>
+        <span className="tx-kind">{label}</span>
+      </summary>
+      {segments.length > 1 ? (
+        <div className="tx-think-segs">
+          {segments.map((s, i) => (
+            <TruncatedPre key={i} text={s} className="tx-think-seg" />
           ))}
-        </>
-      )
-    }
-    case 'result':
-      return <ResultBlock event={event} />
-    case 'system': {
-      const subtype = typeof event.subtype === 'string' ? event.subtype : ''
-      const model = typeof event.model === 'string' ? ` · ${event.model}` : ''
-      return (
-        <details className="tx-block tx-system">
-          <summary>
-            <span className="tx-kind">{`system${subtype ? ' · ' + subtype : ''}`}</span>
-            {model && <span className="tx-arg dim">{model.slice(3)}</span>}
-          </summary>
-          <TruncatedPre text={raw} />
-        </details>
-      )
-    }
-    default:
-      // Unknown / future event type — collapsed raw JSON, never a crash.
-      return <RawJson raw={raw} label={String(event.type)} />
+        </div>
+      ) : (
+        <TruncatedPre text={segments[0]} />
+      )}
+    </details>
+  )
+}
+
+// A flat, ordered render item. Flattening events into this list is what lets a
+// thinking run span content-block *and* event boundaries: consecutive thinking
+// segments coalesce into one item regardless of how the stream chunked them.
+type Item =
+  | { kind: 'raw'; text: string }
+  | { kind: 'thinking'; segments: string[] }
+  | { kind: 'content'; block: Json }
+  | { kind: 'result'; event: Json }
+  | { kind: 'system'; event: Json; raw: string }
+  | { kind: 'unknown'; raw: string; label: string }
+
+// Flatten blocks into render items, coalescing runs of consecutive thinking
+// segments into a single item. Any non-thinking item (assistant text, tool_use,
+// tool_result, result, system, shell output) breaks the run.
+function flattenBlocks(blocks: Block[]): Item[] {
+  const items: Item[] = []
+  const pushThinking = (text: string) => {
+    const last = items[items.length - 1]
+    if (last && last.kind === 'thinking') last.segments.push(text)
+    else items.push({ kind: 'thinking', segments: [text] })
   }
+  for (const b of blocks) {
+    if (b.kind === 'raw') {
+      items.push({ kind: 'raw', text: b.text })
+      continue
+    }
+    const event = b.event
+    switch (event.type) {
+      case 'assistant':
+      case 'user': {
+        const cblocks = messageBlocks(event)
+        if (!cblocks) {
+          items.push({ kind: 'unknown', raw: b.raw, label: String(event.type) })
+          break
+        }
+        for (const cb of cblocks) {
+          if (cb.type === 'thinking' || cb.type === 'redacted_thinking') {
+            pushThinking(typeof cb.thinking === 'string' ? cb.thinking : '[redacted]')
+          } else {
+            items.push({ kind: 'content', block: cb })
+          }
+        }
+        break
+      }
+      case 'result':
+        items.push({ kind: 'result', event })
+        break
+      case 'system':
+        items.push({ kind: 'system', event, raw: b.raw })
+        break
+      default:
+        // Unknown / future event type — collapsed raw JSON, never a crash.
+        items.push({ kind: 'unknown', raw: b.raw, label: String(event.type) })
+    }
+  }
+  return items
 }
 
 export function Transcript({ text }: { text: string }) {
-  const blocks = useMemo(() => parseTranscript(text), [text])
+  const items = useMemo(() => flattenBlocks(parseTranscript(text)), [text])
   return (
     <div className="transcript">
-      {blocks.map((b, i) =>
-        b.kind === 'raw' ? (
-          <pre key={i} className="tx-shell">
-            {b.text}
-          </pre>
-        ) : (
-          <EventBlock key={i} event={b.event} raw={b.raw} />
-        ),
-      )}
+      {items.map((it, i) => {
+        switch (it.kind) {
+          case 'raw':
+            return (
+              <pre key={i} className="tx-shell">
+                {it.text}
+              </pre>
+            )
+          case 'thinking':
+            return <ThinkingRun key={i} segments={it.segments} />
+          case 'content':
+            return <ContentBlock key={i} block={it.block} />
+          case 'result':
+            return <ResultBlock key={i} event={it.event} />
+          case 'system':
+            return <SystemBlock key={i} event={it.event} raw={it.raw} />
+          case 'unknown':
+            return <RawJson key={i} raw={it.raw} label={it.label} />
+        }
+      })}
     </div>
   )
 }

@@ -1027,6 +1027,18 @@ td.actions button {
 .tx-unknown .tx-kind {
   color: var(--dim);
 }
+/* A collapsed thinking run expands to its segments stacked in order; each keeps
+   its own bordered, scrollable box (so nothing scrolls the page sideways) and
+   the gap is the subtle separator between them. */
+.tx-think-segs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-top: var(--sp-1);
+}
+.tx-think-seg {
+  margin-top: 0;
+}
 .tx-error .tx-kind {
   color: var(--danger);
 }
