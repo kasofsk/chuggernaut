@@ -17,13 +17,16 @@ use container::{
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use store::worker::{encode_reply, op_from_subject};
 use store::{NatsStore, StoreError};
 use types::worker::{
     ContainerRef, CopyFileOk, CopyFileRequest, FileSource, InspectOk, LaunchOk, LogsOk, LogsTailOk,
-    LogsTailRequest, PingOk, WireStatus, WorkerError, WorkerLaunchRequest, WorkerReply, b64_decode,
-    b64_encode,
+    LogsTailRequest, PingOk, RefreshOk, RefreshRequest, WireStatus, WorkerError,
+    WorkerLaunchRequest, WorkerReply, b64_decode, b64_encode,
 };
 
 /// Logs are tailed to fit the reply under NATS's 1MB max_payload after
@@ -32,6 +35,80 @@ const LOGS_CAP: usize = 700 * 1024;
 
 /// Concurrent op handlers — a slow launch must not starve inspect polls.
 const MAX_INFLIGHT: usize = 16;
+
+/// How long the swap step waits for in-flight launches to finish before it
+/// gives up and aborts (spec §3.1 drain guarantee): a launch turns into a
+/// running container in seconds, so this only ever waits out the ones already
+/// in flight when quiescing began.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Guards the daemon self-refresh swap window (spec §3.1 drain guarantee).
+/// Refreshing must never interrupt in-flight job containers, and the daemon
+/// must not replace itself *between accepting a launch and the container
+/// existing* — so once the swap window opens, new launches are refused
+/// (retryably) and the swap waits for accepted-but-not-yet-created launches to
+/// finish. Job containers themselves are untouched by the daemon replace: the
+/// dispatcher's poll-based `wait` re-attaches (spec §3.1).
+#[derive(Default)]
+struct RefreshGate {
+    /// Set for the swap window; refuses new launches. `SeqCst` so it orders
+    /// against `inflight` in the launch/drain handshake below.
+    quiescing: AtomicBool,
+    /// Launches accepted whose container may not yet exist.
+    inflight: AtomicUsize,
+    /// One refresh at a time.
+    refreshing: AtomicBool,
+}
+
+/// Held for the accept→container-exists window of one launch; decrements the
+/// in-flight count on drop so the swap can tell when it is safe to proceed.
+struct LaunchPermit<'a> {
+    gate: &'a RefreshGate,
+}
+
+impl Drop for LaunchPermit<'_> {
+    fn drop(&mut self) {
+        self.gate.inflight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl RefreshGate {
+    /// Reserve a launch slot, or `None` when the node is quiescing for a swap.
+    /// Increment-then-recheck closes the race with [`Self::quiesce`] +
+    /// [`Self::drained`]: either drain observes this increment and waits, or
+    /// this observes the flag and backs off — the swap never races a launch.
+    fn try_launch(&self) -> Option<LaunchPermit<'_>> {
+        if self.quiescing.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.inflight.fetch_add(1, Ordering::SeqCst);
+        if self.quiescing.load(Ordering::SeqCst) {
+            self.inflight.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(LaunchPermit { gate: self })
+    }
+
+    /// Claim the sole refresh slot; `false` if one is already running.
+    fn begin_refresh(&self) -> bool {
+        !self.refreshing.swap(true, Ordering::SeqCst)
+    }
+
+    /// Open the swap window: refuse new launches.
+    fn quiesce(&self) {
+        self.quiescing.store(true, Ordering::SeqCst);
+    }
+
+    /// Abort a refresh that failed before the swap: reopen launches.
+    fn abort(&self) {
+        self.quiescing.store(false, Ordering::SeqCst);
+        self.refreshing.store(false, Ordering::SeqCst);
+    }
+
+    fn drained(&self) -> bool {
+        self.inflight.load(Ordering::SeqCst) == 0
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerRunError {
@@ -54,6 +131,11 @@ struct WorkerState {
     /// Node-local build caching is on (`WORKER_CACHE_DIR` was set). When true,
     /// the backend bind-mounts the cache and every launch gets sccache env.
     cache_enabled: bool,
+    /// Node-local build+swap script for self-refresh (spec §3.1); `None` ⇒
+    /// refresh requests are rejected as unconfigured.
+    refresh_script: Option<PathBuf>,
+    /// Drain guarantee for the self-refresh swap window.
+    refresh: RefreshGate,
 }
 
 /// Run the daemon until ctrl-c. Containers it launched keep running after
@@ -113,7 +195,15 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         artifact_hashes,
         version: version_string(),
         cache_enabled,
+        refresh_script: config.refresh_script.clone(),
+        refresh: RefreshGate::default(),
     });
+    if state.refresh_script.is_none() {
+        tracing::warn!(
+            "WORKER_REFRESH_SCRIPT unwired — this node will reject deploy self-refresh requests \
+             (worker images stay at the deployed SHA until refreshed by hand)"
+        );
+    }
 
     let mut sub = store
         .subscribe_requests(&store::subjects::worker_all(&config.node))
@@ -158,7 +248,7 @@ fn version_string() -> String {
     }
 }
 
-async fn handle(state: &WorkerState, subject: &str, payload: &[u8]) -> Vec<u8> {
+async fn handle(state: &Arc<WorkerState>, subject: &str, payload: &[u8]) -> Vec<u8> {
     match op_from_subject(subject) {
         Some("launch") => encode_reply(&launch(state, payload).await),
         Some("kill") => encode_reply(&kill(state, payload).await),
@@ -169,6 +259,7 @@ async fn handle(state: &WorkerState, subject: &str, payload: &[u8]) -> Vec<u8> {
         Some("ping") => encode_reply(&ping(state).await),
         Some("remove") => encode_reply(&remove(state, payload).await),
         Some("list_exited") => encode_reply(&list_exited(state).await),
+        Some("refresh") => encode_reply(&refresh(state, payload).await),
         other => encode_reply::<()>(&WorkerReply::Err {
             error: WorkerError::Other {
                 message: format!("unknown op {other:?} on {subject}"),
@@ -203,6 +294,17 @@ fn reply<T>(r: Result<T, WorkerError>) -> WorkerReply<T> {
 async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
     reply(
         async {
+            // Drain guarantee (spec §3.1): once the daemon is quiescing for a
+            // self-refresh swap, refuse new launches with NoCapacity — a
+            // *transient* signal the dispatcher queues and retries, so no task
+            // fails. The permit is held until the container exists, so the swap
+            // never lands mid-launch.
+            let _permit = state
+                .refresh
+                .try_launch()
+                .ok_or_else(|| WorkerError::NoCapacity {
+                    message: format!("node {} is refreshing — launch will be retried", state.node),
+                })?;
             let req: WorkerLaunchRequest = parse(payload)?;
             let mut files = Vec::with_capacity(req.files.len());
             for f in req.files {
@@ -394,9 +496,145 @@ async fn ping(state: &WorkerState) -> WorkerReply<PingOk> {
     )
 }
 
+/// Self-refresh (spec §3.1): accept fast, then rebuild and swap in the
+/// background. The build runs while launches continue (it takes minutes);
+/// only the brief swap window quiesces launches. Returns the version we are
+/// refreshing away from — the new one shows up on a later `ping`, clearing the
+/// dispatcher's version-drift warning.
+async fn refresh(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<RefreshOk> {
+    reply(
+        async {
+            let req: RefreshRequest = parse(payload)?;
+            let Some(script) = state.refresh_script.clone() else {
+                return Err(WorkerError::Other {
+                    message: format!(
+                        "node {} has no self-refresh script (WORKER_REFRESH_SCRIPT unset)",
+                        state.node
+                    ),
+                });
+            };
+            let from_version = state.version.clone();
+            if !state.refresh.begin_refresh() {
+                // A refresh is already converging — not an error, and not drift:
+                // report it as not-accepted so the caller skips the swap-wait
+                // rather than logging a scary "not accepted (drift remains)".
+                return Ok(RefreshOk {
+                    accepted: false,
+                    from_version,
+                });
+            }
+            let st = state.clone();
+            tokio::spawn(async move { run_refresh(st, script, req).await });
+            Ok(RefreshOk {
+                accepted: true,
+                from_version,
+            })
+        }
+        .await,
+    )
+}
+
+/// The background refresh sequence: build the images at the SHA (launches keep
+/// flowing), then quiesce + drain in-flight launches and swap the daemon. Any
+/// failure before the swap reopens launches and leaves the old daemon running,
+/// so version drift stays surfaced (via ping) rather than turning into an
+/// outage.
+async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshRequest) {
+    tracing::info!(node = %state.node, sha = %req.sha, tag = %req.tag, "worker refresh: building images");
+    if let Err(e) = run_script(&script, &["build", &req.sha, &req.tag]).await {
+        tracing::error!(node = %state.node, "worker refresh: build failed, aborting: {e}");
+        state.refresh.abort();
+        return;
+    }
+
+    // Drain guarantee: refuse new launches, then wait for accepted-but-not-yet-
+    // created launches to finish before swapping (spec §3.1).
+    state.refresh.quiesce();
+    if !drain(&state.refresh, DRAIN_TIMEOUT).await {
+        tracing::error!(
+            node = %state.node,
+            "worker refresh: in-flight launches did not drain in {DRAIN_TIMEOUT:?}; aborting swap"
+        );
+        state.refresh.abort();
+        return;
+    }
+
+    tracing::info!(node = %state.node, "worker refresh: swapping daemon (job containers survive)");
+    if let Err(e) = run_script(&script, &["swap", &req.tag]).await {
+        // The swap spawns a detached replacement, so on success this process is
+        // simply removed and never returns here. Reaching this arm means the
+        // swap itself failed to launch — reopen so the node keeps serving.
+        tracing::error!(node = %state.node, "worker refresh: swap failed: {e}");
+        state.refresh.abort();
+    }
+}
+
+/// Wait until no launches are in flight, or the timeout elapses. Returns
+/// whether the drain completed.
+async fn drain(gate: &RefreshGate, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while !gate.drained() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    true
+}
+
+/// Run the node-local refresh script; non-zero exit is an error. The script
+/// reads its own ssh-front / git coordinates from the daemon's environment
+/// (spec §3.1) — the daemon passes only the phase, SHA, and tag.
+async fn run_script(script: &Path, args: &[&str]) -> Result<(), String> {
+    let status = tokio::process::Command::new(script)
+        .args(args)
+        .status()
+        .await
+        .map_err(|e| format!("spawning {}: {e}", script.display()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{} {:?} exited {status}", script.display(), args))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The swap window refuses new launches (retryable NoCapacity), and each
+    /// permit is released on drop so the drain can complete — the core of the
+    /// spec §3.1 drain guarantee, exercised without Docker or NATS.
+    #[test]
+    fn refresh_gate_quiesce_and_drain() {
+        let gate = RefreshGate::default();
+
+        // Normal operation: launches are admitted.
+        let p1 = gate.try_launch().expect("admitted before quiescing");
+        assert!(!gate.drained(), "a live launch means not drained");
+
+        // First refresh claims the slot; a concurrent one is refused.
+        assert!(gate.begin_refresh());
+        assert!(!gate.begin_refresh(), "only one refresh at a time");
+
+        // Swap window opens: new launches are refused so the swap can't land
+        // between accepting a launch and the container existing.
+        gate.quiesce();
+        assert!(
+            gate.try_launch().is_none(),
+            "launches refused while quiescing"
+        );
+
+        // The swap must wait for the launch already in flight to finish.
+        assert!(!gate.drained());
+        drop(p1);
+        assert!(gate.drained(), "drained once the in-flight launch releases");
+
+        // Aborting reopens the node (build/drain failure path).
+        gate.abort();
+        assert!(gate.try_launch().is_some(), "launches admitted after abort");
+        assert!(gate.begin_refresh(), "refresh slot freed after abort");
+    }
 
     /// Caching on ⇒ the launch env gains sccache wiring, with `SCCACHE_DIR`
     /// pinned to the same mount path the backend binds.

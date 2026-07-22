@@ -36,6 +36,10 @@ git archive --format=tar HEAD \
 # NODE/NATS URL expand HERE (from chuggernaut.env); \$HOME expands on the node.
 NODE="${CHUG_WORKER_NODE:-nuc}"
 NATS="${WORKER_NATS_URL:?set WORKER_NATS_URL (tailnet NATS URL of the dispatcher host)}"
+# Pass the self-refresh coordinates (spec §3.1) through so a daemon started via
+# this legacy path can also be refreshed later over the worker RPC (no-ssh path).
+# Empty when unset — the daemon then just rejects refresh requests.
+REFRESH_ENV="-e WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-} -e WORKER_GIT_KEY=${WORKER_GIT_KEY:-/data/keys/worker_git}"
 REMOTE="docker rm -f chug-worker >/dev/null 2>&1 || true
 docker run -d --restart=always --name chug-worker \
   -v /var/run/docker.sock:/var/run/docker.sock \
@@ -43,6 +47,7 @@ docker run -d --restart=always --name chug-worker \
   -e WORKER_NODE=$NODE \
   -e NATS_URL=$NATS \
   -e NATS_CREDS=/data/keys/worker.creds \
+  $REFRESH_ENV \
   chuggernaut/worker:$TAG >/dev/null"
 ssh "$WORKER_SSH" "$REMOTE"
 

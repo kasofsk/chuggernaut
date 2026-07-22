@@ -6,7 +6,8 @@ use crate::{NatsStore, StoreError, subjects};
 use std::time::Duration;
 use types::worker::{
     ContainerRef, CopyFileOk, CopyFileRequest, InspectOk, LaunchOk, ListExitedOk, LogsOk,
-    LogsTailOk, LogsTailRequest, PingOk, WorkerError, WorkerLaunchRequest, WorkerReply,
+    LogsTailOk, LogsTailRequest, PingOk, RefreshOk, RefreshRequest, WorkerError,
+    WorkerLaunchRequest, WorkerReply,
 };
 
 /// Requests must fit NATS's default 1MB max_payload with headroom. Launch
@@ -18,6 +19,9 @@ pub const MAX_REQUEST_BYTES: usize = 900 * 1024;
 const OP_TIMEOUT: Duration = Duration::from_secs(60);
 /// Liveness probe — placement blocks on this, keep it tight.
 const PING_TIMEOUT: Duration = Duration::from_secs(2);
+/// Self-refresh: the daemon accepts fast and builds/swaps in the background
+/// (spec §3.1), so this only covers the accept round-trip, not the build.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Typed request-reply to one worker node.
 #[derive(Clone)]
@@ -145,6 +149,16 @@ impl WorkerRpc {
     pub async fn ping(&self) -> std::result::Result<PingOk, WorkerRpcError> {
         self.call("ping", &serde_json::json!({}), PING_TIMEOUT)
             .await
+    }
+
+    /// Request a self-refresh (spec §3.1): the daemon rebuilds its images at
+    /// `req.sha` and swaps itself. Returns as soon as the daemon accepts — the
+    /// new version shows up on a later `ping`.
+    pub async fn refresh(
+        &self,
+        req: &RefreshRequest,
+    ) -> std::result::Result<RefreshOk, WorkerRpcError> {
+        self.call("refresh", req, REFRESH_TIMEOUT).await
     }
 
     pub async fn remove(&self, id: &str) -> std::result::Result<(), WorkerRpcError> {

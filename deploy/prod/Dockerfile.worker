@@ -18,11 +18,20 @@ COPY . .
 RUN cargo build --release --bin chuggernaut --bin chuggernaut-channel
 
 FROM debian:bookworm-slim
+# git + openssh-client + docker CLI let the daemon self-refresh (spec §3.1):
+# fetch the build context over the ssh front and drive `docker build` against
+# the mounted host socket. docker.io brings the client (the daemon is unused).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates git openssh-client docker.io \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/chuggernaut /usr/local/bin/chuggernaut
 # The worker substitutes this node-local copy into launches that reference the
 # "channel" artifact — the dispatcher never ships the bytes (spec §3.1).
 COPY --from=build /src/target/release/chuggernaut-channel /usr/local/lib/chuggernaut/chuggernaut-channel
+# Self-refresh script (spec §3.1). The daemon auto-detects it at this default
+# path (WORKER_REFRESH_SCRIPT) and runs it on a `refresh` RPC. It ships in the
+# image so a refreshed daemon runs the refreshed script.
+COPY deploy/prod/worker-refresh.sh /usr/local/lib/chuggernaut/worker-refresh.sh
+RUN chmod +x /usr/local/lib/chuggernaut/worker-refresh.sh
 ENTRYPOINT ["/usr/local/bin/chuggernaut", "worker"]

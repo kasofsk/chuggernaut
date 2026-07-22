@@ -39,6 +39,7 @@ async fn setup(
         docker_endpoint: local_docker_endpoint(),
         channel_binary: artifact_path,
         cache_dir: None,
+        refresh_script: None,
     };
     let daemon = tokio::spawn(async move {
         if let Err(e) = worker::run(config).await {
@@ -277,6 +278,206 @@ async fn no_reachable_capacity_fails_startup() {
     )
     .unwrap();
     assert!(fleet.startup_check().await.is_err());
+}
+
+/// Spawn a worker daemon (node `node`, local Docker) with an optional
+/// self-refresh script. Returns the join handle; the caller builds its own
+/// fleet/RPC over the same NATS server.
+fn spawn_daemon(
+    server: &NatsTestServer,
+    node: &str,
+    channel_bytes: &[u8],
+    refresh_script: Option<std::path::PathBuf>,
+) -> tokio::task::JoinHandle<()> {
+    let dir = std::env::temp_dir().join(format!(
+        "chug-worker-daemon-{}-{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let channel = dir.join("chuggernaut-channel");
+    std::fs::write(&channel, channel_bytes).unwrap();
+    let config = WorkerConfig {
+        node: node.into(),
+        nats_url: server.url().to_string(),
+        nats_creds: None,
+        docker_endpoint: local_docker_endpoint(),
+        channel_binary: channel,
+        cache_dir: None,
+        refresh_script,
+    };
+    tokio::spawn(async move {
+        if let Err(e) = worker::run(config).await {
+            eprintln!("daemon exited: {e}");
+        }
+    })
+}
+
+/// Write an executable no-op refresh script (build/swap both exit 0) so the
+/// daemon's refresh sequence runs without touching Docker or the real script.
+fn fake_refresh_script() -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "chug-fake-refresh-{}-{:x}.sh",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+async fn fleet_over(store: store::NatsStore, node: &str, slots: u32) -> FleetBackend {
+    FleetBackend::new(
+        vec![DockerNodeConfig {
+            name: node.into(),
+            endpoint: "worker".into(),
+            slots,
+        }],
+        store,
+    )
+    .unwrap()
+}
+
+/// Wait for a daemon's subscription to be live (a ghost inspect round-trips).
+async fn await_reachable(fleet: &FleetBackend, node: &str) {
+    for _ in 0..100 {
+        if fleet.inspect(&format!("{node}/deadbeef")).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("worker daemon never became reachable");
+}
+
+/// A task's `wait` stream survives a daemon restart and still delivers the exit
+/// (spec §3.1 drain guarantee): job containers run on Docker, not in the daemon,
+/// so replacing the daemon mid-job leaves the container running and the
+/// dispatcher's poll-based `wait` re-attaches over the new daemon.
+#[tokio::test]
+async fn wait_survives_daemon_restart() {
+    let server = require_nats!();
+    if !suite::docker_available() {
+        eprintln!("skipping: Docker daemon unavailable");
+        return;
+    }
+    let daemon = spawn_daemon(&server, "w1", b"x", None);
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let fleet = fleet_over(store, "w1", 8).await;
+    await_reachable(&fleet, "w1").await;
+
+    // A container that outlives the daemon restart, then exits non-zero.
+    let id = fleet.launch(suite::cfg("sleep 4; exit 7")).await.unwrap();
+
+    // Start waiting, then yank and replace the daemon underneath the wait.
+    let wait_fleet = &fleet;
+    let waiter = wait_fleet.wait(&id);
+    tokio::pin!(waiter);
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    daemon.abort();
+    let _ = daemon.await;
+    // Container is still running on Docker; bring a fresh daemon up on the node.
+    let daemon2 = spawn_daemon(&server, "w1", b"x", None);
+    await_reachable(&fleet, "w1").await;
+
+    // The exit is still delivered through the new daemon.
+    let code = waiter.await.unwrap();
+    assert_eq!(code, 7, "exit delivered across the daemon restart");
+    suite::rm(&id);
+    daemon2.abort();
+}
+
+/// The self-refresh RPC over the proxy: unconfigured nodes reject it, and a
+/// configured node accepts and quiesces the swap window so new launches are
+/// refused (retryable NoCapacity) — never interrupting in-flight containers.
+#[tokio::test]
+async fn refresh_rpc_and_quiesce_window() {
+    use store::worker::WorkerRpc;
+    use types::worker::RefreshRequest;
+
+    let server = require_nats!();
+    if !suite::docker_available() {
+        eprintln!("skipping: Docker daemon unavailable");
+        return;
+    }
+
+    // 1. No script wired ⇒ refresh is cleanly rejected as unconfigured.
+    let daemon = spawn_daemon(&server, "w1", b"x", None);
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let fleet = fleet_over(store.clone(), "w1", 8).await;
+    await_reachable(&fleet, "w1").await;
+    let rpc = WorkerRpc::new(store.clone(), "w1");
+    let err = rpc
+        .refresh(&RefreshRequest {
+            sha: "deadbeef".into(),
+            tag: "prod".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("self-refresh script"),
+        "unexpected: {err}"
+    );
+    daemon.abort();
+    let _ = daemon.await;
+
+    // 2. Script wired ⇒ refresh is accepted and the swap window quiesces
+    //    launches. The no-op script leaves the daemon quiesced (a real swap
+    //    replaces the process here), so a subsequent launch is refused.
+    let script = fake_refresh_script();
+    let daemon = spawn_daemon(&server, "w1", b"x", Some(script));
+    await_reachable(&fleet, "w1").await;
+    let rpc = WorkerRpc::new(store, "w1");
+    let ok = rpc
+        .refresh(&RefreshRequest {
+            sha: "cafef00d".into(),
+            tag: "prod".into(),
+        })
+        .await
+        .unwrap();
+    assert!(ok.accepted);
+
+    // A second refresh while one is converging is reported as not-accepted
+    // (not an error, not drift) so the deploy caller skips the swap-wait.
+    let again = rpc
+        .refresh(&RefreshRequest {
+            sha: "cafef00d".into(),
+            tag: "prod".into(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        !again.accepted,
+        "concurrent refresh must report not-accepted"
+    );
+
+    // Poll: once build+quiesce+swap have run, launches are refused.
+    let mut refused = false;
+    for _ in 0..30 {
+        match fleet.launch(suite::cfg("true")).await {
+            Ok(id) => {
+                // Not quiesced yet (or a real container slipped in) — clean up.
+                suite::rm(&id);
+            }
+            Err(e) => {
+                assert!(e.to_string().contains("refreshing"), "unexpected: {e}");
+                refused = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(refused, "launches must be refused during the swap window");
+    daemon.abort();
 }
 
 #[tokio::test]

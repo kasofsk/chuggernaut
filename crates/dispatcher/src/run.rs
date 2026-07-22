@@ -35,12 +35,16 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
     // §3.1). Placement keeps it fresh as nodes drop/recover, but the snapshot
     // is written once, so this is the boot-time view.
     let node_availability: Vec<(String, bool)>;
+    // Per-node build version at boot for the snapshot (spec §3.1); empty for a
+    // pure Docker fleet (docker endpoints carry no chuggernaut version).
+    let node_versions: Vec<(String, Option<String>)>;
     let backend: Arc<dyn container::ContainerBackend> =
         if worker::backend::has_worker_nodes(&config.docker_nodes) {
             let fleet = worker::FleetBackend::new(config.docker_nodes.clone(), store.clone())?;
             // Fleet-level rule: refuses only when no reachable node has slots > 0.
             fleet.startup_check().await?;
             node_availability = fleet.availability();
+            node_versions = fleet.node_versions();
             Arc::new(fleet)
         } else {
             let docker = DockerBackend::new(config.docker_nodes.clone())?;
@@ -48,6 +52,7 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
             // unreachable node is logged and excluded until it answers again.
             docker.ping_all().await?;
             node_availability = docker.availability();
+            node_versions = Vec::new();
             Arc::new(docker)
         };
 
@@ -79,6 +84,7 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
         &store,
         &config,
         &node_availability,
+        &node_versions,
         core_config.age_identity.is_some(),
     )
     .await;
@@ -113,6 +119,7 @@ async fn publish_config_snapshot(
     store: &NatsStore,
     config: &DispatcherConfig,
     node_availability: &[(String, bool)],
+    node_versions: &[(String, Option<String>)],
     secrets_encryption: bool,
 ) {
     let snapshot = types::DispatcherConfigSnapshot {
@@ -130,6 +137,10 @@ async fn publish_config_snapshot(
                     .find(|(name, _)| name == &n.name)
                     .map(|(_, up)| *up)
                     .unwrap_or(true),
+                version: node_versions
+                    .iter()
+                    .find(|(name, _)| name == &n.name)
+                    .and_then(|(_, v)| v.clone()),
             })
             .collect(),
         agent_provider_default: config.agent_provider_default.clone(),

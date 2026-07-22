@@ -155,6 +155,30 @@ pub struct ListExitedOk {
     pub ids: Vec<String>,
 }
 
+/// Payload for `refresh` (spec §3.1 worker self-refresh): rebuild this node's
+/// images at `sha` and swap the daemon. The node fetches the build context
+/// itself (git archive over the existing ssh front) — the dispatcher ships no
+/// bytes, keeping the message small.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RefreshRequest {
+    /// Target git SHA to build the three node images at.
+    pub sha: String,
+    /// Image tag to build/run (e.g. `prod`).
+    pub tag: String,
+}
+
+/// Reply for `refresh`: the daemon accepted the request and reports the version
+/// it is refreshing *from*. The new version arrives via a later `ping` once the
+/// build completes and the daemon has swapped — the dispatcher's version-drift
+/// warning clears then (spec §3.1).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RefreshOk {
+    /// The daemon began refreshing (false → a refresh was already in progress).
+    pub accepted: bool,
+    /// The version the node is refreshing away from.
+    pub from_version: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PingOk {
     /// Running `chuggernaut.managed` containers on the node (slot accounting).

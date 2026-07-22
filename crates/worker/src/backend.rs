@@ -17,8 +17,8 @@ use container::docker::{DockerBackend, DockerNodeConfig};
 use container::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus, LogTail,
 };
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use store::NatsStore;
 use store::worker::{WorkerRpc, WorkerRpcError};
 use types::worker::{
@@ -46,6 +46,10 @@ enum NodeHandle {
         /// out-of-service nodes but always re-probes them.
         in_service: AtomicBool,
         version_warned: AtomicBool,
+        /// Last version reported by a successful ping (spec §3.1), surfaced in
+        /// the platform config snapshot so the UI can show fleet versions and
+        /// spot drift. `None` until the node first answers.
+        last_version: Mutex<Option<String>>,
     },
 }
 
@@ -94,6 +98,7 @@ impl FleetBackend {
                     slots: c.slots,
                     in_service: AtomicBool::new(true),
                     version_warned: AtomicBool::new(false),
+                    last_version: Mutex::new(None),
                 }
             } else {
                 NodeHandle::Docker {
@@ -159,6 +164,7 @@ impl FleetBackend {
             slots,
             in_service,
             version_warned,
+            last_version,
         } = &node.handle
         else {
             return None;
@@ -167,6 +173,18 @@ impl FleetBackend {
             Ok(ping) => {
                 if !in_service.swap(true, Ordering::Relaxed) {
                     tracing::info!(node = %node.name, version = %ping.version, "worker node back in service");
+                }
+                // Record the reported version for the platform snapshot. A
+                // refreshed daemon reports the new SHA here, which both clears
+                // the drift warning below and flows to the UI.
+                {
+                    let mut v = last_version.lock().unwrap();
+                    if v.as_deref() != Some(ping.version.as_str()) {
+                        // Version moved (e.g. after a refresh): re-arm the drift
+                        // warning so a *new* mismatch is re-reported.
+                        version_warned.store(false, Ordering::Relaxed);
+                        *v = Some(ping.version.clone());
+                    }
                 }
                 let own = env!("CARGO_PKG_VERSION");
                 if !ping.version.starts_with(own) && !version_warned.swap(true, Ordering::Relaxed) {
@@ -258,6 +276,23 @@ impl FleetBackend {
                     NodeHandle::Worker { in_service, .. } => in_service.load(Ordering::Relaxed),
                 };
                 (n.name.clone(), up)
+            })
+            .collect()
+    }
+
+    /// Per-node build version for the platform snapshot (spec §3.1): `(name,
+    /// version)` as of the last successful ping. `None` for docker-endpoint
+    /// nodes (they carry no chuggernaut version) and for workers that have not
+    /// answered yet. Lets the UI show fleet versions and spot deploy drift.
+    pub fn node_versions(&self) -> Vec<(String, Option<String>)> {
+        self.nodes
+            .iter()
+            .map(|n| {
+                let version = match &n.handle {
+                    NodeHandle::Worker { last_version, .. } => last_version.lock().unwrap().clone(),
+                    NodeHandle::Docker { .. } => None,
+                };
+                (n.name.clone(), version)
             })
             .collect()
     }

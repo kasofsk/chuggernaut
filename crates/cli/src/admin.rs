@@ -42,6 +42,27 @@ pub enum AdminCmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Ask a worker node to rebuild its images at a SHA and swap its daemon
+    /// (spec §3.1 self-refresh). The dispatcher host cannot ssh a tagged worker,
+    /// so the deploy inverts control and requests refresh over the worker RPC.
+    /// Never fails the deploy: an unreachable/failed node is a WARNING with its
+    /// version drift surfaced, not an error.
+    WorkerRefresh {
+        /// Node name (its `{node}|worker|N` DOCKER_NODES entry).
+        #[arg(long)]
+        node: String,
+        /// Git SHA to build the node images at.
+        #[arg(long)]
+        sha: String,
+        /// Image tag to build/run.
+        #[arg(long, default_value = "prod")]
+        tag: String,
+        /// Seconds to wait for the node to come back on the new version. 0 →
+        /// request and report the accept without confirming the swap (builds
+        /// can take minutes; the new version still flows to the fleet snapshot).
+        #[arg(long, default_value = "0")]
+        wait_secs: u64,
+    },
 }
 
 #[derive(clap::Args, Debug)]
@@ -205,7 +226,79 @@ pub async fn run(args: AdminArgs) -> Result<()> {
         AdminCmd::Project(cmd) => run_project(&store, cmd).await,
         AdminCmd::Secret(cmd) => run_secret(&store, &args.keys_dir, cmd).await,
         AdminCmd::Var(cmd) => run_var(&store, cmd).await,
+        AdminCmd::WorkerRefresh {
+            node,
+            sha,
+            tag,
+            wait_secs,
+        } => run_worker_refresh(&store, &node, &sha, &tag, wait_secs).await,
         AdminCmd::WorkerCreds { .. } => unreachable!("handled before connect"),
+    }
+}
+
+/// Request a worker self-refresh and report the outcome (spec §3.1). Soft by
+/// design: it prints `refresh OK` / a `WARNING:` line and always returns `Ok`,
+/// so a lagging or unreachable node never fails the deploy — the drift is
+/// surfaced (here and via the fleet snapshot's per-node version), not fatal.
+async fn run_worker_refresh(
+    store: &NatsStore,
+    node: &str,
+    sha: &str,
+    tag: &str,
+    wait_secs: u64,
+) -> Result<()> {
+    use store::worker::WorkerRpc;
+    use types::worker::RefreshRequest;
+
+    let rpc = WorkerRpc::new(store.clone(), node);
+    let req = RefreshRequest {
+        sha: sha.to_string(),
+        tag: tag.to_string(),
+    };
+    let ok = match rpc.refresh(&req).await {
+        Ok(ok) => ok,
+        Err(e) => {
+            // Unreachable or refused: warn, don't fail the deploy.
+            println!("WARNING: worker refresh node={node} not accepted (drift remains): {e}");
+            return Ok(());
+        }
+    };
+    if !ok.accepted {
+        // A refresh is already in flight (converging to some SHA) — not a
+        // failure and not drift; nothing new to start or wait on.
+        println!(
+            "refresh already in progress: node={node} from={}",
+            ok.from_version
+        );
+        return Ok(());
+    }
+    println!(
+        "refresh requested: node={node} from={} -> sha={sha} tag={tag}",
+        ok.from_version
+    );
+
+    if wait_secs == 0 {
+        return Ok(());
+    }
+    // A refreshed daemon reports the new SHA on ping; the version string is
+    // `{pkg}+{sha}`, so a `+{short_sha}` substring confirms the swap landed.
+    let needle = format!("+{}", &sha[..sha.len().min(12)]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+    loop {
+        if let Ok(ping) = rpc.ping().await
+            && ping.version.contains(&needle)
+        {
+            println!("refresh OK: node={node} version={}", ping.version);
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            println!(
+                "WARNING: worker refresh node={node} not confirmed within {wait_secs}s \
+                 (build may still be running; check the fleet snapshot for its version)"
+            );
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 }
 

@@ -23,6 +23,12 @@ pub struct WorkerNode {
     /// field existed.
     #[serde(default = "default_available")]
     pub available: bool,
+    /// Build version last reported by a worker node's ping (spec §3.1):
+    /// `chuggernaut` version + git SHA. `None` for docker-endpoint nodes and
+    /// for workers that have not answered yet. Lets the UI show fleet versions
+    /// and spot deploy drift after a worker self-refresh.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 fn default_available() -> bool {

@@ -23,6 +23,13 @@ pub struct WorkerConfig {
     /// A node property, provisioned entirely worker-side: it never rides the
     /// wire or the dispatcher's launch config (spec §3.1).
     pub cache_dir: Option<PathBuf>,
+    /// Node-local script that rebuilds the three node images at a given SHA and
+    /// swaps the daemon (`worker-refresh.sh build <sha> <tag>` / `swap <tag>`),
+    /// invoked when a `refresh` RPC arrives (spec §3.1). `None` ⇒ self-refresh
+    /// is not wired and refresh requests are rejected. Set from
+    /// `WORKER_REFRESH_SCRIPT`, defaulting to the image's bundled copy when it
+    /// exists.
+    pub refresh_script: Option<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -59,7 +66,22 @@ impl WorkerConfig {
                     PathBuf::from("/usr/local/lib/chuggernaut/chuggernaut-channel")
                 }),
             cache_dir: parse_cache_dir(std::env::var("WORKER_CACHE_DIR").ok()),
+            refresh_script: resolve_refresh_script(std::env::var("WORKER_REFRESH_SCRIPT").ok()),
         })
+    }
+}
+
+/// Resolve `WORKER_REFRESH_SCRIPT`: an explicit path wins; unset falls back to
+/// the image's bundled copy only if it is actually present, so a node without
+/// the script cleanly reports self-refresh as unconfigured rather than failing
+/// at swap time. Pure over its input for unit testing.
+fn resolve_refresh_script(raw: Option<String>) -> Option<PathBuf> {
+    match raw.filter(|s| !s.is_empty()) {
+        Some(path) => Some(PathBuf::from(path)),
+        None => {
+            let default = PathBuf::from("/usr/local/lib/chuggernaut/worker-refresh.sh");
+            default.exists().then_some(default)
+        }
     }
 }
 
@@ -94,6 +116,19 @@ mod tests {
         );
         // An empty value is treated as unset, not a bind on `/`.
         assert_eq!(parse_cache_dir(Some(String::new())), None);
+    }
+
+    #[test]
+    fn refresh_script_resolves_explicit_and_absent() {
+        // Explicit path is taken verbatim, even if it does not (yet) exist.
+        assert_eq!(
+            resolve_refresh_script(Some("/opt/refresh.sh".into())),
+            Some(PathBuf::from("/opt/refresh.sh"))
+        );
+        // Empty is treated as unset; the bundled default is absent in tests, so
+        // self-refresh is cleanly unconfigured rather than pointing at nothing.
+        assert_eq!(resolve_refresh_script(Some(String::new())), None);
+        assert_eq!(resolve_refresh_script(None), None);
     }
 
     #[test]

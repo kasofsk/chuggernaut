@@ -101,9 +101,30 @@ mkdir -p "$UI_ROOT"
 ( cd web && npm ci && npm run build )
 rsync -a --delete web/dist/ "$UI_ROOT/"
 
-# 3. Worker node: daemon + agent images built on the node over ssh, daemon
-#    restarted (no-op when WORKER_SSH is unset — see build-worker.sh).
+# 3. Worker nodes: refresh to the deployed SHA (rebuild the three node images +
+#    swap the daemon — job containers survive, spec §3.1).
+#
+#    Two paths, and prod uses (b): (a) legacy over plain SSH (build-worker.sh),
+#    used only when WORKER_SSH is set (a laptop that can reach the node); no-ops
+#    otherwise. (b) NO-SSH self-refresh: the dispatcher host cannot ssh a tagged
+#    worker (Tailscale blocks tagged->tagged), so we invert control and REQUEST
+#    refresh over the worker RPC. Each worker node in DOCKER_NODES gets a request;
+#    a node that fails is a WARNING with its drift surfaced (its ping version
+#    also feeds the fleet snapshot), never a deploy failure.
 CHUG_IMAGE_TAG="${CHUG_IMAGE_TAG:-prod}" deploy/prod/build-worker.sh
+if [ -z "${WORKER_SSH:-}" ] && [ -n "${DOCKER_NODES:-}" ]; then
+  echo "$DOCKER_NODES" | tr ',' '\n' | while IFS='|' read -r wn wep _wslots; do
+    wn="$(echo "$wn" | tr -d '[:space:]')"
+    wep="$(echo "$wep" | tr -d '[:space:]')"
+    [ "$wep" = "worker" ] || continue
+    echo "update: requesting self-refresh of worker '$wn' -> $TARGET_SHA"
+    target/release/chuggernaut admin worker-refresh \
+      --nats-url "${NATS_URL:-nats://localhost:4222}" \
+      --keys-dir "$KEYS_DIR" \
+      --node "$wn" --sha "$TARGET_SHA" --tag "${CHUG_IMAGE_TAG:-prod}" \
+      || echo "update: WARNING worker '$wn' refresh request errored (non-fatal)"
+  done
+fi
 
 # 4. Idempotent init — creates only missing keys (e.g. a newly-added age key).
 target/release/chuggernaut init --keys-dir "$KEYS_DIR" --repos-root "$REPOS_ROOT"

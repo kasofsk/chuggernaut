@@ -313,6 +313,9 @@ export interface WorkerNode {
   slots: number
   /** Node health at snapshot time; false → unreachable, excluded from placement. */
   available: boolean
+  /** Worker build version (chuggernaut + git SHA) from its last ping; null for
+   *  docker-endpoint nodes or workers that have not answered yet. */
+  version?: string | null
 }
 
 /** The dispatcher's runtime config snapshot (fleet + defaults + paths). */
