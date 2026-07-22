@@ -280,7 +280,6 @@ impl Core {
         let key = (owner.to_string(), project.to_string(), seq);
         let job = self.must_get(owner, project, seq)?.clone();
         let job_type = self.active.get(&key).expect("exec state").job_type.clone();
-        let base_ref = job.base_ref.clone().expect("base_ref set");
         let task_id = self.next_task_id(owner, project, seq).await?;
         let phase_name = format!("{phase:?}");
 
@@ -334,6 +333,10 @@ impl Core {
             },
             attempt,
             evaluator: Some(evaluator.name.clone()),
+            // Mirror the evaluator name into the shared label field so the UI
+            // reads one label mechanism for every task kind (job #146). The
+            // `evaluator` field stays populated for back-compat.
+            label: Some(evaluator.name.clone()),
             stage: evaluator.stage,
             performed_by: None,
             container_id: None,
@@ -412,86 +415,123 @@ impl Core {
                 }
             }
             EvaluatorType::Agent => {
-                let tx = self.self_tx.clone().expect("spawned core");
-                let (o, p) = (owner.to_string(), project.to_string());
-                let mut env = self
-                    .container_env(
-                        owner,
-                        project,
-                        seq,
-                        branch,
-                        &job_type,
-                        &evaluator.secrets,
-                        ChannelRole::Eval {
-                            task_id,
-                            evaluator: evaluator.name.clone(),
-                        },
-                        eval_timeout,
-                    )
-                    .await?;
-                self.inject_platform_agent_secrets(&mut env).await?;
-                // Evaluators judge against the same brief the author saw.
-                let prompt = format!(
-                    "{}{}",
-                    self.repos
-                        .read_file_at(
-                            owner,
-                            project,
-                            &base_ref,
-                            evaluator.prompt.as_deref().unwrap_or_default()
-                        )
-                        .await?
-                        .unwrap_or_default(),
-                    self.work_brief(owner, project, &job)
-                );
-                let (mcp_servers, mut files) = self.channel_mcp(&env);
-                files.extend(
-                    self.ssh_credential_files(
-                        owner,
-                        project,
-                        seq,
-                        ChannelRole::Eval {
-                            task_id,
-                            evaluator: evaluator.name.clone(),
-                        },
-                        eval_timeout,
-                    )
-                    .await?,
-                );
-                let config = AgentRunConfig {
-                    image: eval_image(&job_type, evaluator),
-                    prompt,
-                    model: evaluator
-                        .model
-                        .clone()
-                        .or_else(|| self.config.agent_model_default.clone()),
-                    system_prompt: None,
-                    mcp_servers,
-                    files,
-                    env,
-                    task_timeout: task_timeout(&job_type),
-                    eval_context: vec![],
-                    merge_conflict: None,
-                    session_id: session_id.clone().unwrap_or_default(),
-                    node: job_type.placement_node().map(String::from),
-                };
-                let provider = self.provider.clone();
-                let harvest = self.harvester();
-                let on_launch = self.launch_reporter(owner, project, seq, task_id);
-                tokio::spawn(async move {
-                    let (exit_code, usage) = match provider.run(config, on_launch).await {
-                        Ok(out) => {
-                            let usage = harvest.collect(&o, &p, seq, task_id, &out).await;
-                            if let Some(id) = &out.container_id {
-                                harvest.dispose(seq, task_id, id).await;
-                            }
-                            (out.exit_code, usage)
-                        }
-                        Err(e) => {
-                            tracing::error!("eval agent run failed: {e}");
-                            (-1, None)
-                        }
-                    };
+                // Agent evaluators launch through the provider, whose
+                // `NoCapacity` is queued (not burned as a verdict-less exit) —
+                // shared with the launch-queue resume so a queued agent eval
+                // relaunches identically (§3.5, #140).
+                self.spawn_eval_agent(
+                    owner,
+                    project,
+                    seq,
+                    task_id,
+                    session_id.clone(),
+                    branch,
+                    evaluator,
+                )
+                .await?;
+            }
+            EvaluatorType::Human => unreachable!(),
+        }
+        Ok(task_id)
+    }
+
+    /// Build and spawn an agent evaluator run (§3.3). Shared by the initial
+    /// Evaluation fan-out and the launch-queue resume ([`Core::resume_launch`]),
+    /// so a queued agent eval relaunches byte-identically. The spawned task
+    /// reports a `NoCapacity` launch refusal back as [`Msg::LaunchDeferred`] so
+    /// the actor queues the launch (§3.5) instead of letting the provider's
+    /// erased error surface as a verdict-less exit that burns `eval_retries` —
+    /// the #125/#130 saturated-fleet escalation this closes (#140). Any other
+    /// outcome reports through the normal exit fan-in.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn spawn_eval_agent(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task_id: u64,
+        session_id: Option<String>,
+        branch: &str,
+        evaluator: &Evaluator,
+    ) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        let job = self.must_get(owner, project, seq)?.clone();
+        let job_type = self.active.get(&key).expect("exec state").job_type.clone();
+        let base_ref = job.base_ref.clone().expect("base_ref set");
+        let eval_timeout = task_timeout(&job_type);
+        let tx = self.self_tx.clone().expect("spawned core");
+        let (o, p) = (owner.to_string(), project.to_string());
+        let mut env = self
+            .container_env(
+                owner,
+                project,
+                seq,
+                branch,
+                &job_type,
+                &evaluator.secrets,
+                ChannelRole::Eval {
+                    task_id,
+                    evaluator: evaluator.name.clone(),
+                },
+                eval_timeout,
+            )
+            .await?;
+        self.inject_platform_agent_secrets(&mut env).await?;
+        // Evaluators judge against the same brief the author saw.
+        let prompt = format!(
+            "{}{}",
+            self.repos
+                .read_file_at(
+                    owner,
+                    project,
+                    &base_ref,
+                    evaluator.prompt.as_deref().unwrap_or_default()
+                )
+                .await?
+                .unwrap_or_default(),
+            self.work_brief(owner, project, &job)
+        );
+        let (mcp_servers, mut files) = self.channel_mcp(&env);
+        files.extend(
+            self.ssh_credential_files(
+                owner,
+                project,
+                seq,
+                ChannelRole::Eval {
+                    task_id,
+                    evaluator: evaluator.name.clone(),
+                },
+                eval_timeout,
+            )
+            .await?,
+        );
+        let config = AgentRunConfig {
+            image: eval_image(&job_type, evaluator),
+            prompt,
+            model: evaluator
+                .model
+                .clone()
+                .or_else(|| self.config.agent_model_default.clone()),
+            system_prompt: None,
+            mcp_servers,
+            files,
+            env,
+            task_timeout: task_timeout(&job_type),
+            eval_context: vec![],
+            merge_conflict: None,
+            session_id: session_id.unwrap_or_default(),
+            node: job_type.placement_node().map(String::from),
+        };
+        let provider = self.provider.clone();
+        let harvest = self.harvester();
+        let on_launch = self.launch_reporter(owner, project, seq, task_id);
+        tokio::spawn(async move {
+            match provider.run(config, on_launch).await {
+                Ok(out) => {
+                    let usage = harvest.collect(&o, &p, seq, task_id, &out).await;
+                    if let Some(id) = &out.container_id {
+                        harvest.dispose(seq, task_id, id).await;
+                    }
                     let _ = tx
                         .send(Msg::TaskExited {
                             owner: o,
@@ -499,7 +539,7 @@ impl Core {
                             seq,
                             task_id,
                             exit: TaskExit {
-                                exit_code,
+                                exit_code: out.exit_code,
                                 eval_json: None,
                                 usage,
                                 assessment: None,
@@ -508,11 +548,43 @@ impl Core {
                             },
                         })
                         .await;
-                });
+                }
+                // Fleet at capacity: queue this launch behind the freed-slot
+                // signal rather than reporting a verdict-less exit that would
+                // exhaust eval_retries in milliseconds (#140).
+                Err(agent::AgentError::Backend(container::BackendError::NoCapacity(reason))) => {
+                    let _ = tx
+                        .send(Msg::LaunchDeferred {
+                            owner: o,
+                            project: p,
+                            seq,
+                            task_id,
+                            reason,
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    tracing::error!("eval agent run failed: {e}");
+                    let _ = tx
+                        .send(Msg::TaskExited {
+                            owner: o,
+                            project: p,
+                            seq,
+                            task_id,
+                            exit: TaskExit {
+                                exit_code: -1,
+                                eval_json: None,
+                                usage: None,
+                                assessment: None,
+                                launch_error: None,
+                                infra_loss: false,
+                            },
+                        })
+                        .await;
+                }
             }
-            EvaluatorType::Human => unreachable!(),
-        }
-        Ok(task_id)
+        });
+        Ok(())
     }
 
     /// `req.eval.submit.*` (spec §4.2): the authoritative agent verdict.
@@ -1518,6 +1590,9 @@ impl Core {
             state: TaskState::Running,
             attempt,
             evaluator: None,
+            // The wrap-up task carries its configured/derived label so it renders
+            // as `Command · publish`, not a bare `Command` (job #146).
+            label: Some(job_type.wrap_up.label()),
             stage: 0,
             performed_by: None,
             container_id: None,

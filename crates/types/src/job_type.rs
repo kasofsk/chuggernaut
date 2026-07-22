@@ -100,6 +100,13 @@ pub struct WrapUpSpec {
     /// external (deploys, reports) and whose branch is scratch.
     #[serde(default)]
     pub r#type: WrapUpMode,
+    /// Human-facing label for the wrap-up task, so it is as self-describing as
+    /// an evaluator (`Command · publish` instead of a bare `Command`, job #146).
+    /// Validated like an evaluator name. Unset → derived from the mode (see
+    /// [`WrapUpSpec::label`]): a command wrap-up takes its script's basename
+    /// (`tasks/web-publish.sh` → `web-publish`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Optional post-merge command (spec §3.2, design-lifecycle.md wrap-up
     /// hook): a shell command run in the WrapUp phase *after* the squash lands
     /// on the default branch, against the merged main content. It ships the
@@ -119,6 +126,47 @@ pub struct WrapUpSpec {
     /// the only container they reach; not inherited from `work.secrets`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<String>,
+}
+
+impl WrapUpSpec {
+    /// The wrap-up task's display label (job #146): the explicit `name`, else a
+    /// value derived from the mode. A command wrap-up (`run` set) derives from
+    /// the script's basename with any extension stripped
+    /// (`./tasks/web-publish.sh staging` → `web-publish`); anything else falls
+    /// back to a generic marker. Only consulted when a wrap-up task actually
+    /// launches, so the fallback is a safety net, not a common path.
+    pub fn label(&self) -> String {
+        if let Some(name) = self.name.as_ref().filter(|n| !n.is_empty()) {
+            return name.clone();
+        }
+        if let Some(run) = &self.run
+            && let Some(derived) = derive_command_label(run)
+        {
+            return derived;
+        }
+        "wrap-up-agent".to_string()
+    }
+}
+
+/// Derive a task label from a shell `run` command: the first token's path
+/// basename with a single trailing extension stripped
+/// (`./tasks/web-publish.sh staging` → `web-publish`). None when the command is
+/// empty or reduces to nothing usable.
+fn derive_command_label(run: &str) -> Option<String> {
+    let first = run.split_whitespace().next()?;
+    let base = first.rsplit('/').next().unwrap_or(first);
+    let stem = base.rsplit_once('.').map(|(s, _)| s).unwrap_or(base);
+    (!stem.is_empty()).then(|| stem.to_string())
+}
+
+/// Whether a label/evaluator-style name is well-formed (job #146): non-empty and
+/// limited to `[A-Za-z0-9._-]` — no whitespace or shell-hostile characters, so
+/// it renders cleanly in a task row and travels safely through events.
+pub fn is_valid_task_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// Wrap-up mode after eval-pass (design-lifecycle.md).
@@ -465,6 +513,17 @@ impl JobType {
         // image from somewhere, and its `image`/`secrets` are meaningless without
         // it.
         let wrap = &self.wrap_up;
+        // The wrap-up task label (job #146) is validated like an evaluator name:
+        // a bad token would render as a broken task row / event field.
+        if let Some(name) = wrap.name.as_deref()
+            && !is_valid_task_name(name)
+        {
+            errs.push(FieldRuleError::Invalid {
+                field: "wrap_up.name",
+                context: format!("job type '{}'", self.name),
+                reason: format!("{name:?} is not a valid name ([A-Za-z0-9._-]+)"),
+            });
+        }
         let wctx = format!("wrap_up.run in job type '{}'", self.name);
         if wrap.run.is_some() {
             if wrap.r#type == WrapUpMode::None {
@@ -1030,6 +1089,95 @@ wrap_up:
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn wrap_up_name_round_trips_and_derives_label() {
+        // Explicit name parses, round-trips, and is the label.
+        let yaml = r#"
+name: web
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+wrap_up:
+  run: ./tasks/web-publish.sh
+  name: publish
+"#;
+        let jt = JobType::parse(yaml).unwrap();
+        assert_eq!(jt.wrap_up.name.as_deref(), Some("publish"));
+        assert_eq!(jt.wrap_up.label(), "publish");
+        assert_eq!(jt.validate(), vec![]);
+        // Absent name is omitted on the wire (skip_serializing_if).
+        let no_name = JobType::parse(
+            r#"
+name: web
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+wrap_up:
+  run: ./tasks/web-publish.sh
+"#,
+        )
+        .unwrap();
+        assert_eq!(no_name.wrap_up.name, None);
+        assert!(
+            !serde_yaml::to_string(&no_name.wrap_up)
+                .unwrap()
+                .contains("name")
+        );
+        // Unset → derived from the command's script basename.
+        assert_eq!(no_name.wrap_up.label(), "web-publish");
+
+        // Derivation drops path and args and strips the extension.
+        let derived = |run: &str| {
+            WrapUpSpec {
+                run: Some(run.into()),
+                ..Default::default()
+            }
+            .label()
+        };
+        assert_eq!(derived("./tasks/web-publish.sh staging"), "web-publish");
+        assert_eq!(derived("deploy"), "deploy");
+        // A run with no derivable stem (or no run at all) falls back.
+        assert_eq!(WrapUpSpec::default().label(), "wrap-up-agent");
+    }
+
+    #[test]
+    fn wrap_up_name_rejects_bad_tokens() {
+        let jt_with_name = |name: &str| {
+            JobType::parse(&format!(
+                r#"
+name: web
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+wrap_up:
+  run: ./tasks/web-publish.sh
+  name: "{name}"
+"#
+            ))
+            .unwrap()
+        };
+        // Good names validate cleanly.
+        assert_eq!(jt_with_name("publish").validate(), vec![]);
+        assert_eq!(jt_with_name("web-publish").validate(), vec![]);
+        // Whitespace / shell-hostile tokens are rejected offline.
+        for bad in ["has space", "bad;rm", "", "na/me"] {
+            let errs = jt_with_name(bad).validate();
+            assert!(
+                errs.iter().any(|e| matches!(
+                    e,
+                    FieldRuleError::Invalid {
+                        field: "wrap_up.name",
+                        ..
+                    }
+                )),
+                "expected wrap_up.name error for {bad:?}, got {errs:?}"
+            );
+        }
     }
 
     #[test]

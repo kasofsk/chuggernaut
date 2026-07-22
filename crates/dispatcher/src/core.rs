@@ -378,6 +378,18 @@ pub enum Msg {
         task_id: u64,
         container_id: String,
     },
+    /// Posted by an agent launch task (an agent evaluator) when the fleet is at
+    /// capacity: the provider erases [`container::BackendError::NoCapacity`], so
+    /// the spawned task signals it back here for the actor to queue the launch
+    /// through [`Core::defer_launch`] instead of burning `eval_retries` (#140).
+    /// Never posted by anything outside the crate.
+    LaunchDeferred {
+        owner: String,
+        project: String,
+        seq: u64,
+        task_id: u64,
+        reason: String,
+    },
 }
 
 /// Cloneable façade over the core channel; the only way other components
@@ -1215,6 +1227,20 @@ impl Core {
                     .await
                 {
                     tracing::error!("container-start handling for {owner}/{project}#{seq}: {e}");
+                }
+            }
+            Msg::LaunchDeferred {
+                owner,
+                project,
+                seq,
+                task_id,
+                reason,
+            } => {
+                if let Err(e) = self
+                    .on_launch_deferred(&owner, &project, seq, task_id, reason)
+                    .await
+                {
+                    tracing::error!("deferring launch for {owner}/{project}#{seq}: {e}");
                 }
             }
         }

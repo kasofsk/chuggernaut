@@ -33,6 +33,9 @@ fn phase_kind(phase: TaskPhase) -> &'static str {
         TaskPhase::MergeGate => "gate",
         TaskPhase::WrapUp => "wrap_up",
         TaskPhase::Triage => "triage",
+        // Escalation tasks are Human (#141) and never occupy a fleet slot, so
+        // this arm is only for match exhaustiveness.
+        TaskPhase::Escalation => "escalation",
     }
 }
 

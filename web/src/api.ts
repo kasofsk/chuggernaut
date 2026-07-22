@@ -237,12 +237,16 @@ export interface Task {
   /** the lifecycle phase that spawned the task. The named values are the ones
    *  the UI treats specially; the `string` arm keeps a future phase (e.g. a
    *  WrapUp command task, job #63) from being a type error — it renders as-is. */
-  phase: 'Work' | 'Evaluation' | 'MergeGate' | 'Triage' | (string & {})
+  phase: 'Work' | 'Evaluation' | 'MergeGate' | 'WrapUp' | 'Triage' | 'Escalation' | (string & {})
   cycle: number
   kind: TaskKind
   state: 'Pending' | 'Running' | 'Done' | 'Failed'
   attempt: number
   evaluator: string | null
+  /** human-facing task label from job-type config (job #146): a wrap-up task's
+   *  `wrap_up.name` (or a derived default), and an evaluator's name mirrored
+   *  here. Absent on older records, which fall back to `evaluator`. */
+  label?: string | null
   /** set on claimed attempts: the declared kind stays, a human performed it */
   performed_by?: 'human' | null
   container_id: string | null

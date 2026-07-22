@@ -3,7 +3,7 @@
 //! is the source of truth the dispatcher recovers from.
 
 use chrono::Utc;
-use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
+use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, EvalSubmission, spawn};
 use std::sync::Arc;
 use std::time::Duration;
 use store::NatsStore;
@@ -39,6 +39,20 @@ work:
   type: command
   run: ./build.sh
 work_retries: 1
+"#;
+
+// Command work + agent eval: the shape where an agent evaluator can be parked
+// Pending under capacity pressure (§3.5, #140) and must be re-queued on restart.
+const AGENT_EVAL: &str = r#"
+name: agent-eval
+image: img:latest
+work:
+  type: command
+  run: ./build.sh
+eval:
+  - name: reviewer
+    type: agent
+    prompt: prompts/eval.md
 "#;
 
 const MANUAL_DEADLINE: &str = r#"
@@ -224,6 +238,7 @@ async fn restart_recovers_orphaned_running_work_task() {
             state: TaskState::Running,
             attempt: 1,
             evaluator: None,
+            label: None,
             stage: 0,
             performed_by: None,
             container_id: None,
@@ -356,6 +371,7 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
             state: TaskState::Running,
             attempt: 1,
             evaluator: None,
+            label: None,
             stage: 0,
             performed_by: None,
             container_id: Some("pruned-work-container".into()),
@@ -488,6 +504,7 @@ async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
         state,
         attempt: 1,
         evaluator: None,
+        label: None,
         stage: 0,
         performed_by: None,
         container_id: container.map(Into::into),
@@ -628,6 +645,7 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
             state: TaskState::Running,
             attempt: 1,
             evaluator: None,
+            label: None,
             stage: 0,
             performed_by: None,
             container_id: Some("exited-nonzero".into()),
@@ -757,6 +775,7 @@ async fn restart_requeues_queued_pending_work_task() {
             state: TaskState::Pending,
             attempt: 1,
             evaluator: None,
+            label: None,
             stage: 0,
             performed_by: None,
             container_id: None,
@@ -880,6 +899,7 @@ async fn seed_queued_command_work(
             state: TaskState::Pending,
             attempt: 1,
             evaluator: None,
+            label: None,
             stage: 0,
             performed_by: None,
             container_id: None,
@@ -1042,6 +1062,213 @@ async fn restart_preserves_queue_wait_clock_for_timeout() {
     );
 }
 
+/// A dispatcher died with an **agent** evaluator queued under capacity pressure
+/// (§3.5, #140): the job is Evaluation, the eval task Pending (kind Agent) with
+/// no container — what `defer_launch` persists for an agent eval. Reconciliation
+/// must re-queue it (not drop it as it once did for non-command kinds), and once
+/// the fleet has capacity the *same* task relaunches through the provider, the
+/// evaluator passes, and the job lands.
+#[tokio::test]
+async fn restart_requeues_queued_pending_agent_eval() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/agent-eval.yaml", AGENT_EVAL.as_bytes(), "type")
+        .await;
+    clone
+        .commit_file("prompts/eval.md", b"review it", "prompt")
+        .await;
+    clone.push("main").await;
+    let head = repo.head().await;
+    repo.create_job_branch(1, &head).await;
+
+    store
+        .jobs()
+        .await
+        .unwrap()
+        .put(&Job {
+            id: 1,
+            project: "acme/api".into(),
+            r#type: "agent-eval".into(),
+            title: String::new(),
+            description: String::new(),
+            deps: vec![],
+            members: vec![],
+            batch_id: None,
+            state: JobState::Evaluation,
+            branch: "job/1".into(),
+            base_ref: Some(head),
+            knowledge_tags: vec![],
+            eval: vec![],
+            timeout: None,
+            model: None,
+            claim_next: false,
+            escalation: None,
+            factory: None,
+            created_at: Utc::now(),
+            ready_at: Some(Utc::now()),
+            completed_at: None,
+            cover_html: None,
+        })
+        .await
+        .unwrap();
+    let tasks = store.tasks().await.unwrap();
+    // Work already succeeded; only the eval remains.
+    tasks
+        .put(&Task {
+            id: 1,
+            job_seq: 1,
+            project: "acme/api".into(),
+            phase: TaskPhase::Work,
+            cycle: 1,
+            kind: TaskKind::Command {
+                run: "./build.sh".into(),
+            },
+            state: TaskState::Done,
+            attempt: 1,
+            evaluator: None,
+            label: None,
+            stage: 0,
+            performed_by: None,
+            container_id: None,
+            rework_reason: None,
+            infra_loss: false,
+            session_id: None,
+            result: Some(types::TaskResult::Command {
+                pass: true,
+                exit_code: 0,
+                output: String::new(),
+                structured: None,
+            }),
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            completed_at: Some(Utc::now()),
+            pending_reason: None,
+            queued_at: None,
+        })
+        .await
+        .unwrap();
+    // The crash-time eval: Pending agent evaluator, no container — a queued
+    // launch (§3.5), exactly what the agent NoCapacity path parks.
+    tasks
+        .put(&Task {
+            id: 2,
+            job_seq: 1,
+            project: "acme/api".into(),
+            phase: TaskPhase::Evaluation,
+            cycle: 1,
+            kind: TaskKind::Agent {
+                provider: "claude".into(),
+                model: None,
+                prompt: "review it".into(),
+            },
+            state: TaskState::Pending,
+            attempt: 1,
+            evaluator: Some("reviewer".into()),
+            label: Some("reviewer".into()),
+            stage: 0,
+            performed_by: None,
+            container_id: None,
+            rework_reason: None,
+            infra_loss: false,
+            session_id: Some("sess-eval-1".into()),
+            result: None,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            pending_reason: Some(types::PendingReason::QueuedForCapacity),
+            queued_at: Some(Utc::now()),
+        })
+        .await
+        .unwrap();
+
+    // "Restart": a fresh core whose provider launches through the backend, so the
+    // agent eval's relaunch actually runs. The fleet stays full for agent
+    // launches until we free it — that keeps the eval from running before the
+    // submit_eval hook is wired (a queued-NoCapacity attempt consumes no hook),
+    // so the pass is deterministic regardless of when the startup drain fires.
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let backend = Arc::new(FakeBackend::new());
+    let full = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let f = full.clone();
+    backend.fail_launch_no_capacity_if(move |cfg| {
+        (f.load(std::sync::atomic::Ordering::SeqCst) && cfg.cmd.iter().any(|c| c == "agent"))
+            .then(|| "no free slots on any node".to_string())
+    });
+    let provider = Arc::new(FakeProvider::with_backend(backend.clone()));
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        backend.clone(),
+        provider.clone(),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let handle = spawn(core);
+    // Wire the eval verdict now that the core exists: the relaunched agent run
+    // submits a pass for task 2.
+    let h = handle.clone();
+    provider.on_run(move |_| {
+        let h = h.clone();
+        async move {
+            h.submit_eval(
+                "acme",
+                "api",
+                1,
+                2,
+                EvalSubmission {
+                    pass: true,
+                    abort: false,
+                    structured: None,
+                    token_usage: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+    });
+
+    // Free the fleet; the re-queued eval drains, relaunches the same task, and
+    // passes. If reconciliation had dropped the queued agent eval, nothing
+    // launches and the job wedges in Evaluation — this wait would time out.
+    full.store(false, std::sync::atomic::Ordering::SeqCst);
+    handle.trigger_scan().await.unwrap();
+    wait_for_state(&store, 1, JobState::Done).await;
+    let evals: Vec<_> = store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", 1)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.phase == TaskPhase::Evaluation)
+        .collect();
+    assert_eq!(
+        evals.len(),
+        1,
+        "re-queued the existing eval task, not a new attempt"
+    );
+    assert_eq!((evals[0].id, evals[0].attempt), (2, 1));
+    assert_eq!(evals[0].state, TaskState::Done);
+}
+
 /// §3.6 startup sweep: exited `chuggernaut.managed` containers left behind by
 /// a crash/restart are reclaimed at boot — but only when their task is terminal
 /// (or gone entirely). A container a live task may still resume is kept.
@@ -1111,6 +1338,7 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
         state,
         attempt: 1,
         evaluator: None,
+        label: None,
         stage: 0,
         performed_by: None,
         container_id: Some(container.into()),
@@ -1282,6 +1510,7 @@ fn work_task(id: u64, state: TaskState, container_id: Option<&str>) -> Task {
         state,
         attempt: 1,
         evaluator: None,
+        label: None,
         stage: 0,
         performed_by: None,
         container_id: container_id.map(Into::into),
@@ -1517,6 +1746,7 @@ async fn restart_lands_job_orphaned_in_wrapup() {
             state: TaskState::Done,
             attempt: 1,
             evaluator: None,
+            label: None,
             stage: 0,
             performed_by: None,
             container_id: None,
@@ -1649,6 +1879,7 @@ wrap_up:
             state: TaskState::Done,
             attempt: 1,
             evaluator: None,
+            label: None,
             stage: 0,
             performed_by: None,
             container_id: None,
@@ -1684,6 +1915,7 @@ wrap_up:
             state: TaskState::Running,
             attempt: 1,
             evaluator: None,
+            label: None,
             stage: 0,
             performed_by: None,
             container_id: Some("dead-publish-container".into()),
@@ -1988,6 +2220,7 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
             state: TaskState::Done,
             attempt: 1,
             evaluator: None,
+            label: None,
             stage: 0,
             performed_by: None,
             container_id: None,

@@ -274,11 +274,12 @@ impl Core {
                     && !matches!(task.kind, TaskKind::Human { .. })
                     && task.performed_by.is_none()
                 {
-                    self.launch_queue.push_back(crate::queue::QueuedLaunch {
+                    self.enqueue_launch(crate::queue::QueuedLaunch {
                         owner: owner.to_string(),
                         project: project.to_string(),
                         seq,
                         task_id: task.id,
+                        priority: crate::launch_queue::launch_priority(task.phase),
                         // Restore the persisted enqueue time (§3.5) so the queue's
                         // FIFO order and the max-wait clock survive this restart;
                         // fall back to now for records written before it existed.
@@ -521,18 +522,21 @@ impl Core {
                     if task.state == TaskState::Running {
                         running.push(task.clone());
                     }
-                    // A command evaluator queued under capacity pressure (§3.5):
-                    // Pending, no container — re-queue so the launch resumes when
-                    // a slot frees; the slot stays open (outcome None) meanwhile.
+                    // An evaluator queued under capacity pressure (§3.5): Pending,
+                    // no container — re-queue so the launch resumes when a slot
+                    // frees; the slot stays open (outcome None) meanwhile. Covers
+                    // command and agent evaluators alike (#140); a Pending Human
+                    // evaluator waits on the inbox, not the launch queue.
                     if task.state == TaskState::Pending
                         && task.container_id.is_none()
-                        && matches!(task.kind, types::TaskKind::Command { .. })
+                        && !matches!(task.kind, types::TaskKind::Human { .. })
                     {
-                        self.launch_queue.push_back(crate::queue::QueuedLaunch {
+                        self.enqueue_launch(crate::queue::QueuedLaunch {
                             owner: owner.to_string(),
                             project: project.to_string(),
                             seq,
                             task_id: task.id,
+                            priority: crate::launch_queue::launch_priority(task.phase),
                             // Persisted enqueue time (§3.5): stable FIFO + clock
                             // across restarts. See recover_work for the rationale.
                             queued_at: task.queued_at.unwrap_or_else(Utc::now),

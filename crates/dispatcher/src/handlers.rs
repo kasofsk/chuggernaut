@@ -1705,6 +1705,7 @@ mod tests {
             state,
             attempt: 1,
             evaluator: None,
+            label: None,
             stage: 0,
             performed_by: None,
             container_id: None,

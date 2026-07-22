@@ -917,6 +917,7 @@ async fn list_pending_hides_terminal_job_zombie() {
         state: TaskState::Pending,
         attempt: 1,
         evaluator: None,
+        label: None,
         stage: 0,
         performed_by: None,
         container_id: None,

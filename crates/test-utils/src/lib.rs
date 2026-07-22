@@ -438,20 +438,10 @@ impl AgentProvider for FakeProvider {
         config: AgentRunConfig,
         on_launch: agent::LaunchReporter,
     ) -> Result<AgentOutput, AgentError> {
-        let (exit_code, hook) = {
-            let mut st = self.state.lock().unwrap();
-            let exit = if st.scripted_exits.is_empty() {
-                0
-            } else {
-                st.scripted_exits.remove(0)
-            };
-            let idx = st.runs.len();
-            let hook = st.hooks.get_mut(idx).and_then(Option::take);
-            st.runs.push(config.clone());
-            (exit, hook)
-        };
-        // Launch before the hook so the container exists for the whole run,
-        // as it would for a real provider.
+        // Launch first, before recording the run or consuming a hook/exit, so a
+        // refused container (e.g. `NoCapacity`) short-circuits with no run
+        // side-effects — mirroring a real provider whose `?` on launch precedes
+        // any container work, and the dispatcher's #140 queue-on-capacity path.
         let container_id = match &self.backend {
             Some(backend) => Some(
                 backend
@@ -467,6 +457,18 @@ impl AgentProvider for FakeProvider {
                     .await?,
             ),
             None => None,
+        };
+        let (exit_code, hook) = {
+            let mut st = self.state.lock().unwrap();
+            let exit = if st.scripted_exits.is_empty() {
+                0
+            } else {
+                st.scripted_exits.remove(0)
+            };
+            let idx = st.runs.len();
+            let hook = st.hooks.get_mut(idx).and_then(Option::take);
+            st.runs.push(config.clone());
+            (exit, hook)
         };
         // Report the id the instant the "container" launches, mirroring a real
         // provider — so the dispatcher stamps it onto the Running task record.

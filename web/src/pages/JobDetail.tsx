@@ -344,7 +344,7 @@ export function JobDetail() {
             <div className="inbox-task" key={t.id}>
               <div className="inbox-head">
                 task {t.id} · {t.phase}
-                {t.evaluator ? ` · ${t.evaluator}` : ''}
+                {(t.evaluator ?? t.label) ? ` · ${t.evaluator ?? t.label}` : ''}
               </div>
               {t.kind.kind === 'Human' && <pre className="prompt">{t.kind.prompt}</pre>}
               {t.performed_by === 'human' && (
@@ -425,7 +425,7 @@ export function JobDetail() {
                 </td>
                 <td>
                   {t.kind.kind}
-                  {t.evaluator ? ` · ${t.evaluator}` : ''}
+                  {(t.evaluator ?? t.label) ? ` · ${t.evaluator ?? t.label}` : ''}
                   {t.performed_by === 'human' && <span className="dim"> · by human</span>}
                 </td>
                 <td>

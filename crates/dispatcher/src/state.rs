@@ -41,8 +41,10 @@ pub fn assert_transition(from: JobState, to: JobState) -> Result<(), InvalidTran
         // gate failure (free rework). WrapUp→Done: clean squash / no-op.
         // WrapUp→Escalated: unexpected hard wrap-up failure (git plumbing).
         (WrapUp, WrapUp | Work | Done | Escalated) => true,
-        // Post-work escalation: Retry→Work, Resolve→Evaluation.
-        (Escalated, Work | Evaluation) => true,
+        // Post-work escalation resolution. Retry resumes at the phase that
+        // failed (#141): Work exhaustion→Work, eval exhaustion→Evaluation,
+        // wrap-up failure→WrapUp. Resolve→Evaluation (operator did the work).
+        (Escalated, Work | Evaluation | WrapUp) => true,
         // Pre-work (Stalled) escalation: Retry re-runs the failed step →Ready
         // (or self-loops if re-validation still fails). Resolve is not in the
         // table, so it is structurally impossible (§1.2).
@@ -91,6 +93,7 @@ mod tests {
             (WrapUp, Escalated),
             (Escalated, Work),
             (Escalated, Evaluation),
+            (Escalated, WrapUp),
             (Stalled, Ready),
             (Stalled, Stalled),
             (Frozen, Revoked),

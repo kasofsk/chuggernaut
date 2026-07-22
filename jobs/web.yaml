@@ -26,6 +26,7 @@ eval:
 # escalates; the merge stays. web-publish.yaml remains for manual re-publishes.
 wrap_up:
   run: ./tasks/web-publish.sh
+  name: publish                     # task label (#146): renders `Command · publish`, not a bare `Command`
   # Same key as web-publish.yaml (spec §8.2): the private-key VALUE, written to
   # a 0600 tempfile for `ssh -i` by the script.
   secrets: [MINI_DEPLOY_KEY]

@@ -22,6 +22,14 @@ pub struct Task {
     /// reconciliation and the UI both need the mapping.
     #[serde(default)]
     pub evaluator: Option<String>,
+    /// Human-facing label for the task, so every task kind is as
+    /// self-describing as an evaluator (job #146). Set from the job-type config:
+    /// a wrap-up task carries its `wrap_up.name` (or a derived default), and an
+    /// evaluator task mirrors its `evaluator` name here so the UI reads one
+    /// label field for both. None for work/escalation/triage tasks and for
+    /// records written before labels existed (they fall back to `evaluator`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// Evaluation stage this task belongs to (spec §3.3 staged evaluation).
     /// Carries the evaluator's `stage:` for Evaluation/MergeGate tasks so the
     /// UI can group a cycle's tasks by stage; 0 for work/escalation/triage
@@ -109,6 +117,13 @@ pub enum TaskPhase {
     /// Purely advisory — it never drives a job transition. Only created while
     /// the job is Escalated or Stalled, and may be repeated.
     Triage,
+    /// A Human escalation task (spec §1.2, §3.4): the operator-facing decision
+    /// item created when automation exhausts a phase's budget. Stamped with its
+    /// own phase — not the phase that failed — so the UI never reads an
+    /// escalation resolution as a `Work · pass` row (job #141). Records written
+    /// before this existed carry escalations under `Work`; the UI tolerates
+    /// both (a Human result with an `action` is an escalation regardless).
+    Escalation,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -536,5 +551,42 @@ mod tests {
             }
         );
         assert!(!serde_json::to_string(&legacy).unwrap().contains("summary"));
+    }
+
+    #[test]
+    fn label_defaults_absent_and_round_trips() {
+        // Old task records (no `label` key) deserialize to None, and None is
+        // omitted on the wire (skip_serializing_if) — job #146 back-compat.
+        let json = r#"{
+          "id": 4, "job_seq": 7, "project": "acme/api",
+          "phase": "WrapUp", "cycle": 1,
+          "kind": { "kind": "Command", "run": "./tasks/web-publish.sh" },
+          "state": "Running", "attempt": 1,
+          "container_id": "fake/c1", "result": null,
+          "created_at": "2026-07-21T10:00:00Z", "started_at": null, "completed_at": null
+        }"#;
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert_eq!(task.label, None);
+        assert!(!serde_json::to_string(&task).unwrap().contains("label"));
+
+        // A labelled wrap-up task round-trips.
+        let mut labelled = task.clone();
+        labelled.label = Some("publish".into());
+        let json = serde_json::to_string(&labelled).unwrap();
+        assert!(json.contains(r#""label":"publish""#));
+        assert_eq!(serde_json::from_str::<Task>(&json).unwrap(), labelled);
+    }
+
+    #[test]
+    fn escalation_phase_round_trips() {
+        // The dedicated escalation phase (job #141) round-trips, and the legacy
+        // `Work`-stamped escalation record still deserializes (back-compat).
+        let p: TaskPhase = serde_json::from_str(r#""Escalation""#).unwrap();
+        assert_eq!(p, TaskPhase::Escalation);
+        assert_eq!(serde_json::to_string(&p).unwrap(), r#""Escalation""#);
+        assert_eq!(
+            serde_json::from_str::<TaskPhase>(r#""Work""#).unwrap(),
+            TaskPhase::Work
+        );
     }
 }

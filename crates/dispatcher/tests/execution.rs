@@ -11,7 +11,7 @@ use std::time::Duration;
 use store::NatsStore;
 use test_utils::repo::{TempRepo, clone_branch_from};
 use test_utils::{FakeBackend, FakeProvider};
-use types::{JobState, TaskPhase, TaskState};
+use types::{EscalationAction, JobState, TaskPhase, TaskResolution, TaskState};
 
 const IMPL_CMD_EVAL: &str = r#"
 name: impl-cmd
@@ -32,6 +32,22 @@ work:
   type: agent
   prompt: prompts/impl.md
 rework_budget: 1
+eval:
+  - name: reviewer
+    type: agent
+    prompt: prompts/eval.md
+"#;
+
+// Command work + **agent** eval: the work launches through the backend directly
+// (so it takes the freed slot), while the evaluator runs through the provider —
+// the #125/#130 saturated-web shape where an agent evaluator (review-web) hits
+// NoCapacity and must queue rather than burn eval_retries (#140).
+const CMD_WORK_AGENT_EVAL: &str = r#"
+name: cmd-agent-eval
+image: img:latest
+work:
+  type: command
+  run: ./build.sh
 eval:
   - name: reviewer
     type: agent
@@ -93,6 +109,19 @@ wrap_up:
   run: ./tasks/web-publish.sh
 "#;
 
+// Web-style wrap-up with an explicit label (job #146): the wrap-up task should
+// render `Command · publish`, not a bare `Command`.
+const WEBPUB_NAMED: &str = r#"
+name: webpub-named
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+wrap_up:
+  run: ./tasks/web-publish.sh
+  name: publish
+"#;
+
 // Same shape but the stage-0 review is advisory: its failure must not stop the
 // stage-1 evaluator from running.
 const STAGED_ADVISORY: &str = r#"
@@ -146,9 +175,11 @@ async fn rig_full(
         ("jobs/impl-agent.yaml", IMPL_AGENT_EVAL),
         ("jobs/flaky.yaml", FLAKY),
         ("jobs/cmd-work.yaml", CMD_WORK),
+        ("jobs/cmd-agent-eval.yaml", CMD_WORK_AGENT_EVAL),
         ("jobs/staged.yaml", STAGED),
         ("jobs/staged-advisory.yaml", STAGED_ADVISORY),
         ("jobs/webpub.yaml", WEBPUB),
+        ("jobs/webpub-named.yaml", WEBPUB_NAMED),
         ("prompts/impl.md", "implement it"),
         ("prompts/eval.md", "review it"),
         ("tags/rust.md", "# rust\nrust conventions here"),
@@ -781,7 +812,7 @@ async fn crashed_work_attempt_recovers_branch_and_notes_resume() {
 
 // ---- §3.5 capacity queue: no free slots defers the launch, never fails it ----
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Poll the task log for the first task matching `pred`.
 async fn wait_for_task(
@@ -1017,6 +1048,504 @@ async fn queued_launch_escalates_after_max_wait() {
                 && t.state == TaskState::Pending),
         "an escalation task is raised",
     );
+}
+
+/// Priority inversion fix (#140): when the fleet is full and both an eval launch
+/// and a work launch are queued, freeing a single slot must launch the *eval*
+/// first — a finishing-phase launch drains ahead of queued work, so a job that
+/// has finished its work never loses its evaluation slot to one that has not
+/// started. The work launch stays queued.
+#[tokio::test]
+async fn queued_eval_drains_before_queued_work() {
+    let Some(rig) = rig().await else { return };
+    // Phase 1: fleet full — every backend launch is refused, so both the eval
+    // (impl-cmd, agent work + command eval) and the work (cmd-work, command
+    // work) queue Pending. Phase 2: permit exactly one launch, then observe
+    // which of the two queued launches takes it.
+    let full = Arc::new(AtomicBool::new(true));
+    let permits = Arc::new(AtomicUsize::new(0));
+    let (f, p) = (full.clone(), permits.clone());
+    rig.backend.fail_launch_no_capacity_if(move |_| {
+        if f.load(Ordering::SeqCst) {
+            return Some("no free slots on any node".to_string());
+        }
+        // Let the first drained launch through; block the rest so only the
+        // higher-priority one lands on the freed slot.
+        (p.fetch_add(1, Ordering::SeqCst) >= 1).then(|| "no free slots on any node".to_string())
+    });
+    commit_work(&rig); // the eval job's agent work runs via the provider and passes
+    rig.backend
+        .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
+
+    let eval_job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle
+        .release_job("acme", "api", eval_job.id)
+        .await
+        .unwrap();
+    let work_job = rig.handle.create_job(req("cmd-work")).await.unwrap();
+    rig.handle
+        .release_job("acme", "api", work_job.id)
+        .await
+        .unwrap();
+
+    // Both launches park Pending under capacity pressure.
+    wait_for_task(&rig.store, eval_job.id, |t| {
+        t.phase == TaskPhase::Evaluation && t.state == TaskState::Pending
+    })
+    .await;
+    wait_for_task(&rig.store, work_job.id, |t| {
+        t.phase == TaskPhase::Work && t.state == TaskState::Pending
+    })
+    .await;
+
+    // Free one slot: the eval drains first and the eval job completes.
+    full.store(false, Ordering::SeqCst);
+    rig.handle.trigger_scan().await.unwrap();
+    wait_for_state(&rig.store, eval_job.id, JobState::Done).await;
+
+    // The work launch never got the slot — still queued Pending, no container.
+    let work = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", work_job.id)
+        .await
+        .unwrap();
+    let work_task = work.iter().find(|t| t.phase == TaskPhase::Work).unwrap();
+    assert_eq!(
+        work_task.state,
+        TaskState::Pending,
+        "the queued work launch must wait behind the eval launch (#140)",
+    );
+    assert!(work_task.container_id.is_none());
+    let work_state = rig
+        .store
+        .jobs()
+        .await
+        .unwrap()
+        .get("acme", "api", work_job.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .state;
+    assert_eq!(work_state, JobState::Work, "work job still awaiting a slot");
+}
+
+/// A starved *eval* launch that outwaits the queue escalates with the
+/// `no_free_slots_timeout` reason — never by burning `eval_retries` on instant
+/// retries (#140). Same backstop the work path uses; this pins the eval arm.
+#[tokio::test]
+async fn queued_eval_escalates_after_max_wait_not_retry_exhaustion() {
+    let Some(rig) = rig_full(None, Some(Duration::from_millis(1))).await else {
+        return;
+    };
+    // Fleet stays full forever: the eval command launch never gets a slot.
+    rig.backend
+        .fail_launch_no_capacity_if(|_| Some("no free slots on any node".to_string()));
+    commit_work(&rig); // agent work passes, so the job reaches Evaluation
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+
+    // The eval queues (Pending, attempt 1 — no eval_retries burned), then the
+    // backstop scan escalates it.
+    let eval = wait_for_task(&rig.store, job.id, |t| {
+        t.phase == TaskPhase::Evaluation && t.state == TaskState::Pending
+    })
+    .await;
+    assert_eq!(eval.attempt, 1, "queueing burns no eval_retries");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    rig.handle.trigger_scan().await.unwrap();
+    let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+    assert_eq!(
+        escalated.escalation.unwrap().reason,
+        "no_free_slots_timeout",
+        "starved eval escalates on the queue timeout, not eval_infra_failure",
+    );
+}
+
+/// An **agent** evaluator (the #125/#130 shape: `review-web` on a saturated web
+/// fleet) queues on `NoCapacity` instead of instant-failing and burning
+/// `eval_retries` (#140). The provider erases the variant, so the spawned run
+/// signals it back and the actor parks the eval Pending; freeing a slot
+/// relaunches the *same* task, which passes → the job lands. The command work
+/// took the earlier slot, so only the eval — the finishing-phase launch — waits.
+#[tokio::test]
+async fn agent_eval_queues_on_no_capacity_then_launches_when_freed() {
+    // The provider launches through the backend (artifacts capture on), so an
+    // agent eval's launch actually reaches NoCapacity — mirroring ClaudeProvider.
+    let Some(rig) = rig_full(Some("acme/api".into()), None).await else {
+        return;
+    };
+    // Command work launches fine; only the agent eval container (cmd `["agent"]`)
+    // is refused while the fleet is full, so the queued launch is the eval.
+    let full = Arc::new(AtomicBool::new(true));
+    let f = full.clone();
+    rig.backend.fail_launch_no_capacity_if(move |cfg| {
+        (f.load(Ordering::SeqCst) && cfg.cmd.iter().any(|c| c == "agent"))
+            .then(|| "no free slots on any node".to_string())
+    });
+    // The agent eval passes once it finally runs (task 2 on the only job).
+    let h = rig.handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: true,
+                abort: false,
+                structured: None,
+                token_usage: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let job = rig.handle.create_job(req("cmd-agent-eval")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+
+    // The agent eval parks Pending (queued) — attempt 1, no eval_retries burned —
+    // holding the job in Evaluation rather than escalating on retry exhaustion.
+    let eval = wait_for_task(&rig.store, job.id, |t| {
+        t.phase == TaskPhase::Evaluation && t.state == TaskState::Pending
+    })
+    .await;
+    assert_eq!(
+        eval.attempt, 1,
+        "queueing an agent eval burns no eval_retries"
+    );
+    assert!(
+        eval.container_id.is_none(),
+        "a queued task holds no container"
+    );
+    assert!(
+        matches!(eval.kind, types::TaskKind::Agent { .. }),
+        "the queued launch is the agent evaluator, not the command work",
+    );
+    assert_eq!(
+        rig.store
+            .jobs()
+            .await
+            .unwrap()
+            .get("acme", "api", job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        JobState::Evaluation,
+        "queued, not escalated as eval_infra_failure",
+    );
+    assert!(
+        event_types(&rig.store)
+            .await
+            .contains(&"task-queued".into()),
+        "a task-queued event surfaces the wait",
+    );
+
+    // Free a slot; the scan drives the drain and the eval relaunches the *same*
+    // task, passes, and the job lands.
+    full.store(false, Ordering::SeqCst);
+    rig.handle.trigger_scan().await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let evals: Vec<_> = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.phase == TaskPhase::Evaluation)
+        .collect();
+    assert_eq!(
+        evals.len(),
+        1,
+        "one eval task drained from the queue — no retry inflation"
+    );
+    assert_eq!(evals[0].state, TaskState::Done);
+}
+
+/// A starved *agent* eval that outwaits the queue escalates with the
+/// `no_free_slots_timeout` reason — never by burning `eval_retries` on instant
+/// retries (#140). Pins the agent arm of the queue-timeout backstop, the exact
+/// failure mode #125/#130 hit before the fix.
+#[tokio::test]
+async fn agent_eval_escalates_after_max_wait_not_retry_exhaustion() {
+    let Some(rig) = rig_full(Some("acme/api".into()), Some(Duration::from_millis(1))).await else {
+        return;
+    };
+    // The agent eval container is refused forever; command work still launches.
+    rig.backend.fail_launch_no_capacity_if(|cfg| {
+        cfg.cmd
+            .iter()
+            .any(|c| c == "agent")
+            .then(|| "no free slots on any node".to_string())
+    });
+
+    let job = rig.handle.create_job(req("cmd-agent-eval")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+
+    // The agent eval queues (Pending, attempt 1 — no eval_retries burned), then
+    // the backstop scan escalates it on the queue timeout.
+    let eval = wait_for_task(&rig.store, job.id, |t| {
+        t.phase == TaskPhase::Evaluation && t.state == TaskState::Pending
+    })
+    .await;
+    assert_eq!(eval.attempt, 1, "queueing burns no eval_retries");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    rig.handle.trigger_scan().await.unwrap();
+    let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+    assert_eq!(
+        escalated.escalation.unwrap().reason,
+        "no_free_slots_timeout",
+        "starved agent eval escalates on the queue timeout, not eval_infra_failure",
+    );
+}
+
+/// A queued agent eval that is *resumed* but re-hits `NoCapacity` (it lost the
+/// freed slot to a concurrent launch) re-defers instead of failing — and the
+/// re-defer must **preserve** the original `queued_at` so the max-wait backstop
+/// keeps accumulating rather than resetting on each resume (#140 rework). The
+/// eval queues (T0), a slot frees, the first resume loses the race and
+/// re-defers, and the next resume places. The re-defer keeps `queued_at == T0`
+/// (never restamped), exactly one eval task runs at attempt 1 (no `eval_retries`
+/// burned), and the resumed record drops its `QueuedForCapacity` badge.
+#[tokio::test]
+async fn agent_eval_redefer_preserves_queue_time_and_burns_no_retries() {
+    let Some(rig) = rig_full(Some("acme/api".into()), None).await else {
+        return;
+    };
+    // The agent eval container (cmd `["agent"]`) is refused while the fleet is
+    // full; command work always launches. After capacity returns, the first
+    // resume still loses the slot race exactly once (`redefer`), forcing the
+    // re-defer under test; the next resume places.
+    let full = Arc::new(AtomicBool::new(true));
+    let redefer = Arc::new(AtomicBool::new(true));
+    let (f, rd) = (full.clone(), redefer.clone());
+    rig.backend.fail_launch_no_capacity_if(move |cfg| {
+        if !cfg.cmd.iter().any(|c| c == "agent") {
+            return None;
+        }
+        if f.load(Ordering::SeqCst) || rd.swap(false, Ordering::SeqCst) {
+            return Some("no free slots on any node".to_string());
+        }
+        None
+    });
+    let h = rig.handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: true,
+                abort: false,
+                structured: None,
+                token_usage: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let job = rig.handle.create_job(req("cmd-agent-eval")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+
+    // Observe the queued eval and capture its enqueue time; the re-defer must
+    // keep this exact value (a reset would restamp it to a later `now`).
+    let queued = wait_for_task(&rig.store, job.id, |t| {
+        t.phase == TaskPhase::Evaluation && t.state == TaskState::Pending
+    })
+    .await;
+    assert_eq!(queued.attempt, 1, "queueing burns no eval_retries");
+    let first_queued_at = queued.queued_at.expect("a queued eval carries queued_at");
+    // A measurable gap so a *reset* on the re-defer would land at a distinctly
+    // later `now` — the assertion below would then catch it.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Free a slot; the first resume re-defers (loses the race), the next places
+    // the same task, which passes → the job lands.
+    full.store(false, Ordering::SeqCst);
+    rig.handle.trigger_scan().await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+    assert!(
+        !redefer.load(Ordering::SeqCst),
+        "the resume→re-defer path ran (the one-shot slot-race loss was consumed)"
+    );
+
+    let evals: Vec<_> = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.phase == TaskPhase::Evaluation)
+        .collect();
+    assert_eq!(
+        evals.len(),
+        1,
+        "one eval task drained across the re-defers — no retry inflation"
+    );
+    let eval = &evals[0];
+    assert_eq!(eval.state, TaskState::Done);
+    assert_eq!(
+        eval.attempt, 1,
+        "re-deferring on NoCapacity never burns an eval_retries attempt"
+    );
+    assert_eq!(
+        eval.pending_reason, None,
+        "a resumed-then-completed eval clears its QueuedForCapacity badge"
+    );
+    assert_eq!(
+        eval.queued_at,
+        Some(first_queued_at),
+        "every re-defer preserved the original queued_at (backstop accumulates, no reset)"
+    );
+}
+
+/// Eval-exhaustion escalation + Retry (#141) resumes at Evaluation: it re-runs
+/// the evaluators against the preserved branch and never launches a fresh work
+/// task. The work attempt counter and cycle are untouched; a fresh eval fan-out
+/// passes → the job lands.
+#[tokio::test]
+async fn eval_exhaustion_retry_reruns_evaluation_without_new_work() {
+    let Some(rig) = rig().await else { return };
+    // The command eval is refused at launch until we clear the flag, so
+    // eval_retries exhausts and the job escalates with `eval_infra_failure`.
+    let fail = Arc::new(AtomicBool::new(true));
+    let f = fail.clone();
+    rig.backend.fail_launch_if(move |_| {
+        f.load(Ordering::SeqCst)
+            .then(|| "invalid memory limit \"5g\"".to_string())
+    });
+    commit_work(&rig); // agent work passes → job reaches Evaluation
+    rig.backend
+        .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    let before = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let work_before = before.iter().filter(|t| t.phase == TaskPhase::Work).count();
+    assert_eq!(work_before, 1, "exactly one work task ran");
+    let esc = before
+        .iter()
+        .find(|t| matches!(t.kind, types::TaskKind::Human { .. }) && t.state == TaskState::Pending)
+        .expect("a Human escalation task");
+    // #141: escalation tasks are stamped with their own phase, not Work.
+    assert_eq!(esc.phase, TaskPhase::Escalation);
+
+    // Clear the fleet fault and Retry: evaluation re-runs, no new work.
+    fail.store(false, Ordering::SeqCst);
+    rig.handle
+        .resolve_task(
+            "acme",
+            "api",
+            job.id,
+            esc.id,
+            TaskResolution::Escalation {
+                action: EscalationAction::Retry,
+                structured: None,
+            },
+            "david",
+        )
+        .await
+        .unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let after = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    // No new work task: work still ran exactly once, still attempt 1.
+    let works: Vec<_> = after
+        .iter()
+        .filter(|t| t.phase == TaskPhase::Work)
+        .collect();
+    assert_eq!(works.len(), 1, "Retry re-ran evaluation, not work (#141)");
+    assert_eq!(works[0].attempt, 1, "work attempt counter untouched");
+    // A fresh eval fan-out ran after the retry and passed.
+    assert!(
+        after
+            .iter()
+            .any(|t| t.phase == TaskPhase::Evaluation && t.state == TaskState::Done),
+        "the retried evaluation produced a passing eval task: {after:?}",
+    );
+    // Cycle never bumped — a retry is not a rework.
+    assert!(
+        after.iter().all(|t| t.cycle == 1),
+        "cycle stays 1 across the escalation retry: {after:?}",
+    );
+}
+
+/// A wrap-up task carries its label from job-type config (#146): the explicit
+/// `wrap_up.name` when set, and a derived default (the script basename) when not.
+#[tokio::test]
+async fn wrap_up_task_carries_label() {
+    let Some(rig) = rig().await else { return };
+    commit_work(&rig); // agent work for the named job
+    commit_work(&rig); // agent work for the derived job
+    // Explicit name → the wrap-up task's label is exactly it.
+    let named = rig.handle.create_job(req("webpub-named")).await.unwrap();
+    rig.handle
+        .release_job("acme", "api", named.id)
+        .await
+        .unwrap();
+    wait_for_state(&rig.store, named.id, JobState::Done).await;
+    let wrap = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", named.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.phase == TaskPhase::WrapUp)
+        .expect("a wrap-up task");
+    assert_eq!(wrap.label.as_deref(), Some("publish"));
+
+    // Unset name → derived from the publish script's basename.
+    let derived = rig.handle.create_job(req("webpub")).await.unwrap();
+    rig.handle
+        .release_job("acme", "api", derived.id)
+        .await
+        .unwrap();
+    wait_for_state(&rig.store, derived.id, JobState::Done).await;
+    let wrap = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", derived.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.phase == TaskPhase::WrapUp)
+        .expect("a wrap-up task");
+    assert_eq!(wrap.label.as_deref(), Some("web-publish"));
 }
 
 async fn event_types(store: &NatsStore) -> Vec<String> {
@@ -1548,6 +2077,84 @@ async fn wrap_up_command_failure_escalates_but_merge_stays() {
     );
     let events = event_types(&rig.store).await;
     assert!(events.contains(&"job-escalated".to_string()), "{events:?}");
+}
+
+/// Wrap-up-failure escalation + Retry (#141) resumes at WrapUp: it re-runs only
+/// the publish command (the squash already landed) and never launches a fresh
+/// work task. The retry publish succeeds → the job lands.
+#[tokio::test]
+async fn wrap_up_failure_retry_reruns_only_publish() {
+    let Some(rig) = rig().await else { return };
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone
+            .commit_file("web/src/app.tsx", b"<App/>", "implement")
+            .await;
+        clone.push(&branch).await;
+    });
+    rig.backend.script_exits([7, 0]); // publish fails, then succeeds on retry
+
+    let job = rig.handle.create_job(req("webpub")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    let before = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let work_before = before.iter().filter(|t| t.phase == TaskPhase::Work).count();
+    let esc = before
+        .iter()
+        .find(|t| matches!(t.kind, types::TaskKind::Human { .. }) && t.state == TaskState::Pending)
+        .expect("a Human escalation task");
+    assert_eq!(esc.phase, TaskPhase::Escalation);
+
+    // Retry: re-run only the publish.
+    rig.handle
+        .resolve_task(
+            "acme",
+            "api",
+            job.id,
+            esc.id,
+            TaskResolution::Escalation {
+                action: EscalationAction::Retry,
+                structured: None,
+            },
+            "david",
+        )
+        .await
+        .unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let after = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        after.iter().filter(|t| t.phase == TaskPhase::Work).count(),
+        work_before,
+        "Retry re-ran the publish, not work (#141)",
+    );
+    let wrapups: Vec<_> = after
+        .iter()
+        .filter(|t| t.phase == TaskPhase::WrapUp)
+        .collect();
+    assert_eq!(wrapups.len(), 2, "the failed publish plus the retried one");
+    assert!(
+        wrapups.iter().any(|t| t.state == TaskState::Done),
+        "the retried publish landed the job: {wrapups:?}",
+    );
+    assert!(after.iter().all(|t| t.cycle == 1), "cycle untouched");
 }
 
 /// A job revoked before it lands never runs its `wrap_up.run` command: the

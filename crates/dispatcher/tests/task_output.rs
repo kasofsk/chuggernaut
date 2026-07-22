@@ -26,6 +26,7 @@ fn running_task(id: u64, container_id: Option<&str>) -> Task {
         state: TaskState::Running,
         attempt: 1,
         evaluator: None,
+        label: None,
         stage: 0,
         performed_by: None,
         container_id: container_id.map(String::from),

@@ -94,6 +94,7 @@ fn work_task(id: u64, job_seq: u64, state: TaskState, container_id: Option<&str>
         evaluator: None,
         stage: 0,
         performed_by: None,
+        label: None,
         container_id: container_id.map(Into::into),
         rework_reason: None,
         infra_loss: false,

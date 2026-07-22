@@ -319,6 +319,7 @@ impl Core {
             },
             attempt,
             evaluator: None,
+            label: None,
             stage: 0,
             performed_by: claimed.then_some(types::Performer::Human),
             container_id: None,
@@ -607,6 +608,9 @@ impl Core {
                 }
                 self.on_triage_exited(owner, project, seq, task, exit).await
             }
+            // Escalation tasks are Human — they launch no container, so no
+            // TaskExited ever fires for one; nothing to do defensively.
+            TaskPhase::Escalation => Ok(()),
         }
     }
 
@@ -1061,7 +1065,8 @@ impl Core {
 
         match (job.state, resolution) {
             // Post-work escalation task (§1.2): work executed, automation ran
-            // out. Retry re-enters Work; Resolve re-enters Evaluation.
+            // out. Retry resumes at the phase that exhausted (see
+            // `escalation_retry_phase`); Resolve re-enters Evaluation.
             (JobState::Escalated, TaskResolution::Escalation { action, structured }) => {
                 complete_task(&mut task, true, false, structured, Some(action));
                 self.tasks.put(&task).await?;
@@ -1237,11 +1242,85 @@ impl Core {
         }
     }
 
-    /// §1.2 escalation Retry: new work task, same cycle, attempt++, branch
-    /// used AS-IS — the operator may have modified it. `work_retries` budget
-    /// is not reset.
+    /// §1.2 escalation Retry: resume at the phase that actually failed (job
+    /// #141), so a Retry never re-runs work that already succeeded. The failed
+    /// phase is read from the escalation record — its `failing_task`'s phase
+    /// when one was recorded, else the machine reason (an eval reduce escalation
+    /// names no single culprit). Cycle is untouched in every case; cycles bump
+    /// only on a real eval FAIL → rework.
+    ///
+    /// - **Work** exhausted (`work_retries`) → re-run Work (the pre-#141
+    ///   behavior: same cycle, attempt++, branch used AS-IS).
+    /// - **Evaluation** exhausted (`eval_retries`, abort, or rework budget) →
+    ///   re-enter Evaluation against the intact branch with a fresh eval
+    ///   fan-out; no work task is created, no work attempt burned.
+    /// - **Wrap-up** failed → re-run only the publish command; the squash has
+    ///   already landed, so the merge is never redone.
     async fn escalation_retry(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         self.ensure_exec_state(owner, project, seq).await?;
+        match self.escalation_retry_phase(owner, project, seq).await? {
+            TaskPhase::Evaluation | TaskPhase::MergeGate => {
+                // Work is Done and the branch intact: re-enter Evaluation. The
+                // round is rebuilt from the job type, so eval_retries is a fresh
+                // grant and the work attempt counter is untouched (#141).
+                self.enter_evaluation(owner, project, seq).await
+            }
+            TaskPhase::WrapUp => self.retry_wrapup(owner, project, seq).await,
+            TaskPhase::Work | TaskPhase::Triage | TaskPhase::Escalation => {
+                self.retry_work(owner, project, seq).await
+            }
+        }
+    }
+
+    /// The phase an escalation Retry should resume at (#141). Prefers the
+    /// failing task's own phase — authoritative for work/wrap-up failures and
+    /// launch-queue timeouts, which record a culprit — and falls back to the
+    /// escalation reason for eval-reduce escalations (which record none).
+    /// Unknown/legacy reasons resume at Work, the historical default.
+    async fn escalation_retry_phase(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+    ) -> Result<TaskPhase> {
+        let (reason, failing_task) = {
+            let esc = self.must_get(owner, project, seq)?.escalation.as_ref();
+            (
+                esc.map(|e| e.reason.clone()),
+                esc.and_then(|e| e.failing_task),
+            )
+        };
+        if let Some(task_id) = failing_task
+            && let Some(task) = self.tasks.get(owner, project, seq, task_id).await?
+        {
+            return Ok(match task.phase {
+                TaskPhase::Evaluation | TaskPhase::MergeGate => TaskPhase::Evaluation,
+                TaskPhase::WrapUp => TaskPhase::WrapUp,
+                _ => TaskPhase::Work,
+            });
+        }
+        Ok(match reason.as_deref() {
+            Some("eval_infra_failure" | "eval_abort" | "rework_budget_exhausted") => {
+                TaskPhase::Evaluation
+            }
+            Some("wrap_up_failed") => TaskPhase::WrapUp,
+            _ => TaskPhase::Work,
+        })
+    }
+
+    /// Re-run only the wrap-up publish after a `wrap_up_failed` escalation
+    /// (#141): the squash already landed, so the merge is final — set the job
+    /// back to WrapUp and relaunch the command at a fresh attempt.
+    async fn retry_wrapup(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        let mut job = self.must_get(owner, project, seq)?.clone();
+        self.set_state(&mut job, JobState::WrapUp).await?;
+        self.launch_wrapup_task(owner, project, seq, 1).await
+    }
+
+    /// Re-run Work after a work-phase escalation (#141, pre-existing behavior):
+    /// new work task, same cycle, attempt++, branch used AS-IS — the operator
+    /// may have modified it. `work_retries` budget is not reset.
+    async fn retry_work(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
         let cycle = self.active.get(&key).expect("exec state").cycle;
         let work_type = self

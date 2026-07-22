@@ -381,6 +381,13 @@
             "null"
           ]
         },
+        "name": {
+          "description": "Human-facing label for the wrap-up task, so it is as self-describing as\nan evaluator (`Command · publish` instead of a bare `Command`, job #146).\nValidated like an evaluator name. Unset → derived from the mode (see\n[`WrapUpSpec::label`]): a command wrap-up takes its script's basename\n(`tasks/web-publish.sh` → `web-publish`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "run": {
           "description": "Optional post-merge command (spec §3.2, design-lifecycle.md wrap-up\nhook): a shell command run in the WrapUp phase *after* the squash lands\non the default branch, against the merged main content. It ships the\nmerged result — a web job publishing its built UI, say — so it only runs\nonce the merge is final, and never at all if the job is revoked or\nescalated before landing. Valid with `type: merge` only. A non-zero exit\nescalates the job (the merge is not undone). The command clones the\ndefault branch, so it must be idempotent (a restart may re-launch it).",
           "type": [

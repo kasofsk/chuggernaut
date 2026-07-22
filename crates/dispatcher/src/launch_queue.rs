@@ -4,10 +4,12 @@
 //! and re-attempted when a running container exits and frees a slot, drained by
 //! `Core::run` after every message and by the periodic scan as a backstop. A
 //! launch that outwaits [`MAX_QUEUE_WAIT`] escalates with a clear reason — the
-//! genuinely-wedged-fleet backstop. Only the command launch paths (work,
-//! evaluator, merge gate, wrap-up) queue; genuinely-unreachable-node and other
-//! launch errors keep today's fail-the-task semantics. Agent launches run
-//! through the provider and are out of scope here.
+//! genuinely-wedged-fleet backstop. Every launch path queues on capacity
+//! pressure: the command paths (work, evaluator, merge gate, wrap-up) inline,
+//! and agent evaluators via [`Msg::LaunchDeferred`] — the provider erases
+//! `NoCapacity`, so the spawned run signals it back for [`Core::defer_launch`]
+//! (#140). Genuinely-unreachable-node and other launch errors keep today's
+//! fail-the-task semantics.
 //!
 //! Single-writer intact: the queue lives in the actor, the slot-freed signal
 //! rides the existing container-exit fan-in, and every queue mutation happens
@@ -15,7 +17,7 @@
 
 use crate::core::{Core, Msg, Result, TaskExit};
 use crate::exec::{ChannelRole, eval_image, task_timeout};
-use crate::queue::QueuedLaunch;
+use crate::queue::{LaunchPriority, QueuedLaunch};
 use chrono::Utc;
 use container::{BackendError, ContainerLaunchConfig, bootstrap_cmd};
 use std::time::Duration;
@@ -29,6 +31,16 @@ pub(crate) const MAX_QUEUE_WAIT: Duration = Duration::from_secs(30 * 60);
 /// Escalation reason for a launch that outwaited the queue (spec §3.5). A
 /// stable, clear code a later structured-escalation pass (job #76) can adopt.
 pub(crate) const QUEUE_TIMEOUT_REASON: &str = "no_free_slots_timeout";
+
+/// The drain-priority class of a launch by its phase (spec §3.5, job #140):
+/// evaluation, merge gate, and wrap-up are finishing-phase launches that jump
+/// ahead of queued work.
+pub(crate) fn launch_priority(phase: TaskPhase) -> LaunchPriority {
+    match phase {
+        TaskPhase::Work => LaunchPriority::Work,
+        _ => LaunchPriority::Finishing,
+    }
+}
 
 /// The container monitor a resumed launch needs — mirrors the two command
 /// monitor shapes the initial launch paths spawn.
@@ -49,6 +61,12 @@ enum ResumeOutcome {
     Discarded,
     /// The fleet is still full; the entry is re-queued unchanged.
     NoCapacity,
+    /// An agent evaluator was re-spawned through the provider (#140). The launch
+    /// is asynchronous — capacity is claimed by the spawned run, whose own
+    /// `NoCapacity` re-defers a fresh entry — so the drain retires this entry and
+    /// stops, treating the freed slot as spoken for. The next freed slot (or the
+    /// periodic scan) drains any remaining entries.
+    SpawnedAgent,
 }
 
 impl Core {
@@ -107,7 +125,16 @@ impl Core {
         task: &mut Task,
         reason: String,
     ) -> Result<()> {
-        let queued_at = Utc::now();
+        // Preserve the original enqueue time across *re-deferrals* (§3.5): when a
+        // resumed agent eval loses the slot race and signals `NoCapacity` back
+        // (its record still carries the first defer's `queued_at`), the wait must
+        // keep accumulating from that first defer rather than restarting the
+        // max-wait backstop clock — otherwise a churning-but-full fleet could
+        // reset the clock on every resume and never escalate. First defer: the
+        // task has no `queued_at` yet, so stamp now. (The command paths never
+        // re-enter here — they re-queue the same entry directly — so this only
+        // affects the agent re-defer path; command tasks always stamp now.)
+        let queued_at = task.queued_at.unwrap_or_else(Utc::now);
         task.state = TaskState::Pending;
         task.container_id = None;
         // The task-timeout clock starts when the container actually launches,
@@ -130,11 +157,12 @@ impl Core {
             }),
         )
         .await?;
-        self.launch_queue.push_back(QueuedLaunch {
+        self.enqueue_launch(QueuedLaunch {
             owner: owner.to_string(),
             project: project.to_string(),
             seq,
             task_id: task.id,
+            priority: launch_priority(task.phase),
             queued_at,
         });
         Ok(())
@@ -164,6 +192,49 @@ impl Core {
         }
     }
 
+    /// An agent evaluator launch came back [`BackendError::NoCapacity`] from the
+    /// provider (which erases the variant), reported via [`Msg::LaunchDeferred`].
+    /// Park and queue it exactly as the command paths do inline (§3.5, #140).
+    /// Runs on the single-writer loop, so it never races the exit handler. A
+    /// no-op if the task already left its launching state (resolved, superseded)
+    /// or the job is no longer active.
+    pub(crate) async fn on_launch_deferred(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task_id: u64,
+        reason: String,
+    ) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        if !self.active.contains_key(&key) {
+            return Ok(()); // job escalated/revoked out from under the launch
+        }
+        let Some(mut task) = self.tasks.get(owner, project, seq, task_id).await? else {
+            return Ok(()); // task record vanished
+        };
+        // Only a live launch attempt defers; a resolved/failed record is stale
+        // (a duplicate signal, or a superseded round's leftover).
+        if task.state != TaskState::Running {
+            return Ok(());
+        }
+        self.defer_launch(owner, project, seq, &mut task, reason)
+            .await
+    }
+
+    /// Insert a deferred launch respecting its [`LaunchPriority`] then FIFO
+    /// (spec §3.5, #140): a finishing-phase launch lands ahead of every queued
+    /// work launch but behind earlier finishing launches, so eval/wrap-up drain
+    /// first and neither class starves the other's ordering.
+    pub(crate) fn enqueue_launch(&mut self, entry: QueuedLaunch) {
+        let pos = self
+            .launch_queue
+            .iter()
+            .position(|q| q.priority > entry.priority)
+            .unwrap_or(self.launch_queue.len());
+        self.launch_queue.insert(pos, entry);
+    }
+
     /// Attempt every queued launch once, FIFO (spec §3.5). Called after each
     /// container exit (a freed slot) and by the periodic scan. A `NoCapacity`
     /// re-queue means the fleet is still full, so draining stops — the remaining
@@ -183,9 +254,15 @@ impl Core {
             };
             match self.resume_launch(&q).await? {
                 ResumeOutcome::Settled | ResumeOutcome::Discarded => continue,
+                // The agent launch is async and has claimed the freed slot; its
+                // own NoCapacity re-defers a fresh entry, so retire this one and
+                // stop draining (#140).
+                ResumeOutcome::SpawnedAgent => break,
                 ResumeOutcome::NoCapacity => {
-                    // Preserve queued_at so the backstop measures the total wait.
-                    self.launch_queue.push_back(q);
+                    // Preserve queued_at so the backstop measures the total wait,
+                    // and re-insert by priority (#140) so a re-queued finishing
+                    // launch stays ahead of queued work rather than falling behind.
+                    self.enqueue_launch(q);
                     break;
                 }
             }
@@ -209,6 +286,55 @@ impl Core {
         // The job left execution (escalated / revoked): drop the stale entry.
         if !self.active.contains_key(&key) {
             return Ok(ResumeOutcome::Discarded);
+        }
+        // An agent evaluator relaunches through the provider, not a command
+        // container (#140). Only the Evaluation fan-out ever queues an agent —
+        // the merge gate is command-only — so rebuild it from the persisted
+        // evaluator + session id against the job branch and re-spawn. The
+        // spawned run re-defers if the fleet is still full.
+        if let TaskKind::Agent { .. } = &task.kind {
+            let job = self.must_get(owner, project, seq)?.clone();
+            let job_type = self.active.get(&key).expect("checked").job_type.clone();
+            let Some(evaluator) = job_type
+                .eval
+                .iter()
+                .find(|e| Some(&e.name) == task.evaluator.as_ref())
+                .cloned()
+            else {
+                return Ok(ResumeOutcome::Discarded); // evaluator no longer declared
+            };
+            let mut task = task;
+            let session_id = task.session_id.clone();
+            task.state = TaskState::Running;
+            task.started_at = Some(Utc::now());
+            // Off the queue → drop the "queued" badge the instant it launches
+            // (§3.5), matching the command path (`launch_resumed`). The launch is
+            // optimistic — the spawned run may re-hit `NoCapacity` and re-defer —
+            // so keep `queued_at` on the record: it is the anchor `defer_launch`
+            // preserves so the backstop clock accumulates rather than resetting.
+            task.pending_reason = None;
+            self.tasks.put(&task).await?;
+            self.publish(
+                owner,
+                project,
+                seq,
+                "task-launched",
+                serde_json::json!({
+                    "task_id": task.id, "phase": format!("{:?}", task.phase),
+                }),
+            )
+            .await?;
+            self.spawn_eval_agent(
+                owner,
+                project,
+                seq,
+                task.id,
+                session_id,
+                &job.branch,
+                &evaluator,
+            )
+            .await?;
+            return Ok(ResumeOutcome::SpawnedAgent);
         }
         let run = match &task.kind {
             TaskKind::Command { run } => run.clone(),
@@ -267,7 +393,11 @@ impl Core {
                 task_timeout(&job_type),
                 MonitorKind::Logs,
             ),
-            TaskPhase::Triage => return Ok(ResumeOutcome::Discarded),
+            // Neither ever launches a queued command container: triage runs
+            // through the agent provider, escalation tasks are Human.
+            TaskPhase::Triage | TaskPhase::Escalation => {
+                return Ok(ResumeOutcome::Discarded);
+            }
         };
 
         let config = self
