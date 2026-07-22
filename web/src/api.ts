@@ -238,6 +238,23 @@ export interface Task {
 
 export type ArtifactKind = 'session.jsonl' | 'stdout.log'
 
+/**
+ * GET .../tasks/{id}/output?since=<byte offset> — a task's stdout as a resumable
+ * tail. While the container runs it returns the live tail (`running: true`);
+ * after exit it serves the harvested stdout.log at the *same* byte offsets
+ * (`running: false`), so a poller that keeps handing `offset` back never drops a
+ * line across the container-exit transition. 404 before a container exists (a
+ * parked human task, a Pending launch); 502 if the owning node is unreachable.
+ */
+export interface TaskOutput {
+  /** the new end offset — pass as `since` on the next poll to resume gaplessly */
+  offset: number
+  /** bytes since the requested offset (may be empty on a quiet tail) */
+  data: string
+  /** true while the container runs (live tail); false once serving the artifact */
+  running: boolean
+}
+
 export interface Identity {
   sub: string
   kind: 'user' | 'dispatcher'
@@ -443,6 +460,13 @@ export const api = {
 
   diff: (owner: string, project: string, seq: number) =>
     req<DiffResponse>('GET', `/api/v1/projects/${owner}/${project}/diff/${seq}`),
+
+  /** A task's stdout tail from `since` (byte offset); see {@link TaskOutput}. */
+  taskOutput: (owner: string, project: string, seq: number, taskId: number, since: number) =>
+    req<TaskOutput>(
+      'GET',
+      `/api/v1/projects/${owner}/${project}/jobs/${seq}/tasks/${taskId}/output?since=${since}`,
+    ),
 
   artifacts: (owner: string, project: string, seq: number, taskId: number) =>
     req<{ artifacts: ArtifactKind[] }>(

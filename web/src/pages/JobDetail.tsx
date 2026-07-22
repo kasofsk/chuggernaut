@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ApiError,
@@ -19,6 +19,7 @@ import { useDebouncedCallback, useProjectEvents, type JobEvent } from '../useEve
 import { StateBadge, TaskBadge } from '../components/StateBadge'
 import { ResolveForm } from '../components/ResolveForm'
 import { TaskArtifacts } from '../components/TaskArtifacts'
+import { TaskLogPane } from '../components/TaskLogs'
 import { EvaluatorTable } from '../components/EvaluatorTable'
 import { Markdown } from '../components/Markdown'
 
@@ -32,6 +33,9 @@ export function JobDetail() {
   const [criteria, setCriteria] = useState<JobCriteria | null>(null)
   const [events, setEvents] = useState<JobEvent[]>([])
   const [error, setError] = useState<string | null>(null)
+  // The one task whose live-log pane is expanded, if any. Kept to a single open
+  // pane so at most one tail loop polls at a time.
+  const [openLogs, setOpenLogs] = useState<number | null>(null)
 
   const refresh = useCallback(() => {
     Promise.all([
@@ -267,11 +271,13 @@ export function JobDetail() {
               <th>dur</th>
               <th>detail</th>
               <th>artifacts</th>
+              <th>logs</th>
             </tr>
           </thead>
           <tbody>
             {tasks.map((t) => (
-              <tr key={t.id}>
+              <Fragment key={t.id}>
+              <tr>
                 <td>{t.id}</td>
                 <td><PhaseLabel phase={t.phase} /></td>
                 <td>
@@ -294,11 +300,39 @@ export function JobDetail() {
                 <td>
                   <TaskArtifacts owner={owner} project={project} seq={jobSeq} task={t} />
                 </td>
+                <td className="logs-cell">
+                  {t.container_id ? (
+                    <button
+                      className="linklike"
+                      onClick={() => setOpenLogs((cur) => (cur === t.id ? null : t.id))}
+                    >
+                      {openLogs === t.id ? 'hide' : t.state === 'Running' ? 'live' : 'logs'}
+                    </button>
+                  ) : (
+                    <span className="dim" title="no container ran for this task yet">
+                      —
+                    </span>
+                  )}
+                </td>
               </tr>
+              {openLogs === t.id && (
+                <tr className="log-row">
+                  <td colSpan={10}>
+                    <TaskLogPane
+                      owner={owner}
+                      project={project}
+                      seq={jobSeq}
+                      task={t}
+                      onClose={() => setOpenLogs(null)}
+                    />
+                  </td>
+                </tr>
+              )}
+              </Fragment>
             ))}
             {tasks.length === 0 && (
               <tr>
-                <td colSpan={9} className="dim">
+                <td colSpan={10} className="dim">
                   no tasks yet
                 </td>
               </tr>

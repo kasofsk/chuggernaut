@@ -800,6 +800,69 @@ td.actions button {
   line-height: 1.4;
 }
 
+/* Live task logs: the tailed stdout pane, expanded inline under a task row. */
+.logs-cell {
+  white-space: nowrap;
+}
+.log-row > td {
+  padding: 0.3rem 0.6rem;
+}
+.log-pane {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--inset);
+}
+.log-head {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: center;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+.log-head strong {
+  margin-right: auto;
+}
+.log-status {
+  font-size: var(--fs-xs);
+}
+.log-status.live {
+  color: var(--green);
+}
+.log-status.warn {
+  color: var(--orange);
+}
+.log-truncated {
+  padding: 0.3rem 0.6rem;
+  font-size: var(--fs-xs);
+  border-bottom: 1px dashed var(--border-faint);
+}
+/* Bound the height and scroll inside the box; wrap long lines so a wide build
+   log never pushes the page sideways (web/CLAUDE.md mobile rule). */
+.log-body {
+  margin: 0;
+  padding: 0.6rem;
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  color: var(--text);
+}
+.log-jump {
+  display: block;
+  width: 100%;
+  border: none;
+  border-top: 1px solid var(--border);
+  background: var(--btn-bg);
+  color: var(--text);
+  padding: 0.35rem;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--fs-xs);
+}
+
 /* Channel: the agent's narrative, from the event stream. Each post is its own
    card-row: a header (timestamp + origination + optional percent) over the
    rendered markdown body. Replies (operator/platform → agent) are set off with
@@ -1154,6 +1217,11 @@ td.actions button {
   /* Artifact toolbar (name + open/close/raw links) wraps rather than
      overflowing the viewer card. */
   .artifact-head {
+    flex-wrap: wrap;
+    row-gap: 0.2rem;
+  }
+  /* Log pane toolbar (task label + status + close) wraps rather than overflowing. */
+  .log-head {
     flex-wrap: wrap;
     row-gap: 0.2rem;
   }
