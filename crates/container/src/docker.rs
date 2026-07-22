@@ -41,6 +41,21 @@ pub struct DockerNodeConfig {
     pub slots: u32,
 }
 
+/// One node's boot-time probe, reported by [`DockerBackend::probe_all`]: its
+/// configured slot count and whether it answered its ping. A fleet owner (the
+/// dispatcher's fleet backend) uses these to apply the §3.6 "no live capacity"
+/// rule ONCE across every transport instead of per-sub-backend.
+#[derive(Debug, Clone)]
+pub struct NodeProbe {
+    pub name: String,
+    pub slots: u32,
+    /// `None` when the node answered its ping; `Some(detail)` when unreachable
+    /// (already logged and marked out of service in [`availability`]).
+    ///
+    /// [`availability`]: DockerBackend::availability
+    pub error: Option<String>,
+}
+
 struct Node {
     name: String,
     slots: u32,
@@ -123,15 +138,31 @@ impl DockerBackend {
     /// is re-probed on each launch, so it rejoins without a restart. A
     /// single-node backend still fails fast — its one node is the whole fleet.
     pub async fn ping_all(&self) -> Result<(), BackendError> {
-        let mut live_capacity = false;
-        let mut last_err = None;
+        let probes = self.probe_all().await;
+        if probes.iter().any(|p| p.error.is_none() && p.slots > 0) {
+            Ok(())
+        } else {
+            // The last unreachable node's error, else the all-reachable-but-no-slots case.
+            let last_err = probes.iter().rev().find_map(|p| p.error.clone());
+            Err(BackendError::Unavailable(
+                last_err.unwrap_or_else(|| "no node has slots > 0".into()),
+            ))
+        }
+    }
+
+    /// Ping every node, marking each in/out-of-service and logging failures,
+    /// but apply NO capacity hard-fail — the caller owns that decision.
+    /// [`ping_all`](Self::ping_all) layers the single-backend §3.6 rule on top;
+    /// the dispatcher's fleet backend aggregates these across transports so a
+    /// placement-inert 0-slot node can never veto a fleet that has capacity
+    /// elsewhere (the regression that crash-looped prod 2026-07-22).
+    pub async fn probe_all(&self) -> Vec<NodeProbe> {
+        let mut out = Vec::with_capacity(self.nodes.len());
         for node in &self.nodes {
-            match node.docker.ping().await {
+            let error = match node.docker.ping().await {
                 Ok(_) => {
                     node.in_service.store(true, Ordering::Relaxed);
-                    if node.slots > 0 {
-                        live_capacity = true;
-                    }
+                    None
                 }
                 Err(e) => {
                     node.in_service.store(false, Ordering::Relaxed);
@@ -139,17 +170,16 @@ impl DockerBackend {
                         node = %node.name,
                         "docker node unreachable at startup — out of service until it responds: {e}"
                     );
-                    last_err = Some(format!("node {}: {e}", node.name));
+                    Some(format!("node {}: {e}", node.name))
                 }
-            }
+            };
+            out.push(NodeProbe {
+                name: node.name.clone(),
+                slots: node.slots,
+                error,
+            });
         }
-        if live_capacity {
-            Ok(())
-        } else {
-            Err(BackendError::Unavailable(
-                last_err.unwrap_or_else(|| "no node has slots > 0".into()),
-            ))
-        }
+        out
     }
 
     /// Per-node health for the platform snapshot (spec §3.1): `(name, in_service)`

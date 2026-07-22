@@ -157,26 +157,126 @@ async fn remove_and_exited_sweep_through_the_proxy() {
     daemon.abort();
 }
 
+/// A stand-in worker daemon: answers `ping` (the only op startup capacity
+/// probing needs) over NATS, no Docker involved. Lets the fleet's startup and
+/// placement paths be exercised without a real daemon or docker socket.
+async fn mock_worker(store: &store::NatsStore, node: &str) -> tokio::task::JoinHandle<()> {
+    let mut sub = store
+        .subscribe_requests(&store::subjects::worker_all(node))
+        .await
+        .expect("subscribe mock worker");
+    // Ensure the SUB reached the server before any ping is published.
+    store.client().flush().await.expect("flush sub");
+    tokio::spawn(async move {
+        while let Some(req) = sub.next().await {
+            if req.subject.ends_with(".ping") {
+                let reply = types::worker::WorkerReply::Ok {
+                    value: types::worker::PingOk {
+                        running: 0,
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        artifacts: std::collections::HashMap::new(),
+                    },
+                };
+                req.respond(serde_json::to_vec(&reply).unwrap()).await;
+            }
+        }
+    })
+}
+
+/// A responding worker gives the fleet live capacity, so startup succeeds and a
+/// second, unreachable worker is soft-failed — a pin onto it fails *placement*,
+/// not startup (spec §3.1/§3.6).
 #[tokio::test]
-async fn out_of_service_worker_fails_placement_not_startup() {
+async fn worker_capacity_starts_fleet_and_dead_worker_fails_placement() {
     let server = require_nats!();
-    // No daemon at all: startup succeeds (soft-fail), launch reports no slots.
     let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let mock = mock_worker(&store, "up").await;
     let fleet = FleetBackend::new(
-        vec![DockerNodeConfig {
-            name: "ghost".into(),
-            endpoint: "worker".into(),
-            slots: 4,
-        }],
+        vec![
+            DockerNodeConfig {
+                name: "up".into(),
+                endpoint: "worker".into(),
+                slots: 4,
+            },
+            DockerNodeConfig {
+                name: "ghost".into(),
+                endpoint: "worker".into(),
+                slots: 4,
+            },
+        ],
         store,
     )
     .unwrap();
-    fleet.startup_check().await.unwrap(); // must NOT error
-    let err = fleet.launch(suite::cfg("true")).await.unwrap_err();
+
+    fleet.startup_check().await.unwrap(); // "up" responds ⇒ starts
+    // availability() still reports every node (spec §3.1 snapshot).
+    let avail = fleet.availability();
+    assert_eq!(avail.len(), 2);
+    assert!(avail.iter().any(|(n, up)| n == "up" && *up));
+    assert!(avail.iter().any(|(n, up)| n == "ghost" && !*up));
+
+    // A pin onto the out-of-service worker fails placement, not startup.
+    let mut cfg = suite::cfg("true");
+    cfg.node = Some("ghost".into());
+    let err = fleet.launch(cfg).await.unwrap_err();
     assert!(
         err.to_string().contains("no free slots"),
         "unexpected: {err}"
     );
+    mock.abort();
+}
+
+/// The prod outage, end-to-end: a 0-slot docker placeholder (unreachable here,
+/// no docker needed) beside a responding worker must NOT veto startup — capacity
+/// is a fleet property, evaluated once across transports.
+#[tokio::test]
+async fn zero_slot_docker_does_not_veto_live_worker_fleet() {
+    let server = require_nats!();
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let mock = mock_worker(&store, "air").await;
+    let fleet = FleetBackend::new(
+        vec![
+            DockerNodeConfig {
+                name: "local".into(),
+                endpoint: "tcp://127.0.0.1:1".into(),
+                slots: 0,
+            },
+            DockerNodeConfig {
+                name: "air".into(),
+                endpoint: "worker".into(),
+                slots: 4,
+            },
+        ],
+        store,
+    )
+    .unwrap();
+    fleet.startup_check().await.unwrap();
+    mock.abort();
+}
+
+/// No reachable node has capacity anywhere (0-slot docker + unreachable worker)
+/// ⇒ refuse to start (spec §3.6).
+#[tokio::test]
+async fn no_reachable_capacity_fails_startup() {
+    let server = require_nats!();
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let fleet = FleetBackend::new(
+        vec![
+            DockerNodeConfig {
+                name: "local".into(),
+                endpoint: "tcp://127.0.0.1:1".into(),
+                slots: 0,
+            },
+            DockerNodeConfig {
+                name: "ghost".into(),
+                endpoint: "worker".into(),
+                slots: 4,
+            },
+        ],
+        store,
+    )
+    .unwrap();
+    assert!(fleet.startup_check().await.is_err());
 }
 
 #[tokio::test]

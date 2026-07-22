@@ -6,8 +6,11 @@
 //! slots, ties broken by name. Worker free slots come from the ping reply
 //! (the worker counts its own managed containers); a worker that fails its
 //! ping is out-of-service — skipped by placement, re-probed on the next
-//! placement attempt, and NEVER fatal at startup. Docker-endpoint nodes keep
-//! the strict §3.6 startup rule.
+//! placement attempt, and NEVER fatal at startup. Startup capacity is a
+//! fleet-level property (§3.6): every node (docker or worker) is probed and
+//! marked in/out-of-service, and the "no live capacity" hard-fail is applied
+//! once across the whole fleet — a placement-inert 0-slot node never vetoes a
+//! fleet that has slots elsewhere.
 
 use async_trait::async_trait;
 use container::docker::{DockerBackend, DockerNodeConfig};
@@ -55,6 +58,30 @@ pub struct FleetBackend {
     nodes: Vec<FleetNode>,
 }
 
+/// One fleet node's boot-time capacity, transport-agnostic: its configured
+/// slots and whether it answered its startup probe. Feeds [`evaluate_startup`].
+struct NodeCapacity {
+    slots: u32,
+    reachable: bool,
+}
+
+/// The §3.6 startup rule as a fleet-level property (spec §3.1), evaluated ONCE
+/// across every transport: the fleet may start iff at least one reachable node
+/// has slots > 0. A 0-slot node is placement-inert and never blocks startup,
+/// whatever its transport; an unreachable node is out of service, not fatal —
+/// unless it was the fleet's only capacity.
+fn evaluate_startup(nodes: &[NodeCapacity]) -> Result<(), BackendError> {
+    if nodes.iter().any(|n| n.reachable && n.slots > 0) {
+        return Ok(());
+    }
+    let detail = if nodes.iter().any(|n| n.slots > 0) {
+        "no node with slots > 0 is reachable"
+    } else {
+        "no node has slots > 0"
+    };
+    Err(BackendError::Unavailable(detail.into()))
+}
+
 impl FleetBackend {
     /// Partition `DOCKER_NODES` entries: `worker` endpoints become NATS-proxied
     /// nodes; everything else gets its own single-node [`DockerBackend`].
@@ -84,25 +111,45 @@ impl FleetBackend {
         Ok(Self { nodes })
     }
 
-    /// §3.6 startup, softened for worker nodes: docker-endpoint nodes must
-    /// answer (hard fail, unchanged); a worker that doesn't answer is logged
-    /// and marked out-of-service — its daemon dialing in later brings it back
-    /// without a dispatcher restart.
+    /// §3.6 startup as a fleet-level property (spec §3.1): probe every node,
+    /// mark each in/out-of-service and log, then apply the "no live capacity"
+    /// hard-fail ONCE across every transport. Capacity is a fleet property, not
+    /// a per-sub-backend one: a reachable 0-slot docker node is placement-inert
+    /// and must never veto a fleet whose worker (or another docker node) has
+    /// slots to spare — the regression that crash-looped prod 2026-07-22.
+    ///
+    /// A worker that doesn't answer is logged and out-of-service, not fatal —
+    /// its daemon dialing in later brings it back without a dispatcher restart.
+    /// The pure-`DockerBackend` single-node path (`run.rs`) still fails fast via
+    /// [`DockerBackend::ping_all`].
     pub async fn startup_check(&self) -> Result<(), BackendError> {
+        let mut caps = Vec::with_capacity(self.nodes.len());
         for node in &self.nodes {
             match &node.handle {
-                NodeHandle::Docker { backend } => backend.ping_all().await?,
-                NodeHandle::Worker { .. } => {
-                    if self.probe_worker(node).await.is_none() {
+                NodeHandle::Docker { backend } => {
+                    for probe in backend.probe_all().await {
+                        caps.push(NodeCapacity {
+                            slots: probe.slots,
+                            reachable: probe.error.is_none(),
+                        });
+                    }
+                }
+                NodeHandle::Worker { slots, .. } => {
+                    let reachable = self.probe_worker(node).await.is_some();
+                    if !reachable {
                         tracing::warn!(
                             node = %node.name,
                             "worker node unreachable at startup — out of service until its daemon connects"
                         );
                     }
+                    caps.push(NodeCapacity {
+                        slots: *slots,
+                        reachable,
+                    });
                 }
             }
         }
-        Ok(())
+        evaluate_startup(&caps)
     }
 
     /// Ping a worker node; updates in_service and returns free slots when live.
@@ -417,3 +464,51 @@ pub fn has_worker_nodes(configs: &[DockerNodeConfig]) -> bool {
 
 // Arc so run.rs can pass it around like the DockerBackend today.
 pub type SharedFleet = Arc<FleetBackend>;
+
+#[cfg(test)]
+mod tests {
+    //! Fleet-level startup capacity (spec §3.1/§3.6) — the pure decision, no
+    //! docker daemon or NATS needed. `(reachable, slots)` faithfully models each
+    //! node's boot probe regardless of transport (docker or worker).
+    use super::{NodeCapacity, evaluate_startup};
+
+    fn node(reachable: bool, slots: u32) -> NodeCapacity {
+        NodeCapacity { slots, reachable }
+    }
+
+    /// The outage case: a reachable 0-slot docker placeholder plus a responding
+    /// 4-slot worker starts fine. The 0-slot node must not veto the fleet.
+    #[test]
+    fn zero_slot_docker_does_not_veto_worker_capacity() {
+        assert!(evaluate_startup(&[node(true, 0), node(true, 4)]).is_ok());
+    }
+
+    /// A reachable 0-slot docker node with the only worker unreachable ⇒ no live
+    /// capacity anywhere ⇒ refuse to start.
+    #[test]
+    fn zero_slot_docker_plus_dead_worker_fails() {
+        let err = evaluate_startup(&[node(true, 0), node(false, 4)]).unwrap_err();
+        assert!(err.to_string().contains("reachable"), "{err}");
+    }
+
+    /// An unreachable docker node is out-of-service, not fatal, when a responding
+    /// worker carries the fleet's capacity.
+    #[test]
+    fn unreachable_docker_starts_when_worker_responds() {
+        assert!(evaluate_startup(&[node(false, 2), node(true, 4)]).is_ok());
+    }
+
+    /// A single reachable node with slots is the all-docker single-node path —
+    /// unchanged: it starts.
+    #[test]
+    fn single_reachable_node_with_slots_starts() {
+        assert!(evaluate_startup(&[node(true, 4)]).is_ok());
+    }
+
+    /// Every node reachable but all 0-slot ⇒ nothing can ever be placed ⇒ refuse.
+    #[test]
+    fn all_zero_slot_reachable_fails() {
+        let err = evaluate_startup(&[node(true, 0), node(true, 0)]).unwrap_err();
+        assert!(err.to_string().contains("slots > 0"), "{err}");
+    }
+}

@@ -25,9 +25,12 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
     let repos = RepoManager::new(&config.repos_root);
     repos.check_git_version().await?;
 
-    // Worker nodes (spec §3.1) are NATS-proxied and soft-fail at startup (an
-    // unreachable worker is out-of-service, not fatal); plain Docker fleets
-    // keep the strict §3.6 rule and the exact single-backend path.
+    // Mixed fleets (spec §3.1/§3.6) probe every node — docker or worker — mark
+    // each in/out-of-service, and apply the "no live capacity" hard-fail once
+    // across the whole fleet: capacity is a fleet-level property, so a
+    // placement-inert 0-slot node never vetoes a fleet with slots elsewhere.
+    // A plain Docker fleet (no worker nodes) keeps the exact single-backend
+    // path below.
     // Per-node health captured at startup for the platform snapshot (spec
     // §3.1). Placement keeps it fresh as nodes drop/recover, but the snapshot
     // is written once, so this is the boot-time view.
@@ -35,7 +38,8 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
     let backend: Arc<dyn container::ContainerBackend> =
         if worker::backend::has_worker_nodes(&config.docker_nodes) {
             let fleet = worker::FleetBackend::new(config.docker_nodes.clone(), store.clone())?;
-            fleet.startup_check().await?; // hard-fails only on docker-endpoint nodes
+            // Fleet-level rule: refuses only when no reachable node has slots > 0.
+            fleet.startup_check().await?;
             node_availability = fleet.availability();
             Arc::new(fleet)
         } else {
