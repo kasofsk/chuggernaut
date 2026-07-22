@@ -20,6 +20,7 @@ import { StateBadge, TaskBadge } from '../components/StateBadge'
 import { ResolveForm } from '../components/ResolveForm'
 import { TaskArtifacts } from '../components/TaskArtifacts'
 import { EvaluatorTable } from '../components/EvaluatorTable'
+import { Markdown } from '../components/Markdown'
 
 export function JobDetail() {
   const { owner = '', project = '', seq = '' } = useParams()
@@ -309,7 +310,7 @@ export function JobDetail() {
 
       <TaskReports tasks={tasks} />
 
-      <ChannelLog events={events} />
+      <ChannelLog events={events} tasks={tasks} />
 
       {diff && diff.diff && (
         <section className="card">
@@ -425,11 +426,21 @@ function TaskReports({ tasks }: { tasks: Task[] }) {
         {thread.map((t) => (
           <li className="report" key={t.id}>
             <div className="report-head">
-              <span>
-                task {t.id} · {t.phase}
-                {t.evaluator ? ` · ${t.evaluator}` : ''}
-                {t.performed_by === 'human' && <span className="dim"> · by human</span>}
-              </span>
+              <div className="report-id">
+                <span className="report-task">task {t.id}</span>
+                <PhaseLabel phase={t.phase} />
+                {t.evaluator && <span className="report-eval">{t.evaluator}</span>}
+                <span className="dim">
+                  cycle {t.cycle}
+                  {t.attempt > 1 ? ` · attempt ${t.attempt}` : ''}
+                </span>
+                <span className="dim report-performer">{performerLabel(t)}</span>
+                {t.started_at && (
+                  <time className="dim" title={fmtIso(t.started_at)}>
+                    {fmtStamp(t.started_at)}
+                  </time>
+                )}
+              </div>
               <TaskBadge state={t.state} />
             </div>
             <TaskReportBody task={t} />
@@ -474,7 +485,7 @@ function WorkReport({ r }: { r: WorkResult }) {
   return (
     <div className="report-body">
       {r.summary ? (
-        <p className="report-summary">{r.summary}</p>
+        <Markdown text={r.summary} className="report-summary" />
       ) : (
         <div className="dim">no summary</div>
       )}
@@ -487,7 +498,7 @@ function WorkReport({ r }: { r: WorkResult }) {
           ))}
         </ul>
       )}
-      {notes && <p className="report-notes">{notes}</p>}
+      {notes && <Markdown text={notes} className="report-notes" />}
       <TokenChip usage={r.token_usage} />
     </div>
   )
@@ -573,7 +584,7 @@ function StructuredBody({ parsed }: { parsed: ParsedStructured }) {
   const rest = Object.entries(value).filter(([k]) => !consumed.has(k))
   return (
     <>
-      {body && <p className="report-summary">{body}</p>}
+      {body && <Markdown text={body} className="report-summary" />}
       {findings && findings.length > 0 && <FindingList findings={findings} />}
       {rest.length > 0 && (
         <details className="report-output">
@@ -649,7 +660,7 @@ function HumanReport({ r }: { r: HumanResult }) {
         {r.action && <span className="badge badge-blue">{r.action}</span>}
         {r.operator && <span className="dim">by {r.operator}</span>}
       </div>
-      {r.summary && <p className="report-summary">{r.summary}</p>}
+      {r.summary && <Markdown text={r.summary} className="report-summary" />}
       <StructuredBody parsed={parsed} />
     </div>
   )
@@ -744,7 +755,7 @@ function DiffView({ diff }: { diff: string }) {
  * status cache with a 7-day TTL, not a record. The durable history is the
  * `job-events` stream, which is also what feeds this page over SSE.
  */
-function ChannelLog({ events }: { events: JobEvent[] }) {
+function ChannelLog({ events, tasks }: { events: JobEvent[]; tasks: Task[] }) {
   const posts = events.filter(
     (e) => e.event_type === 'channel-update' || e.event_type === 'channel-reply',
   )
@@ -755,22 +766,100 @@ function ChannelLog({ events }: { events: JobEvent[] }) {
         Channel <span className="dim">{posts.length}</span>
       </h2>
       <ul className="channel-log">
-        {posts.map((e, i) => (
-          <li key={i}>
-            <span className="dim">{new Date(e.ts).toLocaleTimeString()}</span>{' '}
-            {e.event_type === 'channel-update' ? (
-              <>
-                {typeof e.percent === 'number' && (
-                  <span className="pct">{e.percent}%</span>
-                )}{' '}
-                {String(e.message ?? '')}
-              </>
-            ) : (
-              <em>{String(e.text ?? '')}</em>
-            )}
-          </li>
-        ))}
+        {posts.map((e, i) => {
+          const reply = e.event_type === 'channel-reply'
+          // channel-reply is the operator/platform replying to the agent;
+          // channel-update is the agent's own progress note.
+          const text = String((reply ? e.text : e.message) ?? '')
+          const percent = !reply && typeof e.percent === 'number' ? e.percent : null
+          const origin = channelOrigin(e, tasks)
+          return (
+            <li className={reply ? 'channel-post channel-reply' : 'channel-post'} key={i}>
+              <div className="channel-head">
+                <time className="dim channel-time" title={fmtIso(String(e.ts))}>
+                  {fmtStamp(String(e.ts))}
+                </time>
+                <span className="channel-who">{reply ? '↩ reply' : (origin ?? 'agent')}</span>
+                {percent != null && <span className="badge badge-blue pct">{percent}%</span>}
+              </div>
+              <Markdown text={text} className="channel-md" />
+            </li>
+          )
+        })}
       </ul>
     </section>
   )
+}
+
+// Best-effort attribution for a channel post. Channel events are open-keyed
+// (useEvents.ts JobEvent), so we prefer an explicit `task_id`/`cycle` if the
+// payload carries one. Today the job-events channel frames DON'T — no task
+// attribution rides on the wire (backend gap) — so we fall back to correlating
+// the post's timestamp against task start/complete windows and label it
+// best-effort ("during task 3 · work · cycle 2") rather than fake precision.
+function channelOrigin(e: JobEvent, tasks: Task[]): string | null {
+  const taskId = numField(e, 'task_id') ?? numField(e, 'task')
+  const explicit = taskId != null ? tasks.find((t) => t.id === taskId) : undefined
+  const t = explicit ?? taskAtTime(tasks, String(e.ts))
+  if (!t) return null
+  const cycle = numField(e, 'cycle') ?? t.cycle
+  const phase = t.phase.toLowerCase()
+  const label = `task ${t.id} · ${phase} · cycle ${cycle}`
+  return explicit ? label : `during ${label}`
+}
+
+// The task whose [started_at, completed_at] window brackets the given instant;
+// among overlaps the latest-started wins (the most recently active task). Used
+// to attribute channel posts that carry no task id of their own.
+function taskAtTime(tasks: Task[], iso: string): Task | undefined {
+  const at = new Date(iso).getTime()
+  if (Number.isNaN(at)) return undefined
+  let best: Task | undefined
+  let bestStart = -Infinity
+  for (const t of tasks) {
+    if (!t.started_at) continue
+    const start = new Date(t.started_at).getTime()
+    if (Number.isNaN(start) || start > at) continue
+    const end = t.completed_at ? new Date(t.completed_at).getTime() : Infinity
+    if (at > end) continue
+    if (start > bestStart) {
+      best = t
+      bestStart = start
+    }
+  }
+  return best
+}
+
+// A numeric field off an open-keyed event, or null when absent/non-numeric.
+function numField(e: JobEvent, key: string): number | null {
+  const v = e[key]
+  return typeof v === 'number' ? v : null
+}
+
+// Who ran the task: the agent model (kind.model on Agent tasks) or, for a
+// human-claimed/human-kind task, the operator's email if the result carries it.
+function performerLabel(t: Task): string {
+  if (t.performed_by === 'human') {
+    const op = t.result?.kind === 'Human' ? t.result.operator : null
+    return op ? `human · ${op}` : 'human'
+  }
+  if (t.kind.kind === 'Agent' && t.kind.model) return t.kind.model
+  if (t.kind.kind === 'Command') return 'command'
+  return ''
+}
+
+// A timestamp as compact local time, prefixed with the date when it isn't
+// today (channel history can span days). The full ISO value rides as a tooltip.
+function fmtStamp(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  const time = d.toLocaleTimeString([], { hour12: false })
+  if (d.toDateString() === new Date().toDateString()) return time
+  return `${d.toLocaleDateString()} ${time}`
+}
+
+// Full ISO-8601 for a tooltip; the raw value back if it doesn't parse.
+function fmtIso(iso: string): string {
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? iso : d.toISOString()
 }

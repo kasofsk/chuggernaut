@@ -800,18 +800,170 @@ td.actions button {
   line-height: 1.4;
 }
 
-/* Channel: the agent's narrative, from the event stream. */
+/* Channel: the agent's narrative, from the event stream. Each post is its own
+   card-row: a header (timestamp + origination + optional percent) over the
+   rendered markdown body. Replies (operator/platform → agent) are set off with
+   an accent rail so they read as distinct from the agent's own updates. */
 .channel-log {
   list-style: none;
   margin: 0;
   padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
 }
-.channel-log li {
-  padding: 0.2rem 0;
-  border-bottom: 1px solid var(--border-faint);
+.channel-post {
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--inset);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--r-md);
+}
+.channel-reply {
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--inset));
+}
+.channel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-xs);
+  margin-bottom: var(--sp-1);
+}
+.channel-time {
+  font-variant-numeric: tabular-nums;
+}
+.channel-who {
+  color: var(--dim);
+}
+.channel-reply .channel-who {
+  color: var(--accent);
 }
 .channel-log .pct {
   font-variant-numeric: tabular-nums;
+}
+
+/* Rendered agent/operator markdown (channel posts, report summaries/notes).
+   Headings are scaled to card context — an h1 here must not read as a page
+   title — and everything wide (code blocks, tables, long tokens) wraps or
+   scrolls inside its own container so the page body never moves sideways. */
+.md {
+  /* markdown semantics, not raw pre-wrap: this element may also carry
+     .report-summary/.report-notes (which set pre-wrap) — reset so soft breaks
+     collapse the way the renderer intends. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.md > :first-child {
+  margin-top: 0;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+.md p {
+  margin: 0 0 var(--sp-2);
+}
+.md ul,
+.md ol {
+  margin: 0 0 var(--sp-2);
+  padding-left: 1.3rem;
+}
+.md li {
+  margin: 0.1rem 0;
+}
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  margin: var(--sp-2) 0 var(--sp-1);
+  line-height: 1.25;
+  font-weight: 600;
+}
+.md h1 {
+  font-size: var(--fs-lg);
+}
+.md h2 {
+  font-size: var(--fs-md);
+}
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  font-size: var(--fs-sm);
+  color: var(--dim);
+}
+.md a {
+  color: var(--accent);
+}
+.md code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  padding: 0.05rem 0.3rem;
+  border-radius: var(--r-sm);
+  overflow-wrap: anywhere;
+}
+/* Code fences keep their formatting: scroll on the x-axis inside their own box
+   rather than widening the card. */
+.md pre {
+  background: var(--card);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--r-sm);
+  padding: 0.6rem;
+  margin: 0 0 var(--sp-2);
+  max-height: 40vh;
+  overflow: auto;
+}
+.md pre code {
+  background: none;
+  padding: 0;
+  white-space: pre;
+}
+.md blockquote {
+  margin: 0 0 var(--sp-2);
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--border);
+  color: var(--dim);
+}
+.md table {
+  border-collapse: collapse;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.md th,
+.md td {
+  border: 1px solid var(--border);
+  padding: 0.2rem 0.4rem;
+  text-align: left;
+}
+/* Fallback when markdown parsing throws: the raw source, wrapped. */
+.md-fallback {
+  white-space: pre-wrap;
+}
+
+/* Reports thread: a stronger identity line per report — task, phase badge,
+   evaluator, cycle, performer, started — that wraps rather than colliding. */
+.report-id {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+  min-width: 0;
+}
+.report-task {
+  color: var(--text);
+  font-weight: 600;
+}
+.report-eval {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--dim);
+}
+.report-performer {
+  overflow-wrap: anywhere;
 }
 
 .tabs {
