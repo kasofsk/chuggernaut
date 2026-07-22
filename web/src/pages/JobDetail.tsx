@@ -68,9 +68,10 @@ export function JobDetail() {
         // A batch: pull the member jobs from the project list (one fetch) so the
         // Members section stays live with the same debounced refresh. Non-batches
         // skip the call and clear any stale members.
-        if (j.members.length > 0) {
+        const memberIds = j.members ?? []
+        if (memberIds.length > 0) {
           api.jobs(owner, project).then(
-            (all) => setMembers(all.filter((m) => j.members.includes(m.id))),
+            (all) => setMembers(all.filter((m) => memberIds.includes(m.id))),
             () => {},
           )
         } else {
@@ -289,13 +290,13 @@ export function JobDetail() {
       </section>
       )}
 
-      {!isDraft && job.members.length > 0 && (
+      {!isDraft && (job.members ?? []).length > 0 && (
         <section className="card">
           <h2>
-            Members <span className="dim">{job.members.length}</span>
+            Members <span className="dim">{(job.members ?? []).length}</span>
           </h2>
           <ul className="batch-members">
-            {job.members.map((id) => {
+            {(job.members ?? []).map((id) => {
               const m = members.find((x) => x.id === id)
               return (
                 <li key={id}>

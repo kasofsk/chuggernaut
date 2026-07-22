@@ -380,9 +380,9 @@ export function ProjectPage() {
                   <Link className="dim" to={`/p/${owner}/${project}/job-types/${encodeURIComponent(j.type)}`}>
                     {j.type}
                   </Link>
-                  {j.members.length > 0 && (
+                  {(j.members ?? []).length > 0 && (
                     <span className="chip-batch" title="a batch: implements its member jobs on one branch">
-                      batch ({j.members.length})
+                      batch ({(j.members ?? []).length})
                     </span>
                   )}
                 </td>

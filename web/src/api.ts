@@ -102,8 +102,10 @@ export interface Job {
   /** upstream job ids that must be Done before this job starts */
   deps: number[]
   /** member job ids this batch absorbs onto one branch; empty for an ordinary
-   *  job — non-empty marks this record as a batch (spec §2.1 batches) */
-  members: number[]
+   *  job — non-empty marks this record as a batch (spec §2.1 batches).
+   *  Optional: records stored before batches existed are served verbatim
+   *  without the field, so every use must guard (`job.members ?? []`). */
+  members?: number[]
   /** set on a member absorbed into a batch: the batch job's id (implies the
    *  record is in the Batched state under it); absent for ordinary jobs/batches */
   batch_id?: number | null
