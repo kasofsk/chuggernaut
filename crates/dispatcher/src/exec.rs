@@ -1,5 +1,6 @@
 //! The work-execution sequence (spec §3.2): Ready→Work, container launch,
-//! retry-with-branch-reset, and the rework/conflict re-entry paths. Evaluation
+//! retry with branch recover-or-reset (§3.2 crash recovery), and the
+//! rework/conflict re-entry paths. Evaluation
 //! lives in `eval.rs`; both are `impl Core` blocks — the core stays the single
 //! writer, these files are its execution verbs.
 
@@ -187,10 +188,14 @@ impl Core {
                 work_timeout,
             },
         );
-        self.launch_work_task(owner, project, seq, cycle, 1).await
+        self.launch_work_task(owner, project, seq, cycle, 1, false)
+            .await
     }
 
-    /// Create + launch one work task record (§1.2 creation rules).
+    /// Create + launch one work task record (§1.2 creation rules). `resume` is
+    /// set by the crash-recovery paths when the job branch was kept (not reset)
+    /// because a previous attempt left commits on it; it injects a resume note
+    /// into the agent prompt (§3.2 crash recovery).
     pub(crate) async fn launch_work_task(
         &mut self,
         owner: &str,
@@ -198,6 +203,7 @@ impl Core {
         seq: u64,
         cycle: u32,
         attempt: u32,
+        resume: bool,
     ) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
         let exec = self.active.get(&key).expect("exec state");
@@ -340,6 +346,7 @@ impl Core {
                         &job_brief_block(&job),
                         &eval_context,
                         merge_conflict.as_deref(),
+                        resume,
                     )
                     .await?;
                 let (mcp_servers, mut files) = self.channel_mcp(&env);
@@ -568,13 +575,14 @@ impl Core {
             .and_then(|e| e.job_type.work_retries)
             .unwrap_or(0);
         if task.attempt <= work_retries {
-            // §2.1: hard-reset to base_ref, new task record, attempt++.
+            // §2.1/§3.2: new task record, attempt++. The branch is recovered if
+            // the crashed attempt pushed commits, else reset to base_ref.
             let job = self.must_get(owner, project, seq)?.clone();
             let base_ref = job.base_ref.clone().expect("base_ref set in Work");
-            self.repos
-                .reset_branch(owner, project, &job.branch, &base_ref)
-                .await?;
-            self.launch_work_task(owner, project, seq, task.cycle, task.attempt + 1)
+            let resume =
+                recover_or_reset_branch(&self.repos, owner, project, &job.branch, &base_ref)
+                    .await?;
+            self.launch_work_task(owner, project, seq, task.cycle, task.attempt + 1, resume)
                 .await
         } else {
             self.active.remove(&key);
@@ -803,13 +811,15 @@ impl Core {
                     .and_then(|e| e.job_type.work_retries)
                     .unwrap_or(0);
                 if task.attempt <= work_retries {
-                    // §2.1: hard-reset to base_ref, new task record, attempt++.
+                    // §2.1: an operator fail-out is a deliberate rejection, not a
+                    // crash — hard-reset to base_ref so the next attempt starts
+                    // clean rather than resuming the declined work.
                     let job = self.must_get(owner, project, seq)?.clone();
                     let base_ref = job.base_ref.clone().expect("base_ref set in Work");
                     self.repos
                         .reset_branch(owner, project, &job.branch, &base_ref)
                         .await?;
-                    self.launch_work_task(owner, project, seq, task.cycle, task.attempt + 1)
+                    self.launch_work_task(owner, project, seq, task.cycle, task.attempt + 1, false)
                         .await
                 } else {
                     self.active.remove(&key);
@@ -875,8 +885,17 @@ impl Core {
             .max()
             .unwrap_or(0);
         let mut job = self.must_get(owner, project, seq)?.clone();
+        // Branch used as-is (§1.2); if it carries commits from the escalated
+        // attempt, tell the retry it is resuming so it builds on them (§3.2).
+        let base_ref = job.base_ref.clone().ok_or_else(|| {
+            CoreError::NotFound(format!("{owner}/{project}#{seq} has no base_ref"))
+        })?;
+        let resume = self
+            .repos
+            .has_commits_beyond(owner, project, &base_ref, &job.branch)
+            .await?;
         self.set_state(&mut job, JobState::Work).await?;
-        self.launch_work_task(owner, project, seq, cycle, last_attempt + 1)
+        self.launch_work_task(owner, project, seq, cycle, last_attempt + 1, resume)
             .await
     }
 
@@ -1024,6 +1043,7 @@ impl Core {
         brief: &str,
         eval_context: &[EvalResult],
         merge_conflict: Option<&str>,
+        resume: bool,
     ) -> Result<String> {
         let mut prompt = self
             .repos
@@ -1033,6 +1053,9 @@ impl Core {
         prompt.push_str(brief);
         if !eval_context.is_empty() || merge_conflict.is_some() {
             prompt.push_str(&rework_context_block(eval_context, merge_conflict));
+        }
+        if resume {
+            prompt.push_str(RESUME_NOTE_BLOCK);
         }
         Ok(prompt)
     }
@@ -1388,6 +1411,53 @@ pub(crate) fn job_brief_block(job: &types::Job) -> String {
     block
 }
 
+/// §3.2 crash-recovery note: appended to the work agent's prompt when the job
+/// branch was recovered from an interrupted attempt rather than reset, so the
+/// agent builds on the pushed commits instead of redoing them.
+pub(crate) const RESUME_NOTE_BLOCK: &str = "\n\n---\n## Resuming a Previous Attempt\n\
+    A previous attempt at this job was interrupted (crash, node loss, or dispatcher restart) \
+    after pushing commits to your branch. Those commits have been preserved — your branch is \
+    **not** a fresh checkout of the base. Review what is already there (e.g. `git log`, \
+    `git diff`) before continuing, and build on it rather than redoing or duplicating the work.\n";
+
+/// §3.2 crash recovery: prepare the deterministic job branch (`job/{seq}`) for
+/// a fresh work attempt, choosing between recovering a crashed attempt's work
+/// and the clean-slate reset. Deterministic naming makes this a pure lookup:
+///
+/// - Branch absent → create it at `base_ref`; a job with no prior attempt
+///   behaves exactly as before. Returns `false` (fresh start).
+/// - Branch present with commits beyond `base_ref` → a previous attempt pushed
+///   before it was interrupted; keep the branch untouched so the retry resumes
+///   that work. Returns `true` (the prompt should note the resume). The branch
+///   may be behind the moved default branch; that stale-behind case is left for
+///   the pre-eval rebase / merge gate to resolve, exactly as for a solo job.
+/// - Branch present with nothing beyond `base_ref` → nothing to recover; hard-
+///   reset to `base_ref` (the §2.1 clean-slate retry, a no-op here). Returns
+///   `false`.
+pub(crate) async fn recover_or_reset_branch(
+    repos: &vcs::RepoManager,
+    owner: &str,
+    project: &str,
+    branch: &str,
+    base_ref: &str,
+) -> Result<bool> {
+    if repos.resolve_ref(owner, project, branch).await.is_err() {
+        repos
+            .create_branch(owner, project, branch, base_ref)
+            .await?;
+        return Ok(false);
+    }
+    if repos
+        .has_commits_beyond(owner, project, base_ref, branch)
+        .await?
+    {
+        Ok(true)
+    } else {
+        repos.reset_branch(owner, project, branch, base_ref).await?;
+        Ok(false)
+    }
+}
+
 /// §4.3 rework-context block appended to the prompt file content.
 pub(crate) fn rework_context_block(
     eval_context: &[EvalResult],
@@ -1422,4 +1492,118 @@ pub(crate) fn eval_image(job_type: &JobType, evaluator: &Evaluator) -> String {
         .clone()
         .or_else(|| job_type.image.clone())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit coverage for the §3.2 crash-recovery branch decision — the pure
+    //! recover-or-reset lookup over a real bare repo. The end-to-end resume
+    //! (crash-after-push → retry recovers + prompt notes it) is exercised in
+    //! Tier-2 (`tests/execution.rs`).
+    use super::recover_or_reset_branch;
+    use test_utils::repo::TempRepo;
+
+    async fn tip(repo: &TempRepo, branch: &str) -> String {
+        repo.manager
+            .resolve_ref(&repo.owner, &repo.project, branch)
+            .await
+            .expect("resolve branch")
+    }
+
+    /// Branch does not exist → created at `base_ref`, no resume. A job with no
+    /// prior attempt behaves exactly as before.
+    #[tokio::test]
+    async fn absent_branch_is_created_fresh_no_resume() {
+        let repo = TempRepo::create("acme", "api").await;
+        let base = repo.head().await;
+
+        let resume = recover_or_reset_branch(&repo.manager, "acme", "api", "job/1", &base)
+            .await
+            .unwrap();
+
+        assert!(!resume, "no prior branch → fresh start, no resume note");
+        assert_eq!(
+            tip(&repo, "job/1").await,
+            base,
+            "branch created at base_ref"
+        );
+    }
+
+    /// Branch exists with commits beyond `base_ref` (a crashed attempt pushed) →
+    /// kept untouched and resume requested.
+    #[tokio::test]
+    async fn branch_with_commits_is_recovered_with_resume() {
+        let repo = TempRepo::create("acme", "api").await;
+        let base = repo.head().await;
+        repo.create_job_branch(1, &base).await;
+        let clone = repo.clone_branch("job/1").await;
+        clone.commit_file("wip.rs", b"partial", "wip").await;
+        clone.push("job/1").await;
+        let crashed_tip = tip(&repo, "job/1").await;
+        assert_ne!(crashed_tip, base, "the attempt pushed a commit");
+
+        let resume = recover_or_reset_branch(&repo.manager, "acme", "api", "job/1", &base)
+            .await
+            .unwrap();
+
+        assert!(resume, "commits beyond base_ref are recovered");
+        assert_eq!(
+            tip(&repo, "job/1").await,
+            crashed_tip,
+            "the recovered branch is kept, not reset"
+        );
+    }
+
+    /// Branch exists but carries nothing beyond `base_ref` → reset (a no-op
+    /// here), no resume. This is the clean-slate retry.
+    #[tokio::test]
+    async fn empty_branch_is_reset_no_resume() {
+        let repo = TempRepo::create("acme", "api").await;
+        let base = repo.head().await;
+        repo.create_job_branch(1, &base).await; // created, nothing pushed
+
+        let resume = recover_or_reset_branch(&repo.manager, "acme", "api", "job/1", &base)
+            .await
+            .unwrap();
+
+        assert!(!resume, "an empty branch has nothing to recover");
+        assert_eq!(tip(&repo, "job/1").await, base);
+    }
+
+    /// The recovered branch may be behind a moved default branch (a deploy
+    /// landed after `base_ref` was pinned). Policy: recover as-is, do not rebase
+    /// — the pre-eval rebase and merge gate handle the stale stacking later.
+    #[tokio::test]
+    async fn stale_behind_main_is_recovered_not_rebased() {
+        let repo = TempRepo::create("acme", "api").await;
+        let base = repo.head().await;
+
+        // Default branch moves on after base_ref was pinned.
+        let main_clone = repo.clone_branch("main").await;
+        main_clone
+            .commit_file("landed.rs", b"deploy", "deploy")
+            .await;
+        main_clone.push("main").await;
+        let new_main = repo.head().await;
+        assert_ne!(new_main, base);
+
+        // The crashed attempt's branch, built off the OLD base_ref.
+        repo.create_job_branch(1, &base).await;
+        let job_clone = repo.clone_branch("job/1").await;
+        job_clone.commit_file("wip.rs", b"partial", "wip").await;
+        job_clone.push("job/1").await;
+        let crashed_tip = tip(&repo, "job/1").await;
+
+        let resume = recover_or_reset_branch(&repo.manager, "acme", "api", "job/1", &base)
+            .await
+            .unwrap();
+
+        assert!(resume, "a branch behind the moved main is still recovered");
+        assert_eq!(
+            tip(&repo, "job/1").await,
+            crashed_tip,
+            "recovery must not rebase onto the moved main"
+        );
+        assert_ne!(tip(&repo, "job/1").await, new_main);
+    }
 }

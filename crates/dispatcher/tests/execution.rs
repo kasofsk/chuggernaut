@@ -369,6 +369,56 @@ async fn eval_failure_reworks_with_context_then_passes() {
     assert!(events.contains(&"job-rework-started".to_string()));
 }
 
+/// §3.2 crash recovery: an attempt that pushes commits then crashes is retried
+/// on the SAME branch — the commits survive, the retry's prompt notes the
+/// resume, and the recovered work lands on merge instead of being redone.
+#[tokio::test]
+async fn crashed_work_attempt_recovers_branch_and_notes_resume() {
+    let Some(rig) = rig().await else { return };
+    let bare = rig.repo.bare_path();
+
+    // Attempt 1 pushes a commit, then "crashes" (the scripted non-zero exit).
+    // Attempt 2 (no hook) just succeeds — nothing to push, the recovered commit
+    // is the whole product.
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone.commit_file("wip.rs", b"partial work", "wip").await;
+        clone.push(&branch).await;
+    });
+    rig.provider.script_exits([2, 0]); // flaky: work_retries 1 → crash then recover
+
+    let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let runs = rig.provider.runs();
+    assert_eq!(runs.len(), 2, "one crash, one recovered retry");
+    assert!(
+        !runs[0].prompt.contains("Resuming a Previous Attempt"),
+        "the first attempt is not a resume: {}",
+        runs[0].prompt
+    );
+    assert!(
+        runs[1].prompt.contains("Resuming a Previous Attempt"),
+        "the retry prompt must note the resume: {}",
+        runs[1].prompt
+    );
+
+    // The crashed attempt's commit was recovered — not redone — and merged.
+    let merged = rig
+        .repo
+        .manager
+        .read_file_at("acme", "api", "main", "wip.rs")
+        .await
+        .unwrap();
+    assert_eq!(
+        merged.as_deref(),
+        Some("partial work"),
+        "the recovered commit should land on main"
+    );
+}
+
 async fn event_types(store: &NatsStore) -> Vec<String> {
     store
         .read_stream("job-events", 100)

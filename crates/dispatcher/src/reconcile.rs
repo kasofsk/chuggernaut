@@ -128,8 +128,22 @@ impl Core {
             .filter(|t| t.phase == TaskPhase::Work && t.cycle == cycle && t.evaluator.is_none())
             .max_by_key(|t| t.id);
         let Some(task) = latest else {
-            // Crashed between Ready→Work and the first task write: relaunch.
-            return self.launch_work_task(owner, project, seq, cycle, 1).await;
+            // Crashed between Ready→Work and the first task write: relaunch. The
+            // branch may already carry commits if the crash was later than it
+            // looks — recover them rather than reset (§3.2).
+            let job = self.must_get(owner, project, seq)?.clone();
+            let base_ref = job.base_ref.clone().expect("base_ref set in Work");
+            let resume = crate::exec::recover_or_reset_branch(
+                &self.repos,
+                owner,
+                project,
+                &job.branch,
+                &base_ref,
+            )
+            .await?;
+            return self
+                .launch_work_task(owner, project, seq, cycle, 1, resume)
+                .await;
         };
         match (task.state, work_type) {
             // Pending human work waits on the inbox; nothing to recover.
@@ -395,12 +409,19 @@ impl Core {
             .and_then(|e| e.job_type.work_retries)
             .unwrap_or(0);
         if task.attempt <= work_retries {
+            // §3.2 crash recovery: a task found Failed on restart may have pushed
+            // commits before dying — recover the branch instead of resetting.
             let job = self.must_get(owner, project, seq)?.clone();
             let base_ref = job.base_ref.clone().expect("base_ref set in Work");
-            self.repos
-                .reset_branch(owner, project, &job.branch, &base_ref)
-                .await?;
-            self.launch_work_task(owner, project, seq, task.cycle, task.attempt + 1)
+            let resume = crate::exec::recover_or_reset_branch(
+                &self.repos,
+                owner,
+                project,
+                &job.branch,
+                &base_ref,
+            )
+            .await?;
+            self.launch_work_task(owner, project, seq, task.cycle, task.attempt + 1, resume)
                 .await
         } else {
             self.active.remove(&key);
