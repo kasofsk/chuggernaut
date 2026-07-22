@@ -86,6 +86,17 @@ export function ProjectPage() {
     }
   }
 
+  // Jobs whose Work attempt is parked for a human (a claim materialized: a human
+  // is doing the work locally, no agent launched). The jobs LIST reply carries
+  // `claim_next` but not the derived `awaiting_human`, so we read this off the
+  // pending tasks the page already loads for the Inbox — a parked claimed attempt
+  // is a Pending Work task with performed_by='human'. No extra fetch, no API
+  // change: `claim_next` covers the pre-park window, this covers the in-Work
+  // window, so the claimed badge persists for the whole life of the claim.
+  const claimedInWork = new Set(
+    pending.filter((t) => t.phase === 'Work' && t.performed_by === 'human').map((t) => t.job_seq),
+  )
+
   // A terminal job's pending tasks are zombies — revoke doesn't (yet) close
   // them out server-side, and there is nothing valid to resolve. Hide them so
   // the inbox never offers actions the dispatcher will reject.
@@ -257,13 +268,11 @@ export function ProjectPage() {
                 </td>
                 <td>
                   <StateBadge state={j.state} />
-                  {j.awaiting_human?.claimed && (
-                    <span className="badge badge-purple" title="a claimed attempt is in progress — a human is doing the work">
-                      human working
-                    </span>
-                  )}
-                  {j.claim_next && (
-                    <span className="badge badge-purple" title="the next work attempt will park for a human instead of launching">
+                  {(j.claim_next || (j.state === 'Work' && claimedInWork.has(j.id))) && (
+                    <span
+                      className="badge badge-purple"
+                      title="work attempt claimed by a human — no agent will be launched"
+                    >
                       claimed
                     </span>
                   )}

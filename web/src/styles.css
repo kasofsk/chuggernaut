@@ -388,6 +388,11 @@ table.jobs tbody tr:hover {
 table.jobs tr:last-child td {
   border-bottom: none;
 }
+/* The state cell can carry a trailing "claimed" badge next to the state badge;
+   space them so they don't touch. */
+table.jobs td .badge + .badge {
+  margin-left: 0.35rem;
+}
 td.actions {
   white-space: nowrap;
 }
