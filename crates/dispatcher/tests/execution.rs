@@ -995,10 +995,12 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
         return;
     };
 
-    // stdout as the real CLI emits it under `--output-format json`: the result
-    // object carries the authoritative usage.
+    // stdout as the real CLI emits it under `--output-format stream-json`: a
+    // stream of JSONL events whose final `type:"result"` event carries the
+    // authoritative usage. Harvesting scans for the last parseable line.
     rig.backend.put_logs(
         br#"Cloning into '/workspace'...
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}],"usage":{"input_tokens":1200,"output_tokens":10}},"session_id":"s"}
 {"type":"result","subtype":"success","is_error":false,"session_id":"s","total_cost_usd":0.01,"usage":{"input_tokens":1200,"cache_creation_input_tokens":300,"cache_read_input_tokens":400,"output_tokens":56}}"#
             .to_vec(),
     );

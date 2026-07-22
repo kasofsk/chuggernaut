@@ -1,7 +1,8 @@
 //! ClaudeProvider (spec §4.3).
 //!
 //! CMD (inside the workspace bootstrap): `claude -p "$(cat /chuggernaut/prompt.md)"
-//! --model {model} --append-system-prompt {system_prompt}
+//! --output-format stream-json --verbose --model {model}
+//! --append-system-prompt {system_prompt}
 //! --mcp-config /chuggernaut/mcp-config.json`.
 //! Prompt content is injected at `/chuggernaut/prompt.md` — never a path, never
 //! inline in the shell command. The `--mcp-config` payload carries NATS
@@ -50,10 +51,15 @@ impl ClaudeProvider {
     /// sets IS_SANDBOX=1 so the flag is accepted under root).
     ///
     /// `--session-id` makes the transcript filename deterministic so it can be
-    /// harvested after exit. `--output-format json` makes stdout a single
-    /// result object carrying real `usage` and the session id — the CLI's
+    /// harvested after exit. `--output-format stream-json` (which `-p` requires
+    /// be paired with `--verbose`) makes stdout a stream of JSONL events —
+    /// assistant text, tool_use, and a final `type:"result"` object — emitted
+    /// AS the agent works, so the live log viewer has something to show for the
+    /// whole run instead of silence until exit. The final result event carries
+    /// the same real `usage`/`result`/`session_id` fields the single-object
+    /// `json` format did, so result parsing is unchanged. This is the CLI's
     /// documented interface, as opposed to the transcript, whose format is
-    /// internal and version-unstable. Nothing read agent stdout before this.
+    /// internal and version-unstable.
     ///
     /// The MCP config is written to [`MCP_CONFIG_PATH`] (mode 0600) and passed
     /// by path: the CLI accepts a file for `--mcp-config`, and the payload
@@ -61,7 +67,7 @@ impl ClaudeProvider {
     fn claude_invocation(config: &AgentRunConfig) -> Invocation {
         let mut command = format!(
             "claude -p \"$(cat {PROMPT_PATH})\" --dangerously-skip-permissions \
-             --output-format json --session-id {}",
+             --output-format stream-json --verbose --session-id {}",
             shell_quote(&config.session_id)
         );
         if let Some(model) = &config.model {
@@ -148,13 +154,15 @@ impl AgentProvider for ClaudeProvider {
     }
 }
 
-/// Pull real token usage out of the CLI's `--output-format json` result object,
-/// which is its documented interface — unlike the session transcript, whose
-/// format Anthropic documents as internal and version-unstable.
+/// Pull real token usage out of the CLI's result object, which is its
+/// documented interface — unlike the session transcript, whose format Anthropic
+/// documents as internal and version-unstable.
 ///
-/// The result object is the last JSON value on stdout; anything the container
-/// printed before it (the workspace clone, npm noise) is skipped by scanning
-/// for the last line that parses. Returns `None` rather than erroring: usage is
+/// Under `--output-format stream-json` the result object is the final
+/// `type:"result"` event, and stdout is a stream of JSONL events preceding it
+/// (assistant text, tool_use). Scanning for the last line that parses picks it
+/// out regardless — and also skips anything the container printed before it (the
+/// workspace clone, npm noise). Returns `None` rather than erroring: usage is
 /// reporting, and must never fail a task that otherwise succeeded.
 pub fn parse_usage(stdout: &[u8]) -> Option<types::TokenUsage> {
     let text = String::from_utf8_lossy(stdout);
@@ -172,15 +180,16 @@ pub fn parse_usage(stdout: &[u8]) -> Option<types::TokenUsage> {
     })
 }
 
-/// Pull the agent's final result text out of the CLI's `--output-format json`
-/// result object — its `result` field. Used to capture a **triage assessment**
-/// (spec §1.2), which runs without the channel MCP: there is no `submit_result`
-/// call, so the CLI's own JSON result on stdout is the only channel for the
-/// written output.
+/// Pull the agent's final result text out of the CLI's result object — its
+/// `result` field. Used to capture a **triage assessment** (spec §1.2), which
+/// runs without the channel MCP: there is no `submit_result` call, so the CLI's
+/// own JSON result on stdout is the only channel for the written output.
 ///
-/// Same last-parseable-line scan as [`parse_usage`] — anything the container
-/// printed before the result object (clone, npm noise) is skipped. Returns
-/// `None` when stdout carries no result object or the result is empty.
+/// Same last-parseable-line scan as [`parse_usage`] — under `stream-json` the
+/// final `type:"result"` event is the last parseable line, and anything printed
+/// before it (clone, npm noise, the streamed assistant/tool_use events) is
+/// skipped. Returns `None` when stdout carries no result object or the result
+/// is empty.
 pub fn parse_result(stdout: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stdout);
     let value: serde_json::Value = text
@@ -250,6 +259,23 @@ mod tests {
     /// fixture is where it should break.
     const RESULT_JSON: &str = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"duration_ms":499,"duration_api_ms":0,"num_turns":1,"result":"Invalid API key","stop_reason":"stop_sequence","session_id":"6f1db8aa-e7a0-465c-ad2c-492d6ef2cd86","total_cost_usd":0,"usage":{"input_tokens":12,"cache_creation_input_tokens":34,"cache_read_input_tokens":56,"output_tokens":78,"service_tier":"standard"},"modelUsage":{},"permission_denials":[],"terminal_reason":"api_error","uuid":"c5596749-3e8f-4175-8a7a-be175d506a9e"}"#;
 
+    /// Recorded verbatim from `claude -p "say hi in exactly one word"
+    /// --output-format stream-json --verbose` on CLI 2.1.217 — the format #103
+    /// switches to. JSONL: a `system`/`init` event, a streamed `assistant`
+    /// event, a `rate_limit_event`, then the final `type:"result"` event that
+    /// carries the same `usage`/`result`/`session_id` fields the single-object
+    /// `json` format did. This is an externally-owned contract: result parsing
+    /// scans for the last parseable line, which must be this result event.
+    const STREAM_JSON: &str = concat!(
+        r#"{"type":"system","subtype":"init","cwd":"/private/tmp","session_id":"4ceaa089-9e75-4c30-9d96-261158e741be","tools":["Bash","Read","Write"],"mcp_servers":[],"model":"claude-fable-5","permissionMode":"default","uuid":"c1b2eba6-41ef-4a3a-a8a4-d68a397306b6"}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"model":"claude-fable-5","id":"msg_011CdHF3Lk5Wr3aQA8UnvPRU","type":"message","role":"assistant","content":[{"type":"text","text":"Hi"}],"stop_reason":null,"usage":{"input_tokens":2,"cache_creation_input_tokens":7882,"cache_read_input_tokens":15109,"output_tokens":5,"service_tier":"standard"}},"parent_tool_use_id":null,"session_id":"4ceaa089-9e75-4c30-9d96-261158e741be","uuid":"0c27a503-1617-42ac-af5d-f77b15d098ab"}"#,
+        "\n",
+        r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1784740200,"rateLimitType":"five_hour"},"uuid":"ce57daaa-cdf8-4518-8fd9-a7808e20cc10","session_id":"4ceaa089-9e75-4c30-9d96-261158e741be"}"#,
+        "\n",
+        r#"{"type":"result","subtype":"success","is_error":false,"api_error_status":null,"duration_ms":1988,"duration_api_ms":1883,"num_turns":1,"result":"Hi","stop_reason":"end_turn","session_id":"4ceaa089-9e75-4c30-9d96-261158e741be","total_cost_usd":0.173019,"usage":{"input_tokens":2,"cache_creation_input_tokens":7882,"cache_read_input_tokens":15109,"output_tokens":5,"service_tier":"standard"},"permission_denials":[],"terminal_reason":"completed","uuid":"d1148bcb-66a2-4c19-8bc8-54e3d7fb392a"}"#,
+    );
+
     /// A realistic job-scoped NATS credential — user JWT + NKEY seed — as it
     /// arrives in the channel MCP server's `env`. The whole point of the change
     /// is that no fragment of this ever reaches argv.
@@ -310,16 +336,20 @@ mod tests {
         assert!(!inv.command.contains("chuggernaut-channel"));
     }
 
-    /// Without these two the transcript is unaddressable and usage unmeasurable
-    /// — the whole point of capture.
+    /// Without the session id the transcript is unaddressable; without
+    /// stream-json (+ its mandatory `--verbose`) stdout stays silent until exit
+    /// and the live log viewer has nothing to show — the whole point of #103.
     #[test]
-    fn invocation_pins_session_and_json_output() {
+    fn invocation_pins_session_and_streaming_output() {
         let cmd = ClaudeProvider::claude_invocation(&config()).command;
         assert!(
             cmd.contains("--session-id 'da08d5f3-844e-430e-8363-39b4882f437b'"),
             "{cmd}"
         );
-        assert!(cmd.contains("--output-format json"), "{cmd}");
+        assert!(cmd.contains("--output-format stream-json"), "{cmd}");
+        // `-p` with stream-json is rejected by the CLI unless `--verbose` is
+        // also passed; the two must travel together.
+        assert!(cmd.contains("--verbose"), "{cmd}");
     }
 
     #[test]
@@ -332,7 +362,8 @@ mod tests {
         assert_eq!(
             inv.command,
             "claude -p \"$(cat /chuggernaut/prompt.md)\" --dangerously-skip-permissions \
-             --output-format json --session-id 'da08d5f3-844e-430e-8363-39b4882f437b'"
+             --output-format stream-json --verbose \
+             --session-id 'da08d5f3-844e-430e-8363-39b4882f437b'"
         );
         assert!(inv.files.is_empty());
     }
@@ -403,6 +434,36 @@ mod tests {
         let mut stdout = b"Cloning into '/workspace'...\nnpm notice\n".to_vec();
         stdout.extend_from_slice(RESULT_JSON.as_bytes());
         assert_eq!(parse_usage(&stdout).unwrap().input_tokens, 12);
+    }
+
+    /// #103: under `stream-json` stdout is a stream of JSONL events, and the
+    /// final `type:"result"` event carries the same usage the single-object
+    /// `json` format did. The last-parseable-line scan must land on it — not on
+    /// an earlier `assistant` event, which also carries a (partial) `usage`.
+    #[test]
+    fn parses_usage_from_the_stream_json_result_event() {
+        let usage = parse_usage(STREAM_JSON.as_bytes()).expect("usage");
+        assert_eq!(usage.input_tokens, 2);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.cache_write_tokens, Some(7882));
+        assert_eq!(usage.cache_read_tokens, Some(15109));
+    }
+
+    /// #103: the streamed transcript's final event carries the `result` text,
+    /// just as the single-object `json` format did — triage keeps working.
+    #[test]
+    fn parses_result_from_the_stream_json_result_event() {
+        assert_eq!(parse_result(STREAM_JSON.as_bytes()).as_deref(), Some("Hi"));
+    }
+
+    /// The whole streamed transcript rides in stdout, so parsing must still land
+    /// on the result event after leading container noise precedes the stream.
+    #[test]
+    fn parses_stream_json_past_leading_container_noise() {
+        let mut stdout = b"Cloning into '/workspace'...\nnpm notice\n".to_vec();
+        stdout.extend_from_slice(STREAM_JSON.as_bytes());
+        assert_eq!(parse_usage(&stdout).unwrap().input_tokens, 2);
+        assert_eq!(parse_result(&stdout).as_deref(), Some("Hi"));
     }
 
     /// Usage is reporting; a task that worked must not fail because stdout was

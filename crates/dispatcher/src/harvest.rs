@@ -34,8 +34,9 @@ impl Harvester {
         Self { backend, artifacts }
     }
 
-    /// Collect everything an agent run left behind: container logs (which carry
-    /// the CLI's `--output-format json` result) and the session transcript.
+    /// Collect everything an agent run left behind: container logs (the CLI's
+    /// `--output-format stream-json` event stream, whose final `type:"result"`
+    /// event carries usage/result) and the session transcript.
     /// Returns measured token usage if the result object was parseable.
     ///
     /// Best-effort throughout: a job must never fail because its *reporting*

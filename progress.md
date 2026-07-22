@@ -180,7 +180,7 @@ command eval → squash-merge to `main` in ~10s over the HTTP API.
 | `vcs` | ✅ done | Pre-existing + `create_squash_candidate` / `advance_default` (merge gate) |
 | `container` | ✅ done | `DockerBackend` over bollard 0.19: fleet nodes, label-counted slot placement, put-archive injection, `logs()` capture, `{node}/{id}` routing. `k8s.rs` still stub |
 | `dispatcher` | ✅ done (orchestration) | Everything in spec Parts 2–3: lifecycle, execution, rework, merge gate, human tasks, reconciliation, scans, NATS submit handlers |
-| `agent` | 🟡 partial | `ClaudeProvider` done (invocation, prompt injection, MCP config, self-enforced timeout, `--session-id` + `--output-format json`, container id + measured usage out). `CodexProvider` stub. KO/system-prompt injection not wired |
+| `agent` | 🟡 partial | `ClaudeProvider` done (invocation, prompt injection, MCP config, self-enforced timeout, `--session-id` + `--output-format stream-json`, container id + measured usage out). `CodexProvider` stub. KO/system-prompt injection not wired |
 | `chuggernaut-channel` | 🟡 partial | Working stdio MCP server: update_status/reply (now posted over `req.channel.*`, no KV writes)/channel_check + role-gated submit_result/submit_eval. Missing: `submit_review` local mode (§4.5), `create_job` (factories §13), push-mode inbox |
 | `chuggernaut-harness` | 🔴 scaffold | Config types + loop protocol as TODO (§4.5) |
 | `chuggernaut-ko` | 🔴 stub | |
@@ -407,9 +407,11 @@ command eval → squash-merge to `main` in ~10s over the HTTP API.
 - **The transcript is opaque; the CLI's JSON result is the contract.** Anthropic
   documents the `.jsonl` format as internal and version-unstable, so nothing
   parses it. `--session-id` (a dispatcher-minted UUID persisted on the `Task`)
-  makes the filename deterministic; `--output-format json` supplies session id,
-  cost, and real `usage`, which now supersedes the agent's self-report on both
-  work and eval paths. `CLAUDE_CONFIG_DIR=/chuggernaut/claude` decouples the
+  makes the filename deterministic; `--output-format stream-json --verbose`
+  streams JSONL events to stdout as the agent works (so live logs show activity,
+  not silence until exit), and its final `type:"result"` event supplies session
+  id, cost, and real `usage`, which now supersedes the agent's self-report on
+  both work and eval paths. `CLAUDE_CONFIG_DIR=/chuggernaut/claude` decouples the
   path from `HOME` (only `/root` because `Dockerfile.agent` sets no `USER`).
   **Measured in the real agent image**, contradicting the published docs: the
   cwd slug keeps its leading dash, so `/workspace` → `-workspace`.

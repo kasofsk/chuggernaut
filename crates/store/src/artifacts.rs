@@ -15,7 +15,7 @@
 //! Transcripts are treated as **opaque bytes**. Anthropic documents the
 //! `.jsonl` entry format as internal to Claude Code and subject to change on any
 //! release, so nothing here parses it; structured data comes from the CLI's
-//! `--output-format json` instead.
+//! `--output-format stream-json` event stream instead.
 
 use crate::{StoreError, keys};
 use async_nats::jetstream::object_store::ObjectStore;
