@@ -56,6 +56,31 @@ work:
 work_retries: 1
 "#;
 
+// Agent work + command eval WITH a rework budget: lets an eval failure drive a
+// real eval-failure rework (Change A) rather than escalating on the spot.
+const REWORKABLE: &str = r#"
+name: reworkable
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+rework_budget: 1
+eval:
+  - name: tests
+    type: command
+    run: ./ci.sh
+"#;
+
+// Agent work, NO evaluators: auto-squashes at wrap-up with no review to catch
+// conflict markers — the case the §3.2 step-12 marker guard exists for.
+const NO_EVAL: &str = r#"
+name: no-eval
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+"#;
+
 struct Rig {
     _server: test_utils::nats::NatsTestServer,
     store: NatsStore,
@@ -76,6 +101,8 @@ async fn rig() -> Option<Rig> {
         ("jobs/human-gated.yaml", HUMAN_EVAL),
         ("jobs/manual.yaml", HUMAN_WORK),
         ("jobs/flaky.yaml", FLAKY),
+        ("jobs/reworkable.yaml", REWORKABLE),
+        ("jobs/no-eval.yaml", NO_EVAL),
         ("prompts/impl.md", "implement it"),
         ("prompts/approve.md", "approve it"),
         ("prompts/manual.md", "do it by hand"),
@@ -485,6 +512,166 @@ async fn merge_gate_failure_reworks_on_new_base_without_budget() {
             .unwrap()
             .is_some()
     );
+}
+
+/// Change A: an eval-failure rework PRESERVES the branch. Cycle 1 commits file
+/// A; cycle 2 commits only file B — under the old reset-on-re-entry both would
+/// need re-doing, so A surviving on the merge proves the commits carry forward
+/// (fix-in-place, base_ref unchanged).
+#[tokio::test]
+async fn eval_failure_rework_preserves_prior_commits() {
+    let Some(rig) = rig().await else { return };
+    rig.backend.script_exits([1, 0]); // command eval: c1 fail, c2 pass
+
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone.commit_file("a.txt", b"from cycle 1", "c1").await;
+        clone.push(&branch).await;
+    });
+    let bare2 = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        // Rework re-entry: commit ONLY file B, never re-creating A.
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare2, &branch).await;
+        clone.commit_file("b.txt", b"from cycle 2", "c2").await;
+        clone.push(&branch).await;
+    });
+
+    let job = rig.handle.create_job(req("reworkable")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let m = &rig.repo.manager;
+    assert_eq!(
+        m.read_file_at("acme", "api", "main", "a.txt")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("from cycle 1"),
+        "cycle-1 commit must survive the eval-failure rework"
+    );
+    assert_eq!(
+        m.read_file_at("acme", "api", "main", "b.txt")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("from cycle 2")
+    );
+
+    let events = event_types(&rig.store).await;
+    assert_eq!(
+        events.iter().filter(|e| *e == "job-rework-started").count(),
+        1
+    );
+    // work c1, eval c1, work c2, eval c2 — one rework cycle, no extra tasks.
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 4);
+    assert_eq!(tasks[2].cycle, 2);
+}
+
+/// §3.2 step-12 guard: a no-evaluator job auto-squashes with no review to catch
+/// markers. A conflict rework leaves a WIP marker commit; if the agent never
+/// resolves it, the guard escalates instead of landing `<<<<<<<` on the default
+/// branch.
+#[tokio::test]
+async fn unresolved_markers_on_no_evaluator_job_escalates() {
+    let Some(rig) = rig().await else { return };
+    let bare = rig.repo.bare_path();
+    // Work c1: commit src/x on the branch AND land a conflicting src/x on main.
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone.commit_file("src/x.rs", b"branch side", "c1").await;
+        clone.push(&branch).await;
+        let main = clone_branch_from(&bare, "main").await;
+        main.commit_file("src/x.rs", b"main side", "other").await;
+        main.push("main").await;
+    });
+    // Work c2 (conflict rework): the agent does NOTHING — markers stay unresolved.
+    rig.provider.on_run(|_| async {});
+
+    let job = rig.handle.create_job(req("no-eval")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    // Nothing with markers reached the default branch.
+    assert_eq!(
+        rig.repo
+            .manager
+            .read_file_at("acme", "api", "main", "src/x.rs")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("main side"),
+        "conflict markers must NOT be squashed onto the default branch"
+    );
+    let events = event_types(&rig.store).await;
+    assert!(events.contains(&"job-escalated".to_string()));
+    assert_eq!(
+        events.iter().filter(|e| *e == "job-rework-started").count(),
+        1,
+        "one conflict rework happened before the guard escalated"
+    );
+}
+
+/// The happy counterpart to the guard: on a no-evaluator job the agent resolves
+/// the WIP markers in place, so the squash is clean and lands the resolved tree
+/// as a single commit (spec §3.2 step 12, degenerate 3-way).
+#[tokio::test]
+async fn resolved_wip_markers_squash_clean_on_no_evaluator_job() {
+    let Some(rig) = rig().await else { return };
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone.commit_file("src/x.rs", b"branch side", "c1").await;
+        clone.push(&branch).await;
+        let main = clone_branch_from(&bare, "main").await;
+        main.commit_file("src/x.rs", b"main side", "other").await;
+        main.push("main").await;
+    });
+    let bare2 = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        assert!(
+            cfg.merge_conflict.is_some(),
+            "resolve-in-place context must be injected on the rework"
+        );
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare2, &branch).await;
+        clone
+            .commit_file("src/x.rs", b"resolved", "resolve markers")
+            .await;
+        clone.push(&branch).await;
+    });
+
+    let job = rig.handle.create_job(req("no-eval")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let m = &rig.repo.manager;
+    let landed = m
+        .read_file_at("acme", "api", "main", "src/x.rs")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(landed, "resolved");
+    assert!(!landed.contains("<<<<<<<"));
+
+    let events = event_types(&rig.store).await;
+    assert_eq!(
+        events.iter().filter(|e| *e == "job-rework-started").count(),
+        1
+    );
+    assert!(!events.contains(&"job-merge-gate-started".to_string()));
 }
 
 #[tokio::test]

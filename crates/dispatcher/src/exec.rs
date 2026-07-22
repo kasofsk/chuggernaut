@@ -136,17 +136,21 @@ impl Core {
                 .await;
         }
 
-        // Create the branch on first entry; reset it on re-entry.
+        // Cycle 1 (start_job) creates the branch; every rework re-entry finds it
+        // already present and PRESERVES the agent's commits — reworks are
+        // fix-in-place (spec §3.2 step 12). Eval-failure rework keeps base_ref, so
+        // the prior work carries forward untouched; conflict / gate-failure rework
+        // has already rebased the branch onto the new base with a WIP marker
+        // commit (see `conflict_rework` / `gate_reduce`), so we must not discard
+        // it either. Branch existence is what discriminates cycle 1 (absent) from
+        // all three rework callers (present). Container-failure retries reset the
+        // branch directly via `recover_or_reset_branch`, NOT through here.
         if self
             .repos
             .resolve_ref(owner, project, &job.branch)
             .await
-            .is_ok()
+            .is_err()
         {
-            self.repos
-                .reset_branch(owner, project, &job.branch, &base_ref)
-                .await?;
-        } else {
             self.repos
                 .create_branch(owner, project, &job.branch, &base_ref)
                 .await?;

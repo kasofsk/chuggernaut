@@ -17,7 +17,7 @@ use types::{
     EvalResult, Evaluator, EvaluatorType, JobState, Task, TaskKind, TaskPhase, TaskResult,
     TaskState, WorkType, WrapUpMode,
 };
-use vcs::{MergeOutcome, RebaseOutcome};
+use vcs::{ConflictRebaseOutcome, MergeOutcome, RebaseOutcome};
 
 /// One cycle's evaluation, run as an ascending sequence of stages (spec §3.3
 /// staged evaluation). Only the current stage has live tasks: `slots` is the
@@ -1132,6 +1132,11 @@ impl Core {
                         .await?;
                     Ok(FinalizeStep::Completed)
                 }
+                MergeOutcome::UnresolvedMarkers { files } => {
+                    self.escalate_unresolved_markers(owner, project, seq, files)
+                        .await?;
+                    Ok(FinalizeStep::Completed)
+                }
             };
         }
 
@@ -1154,6 +1159,11 @@ impl Core {
             }
             MergeOutcome::Conflict { files } => {
                 self.conflict_rework(owner, project, seq, &base_ref, &head, files)
+                    .await?;
+                Ok(FinalizeStep::Completed)
+            }
+            MergeOutcome::UnresolvedMarkers { files } => {
+                self.escalate_unresolved_markers(owner, project, seq, files)
                     .await?;
                 Ok(FinalizeStep::Completed)
             }
@@ -1360,10 +1370,20 @@ impl Core {
             let job = self.must_get(owner, project, seq)?.clone();
             let old_base = job.base_ref.clone().expect("base_ref set");
             let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
-            let context = self
+            // Rebase job/{seq} onto the new base (the head the candidate was gated
+            // against), committing the 3-way-merged tree as a WIP commit so the
+            // agent fixes in place; enter_work preserves it (spec §3.2 step 12,
+            // §3.3). A gate failure usually merges cleanly (it is an eval failure,
+            // not a text conflict), but the augmented context handles either arm.
+            let outcome = self
+                .repos
+                .rebase_onto_with_conflict(owner, project, seq, &gate.old_head)
+                .await?;
+            let mut context = self
                 .repos
                 .conflict_context(owner, project, &old_base, &gate.old_head, &[])
                 .await?;
+            augment_conflict_context(&mut context, &outcome);
             let mut job = job;
             job.base_ref = Some(gate.old_head.clone());
             self.jobs.put(&job).await?;
@@ -1399,6 +1419,34 @@ impl Core {
         self.on_job_done(owner, project, seq).await
     }
 
+    /// §3.2 step 12 guard: a squash carried conflict markers left by a WIP
+    /// rebase the agent never resolved. A no-evaluator job would land them on
+    /// the default branch, so escalate to a human instead of merging.
+    async fn escalate_unresolved_markers(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        files: Vec<String>,
+    ) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        self.active.remove(&key);
+        self.escalate(
+            owner,
+            project,
+            seq,
+            "unresolved_conflict_markers",
+            format!(
+                "Job {seq}: the branch still carries unresolved conflict markers in {} \
+                 after a rebase-with-markers rework — merging would land \
+                 `<<<<<<< / ======= / >>>>>>>` on the default branch. Resolve the markers \
+                 on job/{seq} and commit before finalizing.",
+                files.join(", ")
+            ),
+        )
+        .await
+    }
+
     /// §3.2 step 12 conflict path: rebase-as-rework, budget NOT consumed.
     async fn conflict_rework(
         &mut self,
@@ -1412,10 +1460,20 @@ impl Core {
         let key = (owner.to_string(), project.to_string(), seq);
         let mut job = self.must_get(owner, project, seq)?.clone();
         let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
-        let context = self
+        // Rebase job/{seq} onto the new base, committing the 3-way-merged tree
+        // (conflict markers in the conflicting hunks only) as a WIP commit — the
+        // merge is now ON the branch, and the agent resolves it in place rather
+        // than redoing the work (spec §3.2 step 12). enter_work below preserves
+        // this branch (Change A).
+        let outcome = self
+            .repos
+            .rebase_onto_with_conflict(owner, project, seq, head)
+            .await?;
+        let mut context = self
             .repos
             .conflict_context(owner, project, old_base, head, &files)
             .await?;
+        augment_conflict_context(&mut context, &outcome);
         job.base_ref = Some(head.to_string());
         self.jobs.put(&job).await?;
         self.graphs
@@ -1434,6 +1492,34 @@ impl Core {
         .await?;
         self.enter_work(owner, project, seq, cycle + 1, Vec::new(), Some(context))
             .await
+    }
+}
+
+/// Augment the §4.3 conflict-context block with resolve-in-place guidance: the
+/// 3-way merge is ALREADY committed on job/{seq} (Change B), so the agent must
+/// resolve the markers where they sit and commit — not reimplement the change.
+fn augment_conflict_context(context: &mut String, outcome: &ConflictRebaseOutcome) {
+    match outcome {
+        ConflictRebaseOutcome::Conflict { files } => {
+            context.push_str(
+                "\nThe merge with the updated base is ALREADY committed on your job \
+                 branch as a WIP commit. Conflict markers \
+                 (<<<<<<< / ======= / >>>>>>>) are present in these files:\n",
+            );
+            for f in files {
+                context.push_str(&format!("  {f}\n"));
+            }
+            context.push_str(
+                "Resolve the markers in place and commit. Do NOT reimplement your change \
+                 from scratch — everything else already merged cleanly onto the new base.\n",
+            );
+        }
+        ConflictRebaseOutcome::Clean => {
+            context.push_str(
+                "\nYour branch has ALREADY been rebased onto the updated base and merged \
+                 cleanly (no conflict markers). Continue from the current branch state.\n",
+            );
+        }
     }
 }
 

@@ -47,12 +47,35 @@ pub enum MergeOutcome {
     Conflict {
         files: Vec<String>,
     },
+    /// The squash tree still carries conflict markers left by a prior WIP
+    /// rebase commit that the agent never resolved (spec §3.2 step 12 guard).
+    /// Merging would land `<<<<<<< / ======= / >>>>>>>` on the default branch,
+    /// so the dispatcher escalates instead.
+    UnresolvedMarkers {
+        files: Vec<String>,
+    },
 }
 
 /// Internal result of building a squash commit without advancing any ref.
 enum SquashBuild {
     Commit { commit: String, old_head: String },
     NoOp,
+    Conflict { files: Vec<String> },
+    UnresolvedMarkers { files: Vec<String> },
+}
+
+/// Outcome of [`RepoManager::rebase_onto_with_conflict`] — the merge-tree
+/// rebase that REUSES the merged tree instead of discarding it (spec §3.2
+/// step 12 conflict / merge-gate rework). Unlike [`RebaseOutcome`], BOTH arms
+/// move `job/{seq}` to a single WIP commit parented on the new base; a
+/// `Conflict` leaves conflict markers in the listed files' blobs for the agent
+/// to resolve in place.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConflictRebaseOutcome {
+    /// Merged cleanly onto the new base (defensive — a real conflict is the
+    /// expected reason this path runs).
+    Clean,
+    /// Merged onto the new base with conflict markers in the listed files.
     Conflict { files: Vec<String> },
 }
 
@@ -857,6 +880,17 @@ impl RepoManager {
         match out.status.code() {
             Some(0) => {
                 let tree = stdout.trim().to_string();
+                // §3.2 step 12 guard: a clean merge-tree can still carry conflict
+                // markers if the branch holds an UNRESOLVED WIP-rebase commit
+                // (merge-base == new base → the branch's blob, markers and all,
+                // is taken verbatim). A no-evaluator job would otherwise squash
+                // them straight onto the default branch.
+                let unresolved = self
+                    .residual_conflict_markers(owner, project, base_ref, &branch, &tree)
+                    .await?;
+                if !unresolved.is_empty() {
+                    return Ok(SquashBuild::UnresolvedMarkers { files: unresolved });
+                }
                 let subject = format!("job/{seq}: {job_type}");
                 let mut args = vec!["commit-tree", &tree, "-p", &old_head, "-m", &subject];
                 if let Some(s) = summary {
@@ -887,6 +921,154 @@ impl RepoManager {
         }
     }
 
+    /// Rebase `job/{seq}` onto `new_base` by REUSING the tree `git merge-tree`
+    /// already writes (spec §3.2 step 12 conflict / merge-gate rework). Unlike
+    /// [`Self::rebase_branch`] this spins up no worktree and never fails on a
+    /// conflict: it commits the 3-way-merged tree — conflict markers and all —
+    /// as a single WIP commit parented on `new_base`, collapsing the job's prior
+    /// commits into it. `merge-tree` computes the merge base automatically (the
+    /// old base, the common ancestor of `new_base` and the branch), so the
+    /// merged tree carries both sides' changes with `<<<<<<< / ======= />>>>>>>`
+    /// markers in the conflicting hunks only. The agent resolves the markers in
+    /// place and commits; the next squash's merge-base is then `new_base`
+    /// (degenerate 3-way), so the resolved tree lands exactly.
+    ///
+    /// On conflict the WIP commit records the conflicted paths as
+    /// `Conflicted-file:` trailers so [`Self::residual_conflict_markers`] can
+    /// find and scan them later without re-deriving the merge.
+    pub async fn rebase_onto_with_conflict(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        new_base: &str,
+    ) -> Result<ConflictRebaseOutcome> {
+        let repo = self.repo_path(owner, project);
+        let branch = format!("job/{seq}");
+        let branch_tip = self.resolve_ref(owner, project, &branch).await?;
+        let out = self
+            .exec(
+                &repo,
+                &[
+                    "merge-tree",
+                    "--write-tree",
+                    "--name-only",
+                    new_base,
+                    &branch,
+                ],
+                None,
+            )
+            .await?;
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        // Line 0 is the merged tree OID in BOTH exit 0 and exit 1.
+        let tree = stdout.lines().next().unwrap_or_default().trim().to_string();
+        let short = &new_base[..new_base.len().min(7)];
+
+        // Build the commit message, then commit the merged tree as one commit
+        // parented on the new base and move the branch ref onto it (CAS on the
+        // old tip: the single-writer dispatcher makes a race impossible, so a
+        // surprise is a logic bug).
+        let (msg, result) = match out.status.code() {
+            Some(0) => (
+                format!("job/{seq}: rebased onto {short}"),
+                ConflictRebaseOutcome::Clean,
+            ),
+            Some(1) => {
+                let mut files: Vec<String> = stdout
+                    .lines()
+                    .skip(1)
+                    .take_while(|l| !l.trim().is_empty())
+                    .map(str::to_string)
+                    .collect();
+                files.dedup();
+                let mut msg = format!(
+                    "WIP: unresolved merge conflict - resolve markers and commit (job/{seq})\n"
+                );
+                for f in &files {
+                    msg.push_str(&format!("\nConflicted-file: {f}"));
+                }
+                (msg, ConflictRebaseOutcome::Conflict { files })
+            }
+            _ => {
+                return Err(VcsError::Git {
+                    args: "merge-tree --write-tree".into(),
+                    stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+                });
+            }
+        };
+
+        let commit = self
+            .run(&repo, &["commit-tree", &tree, "-p", new_base, "-m", &msg])
+            .await?;
+        self.run(
+            &repo,
+            &[
+                "update-ref",
+                &format!("refs/heads/{branch}"),
+                commit.trim(),
+                &branch_tip,
+            ],
+        )
+        .await?;
+        Ok(result)
+    }
+
+    /// Scan for residual conflict markers a WIP-rebase commit
+    /// ([`Self::rebase_onto_with_conflict`]) left behind (spec §3.2 step 12
+    /// guard). Returns the flagged files whose blob in `tree` STILL carries
+    /// conflict markers — i.e. the agent never resolved them. Only files a WIP
+    /// commit recorded (`Conflicted-file:` trailers in `base_ref..branch`) are
+    /// scanned, so the cost is bounded to the originally-conflicted set. No WIP
+    /// commit on the branch → nothing to scan → empty.
+    async fn residual_conflict_markers(
+        &self,
+        owner: &str,
+        project: &str,
+        base_ref: &str,
+        branch: &str,
+        tree: &str,
+    ) -> Result<Vec<String>> {
+        let repo = self.repo_path(owner, project);
+        // %B (full body) of each commit unique to the branch, record-separated.
+        let bodies = self
+            .run(
+                &repo,
+                &["log", "--format=%B%x1e", &format!("{base_ref}..{branch}")],
+            )
+            .await?;
+        let mut flagged: Vec<String> = Vec::new();
+        for body in bodies.split('\x1e') {
+            let body = body.trim_start_matches(['\n', '\r']);
+            if !body.starts_with("WIP: unresolved merge conflict") {
+                continue;
+            }
+            for line in body.lines() {
+                if let Some(f) = line.strip_prefix("Conflicted-file: ") {
+                    flagged.push(f.trim().to_string());
+                }
+            }
+        }
+        if flagged.is_empty() {
+            return Ok(Vec::new());
+        }
+        flagged.sort();
+        flagged.dedup();
+        let mut unresolved = Vec::new();
+        for f in flagged {
+            let out = self
+                .exec(&repo, &["cat-file", "blob", &format!("{tree}:{f}")], None)
+                .await?;
+            if !out.status.success() {
+                continue; // path gone from the merged tree — nothing to land
+            }
+            let content = String::from_utf8_lossy(&out.stdout);
+            if content.contains("<<<<<<< ") && content.contains(">>>>>>> ") {
+                unresolved.push(f);
+            }
+        }
+        Ok(unresolved)
+    }
+
     /// Squash-merge `job/{seq}` into the default branch. A squash-merge is by
     /// definition one new commit with one parent — built by
     /// [`Self::build_squash_commit`], then `update-ref` (CAS on the old head).
@@ -906,6 +1088,9 @@ impl RepoManager {
         {
             SquashBuild::NoOp => Ok(MergeOutcome::NoOp),
             SquashBuild::Conflict { files } => Ok(MergeOutcome::Conflict { files }),
+            SquashBuild::UnresolvedMarkers { files } => {
+                Ok(MergeOutcome::UnresolvedMarkers { files })
+            }
             SquashBuild::Commit { commit, old_head } => {
                 self.advance_default(owner, project, &commit, &old_head)
                     .await?;
@@ -933,6 +1118,9 @@ impl RepoManager {
         {
             SquashBuild::NoOp => Ok(MergeOutcome::NoOp),
             SquashBuild::Conflict { files } => Ok(MergeOutcome::Conflict { files }),
+            SquashBuild::UnresolvedMarkers { files } => {
+                Ok(MergeOutcome::UnresolvedMarkers { files })
+            }
             SquashBuild::Commit { commit, .. } => {
                 self.create_branch(owner, project, &format!("merge-gate/{seq}"), &commit)
                     .await?;
