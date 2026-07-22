@@ -24,6 +24,17 @@ RUN curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_
  && rm -rf /tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl \
  && sccache --version
 
+# nats-server binary for tier-2 (NATS) integration tests. A single ~15 MB
+# static binary; test-utils' harness spawns it as an ephemeral process (no
+# Docker needed) so `tasks/ci.sh` in this image actually EXECUTES the NATS
+# tier instead of silently skipping it (testing.md).
+ARG NATS_VERSION=2.10.22
+RUN curl -fsSL "https://github.com/nats-io/nats-server/releases/download/v${NATS_VERSION}/nats-server-v${NATS_VERSION}-linux-amd64.tar.gz" \
+    | tar -xz -C /tmp \
+ && install -m 0755 "/tmp/nats-server-v${NATS_VERSION}-linux-amd64/nats-server" /usr/local/bin/nats-server \
+ && rm -rf "/tmp/nats-server-v${NATS_VERSION}-linux-amd64" \
+ && nats-server --version
+
 RUN rustup component add rustfmt clippy \
  && npm install -g @anthropic-ai/claude-code
 

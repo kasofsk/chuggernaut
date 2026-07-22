@@ -424,9 +424,11 @@ async fn work_command_launch_failure_retries_then_escalates() {
         .list_for_job("acme", "api", job.id)
         .await
         .unwrap();
+    // The escalation Human task also carries phase Work (escalation::
+    // escalation_task), so exclude it — `works` is the container work attempts.
     let works: Vec<_> = tasks
         .iter()
-        .filter(|t| t.phase == TaskPhase::Work)
+        .filter(|t| t.phase == TaskPhase::Work && !matches!(t.kind, types::TaskKind::Human { .. }))
         .collect();
     // The failing task named on the escalation is the last failed work attempt.
     assert_eq!(esc.failing_task, works.last().map(|t| t.id));

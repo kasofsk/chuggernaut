@@ -20,15 +20,14 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
     let operator = KeyPair::new_operator();
     let sys = KeyPair::new_account();
     let chug = KeyPair::new_account();
-    let config = format!(
-        "port: 4222\njetstream {{ store_dir: \"/tmp/js\" }}\n{}",
-        resolver_config(
-            &operator_jwt(&operator, "chuggernaut").unwrap(),
-            &sys.public_key(),
-            &system_account_jwt(&operator, &sys.public_key()).unwrap(),
-            &chug.public_key(),
-            &account_jwt(&operator, &chug.public_key(), "CHUG").unwrap(),
-        ),
+    // Auth/resolver stanza only — the harness owns the listen port and the
+    // JetStream store (spawn_with_config prepends both).
+    let config = resolver_config(
+        &operator_jwt(&operator, "chuggernaut").unwrap(),
+        &sys.public_key(),
+        &system_account_jwt(&operator, &sys.public_key()).unwrap(),
+        &chug.public_key(),
+        &account_jwt(&operator, &chug.public_key(), "CHUG").unwrap(),
     );
     let server = require_nats_config!(&config);
 

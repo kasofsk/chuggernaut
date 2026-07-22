@@ -2,6 +2,23 @@
 
 Normal tests plus fixture-driven end-to-end runs. Three tiers, in increasing cost; CI runs the first two on every PR, the third nightly and on demand.
 
+## What CI actually runs
+
+The merge gate (`tasks/ci.sh`, mirrored by `.github/workflows/ci.yml`) runs
+tiers 1 **and 2**. The `agent-rust` image bakes a `nats-server` binary
+(`deploy/prod/Dockerfile.agent-rust`), and the `test-utils` harness spawns it as
+an ephemeral per-test process — so the NATS tier executes for real rather than
+self-skipping. `ci.sh` prints the tier state up front and a per-tier pass tally
+at the end (`tier-2 (NATS): N passed across M file(s)`), so a green gate is never
+silently partial.
+
+Tier 3 (real Docker containers) stays out of the gate and self-skips. If NATS is
+somehow unavailable (no binary **and** no Docker), `ci.sh` prints
+`tier-2 (NATS): SKIPPED` and, when the diff itself adds or edits a tier-2 test
+file, a loud `!!!` warning — such a change then needs a **manual verification
+note** in the work summary (run the tier-2 suite locally with a `nats-server` on
+`PATH`).
+
 ## Tier 1: Unit
 
 Pure-logic tests, no I/O, colocated with the code:
@@ -14,7 +31,7 @@ Pure-logic tests, no I/O, colocated with the code:
 
 ## Tier 2: Integration (per crate, real dependencies, fake peers)
 
-- `store` against a **real NATS server** (testcontainers or a spawned `nats-server` binary — `test-utils` provides the harness): bucket creation, watch semantics, stream replay-from-sequence, request-reply retry
+- `store` against a **real NATS server** (`test-utils` spawns one — a local `nats-server` binary if present, else a Docker `nats:2-alpine` container; skips only when neither is available): bucket creation, watch semantics, stream replay-from-sequence, request-reply retry
 - `vcs` against **temp bare repos on disk**: branch lifecycle, squash-merge (clean, no-op, conflict), conflict-context builder, diff-by-job-state including the Done-state `git log --grep` recovery
 - `container` against the **local Docker socket** (skipped when unavailable): launch/wait/kill/inspect/copy_file, bootstrap wrapper, resource limits
 - `dispatcher` with **real NATS + fake `ContainerBackend` + fake `AgentProvider`** (`test-utils`): full lifecycle runs entirely in-process — seed jobs, drive Ready→Work→Evaluation→Done, retries, rework, escalation, revoke cascades, restart reconciliation (kill and restart the dispatcher task mid-run, assert §3.6 behavior), factory batching/backpressure with synthetic ingest events
@@ -42,6 +59,6 @@ The v1 fixture format (`title`/`body`/`deps`/`priority`/`capabilities`) predates
 
 ## Conventions
 
-- `test-utils` owns: NATS harness, temp-repo builder, fake backend/provider, fixture seeding, and an `e2e!` guard macro that skips when Docker/NATS are unavailable
+- `test-utils` owns: the NATS harness (local `nats-server` process, else Docker container), temp-repo builder, fake backend/provider, fixture seeding, and `require_nats!`/`e2e!` guard macros that skip when NATS/Docker are unavailable
 - Every bug fix lands with a regression test at the lowest tier that can express it
 - Coverage is tracked per crate (v1 discipline carries over); `dispatcher::state` and `release` validation are held to ~100% branch coverage — they are the correctness core
