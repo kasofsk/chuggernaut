@@ -78,6 +78,19 @@ eval:
     stage: 1
 "#;
 
+// A web-style job with a post-merge wrap-up command (spec §3.2): agent work,
+// no evaluators (auto-pass), and a `wrap_up.run` publish that ships the merged
+// result. The publish is the only container that launches through the backend.
+const WEBPUB: &str = r#"
+name: webpub
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+wrap_up:
+  run: ./tasks/web-publish.sh
+"#;
+
 // Same shape but the stage-0 review is advisory: its failure must not stop the
 // stage-1 evaluator from running.
 const STAGED_ADVISORY: &str = r#"
@@ -126,6 +139,7 @@ async fn rig_with_artifacts(artifacts_identity: Option<String>) -> Option<Rig> {
         ("jobs/cmd-work.yaml", CMD_WORK),
         ("jobs/staged.yaml", STAGED),
         ("jobs/staged-advisory.yaml", STAGED_ADVISORY),
+        ("jobs/webpub.yaml", WEBPUB),
         ("prompts/impl.md", "implement it"),
         ("prompts/eval.md", "review it"),
         ("tags/rust.md", "# rust\nrust conventions here"),
@@ -912,6 +926,192 @@ async fn finalize_none_completes_without_merging() {
             .await
             .is_err(),
         "job branch deleted at Done"
+    );
+}
+
+/// A web-style job with a `wrap_up.run` command (spec §3.2): eval passes, the
+/// squash lands on main, and only THEN the publish command runs — against the
+/// merged default branch — carrying the job to Done. The merged content is on
+/// main before the publish launches, and the publish container clones the
+/// default branch (not the scratch job branch).
+#[tokio::test]
+async fn wrap_up_command_runs_after_merge_against_main() {
+    let Some(rig) = rig().await else { return };
+
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone
+            .commit_file("web/src/app.tsx", b"<App/>", "implement")
+            .await;
+        clone.push(&branch).await;
+    });
+    // The publish container clones main and, in the moment it runs, must see the
+    // merged content already on the default branch.
+    let repos_root = rig
+        .repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    rig.backend.on_launch(move |_cfg| {
+        let manager = vcs::RepoManager::new(repos_root.clone());
+        async move {
+            let merged = manager
+                .read_file_at("acme", "api", "main", "web/src/app.tsx")
+                .await
+                .unwrap();
+            assert_eq!(
+                merged.as_deref(),
+                Some("<App/>"),
+                "the squash must land on main BEFORE the publish runs"
+            );
+        }
+    });
+
+    let job = rig.handle.create_job(req("webpub")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    // Task log: work Done, then the WrapUp command task Done.
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 2, "work + wrap-up command");
+    assert_eq!(tasks[0].phase, TaskPhase::Work);
+    let wrapup = &tasks[1];
+    assert_eq!(wrapup.phase, TaskPhase::WrapUp);
+    assert_eq!(wrapup.state, TaskState::Done);
+    assert!(matches!(wrapup.kind, types::TaskKind::Command { .. }));
+
+    // The single backend launch is the publish, and it cloned the DEFAULT
+    // branch (merged main), not the scratch job branch.
+    let launches = rig.backend.launches();
+    assert_eq!(
+        launches.len(),
+        1,
+        "only the publish launches through backend"
+    );
+    assert_eq!(
+        launches[0].env.get("JOB_BRANCH").map(String::as_str),
+        Some("main"),
+        "publish runs against merged main, not the job branch"
+    );
+
+    let events = event_types(&rig.store).await;
+    assert!(events.contains(&"job-done".to_string()), "{events:?}");
+}
+
+/// A failed `wrap_up.run` command escalates the job — but the squash has
+/// already landed, so the merge is NOT undone (spec §3.2 wrap-up failure).
+#[tokio::test]
+async fn wrap_up_command_failure_escalates_but_merge_stays() {
+    let Some(rig) = rig().await else { return };
+
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone
+            .commit_file("web/src/app.tsx", b"<App/>", "implement")
+            .await;
+        clone.push(&branch).await;
+    });
+    rig.backend.script_exits([7]); // the publish command fails
+
+    let job = rig.handle.create_job(req("webpub")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    // The merge stands — the change is on main despite the failed publish.
+    let merged = rig
+        .repo
+        .manager
+        .read_file_at("acme", "api", "main", "web/src/app.tsx")
+        .await
+        .unwrap();
+    assert_eq!(
+        merged.as_deref(),
+        Some("<App/>"),
+        "a failed publish must not un-merge the landed squash"
+    );
+
+    // The WrapUp command is Failed and a Human escalation task is open.
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let wrapup = tasks
+        .iter()
+        .find(|t| t.phase == TaskPhase::WrapUp)
+        .expect("wrap-up task");
+    assert_eq!(wrapup.state, TaskState::Failed);
+    assert!(
+        tasks
+            .iter()
+            .any(|t| matches!(t.kind, types::TaskKind::Human { .. })
+                && t.state == TaskState::Pending),
+        "an escalation task should be open: {tasks:?}"
+    );
+    let events = event_types(&rig.store).await;
+    assert!(events.contains(&"job-escalated".to_string()), "{events:?}");
+}
+
+/// A job revoked before it lands never runs its `wrap_up.run` command: the
+/// publish only fires off a successful merge, never off a revoke.
+#[tokio::test]
+async fn revoked_job_never_runs_wrap_up_command() {
+    let Some(rig) = rig().await else { return };
+
+    // Hold the work agent open so the revoke lands while the job is in Work —
+    // well before any merge or wrap-up.
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (s2, r2) = (started.clone(), release.clone());
+    rig.provider.on_run(move |_cfg| async move {
+        s2.notify_one();
+        r2.notified().await; // block until the test lets go
+    });
+
+    let job = rig.handle.create_job(req("webpub")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    started.notified().await; // work is running
+    wait_for_state(&rig.store, job.id, JobState::Work).await;
+
+    rig.handle.revoke_job("acme", "api", job.id).await.unwrap();
+    release.notify_one(); // let the (now-orphaned) work run return
+
+    wait_for_state(&rig.store, job.id, JobState::Revoked).await;
+    // Give any erroneous follow-on work a moment to (not) happen.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    assert!(
+        tasks.iter().all(|t| t.phase != TaskPhase::WrapUp),
+        "a revoked job must never create a wrap-up command task: {tasks:?}"
+    );
+    assert!(
+        rig.backend.launches().is_empty(),
+        "no publish container should ever launch for a revoked job"
     );
 }
 

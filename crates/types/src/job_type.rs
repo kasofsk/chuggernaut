@@ -91,7 +91,7 @@ impl ReviewSpec {
 /// Wrap-up declaration (design-lifecycle.md): the job's third step. A block
 /// rather than a bare scalar so future wrap-up behavior (e.g. a
 /// `deployed/{env}` tag ref) extends it without reshaping the schema.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WrapUpSpec {
@@ -100,6 +100,25 @@ pub struct WrapUpSpec {
     /// external (deploys, reports) and whose branch is scratch.
     #[serde(default)]
     pub r#type: WrapUpMode,
+    /// Optional post-merge command (spec §3.2, design-lifecycle.md wrap-up
+    /// hook): a shell command run in the WrapUp phase *after* the squash lands
+    /// on the default branch, against the merged main content. It ships the
+    /// merged result — a web job publishing its built UI, say — so it only runs
+    /// once the merge is final, and never at all if the job is revoked or
+    /// escalated before landing. Valid with `type: merge` only. A non-zero exit
+    /// escalates the job (the merge is not undone). The command clones the
+    /// default branch, so it must be idempotent (a restart may re-launch it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// Image for the `run` container; falls back to the job's top-level image
+    /// (like an evaluator, §1.1). Required when `run` is set and the job type
+    /// declares no top-level image (`work.type: human`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Secrets injected into the `run` container. Scoped here because that is
+    /// the only container they reach; not inherited from `work.secrets`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<String>,
 }
 
 /// Wrap-up mode after eval-pass (design-lifecycle.md).
@@ -438,6 +457,39 @@ impl JobType {
                     context: format!("job type '{}'", self.name),
                     reason: e.to_string(),
                 });
+            }
+        }
+
+        // Wrap-up command hook (spec §3.2): the post-merge `run` only makes
+        // sense for a merge job (there is no merge to follow otherwise), needs an
+        // image from somewhere, and its `image`/`secrets` are meaningless without
+        // it.
+        let wrap = &self.wrap_up;
+        let wctx = format!("wrap_up.run in job type '{}'", self.name);
+        if wrap.run.is_some() {
+            if wrap.r#type == WrapUpMode::None {
+                errs.push(FieldRuleError::Disallowed {
+                    field: "wrap_up.run",
+                    context: "wrap_up.type: none".into(),
+                });
+            }
+            if wrap.image.is_none() && self.image.is_none() {
+                errs.push(FieldRuleError::Required {
+                    field: "wrap_up.image",
+                    context: wctx,
+                });
+            }
+        } else {
+            for (present, field) in [
+                (wrap.image.is_some(), "wrap_up.image"),
+                (!wrap.secrets.is_empty(), "wrap_up.secrets"),
+            ] {
+                if present {
+                    errs.push(FieldRuleError::Disallowed {
+                        field,
+                        context: format!("wrap_up without run in job type '{}'", self.name),
+                    });
+                }
             }
         }
 
@@ -872,6 +924,112 @@ wrap_up:
         let jt = JobType::parse(yaml).unwrap();
         assert_eq!(jt.wrap_up.r#type, WrapUpMode::None);
         assert_eq!(jt.validate(), vec![]);
+    }
+
+    #[test]
+    fn wrap_up_run_parses_and_validates_against_top_level_image() {
+        // The web-job shape: default `merge` wrap-up plus a post-merge publish
+        // command that inherits the top-level image and declares its own secret.
+        let yaml = r#"
+name: web
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+wrap_up:
+  run: ./tasks/web-publish.sh
+  secrets: [MINI_DEPLOY_KEY]
+"#;
+        let jt = JobType::parse(yaml).unwrap();
+        assert_eq!(jt.wrap_up.r#type, WrapUpMode::Merge);
+        assert_eq!(jt.wrap_up.run.as_deref(), Some("./tasks/web-publish.sh"));
+        assert_eq!(jt.wrap_up.secrets, vec!["MINI_DEPLOY_KEY".to_string()]);
+        assert_eq!(jt.validate(), vec![]);
+    }
+
+    #[test]
+    fn wrap_up_run_takes_its_own_image() {
+        // A human-work job has no top-level image, so the wrap-up command must
+        // carry one; when it does, it validates.
+        let yaml = r#"
+name: manual
+work:
+  type: human
+  prompt: p.md
+wrap_up:
+  run: ./publish.sh
+  image: publisher:latest
+"#;
+        let jt = JobType::parse(yaml).unwrap();
+        assert_eq!(jt.wrap_up.image.as_deref(), Some("publisher:latest"));
+        assert_eq!(jt.validate(), vec![]);
+    }
+
+    #[test]
+    fn wrap_up_run_requires_an_image_and_forbids_type_none() {
+        // No top-level image and no wrap_up.image → the command cannot launch;
+        // and `run` on a `type: none` job has no merge to follow.
+        let yaml = r#"
+name: manual
+work:
+  type: human
+  prompt: p.md
+wrap_up:
+  type: none
+  run: ./publish.sh
+"#;
+        let jt = JobType::parse(yaml).unwrap();
+        let errs = jt.validate();
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                FieldRuleError::Required {
+                    field: "wrap_up.image",
+                    ..
+                }
+            )),
+            "missing image should be Required: {errs:?}"
+        );
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                FieldRuleError::Disallowed {
+                    field: "wrap_up.run",
+                    ..
+                }
+            )),
+            "run on type: none should be Disallowed: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn wrap_up_image_and_secrets_disallowed_without_run() {
+        let yaml = r#"
+name: web
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+wrap_up:
+  image: publisher:latest
+  secrets: [TOKEN]
+"#;
+        let jt = JobType::parse(yaml).unwrap();
+        let errs = jt.validate();
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            FieldRuleError::Disallowed {
+                field: "wrap_up.image",
+                ..
+            }
+        )));
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            FieldRuleError::Disallowed {
+                field: "wrap_up.secrets",
+                ..
+            }
+        )));
     }
 
     #[test]

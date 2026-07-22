@@ -543,6 +543,14 @@ impl Core {
             // on_eval_exited drops anything not in the current round.
             TaskPhase::Evaluation => self.on_eval_exited(owner, project, seq, task, exit).await,
             TaskPhase::MergeGate => self.on_gate_exited(owner, project, seq, task, exit).await,
+            // Post-merge wrap-up command (§3.2): exit 0 lands the job Done, a
+            // non-zero exit escalates — the merge already landed.
+            TaskPhase::WrapUp => {
+                if task.state != TaskState::Running {
+                    return Ok(());
+                }
+                self.on_wrapup_exited(owner, project, seq, task, exit).await
+            }
             // Advisory triage (§1.2): record the assessment; never touch job state.
             TaskPhase::Triage => {
                 if task.state != TaskState::Running {

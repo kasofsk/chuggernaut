@@ -483,6 +483,182 @@ async fn restart_lands_job_orphaned_in_wrapup() {
     wait_for_state(&store, 1, JobState::Done).await;
 }
 
+/// The §3.6 wrap-up-command gap: a dispatcher died AFTER the squash landed on
+/// main but BEFORE the `wrap_up.run` publish finished — the job is in WrapUp
+/// with a Running WrapUp command task whose container is gone. Reconciliation
+/// must NOT re-drive the merge queue (the merge already landed); it must
+/// relaunch the pending publish, which then carries the job to Done. This is
+/// the correctness requirement that killed the first attempt as churn.
+#[tokio::test]
+async fn restart_during_wrapup_relaunches_pending_publish() {
+    const WEBPUB: &str = r#"
+name: webpub
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+wrap_up:
+  run: ./tasks/web-publish.sh
+"#;
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/webpub.yaml", WEBPUB.as_bytes(), "type")
+        .await;
+    clone
+        .commit_file("prompts/impl.md", b"implement it", "prompt")
+        .await;
+    // The squash already landed on main before the crash.
+    clone
+        .commit_file("web/src/app.tsx", b"<App/>", "job/1: webpub")
+        .await;
+    clone.push("main").await;
+    let head = repo.head().await;
+    repo.create_job_branch(1, &head).await;
+
+    store
+        .jobs()
+        .await
+        .unwrap()
+        .put(&Job {
+            id: 1,
+            project: "acme/api".into(),
+            r#type: "webpub".into(),
+            title: String::new(),
+            description: String::new(),
+            deps: vec![],
+            state: JobState::WrapUp,
+            branch: "job/1".into(),
+            base_ref: Some(head),
+            knowledge_tags: vec![],
+            eval: vec![],
+            timeout: None,
+            model: None,
+            claim_next: false,
+            factory: None,
+            created_at: Utc::now(),
+            ready_at: Some(Utc::now()),
+        })
+        .await
+        .unwrap();
+    let tasks = store.tasks().await.unwrap();
+    // Work completed before the crash.
+    tasks
+        .put(&Task {
+            id: 1,
+            job_seq: 1,
+            project: "acme/api".into(),
+            phase: TaskPhase::Work,
+            cycle: 1,
+            kind: TaskKind::Agent {
+                provider: "claude".into(),
+                model: None,
+                prompt: "prompts/impl.md".into(),
+            },
+            state: TaskState::Done,
+            attempt: 1,
+            evaluator: None,
+            stage: 0,
+            performed_by: None,
+            container_id: None,
+            session_id: None,
+            result: Some(types::TaskResult::Work {
+                summary: None,
+                structured: None,
+                token_usage: None,
+            }),
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            completed_at: Some(Utc::now()),
+        })
+        .await
+        .unwrap();
+    // The publish task was in flight when the dispatcher died: Running, with a
+    // container id that no longer exists in the fresh backend.
+    tasks
+        .put(&Task {
+            id: 2,
+            job_seq: 1,
+            project: "acme/api".into(),
+            phase: TaskPhase::WrapUp,
+            cycle: 1,
+            kind: TaskKind::Command {
+                run: "./tasks/web-publish.sh".into(),
+            },
+            state: TaskState::Running,
+            attempt: 1,
+            evaluator: None,
+            stage: 0,
+            performed_by: None,
+            container_id: Some("dead-publish-container".into()),
+            session_id: None,
+            result: None,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            completed_at: None,
+        })
+        .await
+        .unwrap();
+
+    let backend = Arc::new(FakeBackend::new()); // relaunched publish exits 0
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        backend.clone(),
+        Arc::new(FakeProvider::new()),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _handle = spawn(core);
+
+    // Recovery relaunches the publish and lands the job.
+    wait_for_state(&store, 1, JobState::Done).await;
+
+    // Exactly one relaunch happened — the publish, not a re-merge.
+    let launches = backend.launches();
+    assert_eq!(launches.len(), 1, "the pending publish is relaunched once");
+    assert_eq!(
+        launches[0].env.get("JOB_BRANCH").map(String::as_str),
+        Some("main"),
+        "the relaunched publish runs against merged main"
+    );
+
+    // The orphaned Running publish is retired; a fresh attempt completed it.
+    let log = tasks.list_for_job("acme", "api", 1).await.unwrap();
+    let wrapups: Vec<&Task> = log
+        .iter()
+        .filter(|t| t.phase == TaskPhase::WrapUp)
+        .collect();
+    assert_eq!(wrapups.len(), 2, "orphan + relaunch: {log:?}");
+    assert!(
+        wrapups
+            .iter()
+            .any(|t| t.attempt == 2 && t.state == TaskState::Done),
+        "the relaunched publish (attempt 2) completed: {wrapups:?}"
+    );
+    assert!(
+        !wrapups.iter().any(|t| t.state == TaskState::Running),
+        "no publish task is left Running: {wrapups:?}"
+    );
+}
+
 /// Upstream reached Done while the dispatcher was dead: reconciliation
 /// unblocks the dependent and runs it.
 #[tokio::test]

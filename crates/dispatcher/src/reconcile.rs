@@ -161,15 +161,35 @@ impl Core {
     }
 
     /// Recover a job crashed while landing (§2.1 WrapUp; §3.3 Merge Gate,
-    /// Restart). Any in-flight gate is superseded — its Running tasks fail and
-    /// the candidate branch is dropped — and the job re-enters the merge queue
-    /// via `refinalize`, which re-opens the gate fresh against current HEAD. A
-    /// job merely parked in the queue (no gate running) simply re-enqueues.
+    /// Restart; §3.2 wrap-up command). Two cases, discriminated by the task log:
+    ///
+    /// - A `WrapUp`-phase command task exists → the squash **already landed** and
+    ///   only the `wrap_up.run` publish remains (§3.6). Re-driving the merge
+    ///   queue would re-squash, so instead recover the publish: re-attach a live
+    ///   container, replay a lost terminal transition, or relaunch a dead/
+    ///   never-launched one (the command is idempotent by contract).
+    /// - Otherwise the job was still merging: any in-flight gate is superseded —
+    ///   its Running tasks fail and the candidate branch is dropped — and the job
+    ///   re-enters the merge queue via `refinalize`, which re-opens the gate fresh
+    ///   against current HEAD (a job merely parked in the queue simply re-enqueues).
+    ///   `refinalize` → `finish_landing` re-launches the publish on the re-merge,
+    ///   so a crash in the narrow window before the publish task was written still
+    ///   ships it.
     async fn recover_wrapup(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         self.ensure_exec_state(owner, project, seq).await?;
         let key = (owner.to_string(), project.to_string(), seq);
         let cycle = self.active.get(&key).expect("exec state").cycle;
         let all = self.tasks.list_for_job(owner, project, seq).await?;
+
+        if let Some(task) = all
+            .iter()
+            .filter(|t| t.phase == TaskPhase::WrapUp && t.cycle == cycle)
+            .max_by_key(|t| t.id)
+            .cloned()
+        {
+            return self.recover_wrapup_command(owner, project, seq, task).await;
+        }
+
         for t in all.iter().filter(|t| {
             t.phase == TaskPhase::MergeGate && t.cycle == cycle && t.state == TaskState::Running
         }) {
@@ -186,6 +206,65 @@ impl Core {
             .delete_branch(owner, project, &format!("merge-gate/{seq}"))
             .await;
         self.refinalize(owner, project, seq).await
+    }
+
+    /// Recover the `wrap_up.run` publish task after a restart (§3.2, §3.6). The
+    /// merge is already landed; the publish is all that is left, and it must not
+    /// be dropped.
+    async fn recover_wrapup_command(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task: Task,
+    ) -> Result<()> {
+        match task.state {
+            // Publish finished before the crash; only the Done transition was
+            // lost. Land it.
+            TaskState::Done => self.complete_done(owner, project, seq).await,
+            // Publish ran and failed; the escalation was lost. Replay it — the
+            // merge stays (design-lifecycle.md wrap-up failure).
+            TaskState::Failed => {
+                self.active
+                    .remove(&(owner.to_string(), project.to_string(), seq));
+                self.escalate(
+                    owner,
+                    project,
+                    seq,
+                    "wrap_up_failed",
+                    format!(
+                        "Job {seq}: the wrap-up publish command failed (found on restart). \
+                         The squash already landed — the merge is final; only the publish \
+                         did not run. Re-run the publish (jobs/web-publish.yaml) or resolve."
+                    ),
+                )
+                .await
+            }
+            // In flight at crash time. If the container is still alive, re-attach
+            // and let it finish (settle_running); otherwise it is dead or was
+            // never launched — relaunch a fresh attempt, the command is
+            // idempotent by contract (§3.2).
+            TaskState::Running | TaskState::Pending => {
+                let alive = match &task.container_id {
+                    Some(cid) => matches!(
+                        self.backend.inspect(cid).await,
+                        Ok(Some(container::ContainerStatus::Running))
+                    ),
+                    None => false,
+                };
+                if alive {
+                    return self.settle_running(owner, project, seq, task).await;
+                }
+                // Retire the orphaned record so it does not linger as Running,
+                // then relaunch (the newer task's higher id wins any future scan).
+                let mut dead = task.clone();
+                dead.state = TaskState::Failed;
+                dead.completed_at = Some(Utc::now());
+                self.tasks.put(&dead).await?;
+                self.launch_wrapup_task(owner, project, seq, task.attempt + 1)
+                    .await
+            }
+        }
     }
 
     async fn recover_evaluation(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {

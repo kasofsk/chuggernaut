@@ -374,6 +374,27 @@
       "description": "Wrap-up declaration (design-lifecycle.md): the job's third step. A block\nrather than a bare scalar so future wrap-up behavior (e.g. a\n`deployed/{env}` tag ref) extends it without reshaping the schema.",
       "type": "object",
       "properties": {
+        "image": {
+          "description": "Image for the `run` container; falls back to the job's top-level image\n(like an evaluator, §1.1). Required when `run` is set and the job type\ndeclares no top-level image (`work.type: human`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run": {
+          "description": "Optional post-merge command (spec §3.2, design-lifecycle.md wrap-up\nhook): a shell command run in the WrapUp phase *after* the squash lands\non the default branch, against the merged main content. It ships the\nmerged result — a web job publishing its built UI, say — so it only runs\nonce the merge is final, and never at all if the job is revoked or\nescalated before landing. Valid with `type: merge` only. A non-zero exit\nescalates the job (the merge is not undone). The command clones the\ndefault branch, so it must be idempotent (a restart may re-launch it).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secrets": {
+          "description": "Secrets injected into the `run` container. Scoped here because that is\nthe only container they reach; not inherited from `work.secrets`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "type": {
           "description": "`merge` (default) squash-merges the job branch through the merge\nqueue/gate; `none` goes straight to Done — for jobs whose effect is\nexternal (deploys, reports) and whose branch is scratch.",
           "$ref": "#/$defs/WrapUpMode",

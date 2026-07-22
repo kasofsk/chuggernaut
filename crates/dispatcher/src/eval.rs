@@ -1122,7 +1122,7 @@ impl Core {
                 .await?
             {
                 MergeOutcome::Merged { .. } | MergeOutcome::NoOp => {
-                    self.complete_done(owner, project, seq).await?;
+                    self.finish_landing(owner, project, seq).await?;
                     Ok(FinalizeStep::Completed)
                 }
                 // head == base_ref makes a conflict impossible by construction;
@@ -1154,7 +1154,7 @@ impl Core {
             .await?
         {
             MergeOutcome::NoOp => {
-                self.complete_done(owner, project, seq).await?;
+                self.finish_landing(owner, project, seq).await?;
                 Ok(FinalizeStep::Completed)
             }
             MergeOutcome::Conflict { files } => {
@@ -1192,7 +1192,7 @@ impl Core {
                         .repos
                         .delete_branch(owner, project, &format!("merge-gate/{seq}"))
                         .await;
-                    self.complete_done(owner, project, seq).await?;
+                    self.finish_landing(owner, project, seq).await?;
                     return Ok(FinalizeStep::Completed);
                 }
 
@@ -1362,7 +1362,7 @@ impl Core {
                 return Ok(());
             }
             let _ = self.repos.delete_branch(owner, project, &gate_branch).await;
-            self.complete_done(owner, project, seq).await?;
+            self.finish_landing(owner, project, seq).await?;
         } else {
             // Integration failure: rework on the new base, budget NOT consumed
             // — same treatment as a merge conflict (§3.3).
@@ -1407,8 +1407,232 @@ impl Core {
         self.pump_merges(owner, project).await
     }
 
+    /// The squash has landed on the default branch (spec §3.2 step 12). If the
+    /// job type declares a `wrap_up.run` publish command, launch it against the
+    /// merged main content and hold the job in WrapUp until it exits (the merge
+    /// queue advances regardless — the publish is an external effect, not a
+    /// merge). Otherwise this is a plain code job: go straight to Done.
+    ///
+    /// This is the single post-merge fork, reached from every merge-success site
+    /// (fast path, gate-skip promote, candidate NoOp, gate promote), so a restart
+    /// that re-drives finalization re-launches the publish through here too — the
+    /// §3.6 gap fix for a crash between the squash landing and the publish
+    /// completing.
+    pub(crate) async fn finish_landing(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+    ) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        let run = self
+            .active
+            .get(&key)
+            .and_then(|e| e.job_type.wrap_up.run.clone());
+        match run {
+            Some(_) => self.launch_wrapup_task(owner, project, seq, 1).await,
+            None => self.complete_done(owner, project, seq).await,
+        }
+    }
+
+    /// Create + launch the `wrap_up.run` command task (spec §3.2). It clones the
+    /// *default* branch — the squash has already landed, so its HEAD carries the
+    /// merged content the publish must ship. The task record (phase `WrapUp`) is
+    /// the restart marker: its presence tells reconciliation the merge is done
+    /// and only the publish remains (§3.6). Idempotent by contract — a restart
+    /// may re-launch it.
+    pub(crate) async fn launch_wrapup_task(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        attempt: u32,
+    ) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        let job = self.must_get(owner, project, seq)?.clone();
+        let job_type = self.active.get(&key).expect("exec state").job_type.clone();
+        let cycle = self.active.get(&key).expect("exec state").cycle;
+        let run = job_type.wrap_up.run.clone().unwrap_or_default();
+        // The publish ships merged main, so it runs against the default branch,
+        // not the (now-landed) scratch job branch.
+        let default_branch = self.repos.default_branch(owner, project).await?;
+        let timeout = task_timeout(&job_type);
+
+        let task_id = self.next_task_id(owner, project, seq).await?;
+        let mut task = Task {
+            id: task_id,
+            job_seq: seq,
+            project: job.project.clone(),
+            phase: TaskPhase::WrapUp,
+            cycle,
+            kind: TaskKind::Command { run: run.clone() },
+            state: TaskState::Running,
+            attempt,
+            evaluator: None,
+            stage: 0,
+            performed_by: None,
+            container_id: None,
+            session_id: None,
+            result: None,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            completed_at: None,
+        };
+        self.tasks.put(&task).await?;
+        self.publish(
+            owner,
+            project,
+            seq,
+            "task-created",
+            serde_json::json!({
+                "task_id": task_id, "phase": "WrapUp", "cycle": cycle, "attempt": attempt,
+            }),
+        )
+        .await?;
+
+        let env = self
+            .container_env(
+                owner,
+                project,
+                seq,
+                &default_branch,
+                &job_type,
+                &job_type.wrap_up.secrets,
+                ChannelRole::Work,
+                timeout,
+            )
+            .await?;
+        let image = job_type
+            .wrap_up
+            .image
+            .clone()
+            .or_else(|| job_type.image.clone())
+            .unwrap_or_default();
+        let launch = ContainerLaunchConfig {
+            image,
+            cmd: bootstrap_cmd(&["sh".into(), "-c".into(), run]),
+            env,
+            files: self
+                .ssh_credential_files(owner, project, seq, ChannelRole::Work, timeout)
+                .await?,
+            cpu_limit: job_type.resources.as_ref().and_then(|r| r.cpu),
+            memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
+            node: job_type.placement_node().map(String::from),
+        };
+        let id = match self.backend.launch(launch).await {
+            Ok(id) => id,
+            Err(e) => {
+                // Launch failure surfaces through the exit fan-in like every other
+                // task (§3.2): `on_wrapup_exited` records it and escalates.
+                self.report_launch_failure(owner, project, seq, task_id, e);
+                return Ok(());
+            }
+        };
+        task.container_id = Some(id.clone());
+        self.tasks.put(&task).await?;
+        let backend = self.backend.clone();
+        let tx = self.self_tx.clone().expect("spawned core");
+        let (o, p) = (owner.to_string(), project.to_string());
+        let harvest = self.harvester();
+        tokio::spawn(async move {
+            let exit_code = backend.wait(&id).await.unwrap_or(-1);
+            harvest.collect_logs(&o, &p, seq, task_id, &id).await;
+            harvest.dispose(seq, task_id, &id).await;
+            let _ = tx
+                .send(Msg::TaskExited {
+                    owner: o,
+                    project: p,
+                    seq,
+                    task_id,
+                    exit: TaskExit::code(exit_code),
+                })
+                .await;
+        });
+        Ok(())
+    }
+
+    /// The `wrap_up.run` command exited (spec §3.2). Exit 0 lands the job Done;
+    /// any non-zero exit (including a launch failure) escalates — the squash is
+    /// already on the default branch, so the merge is never undone; only the
+    /// external publish failed, and a human (or a manual `web-publish` job)
+    /// finishes it.
+    pub(crate) async fn on_wrapup_exited(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        mut task: Task,
+        exit: TaskExit,
+    ) -> Result<()> {
+        let TaskExit {
+            exit_code,
+            launch_error,
+            ..
+        } = exit;
+        let key = (owner.to_string(), project.to_string(), seq);
+        task.completed_at = Some(Utc::now());
+        if exit_code == 0 {
+            task.state = TaskState::Done;
+            task.result = Some(TaskResult::Command {
+                pass: true,
+                exit_code,
+                output: String::new(),
+                structured: None,
+            });
+            self.tasks.put(&task).await?;
+            self.publish(
+                owner,
+                project,
+                seq,
+                "task-completed",
+                serde_json::json!({ "task_id": task.id, "phase": "WrapUp" }),
+            )
+            .await?;
+            return self.complete_done(owner, project, seq).await;
+        }
+
+        task.state = TaskState::Failed;
+        task.result = Some(TaskResult::Command {
+            pass: false,
+            exit_code,
+            output: launch_error.clone().unwrap_or_default(),
+            structured: None,
+        });
+        self.tasks.put(&task).await?;
+        self.publish(
+            owner,
+            project,
+            seq,
+            "task-failed",
+            serde_json::json!({
+                "task_id": task.id, "phase": "WrapUp", "exit_code": exit_code,
+                "launch_error": launch_error,
+            }),
+        )
+        .await?;
+        self.active.remove(&key);
+        self.escalate(
+            owner,
+            project,
+            seq,
+            "wrap_up_failed",
+            format!(
+                "Job {seq}: the wrap-up publish command failed (exit {exit_code}). \
+                 The squash already landed on the default branch — the merge is final; \
+                 only the publish did not run. Re-run the publish (jobs/web-publish.yaml) \
+                 or resolve."
+            ),
+        )
+        .await
+    }
+
     /// Terminal success: branch cleanup, Done, dependents unblock.
-    async fn complete_done(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+    pub(crate) async fn complete_done(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+    ) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
         let mut job = self.must_get(owner, project, seq)?.clone();
         let _ = self.repos.delete_branch(owner, project, &job.branch).await;
