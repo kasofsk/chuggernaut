@@ -566,6 +566,13 @@ td.actions button {
   background: var(--btn-bg);
   color: var(--text);
 }
+/* An assistant-side bubble carrying an error (busy model, bad credential):
+   tinted with the danger color but still reads as the wizard's reply. */
+.wizard-assistant.wizard-error {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+}
 .wizard-input {
   display: flex;
   gap: var(--sp-2);

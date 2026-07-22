@@ -37,6 +37,19 @@ const AGENT_OAUTH_SECRET: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 /// Ceiling on the ticket the wizard writes — a thorough ticket, not a novel.
 const MAX_TOKENS: u32 = 2048;
 
+/// Total time the retry loop may spend *sleeping* between capacity retries. The
+/// wizard is a synchronous chat turn behind an HTTP request — a few seconds of
+/// backoff is fine, minutes are not (the api deadline is ~75s, §routes). Once a
+/// further wait would push cumulative sleep past this, give up with [`WizardError::Busy`].
+const MAX_TOTAL_BACKOFF: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Base unit for the exponential capacity backoff when the server sends no
+/// `retry-after`: attempt 1 waits `BACKOFF_BASE`, attempt 2 twice that, etc.
+const BACKOFF_BASE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Fixed pause before the single retry granted to a generic 5xx.
+const SERVER_ERROR_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// How many recent jobs and repo files to surface as context. Bounded so the
 /// prompt stays small on large repos with long histories.
 const MAX_CONTEXT_JOBS: usize = 15;
@@ -374,7 +387,7 @@ fn extract_json_object(text: &str) -> Option<String> {
     None
 }
 
-/// Errors surfaced to the operator (mapped to a 502/503 by the handler).
+/// Errors surfaced to the operator (mapped to an HTTP status by the handler).
 #[derive(Debug, thiserror::Error)]
 pub enum WizardError {
     #[error("job wizard is not configured")]
@@ -383,6 +396,16 @@ pub enum WizardError {
     EmptyConversation,
     #[error("wizard model request failed: {0}")]
     Http(String),
+    /// Capacity/rate-limit (429/529) that survived retries. The wizard shares
+    /// the platform Claude credential with agent containers (§12.5), so a busy
+    /// account rate-limits both — surface a friendly, retry-worthy message
+    /// rather than the bare status code.
+    #[error("The platform model is busy (agents are running). Try again in a moment.")]
+    Busy,
+    /// The credential was rejected (401): the OAuth token is expired or revoked.
+    /// Distinct from capacity so the operator knows to fix the secret, not wait.
+    #[error("wizard credential invalid; check CLAUDE_CODE_OAUTH_TOKEN")]
+    AuthInvalid,
     #[error("wizard model returned {status}: {message}")]
     Status { status: u16, message: String },
 }
@@ -402,8 +425,71 @@ pub async fn run(
     Ok(parse_turn(&text))
 }
 
+/// How the retry loop should react to a non-success HTTP status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusClass {
+    /// Capacity / rate limit (429, 529): retry with capped backoff honoring
+    /// `retry-after`, then surface [`WizardError::Busy`].
+    Capacity,
+    /// Credential rejected (401): no retry — [`WizardError::AuthInvalid`].
+    Auth,
+    /// Other server error (5xx): one retry, then surface the status.
+    ServerError,
+    /// Other client error: surface immediately.
+    Client,
+}
+
+/// Classify an HTTP status into a retry strategy. Pure so the policy is
+/// unit-testable without a live request.
+fn classify_status(code: u16) -> StatusClass {
+    match code {
+        401 => StatusClass::Auth,
+        429 | 529 => StatusClass::Capacity,
+        500..=599 => StatusClass::ServerError,
+        _ => StatusClass::Client,
+    }
+}
+
+/// The delay before the next capacity retry, or `None` to stop retrying because
+/// another wait would push cumulative sleep past [`MAX_TOTAL_BACKOFF`]. Waits at
+/// least the exponential floor (`BACKOFF_BASE * 2^(attempt-1)`, `attempt` from
+/// 1), honoring a larger `retry-after` when the server asks us to wait longer.
+/// Taking the max (not `retry-after` verbatim) keeps the schedule monotonic, so
+/// a `retry-after: 0` can't spin the loop without ever advancing the cap. Pure
+/// and deterministic so the schedule and the cap are directly testable.
+fn next_capacity_delay(
+    attempt: u32,
+    retry_after: Option<std::time::Duration>,
+    already_waited: std::time::Duration,
+) -> Option<std::time::Duration> {
+    let floor = BACKOFF_BASE.saturating_mul(2u32.saturating_pow(attempt.saturating_sub(1)));
+    let delay = retry_after.unwrap_or(floor).max(floor);
+    // Stop if this wait would exceed the total budget — the UI can't block for
+    // minutes on a synchronous turn.
+    if already_waited.saturating_add(delay) > MAX_TOTAL_BACKOFF {
+        return None;
+    }
+    Some(delay)
+}
+
+/// Parse a `retry-after` header value (Anthropic sends whole seconds). Returns
+/// `None` for anything unparseable or negative. Pure for testing.
+fn parse_retry_after(value: &str) -> Option<std::time::Duration> {
+    let secs: f64 = value.trim().parse().ok()?;
+    if secs.is_finite() && secs >= 0.0 {
+        Some(std::time::Duration::from_secs_f64(secs))
+    } else {
+        None
+    }
+}
+
 /// POST the conversation to the Anthropic Messages API and return the assistant
 /// text. Mirrors the reqwest shape in [`crate::github`].
+///
+/// Retries transient failures (§12.5): 429/529 capacity limits back off
+/// (honoring `retry-after`, capped by [`MAX_TOTAL_BACKOFF`]) and then surface
+/// the friendly [`WizardError::Busy`]; a generic 5xx gets one retry. A 401 is a
+/// bad credential — no retry, [`WizardError::AuthInvalid`].
 async fn call_anthropic(
     config: &WizardConfig,
     system: &str,
@@ -419,38 +505,87 @@ async fn call_anthropic(
             .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
             .collect::<Vec<_>>(),
     });
-    let mut req = reqwest::Client::new()
-        .post(&url)
-        .header("anthropic-version", ANTHROPIC_VERSION)
-        .header("content-type", "application/json")
-        .timeout(std::time::Duration::from_secs(60))
-        .json(&body);
-    // Auth header(s) depend on the token shape: x-api-key vs Bearer + oauth
-    // beta (§12.5). The key is only ever an HTTP header, never argv.
-    for (name, value) in auth_headers(config) {
-        req = req.header(name, value);
+    let client = reqwest::Client::new();
+
+    let mut attempt: u32 = 0;
+    let mut waited = std::time::Duration::ZERO;
+    let mut server_error_retried = false;
+    loop {
+        attempt += 1;
+        let mut req = client
+            .post(&url)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .timeout(std::time::Duration::from_secs(60))
+            .json(&body);
+        // Auth header(s) depend on the token shape: x-api-key vs Bearer + oauth
+        // beta (§12.5). The key is only ever an HTTP header, never argv.
+        for (name, value) in auth_headers(config) {
+            req = req.header(name, value);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| WizardError::Http(e.to_string()))?;
+        let status = resp.status();
+        // Read `retry-after` before consuming the body.
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_retry_after);
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| WizardError::Http(e.to_string()))?;
+        if status.is_success() {
+            return extract_reply_text(&text)
+                .ok_or_else(|| WizardError::Http("empty model response".into()));
+        }
+
+        let code = status.as_u16();
+        match classify_status(code) {
+            StatusClass::Auth => {
+                // Never log the credential; the status alone tells the story.
+                tracing::warn!(
+                    "job wizard: credential rejected ({code}); check {AGENT_OAUTH_SECRET}"
+                );
+                return Err(WizardError::AuthInvalid);
+            }
+            StatusClass::Capacity => match next_capacity_delay(attempt, retry_after, waited) {
+                Some(delay) => {
+                    tracing::warn!(
+                        "job wizard: model busy ({code}), retrying in {:?} (attempt {attempt})",
+                        delay
+                    );
+                    tokio::time::sleep(delay).await;
+                    waited = waited.saturating_add(delay);
+                    continue;
+                }
+                None => {
+                    tracing::warn!("job wizard: model still busy ({code}) after {:?}", waited);
+                    return Err(WizardError::Busy);
+                }
+            },
+            StatusClass::ServerError if !server_error_retried => {
+                server_error_retried = true;
+                tracing::warn!("job wizard: upstream 5xx ({code}), retrying once");
+                tokio::time::sleep(SERVER_ERROR_RETRY_DELAY).await;
+                continue;
+            }
+            StatusClass::ServerError | StatusClass::Client => {
+                // Anthropic errors carry {"error": {"message": ...}}; fall back to body.
+                let message = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| v["error"]["message"].as_str().map(String::from))
+                    .unwrap_or(text);
+                return Err(WizardError::Status {
+                    status: code,
+                    message,
+                });
+            }
+        }
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| WizardError::Http(e.to_string()))?;
-    let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| WizardError::Http(e.to_string()))?;
-    if !status.is_success() {
-        // Anthropic errors carry {"error": {"message": ...}}; fall back to body.
-        let message = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|v| v["error"]["message"].as_str().map(String::from))
-            .unwrap_or(text);
-        return Err(WizardError::Status {
-            status: status.as_u16(),
-            message,
-        });
-    }
-    extract_reply_text(&text).ok_or_else(|| WizardError::Http("empty model response".into()))
 }
 
 /// Pull the concatenated `text` blocks out of a Messages API response.
@@ -468,6 +603,7 @@ fn extract_reply_text(body: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn context_lists_jobs_and_files() {
@@ -628,6 +764,86 @@ mod tests {
         // The non-secret fields still render.
         assert!(dbg.contains("OAuth"));
         assert!(disp.contains("api.anthropic.com"));
+    }
+
+    #[test]
+    fn classify_status_routes_each_family() {
+        // Capacity limits: 429 and Anthropic's 529 "overloaded".
+        assert_eq!(classify_status(429), StatusClass::Capacity);
+        assert_eq!(classify_status(529), StatusClass::Capacity);
+        // Auth failure is its own class — no retry.
+        assert_eq!(classify_status(401), StatusClass::Auth);
+        // Other 5xx get the one-retry path.
+        assert_eq!(classify_status(500), StatusClass::ServerError);
+        assert_eq!(classify_status(503), StatusClass::ServerError);
+        // Other 4xx surface immediately.
+        assert_eq!(classify_status(400), StatusClass::Client);
+        assert_eq!(classify_status(404), StatusClass::Client);
+    }
+
+    #[test]
+    fn capacity_backoff_is_exponential_without_retry_after() {
+        // attempt n waits BACKOFF_BASE * 2^(n-1): 500ms, 1s, 2s, 4s …
+        let d = |a| next_capacity_delay(a, None, Duration::ZERO).unwrap();
+        assert_eq!(d(1), Duration::from_millis(500));
+        assert_eq!(d(2), Duration::from_millis(1000));
+        assert_eq!(d(3), Duration::from_millis(2000));
+        assert_eq!(d(4), Duration::from_millis(4000));
+    }
+
+    #[test]
+    fn capacity_backoff_honors_retry_after() {
+        // A larger retry-after wins over the exponential floor…
+        let ra = Some(Duration::from_secs(3));
+        assert_eq!(
+            next_capacity_delay(1, ra, Duration::ZERO),
+            Some(Duration::from_secs(3))
+        );
+        // …but a tiny (or zero) retry-after can't drop below the floor — the
+        // schedule stays monotonic so the total-wait cap always terminates the
+        // loop rather than spinning on `retry-after: 0`.
+        assert_eq!(
+            next_capacity_delay(1, Some(Duration::ZERO), Duration::ZERO),
+            Some(BACKOFF_BASE)
+        );
+    }
+
+    #[test]
+    fn capacity_backoff_caps_total_wait() {
+        // Once cumulative sleep + the next wait would exceed the ~20s budget,
+        // stop retrying (→ Busy) rather than block the synchronous turn.
+        let almost = MAX_TOTAL_BACKOFF - Duration::from_secs(2);
+        // A 2s wait fits exactly at the boundary…
+        assert!(next_capacity_delay(1, Some(Duration::from_secs(2)), almost).is_some());
+        // …a 3s wait pushes past the cap.
+        assert!(next_capacity_delay(1, Some(Duration::from_secs(3)), almost).is_none());
+        // Already at the cap: never wait again.
+        assert!(
+            next_capacity_delay(1, Some(Duration::from_millis(1)), MAX_TOTAL_BACKOFF).is_none()
+        );
+    }
+
+    #[test]
+    fn retry_after_parses_seconds_and_rejects_garbage() {
+        assert_eq!(parse_retry_after("2"), Some(Duration::from_secs(2)));
+        assert_eq!(parse_retry_after("  0 "), Some(Duration::ZERO));
+        assert_eq!(parse_retry_after("1.5"), Some(Duration::from_secs_f64(1.5)));
+        assert_eq!(parse_retry_after("-1"), None);
+        assert_eq!(parse_retry_after("soon"), None);
+        assert_eq!(parse_retry_after(""), None);
+    }
+
+    #[test]
+    fn friendly_messages_never_leak_the_bare_status() {
+        // 429/529 map to the busy message; 401 to the credential message. None
+        // of them is a bare status code the operator shouldn't see.
+        let busy = WizardError::Busy.to_string();
+        assert!(busy.contains("busy"), "{busy}");
+        assert!(!busy.contains("429") && !busy.contains("529"), "{busy}");
+
+        let auth = WizardError::AuthInvalid.to_string();
+        assert!(auth.contains("CLAUDE_CODE_OAUTH_TOKEN"), "{auth}");
+        assert!(!auth.contains("401"), "{auth}");
     }
 
     #[test]

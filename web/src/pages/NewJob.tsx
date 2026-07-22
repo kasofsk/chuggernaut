@@ -129,6 +129,10 @@ function JobWizard({
         setDrafted(true)
       }
     } catch (err) {
+      // 503 = wizard not configured → step aside for manual entry. Everything
+      // else (a busy model, a bad credential, an upstream blip) carries a
+      // human-readable message from the dispatcher; show it as the wizard's own
+      // reply so the operator can just retry, not a generic red failure.
       if (err instanceof ApiError && err.status === 503) setUnavailable(true)
       else setError(err instanceof Error ? err.message : 'wizard request failed')
     } finally {
@@ -170,6 +174,11 @@ function JobWizard({
             </div>
           ))}
           {busy && <div className="wizard-msg wizard-assistant dim">thinking…</div>}
+          {/* An error (busy model, bad credential, upstream blip) reads as the
+              wizard's reply — assistant-side, with its friendly message — not a
+              generic failure. Kept out of `messages` so it isn't fed back to the
+              model as conversation history on the next turn. */}
+          {error && <div className="wizard-msg wizard-assistant wizard-error">{error}</div>}
         </div>
         {/* A plain <div>, not a <form>: this whole component renders inside the
             outer create-job <form>, and nested forms are invalid HTML (the
@@ -202,7 +211,6 @@ function JobWizard({
           Drafted below — edit the title and description freely, then create the job.
         </div>
       )}
-      {error && <div className="error">{error}</div>}
     </div>
   )
 }

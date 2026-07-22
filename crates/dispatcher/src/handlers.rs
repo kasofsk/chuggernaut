@@ -166,6 +166,16 @@ fn bad_gateway(message: &str) -> Vec<u8> {
     .unwrap()
 }
 
+/// 429 for a transient "model is busy" reply: kept distinct from the 502 used
+/// for hard upstream failures and the 503 used for "unconfigured" so the UI can
+/// tell a retry-worthy busy apart from a permanent fallback.
+fn too_many_requests(message: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "error": { "status": 429, "message": message }
+    }))
+    .unwrap()
+}
+
 const NOT_FOUND: &[u8] = br#"{"error":{"status":404,"message":"not found"}}"#;
 
 /// Wire body for `req.jobs.create` (spec §6.2 POST .../jobs).
@@ -1047,8 +1057,12 @@ async fn wizard_reply(
         Err(WizardError::Unconfigured) => {
             service_unavailable(&WizardError::Unconfigured.to_string())
         }
+        // Transient capacity limit: 429 (not 503 — that's the "unconfigured →
+        // fall back to manual entry" signal). The friendly message is shown as
+        // the wizard's reply so the operator knows to retry, never a bare code.
+        Err(e @ WizardError::Busy) => too_many_requests(&e.to_string()),
         // Upstream model failures surface as 502 — the request was well-formed,
-        // the dependency failed.
+        // the dependency failed. Covers AuthInvalid, Status, and Http.
         Err(e) => bad_gateway(&e.to_string()),
     }
 }
