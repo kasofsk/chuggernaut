@@ -82,6 +82,13 @@ pub struct Job {
     pub created_at: DateTime<Utc>,
     /// Set once (immutably) when job first enters Ready; anchor for `job_deadline`.
     pub ready_at: Option<DateTime<Utc>>,
+    /// When the job reached a terminal state (Done or Revoked). Set once by the
+    /// dispatcher's single state-write path at the terminal transition and never
+    /// cleared — so the jobs list can show completion time and duration without
+    /// opening the job. None while the job is still live; defaulted so records
+    /// written before completion stamping existed deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -263,6 +270,40 @@ mod tests {
         let back = serde_json::to_string(&escalated).unwrap();
         assert!(back.contains("\"failing_task\":4"));
         assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), escalated);
+    }
+
+    #[test]
+    fn job_round_trips_with_completed_at_and_stays_backward_compat() {
+        // Old records (no completed_at key) deserialize to None and omit it on
+        // the wire — the jobs list treats a missing stamp as "still live".
+        let json = r#"{
+          "id": 5,
+          "project": "acme/api",
+          "type": "implement-endpoint",
+          "deps": [],
+          "state": "Done",
+          "branch": "job/5",
+          "base_ref": null,
+          "knowledge_tags": [],
+          "factory": null,
+          "created_at": "2026-07-22T10:00:00Z",
+          "ready_at": null
+        }"#;
+        let job: Job = serde_json::from_str(json).unwrap();
+        assert_eq!(job.completed_at, None);
+        assert!(
+            !serde_json::to_string(&job)
+                .unwrap()
+                .contains("completed_at")
+        );
+
+        // A stamped completion round-trips and appears on the wire.
+        let at = "2026-07-22T12:30:00Z".parse::<DateTime<Utc>>().unwrap();
+        let mut finished = job.clone();
+        finished.completed_at = Some(at);
+        let back = serde_json::to_string(&finished).unwrap();
+        assert!(back.contains("\"completed_at\":\"2026-07-22T12:30:00Z\""));
+        assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), finished);
     }
 
     #[test]

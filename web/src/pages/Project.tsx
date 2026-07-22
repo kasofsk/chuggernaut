@@ -7,7 +7,39 @@ import { ResolveForm } from '../components/ResolveForm'
 import { ProjectTabs } from '../components/ProjectTabs'
 import { OriginPanel } from '../components/OriginPanel'
 
-type SortKey = 'id' | 'state' | 'type'
+type SortKey = 'id' | 'state' | 'type' | 'completed'
+
+// Compact local timestamp for the jobs table (reuses JobDetail's #57
+// conventions): time-only when the moment is today, date prepended otherwise.
+// Callers pass the raw ISO string as the cell's `title` for the full tooltip.
+function fmtStamp(iso: string): string {
+  const d = new Date(iso)
+  const now = new Date()
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
+  return sameDay ? time : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`
+}
+
+// Humane duration, matching JobDetail's #57 task-duration format:
+// '42s', '3m 12s', '1h 04m'.
+function fmtDuration(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000))
+  if (total < 60) return `${total}s`
+  const m = Math.floor(total / 60)
+  if (m < 60) return `${m}m ${String(total % 60).padStart(2, '0')}s`
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
+}
+
+// Tooltip for the completed cell: the full ISO instant plus the humanized
+// created→completed duration (the same hint shown muted in the cell). Undefined
+// for live jobs so the cell has no tooltip.
+function completedTip(j: Job): string | undefined {
+  if (!j.completed_at) return undefined
+  return `${j.completed_at} · took ${fmtDuration(Date.parse(j.completed_at) - Date.parse(j.created_at))}`
+}
 
 // State-column sort order. Alphabetical scatters related states, so rank them by
 // lifecycle instead: inert pre-release first, terminal history next, live activity,
@@ -128,7 +160,7 @@ export function ProjectPage() {
     setSort((s) =>
       s.key === key
         ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' }
-        : { key, dir: key === 'id' ? 'desc' : 'asc' },
+        : { key, dir: key === 'id' || key === 'completed' ? 'desc' : 'asc' },
     )
   const sortIndicator = (key: SortKey) =>
     sort.key === key ? <span className="sort-ind">{sort.dir === 'asc' ? '▲' : '▼'}</span> : null
@@ -150,6 +182,18 @@ export function ProjectPage() {
   pinnedRef.current = new Set(visible.map((j) => j.id))
 
   const sorted = [...visible].sort((a, b) => {
+    if (sort.key === 'completed') {
+      // Only terminal jobs have a completion moment; non-terminal jobs sink to
+      // the bottom regardless of direction (nothing to order them by), so the
+      // default descending click surfaces the most-recently-finished job first.
+      const ta = a.completed_at ? Date.parse(a.completed_at) : null
+      const tb = b.completed_at ? Date.parse(b.completed_at) : null
+      if (ta === null && tb === null) return b.id - a.id
+      if (ta === null) return 1
+      if (tb === null) return -1
+      const r = ta - tb || a.id - b.id
+      return sort.dir === 'asc' ? r : -r
+    }
     let r =
       sort.key === 'id'
         ? a.id - b.id
@@ -245,6 +289,9 @@ export function ProjectPage() {
               </th>
               <th>deps</th>
               <th>created</th>
+              <th className="sortable" onClick={() => toggleSort('completed')}>
+                completed{sortIndicator('completed')}
+              </th>
               <th></th>
             </tr>
           </thead>
@@ -280,7 +327,21 @@ export function ProjectPage() {
                 <td className="dim">
                   {j.deps.map((d) => `#${d}`).join(', ')}
                 </td>
-                <td className="dim">{new Date(j.created_at).toLocaleString()}</td>
+                <td className="dim" title={j.created_at}>
+                  {fmtStamp(j.created_at)}
+                </td>
+                <td className="dim" title={completedTip(j)}>
+                  {j.completed_at ? (
+                    <>
+                      {fmtStamp(j.completed_at)}
+                      <span className="job-dur">
+                        {fmtDuration(Date.parse(j.completed_at) - Date.parse(j.created_at))}
+                      </span>
+                    </>
+                  ) : (
+                    '—'
+                  )}
+                </td>
                 <td className="actions">
                   {gate &&
                     (gate.runnable ? (

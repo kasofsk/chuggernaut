@@ -28,6 +28,7 @@ fn job(seq: u64) -> Job {
         factory: None,
         created_at: Utc::now(),
         ready_at: None,
+        completed_at: None,
     }
 }
 

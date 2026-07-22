@@ -141,6 +141,7 @@ mod tests {
             factory: None,
             created_at: Utc::now(),
             ready_at: None,
+            completed_at: None,
         }
     }
 

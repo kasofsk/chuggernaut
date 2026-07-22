@@ -142,9 +142,13 @@ async fn submits_flow_over_nats_to_the_core() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert_eq!(
-        jobs.get("acme", "api", 1).await.unwrap().unwrap().state,
-        JobState::Done
+    let done = jobs.get("acme", "api", 1).await.unwrap().unwrap();
+    assert_eq!(done.state, JobState::Done);
+    // The Done transition stamps completed_at so the jobs list can show the
+    // completion moment and derive a duration (completed_at − created_at).
+    assert!(
+        done.completed_at.is_some(),
+        "a job reaching Done must carry completed_at"
     );
 
     // The submit_result summary rode into the squash-merge commit body (§3.2).

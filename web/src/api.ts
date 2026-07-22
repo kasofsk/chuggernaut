@@ -117,6 +117,10 @@ export interface Job {
   factory: string | null
   created_at: string
   ready_at: string | null
+  /** when the job reached a terminal state (Done or Revoked); set once by the
+   *  dispatcher at the terminal transition; null while the job is still live or
+   *  on records written before completion stamping existed */
+  completed_at?: string | null
   /** derived server-side from the task log; null when no human action is pending */
   awaiting_human?: AwaitingHuman | null
 }

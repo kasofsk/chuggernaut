@@ -406,9 +406,13 @@ async fn revoke_cascades_through_pending_dependents() {
 
     let jobs = store.jobs().await.unwrap();
     for seq in [a.id, b.id, c.id] {
-        assert_eq!(
-            jobs.get("acme", "api", seq).await.unwrap().unwrap().state,
-            JobState::Revoked
+        let rec = jobs.get("acme", "api", seq).await.unwrap().unwrap();
+        assert_eq!(rec.state, JobState::Revoked);
+        // Every terminal transition — including a cascaded revoke — stamps the
+        // completion moment so the jobs list can show it without a lookup.
+        assert!(
+            rec.completed_at.is_some(),
+            "revoked job #{seq} must carry completed_at"
         );
     }
     // Terminal: revoking again is rejected.

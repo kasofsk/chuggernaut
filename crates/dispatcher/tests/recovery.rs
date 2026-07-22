@@ -197,6 +197,7 @@ async fn restart_recovers_orphaned_running_work_task() {
             factory: None,
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
+            completed_at: None,
         })
         .await
         .unwrap();
@@ -320,6 +321,7 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
             factory: None,
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
+            completed_at: None,
         })
         .await
         .unwrap();
@@ -450,6 +452,7 @@ async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
             factory: None,
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
+            completed_at: None,
         })
         .await
         .unwrap();
@@ -580,6 +583,7 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
             factory: None,
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
+            completed_at: None,
         })
         .await
         .unwrap();
@@ -703,6 +707,7 @@ async fn restart_requeues_queued_pending_work_task() {
             factory: None,
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
+            completed_at: None,
         })
         .await
         .unwrap();
@@ -831,6 +836,7 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
             factory: None,
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
+            completed_at: None,
         })
         .await
         .unwrap();
@@ -964,6 +970,7 @@ async fn fleet_sweep_core(
             factory: None,
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
+            completed_at: None,
         })
         .await
         .unwrap();
@@ -1218,6 +1225,7 @@ async fn restart_lands_job_orphaned_in_wrapup() {
             factory: None,
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
+            completed_at: None,
         })
         .await
         .unwrap();
@@ -1345,6 +1353,7 @@ wrap_up:
             factory: None,
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
+            completed_at: None,
         })
         .await
         .unwrap();
@@ -1671,6 +1680,7 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
             factory: None,
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
+            completed_at: None,
         })
         .await
         .unwrap();

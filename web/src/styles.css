@@ -441,6 +441,15 @@ td.actions button {
   color: var(--dim);
 }
 
+/* Muted created→completed duration hint beside a finished job's completion time
+   in the jobs table. Kept small and set off so it reads as a secondary detail. */
+.job-dur {
+  margin-left: 0.4rem;
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  white-space: nowrap;
+}
+
 /* Muted stand-in for the run button when a Frozen job's deps aren't Done yet.
    `cursor: help` cues the title tooltip that names the offending deps. */
 .run-gate {

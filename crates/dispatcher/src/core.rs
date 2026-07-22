@@ -1230,6 +1230,7 @@ impl Core {
             factory: req.factory,
             created_at: Utc::now(),
             ready_at: None,
+            completed_at: None,
         };
         self.jobs.put(&job).await?;
         for &upstream in &job.deps {
@@ -1792,6 +1793,14 @@ impl Core {
     pub(crate) async fn set_state(&mut self, job: &mut Job, to: JobState) -> Result<()> {
         assert_transition(job.state, to)?;
         job.state = to;
+        // Stamp the completion moment once, at the terminal transition (Done or
+        // Revoked). This is the single funnel every job-state write flows
+        // through, so it covers the finalize (Evaluation/WrapUp→Done) and revoke
+        // paths uniformly. `get_or_insert_with` keeps it immutable — terminal
+        // states are absorbing, but be defensive.
+        if to.is_terminal() {
+            job.completed_at.get_or_insert_with(Utc::now);
+        }
         self.jobs.put(job).await?;
         self.graphs
             .entry(job.project.clone())
