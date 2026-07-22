@@ -2,6 +2,7 @@
 // (same-origin); a 401 anywhere bounces to /login via the caller.
 
 export type JobState =
+  | 'Draft'
   | 'Frozen'
   | 'Blocked'
   | 'Ready'
@@ -341,24 +342,23 @@ export interface DispatcherSnapshot {
   wizard_available?: boolean
 }
 
-/** One message in the job-wizard conversation. */
-export interface WizardMessage {
-  role: 'user' | 'assistant'
-  content: string
-}
-
-/** A ticket draft the wizard proposes once it has enough to go on. */
-export interface TicketDraft {
+/**
+ * PATCH .../jobs/{seq} — full-field replace of an editable Draft (spec §72).
+ * Every field is sent on every call; the server rejects the PATCH with 409 once
+ * the job has left Draft. `eval` round-trips unchanged (the Draft editor doesn't
+ * expose it) so it isn't wiped by the full replace.
+ */
+export interface JobPatch {
+  type: string
   title: string
   description: string
-}
-
-/** POST .../wizard — one wizard turn: the chat reply, and (once ready) the
- *  drafted ticket to pre-fill the form. */
-export interface WizardTurn {
-  reply: string
-  draft: TicketDraft | null
-  done: boolean
+  deps: number[]
+  knowledge_tags: string[]
+  eval: Evaluator[]
+  /** duration string override, or null for the type default */
+  timeout: string | null
+  /** work-model override, or null for the resolved default */
+  model: string | null
 }
 
 /** GET /platform/config — read-only platform settings (admins only). */
@@ -436,12 +436,11 @@ export const api = {
     req<Job[]>('GET', `/api/v1/projects/${owner}/${project}/jobs`),
   job: (owner: string, project: string, seq: number) =>
     req<Job>('GET', `/api/v1/projects/${owner}/${project}/jobs/${seq}`),
-  createJob: (owner: string, project: string, body: { type: string; title?: string; description?: string; deps?: number[]; knowledge_tags?: string[]; eval?: Evaluator[]; timeout?: string; model?: string }) =>
+  createJob: (owner: string, project: string, body: { type: string; title?: string; description?: string; deps?: number[]; knowledge_tags?: string[]; eval?: Evaluator[]; timeout?: string; model?: string; draft?: boolean }) =>
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs`, body),
-  /** One turn of the New Job job-wizard chat: send the conversation so far,
-   *  get the assistant's reply and (once ready) a ticket draft. */
-  wizard: (owner: string, project: string, messages: WizardMessage[]) =>
-    req<WizardTurn>('POST', `/api/v1/projects/${owner}/${project}/wizard`, { messages }),
+  /** Full-field replace of an editable Draft job; 409 once it has left Draft. */
+  patchJob: (owner: string, project: string, seq: number, body: JobPatch) =>
+    req<Job>('PATCH', `/api/v1/projects/${owner}/${project}/jobs/${seq}`, body),
   criteria: (owner: string, project: string, seq: number) =>
     req<JobCriteria>('GET', `/api/v1/projects/${owner}/${project}/jobs/${seq}/criteria`),
   release: (owner: string, project: string, seq: number) =>

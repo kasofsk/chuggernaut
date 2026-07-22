@@ -22,6 +22,7 @@ import { TaskArtifacts } from '../components/TaskArtifacts'
 import { TaskLogPane } from '../components/TaskLogs'
 import { EvaluatorTable } from '../components/EvaluatorTable'
 import { Markdown } from '../components/Markdown'
+import { DraftEditor } from '../components/DraftEditor'
 
 export function JobDetail() {
   const { owner = '', project = '', seq = '' } = useParams()
@@ -127,6 +128,10 @@ export function JobDetail() {
     } else setActionError(setError)(e)
   }
 
+  // A Draft renders the live edit form in place of the read-only info card; its
+  // task/criteria/diff sections are empty (nothing has run) so they're hidden.
+  const isDraft = job.state === 'Draft'
+
   return (
     <div className="page">
       <header className="topbar">
@@ -150,11 +155,21 @@ export function JobDetail() {
       </header>
       {error && <div className="error banner">{error}</div>}
 
+      {isDraft ? (
+        <DraftEditor
+          owner={owner}
+          project={project}
+          job={job}
+          onRelease={() => api.release(owner, project, job.id).then(refresh, setActionError(setError))}
+          onRevoke={() => api.revoke(owner, project, job.id).then(refresh, setActionError(setError))}
+          onLeftDraft={refresh}
+        />
+      ) : (
       <section className="card">
         <h2>
           {job.title || job.type} <span className="dim">{job.title ? job.type : ''}</span>
         </h2>
-        {job.description && <pre className="prompt">{job.description}</pre>}
+        {job.description && <Markdown text={job.description} className="job-desc" />}
         <dl className="meta">
           <dt>branch</dt>
           <dd>{job.branch}</dd>
@@ -245,8 +260,9 @@ export function JobDetail() {
           )}
         </div>
       </section>
+      )}
 
-      {criteria && <CriteriaCard owner={owner} project={project} criteria={criteria} />}
+      {!isDraft && criteria && <CriteriaCard owner={owner} project={project} criteria={criteria} />}
 
       {pendingHuman.length > 0 && (
         <section className="card inbox">
@@ -299,6 +315,7 @@ export function JobDetail() {
         </section>
       )}
 
+      {!isDraft && (
       <section className="card">
         <h2>Tasks</h2>
         <div className="table-scroll">
@@ -384,6 +401,7 @@ export function JobDetail() {
           </table>
         </div>
       </section>
+      )}
 
       <TaskReports tasks={tasks} />
 

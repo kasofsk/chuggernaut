@@ -299,7 +299,12 @@ export function ProjectPage() {
             {sorted.map((j, i) => {
               const gate = j.state === 'Frozen' ? depGate(j) : null
               return (
-              <tr key={j.id} className={i % 2 ? 'row-stripe' : undefined}>
+              <tr
+                key={j.id}
+                className={[i % 2 ? 'row-stripe' : '', j.state === 'Draft' ? 'row-draft' : '']
+                  .filter(Boolean)
+                  .join(' ') || undefined}
+              >
                 <td>
                   <Link to={`/p/${owner}/${project}/jobs/${j.id}`}>{j.id}</Link>
                 </td>
@@ -343,6 +348,11 @@ export function ProjectPage() {
                   )}
                 </td>
                 <td className="actions">
+                  {j.state === 'Draft' && (
+                    <Link to={`/p/${owner}/${project}/jobs/${j.id}`}>
+                      <button title="open the live draft editor">edit</button>
+                    </Link>
+                  )}
                   {gate &&
                     (gate.runnable ? (
                       <button

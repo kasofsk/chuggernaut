@@ -563,69 +563,80 @@ td.actions button {
   align-self: flex-start;
 }
 
-/* Job wizard: the chat that drafts a ticket on the New Job screen. */
-.wizard {
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--inset);
-  overflow: hidden;
-}
-.wizard-log {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  padding: var(--sp-3);
-  max-height: 300px;
-  overflow-y: auto;
-}
-.wizard-hello {
-  font-size: var(--fs-sm);
-  line-height: 1.4;
-}
-.wizard-msg {
-  max-width: 85%;
-  padding: var(--sp-2) var(--sp-3);
-  border-radius: var(--r-md);
-  font-size: var(--fs-md);
-  line-height: 1.45;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.wizard-user {
-  align-self: flex-end;
-  background: var(--accent);
-  color: var(--bg);
-}
-.wizard-assistant {
-  align-self: flex-start;
-  background: var(--btn-bg);
-  color: var(--text);
-}
-/* An assistant-side bubble carrying an error (busy model, bad credential):
-   tinted with the danger color but still reads as the wizard's reply. */
-.wizard-assistant.wizard-error {
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
-  border: 1px solid var(--danger);
-  color: var(--danger);
-}
-.wizard-input {
-  display: flex;
-  gap: var(--sp-2);
-  padding: var(--sp-2);
-  border-top: 1px solid var(--border);
-}
-.wizard-input textarea {
-  flex: 1;
+/* ── Draft editor ────────────────────────────────────────────────────────
+   The live form a Draft job renders in place of the read-only info card. It
+   reuses the .create-job field layout; these rules add the description
+   editor/preview, the advanced disclosure, and the two-way-sync flash. */
+.draft-desc {
+  width: 100%;
+  min-height: 14rem;
   resize: vertical;
-  min-height: 2.4rem;
-}
-.wizard-input button {
-  align-self: flex-end;
-}
-.wizard-note {
+  font-family: var(--font-mono);
   font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+.draft-preview {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--inset);
+  padding: 0.4rem 0.6rem;
+  min-height: 14rem;
+}
+/* The edit/preview toggle sits at the right end of the field label. */
+.draft-preview-toggle {
+  float: right;
+  font-size: var(--fs-sm);
+  padding: 0;
+}
+.draft-advanced summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: var(--fs-md);
+}
+.draft-advanced summary .dim {
+  font-weight: 400;
+  font-size: var(--fs-sm);
+}
+.draft-advanced .field {
+  margin-top: var(--sp-3);
+}
+.draft-save-hint {
+  align-self: center;
+  font-size: var(--fs-sm);
+}
+/* Two-way sync: a field the remote (chat) side changed flashes an accent wash
+   so the operator sees what moved without it stealing focus. */
+.draft-flash {
+  animation: draft-flash 1.2s ease-out;
+  border-radius: var(--r-sm);
+}
+@keyframes draft-flash {
+  from {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+/* Draft badge: dashed pill so an editable pre-release ticket reads apart from
+   the solid Frozen/terminal states. */
+.badge-draft {
+  --badge: var(--accent);
+  color: var(--badge);
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--badge) 55%, transparent);
+  background: color-mix(in srgb, var(--badge) 10%, transparent);
+}
+/* Draft rows in the jobs table: a faint accent left edge marks them as
+   in-progress, editable tickets. */
+table.jobs tbody tr.row-draft td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* Read-view job description, now rendered as markdown (was a plain <pre>). */
+.job-desc {
+  margin: var(--sp-2) 0;
 }
 
 .kv-row {
@@ -1401,12 +1412,13 @@ td.actions button {
   .meta dd {
     font-size: var(--fs-xs);
   }
-  .create-actions button[type='submit'] {
+  .create-actions button {
     width: 100%;
   }
-  /* Chat bubbles get a touch more width on a narrow screen. */
-  .wizard-msg {
-    max-width: 92%;
+  /* Keep the Draft editor's description input ≥16px so iOS doesn't zoom on
+     focus (the monospace rule above drops it below that on larger screens). */
+  .draft-desc {
+    font-size: 16px;
   }
   td.actions button {
     margin: 0.15rem 0.3rem 0.15rem 0;
