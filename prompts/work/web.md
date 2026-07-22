@@ -22,6 +22,12 @@ Ground rules:
    (that is `tsc -b && vite build` — type errors fail the build). A change
    that does not build is not done. Run the build in the **foreground and
    wait** for it — never as a background task (see the finish-line rules below).
+   If you add or touch a test, run **only that targeted test** (a specific
+   vitest/`npm test` filter) — enough to believe the change works. **Never run
+   a full test sweep**: it is slow, burns a worker slot the fleet needs, and CI
+   is the authority that runs the suite after you submit. A green targeted run
+   plus CI is the contract; suspect broad breakage you can't cheaply verify?
+   Say so in your summary and let CI judge, rather than pre-running everything.
 5. Commit to the current branch (you are already on the job branch) with
    clear messages, and push.
 6. Narrate with `update_status` as you go: after reading the brief (your

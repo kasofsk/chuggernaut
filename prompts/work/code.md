@@ -18,12 +18,29 @@ Then:
    structure of this repository. New behavior lands with a regression test at
    the lowest tier that can express it.
 2. Keep the change minimal and focused — do not refactor unrelated code.
-3. Before submitting, run what the CI evaluator will run (`tasks/ci.sh`):
-   `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-   and `cargo test --workspace`. Tests that need NATS or Docker self-skip in
-   this container ("skipping: Docker daemon unavailable") — that is expected;
-   do not chase them. Run these in the **foreground and wait** for them — never
-   as a background task (see the finish-line rules below).
+3. Before submitting, verify your change — but run **only what it touches**, not
+   the whole workspace. CI runs the full suite (`tasks/ci.sh`:
+   `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D
+   warnings`, `cargo test --workspace`) as its own evaluator task after you
+   submit, and CI is the authority — a green *targeted* run plus CI is the
+   contract, so don't repeat the full suite here.
+   - **Run only the tests relevant to your change**: the specific module or test
+     you touched or added, e.g. `cargo test -p <crate> <name_filter>` — enough
+     to believe the change works. New behavior still lands with its regression
+     test (step 1) — write it, then run *it* specifically.
+   - **Never run the full workspace suite**: no `cargo test --workspace`, no
+     unfiltered `cargo test` at the root, no `tasks/ci.sh`. It is slow, burns a
+     worker slot the fleet needs, and CI already covers it after submission.
+   - **Compile-level checks stay** — they're cheap and encouraged: `cargo check`
+     / `cargo clippy` on the crate(s) you touched (`-p <crate>`), and
+     `cargo fmt` as today.
+   - Targeted tests that need NATS or Docker self-skip in this container
+     ("skipping: Docker daemon unavailable") — that is expected; do not chase
+     them.
+   - Suspect broad breakage you can't cheaply verify (a cross-crate refactor)?
+     Say so in your summary and let CI judge — don't pre-run the world.
+   Run whatever you do run in the **foreground and wait** for it — never as a
+   background task (see the finish-line rules below).
 4. Commit your work to the current branch (you are already on the job
    branch) with clear commit messages, and push.
 5. Narrate as you go with the `update_status` tool — this streams live to
