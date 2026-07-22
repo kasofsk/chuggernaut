@@ -7,7 +7,7 @@ use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
 use std::sync::Arc;
 use std::time::Duration;
 use store::NatsStore;
-use test_utils::repo::TempRepo;
+use test_utils::repo::{TempRepo, clone_branch_from};
 use test_utils::{FakeBackend, FakeProvider};
 use types::{
     EscalationAction, Job, JobState, Task, TaskKind, TaskPhase, TaskResolution, TaskState,
@@ -122,6 +122,22 @@ fn req(r#type: &str) -> CreateJobRequest {
     }
 }
 
+/// Registers a work run that commits a stub to the job branch, so a relaunched
+/// agent attempt produces output and clears the §3.2 empty-output guard.
+fn commit_on_run(provider: &FakeProvider, bare: std::path::PathBuf) {
+    provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        // Branch-derived content so the commit always diffs, even when a prior
+        // job already merged this stub path to the base.
+        let body = format!("// work produced on {branch}\n");
+        clone
+            .commit_file("src/work.rs", body.as_bytes(), "work")
+            .await;
+        clone.push(&branch).await;
+    });
+}
+
 async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> Job {
     let jobs = store.jobs().await.unwrap();
     for _ in 0..100 {
@@ -218,6 +234,7 @@ async fn restart_recovers_orphaned_running_work_task() {
 
     // "Restart": a fresh core reconciles and finishes the job.
     let provider = Arc::new(FakeProvider::new()); // retry exits 0
+    commit_on_run(&provider, repo.bare_path()); // …producing output (§3.2 guard)
     let repos_root = repo
         .bare_path()
         .parent()
@@ -341,6 +358,7 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
         .unwrap();
 
     let provider = Arc::new(FakeProvider::new()); // relaunch exits 0
+    commit_on_run(&provider, repo.bare_path()); // …producing output (§3.2 guard)
     let repos_root = repo
         .bare_path()
         .parent()
@@ -608,11 +626,13 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
         .parent()
         .unwrap()
         .to_path_buf();
+    let provider = Arc::new(FakeProvider::new()); // the retry exits 0
+    commit_on_run(&provider, repo.bare_path()); // …producing output (§3.2 guard)
     let core = Core::new(
         store.clone(),
         vcs::RepoManager::new(repos_root),
         backend,
-        Arc::new(FakeProvider::new()), // the retry exits 0
+        provider,
         CoreConfig {
             repo_url_base: "file:///repos".into(),
             nats_url: server.url().into(),
@@ -1450,6 +1470,10 @@ wrap_up:
 #[tokio::test]
 async fn restart_unblocks_dependent_whose_deps_completed() {
     let Some(rig) = rig().await else { return };
+    // Both the upstream and the dependent are agent work: each run must produce
+    // output to clear the §3.2 empty-output guard and reach Done.
+    commit_on_run(&rig.provider, rig.repo.bare_path());
+    commit_on_run(&rig.provider, rig.repo.bare_path());
 
     let up = rig.handle.create_job(req("flaky")).await.unwrap();
     let down = rig

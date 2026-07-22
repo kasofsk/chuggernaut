@@ -693,6 +693,7 @@ async fn resolved_wip_markers_squash_clean_on_no_evaluator_job() {
 #[tokio::test]
 async fn human_evaluator_and_human_work_resolve_via_inbox() {
     let Some(rig) = rig().await else { return };
+    commit_branch(&rig, "src/gated.rs"); // agent work produces output (§3.2 guard)
 
     // Agent work + human evaluator: job parks in Evaluation on a Pending task.
     let gated = rig.handle.create_job(req("human-gated")).await.unwrap();
@@ -783,6 +784,9 @@ async fn human_evaluator_and_human_work_resolve_via_inbox() {
 async fn escalation_retry_relaunches_work_without_branch_reset() {
     let Some(rig) = rig().await else { return };
     rig.provider.script_exits([1, 1]); // exhaust work_retries: 1
+    rig.provider.on_run(|_| async {}); // attempt 1 (exits 1)
+    rig.provider.on_run(|_| async {}); // attempt 2 (exits 1)
+    commit_branch(&rig, "src/retry.rs"); // Retry attempt commits so it lands (§3.2 guard)
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
     rig.handle.release_job("acme", "api", job.id).await.unwrap();

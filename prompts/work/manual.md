@@ -27,6 +27,13 @@ title/URL).
 
 2. **Resolve this task `Pass`** once your commits are on `job/{N}`.
 
+   **Finish-line rule:** push before you resolve. Confirm your commits actually
+   landed on `job/{N}` (`git log chug/job/{N}` or the tracker) *before* you
+   resolve `Pass` — a `Pass` on an empty branch merges nothing. Run any local
+   verification to completion first; don't resolve while a build or test run is
+   still in flight. If the correct outcome is genuinely *no change*, say so in
+   the resolution `summary` rather than resolving on an empty branch silently.
+
 ## What happens next
 
 Resolving `Pass` moves the job to Evaluation. The evergreen **`ci`** evaluator

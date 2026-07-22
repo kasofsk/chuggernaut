@@ -20,7 +20,8 @@ Ground rules:
 3. Match the existing component and CSS style; keep the change minimal.
 4. Before submitting, prove it builds: `cd web && npm ci && npm run build`
    (that is `tsc -b && vite build` — type errors fail the build). A change
-   that does not build is not done.
+   that does not build is not done. Run the build in the **foreground and
+   wait** for it — never as a background task (see the finish-line rules below).
 5. Commit to the current branch (you are already on the job branch) with
    clear messages, and push.
 6. Narrate with `update_status` as you go: after reading the brief (your
@@ -35,3 +36,18 @@ Ground rules:
      section that would be empty.
    - Prefer bullets to prose; no multi-sentence run-on paragraphs. Keep it
      brief — structure replaces neither brevity nor substance.
+
+**Finish-line rules (this is a headless run — respect them or the work is lost):**
+
+- Your session ends with your final message. Nothing runs after it — when your
+  turn ends the container is torn down, so anything not yet committed and pushed
+  is gone.
+- **Never** run the build or anything load-bearing as a background task. Run it
+  in the foreground and wait. A summary that says "waiting on the build" means
+  you are not done — the container will die mid-run.
+- **Commit and push before you compose your final summary.** A summary that
+  describes unpushed work is a failure: the dispatcher sees an empty branch and
+  discards the attempt. If your correct outcome is genuinely *no change*, say so
+  explicitly in the summary.
+- If the build is still running when you think you are done, you are not done:
+  wait for it, then commit and push, then call `submit_result`.

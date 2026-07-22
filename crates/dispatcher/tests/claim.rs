@@ -134,6 +134,21 @@ async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::J
     panic!("timed out waiting for {want:?}");
 }
 
+/// Registers a work run that commits a stub to the job branch, so an agent work
+/// run produces output and clears the §3.2 empty-output guard.
+fn commit_work(rig: &Rig) {
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        let body = format!("// work produced on {branch}\n");
+        clone
+            .commit_file("src/work.rs", body.as_bytes(), "work")
+            .await;
+        clone.push(&branch).await;
+    });
+}
+
 async fn tasks_for(rig: &Rig, seq: u64) -> Vec<types::Task> {
     rig.store
         .tasks()
@@ -222,6 +237,7 @@ async fn claim_parks_declared_kind_and_pass_flows_to_eval_and_merge() {
 #[tokio::test]
 async fn claimed_fail_relaunches_next_attempt_per_declared_kind() {
     let Some(rig) = rig().await else { return };
+    commit_work(&rig); // the relaunched agent attempt produces output
 
     let job = rig.handle.create_job(req("retryable")).await.unwrap();
     rig.handle.claim_job("acme", "api", job.id).await.unwrap();
@@ -300,6 +316,7 @@ async fn claim_conflicts_while_attempt_in_flight_or_job_terminal() {
 #[tokio::test]
 async fn unclaim_before_launch_restores_normal_execution() {
     let Some(rig) = rig().await else { return };
+    commit_work(&rig); // the normal agent launch produces output
 
     let job = rig.handle.create_job(req("retryable")).await.unwrap();
     let err = rig.handle.unclaim_job("acme", "api", job.id).await;
@@ -325,6 +342,7 @@ async fn rework_after_claimed_attempt_launches_unclaimed_per_declared_kind() {
     let Some(rig) = rig().await else { return };
     // ci fails the first cycle, passes the second.
     rig.backend.script_exits([1, 0]);
+    commit_work(&rig); // the rework (cycle-2) agent work produces output
 
     let job = rig.handle.create_job(req("code")).await.unwrap();
     rig.handle.claim_job("acme", "api", job.id).await.unwrap();

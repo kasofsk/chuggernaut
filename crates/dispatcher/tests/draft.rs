@@ -11,7 +11,7 @@ use dispatcher::core::{
 use std::sync::Arc;
 use std::time::Duration;
 use store::NatsStore;
-use test_utils::repo::TempRepo;
+use test_utils::repo::{TempRepo, clone_branch_from};
 use test_utils::{FakeBackend, FakeProvider};
 use types::JobState;
 
@@ -129,6 +129,23 @@ async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::J
     panic!("timed out waiting for {want:?}");
 }
 
+/// Registers a work run that commits a stub file to the job branch, so an
+/// agent work run produces output and clears the §3.2 empty-output guard.
+fn commit_work(rig: &Rig) {
+    let bare = rig._repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        // Branch-derived content so the commit always diffs, even when a prior
+        // job already merged this stub path to the base.
+        let body = format!("// work produced on {branch}\n");
+        clone
+            .commit_file("src/work.rs", body.as_bytes(), "work")
+            .await;
+        clone.push(&branch).await;
+    });
+}
+
 async fn state_of(store: &NatsStore, seq: u64) -> JobState {
     store
         .jobs()
@@ -147,6 +164,7 @@ async fn state_of(store: &NatsStore, seq: u64) -> JobState {
 #[tokio::test]
 async fn draft_edit_release_runs_edited_description() {
     let Some(rig) = rig().await else { return };
+    commit_work(&rig); // work produces output so the job reaches Done
 
     let job = rig
         .handle
@@ -207,6 +225,7 @@ async fn edit_rejected_outside_draft() {
     let Some(rig) = rig().await else { return };
 
     // A released job is running/queued, not editable.
+    commit_work(&rig); // work produces output so the job can reach Done below
     let job = rig.handle.create_job(create(false, &[], "")).await.unwrap();
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     // Frozen → Ready happens on release; either way it is no longer Draft.
@@ -235,6 +254,7 @@ async fn frozen_to_draft_edit_release() {
     let Some(rig) = rig().await else { return };
 
     // A normally-created (Frozen) job.
+    commit_work(&rig); // work produces output so the job reaches Done
     let job = rig
         .handle
         .create_job(create(false, &[], "FROZEN BODY"))
@@ -282,6 +302,9 @@ async fn revoke_from_draft() {
 #[tokio::test]
 async fn dep_on_draft_stays_blocked_until_released_and_done() {
     let Some(rig) = rig().await else { return };
+    // Draft and dependent both run agent work: each needs output to reach Done.
+    commit_work(&rig);
+    commit_work(&rig);
 
     let draft = rig.handle.create_job(create(true, &[], "")).await.unwrap();
     let dependent = rig

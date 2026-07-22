@@ -28,6 +28,14 @@ pub(crate) const INFRA_LOSS_REASON: &str = "infra_loss";
 /// genuinely-vanishing environment so it escalates instead of looping forever.
 pub(crate) const INFRA_RELAUNCH_CAP: u32 = 3;
 
+/// Machine code for a work attempt that exited 0 but left nothing behind (§3.2
+/// finish-line guard): no commits on `job/{seq}` beyond `base_ref` and no
+/// summary. A headless CLI ends its turn (and its container) before committing,
+/// so the exit is 0 yet the branch is empty. Unlike `infra_loss` this is a
+/// genuine agent failure and DOES spend a `work_retries` budget. Surfaced on
+/// the retired task result and the `task-failed` event `reason`.
+pub(crate) const NO_OUTPUT_REASON: &str = "no_output_produced";
+
 /// Working memory for a job in Work/Evaluation. Restart rebuild is the
 /// reconcile slice; until then a dispatcher restart drops in-flight jobs.
 pub struct ExecState {
@@ -611,7 +619,6 @@ impl Core {
         let key = (owner.to_string(), project.to_string(), seq);
         task.completed_at = Some(Utc::now());
         if exit_code == 0 {
-            task.state = TaskState::Done;
             // Normally already written by handle_submit_result; this covers an
             // agent that exited 0 without submitting.
             if task.result.is_none() {
@@ -632,6 +639,41 @@ impl Core {
             {
                 *token_usage = Some(measured);
             }
+
+            // Finish-line guard (§3.2): a headless work agent that ends its turn
+            // before committing dies with its work in the container filesystem —
+            // the CLI exits 0, but `job/{seq}` carries nothing beyond `base_ref`.
+            // Exit-0 + empty branch + empty summary is exactly that signature:
+            // fail the attempt (`no_output_produced`) and burn a `work_retries`
+            // budget rather than advancing to Evaluation on nothing. A non-empty
+            // summary — the agent declaring "no change is the correct outcome" —
+            // still proceeds to Evaluation. Scoped to AGENT work: a `command`
+            // work task's effect is external (a deploy/build produces no branch
+            // commits by design), so its exit code stays authoritative (§3.2).
+            let summary_present = matches!(
+                &task.result,
+                Some(TaskResult::Work { summary: Some(s), .. }) if !s.trim().is_empty()
+            );
+            let job = self.must_get(owner, project, seq)?.clone();
+            // Only a job still progressing from Work is guarded: a revoked (or
+            // otherwise terminal) job whose orphaned container exits late falls
+            // through to the pre-existing path, which no-ops on the invalid
+            // transition exactly as before.
+            if !summary_present
+                && job.state == JobState::Work
+                && matches!(task.kind, TaskKind::Agent { .. })
+            {
+                let base_ref = job.base_ref.clone().expect("base_ref set in Work");
+                let has_output = self
+                    .repos
+                    .has_commits_beyond(owner, project, &base_ref, &job.branch)
+                    .await?;
+                if !has_output {
+                    return self.fail_work_no_output(owner, project, seq, task).await;
+                }
+            }
+
+            task.state = TaskState::Done;
             self.tasks.put(&task).await?;
             self.publish(
                 owner,
@@ -671,6 +713,77 @@ impl Core {
         )
         .await?;
 
+        self.retry_or_escalate_work(
+            owner,
+            project,
+            seq,
+            &task,
+            format!("Job {seq}: work task failed (exit {exit_code}) with no retries left"),
+        )
+        .await
+    }
+
+    /// A work attempt that exited 0 but produced nothing (§3.2 finish-line
+    /// guard): no commits on `job/{seq}` beyond `base_ref` and no summary — the
+    /// headless CLI ended its turn before committing, so the container died with
+    /// uncommitted work. Retire the attempt Failed with a machine-readable
+    /// [`NO_OUTPUT_REASON`] (recorded on the result and the `task-failed` event
+    /// so the UI shows "exited without producing changes" instead of a silent
+    /// Done → review-fail cycle), then route it through the SAME `work_retries`
+    /// relaunch path a nonzero exit uses. This is a genuine agent failure and
+    /// DOES spend a retry — contrast [`on_infra_loss`], which does not.
+    async fn fail_work_no_output(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        mut task: Task,
+    ) -> Result<()> {
+        task.state = TaskState::Failed;
+        task.result = Some(TaskResult::Command {
+            pass: false,
+            exit_code: 0,
+            output: "exited without producing changes".to_string(),
+            structured: Some(serde_json::json!({ "reason": NO_OUTPUT_REASON })),
+        });
+        self.tasks.put(&task).await?;
+        self.publish(
+            owner,
+            project,
+            seq,
+            "task-failed",
+            serde_json::json!({
+                "task_id": task.id, "phase": "Work", "exit_code": 0,
+                "reason": NO_OUTPUT_REASON,
+            }),
+        )
+        .await?;
+        self.retry_or_escalate_work(
+            owner,
+            project,
+            seq,
+            &task,
+            format!(
+                "Job {seq}: work task exited 0 without producing changes \
+                 ({NO_OUTPUT_REASON}) and has no retries left"
+            ),
+        )
+        .await
+    }
+
+    /// Shared tail for a failed work attempt: burn a `work_retries` budget and
+    /// relaunch the next attempt (recovering the branch per §3.2 crash
+    /// recovery), or escalate `work_retries_exhausted` when the budget is spent.
+    /// Used by a nonzero container exit and the exit-0 empty-output guard alike.
+    async fn retry_or_escalate_work(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task: &Task,
+        exhausted_msg: String,
+    ) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
         let work_retries = self
             .active
             .get(&key)
@@ -693,7 +806,7 @@ impl Core {
                 project,
                 seq,
                 "work_retries_exhausted",
-                format!("Job {seq}: work task failed (exit {exit_code}) with no retries left"),
+                exhausted_msg,
                 Some(task.id),
             )
             .await

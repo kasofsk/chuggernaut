@@ -3,7 +3,9 @@
 //! happy path (agent commits → eval passes → squash-merge → Done), work retry
 //! exhaustion, and the eval-failure rework loop with §4.3 context injection.
 
-use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, EvalSubmission, spawn};
+use dispatcher::core::{
+    Core, CoreConfig, CoreHandle, CreateJobRequest, EvalSubmission, WorkSubmission, spawn,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use store::NatsStore;
@@ -214,6 +216,25 @@ fn req(r#type: &str) -> CreateJobRequest {
     }
 }
 
+/// Registers a work run that commits a stub file to the job branch — the
+/// minimal "the agent produced output" so the §3.2 empty-output guard is
+/// satisfied and the job advances to Evaluation. Mirrors a real work
+/// container's commit+push. First-cycle only: rework cycles inherit the branch.
+fn commit_work(rig: &Rig) {
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        // Branch-derived content so the commit always diffs, even when a prior
+        // job already merged this stub path to the base.
+        let body = format!("// work produced on {branch}\n");
+        clone
+            .commit_file("src/work.rs", body.as_bytes(), "work")
+            .await;
+        clone.push(&branch).await;
+    });
+}
+
 async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::Job {
     let jobs = store.jobs().await.unwrap();
     for _ in 0..100 {
@@ -324,6 +345,165 @@ async fn work_failure_retries_with_reset_then_escalates() {
     assert_eq!(rig.provider.runs().len(), 2);
 }
 
+/// §3.2 empty-output guard: a work container that exits 0 but leaves the branch
+/// empty AND submits no summary (the job-79 finish-line signature — a headless
+/// agent that ended its turn before committing) is a genuine failure, not a
+/// success. Each attempt fails with reason `no_output_produced`, a work retry is
+/// burned and the attempt relaunches, and the job NEVER enters Evaluation.
+#[tokio::test]
+async fn work_exit0_empty_branch_empty_summary_fails_with_no_output() {
+    let Some(rig) = rig().await else { return };
+    // Default provider: both attempts exit 0, commit nothing, submit nothing.
+    // flaky declares work_retries: 1, so attempt 1 fails → relaunch → attempt 2
+    // fails → escalate.
+
+    let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    // Two work attempts ran: the guard burned a retry and relaunched.
+    assert_eq!(
+        rig.provider.runs().len(),
+        2,
+        "attempt + one relaunched retry"
+    );
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let works: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.phase == TaskPhase::Work && !matches!(t.kind, types::TaskKind::Human { .. }))
+        .collect();
+    assert_eq!(works.len(), 2, "attempt 1 + one retry, both failed");
+    for t in &works {
+        assert_eq!(t.state, TaskState::Failed);
+        match &t.result {
+            Some(types::TaskResult::Command {
+                pass: false,
+                output,
+                structured: Some(s),
+                ..
+            }) => {
+                assert_eq!(output, "exited without producing changes");
+                assert_eq!(s["reason"], "no_output_produced");
+            }
+            other => panic!("expected a no-output failure result, got {other:?}"),
+        }
+    }
+    // The empty-output failure never advanced the job to Evaluation.
+    assert!(
+        !tasks.iter().any(|t| t.phase == TaskPhase::Evaluation),
+        "no Evaluation task may exist: {tasks:?}"
+    );
+    // Retries exhausted → the standard work escalation.
+    assert_eq!(
+        escalated.escalation.expect("escalation recorded").reason,
+        "work_retries_exhausted"
+    );
+
+    // The machine reason rode the task-failed events, so the UI can show
+    // "exited without producing changes" instead of a silent Done cycle.
+    let failed: Vec<_> = job_events(&rig.store, job.id)
+        .await
+        .into_iter()
+        .filter(|e| e["event_type"] == "task-failed")
+        .collect();
+    assert!(
+        failed.iter().any(|e| e["reason"] == "no_output_produced"),
+        "a task-failed event must carry the machine reason: {failed:?}"
+    );
+}
+
+/// §3.2 empty-output guard, exception path: an empty branch with a NON-empty
+/// summary is a deliberate "no change is the correct outcome", not a finish-line
+/// death — so it proceeds to Evaluation (here: no evaluators → straight to Done)
+/// and no retry is burned.
+#[tokio::test]
+async fn work_exit0_empty_branch_with_summary_proceeds() {
+    let Some(rig) = rig().await else { return };
+    // Work reports a summary over the handle (like submit_result) but commits
+    // nothing — the branch stays empty.
+    let h = rig.handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_result(
+            "acme",
+            "api",
+            1,
+            WorkSubmission {
+                summary: Some("no code change is the correct outcome here".into()),
+                structured: None,
+                token_usage: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    assert_eq!(
+        rig.provider.runs().len(),
+        1,
+        "no relaunch: the guard passed"
+    );
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let work = tasks
+        .iter()
+        .find(|t| t.phase == TaskPhase::Work)
+        .expect("work task");
+    assert_eq!(work.state, TaskState::Done);
+    match &work.result {
+        Some(types::TaskResult::Work {
+            summary: Some(s), ..
+        }) => assert!(s.contains("no code change")),
+        other => panic!("expected a Work result carrying the summary, got {other:?}"),
+    }
+}
+
+/// §3.2 empty-output guard, regression: exit 0 WITH commits is unchanged even
+/// when no summary is submitted — a real work run advances to Evaluation.
+#[tokio::test]
+async fn work_exit0_with_commits_and_no_summary_proceeds() {
+    let Some(rig) = rig().await else { return };
+    commit_work(&rig); // commits, submits no summary
+    let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let work = tasks
+        .iter()
+        .find(|t| t.phase == TaskPhase::Work)
+        .expect("work task");
+    assert_eq!(
+        work.state,
+        TaskState::Done,
+        "commits present → work succeeds"
+    );
+}
+
 /// Dogfood-#1 regression: an eval container that fails to *launch* must not
 /// leave the task `Running` and the job wedged in `Evaluation`. The launch
 /// error flows through the task-failure machinery: task Failed with the error
@@ -336,6 +516,7 @@ async fn eval_launch_failure_escalates_instead_of_stuck_running() {
     // `backend.launch` calls in this rig are the eval containers.
     rig.backend
         .fail_launch_if(|_| Some("invalid memory limit \"5g\"".into()));
+    commit_work(&rig); // work succeeds (agent path) so the job reaches Evaluation
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
@@ -466,7 +647,7 @@ async fn eval_failure_reworks_with_context_then_passes() {
 
     // Run order: work c1, eval c1 (fail w/ findings), work c2, eval c2 (pass).
     // Task ids are sequential per job: 1=work, 2=eval, 3=work, 4=eval.
-    rig.provider.on_run(|_| async {}); // work cycle 1
+    commit_work(&rig); // work cycle 1 commits so the branch is non-empty
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -824,6 +1005,17 @@ async fn event_types(store: &NatsStore) -> Vec<String> {
         .collect()
 }
 
+/// Full event payloads (one job per rig, so no per-seq filtering is needed).
+async fn job_events(store: &NatsStore, _seq: u64) -> Vec<serde_json::Value> {
+    store
+        .read_stream("job-events", 100)
+        .await
+        .unwrap()
+        .iter()
+        .map(|p| serde_json::from_slice(p).unwrap())
+        .collect()
+}
+
 const IMPL_SECRET: &str = r#"
 name: impl-secret
 image: img:latest
@@ -898,6 +1090,19 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
     assert!(status.success());
 
     let provider = Arc::new(FakeProvider::new());
+    {
+        // Work produces a commit so the job clears the §3.2 empty-output guard.
+        let bare = repo.bare_path();
+        provider.on_run(move |cfg| async move {
+            let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+            let clone = clone_branch_from(&bare, &branch).await;
+            let body = format!("// work produced on {branch}\n");
+            clone
+                .commit_file("src/work.rs", body.as_bytes(), "work")
+                .await;
+            clone.push(&branch).await;
+        });
+    }
     let repos_root = repo
         .bare_path()
         .parent()
@@ -1371,7 +1576,7 @@ async fn eval_abort_escalates_without_consuming_rework_budget() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
 
-    rig.provider.on_run(|_| async {}); // work cycle 1
+    commit_work(&rig); // work cycle 1 produces a commit
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -1498,7 +1703,7 @@ async fn staged_eval_required_review_fail_skips_ci_and_reworks_from_stage0() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
 
-    rig.provider.on_run(|_| async {}); // work cycle 1
+    commit_work(&rig); // work cycle 1 produces a commit
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         // Stage-0 review fails (task 2) → short-circuit; no ci this cycle.
@@ -1576,7 +1781,7 @@ async fn staged_eval_advisory_review_fail_still_runs_ci() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
 
-    rig.provider.on_run(|_| async {}); // work
+    commit_work(&rig); // work produces a commit
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -1624,7 +1829,7 @@ async fn staged_eval_stage0_abort_escalates_without_ci() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
 
-    rig.provider.on_run(|_| async {}); // work
+    commit_work(&rig); // work produces a commit
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -1671,6 +1876,7 @@ async fn staged_eval_stage0_abort_escalates_without_ci() {
 async fn job_level_evaluators_run_alongside_type_evaluators() {
     let Some(rig) = rig().await else { return };
 
+    commit_work(&rig); // work must produce output to reach Evaluation
     let mut r = req("flaky"); // type declares no evaluators
     r.eval = vec![types::Evaluator {
         name: "extra-ci".into(),
@@ -1711,6 +1917,7 @@ async fn job_level_evaluators_run_alongside_type_evaluators() {
 async fn knowledge_tags_inject_into_work_system_prompt() {
     let Some(rig) = rig().await else { return };
 
+    commit_work(&rig); // work must produce output to reach Done
     let mut create = req("flaky"); // type declares knowledge: [rust]
     create.knowledge_tags = vec!["style".into(), "no-such-tag".into()];
     let job = rig.handle.create_job(create).await.unwrap();
@@ -1768,7 +1975,7 @@ async fn finalize_hard_failure_escalates_instead_of_wedging() {
     let handle = rig.handle.clone();
     let bare = rig.repo.bare_path();
 
-    rig.provider.on_run(|_| async {}); // work cycle 1
+    commit_work(&rig); // work commits real content so wrap-up has a squash to run
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         // Sabotage wrap-up: the branch vanishes before the squash-merge.
@@ -1832,7 +2039,7 @@ async fn work_timeout_override_applies_to_work_not_eval() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
 
-    rig.provider.on_run(|_| async {}); // work c1
+    commit_work(&rig); // work c1 produces a commit
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -1906,7 +2113,7 @@ async fn work_timeout_override_times_out_running_work_task() {
 #[tokio::test]
 async fn eval_task_ignores_work_timeout_override() {
     let Some(rig) = rig().await else { return };
-    rig.provider.on_run(|_| async {}); // work c1: exits immediately
+    commit_work(&rig); // work c1: produces a commit and exits immediately
     // Eval "container" blocks so it is Running when the scan fires.
     rig.provider
         .on_run(|_| async { tokio::time::sleep(Duration::from_secs(30)).await });
@@ -2173,7 +2380,7 @@ async fn work_container_id_recorded_while_running_and_kept_after_exit() {
 async fn abort_verdict_escalates_with_recorded_reason() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
-    rig.provider.on_run(|_| async {}); // work c1
+    commit_work(&rig); // work c1 produces a commit
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
