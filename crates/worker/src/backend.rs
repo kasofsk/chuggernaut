@@ -141,22 +141,30 @@ impl FleetBackend {
         }
     }
 
-    /// §3.1 placement across the fleet: most free slots, ties by name.
-    async fn place(&self) -> Result<&FleetNode, BackendError> {
+    /// §3.1 placement across the fleet. Unpinned: most free slots, ties by
+    /// name, out-of-service workers skipped. Pinned (`pin`): that node or a
+    /// launch error — never a fallback (full/out-of-service → "no free slots on
+    /// node {name}", unknown → names the known nodes).
+    async fn place(&self, pin: Option<&str>) -> Result<&FleetNode, BackendError> {
+        if let Some(name) = pin {
+            let node = self.nodes.iter().find(|n| n.name == name).ok_or_else(|| {
+                let known: Vec<&str> = self.nodes.iter().map(|n| n.name.as_str()).collect();
+                BackendError::Launch(format!(
+                    "placement pinned to unknown node {name:?}; known nodes: {}",
+                    known.join(", ")
+                ))
+            })?;
+            return match self.free_slots(node).await? {
+                Some(free) if free > 0 => Ok(node),
+                _ => Err(BackendError::Launch(format!(
+                    "no free slots on node {name}"
+                ))),
+            };
+        }
         let mut best: Option<(&FleetNode, i64)> = None;
         for node in &self.nodes {
-            let free = match &node.handle {
-                NodeHandle::Docker { backend } => backend
-                    .free_slots_by_node()
-                    .await?
-                    .into_iter()
-                    .map(|(_, f)| f)
-                    .next()
-                    .unwrap_or(0),
-                NodeHandle::Worker { .. } => match self.probe_worker(node).await {
-                    Some(free) => free,
-                    None => continue,
-                },
+            let Some(free) = self.free_slots(node).await? else {
+                continue; // out-of-service worker — skipped, re-probed next time
             };
             let better = match best {
                 None => true,
@@ -170,6 +178,40 @@ impl FleetBackend {
             Some((node, free)) if free > 0 => Ok(node),
             _ => Err(BackendError::Launch("no free slots on any node".into())),
         }
+    }
+
+    /// Free slots on a fleet node: `Ok(Some)` when live, `Ok(None)` for an
+    /// out-of-service worker (skipped by placement), `Err` for an unreachable
+    /// docker-endpoint node (strict, spec §3.1).
+    async fn free_slots(&self, node: &FleetNode) -> Result<Option<i64>, BackendError> {
+        match &node.handle {
+            NodeHandle::Docker { backend } => Ok(backend
+                .free_slots_by_node()
+                .await?
+                .into_iter()
+                .map(|(_, f)| f)
+                .next()),
+            NodeHandle::Worker { .. } => Ok(self.probe_worker(node).await),
+        }
+    }
+
+    /// Per-node health for the platform snapshot (spec §3.1): `(name, in_service)`
+    /// as of the last ping/placement probe.
+    pub fn availability(&self) -> Vec<(String, bool)> {
+        self.nodes
+            .iter()
+            .map(|n| {
+                let up = match &n.handle {
+                    NodeHandle::Docker { backend } => backend
+                        .availability()
+                        .first()
+                        .map(|(_, a)| *a)
+                        .unwrap_or(true),
+                    NodeHandle::Worker { in_service, .. } => in_service.load(Ordering::Relaxed),
+                };
+                (n.name.clone(), up)
+            })
+            .collect()
     }
 
     fn route(&self, id: &ContainerId) -> Result<&FleetNode, BackendError> {
@@ -226,7 +268,7 @@ fn to_wire(config: &ContainerLaunchConfig) -> WorkerLaunchRequest {
 #[async_trait]
 impl ContainerBackend for FleetBackend {
     async fn launch(&self, config: ContainerLaunchConfig) -> Result<ContainerId, BackendError> {
-        let node = self.place().await?;
+        let node = self.place(config.node.as_deref()).await?;
         match &node.handle {
             NodeHandle::Docker { backend } => backend.launch(config).await,
             NodeHandle::Worker { rpc, .. } => {

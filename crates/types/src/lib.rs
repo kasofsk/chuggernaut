@@ -21,8 +21,8 @@ pub use duration::{DurationParseError, parse_duration};
 pub use ingest::IngestEvent;
 pub use job::{Job, JobState};
 pub use job_type::{
-    Evaluator, EvaluatorType, JobType, ProjectDefaults, ReviewSpec, WorkSpec, WorkType, WrapUpMode,
-    WrapUpSpec,
+    Evaluator, EvaluatorType, JobType, Placement, ProjectDefaults, ReviewSpec, WorkSpec, WorkType,
+    WrapUpMode, WrapUpSpec,
 };
 pub use knowledge::{KnowledgeObject, KnowledgeScope};
 pub use platform::{DispatcherConfigSnapshot, WorkerNode};

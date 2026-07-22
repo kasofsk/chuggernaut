@@ -26,6 +26,10 @@ pub struct JobType {
     #[serde(default)]
     pub wrap_up: WrapUpSpec,
     pub resources: Option<Resources>,
+    /// Optional placement pin (spec §3.1). When set, every container this job
+    /// type launches is placed on the named fleet node instead of the
+    /// most-free one. A single pin — no labels, no anti-affinity, no spillover.
+    pub placement: Option<Placement>,
     pub job_deadline: Option<String>,
     pub work_retries: Option<u32>,
     pub eval_retries: Option<u32>,
@@ -141,6 +145,31 @@ pub struct Resources {
     #[cfg_attr(feature = "schema", schemars(extend("pattern" = crate::resources::MEMORY_PATTERN)))]
     pub memory: Option<String>,
     pub task_timeout: Option<String>,
+}
+
+/// Placement pin (spec §3.1). Shape-only here: `node` names a fleet node, but
+/// whether that node is actually configured cannot be checked offline (the
+/// fleet lives in the dispatcher's env), so release/`validate` only enforce the
+/// name is a well-formed node token — the launch honors or errors on it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Placement {
+    /// Fleet node name to pin onto (`[A-Za-z0-9_-]+`, the same subject-safe
+    /// token the fleet config uses).
+    pub node: Option<String>,
+}
+
+impl Placement {
+    /// True when `node` is a well-formed fleet node token (non-empty,
+    /// `[A-Za-z0-9_-]+`). Kept in sync with the fleet config's `is_subject_safe`
+    /// without depending on it (`types` is pure data).
+    fn node_is_well_formed(node: &str) -> bool {
+        !node.is_empty()
+            && node
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -412,7 +441,26 @@ impl JobType {
             }
         }
 
+        // Placement is shape-validated only (spec §3.1): the fleet node list
+        // lives in the dispatcher's env and is not knowable offline, so a bad
+        // node token is the only thing catchable here. An unknown-but-valid
+        // name surfaces at launch as a placement error.
+        if let Some(node) = self.placement.as_ref().and_then(|p| p.node.as_deref())
+            && !Placement::node_is_well_formed(node)
+        {
+            errs.push(FieldRuleError::Invalid {
+                field: "placement.node",
+                context: format!("job type '{}'", self.name),
+                reason: format!("{node:?} is not a valid node name ([A-Za-z0-9_-]+)"),
+            });
+        }
+
         errs
+    }
+
+    /// The fleet node this job type pins onto, if any (spec §3.1 placement).
+    pub fn placement_node(&self) -> Option<&str> {
+        self.placement.as_ref().and_then(|p| p.node.as_deref())
     }
 
     /// Append project default evaluators (`jobs/_defaults.yaml`, spec §1.1) and
@@ -651,6 +699,59 @@ resources:
                 "should reject memory: {bad}"
             );
         }
+    }
+
+    #[test]
+    fn placement_shape_validated() {
+        let jt_with_node = |node: &str| {
+            JobType::parse(&format!(
+                r#"
+name: impl
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+placement:
+  node: "{node}"
+"#
+            ))
+            .unwrap()
+        };
+
+        // Well-formed node tokens validate and thread through `placement_node`.
+        let jt = jt_with_node("gumbo-nuc-0");
+        assert_eq!(jt.validate(), vec![]);
+        assert_eq!(jt.placement_node(), Some("gumbo-nuc-0"));
+
+        // A bad token is caught offline — the node existing is not checkable
+        // here, but its shape is.
+        for bad in ["nuc.0", "has space", "nuc>"] {
+            let errs = jt_with_node(bad).validate();
+            assert!(
+                errs.iter().any(|e| matches!(
+                    e,
+                    FieldRuleError::Invalid {
+                        field: "placement.node",
+                        ..
+                    }
+                )),
+                "expected placement.node error for {bad:?}, got {errs:?}"
+            );
+        }
+
+        // Omitted placement (and an empty block) is fine: no pin.
+        let none = JobType::parse(
+            r#"
+name: impl
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+"#,
+        )
+        .unwrap();
+        assert_eq!(none.validate(), vec![]);
+        assert_eq!(none.placement_node(), None);
     }
 
     #[test]

@@ -49,6 +49,9 @@ pub struct AgentRunConfig {
     /// Dispatcher-generated session id (a UUID) handed to the CLI, making the
     /// transcript filename deterministic. See [`transcript_path`].
     pub session_id: String,
+    /// Optional fleet node pin from the job type's `placement` (spec §3.1),
+    /// forwarded to the backend at launch. `None` = default placement.
+    pub node: Option<String>,
 }
 
 #[derive(Debug, Clone)]

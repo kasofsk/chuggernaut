@@ -205,6 +205,8 @@ export interface WorkerNode {
   name: string
   endpoint: string
   slots: number
+  /** Node health at snapshot time; false → unreachable, excluded from placement. */
+  available: boolean
 }
 
 /** The dispatcher's runtime config snapshot (fleet + defaults + paths). */

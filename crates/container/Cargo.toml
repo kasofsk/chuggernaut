@@ -13,6 +13,7 @@ serde.workspace = true
 tar = "0.4"
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 # Backend impls will add: bollard (Docker), kube + k8s-openapi (k3s)
 

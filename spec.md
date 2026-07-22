@@ -105,6 +105,9 @@ resources:                     # optional; disallowed for work.type: human
   memory: string               # positive integer, optionally suffixed with a binary unit (Ki|Mi|Gi), or plain bytes: "512Mi", "4Gi", "1048576". No other suffixes ("5g", "4GB" are rejected). Format validated at parse time (release + `chuggernaut validate`), not deferred to container launch
   task_timeout: duration       # per-container execution limit; default 1h
 
+placement:                     # optional; pins every container this job type launches onto a named fleet node (§3.1)
+  node: string                 # fleet node name ([A-Za-z0-9_-]+). Shape-checked at parse; that the node is configured is checked at launch (full/unknown → launch error, no spillover)
+
 wrap_up:                       # optional; the job's third step (work → evaluation → wrap-up); see design-lifecycle.md
   type: merge | none           # default merge: squash-merge the job branch through the merge queue/gate. none: eval-pass goes straight to Done — for jobs whose effect is external (deploys, reports); the job branch is scratch and is deleted unmerged
 
@@ -715,9 +718,10 @@ Responsibilities:
 
 **Docker fleet semantics.** The dispatcher is already the scheduler — single writer, work queue, retries — so the fleet needs no cluster orchestration, only dumb endpoints:
 - **Config**: a node list, each entry `{ name, endpoint, slots }` where `slots` caps concurrent containers on that node. A single entry pointing at the local socket is the single-node deployment. Endpoints take three forms: `unix://` (local socket), `tcp://` (a Docker daemon on a private network or tunnel), and the literal **`worker`** — a NATS-proxied `chuggernaut worker` daemon on the node (below). Node names are subject-safe tokens (`[A-Za-z0-9_-]+`), validated at config parse.
-- **Placement**: at launch, pick the node with the most free slots (ties broken by name). No affinity, no preemption. Worker-node free slots come from the ping reply (the worker counts its own running `chuggernaut.managed` containers).
+- **Placement**: at launch, pick the in-service node with the most free slots (ties broken by name). No preemption. The one affinity control is an **optional pin**: a job type may set `placement: { node: <name> }` (§1.1), which threads through `ContainerLaunchConfig.node` and forces every container that job launches onto the named node. A pin is honored or it fails — a pinned node that is full or out-of-service fails the launch with the same "no free slots" shape as the unpinned case (no spillover onto another node); an unknown pinned name fails naming the known nodes. The node name cannot be checked offline (the fleet list lives in the dispatcher's env), so `validate`/release only shape-check it (`[A-Za-z0-9_-]+`). No labels, no anti-affinity. Worker-node free slots come from the ping reply (the worker counts its own running `chuggernaut.managed` containers).
+- **Out-of-service nodes**: a node that fails its probe is marked *out of service* — logged, excluded from placement, and re-probed on each launch, so a node recovering (or its SSH tunnel reconnecting) rejoins without a dispatcher restart. The platform snapshot's `WorkerNode.available` reflects this for the UI. Placement onto an out-of-service node never happens; a pin onto one fails like a full node.
 - **Container IDs**: `ContainerId` is already opaque; the fleet backend encodes placement as `{node}/{docker_id}` and routes `wait`/`kill`/`inspect`/`copy_file` to the owning daemon.
-- **Node failure**: a node dying makes its containers report not-found — exactly the condition §3.5/§3.6 already classify as task failure; retries land on healthy nodes. All configured **docker-endpoint** nodes must be reachable at dispatcher startup (consistent with the backend-reachability rule in §3.6); **worker** nodes soft-fail — an unreachable worker is logged and marked *out of service* (skipped by placement, re-probed on each placement attempt), and its daemon connecting later brings it back without a dispatcher restart.
+- **Node failure**: a node dying makes its containers report not-found — exactly the condition §3.5/§3.6 already classify as task failure; retries land on healthy nodes. At startup the dispatcher **degrades rather than refusing to start**: a plain docker fleet pings every node and comes up as long as at least one node with slots > 0 responds, marking any unreachable node *out of service* (above) — this is what lets a remote worker reached over an SSH-tunneled `tcp://` endpoint be down at boot without crash-looping the dispatcher. It fails fast only when the *whole* fleet is unreachable. In a mixed **worker** fleet each docker-endpoint node is its own single-node backend (its whole capacity is that one node, so it must answer), while **worker** nodes soft-fail — an unreachable worker is logged and marked out of service (skipped by placement, re-probed on each placement attempt), and its daemon connecting later brings it back without a dispatcher restart.
 - **Addressing discipline**: `REPO_URL` and `NATS_URL` injected into containers must be reachable from every node — never `localhost`.
 - Container-internal files (MCP binaries, prompt, events batch) are **injected via the put-archive API** into the created container before start (see §4.2, §4.3) — no host bind-mounts, so nothing needs to exist on remote node filesystems (worker nodes substitute their node-local static artifacts, below).
 
@@ -756,6 +760,7 @@ pub struct ContainerLaunchConfig {
     pub files: Vec<InjectedFile>,       // written into the created container before start
     pub cpu_limit: Option<f64>,         // fractional CPUs
     pub memory_limit: Option<String>,   // e.g. "4Gi"
+    pub node: Option<String>,           // optional placement pin (§3.1); None = default placement
 }
 
 /// Injected via the backend's file API (Docker put-archive / k8s equivalent)
@@ -907,7 +912,7 @@ On dispatcher startup, apply in order:
 5. Enqueue all jobs currently in Ready state (including those that were Ready before the crash and any newly-Ready jobs from step 4) into the in-memory work queue
 6. **Sweep exited containers**: list exited `chuggernaut.managed` containers (`list_managed_exited`) and `remove` each one whose task is already terminal in KV — or which has no owning task record at all. A container still bound to a live (`Running`/`Pending`) task is kept, since step 2 may re-attach to it. This reclaims overlays orphaned by a crash between a container's exit and the task-exit removal that normally frees it (§3.1). Runs after the in-flight recovery above so any container a live task will resume has been settled and protected first; best-effort, so a Docker error here only warns and never blocks startup.
 
-The task log in `tasks.*` KV is the source of truth for execution state. The configured backend must be reachable at startup; the dispatcher will not start if the backend is unavailable.
+The task log in `tasks.*` KV is the source of truth for execution state. The configured backend must be reachable at startup, but a multi-node fleet only needs *one* node with slots to answer: unreachable nodes are marked out of service and excluded from placement (§3.1), and the dispatcher fails to start only when the whole fleet is unavailable.
 
 ---
 

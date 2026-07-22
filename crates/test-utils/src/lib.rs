@@ -290,6 +290,7 @@ impl AgentProvider for FakeProvider {
                         files: config.files.clone(),
                         cpu_limit: None,
                         memory_limit: None,
+                        node: config.node.clone(),
                     })
                     .await?,
             ),
@@ -323,6 +324,7 @@ mod tests {
             files: vec![],
             cpu_limit: None,
             memory_limit: None,
+            node: None,
         }
     }
 

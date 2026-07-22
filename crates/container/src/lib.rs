@@ -75,6 +75,10 @@ pub struct ContainerLaunchConfig {
     pub cpu_limit: Option<f64>,
     /// e.g. "4Gi".
     pub memory_limit: Option<String>,
+    /// Optional placement pin (spec §3.1): the fleet node name this container
+    /// must launch on. `None` = the default most-free placement. A pinned node
+    /// that is full or unknown fails the launch rather than spilling over.
+    pub node: Option<String>,
 }
 
 /// Injected via the backend's file API (Docker put-archive / k8s equivalent)

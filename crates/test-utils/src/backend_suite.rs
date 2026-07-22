@@ -39,6 +39,7 @@ pub fn cfg(cmd: &str) -> ContainerLaunchConfig {
         files: vec![],
         cpu_limit: None,
         memory_limit: Some("128Mi".into()),
+        node: None,
     }
 }
 

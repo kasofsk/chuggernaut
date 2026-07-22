@@ -71,6 +71,7 @@ impl AgentProvider for ClaudeProvider {
             files,
             cpu_limit: None,    // resource limits ride on the dispatcher's
             memory_limit: None, // command-container path; provider adds none yet
+            node: config.node.clone(),
         };
         let id = self.backend.launch(launch).await?;
         let out = |exit_code| AgentOutput {
@@ -194,6 +195,7 @@ mod tests {
             eval_context: vec![],
             merge_conflict: None,
             session_id: "da08d5f3-844e-430e-8363-39b4882f437b".into(),
+            node: None,
         }
     }
 

@@ -169,6 +169,7 @@ impl Core {
             eval_context: vec![],
             merge_conflict: None,
             session_id: session_id.clone(),
+            node: None, // triage runs on the platform image; no per-type pin
         };
         let provider = self.provider.clone();
         let tx = self.self_tx.clone().expect("spawned core");

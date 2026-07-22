@@ -377,6 +377,7 @@ impl Core {
                     eval_context,
                     merge_conflict,
                     session_id: session_id.clone().unwrap_or_default(),
+                    node: job_type.placement_node().map(String::from),
                 };
                 let provider = self.provider.clone();
                 let tx = self.self_tx.clone().expect("spawned core");
@@ -428,6 +429,7 @@ impl Core {
                         .await?,
                     cpu_limit: job_type.resources.as_ref().and_then(|r| r.cpu),
                     memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
+                    node: job_type.placement_node().map(String::from),
                 };
                 let id = self
                     .backend

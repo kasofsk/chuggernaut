@@ -17,6 +17,16 @@ pub struct WorkerNode {
     pub endpoint: String,
     /// Max concurrent chuggernaut containers on this node.
     pub slots: u32,
+    /// Node health at snapshot time (spec §3.1): `false` when the node was
+    /// unreachable and marked out-of-service — placement skips it until it
+    /// answers again. Defaults to `true` for snapshots written before this
+    /// field existed.
+    #[serde(default = "default_available")]
+    pub available: bool,
+}
+
+fn default_available() -> bool {
+    true
 }
 
 /// A snapshot of the dispatcher's runtime configuration for display. Contains

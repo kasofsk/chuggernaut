@@ -52,6 +52,7 @@ export function PlatformSettingsPage() {
                       <th>name</th>
                       <th>endpoint</th>
                       <th>slots</th>
+                      <th>health</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -62,6 +63,7 @@ export function PlatformSettingsPage() {
                           <code>{n.endpoint}</code>
                         </td>
                         <td>{n.slots}</td>
+                        <td>{n.available ? 'up' : 'out of service'}</td>
                       </tr>
                     ))}
                   </tbody>

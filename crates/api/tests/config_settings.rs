@@ -124,6 +124,7 @@ async fn config_endpoints() {
                     name: "local".into(),
                     endpoint: "unix:///var/run/docker.sock".into(),
                     slots: 4,
+                    available: true,
                 }],
                 agent_provider_default: "claude".into(),
                 agent_model_default: Some("claude-sonnet-5".into()),

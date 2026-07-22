@@ -28,14 +28,22 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
     // Worker nodes (spec §3.1) are NATS-proxied and soft-fail at startup (an
     // unreachable worker is out-of-service, not fatal); plain Docker fleets
     // keep the strict §3.6 rule and the exact single-backend path.
+    // Per-node health captured at startup for the platform snapshot (spec
+    // §3.1). Placement keeps it fresh as nodes drop/recover, but the snapshot
+    // is written once, so this is the boot-time view.
+    let node_availability: Vec<(String, bool)>;
     let backend: Arc<dyn container::ContainerBackend> =
         if worker::backend::has_worker_nodes(&config.docker_nodes) {
             let fleet = worker::FleetBackend::new(config.docker_nodes.clone(), store.clone())?;
             fleet.startup_check().await?; // hard-fails only on docker-endpoint nodes
+            node_availability = fleet.availability();
             Arc::new(fleet)
         } else {
             let docker = DockerBackend::new(config.docker_nodes.clone())?;
-            docker.ping_all().await?; // §3.6: refuse to start if any node is unreachable
+            // §3.1/§3.6: start as long as one node with slots responds; any
+            // unreachable node is logged and excluded until it answers again.
+            docker.ping_all().await?;
+            node_availability = docker.availability();
             Arc::new(docker)
         };
 
@@ -63,7 +71,13 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
     // defaults + resolved paths) to the `platform` bucket so the api/UI can
     // display it — this config otherwise lives only in this process's env.
     // Best-effort: a failed write must not stop the dispatcher from starting.
-    publish_config_snapshot(&store, &config, core_config.age_identity.is_some()).await;
+    publish_config_snapshot(
+        &store,
+        &config,
+        &node_availability,
+        core_config.age_identity.is_some(),
+    )
+    .await;
 
     // §7.3 user-cert minting signs with the CA key directly (no job-record
     // write), so it rides the API handlers rather than the single-writer core.
@@ -90,6 +104,7 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
 async fn publish_config_snapshot(
     store: &NatsStore,
     config: &DispatcherConfig,
+    node_availability: &[(String, bool)],
     secrets_encryption: bool,
 ) {
     let snapshot = types::DispatcherConfigSnapshot {
@@ -100,6 +115,13 @@ async fn publish_config_snapshot(
                 name: n.name.clone(),
                 endpoint: n.endpoint.clone(),
                 slots: n.slots,
+                // Absent from the availability list ⇒ assume up (the list is
+                // built from the same node set, so this is belt-and-suspenders).
+                available: node_availability
+                    .iter()
+                    .find(|(name, _)| name == &n.name)
+                    .map(|(_, up)| *up)
+                    .unwrap_or(true),
             })
             .collect(),
         agent_provider_default: config.agent_provider_default.clone(),

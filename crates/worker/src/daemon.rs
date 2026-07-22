@@ -219,6 +219,9 @@ async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
                     files,
                     cpu_limit: req.cpu_limit,
                     memory_limit: req.memory_limit,
+                    // The worker runs a single-node local backend; the fleet
+                    // already chose this node, so no further pin applies.
+                    node: None,
                 })
                 .await
                 .map_err(backend_err)?;

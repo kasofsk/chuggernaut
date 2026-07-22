@@ -55,6 +55,17 @@
     "name": {
       "type": "string"
     },
+    "placement": {
+      "description": "Optional placement pin (spec §3.1). When set, every container this job\ntype launches is placed on the named fleet node instead of the\nmost-free one. A single pin — no labels, no anti-affinity, no spillover.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Placement"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "resources": {
       "anyOf": [
         {
@@ -184,6 +195,20 @@
         "agent",
         "human"
       ]
+    },
+    "Placement": {
+      "description": "Placement pin (spec §3.1). Shape-only here: `node` names a fleet node, but\nwhether that node is actually configured cannot be checked offline (the\nfleet lives in the dispatcher's env), so release/`validate` only enforce the\nname is a well-formed node token — the launch honors or errors on it.",
+      "type": "object",
+      "properties": {
+        "node": {
+          "description": "Fleet node name to pin onto (`[A-Za-z0-9_-]+`, the same subject-safe\ntoken the fleet config uses).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "Provider": {
       "type": "string",
