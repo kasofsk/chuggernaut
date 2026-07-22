@@ -113,8 +113,7 @@ function JobWizard({
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight })
   }, [messages, busy])
 
-  async function send(e: FormEvent) {
-    e.preventDefault()
+  async function send() {
     const text = input.trim()
     if (!text || busy) return
     const next: WizardMessage[] = [...messages, { role: 'user', content: text }]
@@ -172,7 +171,11 @@ function JobWizard({
           ))}
           {busy && <div className="wizard-msg wizard-assistant dim">thinking…</div>}
         </div>
-        <form className="wizard-input" onSubmit={send}>
+        {/* A plain <div>, not a <form>: this whole component renders inside the
+            outer create-job <form>, and nested forms are invalid HTML (the
+            browser strips the inner one, so a submit here would fire the outer
+            form instead). Send via an explicit button/Enter handler. */}
+        <div className="wizard-input">
           <textarea
             rows={2}
             autoFocus
@@ -185,14 +188,14 @@ function JobWizard({
               // Enter sends; Shift+Enter inserts a newline.
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
-                send(e)
+                send()
               }
             }}
           />
-          <button type="submit" disabled={busy || !input.trim()}>
+          <button type="button" onClick={send} disabled={busy || !input.trim()}>
             send
           </button>
-        </form>
+        </div>
       </div>
       {drafted && (
         <div className="dim wizard-note">
@@ -332,6 +335,8 @@ function CreateJob({
 
   return (
     <form className="create-job" onSubmit={submit}>
+      {/* JobWizard must not render a <form> inside this create-job form —
+          browsers strip nested forms, and its submit would fire this one. */}
       <JobWizard
         owner={owner}
         project={project}
