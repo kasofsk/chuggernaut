@@ -19,6 +19,15 @@ import './styles.css'
 
 applySavedTheme()
 
+// Register the service worker so the UI is installable as a PWA (Android/Chrome
+// require a registered SW) and gets a basic offline app-shell. Dev runs skip it
+// to avoid the SW caching HMR assets.
+if ('serviceWorker' in navigator && import.meta.env.PROD) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {})
+  })
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ThemePicker />
