@@ -1048,7 +1048,27 @@ async fn wizard_reply(
         .await
         .unwrap_or_default();
 
-    let context = wizard::build_context(&format!("{owner}/{project}"), &files, &jobs);
+    // The live job-type library (already sorted by name) so the wizard picks a
+    // real type and never invents one, and the knowledge-tag vocabulary so it
+    // suggests real tags. Best-effort — same served view as the create form.
+    let job_types: Vec<wizard::JobTypeLine> = list_job_types(repos, owner, project)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|v| wizard::JobTypeLine {
+            name: v["name"].as_str().unwrap_or_default().to_string(),
+            description: v["description"].as_str().unwrap_or_default().to_string(),
+        })
+        .collect();
+    let tags: Vec<String> = list_tags(repos, owner, project).await.unwrap_or_default();
+
+    let context = wizard::build_context(
+        &format!("{owner}/{project}"),
+        &files,
+        &jobs,
+        &job_types,
+        &tags,
+    );
     match wizard::run(config, &context, &request.messages).await {
         Ok(turn) => ok_reply(&turn),
         Err(WizardError::EmptyConversation) => {

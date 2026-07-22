@@ -1,8 +1,9 @@
 //! The "job wizard" (New Job screen): a short chatbot conversation that turns a
-//! rough goal into a high-quality ticket. The wizard sees the project's file
-//! tree and recent jobs as grounding context, asks a couple of clarifying
-//! questions, then proposes a polished title + description written for the
-//! implementer. Purely advisory — it never touches job state; the operator
+//! rough goal into a high-quality ticket. The wizard sees live platform context
+//! — the available job types, the knowledge-tag vocabulary, recent jobs, and the
+//! project's file tree — asks a couple of clarifying questions, then proposes a
+//! polished title + description written for the implementer in the project's
+//! house ticket style. Purely advisory — it never touches job state; the operator
 //! still fills the remaining fields and hits "create job".
 //!
 //! Runs off the core loop like the other read handlers ([`crate::handlers`]):
@@ -221,6 +222,11 @@ pub struct WizardRequest {
 pub struct TicketDraft {
     pub title: String,
     pub description: String,
+    /// One-line justification for the recommended job type. Purely additive —
+    /// omitted from the wire when absent, so the NewJob page (which reads only
+    /// `title`/`description`) keeps working unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_rationale: Option<String>,
 }
 
 /// One wizard turn returned to the UI: what to show in the chat, and — once
@@ -246,11 +252,52 @@ pub struct JobLine {
     pub state: String,
 }
 
-/// Build the grounding context block embedded in the system prompt: the recent
-/// jobs (so the wizard doesn't propose a duplicate and matches house style) and
-/// a sample of the repo's file layout (so it can reference real paths).
-pub fn build_context(project: &str, files: &[String], jobs: &[JobLine]) -> String {
+/// A job type available in the project (`jobs/{name}.yaml`): its name and the
+/// one-line description from the YAML. The wizard picks from this live list so
+/// it never invents a type that isn't configured.
+pub struct JobTypeLine {
+    pub name: String,
+    pub description: String,
+}
+
+/// Build the grounding context block embedded in the system prompt. Everything
+/// here is live platform state so the wizard grounds its draft in reality: the
+/// available job types (so it picks a real one and never invents), the knowledge
+/// tags it may suggest, the recent jobs (so it avoids duplicates and matches
+/// house style), and a sample of the repo layout (so it cites real paths). The
+/// type and tag lists are emitted in the caller's order (already sorted) so the
+/// block is byte-stable across turns — friendly to prompt caching.
+pub fn build_context(
+    project: &str,
+    files: &[String],
+    jobs: &[JobLine],
+    job_types: &[JobTypeLine],
+    tags: &[String],
+) -> String {
     let mut out = format!("Project: {project}\n");
+
+    out.push_str("\nAvailable job types (pick one — never invent a type):\n");
+    if job_types.is_empty() {
+        out.push_str("  (none configured)\n");
+    } else {
+        for t in job_types {
+            let desc = if t.description.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", t.description.trim())
+            };
+            out.push_str(&format!("  {}{}\n", t.name, desc));
+        }
+    }
+
+    out.push_str("\nAvailable knowledge tags (suggest from these; a tag's meaning lives in tags/{tag}.md):\n");
+    if tags.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        out.push_str("  ");
+        out.push_str(&tags.join(", "));
+        out.push('\n');
+    }
 
     out.push_str("\nRecent jobs (newest first):\n");
     if jobs.is_empty() {
@@ -280,31 +327,53 @@ pub fn build_context(project: &str, files: &[String], jobs: &[JobLine]) -> Strin
     out
 }
 
-/// The wizard's system prompt: role, the grounding context, and the strict
-/// JSON output contract [`parse_turn`] reads back.
+/// The wizard's system prompt: role, the house ticket style, the grounding
+/// context, and the strict JSON output contract [`parse_turn`] reads back.
+///
+/// The style section is distilled from what this project's best tickets do in
+/// practice; the constraint one-liners mirror the repo `CLAUDE.md`. Kept static
+/// (only `context` varies) and compact so the input stays prompt-cache friendly.
 pub fn system_prompt(context: &str) -> String {
     format!(
-        "You are the Job Wizard for Chuggernaut, a job orchestrator that runs coding \
-agents against a project repository. An operator wants to create a new job (a \
-ticket for an implementer agent) and has told you their goal. Your job is to run \
-a SHORT conversation that turns their rough goal into an excellent ticket.\n\n\
-Be efficient: ask AT MOST two or three focused clarifying questions total, only \
-when the answer would materially change the implementation. If the goal is \
-already clear enough, skip straight to drafting. Use the project context below \
-to ground your questions and the ticket — reference real files and avoid \
-proposing work that duplicates a recent job.\n\n\
-When you draft the ticket, write it FOR THE IMPLEMENTER: a crisp imperative \
-title, then a thorough description covering the goal, relevant context and \
-files, concrete acceptance criteria, and any constraints or edge cases. Do not \
-invent facts you cannot support from the context or the conversation.\n\n\
+        "You are the Job Wizard for Chuggernaut, a NATS-backed job orchestrator that runs \
+coding agents against a project repository. An operator wants to create a new job (a ticket \
+for an implementer agent) and has told you their goal. Run a SHORT conversation that turns \
+their rough goal into an excellent ticket, written the way this project's best tickets read.\n\n\
+Be efficient. If the goal is clear enough, skip straight to drafting. If it is genuinely \
+ambiguous — the answer would materially change the implementation — ask 1-2 SHARP clarifying \
+questions rather than padding a vague draft. Ground everything in the project context below: \
+pick a job type from the live list (never invent one), cite real files, suggest knowledge \
+tags from the available list, and avoid duplicating a recent job.\n\n\
+=== HOUSE TICKET STYLE ===\n\
+Write the description FOR THE IMPLEMENTER, in roughly this shape:\n\
+1. PROBLEM: open with the problem or incident in one or two sentences, with concrete evidence \
+when available (an error, a symptom, a failing case) — not a vague area.\n\
+2. ANCHORS: name verified anchor points — files, functions, approximate line locations — the \
+implementer should touch, drawn from the repo context. Prefer `crates/x/src/y.rs` over \"the \
+backend\".\n\
+3. CONSTRAINTS: state the hard invariants explicitly when relevant. This repo's are: the \
+dispatcher is the single writer of job records (no locks/CAS/multi-writer); `store` is the \
+only crate that talks to NATS; `types` stays pure data (no async, no I/O); web/UI jobs stay \
+within `web/` and run `npm run build`. Don't restate one that doesn't apply.\n\
+4. SCOPE: spell out edge cases to handle and what is explicitly OUT of scope, so the agent \
+doesn't over-reach.\n\
+5. INTERACTIONS: note likely-concurrent work when it matters (e.g. a recent job touching the \
+same file), so the change doesn't collide.\n\
+6. TESTS: end with a TESTS/acceptance section naming the test tier and the commands that must \
+pass — for code: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D \
+warnings`, `cargo test --workspace`; for web: `npm run build`. Give concrete acceptance \
+criteria, not \"add tests\".\n\
+Do not invent facts you cannot support from the context or the conversation.\n\
+=== END STYLE ===\n\n\
 === PROJECT CONTEXT ===\n{context}\n=== END CONTEXT ===\n\n\
 Respond with a SINGLE JSON object and nothing else, in this exact shape:\n\
-{{\"reply\": string, \"ready\": boolean, \"title\": string, \"description\": string}}\n\
-- While still gathering information: set \"ready\": false, put your next question \
-or feedback in \"reply\", and leave \"title\" and \"description\" as empty strings.\n\
-- Once you can write a good ticket: set \"ready\": true, put a brief one-line \
-confirmation in \"reply\" (e.g. \"Here's a ticket for that.\"), and fill \"title\" \
-and \"description\". \"description\" may use Markdown.\n\
+{{\"reply\": string, \"ready\": boolean, \"title\": string, \"description\": string, \"type_rationale\": string}}\n\
+- While still gathering information: set \"ready\": false, put your next question or feedback in \
+\"reply\", and leave the other fields as empty strings.\n\
+- Once you can write a good ticket: set \"ready\": true, put a brief one-line confirmation in \
+\"reply\" (e.g. \"Here's a ticket for that.\"), fill \"title\" (a crisp imperative line) and \
+\"description\" (Markdown, following the house style above), and put a one-line justification \
+for the job type you'd pick in \"type_rationale\".\n\
 Output only the JSON object — no prose, no code fences."
     )
 }
@@ -324,6 +393,8 @@ pub fn parse_turn(text: &str) -> WizardTurn {
         title: String,
         #[serde(default)]
         description: String,
+        #[serde(default)]
+        type_rationale: String,
     }
 
     if let Some(obj) = extract_json_object(text)
@@ -338,9 +409,13 @@ pub fn parse_turn(text: &str) -> WizardTurn {
         };
         return WizardTurn {
             reply,
-            draft: done.then(|| TicketDraft {
-                title: raw.title.trim().to_string(),
-                description: raw.description.trim().to_string(),
+            draft: done.then(|| {
+                let rationale = raw.type_rationale.trim();
+                TicketDraft {
+                    title: raw.title.trim().to_string(),
+                    description: raw.description.trim().to_string(),
+                    type_rationale: (!rationale.is_empty()).then(|| rationale.to_string()),
+                }
             }),
             done,
         };
@@ -605,6 +680,13 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    fn job_type(name: &str, description: &str) -> JobTypeLine {
+        JobTypeLine {
+            name: name.into(),
+            description: description.into(),
+        }
+    }
+
     #[test]
     fn context_lists_jobs_and_files() {
         let jobs = vec![
@@ -622,7 +704,7 @@ mod tests {
             },
         ];
         let files = vec!["src/main.rs".to_string(), "README.md".to_string()];
-        let ctx = build_context("acme/api", &files, &jobs);
+        let ctx = build_context("acme/api", &files, &jobs, &[], &[]);
         assert!(ctx.contains("Project: acme/api"));
         assert!(ctx.contains("#3 [feature] Add login (Done)"));
         // Empty title renders as an em dash, not blank.
@@ -631,13 +713,65 @@ mod tests {
     }
 
     #[test]
+    fn context_lists_job_types_and_tags() {
+        // The caller passes both lists already sorted; the block preserves that
+        // order so it stays byte-stable across turns (prompt-cache friendly).
+        let types = vec![
+            job_type("code", "General code changes"),
+            job_type("design", "Design/spec work"),
+            job_type("docs", ""), // empty description still lists, no trailing dash
+        ];
+        let tags = vec!["dispatcher".to_string(), "rust".to_string()];
+        let ctx = build_context("p", &[], &[], &types, &tags);
+        assert!(ctx.contains("code — General code changes"));
+        assert!(ctx.contains("design — Design/spec work"));
+        // Empty description: bare name, no " — ".
+        assert!(ctx.contains("\n  docs\n"));
+        // Tags render as one sorted, comma-joined line.
+        assert!(ctx.contains("dispatcher, rust"));
+        // Order is stable: code before design before docs.
+        let code = ctx.find("code —").unwrap();
+        let design = ctx.find("design —").unwrap();
+        assert!(code < design);
+    }
+
+    #[test]
+    fn context_notes_empty_type_and_tag_lists() {
+        let ctx = build_context("p", &[], &[], &[], &[]);
+        assert!(ctx.contains("(none configured)")); // no job types
+        assert!(ctx.contains("Available knowledge tags"));
+    }
+
+    #[test]
     fn context_truncates_and_notes_the_remainder() {
         let files: Vec<String> = (0..MAX_CONTEXT_FILES + 5)
             .map(|i| format!("f{i}.rs"))
             .collect();
-        let ctx = build_context("p", &files, &[]);
+        let ctx = build_context("p", &files, &[], &[], &[]);
         assert!(ctx.contains("… and 5 more"));
         assert!(ctx.contains("(none yet)")); // no jobs
+    }
+
+    #[test]
+    fn system_prompt_teaches_house_style_and_constraints() {
+        // Snapshot-style: the constraint one-liners and the acceptance section
+        // must survive prompt edits — they're what makes the drafts house-shaped.
+        let prompt = system_prompt("=CTX=");
+        // The grounding context is embedded verbatim.
+        assert!(prompt.contains("=CTX="));
+        // Hard constraints mirrored from the repo CLAUDE.md.
+        assert!(prompt.contains("single writer"));
+        assert!(prompt.contains("only crate that talks to NATS"));
+        assert!(prompt.contains("pure data"));
+        assert!(prompt.contains("npm run build"));
+        // House-style anchors and scope guidance.
+        assert!(prompt.contains("ANCHORS"));
+        assert!(prompt.contains("OUT of scope"));
+        // Acceptance/tests section names the CI commands.
+        assert!(prompt.contains("cargo clippy --workspace --all-targets -- -D warnings"));
+        assert!(prompt.contains("cargo test --workspace"));
+        // Picks a live type rather than inventing one.
+        assert!(prompt.contains("never invent one"));
     }
 
     #[test]
@@ -659,6 +793,25 @@ mod tests {
         let draft = turn.draft.expect("draft present");
         assert_eq!(draft.title, "Fix retry loop");
         assert!(draft.description.contains("Acceptance"));
+    }
+
+    #[test]
+    fn parse_captures_type_rationale_when_present() {
+        let turn = parse_turn(
+            r#"{"reply":"ok","ready":true,"title":"T","description":"D","type_rationale":"a code change to a Rust crate"}"#,
+        );
+        let draft = turn.draft.expect("draft present");
+        assert_eq!(
+            draft.type_rationale.as_deref(),
+            Some("a code change to a Rust crate")
+        );
+        // Absent/empty rationale stays None and is skipped from the wire, so the
+        // NewJob page (which reads only title/description) is unaffected.
+        let plain = parse_turn(r#"{"reply":"ok","ready":true,"title":"T","description":"D"}"#);
+        let plain_draft = plain.draft.expect("draft present");
+        assert!(plain_draft.type_rationale.is_none());
+        let json = serde_json::to_string(&plain_draft).unwrap();
+        assert!(!json.contains("type_rationale"), "{json}");
     }
 
     #[test]
