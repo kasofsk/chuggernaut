@@ -752,6 +752,7 @@ impl Core {
                 action,
                 operator: operator.to_string(),
                 resolved_at: Utc::now(),
+                summary: None,
             });
             task.state = TaskState::Done;
             task.completed_at = Some(Utc::now());
@@ -829,6 +830,12 @@ impl Core {
                 },
             ) => {
                 complete_task(&mut task, true, false, structured.clone(), None);
+                // Persist the operator's completion summary on the task record
+                // too, so the Reports thread renders human-completed work like
+                // an agent's closing summary — not just in the squash body.
+                if let Some(TaskResult::Human { summary: s, .. }) = &mut task.result {
+                    *s = summary.clone();
+                }
                 self.tasks.put(&task).await?;
                 self.ensure_exec_state(owner, project, seq).await?;
                 // The human's summary is this attempt's submit_result (§1.2

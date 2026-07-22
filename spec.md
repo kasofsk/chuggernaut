@@ -178,7 +178,7 @@ vars: [string]                 # injected into work container and all eval conta
 ² Falls back to the job's top-level `image`. Required per-evaluator when the job declares no top-level image (`work.type: human`).
 
 **`work.type: human`** — no container is launched. The dispatcher creates a `Human` task in `Pending` state in the Work phase; it surfaces in the operator task inbox. The operator performs the work manually, then resolves via `POST .../tasks/{task_id}/resolve`:
-- `TaskResolution::Pass` — work complete; proceeds to Evaluation (or Done if no evaluators).
+- `TaskResolution::Pass` — work complete; proceeds to Evaluation (or Done if no evaluators). A `summary` on the Pass is both used as the squash-merge commit body *and* persisted on the stored `TaskResult::Human { summary }`, so the operator's report renders in the Reports thread like an agent's closing summary.
 - `TaskResolution::Fail` — operator cannot/will not complete; job → Escalated with a Human escalation task.
 
 `work_retries` is disallowed for human work — there is no container to retry. Human work tasks are excluded from the timeout scan; use `job_deadline` to bound wall-clock time. If eval fails and rework budget remains, a new Human task is created for the next cycle with all eval findings injected. Command/agent evaluators on human-work jobs run in their per-evaluator `image` (required, since there is no top-level image to fall back to).
@@ -341,7 +341,7 @@ pub enum TaskResult {
     Work    { summary: Option<String>, structured: Option<serde_json::Value>, token_usage: Option<TokenUsage> },
     Command { pass: bool, exit_code: i32, output: String, structured: Option<serde_json::Value> },
     Agent   { pass: bool, abort: bool, structured: Option<serde_json::Value>, token_usage: Option<TokenUsage> },
-    Human   { pass: bool, abort: bool, structured: Option<serde_json::Value>, action: Option<EscalationAction>, operator: String, resolved_at: DateTime<Utc> },
+    Human   { pass: bool, abort: bool, structured: Option<serde_json::Value>, action: Option<EscalationAction>, operator: String, resolved_at: DateTime<Utc>, summary: Option<String> },  // summary: the operator's completion summary on a work-task Pass, carried from TaskResolution::Pass::summary (defaults None; omitted from the wire when absent — pre-summary records still deserialize)
     Triage  { assessment: String, token_usage: Option<TokenUsage> },  // operator-dispatched advisory triage (see below); assessment is the agent's written recommendation, captured from the CLI result text (no submit_result — triage runs without the channel MCP)
 }
 

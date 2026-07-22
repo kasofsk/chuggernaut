@@ -736,7 +736,7 @@ async fn human_evaluator_and_human_work_resolve_via_inbox() {
             1,
             TaskResolution::Pass {
                 structured: None,
-                summary: None,
+                summary: Some("Fixed the config and confirmed the build passes.".into()),
             },
             "david",
         )
@@ -754,9 +754,12 @@ async fn human_evaluator_and_human_work_resolve_via_inbox() {
         .await
         .unwrap();
     assert_eq!(tasks.len(), 2);
+    // The operator's resolution summary is persisted on the work task's result,
+    // not just used as the squash-commit body.
     assert!(matches!(
         tasks[0].result,
-        Some(types::TaskResult::Human { pass: true, ref operator, .. }) if operator == "david"
+        Some(types::TaskResult::Human { pass: true, ref operator, summary: Some(ref s), .. })
+            if operator == "david" && s == "Fixed the config and confirmed the build passes."
     ));
 }
 

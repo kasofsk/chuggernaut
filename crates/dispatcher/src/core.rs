@@ -1240,6 +1240,7 @@ impl Core {
                 action: Some(types::EscalationAction::Revoke),
                 operator: "system".into(),
                 resolved_at: now,
+                summary: None,
             });
             closed.state = types::TaskState::Done;
             closed.completed_at = Some(now);

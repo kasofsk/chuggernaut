@@ -129,6 +129,12 @@ pub enum TaskResult {
         action: Option<EscalationAction>,
         operator: String,
         resolved_at: DateTime<Utc>,
+        /// Work-task Pass only: the operator's completion summary, carried from
+        /// `TaskResolution::Pass::summary` so the Reports thread renders
+        /// human-completed work like an agent's closing summary. Defaults None
+        /// so pre-summary records still deserialize.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
     },
     /// Result of an operator-dispatched triage task (spec §1.2). The agent's
     /// written assessment + recommendation, captured from the CLI JSON result
@@ -322,5 +328,48 @@ mod tests {
                 token_usage: None
             }
         );
+    }
+
+    #[test]
+    fn human_result_summary_round_trips_and_stays_backward_compat() {
+        // A resolved Human work-task result carries the operator's summary and
+        // round-trips it.
+        let resolved_at = "2026-07-22T09:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let with_summary = TaskResult::Human {
+            pass: true,
+            abort: false,
+            structured: None,
+            action: None,
+            operator: "david".into(),
+            resolved_at,
+            summary: Some("Reworked the auth check and verified the fix.".into()),
+        };
+        let json = serde_json::to_string(&with_summary).unwrap();
+        assert!(json.contains(r#""summary":"Reworked the auth check and verified the fix.""#));
+        assert_eq!(
+            serde_json::from_str::<TaskResult>(&json).unwrap(),
+            with_summary
+        );
+
+        // Old stored results (no `summary` key) still deserialize to None, and
+        // None is omitted on the wire (skip_serializing_if).
+        let legacy: TaskResult = serde_json::from_str(
+            r#"{ "kind": "Human", "pass": true, "structured": null, "action": null,
+                 "operator": "david", "resolved_at": "2026-07-22T09:00:00Z" }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy,
+            TaskResult::Human {
+                pass: true,
+                abort: false,
+                structured: None,
+                action: None,
+                operator: "david".into(),
+                resolved_at,
+                summary: None,
+            }
+        );
+        assert!(!serde_json::to_string(&legacy).unwrap().contains("summary"));
     }
 }
