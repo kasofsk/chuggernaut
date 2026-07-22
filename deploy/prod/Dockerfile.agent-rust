@@ -1,8 +1,10 @@
 # Rust agent image for the chuggernaut-on-chuggernaut dogfood project
 # (jobs/code.yaml `image:`): full Rust toolchain + the claude CLI. Built with
-# the repo root as context so the workspace's crate dependencies can be baked
-# in — the image bakes toolchain and dependencies; the node-local sccache
-# below (worker-provisioned, spec §3.1) adds cross-job compile reuse on top.
+# the repo root as context so the whole workspace can be compiled at image-build
+# time — the image bakes the toolchain plus a prebuilt target/ (the warm-target
+# seed below, #123) so agent containers start from "latest main already built".
+# The node-local sccache below (worker-provisioned, spec §3.1) adds cross-job
+# compile reuse on top, catching what the seed's fingerprints miss.
 FROM rust:1.96-bookworm
 
 RUN apt-get update \
@@ -38,12 +40,47 @@ RUN curl -fsSL "https://github.com/nats-io/nats-server/releases/download/v${NATS
 RUN rustup component add rustfmt clippy \
  && npm install -g @anthropic-ai/claude-code
 
-# Pre-warm the crates.io index + .crate downloads into CARGO_HOME so per-job
-# builds skip the network fetch. The layer invalidates when sources change;
-# the compile itself is still cold per container (no cross-job cache in v1).
-COPY Cargo.toml Cargo.lock /prewarm/
-COPY crates /prewarm/crates
-RUN cd /prewarm && cargo fetch --locked && rm -rf /prewarm
+# ── Warm-target seeding (#123) ───────────────────────────────────────────────
+# Bake a prebuilt target/ so agent containers start from "latest main already
+# built" instead of compiling the whole workspace cold every task (minutes
+# each). sccache (above) caches compiler *invocations* but not linking, crate
+# metadata, or dependency .rlibs; this seeds exactly those artifacts so the
+# fresh clone reuses them straight from the image's read-only layer. The two
+# stack — sccache still catches what fingerprinting misses.
+#
+# Path discipline is the whole trick:
+#  - CARGO_TARGET_DIR points OUTSIDE the workspace, at a canonical /opt path, so
+#    the source tree can be deleted after the build while the artifacts survive
+#    into the final image — and so the runtime clone (which needs /workspace
+#    empty) reuses them without a copy. Baked as ENV, it also steers the agent's
+#    own cargo at runtime.
+#  - The seed builds at /workspace, the SAME path the bootstrap clones to
+#    (spec §4.1), so workspace-crate fingerprints (which are keyed on the
+#    package's manifest path) line up with the runtime tree instead of being
+#    invalidated wholesale by a path change.
+#
+# Empirical shape (measured for #123, see the merge summary): registry-
+# dependency artifacts are keyed by checksum and are reused regardless of the
+# fresh clone's mtimes — that is the large, reliable win (369 locked deps).
+# Workspace crates are mtime-sensitive and DO recompile against a fresh clone
+# (its files carry the checkout's mtime); that residual is intentionally left to
+# sccache + the warm dep graph rather than mtime-rewriting in the shared
+# bootstrap, which every image would inherit. Debug profile only: agent tasks
+# and tasks/ci.sh run `cargo test` / `cargo clippy` (debug), never `--release`,
+# so a release target would only bloat the image for no reuse.
+#
+# Per-container privacy is free: each container's cargo writes land on its own
+# overlay (copy-on-write), so the shared seed is never mutated or raced. The
+# target is as fresh as the last agent-image rebuild — the worker self-refresh
+# on every deploy (spec §3.1) keeps it warm with no per-job machinery.
+ENV CARGO_TARGET_DIR=/opt/chug-prebuilt-target
+COPY . /workspace
+RUN cd /workspace \
+ && cargo fetch --locked \
+ && cargo build --workspace --all-targets --locked \
+ && cargo test --workspace --no-run --locked \
+ && cargo clippy --workspace --all-targets --locked \
+ && cd / && rm -rf /workspace
 
 # Headless agents run as root inside a disposable container; IS_SANDBOX lets
 # `--dangerously-skip-permissions` through the CLI's root check.
