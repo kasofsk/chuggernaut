@@ -71,6 +71,18 @@ export function JobDetail() {
     jobSeq,
   )
 
+  // Live-ticking durations: a single shared clock that re-renders the duration
+  // cells once a second while any visible task is Running, and is torn down
+  // otherwise (and on unmount). Finished tasks compute from completed_at, so
+  // they don't tick — only the elapsed-since-started_at cells move.
+  const [now, setNow] = useState(() => Date.now())
+  const anyRunning = tasks.some((t) => t.state === 'Running')
+  useEffect(() => {
+    if (!anyRunning) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [anyRunning])
+
   if (!job) {
     return (
       <div className="page">
@@ -275,9 +287,9 @@ export function JobDetail() {
             </tr>
           </thead>
           <tbody>
-            {tasks.map((t) => (
+            {tasks.map((t, i) => (
               <Fragment key={t.id}>
-              <tr>
+              <tr className={i % 2 ? 'row-stripe' : undefined}>
                 <td>{t.id}</td>
                 <td><PhaseLabel phase={t.phase} /></td>
                 <td>
@@ -295,7 +307,7 @@ export function JobDetail() {
                 <td className="dim task-time" title={t.started_at ?? undefined}>
                   {fmtTime(t.started_at)}
                 </td>
-                <td className="dim task-time">{taskDuration(t)}</td>
+                <td className="dim task-time">{taskDuration(t, now)}</td>
                 <td className="dim result-cell">{resultSummary(t)}</td>
                 <td>
                   <TaskArtifacts owner={owner} project={project} seq={jobSeq} task={t} />
@@ -742,15 +754,16 @@ function fmtDuration(ms: number): string {
 }
 
 // Finished tasks show completed_at − started_at; Running shows elapsed since
-// started_at (recomputed on the existing refresh cadence — no per-second
-// timer); Pending is blank.
-function taskDuration(t: Task): string {
+// started_at, measured against the caller's shared `now` clock so the cell
+// ticks live (JobDetail drives a 1s interval while any task is Running);
+// Pending is blank.
+function taskDuration(t: Task, now: number): string {
   if (!t.started_at) return ''
   const start = new Date(t.started_at).getTime()
   if (t.state === 'Done' || t.state === 'Failed') {
     return t.completed_at ? fmtDuration(new Date(t.completed_at).getTime() - start) : ''
   }
-  if (t.state === 'Running') return fmtDuration(Date.now() - start)
+  if (t.state === 'Running') return fmtDuration(now - start)
   return ''
 }
 

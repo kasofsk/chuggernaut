@@ -194,8 +194,8 @@ export function ProjectPage() {
             </tr>
           </thead>
           <tbody>
-            {sorted.map((j) => (
-              <tr key={j.id}>
+            {sorted.map((j, i) => (
+              <tr key={j.id} className={i % 2 ? 'row-stripe' : undefined}>
                 <td>
                   <Link to={`/p/${owner}/${project}/jobs/${j.id}`}>{j.id}</Link>
                 </td>

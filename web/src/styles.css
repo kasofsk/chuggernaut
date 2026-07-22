@@ -55,6 +55,9 @@
   --red: #f7768e;
   --blue: #7aa2f7;
   --gray: #565f89;
+  /* zebra-stripe tint: a low-contrast wash derived from the theme's text,
+     kept transparent so it layers over whatever surface sits behind the row. */
+  --stripe: color-mix(in srgb, var(--text) 4%, transparent);
 }
 
 [data-theme='midnight'] {
@@ -75,6 +78,7 @@
   --red: #e5695e;
   --blue: #6ea8fe;
   --gray: #6b7183;
+  --stripe: color-mix(in srgb, var(--text) 4%, transparent);
 }
 
 [data-theme='gruvbox'] {
@@ -95,6 +99,7 @@
   --red: #fb4934;
   --blue: #83a598;
   --gray: #928374;
+  --stripe: color-mix(in srgb, var(--text) 4%, transparent);
 }
 
 [data-theme='nord'] {
@@ -115,6 +120,7 @@
   --red: #bf616a;
   --blue: #81a1c1;
   --gray: #6b7689;
+  --stripe: color-mix(in srgb, var(--text) 4%, transparent);
 }
 
 * {
@@ -367,8 +373,17 @@ table.jobs th.sortable:hover {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+/* Zebra striping: alternating rows carry a subtle --stripe wash. Applied by
+   class (set from the row's index in JS) rather than :nth-child, so JobDetail's
+   expandable log rows — an extra <tr> inserted mid-table — don't skew parity.
+   The log row itself never gets the class, so it reads as the plain surface. */
+table.jobs tbody tr.row-stripe {
+  background: var(--stripe);
+}
+/* Hover sits above the stripe (equal specificity, later in source) and is
+   pitched stronger than --stripe so it stays legible on striped rows too. */
 table.jobs tbody tr:hover {
-  background: color-mix(in srgb, var(--text) 4%, transparent);
+  background: color-mix(in srgb, var(--text) 9%, transparent);
 }
 table.jobs tr:last-child td {
   border-bottom: none;
