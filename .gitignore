@@ -3,6 +3,10 @@ target/
 .envrc
 .DS_Store
 
+# process core dumps (e.g. nats-server crashing under qemu during tests)
+core
+core.*
+
 # web
 web/node_modules/
 web/dist/

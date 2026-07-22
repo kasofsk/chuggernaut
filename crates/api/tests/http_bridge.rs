@@ -836,9 +836,17 @@ async fn ssh_cert_minting() {
         listing.contains("--roles eyJhY21lL2FwaSI6Im1lbWJlciJ9"),
         "{listing}"
     );
-    // Validity window is exactly 24h (spec §7.3).
+    // Validity window is ~24h (spec §7.3). `ssh-keygen -V +Ns` sets valid-to to
+    // now+N exactly but *backdates* valid-from to a minute boundary (rounded
+    // down, plus a minute of clock-skew allowance), so the printed window runs
+    // 24h + [60s, 120s). Assert a tolerant band around 24h rather than a single
+    // wall-clock-sensitive value — a bare `== 24h` only ever held when the cert
+    // happened to be signed at exactly :00 seconds, hence the time-of-day flake.
     let window = cert_validity_seconds(&listing);
-    assert_eq!(window, 24 * 3600, "{listing}");
+    assert!(
+        (24 * 3600..24 * 3600 + 180).contains(&window),
+        "expected ~24h window, got {window}s: {listing}"
+    );
 }
 
 /// Live task output over HTTP (§4.2): the `/output` endpoint tails a running

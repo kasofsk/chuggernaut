@@ -134,6 +134,11 @@ async fn rig() -> Option<Rig> {
     .await
     .unwrap();
     let handle = spawn(core);
+    // The operator inbox (`req.tasks.list.pending`) is served off the core actor
+    // by the tasks handler; wire it up so tests can hit the real request path.
+    dispatcher::handlers::spawn_tasks_handler(&store, handle.clone(), backend.clone())
+        .await
+        .unwrap();
     Some(Rig {
         _server: server,
         store,
