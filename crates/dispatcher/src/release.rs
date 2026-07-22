@@ -316,6 +316,7 @@ resources:
             r#type: "code".into(),
             title: String::new(),
             description: String::new(),
+            cover_html: None,
             deps: vec![],
             members: vec![],
             batch_id: None,

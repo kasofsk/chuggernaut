@@ -99,6 +99,10 @@ export interface Job {
   /** ticket-style identity: what this run is for (may be empty) */
   title: string
   description: string
+  /** optional rich cover page for the UI (spec §1.1, §4.3): presentational
+   *  only, never injected into any agent prompt. Rendered above the description
+   *  in a sandboxed iframe. Absent/undefined on records without a cover. */
+  cover_html?: string
   /** upstream job ids that must be Done before this job starts */
   deps: number[]
   /** member job ids this batch absorbs onto one branch; empty for an ordinary

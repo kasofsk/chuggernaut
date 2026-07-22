@@ -2055,4 +2055,54 @@ mod tests {
         );
         assert_ne!(tip(&repo, "job/1").await, new_main);
     }
+
+    /// §4.3 prompt-cleanliness: `cover_html` is presentational and must NEVER
+    /// leak into any agent prompt. `job_brief_block` is the single choke point
+    /// where the brief is injected (work, eval, triage), so asserting its output
+    /// is byte-identical with and without a cover set proves the field cannot
+    /// reach an agent — no matter how large or HTML-laden the cover is.
+    #[test]
+    fn cover_html_never_reaches_the_job_brief() {
+        use super::job_brief_block;
+        let base = types::Job {
+            id: 1,
+            project: "acme/api".into(),
+            r#type: "code".into(),
+            title: "Ship the thing".into(),
+            description: "Do the work described here.".into(),
+            cover_html: None,
+            members: vec![],
+            batch_id: None,
+            deps: vec![],
+            state: types::JobState::Ready,
+            branch: "job/1".into(),
+            base_ref: None,
+            knowledge_tags: vec![],
+            eval: vec![],
+            timeout: None,
+            model: None,
+            claim_next: false,
+            escalation: None,
+            factory: None,
+            created_at: chrono::Utc::now(),
+            ready_at: None,
+            completed_at: None,
+        };
+        let with_cover = types::Job {
+            cover_html: Some(
+                "<html><body><h1>Splashy cover</h1><script>alert(1)</script></body></html>".into(),
+            ),
+            ..base.clone()
+        };
+        assert_eq!(
+            job_brief_block(&base),
+            job_brief_block(&with_cover),
+            "cover_html must not change the injected job brief"
+        );
+        let brief = job_brief_block(&with_cover);
+        assert!(
+            !brief.contains("Splashy cover") && !brief.contains("<script>"),
+            "no cover markup may appear in the brief"
+        );
+    }
 }

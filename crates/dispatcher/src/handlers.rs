@@ -152,6 +152,29 @@ fn bad_request(message: &str) -> Vec<u8> {
     .unwrap()
 }
 
+/// 422 for a well-formed body that fails a semantic bound (e.g. an oversized
+/// `cover_html`) — distinct from the 400 a malformed/unparseable body gets.
+fn unprocessable(message: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "error": { "status": 422, "message": message }
+    }))
+    .unwrap()
+}
+
+/// Byte cap on a job's optional `cover_html` (§1.1). The one job field with a
+/// size bound today: it can carry a whole rendered page, so a runaway value
+/// would bloat every job-list reply. ~256 KiB is generous for a self-contained
+/// styled page yet keeps records sane. Over → 422.
+const COVER_HTML_MAX_BYTES: usize = 256 * 1024;
+
+/// True when a supplied `cover_html` exceeds [`COVER_HTML_MAX_BYTES`]. None
+/// (no cover) is always fine.
+fn cover_too_large(cover_html: &Option<String>) -> bool {
+    cover_html
+        .as_ref()
+        .is_some_and(|h| h.len() > COVER_HTML_MAX_BYTES)
+}
+
 fn service_unavailable(message: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "error": { "status": 503, "message": message }
@@ -186,6 +209,10 @@ struct CreateJobBody {
     title: String,
     #[serde(default)]
     description: String,
+    /// Optional rich cover page for the UI (§1.1, §4.3). Presentational only —
+    /// never enters an agent prompt. Size-capped ([`COVER_HTML_MAX_BYTES`], 422).
+    #[serde(default)]
+    cover_html: Option<String>,
     /// Upstream job ids this job depends on (must be Done before it starts).
     #[serde(default)]
     deps: Vec<u64>,
@@ -222,6 +249,8 @@ struct UpdateJobBody {
     title: String,
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    cover_html: Option<String>,
     #[serde(default)]
     deps: Vec<u64>,
     #[serde(default)]
@@ -846,6 +875,9 @@ async fn spawn_read_handlers(
             let body = match (verb, seq) {
                 ("create", None) => match serde_json::from_slice::<CreateJobBody>(&req.payload) {
                     Err(e) => bad_request(&e.to_string()),
+                    Ok(b) if cover_too_large(&b.cover_html) => unprocessable(&format!(
+                        "cover_html exceeds the {COVER_HTML_MAX_BYTES}-byte limit"
+                    )),
                     Ok(b) => {
                         let create = CreateJobRequest {
                             owner: owner.to_string(),
@@ -853,6 +885,7 @@ async fn spawn_read_handlers(
                             r#type: b.r#type,
                             title: b.title,
                             description: b.description,
+                            cover_html: b.cover_html,
                             deps: b.deps,
                             members: b.members,
                             knowledge_tags: b.knowledge_tags,
@@ -873,6 +906,9 @@ async fn spawn_read_handlers(
                 ("update", Some(seq)) => {
                     match serde_json::from_slice::<UpdateJobBody>(&req.payload) {
                         Err(e) => bad_request(&e.to_string()),
+                        Ok(b) if cover_too_large(&b.cover_html) => unprocessable(&format!(
+                            "cover_html exceeds the {COVER_HTML_MAX_BYTES}-byte limit"
+                        )),
                         Ok(b) => {
                             let update = UpdateJobRequest {
                                 owner: owner.to_string(),
@@ -881,6 +917,7 @@ async fn spawn_read_handlers(
                                 r#type: b.r#type,
                                 title: b.title,
                                 description: b.description,
+                                cover_html: b.cover_html,
                                 deps: b.deps,
                                 knowledge_tags: b.knowledge_tags,
                                 eval: b.eval,
@@ -1559,9 +1596,52 @@ async fn list_pending(store: &NatsStore, owner: &str, project: &str) -> Vec<u8> 
 
 #[cfg(test)]
 mod tests {
-    use super::job_reply_with_awaiting;
+    use super::{
+        COVER_HTML_MAX_BYTES, CreateJobBody, UpdateJobBody, cover_too_large,
+        job_reply_with_awaiting, unprocessable,
+    };
     use chrono::Utc;
     use types::{Job, JobState, Task, TaskKind, TaskPhase, TaskState};
+
+    fn status(body: &[u8]) -> i64 {
+        serde_json::from_slice::<serde_json::Value>(body).unwrap()["error"]["status"]
+            .as_i64()
+            .unwrap()
+    }
+
+    /// The §1.1 cover cap: a body at/under the limit is accepted, one over it is
+    /// rejected with a 422 (not a 400 — the body parsed fine). Exercised on both
+    /// create and the Draft PATCH bodies, since both carry `cover_html`.
+    #[test]
+    fn cover_html_size_cap_rejects_over_limit_with_422() {
+        // Boundary: exactly at the cap is fine, one byte over is not.
+        assert!(!cover_too_large(&None));
+        assert!(!cover_too_large(&Some("x".repeat(COVER_HTML_MAX_BYTES))));
+        assert!(cover_too_large(&Some("x".repeat(COVER_HTML_MAX_BYTES + 1))));
+        // The rejection is a 422.
+        assert_eq!(status(&unprocessable("too big")), 422);
+
+        // An oversized cover still deserializes (well-formed body) — the cap is a
+        // semantic check on top, not a parse error.
+        let over = format!(
+            r#"{{"type":"code","cover_html":{}}}"#,
+            serde_json::to_string(&"x".repeat(COVER_HTML_MAX_BYTES + 1)).unwrap()
+        );
+        let create: CreateJobBody = serde_json::from_str(&over).unwrap();
+        assert!(cover_too_large(&create.cover_html));
+        let update: UpdateJobBody = serde_json::from_str(&over).unwrap();
+        assert!(cover_too_large(&update.cover_html));
+
+        // A modest cover is accepted and round-trips through the wire body.
+        let ok = r#"{"type":"code","cover_html":"<h1>hi</h1>"}"#;
+        let create: CreateJobBody = serde_json::from_str(ok).unwrap();
+        assert_eq!(create.cover_html.as_deref(), Some("<h1>hi</h1>"));
+        assert!(!cover_too_large(&create.cover_html));
+
+        // Absent cover parses to None (back-compat with pre-cover clients).
+        let bare: CreateJobBody = serde_json::from_str(r#"{"type":"code"}"#).unwrap();
+        assert!(bare.cover_html.is_none());
+    }
 
     fn job(state: JobState) -> Job {
         Job {
@@ -1570,6 +1650,7 @@ mod tests {
             r#type: "t".into(),
             title: String::new(),
             description: String::new(),
+            cover_html: None,
             deps: vec![],
             members: vec![],
             batch_id: None,

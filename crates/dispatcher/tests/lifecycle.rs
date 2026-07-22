@@ -99,6 +99,7 @@ fn req(r#type: &str, deps: &[u64]) -> CreateJobRequest {
         r#type: r#type.into(),
         title: String::new(),
         description: String::new(),
+        cover_html: None,
         deps: deps.to_vec(),
         knowledge_tags: vec![],
         eval: vec![],

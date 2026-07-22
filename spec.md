@@ -15,6 +15,7 @@ pub struct Job {
     pub r#type: String,                    // job type name; references jobs/{type}.yaml at base_ref
     pub title: String,                     // ticket-style instance identity: what this run is for (may be empty). The type carries the *how*; title/description carry the *what*.
     pub description: String,               // the ticket body; injected into work and eval prompts as the §4.3 job brief
+    pub cover_html: Option<String>,        // optional rich cover page for the operator UI: PRESENTATIONAL ONLY — never injected into any agent prompt (the §4.3 job brief consumes only title/description), so it can carry an exciting formatted page without polluting what agents read. Accepted on create and the Draft PATCH, size-capped at ~256 KiB (over → 422). Rendered above the description in a sandboxed iframe (no scripts); authors ship self-contained styling. None → no cover; defaults None on old records
     pub deps: Vec<u64>,                    // upstream job ids this job depends on (ordering edges: upstreams must be Done first; their work is in this job's base, their structured results available to it). Plain ids, no named roles — picked at creation, validated at release.
     pub members: Vec<u64>,                 // member job ids absorbed into this batch (§2.1 batches). Empty for an ordinary job; non-empty marks a batch — one branch implementing all members, evaluated under the union of their criteria, whose single merge completes every member. Defaults empty on old records
     pub batch_id: Option<u64>,             // set on a member absorbed into a batch: the batch job's id. Some implies the member is (or was) Batched under that batch; cleared when the batch is revoked/fails and the member returns to Frozen. None for ordinary jobs and batches themselves. Defaults None on old records
@@ -1163,6 +1164,8 @@ Structured context surfaces through MCP tools (`submit_result`, `submit_eval`), 
 {description}
 ```
 
+**Prompt cleanliness** — the job brief is the single point where a job's instance identity enters any prompt, and it consumes **only** `title` and `description`. The job record's `cover_html` (§1.1) is deliberately excluded: it is a presentational cover page for the operator UI and must never reach an agent. Because there is exactly one choke point, this is airtight — a regression test asserts the brief block is byte-identical with and without `cover_html` set. Rich formatting therefore never pollutes what work, eval, or triage agents read; the description stays plain text/markdown.
+
 **Rework context format** — on rework cycles (cycle > 1) where `eval_context` is non-empty or `merge_conflict` is set, the dispatcher reads the prompt file from the repo at `base_ref`, appends the following block (after the job brief, if any), and sets `AgentRunConfig.prompt` to the combined string. The provider injects the prompt content into the created container at `/chuggernaut/prompt.md` (put-archive, §3.1) — never inline in the shell command, never via a host bind-mount.
 
 ```
@@ -1411,6 +1414,7 @@ GET    /api/v1/projects/{owner}/{project}/jobs/{seq}/usage          → 200 OK; 
 POST   /api/v1/projects/{owner}/{project}/jobs
        body: { "type": "implement-endpoint", "title": "Stripe webhook endpoint", "description": "...", "deps": [11, 22], "knowledge_tags": ["payments/stripe-integration"], "eval": [ { "name": "extra-ci", "type": "command", "run": "./ci.sh" } ] }
        title/description optional; the instance's ticket — injected into work and eval prompts as the §4.3 job brief
+       cover_html optional; a rich presentational cover page (§1.1) rendered above the description in the UI, never injected into any prompt; size-capped at ~256 KiB (a larger value → 422)
        knowledge_tags optional; merged with job type's default tags
        eval optional; additive per-job evaluators layered on top of the type's list (§1.1 evaluator schema); validated at release — name collisions with the type's evaluators are a 422
        draft optional (default false); with draft:true the job lands in Draft (§2.1) so its definition can be edited before release, instead of Frozen

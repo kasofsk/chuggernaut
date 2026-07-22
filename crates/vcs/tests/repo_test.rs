@@ -25,6 +25,7 @@ fn job(repo: &TempRepo, id: u64, state: JobState, base_ref: Option<String>) -> J
         r#type: "implement-endpoint".into(),
         title: String::new(),
         description: String::new(),
+        cover_html: None,
         deps: Vec::new(),
         members: vec![],
         batch_id: None,

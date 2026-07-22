@@ -90,6 +90,7 @@ fn create(draft: bool, deps: &[u64], description: &str) -> CreateJobRequest {
         r#type: "simple".into(),
         title: String::new(),
         description: description.into(),
+        cover_html: None,
         deps: deps.to_vec(),
         knowledge_tags: vec![],
         eval: vec![],
@@ -109,6 +110,7 @@ fn update(seq: u64, deps: &[u64], description: &str) -> UpdateJobRequest {
         r#type: "simple".into(),
         title: String::new(),
         description: description.into(),
+        cover_html: None,
         deps: deps.to_vec(),
         knowledge_tags: vec![],
         eval: vec![],
@@ -190,6 +192,43 @@ async fn draft_edit_release_runs_edited_description() {
     assert!(
         !prompt.contains("ORIGINAL BODY"),
         "the pre-edit description must not survive: {prompt}"
+    );
+}
+
+/// `cover_html` round-trips through create and the Draft PATCH, and is
+/// presentational only: the edited cover is stored but never reaches the work
+/// prompt (the description does). Proves the field is Draft-mutable and prompt-
+/// clean end to end.
+#[tokio::test]
+async fn draft_cover_html_round_trips_and_stays_out_of_prompt() {
+    let Some(rig) = rig().await else { return };
+    commit_work(&rig);
+
+    let mut req = create(true, &[], "THE DESCRIPTION");
+    req.cover_html = Some("<h1>SPLASHY COVER</h1>".into());
+    let job = rig.handle.create_job(req).await.unwrap();
+    assert_eq!(job.cover_html.as_deref(), Some("<h1>SPLASHY COVER</h1>"));
+
+    // Draft PATCH replaces the cover.
+    let mut edit = update(job.id, &[], "THE DESCRIPTION");
+    edit.cover_html = Some("<h1>EDITED COVER</h1>".into());
+    let edited = rig.handle.update_job(edit).await.unwrap();
+    assert_eq!(edited.cover_html.as_deref(), Some("<h1>EDITED COVER</h1>"));
+
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    let done = wait_for_state(&rig.store, job.id, JobState::Done).await;
+    // The released record still carries the cover.
+    assert_eq!(done.cover_html.as_deref(), Some("<h1>EDITED COVER</h1>"));
+
+    // ...but no cover markup ever reached the work prompt.
+    let prompt = &rig.provider.runs()[0].prompt;
+    assert!(
+        prompt.contains("THE DESCRIPTION"),
+        "description reaches prompt"
+    );
+    assert!(
+        !prompt.contains("COVER"),
+        "cover_html must never reach the work prompt: {prompt}"
     );
 }
 

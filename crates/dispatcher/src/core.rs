@@ -75,6 +75,9 @@ pub struct CreateJobRequest {
     /// Ticket-style identity: what this run is for (optional, empty = none).
     pub title: String,
     pub description: String,
+    /// Optional rich cover page for the UI (spec §1.1, §4.3). Purely
+    /// presentational — never enters any agent prompt. None = no cover.
+    pub cover_html: Option<String>,
     pub deps: Vec<u64>,
     /// Member job seqs to absorb into a **batch** (spec §2.1 batches). Empty for
     /// an ordinary job; when non-empty this request creates a batch that pulls
@@ -110,6 +113,8 @@ pub struct UpdateJobRequest {
     pub r#type: String,
     pub title: String,
     pub description: String,
+    /// Optional rich cover page (spec §1.1, §4.3); never enters a prompt.
+    pub cover_html: Option<String>,
     pub deps: Vec<u64>,
     pub knowledge_tags: Vec<String>,
     pub eval: Vec<types::Evaluator>,
@@ -1238,6 +1243,7 @@ impl Core {
             r#type: req.r#type,
             title: req.title,
             description: req.description,
+            cover_html: req.cover_html,
             deps: req.deps,
             members: vec![],
             batch_id: None,
@@ -1423,6 +1429,7 @@ impl Core {
             r#type: req.r#type,
             title: req.title,
             description,
+            cover_html: req.cover_html,
             deps,
             members: member_seqs.clone(),
             batch_id: None,
@@ -1716,6 +1723,7 @@ impl Core {
             r#type,
             title,
             description,
+            cover_html,
             deps,
             knowledge_tags,
             eval,
@@ -1741,6 +1749,9 @@ impl Core {
         }
         if job.description != description {
             changed.push("description");
+        }
+        if job.cover_html != cover_html {
+            changed.push("cover_html");
         }
         if job.deps != deps {
             changed.push("deps");
@@ -1770,6 +1781,7 @@ impl Core {
         job.r#type = r#type;
         job.title = title;
         job.description = description;
+        job.cover_html = cover_html;
         job.deps = deps;
         job.knowledge_tags = knowledge_tags;
         job.eval = eval;

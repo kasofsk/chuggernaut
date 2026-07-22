@@ -117,6 +117,7 @@ fn member(r#type: &str, deps: &[u64], title: &str, description: &str) -> CreateJ
         r#type: r#type.into(),
         title: title.into(),
         description: description.into(),
+        cover_html: None,
         deps: deps.to_vec(),
         members: vec![],
         knowledge_tags: vec![],

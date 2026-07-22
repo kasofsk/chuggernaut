@@ -130,6 +130,7 @@ mod tests {
             description: String::new(),
             members: vec![],
             batch_id: None,
+            cover_html: None,
             deps: deps.to_vec(),
             state,
             branch: format!("job/{seq}"),

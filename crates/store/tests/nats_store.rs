@@ -15,6 +15,7 @@ fn job(seq: u64) -> Job {
         r#type: "implement-endpoint".into(),
         title: String::new(),
         description: String::new(),
+        cover_html: None,
         deps: Vec::new(),
         members: vec![],
         batch_id: None,

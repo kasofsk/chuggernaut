@@ -554,6 +554,22 @@ td.actions button {
   overflow-y: auto;
 }
 
+/* Sandboxed job cover page (spec §4.3): untrusted operator HTML rendered above
+   the description. It gets its own bordered surface and a bounded height —
+   without scripts the iframe can't self-size, so tall covers scroll inside the
+   frame rather than pushing the page. Authors should ship self-contained
+   styling (covers get no theme variables). */
+.job-cover {
+  display: block;
+  width: 100%;
+  height: 420px;
+  max-height: 60vh;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: #fff;
+  margin: var(--sp-2) 0;
+}
+
 .resolve {
   display: flex;
   gap: var(--sp-2);

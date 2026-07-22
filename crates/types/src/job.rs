@@ -22,6 +22,15 @@ pub struct Job {
     pub title: String,
     #[serde(default)]
     pub description: String,
+    /// Optional rich, richly-formatted cover page for the operator UI (spec
+    /// §1.1, §4.3). Purely presentational: unlike [`Job::description`], it is
+    /// **never** injected into any agent prompt — the job brief consumes only
+    /// title/description, so the cover can carry HTML the UI sandboxes without
+    /// polluting what agents read. Authors should ship self-contained styling
+    /// (no external scripts/network). None for records that predate it and for
+    /// jobs with a plain-text brief; defaulted so older records deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_html: Option<String>,
     /// Upstream job ids this job depends on. Edges are ordering: upstreams
     /// must be Done first (their work is in this job's base, their structured
     /// results are available to it). Plain ids, no named roles — picked at
@@ -406,6 +415,35 @@ mod tests {
         assert!(!job.is_batch());
         assert_eq!(job.batch_id, None);
         assert!(!serde_json::to_string(&job).unwrap().contains("batch_id"));
+    }
+
+    #[test]
+    fn job_round_trips_with_cover_html_and_stays_backward_compat() {
+        // Old records (no cover_html key) deserialize to None and omit it on
+        // the wire — a job with a plain-text brief carries no cover.
+        let json = r#"{
+          "id": 3,
+          "project": "acme/api",
+          "type": "implement-endpoint",
+          "deps": [],
+          "state": "Draft",
+          "branch": "job/3",
+          "base_ref": null,
+          "knowledge_tags": [],
+          "factory": null,
+          "created_at": "2026-07-22T10:00:00Z",
+          "ready_at": null
+        }"#;
+        let job: Job = serde_json::from_str(json).unwrap();
+        assert_eq!(job.cover_html, None);
+        assert!(!serde_json::to_string(&job).unwrap().contains("cover_html"));
+
+        // A populated cover round-trips and appears on the wire.
+        let mut rich = job.clone();
+        rich.cover_html = Some("<h1>Ship it</h1>".into());
+        let back = serde_json::to_string(&rich).unwrap();
+        assert!(back.contains("\"cover_html\":\"<h1>Ship it</h1>\""));
+        assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), rich);
     }
 
     #[test]

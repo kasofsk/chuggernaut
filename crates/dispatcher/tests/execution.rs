@@ -206,6 +206,7 @@ fn req(r#type: &str) -> CreateJobRequest {
         r#type: r#type.into(),
         title: String::new(),
         description: String::new(),
+        cover_html: None,
         deps: vec![],
         knowledge_tags: vec![],
         eval: vec![],
