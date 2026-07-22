@@ -484,6 +484,7 @@ async fn held_job_lands_after_merged_release_sync() {
             timeout: None,
             model: None,
             factory: None,
+            members: vec![],
             draft: false,
         })
         .await
@@ -589,6 +590,7 @@ async fn reserved_chug_secrets_never_reach_containers() {
             timeout: None,
             model: None,
             factory: None,
+            members: vec![],
             draft: false,
         })
         .await

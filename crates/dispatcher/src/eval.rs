@@ -310,7 +310,7 @@ impl Core {
                     prompt: format!(
                         "{}{}",
                         evaluator.prompt.clone().unwrap_or_default(),
-                        crate::exec::job_brief_block(&job)
+                        self.work_brief(owner, project, &job)
                     ),
                 },
                 true,
@@ -440,7 +440,7 @@ impl Core {
                         )
                         .await?
                         .unwrap_or_default(),
-                    crate::exec::job_brief_block(&job)
+                    self.work_brief(owner, project, &job)
                 );
                 let (mcp_servers, mut files) = self.channel_mcp(&env);
                 files.extend(
@@ -1107,11 +1107,32 @@ impl Core {
             return Ok(FinalizeStep::Completed); // revoked while queued
         }
         let base_ref = job.base_ref.clone().expect("base_ref set");
-        let summary = self
+        let mut summary = self
             .active
             .get(&key)
             .and_then(|e| e.work_submission.as_ref())
             .and_then(|s| s.summary.clone());
+
+        // A batch lands as one squash that completes every member, so open the
+        // commit body with the member list — otherwise git history records only
+        // `job/{batchseq}: {type}` with no trace of which tickets it closed
+        // (spec §2.1 batches; mirrors the create_batch auto-index).
+        if job.is_batch() {
+            let header = format!(
+                "Batch of {} {} jobs: {}",
+                job.members.len(),
+                job.r#type,
+                job.members
+                    .iter()
+                    .map(|m| format!("#{m}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            summary = Some(match summary {
+                Some(prose) if !prose.is_empty() => format!("{header}\n\n{prose}"),
+                _ => header,
+            });
+        }
 
         let default_branch = self.repos.default_branch(owner, project).await?;
         let head = self
@@ -1648,7 +1669,45 @@ impl Core {
         self.active.remove(&key);
         self.publish(owner, project, seq, "job-done", serde_json::json!({}))
             .await?;
-        self.on_job_done(owner, project, seq).await
+        self.on_job_done(owner, project, seq).await?;
+        // A batch merge completes every member (spec §2.1 batches): fan its Done
+        // out so each member lands Done and unblocks its dependents exactly as if
+        // it had run on its own.
+        if job.is_batch() {
+            self.complete_batch_members(owner, project, seq, &job.members)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Fan a batch's completion out to its members (spec §2.1 batches). Each
+    /// member goes Batched→Done (stamping `completed_at` via `set_state`) with a
+    /// `job-completed-via-batch` event; only then does each member's `on_job_done`
+    /// run, so a dependent that waits on several members unblocks once — after
+    /// the last of them is Done — rather than churning on the earlier ones.
+    async fn complete_batch_members(
+        &mut self,
+        owner: &str,
+        project: &str,
+        batch_seq: u64,
+        members: &[u64],
+    ) -> Result<()> {
+        for &m in members {
+            let mut member = self.must_get(owner, project, m)?.clone();
+            self.set_state(&mut member, JobState::Done).await?;
+            self.publish(
+                owner,
+                project,
+                m,
+                "job-completed-via-batch",
+                serde_json::json!({ "batch_id": batch_seq }),
+            )
+            .await?;
+        }
+        for &m in members {
+            self.on_job_done(owner, project, m).await?;
+        }
+        Ok(())
     }
 
     /// §3.2 step 12 guard: a squash carried conflict markers left by a WIP

@@ -128,6 +128,8 @@ mod tests {
             r#type: "t".into(),
             title: String::new(),
             description: String::new(),
+            members: vec![],
+            batch_id: None,
             deps: deps.to_vec(),
             state,
             branch: format!("job/{seq}"),

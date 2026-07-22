@@ -287,7 +287,7 @@ impl Core {
                     prompt: format!(
                         "{}{}",
                         job_type.work.prompt.clone().unwrap_or_default(),
-                        job_brief_block(&job)
+                        self.work_brief(owner, project, &job)
                     ),
                 },
                 true,
@@ -377,13 +377,14 @@ impl Core {
                     )
                     .await?;
                 self.inject_platform_agent_secrets(&mut env).await?;
+                let brief = self.work_brief(owner, project, &job);
                 let prompt = self
                     .build_prompt(
                         owner,
                         project,
                         &base_ref,
                         job_type.work.prompt.as_deref().unwrap_or_default(),
-                        &job_brief_block(&job),
+                        &brief,
                         &eval_context,
                         merge_conflict.as_deref(),
                         resume,
@@ -1823,6 +1824,38 @@ pub(crate) fn job_brief_block(job: &types::Job) -> String {
         block.push('\n');
         block.push_str(&job.description);
         block.push('\n');
+    }
+    block
+}
+
+/// §4.3 batch brief (spec §2.1 batches): the combined block for a batch job —
+/// a preamble instructing the agent to implement every ticket in the one
+/// branch, then each member's ticket under its own `### Ticket #{seq}` heading.
+/// Delivered identically to the work agent and to every evaluator, so the
+/// reviewer judges per-ticket completeness against the same text the author
+/// saw. `members` are the batch's member jobs, in `job.members` order.
+pub(crate) fn batch_brief_block(job: &types::Job, members: &[types::Job]) -> String {
+    let mut block = format!(
+        "\n\n---\n## Job Brief\nThis is a job batch: implement all {} tickets below in this \
+         one branch; address every ticket; your closing summary must cover each by number.\n",
+        members.len()
+    );
+    if !job.description.is_empty() {
+        block.push('\n');
+        block.push_str(&job.description);
+        block.push('\n');
+    }
+    for member in members {
+        block.push_str(&format!("\n### Ticket #{}", member.id));
+        if !member.title.is_empty() {
+            block.push_str(&format!(": {}", member.title));
+        }
+        block.push('\n');
+        if !member.description.is_empty() {
+            block.push('\n');
+            block.push_str(&member.description);
+            block.push('\n');
+        }
     }
     block
 }

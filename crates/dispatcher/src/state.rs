@@ -21,6 +21,12 @@ pub fn assert_transition(from: JobState, to: JobState) -> Result<(), InvalidTran
         (Draft, Ready | Blocked) => true,
         (Frozen, Draft) => true,
         (Frozen, Ready | Blocked) => true,
+        // Batches (spec §2.1). Frozen→Batched: a member is absorbed at batch
+        // creation. Batched→Frozen: the batch was revoked/failed, so the member
+        // is returned (re-batchable). Batched→Done: the batch merged, fanning
+        // completion out to each member. Batched→Revoked via the generic row.
+        (Frozen, Batched) => true,
+        (Batched, Frozen | Done) => true,
         // Blocked→Stalled: Ready-transition re-validation failed (pre-work).
         (Blocked, Ready | Stalled) => true,
         // Ready→Stalled: job_deadline elapsed before work started (pre-work).
@@ -67,6 +73,10 @@ mod tests {
             (Frozen, Draft),
             (Frozen, Ready),
             (Frozen, Blocked),
+            (Frozen, Batched),
+            (Batched, Frozen),
+            (Batched, Done),
+            (Batched, Revoked),
             (Blocked, Ready),
             (Blocked, Stalled),
             (Ready, Work),
@@ -99,6 +109,11 @@ mod tests {
             (Draft, Frozen),
             (Frozen, Work),
             (Frozen, Done),
+            // Batched is invisible to scheduling: it never jumps into execution
+            // or evaluation, only to Done (merge), Frozen (revoke), or Revoked.
+            (Batched, Work),
+            (Batched, Ready),
+            (Batched, Blocked),
             (Blocked, Work),
             // Pre-work escalations use Stalled, never Escalated.
             (Blocked, Escalated),

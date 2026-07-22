@@ -317,6 +317,8 @@ resources:
             title: String::new(),
             description: String::new(),
             deps: vec![],
+            members: vec![],
+            batch_id: None,
             state: types::JobState::Ready,
             branch: "job/1".into(),
             base_ref: None,

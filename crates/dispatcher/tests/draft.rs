@@ -96,6 +96,7 @@ fn create(draft: bool, deps: &[u64], description: &str) -> CreateJobRequest {
         timeout: None,
         model: None,
         factory: None,
+        members: vec![],
         draft,
     }
 }

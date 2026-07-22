@@ -118,6 +118,7 @@ fn req(r#type: &str) -> CreateJobRequest {
         timeout: None,
         model: None,
         factory: None,
+        members: vec![],
         draft: false,
     }
 }

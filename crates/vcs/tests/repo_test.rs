@@ -26,6 +26,8 @@ fn job(repo: &TempRepo, id: u64, state: JobState, base_ref: Option<String>) -> J
         title: String::new(),
         description: String::new(),
         deps: Vec::new(),
+        members: vec![],
+        batch_id: None,
         state,
         branch: format!("job/{id}"),
         base_ref,

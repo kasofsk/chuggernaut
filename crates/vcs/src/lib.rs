@@ -1200,9 +1200,12 @@ impl RepoManager {
             });
         };
         match job.state {
-            // Draft/Stalled are pre-work: no branch commits to diff (§1.2, §2.1).
+            // Draft/Stalled/Batched are pre-work: no branch of their own to
+            // diff (§1.2, §2.1) — a batch member's changes live on the batch
+            // branch, and the batch itself diffs under Work/Evaluation/etc.
             JobState::Draft
             | JobState::Frozen
+            | JobState::Batched
             | JobState::Blocked
             | JobState::Ready
             | JobState::Stalled

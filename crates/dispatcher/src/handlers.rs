@@ -189,6 +189,10 @@ struct CreateJobBody {
     /// Upstream job ids this job depends on (must be Done before it starts).
     #[serde(default)]
     deps: Vec<u64>,
+    /// Member job seqs to absorb into a batch (spec §2.1 batches). Non-empty →
+    /// this request creates a batch instead of an ordinary job.
+    #[serde(default)]
+    members: Vec<u64>,
     #[serde(default)]
     knowledge_tags: Vec<String>,
     /// Additive per-job evaluators (design-lifecycle.md); validated at release.
@@ -850,6 +854,7 @@ async fn spawn_read_handlers(
                             title: b.title,
                             description: b.description,
                             deps: b.deps,
+                            members: b.members,
                             knowledge_tags: b.knowledge_tags,
                             eval: b.eval,
                             timeout: b.timeout,
@@ -1566,6 +1571,8 @@ mod tests {
             title: String::new(),
             description: String::new(),
             deps: vec![],
+            members: vec![],
+            batch_id: None,
             state,
             branch: "job/1".into(),
             base_ref: None,

@@ -16,6 +16,8 @@ fn job(seq: u64) -> Job {
         title: String::new(),
         description: String::new(),
         deps: Vec::new(),
+        members: vec![],
+        batch_id: None,
         state: JobState::Frozen,
         branch: format!("job/{seq}"),
         base_ref: None,

@@ -28,6 +28,19 @@ pub struct Job {
     /// creation, validated (existence, no cycles) at release.
     #[serde(default)]
     pub deps: Vec<u64>,
+    /// Member job ids absorbed into this batch (design-lifecycle.md, spec §2.1
+    /// batches). Empty for an ordinary job; non-empty marks this job as a
+    /// **batch** — one branch implementing all members, evaluated under the
+    /// union of their criteria, whose single merge completes every member.
+    /// Serde-defaulted so records written before batches deserialize.
+    #[serde(default)]
+    pub members: Vec<u64>,
+    /// Set on a member job absorbed into a batch: the batch job's id. `Some`
+    /// implies the job is (or was) [`JobState::Batched`] under that batch;
+    /// cleared when the batch is revoked/fails and the member returns to Frozen.
+    /// None for ordinary jobs and batches themselves; defaulted for old records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<u64>,
     pub state: JobState,
     /// `"job/{id}"`; set at creation; actual git branch created when job enters Work.
     pub branch: String,
@@ -100,6 +113,12 @@ pub enum JobState {
     /// moved back here (`POST .../draft`). Once released, never editable again.
     Draft,
     Frozen,
+    /// Absorbed into a batch (spec §2.1 batches): the member's changes will be
+    /// produced on the batch's single branch and its completion fans out from
+    /// the batch merge. Invisible to scheduling, holds no branch, cannot be
+    /// claimed or released — like Draft. Leaves via Batched→Done (batch merged),
+    /// Batched→Frozen (batch revoked/failed; re-batchable), or Revoked.
+    Batched,
     Blocked,
     Ready,
     Work,
@@ -123,6 +142,14 @@ pub enum JobState {
 impl JobState {
     pub fn is_terminal(self) -> bool {
         matches!(self, JobState::Done | JobState::Revoked)
+    }
+}
+
+impl Job {
+    /// True when this job is a batch: it absorbs [`members`](Job::members) and
+    /// produces one branch for all of them (spec §2.1 batches).
+    pub fn is_batch(&self) -> bool {
+        !self.members.is_empty()
     }
 }
 
@@ -304,6 +331,81 @@ mod tests {
         let back = serde_json::to_string(&finished).unwrap();
         assert!(back.contains("\"completed_at\":\"2026-07-22T12:30:00Z\""));
         assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), finished);
+    }
+
+    #[test]
+    fn job_round_trips_as_batch_and_member() {
+        // A batch job carries `members`; a member carries `batch_id`. Both
+        // round-trip and the Batched state is a first-class serde variant.
+        let json = r#"{
+          "id": 20,
+          "project": "acme/api",
+          "type": "web",
+          "deps": [3],
+          "members": [11, 12, 13],
+          "state": "Frozen",
+          "branch": "job/20",
+          "base_ref": null,
+          "knowledge_tags": [],
+          "factory": null,
+          "created_at": "2026-07-22T10:00:00Z",
+          "ready_at": null
+        }"#;
+        let batch: Job = serde_json::from_str(json).unwrap();
+        assert!(batch.is_batch());
+        assert_eq!(batch.members, vec![11, 12, 13]);
+        assert_eq!(batch.batch_id, None);
+        let back = serde_json::to_string(&batch).unwrap();
+        assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), batch);
+
+        let member_json = r#"{
+          "id": 11,
+          "project": "acme/api",
+          "type": "web",
+          "deps": [],
+          "batch_id": 20,
+          "state": "Batched",
+          "branch": "job/11",
+          "base_ref": null,
+          "knowledge_tags": [],
+          "factory": null,
+          "created_at": "2026-07-22T10:00:00Z",
+          "ready_at": null
+        }"#;
+        let member: Job = serde_json::from_str(member_json).unwrap();
+        assert_eq!(member.state, JobState::Batched);
+        assert!(!member.state.is_terminal());
+        assert!(!member.is_batch());
+        assert_eq!(member.batch_id, Some(20));
+        let back = serde_json::to_string(&member).unwrap();
+        assert!(back.contains(r#""state":"Batched""#));
+        assert!(back.contains(r#""batch_id":20"#));
+        assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), member);
+    }
+
+    #[test]
+    fn old_record_without_batch_fields_stays_compat() {
+        // Records written before batches lack `members`/`batch_id`: they
+        // deserialize to empty/None and omit `batch_id` on the wire (an
+        // ordinary job never advertises a batch it does not belong to).
+        let json = r#"{
+          "id": 1,
+          "project": "acme/api",
+          "type": "code",
+          "deps": [],
+          "state": "Frozen",
+          "branch": "job/1",
+          "base_ref": null,
+          "knowledge_tags": [],
+          "factory": null,
+          "created_at": "2026-07-22T10:00:00Z",
+          "ready_at": null
+        }"#;
+        let job: Job = serde_json::from_str(json).unwrap();
+        assert!(job.members.is_empty());
+        assert!(!job.is_batch());
+        assert_eq!(job.batch_id, None);
+        assert!(!serde_json::to_string(&job).unwrap().contains("batch_id"));
     }
 
     #[test]

@@ -16,6 +16,8 @@ pub struct Job {
     pub title: String,                     // ticket-style instance identity: what this run is for (may be empty). The type carries the *how*; title/description carry the *what*.
     pub description: String,               // the ticket body; injected into work and eval prompts as the §4.3 job brief
     pub deps: Vec<u64>,                    // upstream job ids this job depends on (ordering edges: upstreams must be Done first; their work is in this job's base, their structured results available to it). Plain ids, no named roles — picked at creation, validated at release.
+    pub members: Vec<u64>,                 // member job ids absorbed into this batch (§2.1 batches). Empty for an ordinary job; non-empty marks a batch — one branch implementing all members, evaluated under the union of their criteria, whose single merge completes every member. Defaults empty on old records
+    pub batch_id: Option<u64>,             // set on a member absorbed into a batch: the batch job's id. Some implies the member is (or was) Batched under that batch; cleared when the batch is revoked/fails and the member returns to Frozen. None for ordinary jobs and batches themselves. Defaults None on old records
     pub state: JobState,
     pub branch: String,                    // "job/{id}"; set at creation; actual git branch created when job enters Work
     pub base_ref: Option<String>,          // exact HEAD of default branch; set/updated at every Ready-transition (Frozen→Ready and Blocked→Ready), at Work→Evaluation entry when the branch is rebased onto a moved HEAD (§3.2), and on squash-merge conflict; None until job first enters Ready
@@ -30,7 +32,7 @@ pub struct Job {
     pub ready_at: Option<DateTime<Utc>>,   // set once (immutably) when job first enters Ready; anchor for job_deadline; None until then
 }
 
-pub enum JobState { Draft, Frozen, Blocked, Ready, Work, Evaluation, WrapUp, Escalated, Stalled, Done, Revoked }
+pub enum JobState { Draft, Frozen, Batched, Blocked, Ready, Work, Evaluation, WrapUp, Escalated, Stalled, Done, Revoked }
 
 pub struct Escalation {
     pub reason: String,             // machine reason code, matching the job-escalated / job-stalled event reason (e.g. "launch_validation_failed", "work_retries_exhausted", "eval_abort", "job_deadline_exceeded")
@@ -613,6 +615,9 @@ The authoritative definition of all valid job state transitions. No transition e
 | `Draft` | `Ready` | `POST .../release` accepted | All deps Done | Finalize the edited definition; record `base_ref` = current default HEAD; set `ready_at`; publish `job-finalized` then `job-released` |
 | `Draft` | `Blocked` | `POST .../release` accepted | At least one dep not Done | Finalize the edited definition; publish `job-finalized` then `job-released` |
 | `Frozen` | `Draft` | `POST .../jobs/{seq}/draft` accepted | Job is Frozen (never released) | Reopen for editing; publish `job-drafted` |
+| `Frozen` | `Batched` | A batch that names this job as a member is created (`req.jobs.create.*` with `members`) | Job is Frozen, matches the batch type, is not already batched, and is not itself a batch (§2.1 batches) | Set `batch_id` = the batch's seq; publish `job-batched` |
+| `Batched` | `Frozen` | The owning batch is revoked/fails (§2.1 batches) | — | Clear `batch_id`; publish `job-unbatched` (the member is re-batchable) |
+| `Batched` | `Done` | The owning batch reaches Done — its single merge completes every member | — | Stamp `completed_at`; publish `job-completed-via-batch` (with `batch_id`), then unblock the member's dependents exactly as an individual Done would |
 | `Frozen` | `Ready` | `POST .../release` accepted | All deps Done | Record `base_ref` = current default HEAD; set `ready_at`; publish `job-released` |
 | `Frozen` | `Blocked` | `POST .../release` accepted | At least one dep not Done | Publish `job-released` |
 | `Blocked` | `Ready` | Last upstream dep reaches Done | All deps Done; re-validation of static config at `base_ref` passes | Record `base_ref` = current default HEAD; set `ready_at`; publish `job-unblocked` |
@@ -645,11 +650,12 @@ The authoritative definition of all valid job state transitions. No transition e
 | `Stalled` | `Ready` | Operator resolves a pre-Work escalation with `action: Retry`; the failed step succeeds (re-validation passes / re-enqueue) — see §1.2 pre-Work escalations | — | Record `base_ref` = current default HEAD; set `ready_at` if unset; enqueue; publish `job-escalation-resolved` then `job-unblocked` |
 | `Stalled` | `Stalled` | Operator resolves a pre-Work escalation with `action: Retry`; the failed step still fails | — | Create a new Human task describing the failure; job remains Stalled |
 | `Stalled` | `Revoked` | Operator resolves a pre-Work escalation with `action: Revoke` | — | See Revoked transition below; publish `job-escalation-resolved` then `job-revoked` |
-| any non-terminal | `Revoked` | `POST .../revoke` | Job not already Done or Revoked | Kill Running tasks; **close Pending human/escalation tasks** (mark `Done` with a synthetic `TaskResult::Human` — `operator: "system"`, `action: Revoke` — see §1.2 revoke-closes-tasks) so none linger in the operator inbox; cascade Revoked to Frozen/Blocked/Ready dependents (transitively); dependents in Draft/Work/Evaluation/WrapUp/Escalated/Stalled left in current state (a Draft dependent is not yet committed to the graph — its dep-on-a-Revoked-job surfaces as a release-time validation error instead); delete branch `job/{seq}` if it exists; publish `job-revoked` |
+| any non-terminal | `Revoked` | `POST .../revoke` | Job not already Done or Revoked | Kill Running tasks; **close Pending human/escalation tasks** (mark `Done` with a synthetic `TaskResult::Human` — `operator: "system"`, `action: Revoke` — see §1.2 revoke-closes-tasks) so none linger in the operator inbox; cascade Revoked to Frozen/Blocked/Ready dependents (transitively); dependents in Draft/Work/Evaluation/WrapUp/Escalated/Stalled left in current state (a Draft dependent is not yet committed to the graph — its dep-on-a-Revoked-job surfaces as a release-time validation error instead); delete branch `job/{seq}` if it exists; **if the revoked job is a batch, return each `Batched` member to Frozen** (clear `batch_id`, publish `job-unbatched`) rather than dropping it — members are not graph dependents of the batch, so the cascade never touches them; publish `job-revoked` |
 
 **State descriptions:**
 - **Draft** — created with `draft: true`, or a Frozen job reopened via `POST .../draft`; its definition is editable (full-field replace via `PATCH .../jobs/{seq}`) before it enters the DAG for real. Invisible to scheduling, holds no branch, cannot be claimed. Leaves via `release` (→ Ready/Blocked, which finalizes the edited definition) or `revoke`. Other jobs may declare deps on a Draft — they simply stay Blocked/Frozen until it is released and completes. Only a Frozen never-released job may return here; once released, a job is never editable again
 - **Frozen** — created, awaiting operator approval; no execution begins
+- **Batched** — absorbed into a batch (§2.1 batches): the member's changes will be produced on the batch's single branch, and its completion fans out from the batch's merge. Invisible to scheduling, holds no branch of its own, cannot be claimed or released — like Draft. Leaves via `Batched→Done` (batch merged), `Batched→Frozen` (batch revoked/failed; the member is re-batchable), or `revoke`
 - **Blocked** — waiting on upstream dependencies
 - **Ready** — queued for execution; `base_ref` is set
 - **Work** — work task executing; job stays here across retries within the current cycle
@@ -661,6 +667,16 @@ The authoritative definition of all valid job state transitions. No transition e
 - **Revoked** — terminal; reachable from any non-terminal state
 
 The dispatcher is the sole writer of `jobs.*` KV — including creation. All transitions flow through the dispatcher; no other service writes job records.
+
+**Batches.** Related small jobs of the same type accumulate (e.g. web-polish tickets); running them serially wastes agent cycles, gate runs, and publishes. A **batch** collapses that: a batch *is* a job that absorbs N members of the **same type**, produces **one branch** with all the changes, is evaluated under the **union** of the members' criteria, and whose **single completion** finishes every member.
+
+- **Creation** — `POST .../jobs` with a `members: [seq, …]` payload (plus `type`, optional `title`/`description`). Validated **at creation** (a batch is a structural act over existing jobs, not a definition to iterate on): ≥2 members; each exists, is **Frozen**, matches `type`, is **not already batched**, and is **not itself a batch** (no nesting). Member-on-member deps *within* the batch are allowed — satisfied jointly, they drop out of the batch's deps; the batch depends on the **union of the members' external deps minus the members**. The members' additive `eval` lists are unioned **by name** onto the batch (identical duplicates dedup; a same-name-different-definition clash is a creation error, via the same collision primitive as per-job evaluators). The description defaults to an auto-index (`Batch of N {type} jobs: #a #b …`). Each member goes **Frozen→Batched** with `batch_id` set (`job-batched`).
+- **Lifecycle** — thereafter the batch is an ordinary job: release, claim/park, branch `job/{batchseq}`, reworks with branch preservation, merge gate, and the shared type's single `wrap_up` (a web batch publishes **once**). Budgets are per-job in `ExecState`, so the batch gets its own `work_retries`/`rework_budget` for the whole thing.
+- **Prompt** — the work agent and every evaluator receive a batch-aware §4.3 brief: a preamble (*"This is a job batch: implement all N tickets below in this one branch; address every ticket; your closing summary must cover each by number."*) followed by each member's ticket under a `### Ticket #{seq}: {title}` heading. The reviewer judges per-ticket completeness.
+- **Completion** — when the batch reaches Done its completion **fans out**: each member goes **Batched→Done** (stamping `completed_at`, `job-completed-via-batch` with `batch_id`), then each member's dependents unblock exactly as if it had run individually. The single squash's commit body **opens with the member list** (`Batch of N {type} jobs: #a #b …`, mirroring the auto-index), above the agent's closing summary, so git history records which tickets the one merge closed.
+- **Failure / revoke** — a revoked or failed batch returns each `Batched` member to **Frozen** with `batch_id` cleared (`job-unbatched`), so it is re-batchable and re-releasable on its own.
+
+`Batched` is invisible to scheduling, holds no branch of its own, and — like Draft — cannot be claimed or released.
 
 ---
 
@@ -1398,7 +1414,8 @@ POST   /api/v1/projects/{owner}/{project}/jobs
        knowledge_tags optional; merged with job type's default tags
        eval optional; additive per-job evaluators layered on top of the type's list (§1.1 evaluator schema); validated at release — name collisions with the type's evaluators are a 422
        draft optional (default false); with draft:true the job lands in Draft (§2.1) so its definition can be edited before release, instead of Frozen
-       → 201 Created; body: Job record
+       members optional; with a non-empty members:[seq,…] the request creates a BATCH (§2.1 batches) instead of an ordinary job — it absorbs those existing Frozen same-type jobs (→ Batched) and lands one branch for all of them. Validated at creation (≥2 members, each Frozen/same-type/not-already-batched/not-a-batch); 422 otherwise
+       → 201 Created; body: Job record (a batch carries members; each absorbed member carries batch_id)
 GET    /api/v1/projects/{owner}/{project}/jobs                      → 200 OK; body: Job[]
 PATCH  /api/v1/projects/{owner}/{project}/jobs/{seq}                → 200 OK; body: Job; Member+. Full-field replace of a Draft job's definition (same body shape as create, minus draft); 409 unless the job is Draft (§2.1). Validation identical to create (deferred to release)
 POST   /api/v1/projects                                             body: { owner, name } → 201; platform admins only. Creates repo + hook + Code starter template + counter (§12.2); 409 if it exists.
@@ -1511,6 +1528,9 @@ All events are published exclusively by the dispatcher to `job.events.{owner}.{p
 | `job-updated` | `PATCH .../jobs/{seq}` accepted; a Draft job's definition was edited; includes `fields` (the changed creation-payload field names, not the full payload) |
 | `job-drafted` | Frozen → Draft; a never-released job was reopened for editing (`POST .../draft`) |
 | `job-finalized` | Draft → Ready or Blocked; the edited definition was finalized as part of `POST .../release` (fires alongside `job-released`) |
+| `job-batched` | Frozen → Batched; a job was absorbed into a batch (`POST .../jobs` with `members`); includes `batch_id` (§2.1 batches) |
+| `job-unbatched` | Batched → Frozen; the owning batch was revoked/failed and the member was released (re-batchable); includes `batch_id` |
+| `job-completed-via-batch` | Batched → Done; the owning batch's merge completed the member; includes `batch_id` (§2.1 batches) |
 | `job-released` | `POST .../release` accepted; Frozen/Draft → Ready or Blocked |
 | `job-unblocked` | Blocked → Ready (last upstream dep reached Done) |
 | `job-started` | Ready → Work; includes `cycle` |
