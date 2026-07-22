@@ -2,7 +2,8 @@
 //! claims a job's next work attempt without changing the task's declared
 //! kind. Claim → parked Pending task (no container), Pass → evaluation as
 //! usual, Fail → the next attempt launches per the DECLARED kind (the
-//! no-conversion property), unclaim → normal launch, in-flight claim → 409.
+//! no-conversion property) with the branch PRESERVED and the Fail notes
+//! handed off (#121), unclaim → normal launch, in-flight claim → 409.
 
 use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
 use std::sync::Arc;
@@ -272,6 +273,77 @@ async fn claimed_fail_relaunches_next_attempt_per_declared_kind() {
     assert_eq!(tasks[1].attempt, 2);
     assert!(matches!(tasks[1].kind, TaskKind::Agent { .. }));
     assert_eq!(tasks[1].performed_by, None, "attempt 2 ran normally");
+}
+
+/// #121 regression: a human `Fail` resolution is a deliberate handoff at a
+/// clean commit boundary, NOT a crash. The commit the operator pushed to
+/// `job/{seq}` before handing off is PRESERVED (the branch is not reset to
+/// `base_ref`, unlike a container crash), and the `Fail` `structured` notes
+/// ride into the next agent attempt's context like eval findings.
+#[tokio::test]
+async fn claimed_fail_preserves_branch_and_hands_off_notes() {
+    let Some(rig) = rig().await else { return };
+    commit_work(&rig); // the relaunched agent attempt produces output
+
+    let job = rig.handle.create_job(req("retryable")).await.unwrap();
+    rig.handle.claim_job("acme", "api", job.id).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Work).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(rig.provider.runs().is_empty());
+
+    // The operator pushes a commit (an asset stand-in) on the job branch
+    // before handing off — this is the work that must survive the relaunch.
+    let branch = format!("job/{}", job.id);
+    let clone = clone_branch_from(&rig.repo.bare_path(), &branch).await;
+    clone
+        .commit_file("assets/logo.svg", b"<svg>operator asset</svg>", "add asset")
+        .await;
+    clone.push(&branch).await;
+
+    rig.handle
+        .resolve_task(
+            "acme",
+            "api",
+            job.id,
+            1,
+            TaskResolution::Fail {
+                structured: serde_json::json!({ "notes": "assets committed; agent finish the wiring" }),
+                abort: false,
+            },
+            "david",
+        )
+        .await
+        .unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    // The relaunched agent attempt ran, and its prompt carried the handoff
+    // notes like eval findings, attributed to the operator (§1.2 / §3.2).
+    let runs = rig.provider.runs();
+    assert_eq!(runs.len(), 1, "agent picked the handoff up");
+    let prompt = &runs[0].prompt;
+    assert!(
+        prompt.contains("assets committed; agent finish the wiring"),
+        "handoff notes injected into next attempt: {prompt}"
+    );
+    assert!(
+        prompt.contains("operator handoff (david)"),
+        "handoff attributed to the operator: {prompt}"
+    );
+
+    // The operator's pre-handoff commit survived — the branch was PRESERVED,
+    // not reset to base_ref — so the asset merges through to main intact.
+    let merged = rig
+        .repo
+        .manager
+        .read_file_at("acme", "api", "main", "assets/logo.svg")
+        .await
+        .unwrap();
+    assert_eq!(
+        merged.as_deref(),
+        Some("<svg>operator asset</svg>"),
+        "operator's pre-handoff commit was preserved and merged"
+    );
 }
 
 /// No double pickup: while an attempt is in flight — parked for a human or

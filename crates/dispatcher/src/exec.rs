@@ -1154,9 +1154,12 @@ impl Core {
             // Fail consumes the attempt through the normal work-failure path
             // (§1.2 claims): retries remaining → the next attempt launches per
             // the DECLARED kind (an agent picks the work right back up — no
-            // un-conversion), else escalation.
+            // un-conversion), else escalation. A Fail resolution is a deliberate
+            // handoff at a clean commit boundary, so — unlike a container crash —
+            // the branch is PRESERVED and the operator's notes carry forward
+            // (#121).
             (JobState::Work, TaskResolution::Fail { structured, .. }) => {
-                complete_task(&mut task, false, false, Some(structured), None);
+                complete_task(&mut task, false, false, Some(structured.clone()), None);
                 task.state = TaskState::Failed;
                 self.tasks.put(&task).await?;
                 self.publish(
@@ -1177,14 +1180,21 @@ impl Core {
                     .and_then(|e| e.job_type.work_retries)
                     .unwrap_or(0);
                 if task.attempt <= work_retries {
-                    // §2.1: an operator fail-out is a deliberate rejection, not a
-                    // crash — hard-reset to base_ref so the next attempt starts
-                    // clean rather than resuming the declined work.
-                    let job = self.must_get(owner, project, seq)?.clone();
-                    let base_ref = job.base_ref.clone().expect("base_ref set in Work");
-                    self.repos
-                        .reset_branch(owner, project, &job.branch, &base_ref)
-                        .await?;
+                    // §2.1/§3.2 (#121): a HUMAN Fail resolution is a deliberate
+                    // handoff at a clean commit boundary, NOT a crash — PRESERVE
+                    // the branch (and any commits the operator pushed) exactly
+                    // like an eval-failure rework (#56 Change A, enter_work
+                    // preserve-on-exists). Container failures still reset via
+                    // `recover_or_reset_branch`; this resolution path never does.
+                    // The Fail notes ride into the next attempt's context like
+                    // eval findings so the handoff instructions are not dropped.
+                    if let Some(exec) = self.active.get_mut(&key) {
+                        exec.eval_context.push(EvalResult {
+                            evaluator: format!("operator handoff ({operator})"),
+                            pass: false,
+                            structured: Some(structured),
+                        });
+                    }
                     self.launch_work_task(owner, project, seq, task.cycle, task.attempt + 1, false)
                         .await
                 } else {
