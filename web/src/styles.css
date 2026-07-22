@@ -436,6 +436,20 @@ td.actions button {
   color: var(--dim);
 }
 
+/* Muted stand-in for the run button when a Frozen job's deps aren't Done yet.
+   `cursor: help` cues the title tooltip that names the offending deps. */
+.run-gate {
+  display: inline-block;
+  margin-left: 0.3rem;
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  white-space: nowrap;
+  cursor: help;
+}
+.run-gate-dead {
+  color: var(--danger);
+}
+
 .inbox {
   border-color: color-mix(in srgb, var(--orange) 40%, var(--border));
   border-left: 3px solid var(--orange);

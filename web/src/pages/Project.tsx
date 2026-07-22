@@ -64,6 +64,28 @@ export function ProjectPage() {
 
   const jobBySeq = new Map(jobs.map((j) => [j.id, j]))
 
+  // Release readiness of a Frozen job's deps, resolved client-side from the same
+  // jobs fetch (the list already holds every job). Releasing before every dep is
+  // Done is at best a Blocked transition; a dep that is Revoked/Failed can never
+  // satisfy it, so the job is un-runnable. Gate the run button accordingly and
+  // surface which deps are the holdup instead of silently offering a bad action.
+  const depGate = (j: Job) => {
+    const unmet = j.deps.filter((d) => jobBySeq.get(d)?.state !== 'Done')
+    if (unmet.length === 0) return { runnable: true as const }
+    const dead = unmet.filter((d) => {
+      const s = jobBySeq.get(d)?.state as string | undefined
+      return s === 'Revoked' || s === 'Failed'
+    })
+    const refs = (ds: number[]) => ds.map((d) => `#${d}`).join(', ')
+    return {
+      runnable: false as const,
+      dead: dead.length > 0,
+      tip: dead.length
+        ? `un-runnable — ${refs(dead)} ${dead.length > 1 ? 'are' : 'is'} revoked/failed`
+        : `waiting on ${refs(unmet)}`,
+    }
+  }
+
   // A terminal job's pending tasks are zombies — revoke doesn't (yet) close
   // them out server-side, and there is nothing valid to resolve. Hide them so
   // the inbox never offers actions the dispatcher will reject.
@@ -216,7 +238,9 @@ export function ProjectPage() {
             </tr>
           </thead>
           <tbody>
-            {sorted.map((j, i) => (
+            {sorted.map((j, i) => {
+              const gate = j.state === 'Frozen' ? depGate(j) : null
+              return (
               <tr key={j.id} className={i % 2 ? 'row-stripe' : undefined}>
                 <td>
                   <Link to={`/p/${owner}/${project}/jobs/${j.id}`}>{j.id}</Link>
@@ -249,14 +273,22 @@ export function ProjectPage() {
                 </td>
                 <td className="dim">{new Date(j.created_at).toLocaleString()}</td>
                 <td className="actions">
-                  {j.state === 'Frozen' && (
-                    <button
-                      title="hand the job to the dispatcher: work → evaluation → wrap-up"
-                      onClick={() => act(() => api.release(owner, project, j.id))}
-                    >
-                      ▶ run
-                    </button>
-                  )}
+                  {gate &&
+                    (gate.runnable ? (
+                      <button
+                        title="hand the job to the dispatcher: work → evaluation → wrap-up"
+                        onClick={() => act(() => api.release(owner, project, j.id))}
+                      >
+                        ▶ run
+                      </button>
+                    ) : (
+                      <span
+                        className={`run-gate${gate.dead ? ' run-gate-dead' : ''}`}
+                        title={gate.tip}
+                      >
+                        {gate.dead ? '⨯ blocked' : '⏳ waiting'}
+                      </span>
+                    ))}
                   {!j.claim_next &&
                     (j.state === 'Frozen' || j.state === 'Blocked' || j.state === 'Ready') && (
                       <button
@@ -284,7 +316,8 @@ export function ProjectPage() {
                   )}
                 </td>
               </tr>
-            ))}
+              )
+            })}
             {sorted.length === 0 && (
               <tr>
                 <td colSpan={7} className="dim">
