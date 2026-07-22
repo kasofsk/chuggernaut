@@ -229,6 +229,120 @@ async fn artifacts_round_trip_a_blob_larger_than_max_payload() {
     );
 }
 
+/// Operator-uploaded job attachments (a screenshot on a bug report) round-trip
+/// through the same gzip+age object store as transcripts, are listed with their
+/// content type and original size without opening the blob, are scoped per job,
+/// and can be deleted. A larger-than-`max_payload` blob confirms chunking.
+#[tokio::test]
+async fn job_attachments_round_trip_list_and_delete() {
+    let server = require_nats!();
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let (identity, public) = store::secrets::generate_age_keypair();
+    let writer = store
+        .artifacts(store::ArtifactCrypto::encrypt_only(&public).unwrap())
+        .await
+        .unwrap();
+    let reader = store
+        .artifacts(store::ArtifactCrypto::with_identity(&identity).unwrap())
+        .await
+        .unwrap();
+
+    // A screenshot-shaped (incompressible) blob over max_payload, so the
+    // attachment path really exercises object-store chunking.
+    let mut png = Vec::with_capacity(2 * 1024 * 1024);
+    let mut x: u32 = 0x9e37_79b9;
+    while png.len() < 2 * 1024 * 1024 {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        png.extend_from_slice(&x.to_le_bytes());
+    }
+    assert!(png.len() > 1024 * 1024, "fixture must exceed max_payload");
+
+    writer
+        .put_attachment("acme", "api", 42, "mobile-bug.png", "image/png", &png)
+        .await
+        .unwrap();
+    writer
+        .put_attachment(
+            "acme",
+            "api",
+            42,
+            "notes.txt",
+            "text/plain",
+            b"see the crash",
+        )
+        .await
+        .unwrap();
+    // A different job's attachment must not leak into #42's listing.
+    writer
+        .put_attachment("acme", "api", 43, "other.txt", "text/plain", b"unrelated")
+        .await
+        .unwrap();
+
+    // Download returns the bytes decrypted plus the stored metadata.
+    let (meta, bytes) = reader
+        .get_attachment("acme", "api", 42, "mobile-bug.png")
+        .await
+        .unwrap()
+        .expect("attachment present");
+    assert_eq!(bytes, png);
+    assert_eq!(meta.content_type, "image/png");
+    assert_eq!(meta.size, png.len() as u64);
+
+    // Listing reports content type + original size without opening the blob,
+    // scoped to the job, sorted by name.
+    let list = reader.list_attachments("acme", "api", 42).await.unwrap();
+    assert_eq!(
+        list,
+        vec![
+            store::Attachment {
+                name: "mobile-bug.png".into(),
+                content_type: "image/png".into(),
+                size: png.len() as u64,
+            },
+            store::Attachment {
+                name: "notes.txt".into(),
+                content_type: "text/plain".into(),
+                size: 13,
+            },
+        ]
+    );
+
+    // A missing attachment reads as None, not an error.
+    assert!(
+        reader
+            .get_attachment("acme", "api", 42, "nope.png")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Delete removes it; a second delete reports it was already gone.
+    assert!(
+        reader
+            .delete_attachment("acme", "api", 42, "notes.txt")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !reader
+            .delete_attachment("acme", "api", 42, "notes.txt")
+            .await
+            .unwrap()
+    );
+    let names: Vec<String> = reader
+        .list_attachments("acme", "api", 42)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    assert_eq!(names, vec!["mobile-bug.png".to_string()]);
+}
+
 #[tokio::test]
 async fn step_log_upserts_by_step_number() {
     let server = require_nats!();

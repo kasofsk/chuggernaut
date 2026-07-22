@@ -1,4 +1,5 @@
-//! Per-task blob artifacts: Claude session transcripts and container logs.
+//! Blob artifacts: per-task Claude session transcripts and container logs, plus
+//! per-job operator-uploaded attachments (screenshots, reference files; §1.6).
 //!
 //! Stored in a JetStream **Object** Store (chunked internally, so blobs are not
 //! bound by `max_payload`), gzipped, then age-encrypted at rest.
@@ -47,6 +48,43 @@ impl ArtifactKind {
             _ => None,
         }
     }
+}
+
+/// Fallback content type for an attachment whose type is unknown or whose
+/// stored metadata is unreadable.
+pub const DEFAULT_ATTACHMENT_CONTENT_TYPE: &str = "application/octet-stream";
+
+/// Metadata for one operator-uploaded job attachment (spec §1.6).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Attachment {
+    /// Filename as uploaded (the object-name suffix after the job prefix).
+    pub name: String,
+    /// Client-supplied MIME type, echoed back on download.
+    pub content_type: String,
+    /// Original (plaintext) size in bytes.
+    pub size: u64,
+}
+
+/// Pack an attachment's content type and original size into the object
+/// description field, so a listing can report them without opening the blob.
+fn attachment_desc(content_type: &str, size: u64) -> String {
+    serde_json::json!({ "content_type": content_type, "size": size }).to_string()
+}
+
+/// Inverse of [`attachment_desc`], tolerant of a missing or malformed
+/// description (falls back to the default content type and a zero size).
+fn parse_attachment_desc(desc: Option<&str>) -> (String, u64) {
+    desc.and_then(|d| serde_json::from_str::<serde_json::Value>(d).ok())
+        .map(|v| {
+            let content_type = v
+                .get("content_type")
+                .and_then(|c| c.as_str())
+                .unwrap_or(DEFAULT_ATTACHMENT_CONTENT_TYPE)
+                .to_string();
+            let size = v.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+            (content_type, size)
+        })
+        .unwrap_or_else(|| (DEFAULT_ATTACHMENT_CONTENT_TYPE.to_string(), 0))
 }
 
 /// gzip + age. Encrypt-only when built from a public key; encrypt+decrypt from
@@ -180,6 +218,127 @@ impl ArtifactStore {
         self.crypto.open(&sealed).map(Some)
     }
 
+    // ── Job attachments (operator-uploaded files) ──────────────────────────
+    //
+    // A job attachment is an operator-uploaded file carried alongside a job —
+    // a screenshot on a bug report, a reference document. Unlike task
+    // artifacts, it is per-*job*, has an arbitrary filename, and carries a
+    // client-supplied content type. It reuses this store's object bucket and
+    // crypto: the bytes are gzipped + age-encrypted at rest, dodging the 1MB
+    // `max_payload` cap exactly as transcripts do. Like a transcript, an
+    // attachment is presentational reference material — served to the UI, never
+    // injected into an agent prompt.
+
+    /// Store (or replace) an attachment. `content_type` and the original byte
+    /// length ride in the object's description so a listing need not open the
+    /// blob to report them.
+    pub async fn put_attachment(
+        &self,
+        owner: &str,
+        project: &str,
+        job_seq: u64,
+        name: &str,
+        content_type: &str,
+        plaintext: &[u8],
+    ) -> crate::Result<()> {
+        use async_nats::jetstream::object_store::ObjectMetadata;
+        let sealed = self.crypto.seal(plaintext)?;
+        let meta = ObjectMetadata {
+            name: keys::job_attachment_key(owner, project, job_seq, name),
+            description: Some(attachment_desc(content_type, plaintext.len() as u64)),
+            chunk_size: None,
+        };
+        self.obj
+            .put(meta, &mut sealed.as_slice())
+            .await
+            .map_err(|e| StoreError::Nats(format!("attachment put: {e}")))?;
+        Ok(())
+    }
+
+    /// One attachment, decrypted, with its metadata. `None` when absent.
+    pub async fn get_attachment(
+        &self,
+        owner: &str,
+        project: &str,
+        job_seq: u64,
+        name: &str,
+    ) -> crate::Result<Option<(Attachment, Vec<u8>)>> {
+        let key = keys::job_attachment_key(owner, project, job_seq, name);
+        let mut object = match self.obj.get(key.as_str()).await {
+            Ok(o) => o,
+            // The object-store API reports a missing object as an error, not None.
+            Err(_) => return Ok(None),
+        };
+        let (content_type, _) = parse_attachment_desc(object.info.description.as_deref());
+        let mut sealed = Vec::new();
+        object
+            .read_to_end(&mut sealed)
+            .await
+            .map_err(|e| StoreError::Nats(format!("attachment read: {e}")))?;
+        let plaintext = self.crypto.open(&sealed)?;
+        let meta = Attachment {
+            name: name.to_string(),
+            content_type,
+            size: plaintext.len() as u64,
+        };
+        Ok(Some((meta, plaintext)))
+    }
+
+    /// Attachments present on a job, by filename. Reads metadata only — the
+    /// blobs are not opened.
+    pub async fn list_attachments(
+        &self,
+        owner: &str,
+        project: &str,
+        job_seq: u64,
+    ) -> crate::Result<Vec<Attachment>> {
+        use futures::TryStreamExt as _;
+        let prefix = keys::job_attachment_prefix(owner, project, job_seq);
+        let list = self
+            .obj
+            .list()
+            .await
+            .map_err(|e| StoreError::Nats(format!("attachment list: {e}")))?;
+        let infos: Vec<_> = list
+            .try_collect()
+            .await
+            .map_err(|e| StoreError::Nats(format!("attachment list: {e}")))?;
+        let mut out: Vec<Attachment> = infos
+            .iter()
+            .filter(|i| !i.deleted)
+            .filter_map(|i| {
+                let name = i.name.strip_prefix(&prefix)?;
+                let (content_type, size) = parse_attachment_desc(i.description.as_deref());
+                Some(Attachment {
+                    name: name.to_string(),
+                    content_type,
+                    size,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    /// Remove an attachment. Returns `false` when it did not exist.
+    pub async fn delete_attachment(
+        &self,
+        owner: &str,
+        project: &str,
+        job_seq: u64,
+        name: &str,
+    ) -> crate::Result<bool> {
+        let key = keys::job_attachment_key(owner, project, job_seq, name);
+        if self.obj.info(key.as_str()).await.is_err() {
+            return Ok(false);
+        }
+        self.obj
+            .delete(key.as_str())
+            .await
+            .map_err(|e| StoreError::Nats(format!("attachment delete: {e}")))?;
+        Ok(true)
+    }
+
     /// Kinds present for a task.
     pub async fn list_for_task(
         &self,
@@ -236,6 +395,20 @@ mod tests {
         // A sibling task's artifacts must not match this task's prefix.
         let other = keys::artifact_key("acme", "api", 42, 71, "stdout.log");
         assert!(other.strip_prefix(&prefix).is_none());
+    }
+
+    #[test]
+    fn attachment_desc_round_trips_and_tolerates_junk() {
+        let (ct, size) = parse_attachment_desc(Some(&attachment_desc("image/png", 4096)));
+        assert_eq!(ct, "image/png");
+        assert_eq!(size, 4096);
+        // Missing or malformed descriptions fall back gracefully.
+        let (ct, size) = parse_attachment_desc(None);
+        assert_eq!(ct, DEFAULT_ATTACHMENT_CONTENT_TYPE);
+        assert_eq!(size, 0);
+        let (ct, size) = parse_attachment_desc(Some("not json"));
+        assert_eq!(ct, DEFAULT_ATTACHMENT_CONTENT_TYPE);
+        assert_eq!(size, 0);
     }
 
     #[test]

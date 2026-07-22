@@ -600,6 +600,45 @@ pub struct ChannelEntry {
 | `channel-inbox` | `channel.inbox.>` | limits: max-age 7d | Operator→agent messages |
 | `ingest` | `ingest.>` | limits: max-age 30d | External event sources (see §13); factory consumers are durable |
 
+**Object store** — file storage; deletion allowed (unlike the deny-delete streams).
+
+| Object store | Max age | Notes |
+|---|---|---|
+| `artifacts` | 90d | Per-task blobs (transcripts, container logs, §4.2) **and** per-job attachments (§1.6); chunked internally, so blobs are not bound by `max_payload`; gzip + age-encrypted at rest under the `age_artifacts` key |
+
+---
+
+### 1.6 Job Attachments
+
+Operators sometimes need to carry a **file** alongside a job — a screenshot on a
+bug report, a reference document, a log excerpt. These **attachments** are
+operator-uploaded blobs scoped to a single job.
+
+- **Storage.** Attachments share the `artifacts` object store with per-task
+  transcripts/logs (§4.2): chunked internally so a screenshot is not bound by
+  NATS's 1MB `max_payload`, and gzip + age-encrypted at rest under the
+  `age_artifacts` key. Object name: `{owner}.{project}.{job_seq}.attachments.{filename}`.
+  Because a task id is always numeric, the literal `attachments` segment can
+  never collide with a per-task artifact key. Each object's description carries
+  the client-supplied content type and original byte length, so a listing
+  reports both without opening the blob.
+- **Presentational, never injected.** Like [`Job::cover_html`] (§1.1), an
+  attachment is reference material for humans (the operator, a human-work
+  performer): it is served to the UI but is **never** injected into any agent
+  prompt — the §4.3 job brief consumes only title/description. (Binary content
+  such as an image is not agent-readable text in any case.)
+- **API surface** (§6.2), served directly by the api against the object store —
+  not through a dispatcher req/reply, which the 1MB `max_payload` would break
+  for a screenshot, exactly as the per-task artifact routes already do:
+  - `GET .../jobs/{seq}/attachments` — list `{ name, content_type, size }` (Viewer+)
+  - `GET .../jobs/{seq}/attachments/{name}` — download the decrypted bytes under the stored content type (Viewer+)
+  - `PUT .../jobs/{seq}/attachments/{name}` — upload/replace; the raw request body is the file bytes and `Content-Type` is stored (Member+). Size-capped at 16 MiB (over → 413); a path-traversal or control-character filename → 400
+  - `DELETE .../jobs/{seq}/attachments/{name}` — remove (Member+); absent → 404
+
+Attachments are independent of the job record — they are not a `Job` field, so
+they may be added or removed at any point in a job's life without a state
+transition, and old records need no migration.
+
 ---
 
 ## Part 2: Job Lifecycle

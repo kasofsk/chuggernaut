@@ -9,7 +9,9 @@ pub mod subjects;
 pub mod vars;
 pub mod worker;
 
-pub use artifacts::{ArtifactCrypto, ArtifactKind, ArtifactStore};
+pub use artifacts::{
+    ArtifactCrypto, ArtifactKind, ArtifactStore, Attachment, DEFAULT_ATTACHMENT_CONTENT_TYPE,
+};
 pub use stores::{
     Bucket, CounterStore, JobStore, ProjectStore, RdepsStore, StepStore, TaskStore, split_project,
 };

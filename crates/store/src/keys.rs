@@ -79,6 +79,20 @@ pub fn artifact_task_prefix(owner: &str, project: &str, job_seq: u64, task_id: u
     format!("{owner}.{project}.{job_seq}.{task_id}.")
 }
 
+/// Object name for a job attachment — an operator-uploaded file (a screenshot
+/// on a bug report, a reference document). Job-scoped, so the literal
+/// `attachments` segment sits where a task artifact's numeric task id would;
+/// since a task id is always numeric it can never collide. The filename is the
+/// trailing remainder and may itself contain dots.
+pub fn job_attachment_key(owner: &str, project: &str, job_seq: u64, name: &str) -> String {
+    format!("{owner}.{project}.{job_seq}.attachments.{name}")
+}
+
+/// Prefix matching every attachment of one job, for listing.
+pub fn job_attachment_prefix(owner: &str, project: &str, job_seq: u64) -> String {
+    format!("{owner}.{project}.{job_seq}.attachments.")
+}
+
 /// Key within the `knowledge` bucket: `{scope-prefix}.{b64(subject)}.{b64(predicate)}`.
 pub fn knowledge_key(scope: &KnowledgeScope, subject: &str, predicate: &str) -> String {
     let prefix = knowledge_scope_prefix(scope);
@@ -127,6 +141,19 @@ mod tests {
         let parts: Vec<&str> = key.split('.').collect();
         assert_eq!(b64_decode(parts[2]).unwrap(), "payments/stripe-integration");
         assert_eq!(b64_decode(parts[3]).unwrap(), "webhook.retry.policy");
+    }
+
+    /// A job attachment is job-scoped; its `attachments` segment must never be
+    /// mistaken for a task id, and a filename with dots must survive listing.
+    #[test]
+    fn job_attachment_key_layout() {
+        let key = job_attachment_key("acme", "api", 42, "mobile-bug.png");
+        assert_eq!(key, "acme.api.42.attachments.mobile-bug.png");
+        let prefix = job_attachment_prefix("acme", "api", 42);
+        assert_eq!(key.strip_prefix(&prefix), Some("mobile-bug.png"));
+        // A task artifact of the same job must not match the attachment prefix.
+        let task_artifact = artifact_key("acme", "api", 42, 7, "stdout.log");
+        assert!(task_artifact.strip_prefix(&prefix).is_none());
     }
 
     #[test]

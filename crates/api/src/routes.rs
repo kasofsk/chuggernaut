@@ -1186,6 +1186,139 @@ pub async fn artifacts_list(
     Ok(Json(serde_json::json!({ "artifacts": names })).into_response())
 }
 
+// ── Job attachments (§1.6): operator-uploaded files ─────────────────────────
+//
+// Screenshots on a bug report, reference documents. Like transcripts, these
+// stream directly from the object store rather than riding a req/reply through
+// the dispatcher — a screenshot routinely exceeds NATS's 1MB max_payload — and
+// the API encrypts on upload / decrypts on download with the `age_artifacts`
+// identity it already holds. Presentational reference material: never injected
+// into an agent prompt.
+
+/// Upper bound on a single uploaded attachment. Screenshots and short clips
+/// fit comfortably; the same value caps the request body (413 over it).
+pub const MAX_ATTACHMENT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Reject path traversal and control characters in an uploaded filename — it
+/// becomes the object-name suffix and a download path segment.
+fn valid_attachment_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.chars().any(char::is_control)
+}
+
+/// Attachments on a job, so the UI can list and offer them.
+pub async fn attachments_list(
+    State(state): State<SharedState>,
+    Path((owner, project, seq)): Path<(String, String, u64)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    let Some(artifacts) = &state.artifacts else {
+        return Ok(Json(serde_json::json!({ "attachments": [] })).into_response());
+    };
+    let list = artifacts
+        .list_attachments(&owner, &project, seq)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "attachments": list })).into_response())
+}
+
+/// Upload (or replace) a job attachment. Member+; the raw request body is the
+/// file bytes and the `Content-Type` header is stored and echoed on download.
+pub async fn attachment_put(
+    State(state): State<SharedState>,
+    Path((owner, project, seq, name)): Path<(String, String, u64, String)>,
+    Auth(identity): Auth,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> ApiResult<Response> {
+    member_on(&identity, &owner, &project)?;
+    if !valid_attachment_name(&name) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid attachment name",
+        ));
+    }
+    if body.is_empty() {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "empty attachment"));
+    }
+    if body.len() > MAX_ATTACHMENT_BYTES {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("attachment exceeds the {MAX_ATTACHMENT_BYTES}-byte limit"),
+        ));
+    }
+    let artifacts = state.artifacts.as_ref().ok_or_else(|| {
+        ApiError::new(StatusCode::NOT_FOUND, "artifact storage is not configured")
+    })?;
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(store::DEFAULT_ATTACHMENT_CONTENT_TYPE);
+    artifacts
+        .put_attachment(&owner, &project, seq, &name, content_type, &body)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "name": name, "content_type": content_type, "size": body.len(),
+        })),
+    )
+        .into_response())
+}
+
+/// One attachment, decrypted, served under its stored content type.
+pub async fn attachment_get(
+    State(state): State<SharedState>,
+    Path((owner, project, seq, name)): Path<(String, String, u64, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    let artifacts = state.artifacts.as_ref().ok_or_else(|| {
+        ApiError::new(StatusCode::NOT_FOUND, "artifact storage is not configured")
+    })?;
+    let (meta, bytes) = artifacts
+        .get_attachment(&owner, &project, seq, &name)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "attachment not found"))?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, meta.content_type)],
+        bytes,
+    )
+        .into_response())
+}
+
+/// Remove a job attachment. Member+.
+pub async fn attachment_delete(
+    State(state): State<SharedState>,
+    Path((owner, project, seq, name)): Path<(String, String, u64, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    member_on(&identity, &owner, &project)?;
+    let artifacts = state.artifacts.as_ref().ok_or_else(|| {
+        ApiError::new(StatusCode::NOT_FOUND, "artifact storage is not configured")
+    })?;
+    let removed = artifacts
+        .delete_attachment(&owner, &project, seq, &name)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if removed {
+        Ok(StatusCode::NO_CONTENT.into_response())
+    } else {
+        Err(ApiError::new(StatusCode::NOT_FOUND, "attachment not found"))
+    }
+}
+
 /// One artifact, decrypted. Served as bytes, not JSON: a transcript is JSONL
 /// and a log is plain text, and both can be large.
 pub async fn artifact_get(

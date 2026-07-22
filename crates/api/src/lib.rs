@@ -180,6 +180,22 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
             "/api/v1/projects/{owner}/{project}/jobs/{seq}/tasks/{task_id}/artifacts/{kind}",
             get(routes::artifact_get),
         )
+        // Job attachments (§1.6): operator-uploaded files (screenshots, docs)
+        .route(
+            "/api/v1/projects/{owner}/{project}/jobs/{seq}/attachments",
+            get(routes::attachments_list),
+        )
+        .route(
+            "/api/v1/projects/{owner}/{project}/jobs/{seq}/attachments/{name}",
+            get(routes::attachment_get)
+                .put(routes::attachment_put)
+                .delete(routes::attachment_delete)
+                // Raise the body cap above axum's 2MB default so a screenshot
+                // upload is not rejected before the handler runs.
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    routes::MAX_ATTACHMENT_BYTES,
+                )),
+        )
         // SSE (§6.4)
         .route(
             "/api/v1/projects/{owner}/{project}/events",

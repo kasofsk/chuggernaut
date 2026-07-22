@@ -776,6 +776,97 @@ async fn http_bridge_end_to_end() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // ── Job attachments: an operator uploads a screenshot on the job ───────
+    //
+    // Raw bytes off the object store (a screenshot exceeds 1MB max_payload),
+    // encrypted with the same identity as transcripts, behind project authz.
+    let png = b"\x89PNG\r\n\x1a\nmobile UI screenshot bytes".to_vec();
+    let put = |name: &str, ctype: &str, cookie: Option<&str>, bytes: Vec<u8>| {
+        let mut req = Request::builder()
+            .method("PUT")
+            .uri(format!(
+                "/api/v1/projects/acme/api/jobs/1/attachments/{name}"
+            ))
+            .header(header::CONTENT_TYPE, ctype);
+        if let Some(c) = cookie {
+            req = req.header(header::COOKIE, c);
+        }
+        router.clone().oneshot(req.body(Body::from(bytes)).unwrap())
+    };
+
+    // Upload requires auth (Member+): anonymous is rejected.
+    let res = put("bug.png", "image/png", None, png.clone())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    let res = put("bug.png", "image/png", Some(&cookie), png.clone())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    // A traversal-shaped filename is rejected before it can escape the prefix.
+    let res = put("..", "image/png", Some(&cookie), png.clone())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Listing reports the file with its content type and original size.
+    let (status, body, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/jobs/1/attachments",
+        Some(&cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["attachments"],
+        serde_json::json!([{
+            "name": "bug.png",
+            "content_type": "image/png",
+            "size": png.len(),
+        }])
+    );
+
+    // Download returns the exact bytes under the stored content type.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/projects/acme/api/jobs/1/attachments/bug.png")
+        .header(header::COOKIE, &cookie)
+        .body(Body::empty())
+        .unwrap();
+    let res = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get(header::CONTENT_TYPE).unwrap(),
+        "image/png"
+    );
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    assert_eq!(&bytes[..], &png[..]);
+
+    // Delete removes it; the listing goes empty and the file 404s.
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/api/v1/projects/acme/api/jobs/1/attachments/bug.png")
+        .header(header::COOKIE, &cookie)
+        .body(Body::empty())
+        .unwrap();
+    let res = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let (status, _, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/jobs/1/attachments/bug.png",
+        Some(&cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 /// §6.x health probe: `GET /api/v1/health` proves the *dispatcher*, not just
