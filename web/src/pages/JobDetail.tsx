@@ -249,6 +249,8 @@ export function JobDetail() {
               <th>cycle</th>
               <th>kind</th>
               <th>state</th>
+              <th>started</th>
+              <th>dur</th>
               <th>detail</th>
               <th>artifacts</th>
             </tr>
@@ -270,6 +272,10 @@ export function JobDetail() {
                 <td>
                   <TaskBadge state={t.state} />
                 </td>
+                <td className="dim task-time" title={t.started_at ?? undefined}>
+                  {fmtTime(t.started_at)}
+                </td>
+                <td className="dim task-time">{taskDuration(t)}</td>
                 <td className="dim result-cell">{resultSummary(t)}</td>
                 <td>
                   <TaskArtifacts owner={owner} project={project} seq={jobSeq} task={t} />
@@ -278,7 +284,7 @@ export function JobDetail() {
             ))}
             {tasks.length === 0 && (
               <tr>
-                <td colSpan={7} className="dim">
+                <td colSpan={9} className="dim">
                   no tasks yet
                 </td>
               </tr>
@@ -360,6 +366,35 @@ function resultSummary(t: Task): string {
   if ('assessment' in r && typeof r.assessment === 'string') parts.push('assessment ↓')
   else if ('structured' in r && r.structured) parts.push(JSON.stringify(r.structured))
   return parts.join(' · ').slice(0, 200)
+}
+
+// A task's start time as a compact local HH:MM:SS; blank until it starts. The
+// full ISO timestamp rides along as the cell's title tooltip (set by caller).
+function fmtTime(iso: string | null): string {
+  if (!iso) return ''
+  return new Date(iso).toLocaleTimeString([], { hour12: false })
+}
+
+// Humane duration: '42s', '3m 12s', '1h 04m'.
+function fmtDuration(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000))
+  if (total < 60) return `${total}s`
+  const m = Math.floor(total / 60)
+  if (m < 60) return `${m}m ${String(total % 60).padStart(2, '0')}s`
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
+}
+
+// Finished tasks show completed_at − started_at; Running shows elapsed since
+// started_at (recomputed on the existing refresh cadence — no per-second
+// timer); Pending is blank.
+function taskDuration(t: Task): string {
+  if (!t.started_at) return ''
+  const start = new Date(t.started_at).getTime()
+  if (t.state === 'Done' || t.state === 'Failed') {
+    return t.completed_at ? fmtDuration(new Date(t.completed_at).getTime() - start) : ''
+  }
+  if (t.state === 'Running') return fmtDuration(Date.now() - start)
+  return ''
 }
 
 // Plain unified-diff render with line coloring; react-diff-view lands with

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, type Job, type Task } from '../api'
 import { useDebouncedCallback, useProjectEvents } from '../useEvents'
@@ -7,12 +7,18 @@ import { ResolveForm } from '../components/ResolveForm'
 import { ProjectTabs } from '../components/ProjectTabs'
 import { OriginPanel } from '../components/OriginPanel'
 
+type SortKey = 'id' | 'state' | 'type'
+
 export function ProjectPage() {
   const { owner = '', project = '' } = useParams()
   const navigate = useNavigate()
   const [jobs, setJobs] = useState<Job[]>([])
   const [pending, setPending] = useState<Task[]>([])
   const [error, setError] = useState<string | null>(null)
+  // Jobs table controls: column sort (default newest-first) and a filter that
+  // hides finished jobs by default.
+  const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'id', dir: 'desc' })
+  const [showFinished, setShowFinished] = useState(false)
 
   const refresh = useCallback(() => {
     Promise.all([api.jobs(owner, project), api.pendingTasks(owner, project)])
@@ -62,6 +68,42 @@ export function ProjectPage() {
       setError(e instanceof Error ? e.message : 'action failed')
     }
   }
+
+  const toggleSort = (key: SortKey) =>
+    setSort((s) =>
+      s.key === key
+        ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' }
+        : { key, dir: key === 'id' ? 'desc' : 'asc' },
+    )
+  const sortIndicator = (key: SortKey) =>
+    sort.key === key ? <span className="sort-ind">{sort.dir === 'asc' ? '▲' : '▼'}</span> : null
+
+  // Filter + stickiness. The default view hides finished jobs, but a job that
+  // was on screen must not vanish mid-view when the SSE refresh flips it to
+  // Done/Revoked. `pinnedRef` remembers the ids currently shown and unions them
+  // with the filter result on the next refresh, so a live transition stays put;
+  // a job that is already finished the first time we see it is filtered out as
+  // usual. Changing the filter resets the pins (finished rows then disappear).
+  const pinnedRef = useRef<Set<number>>(new Set())
+  const filterKeyRef = useRef(showFinished)
+  if (filterKeyRef.current !== showFinished) {
+    filterKeyRef.current = showFinished
+    pinnedRef.current = new Set()
+  }
+  const passesFilter = (j: Job) => showFinished || (j.state !== 'Done' && j.state !== 'Revoked')
+  const visible = jobs.filter((j) => passesFilter(j) || pinnedRef.current.has(j.id))
+  pinnedRef.current = new Set(visible.map((j) => j.id))
+
+  const sorted = [...visible].sort((a, b) => {
+    let r =
+      sort.key === 'id'
+        ? a.id - b.id
+        : sort.key === 'state'
+          ? a.state.localeCompare(b.state)
+          : a.type.localeCompare(b.type)
+    if (r === 0) r = a.id - b.id // stable tiebreak
+    return sort.dir === 'asc' ? r : -r
+  })
 
   return (
     <div className="page">
@@ -122,21 +164,37 @@ export function ProjectPage() {
             <button>new job</button>
           </Link>
         </div>
+        <div className="tag-row">
+          <button
+            type="button"
+            className={`tag ${showFinished ? 'tag-on' : ''}`}
+            onClick={() => setShowFinished((v) => !v)}
+            title="include Done and Revoked jobs in the list"
+          >
+            show finished
+          </button>
+        </div>
         <div className="table-scroll">
           <table className="jobs">
           <thead>
             <tr>
-              <th>#</th>
+              <th className="sortable" onClick={() => toggleSort('id')}>
+                #{sortIndicator('id')}
+              </th>
               <th>title</th>
-              <th>type</th>
-              <th>state</th>
+              <th className="sortable" onClick={() => toggleSort('type')}>
+                type{sortIndicator('type')}
+              </th>
+              <th className="sortable" onClick={() => toggleSort('state')}>
+                state{sortIndicator('state')}
+              </th>
               <th>deps</th>
               <th>created</th>
               <th></th>
             </tr>
           </thead>
           <tbody>
-            {jobs.map((j) => (
+            {sorted.map((j) => (
               <tr key={j.id}>
                 <td>
                   <Link to={`/p/${owner}/${project}/jobs/${j.id}`}>{j.id}</Link>
@@ -205,10 +263,10 @@ export function ProjectPage() {
                 </td>
               </tr>
             ))}
-            {jobs.length === 0 && (
+            {sorted.length === 0 && (
               <tr>
                 <td colSpan={7} className="dim">
-                  no jobs yet
+                  {jobs.length === 0 ? 'no jobs yet' : 'no jobs match — try “show finished”'}
                 </td>
               </tr>
             )}

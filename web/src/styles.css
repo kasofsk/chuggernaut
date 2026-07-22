@@ -349,6 +349,24 @@ table.jobs td {
   border-bottom: 1px solid var(--border-faint);
   vertical-align: top;
 }
+table.jobs th.sortable {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+table.jobs th.sortable:hover {
+  color: var(--text);
+}
+.sort-ind {
+  margin-left: 0.25rem;
+  font-size: 0.7em;
+  color: var(--accent);
+}
+/* Start-time and duration cells: keep them on one line and align the digits. */
+.task-time {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 table.jobs tbody tr:hover {
   background: color-mix(in srgb, var(--text) 4%, transparent);
 }
