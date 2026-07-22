@@ -356,7 +356,7 @@ export function JobDetail() {
 
       <TaskReports tasks={tasks} />
 
-      <ChannelLog events={events} tasks={tasks} />
+      <ChannelLog events={events} />
 
       {diff && diff.diff && (
         <section className="card">
@@ -814,7 +814,7 @@ function DiffView({ diff }: { diff: string }) {
  * status cache with a 7-day TTL, not a record. The durable history is the
  * `job-events` stream, which is also what feeds this page over SSE.
  */
-function ChannelLog({ events, tasks }: { events: JobEvent[]; tasks: Task[] }) {
+function ChannelLog({ events }: { events: JobEvent[] }) {
   const posts = events.filter(
     (e) => e.event_type === 'channel-update' || e.event_type === 'channel-reply',
   )
@@ -831,14 +831,15 @@ function ChannelLog({ events, tasks }: { events: JobEvent[]; tasks: Task[] }) {
           // channel-update is the agent's own progress note.
           const text = String((reply ? e.text : e.message) ?? '')
           const percent = !reply && typeof e.percent === 'number' ? e.percent : null
-          const origin = channelOrigin(e, tasks)
+          const origin = channelOrigin(e)
           return (
             <li className={reply ? 'channel-post channel-reply' : 'channel-post'} key={i}>
               <div className="channel-head">
                 <time className="dim channel-time" title={fmtIso(String(e.ts))}>
                   {fmtStamp(String(e.ts))}
                 </time>
-                <span className="channel-who">{reply ? '↩ reply' : (origin ?? 'agent')}</span>
+                {origin && <span className="badge channel-origin">{origin}</span>}
+                <span className="channel-who">{reply ? '↩ reply' : 'agent'}</span>
                 {percent != null && <span className="badge badge-blue pct">{percent}%</span>}
               </div>
               <Markdown text={text} className="channel-md" />
@@ -850,49 +851,31 @@ function ChannelLog({ events, tasks }: { events: JobEvent[]; tasks: Task[] }) {
   )
 }
 
-// Best-effort attribution for a channel post. Channel events are open-keyed
-// (useEvents.ts JobEvent), so we prefer an explicit `task_id`/`cycle` if the
-// payload carries one. Today the job-events channel frames DON'T — no task
-// attribution rides on the wire (backend gap) — so we fall back to correlating
-// the post's timestamp against task start/complete windows and label it
-// best-effort ("during task 3 · work · cycle 2") rather than fake precision.
-function channelOrigin(e: JobEvent, tasks: Task[]): string | null {
-  const taskId = numField(e, 'task_id') ?? numField(e, 'task')
-  const explicit = taskId != null ? tasks.find((t) => t.id === taskId) : undefined
-  const t = explicit ?? taskAtTime(tasks, String(e.ts))
-  if (!t) return null
-  const cycle = numField(e, 'cycle') ?? t.cycle
-  const phase = t.phase.toLowerCase()
-  const label = `task ${t.id} · ${phase} · cycle ${cycle}`
-  return explicit ? label : `during ${label}`
-}
-
-// The task whose [started_at, completed_at] window brackets the given instant;
-// among overlaps the latest-started wins (the most recently active task). Used
-// to attribute channel posts that carry no task id of their own.
-function taskAtTime(tasks: Task[], iso: string): Task | undefined {
-  const at = new Date(iso).getTime()
-  if (Number.isNaN(at)) return undefined
-  let best: Task | undefined
-  let bestStart = -Infinity
-  for (const t of tasks) {
-    if (!t.started_at) continue
-    const start = new Date(t.started_at).getTime()
-    if (Number.isNaN(start) || start > at) continue
-    const end = t.completed_at ? new Date(t.completed_at).getTime() : Infinity
-    if (at > end) continue
-    if (start > bestStart) {
-      best = t
-      bestStart = start
-    }
-  }
-  return best
+// Attribution for a channel post, straight from the event. Channel frames now
+// carry their originating task's identity end to end (spec §6.3): `task_id`, an
+// optional `phase`, and the evaluator name when the post came from an evaluator.
+// We render a compact chip consistent with the Reports thread headers
+// ("task 3 · review"). Legacy posts carry none of this → null (no chip), which
+// is why the old timestamp-window guessing is gone.
+function channelOrigin(e: JobEvent): string | null {
+  const taskId = numField(e, 'task_id')
+  if (taskId == null) return null
+  const evaluator = strField(e, 'evaluator')
+  const phase = strField(e, 'phase')
+  const detail = evaluator ?? phase?.toLowerCase()
+  return detail ? `task ${taskId} · ${detail}` : `task ${taskId}`
 }
 
 // A numeric field off an open-keyed event, or null when absent/non-numeric.
 function numField(e: JobEvent, key: string): number | null {
   const v = e[key]
   return typeof v === 'number' ? v : null
+}
+
+// A non-empty string field off an open-keyed event, or null.
+function strField(e: JobEvent, key: string): string | null {
+  const v = e[key]
+  return typeof v === 'string' && v.length > 0 ? v : null
 }
 
 // Who ran the task: the agent model (kind.model on Agent tasks) or, for a

@@ -153,7 +153,12 @@ impl Core {
                 owner,
                 project,
                 seq,
-                ChannelRole::Eval { task_id },
+                // Read-only access, like an evaluator; triage runs no channel
+                // MCP (§1.2), so the evaluator-name origin is never read.
+                ChannelRole::Eval {
+                    task_id,
+                    evaluator: String::new(),
+                },
                 TRIAGE_TIMEOUT,
             )
             .await?;

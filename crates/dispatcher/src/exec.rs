@@ -346,7 +346,7 @@ impl Core {
                 &job.branch,
                 &job_type,
                 &job_type.work.secrets,
-                ChannelRole::Work,
+                ChannelRole::Work { task_id },
                 work_timeout,
             )
             .await?;
@@ -368,8 +368,14 @@ impl Core {
                     .await?;
                 let (mcp_servers, mut files) = self.channel_mcp(&env);
                 files.extend(
-                    self.ssh_credential_files(owner, project, seq, ChannelRole::Work, work_timeout)
-                        .await?,
+                    self.ssh_credential_files(
+                        owner,
+                        project,
+                        seq,
+                        ChannelRole::Work { task_id },
+                        work_timeout,
+                    )
+                    .await?,
                 );
                 let config = AgentRunConfig {
                     image: job_type.image.clone().unwrap_or_default(),
@@ -444,7 +450,13 @@ impl Core {
                     cmd: bootstrap_cmd(&["sh".into(), "-c".into(), run]),
                     env,
                     files: self
-                        .ssh_credential_files(owner, project, seq, ChannelRole::Work, work_timeout)
+                        .ssh_credential_files(
+                            owner,
+                            project,
+                            seq,
+                            ChannelRole::Work { task_id },
+                            work_timeout,
+                        )
                         .await?,
                     cpu_limit: job_type.resources.as_ref().and_then(|r| r.cpu),
                     memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
@@ -1183,24 +1195,33 @@ impl Core {
             ),
             ("NATS_URL".into(), self.config.nats_url.clone()),
         ]);
-        match role {
-            ChannelRole::Work => {
+        match &role {
+            ChannelRole::Work { .. } => {
                 env.insert("CHANNEL_ROLE".into(), "work".into());
             }
-            ChannelRole::Eval { task_id } => {
+            ChannelRole::Eval { task_id, .. } => {
                 env.insert("CHANNEL_ROLE".into(), "eval".into());
                 env.insert("JOB_TASK_ID".into(), task_id.to_string());
             }
+        }
+        // §6.3 task origin: the channel binary stamps these onto every post so
+        // the event carries which task produced it (no timestamp guessing).
+        env.insert("CHUG_TASK_ID".into(), role.task_id().to_string());
+        env.insert("CHUG_PHASE".into(), role.phase().into());
+        if let Some(evaluator) = role.evaluator() {
+            env.insert("CHUG_EVALUATOR".into(), evaluator.to_string());
         }
         self.inject_git_ssh_command(&mut env);
         // §7.4: scoped credentials valid for task_timeout, minted per launch.
         if let Some(seed) = &self.config.nats_account_seed {
             let signer = auth::nats::NatsUserSigner::from_account_seed(seed)
                 .map_err(|e| CoreError::Config(format!("nats account seed: {e}")))?;
-            let perms = match role {
-                ChannelRole::Work => auth::nats::work_container_permissions(owner, project, seq),
-                ChannelRole::Eval { task_id } => {
-                    auth::nats::eval_container_permissions(owner, project, seq, task_id)
+            let perms = match &role {
+                ChannelRole::Work { .. } => {
+                    auth::nats::work_container_permissions(owner, project, seq)
+                }
+                ChannelRole::Eval { task_id, .. } => {
+                    auth::nats::eval_container_permissions(owner, project, seq, *task_id)
                 }
             };
             let ttl = chrono::Duration::from_std(creds_ttl)
@@ -1209,9 +1230,9 @@ impl Core {
                 .mint_creds(
                     &format!(
                         "{owner}-{project}-{seq}-{}",
-                        match role {
-                            ChannelRole::Work => "work".to_string(),
-                            ChannelRole::Eval { task_id } => format!("eval-{task_id}"),
+                        match &role {
+                            ChannelRole::Work { .. } => "work".to_string(),
+                            ChannelRole::Eval { task_id, .. } => format!("eval-{task_id}"),
                         }
                     ),
                     &perms,
@@ -1385,7 +1406,7 @@ impl Core {
         }
         let ca = auth::ssh::SshCa::new(self.config.ssh_ca.as_ref().expect("checked"));
         let access = match role {
-            ChannelRole::Work => auth::ssh::CertAccess::ReadWrite,
+            ChannelRole::Work { .. } => auth::ssh::CertAccess::ReadWrite,
             ChannelRole::Eval { .. } => auth::ssh::CertAccess::ReadOnly,
         };
         let ttl =
@@ -1445,11 +1466,39 @@ impl Core {
     }
 }
 
-/// Selects the channel tool set (§4.2) and the §7.4 credential scope.
-#[derive(Debug, Clone, Copy)]
+/// Selects the channel tool set (§4.2), the §7.4 credential scope, and the
+/// task-origin env (§6.3) the channel binary stamps onto its posts.
+#[derive(Debug, Clone)]
 pub(crate) enum ChannelRole {
-    Work,
-    Eval { task_id: u64 },
+    Work { task_id: u64 },
+    Eval { task_id: u64, evaluator: String },
+}
+
+impl ChannelRole {
+    /// The task these credentials/env serve.
+    fn task_id(&self) -> u64 {
+        match self {
+            ChannelRole::Work { task_id } | ChannelRole::Eval { task_id, .. } => *task_id,
+        }
+    }
+
+    /// The phase label stamped as `CHUG_PHASE`. Only agent tasks run the
+    /// channel binary, and agent evaluators post from Evaluation (gate
+    /// evaluators are command-only), so the role maps one-to-one to a phase.
+    fn phase(&self) -> &'static str {
+        match self {
+            ChannelRole::Work { .. } => "Work",
+            ChannelRole::Eval { .. } => "Evaluation",
+        }
+    }
+
+    /// The evaluator name stamped as `CHUG_EVALUATOR`, for eval posts.
+    fn evaluator(&self) -> Option<&str> {
+        match self {
+            ChannelRole::Eval { evaluator, .. } if !evaluator.is_empty() => Some(evaluator),
+            _ => None,
+        }
+    }
 }
 
 /// Fixed container paths for the injected §7.4 SSH credential.

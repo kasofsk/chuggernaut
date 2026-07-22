@@ -368,7 +368,10 @@ impl Core {
                 branch,
                 &job_type,
                 &evaluator.secrets,
-                ChannelRole::Eval { task_id },
+                ChannelRole::Eval {
+                    task_id,
+                    evaluator: evaluator.name.clone(),
+                },
                 eval_timeout,
             )
             .await?;
@@ -387,7 +390,10 @@ impl Core {
                             owner,
                             project,
                             seq,
-                            ChannelRole::Eval { task_id },
+                            ChannelRole::Eval {
+                                task_id,
+                                evaluator: evaluator.name.clone(),
+                            },
                             eval_timeout,
                         )
                         .await?,
@@ -464,7 +470,10 @@ impl Core {
                         owner,
                         project,
                         seq,
-                        ChannelRole::Eval { task_id },
+                        ChannelRole::Eval {
+                            task_id,
+                            evaluator: evaluator.name.clone(),
+                        },
                         eval_timeout,
                     )
                     .await?,
@@ -1520,7 +1529,7 @@ impl Core {
                 &default_branch,
                 &job_type,
                 &job_type.wrap_up.secrets,
-                ChannelRole::Work,
+                ChannelRole::Work { task_id },
                 timeout,
             )
             .await?;
@@ -1535,7 +1544,7 @@ impl Core {
             cmd: bootstrap_cmd(&["sh".into(), "-c".into(), run]),
             env,
             files: self
-                .ssh_credential_files(owner, project, seq, ChannelRole::Work, timeout)
+                .ssh_credential_files(owner, project, seq, ChannelRole::Work { task_id }, timeout)
                 .await?,
             cpu_limit: job_type.resources.as_ref().and_then(|r| r.cpu),
             memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),

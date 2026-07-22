@@ -16,7 +16,9 @@ pub mod task;
 pub mod user;
 pub mod worker;
 
-pub use channel::{AgentReply, ChannelEntry, ChannelStatus, ChannelUpdate, OperatorMessage};
+pub use channel::{
+    AgentReply, ChannelEntry, ChannelOrigin, ChannelStatus, ChannelUpdate, OperatorMessage,
+};
 pub use duration::{DurationParseError, parse_duration};
 pub use ingest::IngestEvent;
 pub use job::{Escalation, Job, JobState};

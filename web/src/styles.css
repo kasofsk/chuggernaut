@@ -920,6 +920,14 @@ td.actions button {
 .channel-log .pct {
   font-variant-numeric: tabular-nums;
 }
+/* Origin chip: which task produced the post (spec §6.3), consistent with the
+   Reports thread headers. Subtle, so it reads as a label, not a status. */
+.channel-origin {
+  background: var(--inset);
+  border: 1px solid var(--border-faint);
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
 
 /* Rendered agent/operator markdown (channel posts, report summaries/notes).
    Headings are scaled to card context — an h1 here must not read as a page

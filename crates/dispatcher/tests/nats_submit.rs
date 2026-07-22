@@ -210,8 +210,11 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
     // The agent narrates progress the way the channel MCP server does.
     let post_store = store.clone();
     provider.on_run(move |_cfg| async move {
+        // The channel binary stamps its task origin (§6.3); the first post
+        // carries it flattened onto the wire, the second omits it (legacy shape)
+        // — both must survive as events.
         for body in [
-            br#"{"message":"cloning","percent":10}"#.as_slice(),
+            br#"{"message":"cloning","percent":10,"task_id":1,"phase":"Work"}"#.as_slice(),
             br#"{"message":"running tests","percent":60}"#.as_slice(),
         ] {
             let reply = post_store
@@ -281,7 +284,12 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
     assert_eq!(updates.len(), 2, "both updates must survive: {updates:?}");
     assert_eq!(updates[0]["message"], "cloning");
     assert_eq!(updates[0]["percent"], 10);
+    // §6.3: the stamped task origin rides through to the event…
+    assert_eq!(updates[0]["task_id"], 1);
+    assert_eq!(updates[0]["phase"], "Work");
     assert_eq!(updates[1]["message"], "running tests");
+    // …and a legacy post without it still lists, carrying no origin keys.
+    assert!(updates[1].get("task_id").is_none());
     assert_eq!(replies.len(), 1, "reply recorded: {replies:?}");
     assert_eq!(replies[0]["text"], "on it");
 

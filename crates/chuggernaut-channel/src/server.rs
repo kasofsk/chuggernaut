@@ -6,7 +6,7 @@
 use serde_json::{Value, json};
 use std::time::Duration;
 use store::{NatsStore, buckets, subjects};
-use types::{AgentReply, ChannelUpdate};
+use types::{AgentReply, ChannelOrigin, ChannelUpdate};
 
 /// Container identity + role, read from the injected env (spec §4.1).
 pub struct JobContext {
@@ -20,6 +20,10 @@ pub struct JobContext {
     pub nats_url: String,
     /// `.creds`-format scoped credentials (§7.4); empty → unauthenticated dev.
     pub nats_creds: String,
+    /// The originating task's identity, stamped onto every update/reply so the
+    /// event carries its provenance end to end (spec §6.3). Read from the
+    /// `CHUG_TASK_ID` / `CHUG_PHASE` / `CHUG_EVALUATOR` env the dispatcher sets.
+    pub origin: ChannelOrigin,
 }
 
 impl JobContext {
@@ -39,6 +43,15 @@ impl JobContext {
                 .and_then(|t| t.parse().ok()),
             nats_url: var("NATS_URL")?,
             nats_creds: std::env::var("NATS_CREDS").unwrap_or_default(),
+            origin: ChannelOrigin {
+                task_id: std::env::var("CHUG_TASK_ID")
+                    .ok()
+                    .and_then(|t| t.parse().ok()),
+                phase: std::env::var("CHUG_PHASE").ok().filter(|s| !s.is_empty()),
+                evaluator: std::env::var("CHUG_EVALUATOR")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
+            },
         })
     }
 }
@@ -179,6 +192,7 @@ impl Server {
                         .get("percent")
                         .and_then(|p| p.as_u64())
                         .map(|p| p as u8),
+                    origin: self.ctx.origin.clone(),
                 };
                 let subject = subjects::channel_update(&owner, &project, seq);
                 self.submit(
@@ -196,6 +210,7 @@ impl Server {
                         .ok_or("text is required")?
                         .to_string(),
                     sent_at: chrono::Utc::now(),
+                    origin: self.ctx.origin.clone(),
                 };
                 let subject = subjects::channel_reply(&owner, &project, seq);
                 self.submit(
@@ -276,7 +291,52 @@ mod tests {
             task_id: (role == "eval").then_some(7),
             nats_url: "nats://unused".into(),
             nats_creds: String::new(),
+            origin: ChannelOrigin::default(),
         }
+    }
+
+    #[test]
+    fn origin_is_stamped_onto_posts_as_flat_wire_fields() {
+        // The binary stamps its container origin onto every post; it must
+        // serialize to the flat `task_id`/`phase`/`evaluator` keys the
+        // dispatcher parses back off `req.channel.>` (spec §6.3).
+        let origin = ChannelOrigin {
+            task_id: Some(3),
+            phase: Some("Evaluation".into()),
+            evaluator: Some("review".into()),
+        };
+        let update = ChannelUpdate {
+            message: "checking".into(),
+            percent: Some(50),
+            origin: origin.clone(),
+        };
+        let v = serde_json::to_value(&update).unwrap();
+        assert_eq!(v["message"], "checking");
+        assert_eq!(v["task_id"], 3);
+        assert_eq!(v["phase"], "Evaluation");
+        assert_eq!(v["evaluator"], "review");
+
+        let reply = AgentReply {
+            text: "on it".into(),
+            sent_at: chrono::Utc::now(),
+            origin,
+        };
+        assert_eq!(serde_json::to_value(&reply).unwrap()["task_id"], 3);
+    }
+
+    #[test]
+    fn legacy_post_without_origin_omits_the_fields() {
+        // A default (empty) origin stamps nothing — old consumers see exactly
+        // today's `{message, percent}` shape.
+        let update = ChannelUpdate {
+            message: "hi".into(),
+            percent: None,
+            origin: ChannelOrigin::default(),
+        };
+        let v = serde_json::to_value(&update).unwrap();
+        assert!(v.get("task_id").is_none());
+        assert!(v.get("phase").is_none());
+        assert!(v.get("evaluator").is_none());
     }
 
     #[tokio::test]

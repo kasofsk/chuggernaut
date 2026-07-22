@@ -15,6 +15,25 @@ pub struct ChannelEntry {
 pub struct ChannelUpdate {
     pub message: String,
     pub percent: Option<u8>,
+    /// Which task produced this post (spec §4.2, §6.3). Stamped by the channel
+    /// binary from its container env; absent on legacy posts.
+    #[serde(flatten)]
+    pub origin: ChannelOrigin,
+}
+
+/// The originating task's identity, carried end to end on every channel post so
+/// the UI attributes a post to a task directly rather than by timestamp
+/// correlation (spec §6.3 events). Every field is optional for back-compat:
+/// legacy events carry none and render as before.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChannelOrigin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// The evaluator's name when the post came from an evaluator task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluator: Option<String>,
 }
 
 /// Appended to the `channel-inbox` stream — never overwritten.
@@ -28,6 +47,9 @@ pub struct OperatorMessage {
 pub struct AgentReply {
     pub text: String,
     pub sent_at: DateTime<Utc>,
+    /// Which task produced this reply (spec §4.2, §6.3); absent on legacy posts.
+    #[serde(flatten)]
+    pub origin: ChannelOrigin,
 }
 
 /// Response body for `GET .../jobs/{seq}/status`.

@@ -960,6 +960,8 @@ BASE_BRANCH     main
 REPO_URL        ssh://git@platform/acme/api.git
 NATS_URL        nats://...
 NATS_TOKEN      <work-scoped JWT — see §7.4>
+CHUG_TASK_ID    43              # originating task id, stamped onto channel posts (§6.3)
+CHUG_PHASE      Work            # originating task phase, stamped onto channel posts (§6.3)
 # secrets (decrypted from age-encrypted NATS KV; named as declared in work.secrets:)
 # platform agent credentials (agent containers only): every secret in the reserved global/agents scope, env-named by the secret; declared secrets win on collision
 GITHUB_TOKEN    ...
@@ -977,6 +979,10 @@ BASE_BRANCH     main
 REPO_URL        ssh://git@platform/acme/api.git
 NATS_URL        nats://...
 NATS_TOKEN      <eval-scoped JWT — see §7.4>
+JOB_TASK_ID     43              # eval task id; addresses req.eval.submit (§4.2)
+CHUG_TASK_ID    43              # originating task id, stamped onto channel posts (§6.3)
+CHUG_PHASE      Evaluation      # originating task phase, stamped onto channel posts (§6.3)
+CHUG_EVALUATOR  review          # evaluator name, stamped onto channel posts (§6.3)
 # secrets (only those declared in the evaluator's own secrets: field)
 # vars (from NATS KV; named as declared in top-level vars:)
 RUST_EDITION    2021
@@ -1483,6 +1489,16 @@ All events are published exclusively by the dispatcher to `job.events.{owner}.{p
 | `task-failed` | Task reached Failed |
 | `step-started` | Harness reported a step beginning (see §4.5); includes `task_id`, `step`, `kind` (`author`\|`inline-review`), `iteration` |
 | `step-completed` | Harness reported a step finished; includes `status` (`done`\|`failed`) and, for inline-review steps, `pass` and `findings` |
+| `channel-update` | Agent posted progress via `req.channel.update.*` (see §4.2); includes `message`, optional `percent`, and the originating-task fields below |
+| `channel-reply` | Agent replied to the operator via `req.channel.reply.*` (see §4.2); includes `text`, `sent_at`, and the originating-task fields below |
+
+**Channel-post origin fields.** `channel-update` and `channel-reply` events carry the identity of the task that produced them, so a consumer attributes a post to its task directly rather than by correlating timestamps against task windows (which is ambiguous the moment two tasks overlap). The channel binary stamps these from its container env (`CHUG_TASK_ID` / `CHUG_PHASE` / `CHUG_EVALUATOR`, set by the dispatcher when composing the agent container) onto every post; the dispatcher preserves them on the event:
+
+- `task_id`: `u64` — the originating task's id.
+- `phase`: optional string — `Work` or `Evaluation`.
+- `evaluator`: optional string — the evaluator's name, present only for evaluator posts.
+
+All three are **optional for back-compat**: a post from an older container (or a command binary that runs no channel MCP) carries none, and the event omits the fields entirely — old consumers render it exactly as before.
 
 ---
 

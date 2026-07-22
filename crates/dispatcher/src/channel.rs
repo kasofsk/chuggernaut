@@ -42,32 +42,112 @@ impl Core {
             last_reply: None,
         });
 
-        let (event_type, payload) = match &post {
-            ChannelPost::Update(update) => {
-                entry.update = Some(update.clone());
-                (
-                    "channel-update",
-                    serde_json::json!({
-                        "message": update.message,
-                        "percent": update.percent,
-                    }),
-                )
-            }
-            ChannelPost::Reply(reply) => {
-                entry.last_reply = Some(reply.clone());
-                (
-                    "channel-reply",
-                    serde_json::json!({
-                        "text": reply.text,
-                        "sent_at": reply.sent_at,
-                    }),
-                )
-            }
-        };
+        match &post {
+            ChannelPost::Update(update) => entry.update = Some(update.clone()),
+            ChannelPost::Reply(reply) => entry.last_reply = Some(reply.clone()),
+        }
+        let (event_type, payload) = channel_event(&post);
         bucket.put_json(&key, &entry).await?;
 
         // The event is the history; the KV write above is only the latest-value
         // cache that `GET .../status` reads.
         self.publish(owner, project, seq, event_type, payload).await
+    }
+}
+
+/// The `job-events` frame for a channel post (spec §6.3). Carries the post's
+/// content plus its originating task's identity (`task_id` / `phase` /
+/// `evaluator`) when the channel binary stamped one — omitted for legacy posts
+/// so old events render exactly as before.
+fn channel_event(post: &ChannelPost) -> (&'static str, serde_json::Value) {
+    let (event_type, mut payload, origin) = match post {
+        ChannelPost::Update(update) => (
+            "channel-update",
+            serde_json::json!({
+                "message": update.message,
+                "percent": update.percent,
+            }),
+            &update.origin,
+        ),
+        ChannelPost::Reply(reply) => (
+            "channel-reply",
+            serde_json::json!({
+                "text": reply.text,
+                "sent_at": reply.sent_at,
+            }),
+            &reply.origin,
+        ),
+    };
+    if let Some(obj) = payload.as_object_mut() {
+        if let Some(task_id) = origin.task_id {
+            obj.insert("task_id".into(), serde_json::json!(task_id));
+        }
+        if let Some(phase) = &origin.phase {
+            obj.insert("phase".into(), serde_json::json!(phase));
+        }
+        if let Some(evaluator) = &origin.evaluator {
+            obj.insert("evaluator".into(), serde_json::json!(evaluator));
+        }
+    }
+    (event_type, payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::channel_event;
+    use crate::core::ChannelPost;
+    use types::{AgentReply, ChannelOrigin, ChannelUpdate};
+
+    /// A work agent's post carries its task_id and phase onto the event (§6.3).
+    #[test]
+    fn work_update_carries_task_id_and_phase() {
+        let (event_type, payload) = channel_event(&ChannelPost::Update(ChannelUpdate {
+            message: "running tests".into(),
+            percent: Some(60),
+            origin: ChannelOrigin {
+                task_id: Some(1),
+                phase: Some("Work".into()),
+                evaluator: None,
+            },
+        }));
+        assert_eq!(event_type, "channel-update");
+        assert_eq!(payload["message"], "running tests");
+        assert_eq!(payload["task_id"], 1);
+        assert_eq!(payload["phase"], "Work");
+        assert!(payload.get("evaluator").is_none());
+    }
+
+    /// An evaluator's post carries the evaluator name (§6.3) — the case the UI
+    /// could previously only guess by timestamp when tasks overlapped.
+    #[test]
+    fn evaluator_post_carries_evaluator_name() {
+        let (_t, payload) = channel_event(&ChannelPost::Reply(AgentReply {
+            text: "looks good".into(),
+            sent_at: chrono::Utc::now(),
+            origin: ChannelOrigin {
+                task_id: Some(4),
+                phase: Some("Evaluation".into()),
+                evaluator: Some("review".into()),
+            },
+        }));
+        assert_eq!(payload["task_id"], 4);
+        assert_eq!(payload["phase"], "Evaluation");
+        assert_eq!(payload["evaluator"], "review");
+    }
+
+    /// A legacy post (no origin) still produces a well-formed event — none of
+    /// the origin keys appear, so old consumers render it as today.
+    #[test]
+    fn legacy_post_without_origin_still_events() {
+        let (event_type, payload) = channel_event(&ChannelPost::Update(ChannelUpdate {
+            message: "cloning".into(),
+            percent: Some(10),
+            origin: ChannelOrigin::default(),
+        }));
+        assert_eq!(event_type, "channel-update");
+        assert_eq!(payload["message"], "cloning");
+        assert!(payload.get("task_id").is_none());
+        assert!(payload.get("phase").is_none());
+        assert!(payload.get("evaluator").is_none());
     }
 }
