@@ -85,9 +85,13 @@ swap)
   SWAP_IMAGE="${WORKER_SWAP_IMAGE:-docker:cli}"
 
   # Optional node-local build cache, re-applied so caching survives the swap.
+  # ENV ONLY, exactly like build-worker.sh's daemon run: the daemon adds the
+  # cache bind to each sibling job container via the docker socket (host path),
+  # so the DAEMON container needs no cache mount of its own. Carrying this
+  # forward is what stops a refresh from silently dropping caching (#55/#82).
   CACHE_ARGS=""
   if [ -n "${WORKER_CACHE_DIR:-}" ]; then
-    CACHE_ARGS="-e WORKER_CACHE_DIR=$WORKER_CACHE_DIR -v $WORKER_CACHE_DIR:$WORKER_CACHE_DIR"
+    CACHE_ARGS="-e WORKER_CACHE_DIR=$WORKER_CACHE_DIR"
   fi
 
   # Recover the REAL host bind sources from the running daemon rather than

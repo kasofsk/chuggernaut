@@ -18,6 +18,13 @@ use types::ProjectRole;
 /// forced command.
 pub const SSH_LOGIN_PRINCIPAL: &str = "git";
 
+/// Sentinel job seq embedded in a worker node's read-only credential
+/// ([`SshCa::issue_node_credential`]). A node is not a real job; the principal
+/// is only borrowed for its repo-scoped read-only *pull* authorization (§5.2),
+/// where the seq is never consulted (pull compares owner/project only, and
+/// read-only forbids every push).
+pub const NODE_CERT_SEQ: u64 = 0;
+
 /// Env names `ssh-shell` exports for the repo's pre-receive hook.
 pub const ENV_PRINCIPAL: &str = "CHUGGERNAUT_PRINCIPAL";
 pub const ENV_ACCESS: &str = "CHUGGERNAUT_ACCESS";
@@ -324,6 +331,71 @@ impl SshCa {
             .sign(
                 &public_key,
                 &principal,
+                &principal,
+                validity,
+                &force_command,
+            )
+            .await?;
+        let private_key = tokio::fs::read_to_string(&key_path)
+            .await
+            .map_err(internal)?;
+        Ok(JobSshCredential {
+            private_key,
+            public_key,
+            certificate,
+        })
+    }
+
+    /// Mint a long-lived READ-ONLY credential for a worker node (spec §3.1):
+    /// the node fetches the platform repo's build context over the ssh front on
+    /// self-refresh, so it needs a git credential that can *pull* exactly that
+    /// repo and nothing else. Authorization is the same repo-scoped read-only
+    /// pull an eval container's cert grants (§7.4) — realized with the
+    /// repo-scoped job principal at a sentinel seq, so it adds NO new branch to
+    /// the §5.2 authorization matrix. The cert `key_id` labels the node for
+    /// `ssh-keygen -L` forensics; the authorizing principal stays the repo scope.
+    /// Validity is long (renew by re-running) — a node credential is
+    /// operator-installed, not per-job ephemeral.
+    pub async fn issue_node_credential(
+        &self,
+        owner: &str,
+        project: &str,
+        node: &str,
+        validity: chrono::Duration,
+    ) -> Result<JobSshCredential, AuthError> {
+        let dir = tempfile::tempdir().map_err(internal)?;
+        let key_path = dir.path().join("worker_git");
+        run(
+            "ssh-keygen",
+            &[
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-q",
+                "-C",
+                &format!("worker-node-{node}"),
+                "-f",
+                path_str(&key_path)?,
+            ],
+        )
+        .await?;
+        let public_key = tokio::fs::read_to_string(key_path.with_extension("pub"))
+            .await
+            .map_err(internal)?;
+
+        // Repo-scoped read-only pull, identical to an eval cert's authorization.
+        let principal = crate::job_ssh_principal(owner, project, NODE_CERT_SEQ);
+        let force_command = format!(
+            "chuggernaut ssh-shell --kind job --principal {principal} --access {}",
+            CertAccess::ReadOnly.as_str()
+        );
+        let certificate = self
+            .sign(
+                &public_key,
+                // key_id names the node so audit logs read `node-{node}`, not a
+                // fake job number.
+                &format!("node-{node}"),
                 &principal,
                 validity,
                 &force_command,
@@ -686,6 +758,54 @@ mod tests {
         let listing = String::from_utf8_lossy(&out.stdout).into_owned();
         assert!(listing.contains("job:acme/api:42"), "{listing}");
         assert!(listing.contains("--access ro"), "{listing}");
+    }
+
+    #[tokio::test]
+    async fn node_credential_is_repo_scoped_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca");
+        run(
+            "ssh-keygen",
+            &["-q", "-t", "ed25519", "-N", "", "-f", ca.to_str().unwrap()],
+        )
+        .await
+        .unwrap();
+
+        let cred = SshCa::new(&ca)
+            .issue_node_credential("acme", "platform", "air", chrono::Duration::days(3650))
+            .await
+            .unwrap();
+        assert!(cred.private_key.contains("OPENSSH PRIVATE KEY"));
+        assert!(
+            cred.certificate
+                .starts_with("ssh-ed25519-cert-v01@openssh.com")
+        );
+
+        let cert_path = dir.path().join("cert.pub");
+        tokio::fs::write(&cert_path, &cred.certificate)
+            .await
+            .unwrap();
+        let listing = ssh_keygen_list(&cert_path).await;
+        // The node is labeled for forensics, scoped to exactly the platform
+        // repo, and read-only.
+        assert!(listing.contains("node-air"), "{listing}");
+        assert!(listing.contains("job:acme/platform:0"), "{listing}");
+        assert!(listing.contains("--access ro"), "{listing}");
+
+        // The authorization it grants: pull the platform repo, nothing else,
+        // and never push.
+        let principal = Principal::parse("job:acme/platform:0");
+        let none = HashMap::new();
+        assert!(authorize_pull(&principal, false, &none, "acme", "platform"));
+        assert!(!authorize_pull(&principal, false, &none, "acme", "other"));
+        assert!(!authorize_push_entry(
+            &principal,
+            CertAccess::ReadOnly,
+            false,
+            &none,
+            "acme",
+            "platform"
+        ));
     }
 
     #[tokio::test]

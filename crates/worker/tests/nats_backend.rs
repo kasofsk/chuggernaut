@@ -40,6 +40,8 @@ async fn setup(
         channel_binary: artifact_path,
         cache_dir: None,
         refresh_script: None,
+        refresh_git_url: None,
+        refresh_git_key: "/data/keys/worker_git".into(),
     };
     let daemon = tokio::spawn(async move {
         if let Err(e) = worker::run(config).await {
@@ -300,6 +302,16 @@ fn spawn_daemon(
     std::fs::create_dir_all(&dir).unwrap();
     let channel = dir.join("chuggernaut-channel");
     std::fs::write(&channel, channel_bytes).unwrap();
+    // A refresh-capable daemon (script wired) also gets a git credential so the
+    // accept path is exercised; the skip-without-credential path is covered by
+    // `refresh_reports_skip_without_git_credential`.
+    let (refresh_git_url, refresh_git_key) = if refresh_script.is_some() {
+        let key = dir.join("worker_git");
+        std::fs::write(&key, b"fake-key").unwrap();
+        (Some("ssh://git@front:2222/acme/chug.git".to_string()), key)
+    } else {
+        (None, "/data/keys/worker_git".into())
+    };
     let config = WorkerConfig {
         node: node.into(),
         nats_url: server.url().to_string(),
@@ -308,6 +320,8 @@ fn spawn_daemon(
         channel_binary: channel,
         cache_dir: None,
         refresh_script,
+        refresh_git_url,
+        refresh_git_key,
     };
     tokio::spawn(async move {
         if let Err(e) = worker::run(config).await {
@@ -477,6 +491,81 @@ async fn refresh_rpc_and_quiesce_window() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert!(refused, "launches must be refused during the swap window");
+    daemon.abort();
+}
+
+/// A refresh RPC to a node with a script but NO git credential reports the skip
+/// in the reply (spec §3.1 / #114) — `accepted == false`, `skipped == Some(..)`
+/// — instead of accepting and silently no-oping in the background. This is what
+/// lets the deploy surface a missing-credential node loudly.
+#[tokio::test]
+async fn refresh_reports_skip_without_git_credential() {
+    use store::worker::WorkerRpc;
+    use types::worker::RefreshRequest;
+
+    let server = require_nats!();
+    if !suite::docker_available() {
+        eprintln!("skipping: Docker daemon unavailable");
+        return;
+    }
+
+    // Script wired, but no WORKER_REFRESH_GIT_URL / key: the exact prod #114
+    // shape. Build the config inline (spawn_daemon would provision a credential).
+    let dir = std::env::temp_dir().join(format!(
+        "chug-worker-skip-{}-{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let channel = dir.join("chuggernaut-channel");
+    std::fs::write(&channel, b"x").unwrap();
+    let config = WorkerConfig {
+        node: "w1".into(),
+        nats_url: server.url().to_string(),
+        nats_creds: None,
+        docker_endpoint: local_docker_endpoint(),
+        channel_binary: channel,
+        cache_dir: None,
+        refresh_script: Some(fake_refresh_script()),
+        refresh_git_url: None,
+        refresh_git_key: dir.join("worker_git"), // absent
+    };
+    let daemon = tokio::spawn(async move {
+        if let Err(e) = worker::run(config).await {
+            eprintln!("daemon exited: {e}");
+        }
+    });
+
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let fleet = fleet_over(store.clone(), "w1", 8).await;
+    await_reachable(&fleet, "w1").await;
+
+    let rpc = WorkerRpc::new(store, "w1");
+    let ok = rpc
+        .refresh(&RefreshRequest {
+            sha: "cafef00d".into(),
+            tag: "prod".into(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        !ok.accepted,
+        "a credential-less node must not accept refresh"
+    );
+    assert!(
+        ok.skipped
+            .as_deref()
+            .is_some_and(|r| r.contains("git credential")),
+        "skip reason must name the missing credential: {:?}",
+        ok.skipped
+    );
+
+    // The skip must not have quiesced the node — launches still flow.
+    let id = fleet.launch(suite::cfg("true")).await.unwrap();
+    suite::rm(&id);
     daemon.abort();
 }
 

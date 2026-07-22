@@ -40,6 +40,17 @@ NATS="${WORKER_NATS_URL:?set WORKER_NATS_URL (tailnet NATS URL of the dispatcher
 # this legacy path can also be refreshed later over the worker RPC (no-ssh path).
 # Empty when unset — the daemon then just rejects refresh requests.
 REFRESH_ENV="-e WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-} -e WORKER_GIT_KEY=${WORKER_GIT_KEY:-/data/keys/worker_git}"
+# Node-local build cache (spec §3.1 "Node-local build caching"): pass the HOST
+# path as ENV ONLY — no bind-mount into the DAEMON container is needed. The
+# daemon adds the cache bind to each *sibling* job container via the docker
+# socket using this host path, so the daemon itself never touches the cache
+# files. Empty when unset ⇒ caching stays off (the daemon reads None). This is
+# the durable fix for #55's dormant cache: baked-in sccache only warms when the
+# daemon actually runs with WORKER_CACHE_DIR.
+CACHE_ENV=""
+if [ -n "${WORKER_CACHE_DIR:-}" ]; then
+  CACHE_ENV="-e WORKER_CACHE_DIR=$WORKER_CACHE_DIR"
+fi
 REMOTE="docker rm -f chug-worker >/dev/null 2>&1 || true
 docker run -d --restart=always --name chug-worker \
   -v /var/run/docker.sock:/var/run/docker.sock \
@@ -48,6 +59,7 @@ docker run -d --restart=always --name chug-worker \
   -e NATS_URL=$NATS \
   -e NATS_CREDS=/data/keys/worker.creds \
   $REFRESH_ENV \
+  $CACHE_ENV \
   chuggernaut/worker:$TAG >/dev/null"
 ssh "$WORKER_SSH" "$REMOTE"
 

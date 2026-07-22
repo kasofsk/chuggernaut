@@ -118,6 +118,13 @@ if [ -z "${WORKER_SSH:-}" ] && [ -n "${DOCKER_NODES:-}" ]; then
     wep="$(echo "$wep" | tr -d '[:space:]')"
     [ "$wep" = "worker" ] || continue
     echo "update: requesting self-refresh of worker '$wn' -> $TARGET_SHA"
+    # The command's stdout streams into the deploy task log, so its outcome is
+    # ALWAYS visible: `refresh requested` / `refresh already in progress` / or,
+    # critically, `node <name>: refresh SKIPPED — no git credential` when the
+    # node lacks WORKER_REFRESH_GIT_URL / its key (spec §3.1). That loud skip is
+    # what stops a credential-less node from making a deploy look like a success
+    # that refreshed nothing (#114); the fleet snapshot's per-node version (#109)
+    # is the cross-check. A non-zero exit (unreachable NATS etc.) is the fallback.
     target/release/chuggernaut admin worker-refresh \
       --nats-url "${NATS_URL:-nats://localhost:4222}" \
       --keys-dir "$KEYS_DIR" \

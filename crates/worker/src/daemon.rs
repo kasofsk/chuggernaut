@@ -134,8 +134,34 @@ struct WorkerState {
     /// Node-local build+swap script for self-refresh (spec §3.1); `None` ⇒
     /// refresh requests are rejected as unconfigured.
     refresh_script: Option<PathBuf>,
+    /// Git URL the refresh fetches its build context from (`WORKER_REFRESH_GIT_URL`);
+    /// `None` (unset/empty) ⇒ no git credential.
+    refresh_git_url: Option<String>,
+    /// The node's git private key (`WORKER_GIT_KEY`); its absence is the other
+    /// half of "no git credential".
+    refresh_git_key: PathBuf,
     /// Drain guarantee for the self-refresh swap window.
     refresh: RefreshGate,
+}
+
+/// Why a refresh cannot even be *attempted*: the node has no git credential to
+/// fetch the build context (spec §3.1). Returns `Some(reason)` when the fetch
+/// would fail before building — `WORKER_REFRESH_GIT_URL` unset, or its key file
+/// missing — so the daemon reports the skip in the RPC reply instead of
+/// accepting and no-oping silently in the background (the #114 failure: a deploy
+/// that "succeeds" in 41s having refreshed nothing). Pure over its inputs so the
+/// skip decision is unit-tested without a backend, NATS, or Docker.
+fn refresh_skip_reason(git_url: Option<&str>, git_key: &Path) -> Option<String> {
+    if git_url.is_none() {
+        return Some("no git credential: WORKER_REFRESH_GIT_URL is unset".to_string());
+    }
+    if !git_key.exists() {
+        return Some(format!(
+            "no git credential: key {} does not exist",
+            git_key.display()
+        ));
+    }
+    None
 }
 
 /// Run the daemon until ctrl-c. Containers it launched keep running after
@@ -196,12 +222,21 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         version: version_string(),
         cache_enabled,
         refresh_script: config.refresh_script.clone(),
+        refresh_git_url: config.refresh_git_url.clone(),
+        refresh_git_key: config.refresh_git_key.clone(),
         refresh: RefreshGate::default(),
     });
     if state.refresh_script.is_none() {
         tracing::warn!(
             "WORKER_REFRESH_SCRIPT unwired — this node will reject deploy self-refresh requests \
              (worker images stay at the deployed SHA until refreshed by hand)"
+        );
+    } else if let Some(reason) =
+        refresh_skip_reason(state.refresh_git_url.as_deref(), &state.refresh_git_key)
+    {
+        tracing::warn!(
+            "self-refresh script wired but {reason} — deploy refresh requests will be SKIPPED \
+             (enroll: `chuggernaut admin worker-git-key`, then set WORKER_REFRESH_GIT_URL)"
         );
     }
 
@@ -537,12 +572,27 @@ async fn refresh(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<Refres
                 });
             };
             let from_version = state.version.clone();
+            // No git credential ⇒ the refresh would fetch nothing. Report the
+            // skip in the reply LOUDLY (spec §3.1 / #114) rather than accepting
+            // and no-oping in the background — the deploy then shows the skip
+            // instead of a silent "success".
+            if let Some(reason) =
+                refresh_skip_reason(state.refresh_git_url.as_deref(), &state.refresh_git_key)
+            {
+                tracing::warn!(node = %state.node, "worker refresh SKIPPED — {reason}");
+                return Ok(RefreshOk {
+                    accepted: false,
+                    skipped: Some(reason),
+                    from_version,
+                });
+            }
             if !state.refresh.begin_refresh() {
                 // A refresh is already converging — not an error, and not drift:
                 // report it as not-accepted so the caller skips the swap-wait
                 // rather than logging a scary "not accepted (drift remains)".
                 return Ok(RefreshOk {
                     accepted: false,
+                    skipped: None,
                     from_version,
                 });
             }
@@ -550,6 +600,7 @@ async fn refresh(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<Refres
             tokio::spawn(async move { run_refresh(st, script, req).await });
             Ok(RefreshOk {
                 accepted: true,
+                skipped: None,
                 from_version,
             })
         }
@@ -675,6 +726,41 @@ mod tests {
         );
         // Untouched request env survives.
         assert_eq!(env.get("JOB_ID").map(String::as_str), Some("7"));
+    }
+
+    /// The refresh skip decision (spec §3.1 / #114): a node with no git URL, or
+    /// a missing key file, is reported as skipped; a fully-credentialed node is
+    /// not. This is the guard that turns a silent background no-op into a loud
+    /// skip in the RPC reply.
+    #[test]
+    fn refresh_skips_without_git_credential() {
+        // No git URL ⇒ skipped, whatever the key.
+        let reason = refresh_skip_reason(None, Path::new("/data/keys/worker_git"));
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|r| r.contains("WORKER_REFRESH_GIT_URL")),
+            "unexpected: {reason:?}"
+        );
+
+        // URL set but the key file is absent ⇒ still skipped (the #114 prod
+        // condition: empty URL AND no /data/keys/worker_git).
+        let missing = Path::new("/definitely/not/a/real/worker_git");
+        let reason = refresh_skip_reason(Some("ssh://git@front:2222/acme/chug.git"), missing);
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|r| r.contains("does not exist")),
+            "unexpected: {reason:?}"
+        );
+
+        // URL set and the key file exists (this test binary is a real file) ⇒
+        // no skip: the refresh may proceed.
+        let present = std::env::current_exe().unwrap();
+        assert_eq!(
+            refresh_skip_reason(Some("ssh://git@front:2222/acme/chug.git"), &present),
+            None
+        );
     }
 
     /// Caching off (the dispatcher's construction never sets a cache dir) ⇒ no

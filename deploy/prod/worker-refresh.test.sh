@@ -120,6 +120,24 @@ if grep -qF '$HOME' "$LOG"; then
 fi
 echo "ok: swap schedules a detached self-replace mounting the real keys source"
 
+# ── Case 3b: swap carries WORKER_CACHE_DIR forward (env only, no daemon mount) ─
+# The refreshed daemon must inherit the node-local build cache config (#55/#82):
+# a refresh that dropped WORKER_CACHE_DIR would silently un-warm the cache. It is
+# passed as ENV only — the daemon binds the cache into sibling job containers via
+# the docker socket, so the daemon container needs no cache mount of its own.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  WORKER_CACHE_DIR=/var/cache/chuggernaut/sccache \
+  sh "$SUT" swap prod
+
+grep_log "WORKER_CACHE_DIR=/var/cache/chuggernaut/sccache"
+# ENV only: the replacement daemon must NOT bind the cache dir into itself.
+if grep -qF -- "-v /var/cache/chuggernaut/sccache:/var/cache/chuggernaut/sccache" "$LOG"; then
+  fail "swap must pass WORKER_CACHE_DIR as env only, not a daemon bind-mount"
+fi
+echo "ok: swap carries WORKER_CACHE_DIR forward as env (no daemon mount)"
+
 # ── Case 4: unknown phase is a hard error ────────────────────────────────────
 if PATH="$BIN:$PATH" sh "$SUT" frobnicate 2>/dev/null; then
   fail "unknown phase should exit non-zero"

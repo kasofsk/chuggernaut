@@ -30,6 +30,17 @@ pub struct WorkerConfig {
     /// `WORKER_REFRESH_SCRIPT`, defaulting to the image's bundled copy when it
     /// exists.
     pub refresh_script: Option<PathBuf>,
+    /// Git URL the refresh script fetches the build context from over the ssh
+    /// front (`WORKER_REFRESH_GIT_URL`, spec §3.1). `None` (unset/empty) ⇒ the
+    /// node has no git credential and reports refresh requests as *skipped* in
+    /// the RPC reply rather than accepting and silently no-oping in the
+    /// background — so a deploy surfaces the missing credential loudly.
+    pub refresh_git_url: Option<String>,
+    /// The node's git private key (`WORKER_GIT_KEY`, default
+    /// `/data/keys/worker_git`). Its absence is the *other* half of "no git
+    /// credential" (the key file the refresh fetch would `ssh -i`), also
+    /// reported as a skip.
+    pub refresh_git_key: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -67,6 +78,12 @@ impl WorkerConfig {
                 }),
             cache_dir: parse_cache_dir(std::env::var("WORKER_CACHE_DIR").ok()),
             refresh_script: resolve_refresh_script(std::env::var("WORKER_REFRESH_SCRIPT").ok()),
+            refresh_git_url: parse_git_url(std::env::var("WORKER_REFRESH_GIT_URL").ok()),
+            refresh_git_key: std::env::var("WORKER_GIT_KEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/data/keys/worker_git")),
         })
     }
 }
@@ -90,6 +107,13 @@ fn resolve_refresh_script(raw: Option<String>) -> Option<PathBuf> {
 /// behavior is unit-tested without mutating the process environment.
 fn parse_cache_dir(raw: Option<String>) -> Option<PathBuf> {
     raw.filter(|s| !s.is_empty()).map(PathBuf::from)
+}
+
+/// Parse `WORKER_REFRESH_GIT_URL` into the optional git URL. Absent or empty ⇒
+/// `None` (no git credential — refresh requests are reported as skipped). Pure
+/// over its input for unit testing.
+fn parse_git_url(raw: Option<String>) -> Option<String> {
+    raw.filter(|s| !s.is_empty())
 }
 
 /// Node names ride in NATS subjects — same charset the dispatcher enforces at
@@ -116,6 +140,20 @@ mod tests {
         );
         // An empty value is treated as unset, not a bind on `/`.
         assert_eq!(parse_cache_dir(Some(String::new())), None);
+    }
+
+    #[test]
+    fn git_url_parses_present_and_absent() {
+        // Absent ⇒ no credential (refresh reported as skipped).
+        assert_eq!(parse_git_url(None), None);
+        // An empty value is treated as unset, the exact prod condition (#114:
+        // WORKER_REFRESH_GIT_URL empty) that must surface as a skip.
+        assert_eq!(parse_git_url(Some(String::new())), None);
+        // Present ⇒ the URL, verbatim.
+        assert_eq!(
+            parse_git_url(Some("ssh://git@front:2222/acme/chug.git".into())),
+            Some("ssh://git@front:2222/acme/chug.git".to_string())
+        );
     }
 
     #[test]

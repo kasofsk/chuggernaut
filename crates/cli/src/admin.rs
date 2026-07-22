@@ -42,6 +42,28 @@ pub enum AdminCmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Mint a worker node's read-only git credential (spec §3.1 self-refresh):
+    /// generate a keypair, sign a long-lived READ-ONLY cert scoped to the
+    /// platform repo, and write the two files to install under the node's
+    /// `~/chuggernaut-worker/keys/` as `worker_git` + `worker_git-cert.pub`.
+    /// Local-only — reads the `ssh_ca` key, no NATS connection.
+    WorkerGitKey {
+        /// Node name (its DOCKER_NODES entry, `{node}|worker|N`).
+        #[arg(long)]
+        node: String,
+        /// Platform repo the node may pull, `{owner}/{project}` — the repo the
+        /// node fetches its build context from over the ssh front.
+        #[arg(long)]
+        project: String,
+        /// Directory to write `worker_git` + `worker_git-cert.pub` into;
+        /// defaults to the keys dir.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+        /// Cert validity in days (renew by re-running). Long-lived by default —
+        /// a node credential is operator-installed, not per-job ephemeral.
+        #[arg(long, default_value = "3650")]
+        days: i64,
+    },
     /// Ask a worker node to rebuild its images at a SHA and swap its daemon
     /// (spec §3.1 self-refresh). The dispatcher host cannot ssh a tagged worker,
     /// so the deploy inverts control and requests refresh over the worker RPC.
@@ -245,6 +267,15 @@ pub async fn run(args: AdminArgs) -> Result<()> {
     if let AdminCmd::WorkerCreds { node, out } = &args.cmd {
         return mint_worker_creds(&args.keys_dir, node, out.as_deref()).await;
     }
+    if let AdminCmd::WorkerGitKey {
+        node,
+        project,
+        out_dir,
+        days,
+    } = &args.cmd
+    {
+        return mint_worker_git_key(&args.keys_dir, node, project, out_dir.as_deref(), *days).await;
+    }
     // Operator-mode NATS requires the dispatcher credentials from init
     // (§12.1); without them (open dev server) connect plain.
     let store = match tokio::fs::read_to_string(args.keys_dir.join("dispatcher.creds")).await {
@@ -265,7 +296,9 @@ pub async fn run(args: AdminArgs) -> Result<()> {
             tag,
             wait_secs,
         } => run_worker_refresh(&store, &node, &sha, &tag, wait_secs).await,
-        AdminCmd::WorkerCreds { .. } => unreachable!("handled before connect"),
+        AdminCmd::WorkerCreds { .. } | AdminCmd::WorkerGitKey { .. } => {
+            unreachable!("handled before connect")
+        }
     }
 }
 
@@ -296,6 +329,14 @@ async fn run_worker_refresh(
             return Ok(());
         }
     };
+    if let Some(reason) = &ok.skipped {
+        // The node has no git credential (spec §3.1 / #114): it could not even
+        // attempt the refresh. Surface it LOUDLY so a deploy never looks like a
+        // success that silently refreshed nothing. Non-fatal, like every other
+        // refresh outcome — the drift also shows in the fleet snapshot.
+        println!("node {node}: refresh SKIPPED — {reason}");
+        return Ok(());
+    }
     if !ok.accepted {
         // A refresh is already in flight (converging to some SHA) — not a
         // failure and not drift; nothing new to start or wait on.
@@ -364,6 +405,63 @@ async fn mint_worker_creds(
         .unwrap_or_else(|| keys_dir.join(format!("worker-{node}.creds")));
     crate::keygen::write_key(&path, &creds, true).await?;
     println!("wrote {} (user worker.{node})", path.display());
+    Ok(())
+}
+
+/// Mint a worker node's read-only git credential (spec §3.1 self-refresh
+/// enrollment). Generates a keypair, signs a long-lived READ-ONLY cert scoped
+/// to the platform repo (the same repo-scoped pull an eval container gets), and
+/// writes `worker_git` + `worker_git-cert.pub` for the operator to install
+/// under the node's `~/chuggernaut-worker/keys/`. Local-only: signs with the
+/// `ssh_ca` key, no NATS.
+async fn mint_worker_git_key(
+    keys_dir: &std::path::Path,
+    node: &str,
+    project: &str,
+    out_dir: Option<&std::path::Path>,
+    days: i64,
+) -> Result<()> {
+    if node.is_empty()
+        || !node
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        bail!("--node {node:?} must be [A-Za-z0-9_-]+ (rides in NATS subjects)");
+    }
+    let Some((owner, repo)) = project.split_once('/') else {
+        bail!("--project must be owner/project, got {project:?}");
+    };
+    if days <= 0 {
+        bail!("--days must be positive, got {days}");
+    }
+    let ca_key = keys_dir.join("ssh_ca");
+    if !ca_key.is_file() {
+        bail!(
+            "SSH CA key {} not found — run `chuggernaut init` first",
+            ca_key.display()
+        );
+    }
+    let cred = auth::ssh::SshCa::new(&ca_key)
+        .issue_node_credential(owner, repo, node, chrono::Duration::days(days))
+        .await?;
+
+    let dir = out_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| keys_dir.into());
+    let key_path = dir.join("worker_git");
+    let cert_path = dir.join("worker_git-cert.pub");
+    crate::keygen::write_key(&key_path, &cred.private_key, true).await?;
+    crate::keygen::write_key(&cert_path, &cred.certificate, false).await?;
+
+    println!(
+        "wrote {} (read-only, {project}, {days}d)",
+        key_path.display()
+    );
+    println!("wrote {}", cert_path.display());
+    println!(
+        "install both under the node's ~/chuggernaut-worker/keys/, then set on the \
+         worker daemon: WORKER_REFRESH_GIT_URL=ssh://git@<ssh-front>:2222/{project}.git"
+    );
     Ok(())
 }
 
