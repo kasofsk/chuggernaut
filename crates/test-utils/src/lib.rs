@@ -137,6 +137,18 @@ impl FakeBackend {
         self.state.lock().unwrap().launch_fail = Some(Box::new(f));
     }
 
+    /// Seed a container as already exited with a specific code, so `inspect`
+    /// reports `Exited { exit_code }` and `wait` returns it — a container that
+    /// ran and exited before this (restarted) dispatcher observed it, as restart
+    /// reconciliation (§3.6) would find one.
+    pub fn seed_exited(&self, id: impl Into<ContainerId>, exit_code: i32) {
+        self.state
+            .lock()
+            .unwrap()
+            .exits
+            .insert(id.into(), exit_code);
+    }
+
     /// Seed the ids that `list_managed_exited` reports — the exited managed
     /// containers a startup sweep should consider.
     pub fn seed_managed_exited(&self, ids: impl IntoIterator<Item = ContainerId>) {

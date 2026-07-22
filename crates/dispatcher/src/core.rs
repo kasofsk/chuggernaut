@@ -153,6 +153,13 @@ pub struct TaskExit {
     /// `Running` forever. Carries the single-wrapped, human-readable reason
     /// (e.g. `container launch failed: invalid memory limit "5g"`).
     pub launch_error: Option<String>,
+    /// Set only by restart reconciliation (§3.6, `settle_running`) when a task's
+    /// container is GONE at restart — docker pruned it, the node rebooted,
+    /// colima restarted. This is an infrastructure loss, not a real nonzero
+    /// exit: the attempt is relaunched without spending a `work_retries`/
+    /// `eval_retries` budget (capped, then escalates `infra_loss`). Never set on
+    /// the in-container exit paths — a real exit keeps burning budget.
+    pub infra_loss: bool,
 }
 
 impl TaskExit {
@@ -160,6 +167,18 @@ impl TaskExit {
     pub fn code(exit_code: i32) -> Self {
         Self {
             exit_code,
+            ..Default::default()
+        }
+    }
+
+    /// A container that was GONE when restart reconciliation looked for it
+    /// (§3.6): an infrastructure loss, distinct from a real nonzero exit. Routed
+    /// through the exit fan-in so [`Core::on_task_exited`] relaunches the attempt
+    /// without spending retry budget (capped, then `infra_loss` escalation).
+    pub fn infra_loss() -> Self {
+        Self {
+            exit_code: -1,
+            infra_loss: true,
             ..Default::default()
         }
     }

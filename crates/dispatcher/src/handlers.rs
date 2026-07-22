@@ -1440,6 +1440,7 @@ mod tests {
             performed_by: None,
             container_id: None,
             rework_reason: None,
+            infra_loss: false,
             session_id: None,
             result: None,
             created_at: Utc::now(),

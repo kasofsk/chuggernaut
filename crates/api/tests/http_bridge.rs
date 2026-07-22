@@ -1028,6 +1028,7 @@ async fn task_output_endpoint() {
         performed_by: None,
         container_id: container.map(String::from),
         rework_reason: None,
+        infra_loss: false,
         session_id: None,
         result: None,
         created_at: chrono::Utc::now(),

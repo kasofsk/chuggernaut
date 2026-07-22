@@ -197,6 +197,7 @@ async fn restart_recovers_orphaned_running_work_task() {
             performed_by: None,
             container_id: None,
             rework_reason: None,
+            infra_loss: false,
             session_id: None, // gone with the crashed dispatcher
             result: None,
             created_at: Utc::now(),
@@ -242,6 +243,391 @@ async fn restart_recovers_orphaned_running_work_task() {
     assert_eq!(tasks[0].state, TaskState::Failed); // the orphan
     assert_eq!((tasks[1].attempt, tasks[1].state), (2, TaskState::Done));
     assert_eq!(provider.runs().len(), 1); // only the retry ran here
+}
+
+/// §3.6 infra-loss accounting: a dispatcher died mid-Work and, by the time it
+/// restarted, the work container was GONE (docker pruned it, the node rebooted,
+/// colima restarted). That is an infrastructure loss, NOT a real failure —
+/// reconciliation relaunches the attempt WITHOUT spending a `work_retries`
+/// budget, and stamps the retired task/event with the infra reason. The
+/// distinguishing fact vs `restart_recovers_orphaned_running_work_task` is that
+/// a container id WAS recorded, so the container demonstrably existed.
+#[tokio::test]
+async fn restart_infra_loss_relaunches_work_without_burning_budget() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/flaky.yaml", FLAKY.as_bytes(), "type")
+        .await;
+    clone
+        .commit_file("prompts/impl.md", b"implement it", "prompt")
+        .await;
+    clone.push("main").await;
+    let head = repo.head().await;
+    repo.create_job_branch(1, &head).await;
+
+    store
+        .jobs()
+        .await
+        .unwrap()
+        .put(&Job {
+            id: 1,
+            project: "acme/api".into(),
+            r#type: "flaky".into(),
+            title: String::new(),
+            description: String::new(),
+            deps: vec![],
+            state: JobState::Work,
+            branch: "job/1".into(),
+            base_ref: Some(head),
+            knowledge_tags: vec![],
+            eval: vec![],
+            timeout: None,
+            model: None,
+            claim_next: false,
+            escalation: None,
+            factory: None,
+            created_at: Utc::now(),
+            ready_at: Some(Utc::now()),
+        })
+        .await
+        .unwrap();
+    // Running work task with a recorded container id that the fresh backend has
+    // never heard of: inspect → not found → infra loss.
+    store
+        .tasks()
+        .await
+        .unwrap()
+        .put(&Task {
+            id: 1,
+            job_seq: 1,
+            project: "acme/api".into(),
+            phase: TaskPhase::Work,
+            cycle: 1,
+            kind: TaskKind::Agent {
+                provider: "claude".into(),
+                model: None,
+                prompt: "prompts/impl.md".into(),
+            },
+            state: TaskState::Running,
+            attempt: 1,
+            evaluator: None,
+            stage: 0,
+            performed_by: None,
+            container_id: Some("pruned-work-container".into()),
+            rework_reason: None,
+            infra_loss: false,
+            session_id: None,
+            result: None,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            completed_at: None,
+        })
+        .await
+        .unwrap();
+
+    let provider = Arc::new(FakeProvider::new()); // relaunch exits 0
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        Arc::new(FakeBackend::new()),
+        provider.clone(),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _handle = spawn(core);
+
+    wait_for_state(&store, 1, JobState::Done).await;
+    let tasks = store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", 1)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 2);
+    // The orphan is retired as an infra loss, not a plain failure.
+    assert_eq!(tasks[0].state, TaskState::Failed);
+    assert!(tasks[0].infra_loss, "orphan carries the infra-loss marker");
+    // Budget UNCHANGED: the relaunch reuses attempt 1 (a real retry would be 2).
+    assert_eq!(
+        (tasks[1].attempt, tasks[1].state),
+        (1, TaskState::Done),
+        "infra relaunch keeps the same attempt: {tasks:?}"
+    );
+    assert!(!tasks[1].infra_loss);
+    assert_eq!(provider.runs().len(), 1); // only the relaunch ran
+}
+
+/// §3.6 infra-loss cap: an environment that keeps eating the container (a node
+/// stuck in a reboot loop) must not relaunch forever. After
+/// `INFRA_RELAUNCH_CAP` losses the job escalates with reason `infra_loss`
+/// rather than a `work_retries`-exhausted failure. The prior losses are seeded
+/// directly (three restarts compressed into one crash state).
+#[tokio::test]
+async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/flaky.yaml", FLAKY.as_bytes(), "type")
+        .await;
+    clone
+        .commit_file("prompts/impl.md", b"implement it", "prompt")
+        .await;
+    clone.push("main").await;
+    let head = repo.head().await;
+    repo.create_job_branch(1, &head).await;
+
+    store
+        .jobs()
+        .await
+        .unwrap()
+        .put(&Job {
+            id: 1,
+            project: "acme/api".into(),
+            r#type: "flaky".into(),
+            title: String::new(),
+            description: String::new(),
+            deps: vec![],
+            state: JobState::Work,
+            branch: "job/1".into(),
+            base_ref: Some(head),
+            knowledge_tags: vec![],
+            eval: vec![],
+            timeout: None,
+            model: None,
+            claim_next: false,
+            escalation: None,
+            factory: None,
+            created_at: Utc::now(),
+            ready_at: Some(Utc::now()),
+        })
+        .await
+        .unwrap();
+    let tasks = store.tasks().await.unwrap();
+    let mk = |id: u64, state: TaskState, infra_loss: bool, container: Option<&str>| Task {
+        id,
+        job_seq: 1,
+        project: "acme/api".into(),
+        phase: TaskPhase::Work,
+        cycle: 1,
+        kind: TaskKind::Agent {
+            provider: "claude".into(),
+            model: None,
+            prompt: "prompts/impl.md".into(),
+        },
+        state,
+        attempt: 1,
+        evaluator: None,
+        stage: 0,
+        performed_by: None,
+        container_id: container.map(Into::into),
+        rework_reason: None,
+        infra_loss,
+        session_id: None,
+        result: None,
+        created_at: Utc::now(),
+        started_at: Some(Utc::now()),
+        completed_at: None,
+    };
+    // Three already-retired infra losses (INFRA_RELAUNCH_CAP), then a fourth
+    // attempt Running against a container the fresh backend has never seen.
+    for id in 1..=3 {
+        tasks
+            .put(&mk(id, TaskState::Failed, true, None))
+            .await
+            .unwrap();
+    }
+    tasks
+        .put(&mk(4, TaskState::Running, false, Some("still-vanishing")))
+        .await
+        .unwrap();
+
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        Arc::new(FakeBackend::new()),
+        Arc::new(FakeProvider::new()),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _handle = spawn(core);
+
+    let job = wait_for_state(&store, 1, JobState::Escalated).await;
+    assert_eq!(
+        job.escalation.as_ref().map(|e| e.reason.as_str()),
+        Some("infra_loss"),
+        "the cap escalates with reason=infra_loss, not work_retries_exhausted"
+    );
+    // The fourth attempt is retired as an infra loss too — no relaunch beyond it.
+    let log = tasks.list_for_job("acme", "api", 1).await.unwrap();
+    let work: Vec<&Task> = log.iter().filter(|t| t.phase == TaskPhase::Work).collect();
+    assert!(
+        work.iter().all(|t| t.attempt == 1),
+        "no infra relaunch ever spent a work_retries budget: {work:?}"
+    );
+    assert_eq!(
+        work.iter().filter(|t| t.infra_loss).count(),
+        4,
+        "four infra losses recorded before escalation: {work:?}"
+    );
+}
+
+/// Regression guard: a REAL nonzero exit found at reconcile still burns the
+/// `work_retries` budget — the infra-loss path must not swallow genuine
+/// failures. Here the container is present-and-exited(1), not gone, so the exit
+/// code is authoritative and the retry advances to attempt 2.
+#[tokio::test]
+async fn restart_real_nonzero_exit_still_burns_budget() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/flaky.yaml", FLAKY.as_bytes(), "type")
+        .await;
+    clone
+        .commit_file("prompts/impl.md", b"implement it", "prompt")
+        .await;
+    clone.push("main").await;
+    let head = repo.head().await;
+    repo.create_job_branch(1, &head).await;
+
+    store
+        .jobs()
+        .await
+        .unwrap()
+        .put(&Job {
+            id: 1,
+            project: "acme/api".into(),
+            r#type: "flaky".into(),
+            title: String::new(),
+            description: String::new(),
+            deps: vec![],
+            state: JobState::Work,
+            branch: "job/1".into(),
+            base_ref: Some(head),
+            knowledge_tags: vec![],
+            eval: vec![],
+            timeout: None,
+            model: None,
+            claim_next: false,
+            escalation: None,
+            factory: None,
+            created_at: Utc::now(),
+            ready_at: Some(Utc::now()),
+        })
+        .await
+        .unwrap();
+    store
+        .tasks()
+        .await
+        .unwrap()
+        .put(&Task {
+            id: 1,
+            job_seq: 1,
+            project: "acme/api".into(),
+            phase: TaskPhase::Work,
+            cycle: 1,
+            kind: TaskKind::Agent {
+                provider: "claude".into(),
+                model: None,
+                prompt: "prompts/impl.md".into(),
+            },
+            state: TaskState::Running,
+            attempt: 1,
+            evaluator: None,
+            stage: 0,
+            performed_by: None,
+            container_id: Some("exited-nonzero".into()),
+            rework_reason: None,
+            infra_loss: false,
+            session_id: None,
+            result: None,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            completed_at: None,
+        })
+        .await
+        .unwrap();
+
+    // The container is still known to the backend and exited(1) — a real
+    // failure the crash merely lost, not a vanished container.
+    let backend = Arc::new(FakeBackend::new());
+    backend.seed_exited("exited-nonzero", 1);
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        backend,
+        Arc::new(FakeProvider::new()), // the retry exits 0
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _handle = spawn(core);
+
+    wait_for_state(&store, 1, JobState::Done).await;
+    let tasks = store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", 1)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 2);
+    // Budget SPENT: a real nonzero exit advances to attempt 2, not a same-attempt
+    // infra relaunch, and the orphan carries no infra-loss marker.
+    assert_eq!(tasks[0].state, TaskState::Failed);
+    assert!(!tasks[0].infra_loss, "a real exit is not an infra loss");
+    assert_eq!((tasks[1].attempt, tasks[1].state), (2, TaskState::Done));
 }
 
 /// §3.6 startup sweep: exited `chuggernaut.managed` containers left behind by
@@ -313,6 +699,7 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
         performed_by: None,
         container_id: Some(container.into()),
         rework_reason: None,
+        infra_loss: false,
         session_id: None,
         result: None,
         created_at: Utc::now(),
@@ -451,6 +838,7 @@ async fn restart_lands_job_orphaned_in_wrapup() {
             performed_by: None,
             container_id: None,
             rework_reason: None,
+            infra_loss: false,
             session_id: None,
             result: Some(types::TaskResult::Work {
                 summary: None,
@@ -575,6 +963,7 @@ wrap_up:
             performed_by: None,
             container_id: None,
             rework_reason: None,
+            infra_loss: false,
             session_id: None,
             result: Some(types::TaskResult::Work {
                 summary: None,
@@ -606,6 +995,7 @@ wrap_up:
             performed_by: None,
             container_id: Some("dead-publish-container".into()),
             rework_reason: None,
+            infra_loss: false,
             session_id: None,
             result: None,
             created_at: Utc::now(),
@@ -898,6 +1288,7 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
             performed_by: None,
             container_id: None,
             rework_reason: None,
+            infra_loss: false,
             session_id: Some("da08d5f3-844e-430e-8363-39b4882f437b".into()),
             result: Some(types::TaskResult::Work {
                 summary: Some("added f() with tests".into()),

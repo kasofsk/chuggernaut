@@ -421,7 +421,7 @@ impl Core {
         // Persisted result + Running only happens for agent eval tasks whose
         // submit_eval landed but whose exit event was lost — on_eval_exited
         // reads the persisted verdict whatever exit code we synthesize.
-        let backend_exit = match &task.container_id {
+        let exit = match &task.container_id {
             Some(cid) => match self.backend.inspect(cid).await {
                 Ok(Some(container::ContainerStatus::Running)) => {
                     // Still running: re-attach a monitor and resume.
@@ -458,22 +458,32 @@ impl Core {
                                     usage: None,
                                     assessment: None,
                                     launch_error: None,
+                                    infra_loss: false,
                                 },
                             })
                             .await;
                     });
                     return Ok(());
                 }
-                Ok(Some(container::ContainerStatus::Exited { exit_code })) => exit_code,
-                // Not found: failure (work) / infra (agent eval) / failed
-                // verdict (command eval) — all reachable via a -1 exit.
-                Ok(None) | Err(_) => -1,
+                Ok(Some(container::ContainerStatus::Exited { exit_code })) => {
+                    // A real exit the crash lost: the code is authoritative and
+                    // keeps burning budget, exactly as it would have live.
+                    TaskExit::code(exit_code)
+                }
+                // The container is GONE — pruned, node rebooted, colima
+                // restarted (or the backend can't answer). We recorded an id, so
+                // the container did exist; its disappearance is an infrastructure
+                // loss, not a real nonzero exit. Relaunch without spending retry
+                // budget (§3.6), capped so a vanishing environment still
+                // escalates (`infra_loss`) rather than looping forever.
+                Ok(None) | Err(_) => TaskExit::infra_loss(),
             },
             // No recorded container id (Human task, or a launch that never
-            // reported one): nothing to re-attach to — treat as not found.
-            None => -1,
+            // reported one): we can't prove a container ever ran, so keep the
+            // failure semantics — a -1 exit that burns budget as before.
+            None => TaskExit::code(-1),
         };
-        self.on_task_exited(owner, project, seq, task.id, TaskExit::code(backend_exit))
+        self.on_task_exited(owner, project, seq, task.id, exit)
             .await
     }
 

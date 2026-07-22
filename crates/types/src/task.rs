@@ -47,6 +47,15 @@ pub struct Task {
     /// causes were recorded still deserialize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rework_reason: Option<ReworkReason>,
+    /// Set when reconciliation retired this attempt because its container was
+    /// gone at restart (spec §3.6): docker pruned it, the node rebooted, colima
+    /// restarted. That is an infrastructure loss, NOT a real nonzero exit — the
+    /// relaunch does not consume a `work_retries`/`eval_retries` budget, and
+    /// these markers are counted to cap infra relaunches per task before
+    /// escalating (`infra_loss`). Defaulted so records written before it existed
+    /// still deserialize; false for every real failure and completion.
+    #[serde(default)]
+    pub infra_loss: bool,
     /// Agent tasks only: the session id handed to the agent CLI, which names
     /// its transcript. Recorded at task creation so the artifact stays
     /// addressable across a dispatcher restart, and so a later cycle can resume
@@ -357,6 +366,28 @@ mod tests {
             assert!(json.contains("\"rework_reason\""));
             assert_eq!(serde_json::from_str::<Task>(&json).unwrap(), reworked);
         }
+    }
+
+    #[test]
+    fn infra_loss_defaults_absent_and_round_trips() {
+        // Old task records (no infra_loss key) deserialize to false.
+        let json = r#"{
+          "id": 1, "job_seq": 7, "project": "acme/api",
+          "phase": "Work", "cycle": 1,
+          "kind": { "kind": "Agent", "provider": "claude", "model": null, "prompt": "p.md" },
+          "state": "Failed", "attempt": 1,
+          "container_id": "gone", "result": null,
+          "created_at": "2026-07-21T10:00:00Z", "started_at": null, "completed_at": null
+        }"#;
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert!(!task.infra_loss);
+
+        // A retired infra loss round-trips as true.
+        let mut lost = task.clone();
+        lost.infra_loss = true;
+        let json = serde_json::to_string(&lost).unwrap();
+        assert!(json.contains(r#""infra_loss":true"#));
+        assert_eq!(serde_json::from_str::<Task>(&json).unwrap(), lost);
     }
 
     #[test]

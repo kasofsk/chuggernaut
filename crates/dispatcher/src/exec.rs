@@ -18,6 +18,17 @@ use types::{
     TaskPhase, TaskResolution, TaskResult, TaskState, WorkType, parse_duration,
 };
 
+/// Machine code for an infrastructure-loss failure/escalation (§3.6): a task
+/// whose container was gone at restart, relaunched without spending retry
+/// budget. The `task-failed`/`job-escalated` event `reason`, and the marker on
+/// the retired task record (pairs with #76 self-reporting).
+pub(crate) const INFRA_LOSS_REASON: &str = "infra_loss";
+
+/// Max infrastructure relaunches for one task lineage (this cycle, this
+/// evaluator) before escalating with reason `infra_loss` (§3.6). Bounds a
+/// genuinely-vanishing environment so it escalates instead of looping forever.
+pub(crate) const INFRA_RELAUNCH_CAP: u32 = 3;
+
 /// Working memory for a job in Work/Evaluation. Restart rebuild is the
 /// reconcile slice; until then a dispatcher restart drops in-flight jobs.
 pub struct ExecState {
@@ -300,6 +311,7 @@ impl Core {
             performed_by: claimed.then_some(types::Performer::Human),
             container_id: None,
             rework_reason,
+            infra_loss: false,
             session_id: session_id.clone(),
             result: None,
             created_at: Utc::now(),
@@ -438,6 +450,7 @@ impl Core {
                                 usage,
                                 assessment: None,
                                 launch_error: None,
+                                infra_loss: false,
                             },
                         })
                         .await;
@@ -555,6 +568,17 @@ impl Core {
         let Some(task) = self.tasks.get(owner, project, seq, task_id).await? else {
             return Ok(());
         };
+        // Container gone at restart (§3.6): an infrastructure loss, not a real
+        // exit. Handled before the per-phase verdict logic so a Work retry
+        // budget is never spent and a command evaluator's vanished container is
+        // never misread as a failing verdict. Only ever set by `settle_running`,
+        // and only for a Running Work/Evaluation task.
+        if exit.infra_loss
+            && task.state == TaskState::Running
+            && matches!(task.phase, TaskPhase::Work | TaskPhase::Evaluation)
+        {
+            return self.on_infra_loss(owner, project, seq, task).await;
+        }
         match task.phase {
             TaskPhase::Work => {
                 // Stale monitors (revoke, rework) may report exits for tasks
@@ -690,6 +714,144 @@ impl Core {
                 Some(task.id),
             )
             .await
+        }
+    }
+
+    /// A Running Work/Evaluation task whose container was GONE when restart
+    /// reconciliation looked for it (§3.6): an infrastructure loss — docker
+    /// pruned it, the node rebooted, colima restarted — distinct from a real
+    /// nonzero exit. Retire the abandoned attempt (recording WHY, so the task
+    /// log and event stream never confuse it with a real failure), then relaunch
+    /// the SAME attempt WITHOUT spending a `work_retries`/`eval_retries` budget —
+    /// mirroring how a conflict rework does not spend `rework_budget`. Capped at
+    /// [`INFRA_RELAUNCH_CAP`] per task (this cycle, this evaluator) so a
+    /// genuinely-vanishing environment still escalates with reason `infra_loss`
+    /// instead of looping forever.
+    async fn on_infra_loss(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        mut task: Task,
+    ) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        let phase = task.phase;
+
+        // Retire the lost attempt, stamped as an infra loss (not a real failure).
+        task.state = TaskState::Failed;
+        task.infra_loss = true;
+        task.completed_at = Some(Utc::now());
+        self.tasks.put(&task).await?;
+        self.publish(
+            owner,
+            project,
+            seq,
+            "task-failed",
+            serde_json::json!({
+                "task_id": task.id, "phase": format!("{phase:?}"),
+                "reason": INFRA_LOSS_REASON,
+            }),
+        )
+        .await?;
+
+        // Count infra losses for this task's lineage (same cycle + evaluator):
+        // the freshly-stamped attempt is included, so the Nth loss sees count N.
+        let losses = self
+            .tasks
+            .list_for_job(owner, project, seq)
+            .await?
+            .iter()
+            .filter(|t| {
+                t.infra_loss
+                    && t.phase == phase
+                    && t.cycle == task.cycle
+                    && t.evaluator == task.evaluator
+            })
+            .count();
+        let over_cap = losses > INFRA_RELAUNCH_CAP as usize;
+
+        match phase {
+            TaskPhase::Work => {
+                if over_cap {
+                    self.active.remove(&key);
+                    return self
+                        .escalate(
+                            owner,
+                            project,
+                            seq,
+                            INFRA_LOSS_REASON,
+                            format!(
+                                "Job {seq}: the work container was lost to infrastructure \
+                                 {losses} times without a real exit (docker prune, node reboot, \
+                                 colima restart). Escalating rather than relaunching forever."
+                            ),
+                            Some(task.id),
+                        )
+                        .await;
+                }
+                // Same attempt: budget untouched. Recover the branch in case the
+                // lost attempt pushed commits before vanishing (§3.2).
+                let job = self.must_get(owner, project, seq)?.clone();
+                let base_ref = job.base_ref.clone().expect("base_ref set in Work");
+                let resume =
+                    recover_or_reset_branch(&self.repos, owner, project, &job.branch, &base_ref)
+                        .await?;
+                self.launch_work_task(owner, project, seq, task.cycle, task.attempt, resume)
+                    .await
+            }
+            TaskPhase::Evaluation => {
+                // The recovered round still owns a slot awaiting this task.
+                let Some(slot_idx) = self
+                    .active
+                    .get(&key)
+                    .and_then(|e| e.round.as_ref())
+                    .and_then(|r| r.slots.iter().position(|s| s.task_id == task.id))
+                else {
+                    return Ok(()); // superseded round; nothing to relaunch into
+                };
+                if over_cap {
+                    self.active.remove(&key);
+                    return self
+                        .escalate(
+                            owner,
+                            project,
+                            seq,
+                            INFRA_LOSS_REASON,
+                            format!(
+                                "Job {seq}: an evaluator container was lost to infrastructure \
+                                 {losses} times without a verdict. Escalating rather than \
+                                 relaunching forever."
+                            ),
+                            Some(task.id),
+                        )
+                        .await;
+                }
+                let (evaluator, cycle) = {
+                    let exec = self.active.get(&key).expect("exec state");
+                    let slot = &exec.round.as_ref().unwrap().slots[slot_idx];
+                    (slot.evaluator.clone(), exec.cycle)
+                };
+                let branch = self.must_get(owner, project, seq)?.branch.clone();
+                // Same attempt: eval_retries untouched.
+                let new_id = self
+                    .launch_evaluator_task(
+                        owner,
+                        project,
+                        seq,
+                        TaskPhase::Evaluation,
+                        &branch,
+                        cycle,
+                        &evaluator,
+                        task.attempt,
+                    )
+                    .await?;
+                let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
+                round.slots[slot_idx].task_id = new_id;
+                round.slots[slot_idx].attempt = task.attempt;
+                Ok(())
+            }
+            // The interception in `on_task_exited` restricts this to Work/Eval.
+            _ => Ok(()),
         }
     }
 

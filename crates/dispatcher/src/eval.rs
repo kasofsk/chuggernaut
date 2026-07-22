@@ -334,6 +334,7 @@ impl Core {
             performed_by: None,
             container_id: None,
             rework_reason: None,
+            infra_loss: false,
             session_id: session_id.clone(),
             result: None,
             created_at: Utc::now(),
@@ -442,6 +443,7 @@ impl Core {
                                 usage: None,
                                 assessment: None,
                                 launch_error: None,
+                                infra_loss: false,
                             },
                         })
                         .await;
@@ -524,6 +526,7 @@ impl Core {
                                 usage,
                                 assessment: None,
                                 launch_error: None,
+                                infra_loss: false,
                             },
                         })
                         .await;
@@ -1503,6 +1506,7 @@ impl Core {
             performed_by: None,
             container_id: None,
             rework_reason: None,
+            infra_loss: false,
             session_id: None,
             result: None,
             created_at: Utc::now(),
