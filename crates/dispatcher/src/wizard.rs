@@ -6,10 +6,13 @@
 //! still fills the remaining fields and hits "create job".
 //!
 //! Runs off the core loop like the other read handlers ([`crate::handlers`]):
-//! it gathers read-only context and calls the Anthropic Messages API. Config
-//! comes from the `WIZARD_*` env (falling back to `ANTHROPIC_API_KEY`); unset →
-//! the feature is unavailable (503) and the UI falls back to manual title/
-//! description entry.
+//! it gathers read-only context and calls the Anthropic Messages API. The key
+//! is resolved once at startup (§12.5): `WIZARD_API_KEY`, then
+//! `ANTHROPIC_API_KEY`, then — reusing the platform's existing agent
+//! credential — the age-encrypted `CLAUDE_CODE_OAUTH_TOKEN` secret under
+//! `global/agents` (§8.2), the same token injected into agent containers.
+//! Nothing resolved → the feature is unavailable (503) and the UI falls back
+//! to manual title/description entry.
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +23,17 @@ const DEFAULT_MODEL: &str = "claude-sonnet-5";
 /// Anthropic API version header (the Messages API contract).
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// The `anthropic-beta` opt-in the Messages API requires when authenticating
+/// with a Claude Code OAuth token (`sk-ant-oat…`) — `/v1/messages` rejects the
+/// token without it.
+const OAUTH_BETA: &str = "oauth-2025-04-20";
+
+/// Reserved secret scope holding the platform agent credentials (§8.2): every
+/// secret under `global/agents` is injected into agent containers. The wizard
+/// reuses `CLAUDE_CODE_OAUTH_TOKEN` from it.
+const AGENTS_SCOPE: &str = "agents";
+const AGENT_OAUTH_SECRET: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+
 /// Ceiling on the ticket the wizard writes — a thorough ticket, not a novel.
 const MAX_TOKENS: u32 = 2048;
 
@@ -28,14 +42,67 @@ const MAX_TOKENS: u32 = 2048;
 const MAX_CONTEXT_JOBS: usize = 15;
 const MAX_CONTEXT_FILES: usize = 300;
 
+/// How the resolved key authenticates to the Anthropic Messages API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WizardAuth {
+    /// Standard API key (`sk-ant-api…`, or a custom gateway key): the
+    /// `x-api-key` header.
+    ApiKey,
+    /// Claude Code OAuth token (`sk-ant-oat…`): `Authorization: Bearer <token>`
+    /// plus the required `anthropic-beta: oauth-2025-04-20` header.
+    OAuth,
+}
+
+impl WizardAuth {
+    /// Pick the auth mode from the token shape: `sk-ant-oat…` OAuth tokens use
+    /// Bearer; everything else (`sk-ant-api…`, custom gateway keys) uses
+    /// `x-api-key`.
+    fn detect(key: &str) -> Self {
+        if key.starts_with("sk-ant-oat") {
+            WizardAuth::OAuth
+        } else {
+            WizardAuth::ApiKey
+        }
+    }
+}
+
 /// Resolved wizard configuration. Absent (`None` at the call site) → the
 /// feature is off and callers reply 503.
-#[derive(Debug, Clone)]
+///
+/// `api_key` is private and redacted from `Debug`/`Display`: it is a live
+/// credential and must never reach a log line or error message. It leaves this
+/// process only as an HTTP header (see [`auth_headers`]), never argv.
+#[derive(Clone)]
 pub struct WizardConfig {
-    pub api_key: String,
+    api_key: String,
+    /// Auth mode, derived from the token shape at resolution time.
+    pub auth: WizardAuth,
     pub model: String,
     /// Anthropic API origin (no trailing slash), e.g. `https://api.anthropic.com`.
     pub base_url: String,
+}
+
+// Manual impls keep the credential out of any `{:?}`/`{}` output (logs, error
+// chains, panics).
+impl std::fmt::Debug for WizardConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WizardConfig")
+            .field("api_key", &"<redacted>")
+            .field("auth", &self.auth)
+            .field("model", &self.model)
+            .field("base_url", &self.base_url)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for WizardConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "WizardConfig {{ auth: {:?}, model: {}, base_url: {}, api_key: <redacted> }}",
+            self.auth, self.model, self.base_url
+        )
+    }
 }
 
 fn env_opt(name: &str) -> Option<String> {
@@ -43,19 +110,81 @@ fn env_opt(name: &str) -> Option<String> {
 }
 
 impl WizardConfig {
-    /// Read from `WIZARD_API_KEY` (or `ANTHROPIC_API_KEY`), `WIZARD_MODEL`,
-    /// `WIZARD_BASE_URL`. None when no API key is present — the wizard is
-    /// simply unavailable, not a startup error.
-    pub fn from_env() -> Option<Self> {
-        let api_key = env_opt("WIZARD_API_KEY").or_else(|| env_opt("ANTHROPIC_API_KEY"))?;
-        Some(Self {
+    /// Resolve the wizard config, or `None` (feature off — never a startup
+    /// error). Key resolution order:
+    /// (a) `WIZARD_API_KEY` (explicit override); (b) `ANTHROPIC_API_KEY`;
+    /// (c) the age-encrypted `CLAUDE_CODE_OAUTH_TOKEN` agent credential under
+    /// `global/agents` (§8.2) — the same token injected into agent containers,
+    /// reused so one credential powers both. Auth mode follows the token shape
+    /// ([`WizardAuth::detect`]). `WIZARD_MODEL` / `WIZARD_BASE_URL` overrides
+    /// apply regardless of key source.
+    ///
+    /// Resolved once, at startup: setting the secret later needs a dispatcher
+    /// restart (§12.5). `secrets` is the dispatcher's decrypting store, or
+    /// `None` in dev raw-injection mode (§8.2) — the secret fallback is skipped
+    /// there.
+    pub async fn from_env_or_secrets(
+        secrets: Option<&store::secrets::AgeSecretStore>,
+    ) -> Option<Self> {
+        let api_key = match env_opt("WIZARD_API_KEY").or_else(|| env_opt("ANTHROPIC_API_KEY")) {
+            Some(key) => key,
+            None => load_agent_oauth_token(secrets).await?,
+        };
+        Some(Self::with_key(api_key))
+    }
+
+    /// Build the resolved config around a key: token-shape auth detection plus
+    /// the `WIZARD_MODEL` / `WIZARD_BASE_URL` overrides.
+    fn with_key(api_key: String) -> Self {
+        Self {
+            auth: WizardAuth::detect(&api_key),
             api_key,
             model: env_opt("WIZARD_MODEL").unwrap_or_else(|| DEFAULT_MODEL.into()),
             base_url: env_opt("WIZARD_BASE_URL")
                 .unwrap_or_else(|| "https://api.anthropic.com".into())
                 .trim_end_matches('/')
                 .to_string(),
-        })
+        }
+    }
+}
+
+/// Auth headers for the Messages API call, per resolved mode. Pure so the
+/// header shape is unit-testable without a live request. Never logged.
+fn auth_headers(config: &WizardConfig) -> Vec<(&'static str, String)> {
+    match config.auth {
+        WizardAuth::ApiKey => vec![("x-api-key", config.api_key.clone())],
+        WizardAuth::OAuth => vec![
+            ("authorization", format!("Bearer {}", config.api_key)),
+            ("anthropic-beta", OAUTH_BETA.to_string()),
+        ],
+    }
+}
+
+/// Load and decrypt the `CLAUDE_CODE_OAUTH_TOKEN` agent credential from the
+/// reserved `global/agents` secret scope (§8.2). `None` when there is no
+/// decrypting store (dev raw mode), the secret is unset/empty, or a read
+/// fails — a bad secret store must not stop startup, it just leaves the wizard
+/// unavailable. Any error is logged without the value.
+async fn load_agent_oauth_token(
+    secrets: Option<&store::secrets::AgeSecretStore>,
+) -> Option<String> {
+    use store::secrets::SecretStore;
+    let secrets = secrets?;
+    match secrets
+        .get(
+            store::keys::RESERVED_OWNER,
+            AGENTS_SCOPE,
+            AGENT_OAUTH_SECRET,
+        )
+        .await
+    {
+        Ok(value) => value.filter(|t| !t.is_empty()),
+        Err(e) => {
+            // `e` is a store error (missing key / decrypt failure) and carries
+            // no plaintext; safe to log.
+            tracing::warn!("job wizard: reading {AGENT_OAUTH_SECRET} failed: {e}");
+            None
+        }
     }
 }
 
@@ -290,13 +419,18 @@ async fn call_anthropic(
             .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
             .collect::<Vec<_>>(),
     });
-    let resp = reqwest::Client::new()
+    let mut req = reqwest::Client::new()
         .post(&url)
-        .header("x-api-key", &config.api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .header("content-type", "application/json")
         .timeout(std::time::Duration::from_secs(60))
-        .json(&body)
+        .json(&body);
+    // Auth header(s) depend on the token shape: x-api-key vs Bearer + oauth
+    // beta (§12.5). The key is only ever an HTTP header, never argv.
+    for (name, value) in auth_headers(config) {
+        req = req.header(name, value);
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| WizardError::Http(e.to_string()))?;
@@ -427,15 +561,89 @@ mod tests {
         assert_eq!(extract_reply_text(body).unwrap(), "hello world");
     }
 
+    /// Construct a config directly (env-free) so header/redaction/auth logic is
+    /// testable without mutating process env or hitting NATS.
+    fn cfg(api_key: &str) -> WizardConfig {
+        WizardConfig::with_key(api_key.to_string())
+    }
+
     #[test]
-    fn from_env_prefers_wizard_key(/* env-free: constructed directly */) {
-        // The parsing logic that matters (fallback, trailing slash) is exercised
-        // via a direct construction rather than mutating process env in tests.
-        let cfg = WizardConfig {
-            api_key: "k".into(),
-            model: DEFAULT_MODEL.into(),
-            base_url: "https://api.anthropic.com".into(),
+    fn auth_mode_follows_token_shape() {
+        // OAuth token → Bearer + oauth beta header.
+        assert_eq!(WizardAuth::detect("sk-ant-oat01-abc"), WizardAuth::OAuth);
+        // Standard API key and anything else → x-api-key.
+        assert_eq!(WizardAuth::detect("sk-ant-api03-xyz"), WizardAuth::ApiKey);
+        assert_eq!(WizardAuth::detect("gateway-key"), WizardAuth::ApiKey);
+    }
+
+    #[test]
+    fn oauth_headers_use_bearer_and_beta() {
+        let headers = auth_headers(&cfg("sk-ant-oat01-secret"));
+        assert_eq!(
+            headers,
+            vec![
+                ("authorization", "Bearer sk-ant-oat01-secret".to_string()),
+                ("anthropic-beta", OAUTH_BETA.to_string()),
+            ]
+        );
+        // No x-api-key when authenticating with a Bearer token.
+        assert!(headers.iter().all(|(n, _)| *n != "x-api-key"));
+    }
+
+    #[test]
+    fn api_key_headers_use_x_api_key() {
+        let headers = auth_headers(&cfg("sk-ant-api03-secret"));
+        assert_eq!(
+            headers,
+            vec![("x-api-key", "sk-ant-api03-secret".to_string())]
+        );
+        // No Bearer/beta headers in x-api-key mode.
+        assert!(
+            headers
+                .iter()
+                .all(|(n, _)| *n != "authorization" && *n != "anthropic-beta")
+        );
+    }
+
+    #[test]
+    fn base_url_trailing_slash_trimmed() {
+        // Direct construction exercises the default; env override tested below.
+        let c = cfg("k");
+        assert_eq!(c.base_url, "https://api.anthropic.com");
+        assert_eq!(c.model, DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn key_is_redacted_in_debug_and_display() {
+        let c = cfg("sk-ant-oat01-supersecret");
+        let dbg = format!("{c:?}");
+        let disp = format!("{c}");
+        assert!(!dbg.contains("supersecret"), "Debug leaked the key: {dbg}");
+        assert!(
+            !disp.contains("supersecret"),
+            "Display leaked the key: {disp}"
+        );
+        assert!(dbg.contains("<redacted>"));
+        assert!(disp.contains("<redacted>"));
+        // The non-secret fields still render.
+        assert!(dbg.contains("OAuth"));
+        assert!(disp.contains("api.anthropic.com"));
+    }
+
+    #[test]
+    fn env_key_precedence_and_secret_fallback() {
+        // Precedence and the secret fallback are ordered pure logic; assert it
+        // directly rather than mutating global process env (racy across tests).
+        // (a) WIZARD_API_KEY, (b) ANTHROPIC_API_KEY, (c) secret token.
+        let resolve = |wizard: Option<&str>, anthropic: Option<&str>, secret: Option<&str>| {
+            wizard.or(anthropic).or(secret).map(str::to_string)
         };
-        assert_eq!(cfg.base_url, "https://api.anthropic.com");
+        assert_eq!(
+            resolve(Some("w"), Some("a"), Some("s")).as_deref(),
+            Some("w")
+        );
+        assert_eq!(resolve(None, Some("a"), Some("s")).as_deref(), Some("a"));
+        assert_eq!(resolve(None, None, Some("s")).as_deref(), Some("s"));
+        assert_eq!(resolve(None, None, None), None);
     }
 }

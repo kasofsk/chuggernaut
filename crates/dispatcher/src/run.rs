@@ -72,6 +72,24 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
             config.keys_dir.display()
         );
     }
+
+    // Resolve the job wizard (§12.5) now that the store is connected: env keys
+    // win, else reuse the age-encrypted CLAUDE_CODE_OAUTH_TOKEN agent
+    // credential (§8.2) so one credential powers both agent containers and the
+    // wizard. The decrypting secret store needs the age identity; without it
+    // (dev raw mode) the secret fallback is skipped. Resolved once at
+    // startup — setting the secret later needs a dispatcher restart.
+    let wizard_secrets = match &core_config.age_identity {
+        Some(identity) => Some(store::secrets::AgeSecretStore::for_dispatcher(
+            store.raw_bucket(store::buckets::SECRETS).await?,
+            identity,
+        )?),
+        None => None,
+    };
+    let wizard = crate::wizard::WizardConfig::from_env_or_secrets(wizard_secrets.as_ref()).await;
+    if wizard.is_none() {
+        tracing::info!("job wizard unconfigured — the New Job screen uses manual entry");
+    }
     if core_config.channel_binary.is_none() {
         tracing::warn!("CHANNEL_BINARY unset — agent containers run without the channel MCP");
     }
@@ -86,6 +104,7 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
         &node_availability,
         &node_versions,
         core_config.age_identity.is_some(),
+        wizard.is_some(),
     )
     .await;
 
@@ -103,7 +122,7 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
         handle.clone(),
         Arc::new(RepoManager::new(&config.repos_root)),
         config.hook_bin.clone(),
-        config.wizard.clone().map(Arc::new),
+        wizard.map(Arc::new),
         ssh_ca,
         output_backend,
     )
@@ -121,6 +140,7 @@ async fn publish_config_snapshot(
     node_availability: &[(String, bool)],
     node_versions: &[(String, Option<String>)],
     secrets_encryption: bool,
+    wizard_available: bool,
 ) {
     let snapshot = types::DispatcherConfigSnapshot {
         nodes: config
@@ -156,7 +176,7 @@ async fn publish_config_snapshot(
             .map(|p| p.display().to_string()),
         hook_bin: config.hook_bin.as_ref().map(|p| p.display().to_string()),
         secrets_encryption,
-        wizard_available: config.wizard.is_some(),
+        wizard_available,
     };
     match store.raw_bucket(store::buckets::PLATFORM).await {
         Ok(bucket) => {

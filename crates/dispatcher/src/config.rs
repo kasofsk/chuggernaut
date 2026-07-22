@@ -45,10 +45,6 @@ pub struct DispatcherConfig {
     /// `/usr/local/bin/chuggernaut` inside the sshd container). Unset → this
     /// process's own path.
     pub hook_bin: Option<PathBuf>,
-    /// The New Job "job wizard" LLM config (`WIZARD_API_KEY` /
-    /// `ANTHROPIC_API_KEY`, `WIZARD_MODEL`, `WIZARD_BASE_URL`). None → the
-    /// wizard is unavailable and the UI falls back to manual entry.
-    pub wizard: Option<crate::wizard::WizardConfig>,
 }
 
 fn env_opt(name: &str) -> Option<String> {
@@ -102,7 +98,6 @@ impl DispatcherConfig {
             triage_image: env_opt("TRIAGE_IMAGE"),
             docker_nodes,
             hook_bin: env_opt("HOOK_BIN").map(PathBuf::from),
-            wizard: crate::wizard::WizardConfig::from_env(),
         })
     }
 
