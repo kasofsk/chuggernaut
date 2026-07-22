@@ -321,6 +321,103 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
 
+    // Members / role management (§7.5, platform admins only). A non-admin is
+    // refused before the request ever reaches the dispatcher.
+    let (status, _, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/members",
+        Some(&cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = call(
+        &router,
+        "PUT",
+        "/api/v1/projects/acme/api/members/op@example.com",
+        Some(&cookie),
+        Some(serde_json::json!({ "role": "owner" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Admin grants op `owner` (→ Admin) on acme/api; the write lands on the
+    // user record via the dispatcher (single writer of users.*).
+    let (status, granted, _) = call(
+        &router,
+        "PUT",
+        "/api/v1/projects/acme/api/members/op@example.com",
+        Some(&admin_cookie),
+        Some(serde_json::json!({ "role": "owner" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{granted}");
+    assert_eq!(granted["role"], "admin");
+    assert_eq!(
+        users
+            .get_json::<User>(&store::keys::user_key("op@example.com"))
+            .await
+            .unwrap()
+            .unwrap()
+            .project_roles
+            .get("acme/api"),
+        Some(&ProjectRole::Admin)
+    );
+
+    // List returns op with its role.
+    let (status, list, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/members",
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list["members"][0]["email"], "op@example.com");
+    assert_eq!(list["members"][0]["role"], "admin");
+
+    // A bad role is a 400; an unknown user is a 404.
+    let (status, _, _) = call(
+        &router,
+        "PUT",
+        "/api/v1/projects/acme/api/members/op@example.com",
+        Some(&admin_cookie),
+        Some(serde_json::json!({ "role": "superuser" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(
+        &router,
+        "PUT",
+        "/api/v1/projects/acme/api/members/ghost@example.com",
+        Some(&admin_cookie),
+        Some(serde_json::json!({ "role": "member" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Remove clears the grant.
+    let (status, _, _) = call(
+        &router,
+        "DELETE",
+        "/api/v1/projects/acme/api/members/op@example.com",
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !users
+            .get_json::<User>(&store::keys::user_key("op@example.com"))
+            .await
+            .unwrap()
+            .unwrap()
+            .project_roles
+            .contains_key("acme/api")
+    );
+
     // Create (201) — and a bad type is a 422 validation envelope at release.
     let (status, job, _) = call(
         &router,

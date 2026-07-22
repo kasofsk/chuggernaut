@@ -410,7 +410,130 @@ pub async fn spawn_api_handlers(
         }
     });
 
+    // ── req.members.{set,remove,list}.{owner}.{project} — §7.5 project-role
+    // management. The dispatcher is the single writer of `users.*`, so the API
+    // (platform-admin-gated) forwards role mutations here rather than writing KV
+    // itself. Payload: `{ email, role? }`.
+    let mut members_sub = store.subscribe_requests("req.members.>").await?;
+    let members_store = store.clone();
+    tokio::spawn(async move {
+        while let Some(req) = members_sub.next().await {
+            let parts: Vec<&str> = req.subject.split('.').collect();
+            let (Some(verb), Some(owner), Some(project)) = (
+                parts.get(2).copied(),
+                parts.get(3).copied(),
+                parts.get(4).copied(),
+            ) else {
+                req.respond(bad_request("malformed subject")).await;
+                continue;
+            };
+            #[derive(serde::Deserialize)]
+            struct Body {
+                #[serde(default)]
+                email: String,
+                #[serde(default)]
+                role: Option<String>,
+            }
+            let body = match serde_json::from_slice::<Body>(&req.payload) {
+                Err(e) => bad_request(&e.to_string()),
+                Ok(b) => {
+                    manage_members(
+                        &members_store,
+                        verb,
+                        owner,
+                        project,
+                        &b.email,
+                        b.role.as_deref(),
+                    )
+                    .await
+                }
+            };
+            req.respond(body).await;
+        }
+    });
+
     spawn_read_handlers(store, handle, repos, wizard, backend).await
+}
+
+/// §7.5 project-role management, dispatcher-side (single writer of `users.*`).
+/// `set` grants/updates a role, `remove` clears one, `list` returns the users
+/// holding any role on the project. Role names accept `owner` as an alias for
+/// `admin` (see `ProjectRole::parse`). 404 when the target user is missing.
+async fn manage_members(
+    store: &NatsStore,
+    verb: &str,
+    owner: &str,
+    project: &str,
+    email: &str,
+    role: Option<&str>,
+) -> Vec<u8> {
+    if let Err(e) = store::keys::validate_subject_component(owner)
+        .and_then(|()| store::keys::validate_subject_component(project))
+    {
+        return bad_request(&e.to_string());
+    }
+    let slug = format!("{owner}/{project}");
+    let users = match store.raw_bucket(store::buckets::USERS).await {
+        Ok(b) => b,
+        Err(e) => return error_reply(&e.into()),
+    };
+
+    // list: no target email — enumerate members holding a role on this project.
+    if verb == "list" {
+        let keys = match users.keys_with_prefix("").await {
+            Ok(k) => k,
+            Err(e) => return error_reply(&e.into()),
+        };
+        let mut members = Vec::new();
+        for key in keys {
+            match users.get_json::<types::User>(&key).await {
+                Ok(Some(user)) => {
+                    if let Some(role) = user.project_roles.get(&slug) {
+                        members.push(serde_json::json!({ "email": user.email, "role": role }));
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => return error_reply(&e.into()),
+            }
+        }
+        members.sort_by(|a, b| a["email"].as_str().cmp(&b["email"].as_str()));
+        return ok_reply(&serde_json::json!({ "members": members }));
+    }
+
+    if email.is_empty() {
+        return bad_request("payload must carry { email }");
+    }
+    let key = store::keys::user_key(email);
+    let mut user = match users.get_json::<types::User>(&key).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return NOT_FOUND.to_vec(),
+        Err(e) => return error_reply(&e.into()),
+    };
+    match verb {
+        "set" => {
+            let Some(role) = role else {
+                return bad_request("payload must carry { role }");
+            };
+            let Some(role) = types::ProjectRole::parse(role) else {
+                return bad_request(&format!(
+                    "invalid role {role:?} (expected owner|member|viewer)"
+                ));
+            };
+            user.project_roles.insert(slug.clone(), role);
+            if let Err(e) = users.put_json(&key, &user).await {
+                return error_reply(&e.into());
+            }
+            ok_reply(&serde_json::json!({ "email": user.email, "project": slug, "role": role }))
+        }
+        "remove" => {
+            user.project_roles.remove(&slug);
+            if let Err(e) = users.put_json(&key, &user).await {
+                return error_reply(&e.into());
+            }
+            ok_reply(&serde_json::json!({ "email": user.email, "project": slug }))
+        }
+        _ => bad_request("malformed subject"),
+    }
 }
 
 /// §7.3 user SSH cert minting. Loads the caller's roles from their user record
@@ -443,6 +566,7 @@ async fn sign_user_cert(
             public_key,
             &user.email,
             &user.project_roles,
+            user.platform_admin,
             chrono::Duration::hours(24),
         )
         .await

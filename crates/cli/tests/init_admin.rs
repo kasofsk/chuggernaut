@@ -2,7 +2,7 @@
 //! skip-guarded). Keygen shells out to openssl/ssh-keygen — present on any
 //! dev/deploy host.
 
-use cli::admin::{self, AdminArgs, AdminCmd, ProjectCmd, UserCmd};
+use cli::admin::{self, AdminArgs, AdminCmd, ProjectCmd, RoleCmd, UserCmd};
 use cli::init::{self, InitArgs};
 use store::NatsStore;
 use test_utils::require_nats;
@@ -183,5 +183,115 @@ async fn admin_project_and_user_commands() {
             .await
             .unwrap(),
         None
+    );
+}
+
+#[tokio::test]
+async fn admin_user_role_commands() {
+    let server = require_nats!();
+    let dir = tempfile::tempdir().unwrap();
+
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let admin_args = |cmd| AdminArgs {
+        nats_url: server.url().to_string(),
+        keys_dir: dir.path().join("no-keys"),
+        cmd,
+    };
+    admin::run(admin_args(AdminCmd::User(UserCmd::Create {
+        email: "dev@example.com".into(),
+        password: "pw".into(),
+        admin: false,
+    })))
+    .await
+    .unwrap();
+
+    // Re-read the stored user's role on a project (None if unset).
+    let role_of = |slug: &str| {
+        let store = store.clone();
+        let slug = slug.to_string();
+        async move {
+            store
+                .raw_bucket(store::buckets::USERS)
+                .await
+                .unwrap()
+                .get_json::<User>(&store::keys::user_key("dev@example.com"))
+                .await
+                .unwrap()
+                .unwrap()
+                .project_roles
+                .get(&slug)
+                .copied()
+        }
+    };
+
+    // set: `owner` is the CLI alias for the top project role (Admin).
+    admin::run(admin_args(AdminCmd::User(UserCmd::Role(RoleCmd::Set {
+        email: "dev@example.com".into(),
+        project: "acme/api".into(),
+        role: "owner".into(),
+    }))))
+    .await
+    .unwrap();
+    assert_eq!(role_of("acme/api").await, Some(types::ProjectRole::Admin));
+
+    // A second set on another project coexists; list runs without error.
+    admin::run(admin_args(AdminCmd::User(UserCmd::Role(RoleCmd::Set {
+        email: "dev@example.com".into(),
+        project: "acme/web".into(),
+        role: "viewer".into(),
+    }))))
+    .await
+    .unwrap();
+    admin::run(admin_args(AdminCmd::User(UserCmd::Role(RoleCmd::List {
+        email: "dev@example.com".into(),
+    }))))
+    .await
+    .unwrap();
+
+    // remove: clears just that project's grant.
+    admin::run(admin_args(AdminCmd::User(UserCmd::Role(RoleCmd::Remove {
+        email: "dev@example.com".into(),
+        project: "acme/api".into(),
+    }))))
+    .await
+    .unwrap();
+    assert_eq!(role_of("acme/api").await, None);
+    assert_eq!(role_of("acme/web").await, Some(types::ProjectRole::Viewer));
+
+    // Errors: bad role, bad slug, unknown user, removing an absent grant.
+    assert!(
+        admin::run(admin_args(AdminCmd::User(UserCmd::Role(RoleCmd::Set {
+            email: "dev@example.com".into(),
+            project: "acme/api".into(),
+            role: "superuser".into(),
+        }))))
+        .await
+        .is_err()
+    );
+    assert!(
+        admin::run(admin_args(AdminCmd::User(UserCmd::Role(RoleCmd::Set {
+            email: "dev@example.com".into(),
+            project: "no-slash".into(),
+            role: "member".into(),
+        }))))
+        .await
+        .is_err()
+    );
+    assert!(
+        admin::run(admin_args(AdminCmd::User(UserCmd::Role(RoleCmd::List {
+            email: "ghost@example.com".into(),
+        }))))
+        .await
+        .is_err()
+    );
+    assert!(
+        admin::run(admin_args(AdminCmd::User(UserCmd::Role(RoleCmd::Remove {
+            email: "dev@example.com".into(),
+            project: "acme/api".into(),
+        }))))
+        .await
+        .is_err()
     );
 }

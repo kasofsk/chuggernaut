@@ -202,6 +202,14 @@ pub fn wizard_chat(owner: &str, project: &str) -> String {
     format!("req.wizard.chat.{owner}.{project}")
 }
 
+/// §7.5 project-role management: the dispatcher (single writer of `users.*`)
+/// mutates a user record's `project_roles`. `verb` is `set` | `remove` | `list`;
+/// the target email rides in the payload (`{ email, role? }`) — emails are not
+/// valid subject tokens. Platform-admin-gated at the API before it forwards here.
+pub fn members(verb: &str, owner: &str, project: &str) -> String {
+    format!("req.members.{verb}.{owner}.{project}")
+}
+
 /// §7.3: mint a 24h user SSH certificate. Payload: `{ public_key, email }` —
 /// the email is the authenticated caller's, read from the JWT by the API; a
 /// client-supplied identity is never forwarded. No owner/project token: the

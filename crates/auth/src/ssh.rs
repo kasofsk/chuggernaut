@@ -23,6 +23,9 @@ pub const ENV_PRINCIPAL: &str = "CHUGGERNAUT_PRINCIPAL";
 pub const ENV_ACCESS: &str = "CHUGGERNAUT_ACCESS";
 pub const ENV_ROLES: &str = "CHUGGERNAUT_ROLES";
 pub const ENV_REPO: &str = "CHUGGERNAUT_REPO";
+/// Set (`1`) when the cert carries the platform-admin flag (§7.3): the shell
+/// exports it for the pre-receive hook. Absent → non-admin (old certs too).
+pub const ENV_ADMIN: &str = "CHUGGERNAUT_ADMIN";
 
 /// Hook body written into `hooks/pre-receive` at project creation (§12.2).
 /// Bakes the path the binary has *on the SSH host*. The no-identity fast
@@ -98,9 +101,11 @@ impl Principal {
 }
 
 /// §5.2 pull column. `roles` is the user's `project_roles` claim (from the
-/// cert's forced command); job and dispatcher principals need none.
+/// cert's forced command); job and dispatcher principals need none. `admin` is
+/// the cert's platform-admin flag (§7.3): a platform admin may read any project.
 pub fn authorize_pull(
     principal: &Principal,
+    admin: bool,
     roles: &HashMap<String, ProjectRole>,
     owner: &str,
     project: &str,
@@ -113,16 +118,18 @@ pub fn authorize_pull(
             ..
         } => o == owner && p == project,
         Principal::User { .. } => {
-            roles.get(&format!("{owner}/{project}")) >= Some(&ProjectRole::Viewer)
+            admin || roles.get(&format!("{owner}/{project}")) >= Some(&ProjectRole::Viewer)
         }
     }
 }
 
 /// §5.2 push column, evaluated per updated ref (pre-receive hook). Protected
 /// refs (the default branch, tags) are dispatcher-only.
+#[allow(clippy::too_many_arguments)]
 pub fn authorize_ref_push(
     principal: &Principal,
     access: CertAccess,
+    admin: bool,
     roles: &HashMap<String, ProjectRole>,
     owner: &str,
     project: &str,
@@ -139,8 +146,10 @@ pub fn authorize_ref_push(
             project: p,
             seq,
         } => o == owner && p == project && refname == format!("refs/heads/job/{seq}"),
+        // A platform admin (§7.3) pushes to any job branch in any project, but
+        // the default branch stays dispatcher-only for everyone.
         Principal::User { .. } => {
-            roles.get(&format!("{owner}/{project}")) >= Some(&ProjectRole::Member)
+            (admin || roles.get(&format!("{owner}/{project}")) >= Some(&ProjectRole::Member))
                 && is_job_branch(refname)
                 && refname != format!("refs/heads/{default_branch}")
         }
@@ -153,6 +162,7 @@ pub fn authorize_ref_push(
 pub fn authorize_push_entry(
     principal: &Principal,
     access: CertAccess,
+    admin: bool,
     roles: &HashMap<String, ProjectRole>,
     owner: &str,
     project: &str,
@@ -168,7 +178,7 @@ pub fn authorize_push_entry(
             ..
         } => o == owner && p == project,
         Principal::User { .. } => {
-            roles.get(&format!("{owner}/{project}")) >= Some(&ProjectRole::Member)
+            admin || roles.get(&format!("{owner}/{project}")) >= Some(&ProjectRole::Member)
         }
     }
 }
@@ -246,20 +256,25 @@ impl SshCa {
 
     /// §7.3: sign a user-submitted public key. Principal = email, 24h
     /// validity; `project_roles` ride in the forced command for the
-    /// authorization hooks.
+    /// authorization hooks, and `platform_admin` rides alongside so a platform
+    /// admin can read any project and push to any job branch (never the default
+    /// branch). Certs minted before the flag existed simply omit it.
     pub async fn sign_user_cert(
         &self,
         public_key_openssh: &str,
         email: &str,
         roles: &HashMap<String, ProjectRole>,
+        platform_admin: bool,
         validity: chrono::Duration,
     ) -> Result<String, AuthError> {
         use base64::Engine;
         let roles_json =
             serde_json::to_string(roles).map_err(|e| AuthError::Internal(e.to_string()))?;
         let roles_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(roles_json);
-        let force_command =
-            format!("chuggernaut ssh-shell --kind user --principal {email} --roles {roles_b64}");
+        let admin_flag = if platform_admin { " --admin" } else { "" };
+        let force_command = format!(
+            "chuggernaut ssh-shell --kind user --principal {email} --roles {roles_b64}{admin_flag}"
+        );
         self.sign(
             public_key_openssh,
             &format!("user:{email}"),
@@ -492,17 +507,27 @@ mod tests {
     fn pull_rules() {
         let none = HashMap::new();
         let job = Principal::parse("job:acme/api:42");
-        assert!(authorize_pull(&job, &none, "acme", "api"));
-        assert!(!authorize_pull(&job, &none, "acme", "web"));
-        assert!(authorize_pull(&Principal::Dispatcher, &none, "acme", "web"));
+        assert!(authorize_pull(&job, false, &none, "acme", "api"));
+        assert!(!authorize_pull(&job, false, &none, "acme", "web"));
+        assert!(authorize_pull(
+            &Principal::Dispatcher,
+            false,
+            &none,
+            "acme",
+            "web"
+        ));
         let user = Principal::parse("d@e.com");
         assert!(authorize_pull(
             &user,
+            false,
             &roles(ProjectRole::Viewer),
             "acme",
             "api"
         ));
-        assert!(!authorize_pull(&user, &none, "acme", "api"));
+        assert!(!authorize_pull(&user, false, &none, "acme", "api"));
+        // Platform admin reads any project with no role grants at all.
+        assert!(authorize_pull(&user, true, &none, "acme", "api"));
+        assert!(authorize_pull(&user, true, &none, "other", "repo"));
     }
 
     #[test]
@@ -510,7 +535,7 @@ mod tests {
         let none = HashMap::new();
         let job = Principal::parse("job:acme/api:42");
         let ok = |p: &Principal, a, r: &HashMap<_, _>, refname| {
-            authorize_ref_push(p, a, r, "acme", "api", refname, "main")
+            authorize_ref_push(p, a, false, r, "acme", "api", refname, "main")
         };
         // Job: own branch only, own project only, rw only.
         assert!(ok(&job, CertAccess::ReadWrite, &none, "refs/heads/job/42"));
@@ -520,6 +545,7 @@ mod tests {
         assert!(!authorize_ref_push(
             &job,
             CertAccess::ReadWrite,
+            false,
             &none,
             "acme",
             "web",
@@ -570,6 +596,52 @@ mod tests {
             CertAccess::ReadWrite,
             &roles(ProjectRole::Admin),
             "refs/tags/v1"
+        ));
+    }
+
+    #[test]
+    fn platform_admin_push_bypass() {
+        let none = HashMap::new();
+        let user = Principal::parse("d@e.com");
+        // admin=true: push to a job branch in any project, no role grant needed.
+        let admin_push = |owner, project, refname, default| {
+            authorize_ref_push(
+                &user,
+                CertAccess::ReadWrite,
+                true,
+                &none,
+                owner,
+                project,
+                refname,
+                default,
+            )
+        };
+        assert!(admin_push("acme", "api", "refs/heads/job/7", "main"));
+        assert!(admin_push("other", "repo", "refs/heads/job/99", "main"));
+        // ...but never the default branch, even for an admin, and even when the
+        // default is not literally "main".
+        assert!(!admin_push("acme", "api", "refs/heads/main", "main"));
+        assert!(!admin_push("acme", "api", "refs/heads/trunk", "trunk"));
+        assert!(!admin_push("acme", "api", "refs/tags/v1", "main"));
+        // Entry gate: an admin may push *something* to any project.
+        assert!(authorize_push_entry(
+            &user,
+            CertAccess::ReadWrite,
+            true,
+            &none,
+            "other",
+            "repo"
+        ));
+        // A read-only cert stays read-only even with the admin flag.
+        assert!(!authorize_ref_push(
+            &user,
+            CertAccess::ReadOnly,
+            true,
+            &none,
+            "acme",
+            "api",
+            "refs/heads/job/7",
+            "main"
         ));
     }
 
@@ -645,25 +717,49 @@ mod tests {
             .await
             .unwrap();
 
+        // Non-admin: forced command carries roles but no --admin flag.
         let cert = SshCa::new(&ca)
             .sign_user_cert(
                 &pubkey,
                 "d@e.com",
                 &roles(ProjectRole::Member),
+                false,
                 chrono::Duration::hours(24),
             )
             .await
             .unwrap();
         let cert_path = dir.path().join("cert.pub");
         tokio::fs::write(&cert_path, &cert).await.unwrap();
+        let listing = ssh_keygen_list(&cert_path).await;
+        assert!(listing.contains("d@e.com"), "{listing}");
+        assert!(listing.contains("--kind user"), "{listing}");
+        assert!(!listing.contains("--admin"), "{listing}");
+
+        // Platform admin: the forced command carries the --admin flag.
+        let admin_cert = SshCa::new(&ca)
+            .sign_user_cert(
+                &pubkey,
+                "admin@e.com",
+                &HashMap::new(),
+                true,
+                chrono::Duration::hours(24),
+            )
+            .await
+            .unwrap();
+        let admin_path = dir.path().join("admin-cert.pub");
+        tokio::fs::write(&admin_path, &admin_cert).await.unwrap();
+        let admin_listing = ssh_keygen_list(&admin_path).await;
+        assert!(admin_listing.contains("--admin"), "{admin_listing}");
+    }
+
+    #[cfg(test)]
+    async fn ssh_keygen_list(cert_path: &std::path::Path) -> String {
         let out = tokio::process::Command::new("ssh-keygen")
             .args(["-L", "-f", cert_path.to_str().unwrap()])
             .output()
             .await
             .unwrap();
-        let listing = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(listing.contains("d@e.com"), "{listing}");
-        assert!(listing.contains("--kind user"), "{listing}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
     #[test]

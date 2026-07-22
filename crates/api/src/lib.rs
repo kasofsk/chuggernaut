@@ -56,6 +56,15 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
             "/api/v1/projects/{owner}/{project}/config",
             get(routes::project_config_get),
         )
+        // Project members / role management (platform admins only, §7.5)
+        .route(
+            "/api/v1/projects/{owner}/{project}/members",
+            get(routes::members_list),
+        )
+        .route(
+            "/api/v1/projects/{owner}/{project}/members/{email}",
+            axum::routing::put(routes::members_set).delete(routes::members_remove),
+        )
         // Origin (linked projects)
         .route(
             "/api/v1/projects/{owner}/{project}/origin",

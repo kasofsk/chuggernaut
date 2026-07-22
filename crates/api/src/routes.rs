@@ -528,6 +528,81 @@ pub async fn projects_link(
     .await
 }
 
+// ── Members (§7.5 project-role management) ───────────────────────────────
+
+/// Platform-admin gate (§7.5 "platform-level config" row): role management is a
+/// platform-admin concern, mirroring `admin user role` on the CLI. The API layer
+/// already treats `platform_admin` as all-powerful.
+fn platform_admin(identity: &Identity) -> ApiResult<()> {
+    if identity.platform_admin {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "platform admin required",
+        ))
+    }
+}
+
+/// `GET /api/v1/projects/{owner}/{project}/members` — users holding a role on
+/// the project, each `{ email, role }`. Platform admins only.
+pub async fn members_list(
+    State(state): State<SharedState>,
+    Path((owner, project)): Path<(String, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    platform_admin(&identity)?;
+    forward(
+        &state,
+        &store::subjects::members("list", &owner, &project),
+        serde_json::json!({}),
+        StatusCode::OK,
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+pub struct MemberRoleBody {
+    /// `owner` | `member` | `viewer` (`owner` is the top project role, §7.5).
+    pub role: String,
+}
+
+/// `PUT /api/v1/projects/{owner}/{project}/members/{email}` — grant/update the
+/// user's role on the project. Body `{ role }`. Platform admins only; the
+/// dispatcher owns the record mutation (single writer of `users.*`).
+pub async fn members_set(
+    State(state): State<SharedState>,
+    Path((owner, project, email)): Path<(String, String, String)>,
+    Auth(identity): Auth,
+    Json(body): Json<MemberRoleBody>,
+) -> ApiResult<Response> {
+    platform_admin(&identity)?;
+    forward(
+        &state,
+        &store::subjects::members("set", &owner, &project),
+        serde_json::json!({ "email": email, "role": body.role }),
+        StatusCode::OK,
+    )
+    .await
+}
+
+/// `DELETE /api/v1/projects/{owner}/{project}/members/{email}` — clear the
+/// user's role on the project. Platform admins only.
+pub async fn members_remove(
+    State(state): State<SharedState>,
+    Path((owner, project, email)): Path<(String, String, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    platform_admin(&identity)?;
+    forward(
+        &state,
+        &store::subjects::members("remove", &owner, &project),
+        serde_json::json!({ "email": email }),
+        StatusCode::OK,
+    )
+    .await
+}
+
 // ── Origin (linked projects) ─────────────────────────────────────────────
 
 /// Link + release state with an opportunistic PR check (Viewer+).

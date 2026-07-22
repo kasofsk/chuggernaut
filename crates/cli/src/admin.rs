@@ -164,6 +164,39 @@ pub enum UserCmd {
         #[arg(long, default_value = "720h")]
         ttl: String,
     },
+    /// Grant, list, or remove a user's project roles (§7.5). Writes the
+    /// `project_roles` map on the user record — the same `users.*` bucket
+    /// `user create` seeds.
+    #[command(subcommand)]
+    Role(RoleCmd),
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum RoleCmd {
+    /// Grant/update a user's role on a project.
+    Set {
+        #[arg(long)]
+        email: String,
+        /// `{owner}/{project}`.
+        #[arg(long)]
+        project: String,
+        /// `owner` | `member` | `viewer` (`owner` is the top project role, §7.5).
+        #[arg(long)]
+        role: String,
+    },
+    /// List a user's project roles.
+    List {
+        #[arg(long)]
+        email: String,
+    },
+    /// Remove a user's role on a project.
+    Remove {
+        #[arg(long)]
+        email: String,
+        /// `{owner}/{project}`.
+        #[arg(long)]
+        project: String,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -490,6 +523,65 @@ async fn run_user(store: &NatsStore, keys_dir: &std::path::Path, cmd: UserCmd) -
         UserCmd::Delete { email } => {
             users.delete(&keys::user_key(&email)).await?;
             println!("deleted {email}");
+        }
+        UserCmd::Role(cmd) => run_role(store, cmd).await?,
+    }
+    Ok(())
+}
+
+/// §7.5 project-role management on the user record. Mutates the `project_roles`
+/// map in the `users.*` bucket — the same write path `user create` uses; the
+/// admin CLI is the operator-side writer. `--project` is `{owner}/{project}`.
+async fn run_role(store: &NatsStore, cmd: RoleCmd) -> Result<()> {
+    let users = store.raw_bucket(store::buckets::USERS).await?;
+    // Validate a `{owner}/{project}` slug into the map-key form it is stored as.
+    let slug = |project: &str| -> Result<String> {
+        let Some((owner, name)) = project.split_once('/') else {
+            bail!("--project must be owner/project, got {project:?}");
+        };
+        keys::validate_subject_component(owner)?;
+        keys::validate_subject_component(name)?;
+        Ok(format!("{owner}/{name}"))
+    };
+    match cmd {
+        RoleCmd::Set {
+            email,
+            project,
+            role,
+        } => {
+            let slug = slug(&project)?;
+            let Some(role) = types::ProjectRole::parse(&role) else {
+                bail!("--role {role:?} must be owner|member|viewer");
+            };
+            let key = keys::user_key(&email);
+            let Some(mut user) = users.get_json::<User>(&key).await? else {
+                bail!("user {email} not found");
+            };
+            user.project_roles.insert(slug.clone(), role);
+            users.put_json(&key, &user).await?;
+            println!("granted {email} {role:?} on {slug}");
+        }
+        RoleCmd::List { email } => {
+            let Some(user) = users.get_json::<User>(&keys::user_key(&email)).await? else {
+                bail!("user {email} not found");
+            };
+            let mut roles: Vec<_> = user.project_roles.iter().collect();
+            roles.sort_by_key(|(p, _)| p.as_str());
+            for (project, role) in roles {
+                println!("{project}\t{role:?}");
+            }
+        }
+        RoleCmd::Remove { email, project } => {
+            let slug = slug(&project)?;
+            let key = keys::user_key(&email);
+            let Some(mut user) = users.get_json::<User>(&key).await? else {
+                bail!("user {email} not found");
+            };
+            if user.project_roles.remove(&slug).is_none() {
+                bail!("user {email} has no role on {slug}");
+            }
+            users.put_json(&key, &user).await?;
+            println!("removed {email}'s role on {slug}");
         }
     }
     Ok(())

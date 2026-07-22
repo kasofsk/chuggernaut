@@ -38,3 +38,18 @@ pub enum ProjectRole {
     Member,
     Admin,
 }
+
+impl ProjectRole {
+    /// Parse an operator-facing role name (the admin CLI `--role` flag and the
+    /// members API body). `owner` is accepted as an alias for `admin` — the top
+    /// project role — so the operator-facing vocabulary can say "owner" while the
+    /// stored role stays the spec's `admin` (§7.5). Case-insensitive.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "viewer" => Some(Self::Viewer),
+            "member" => Some(Self::Member),
+            "admin" | "owner" => Some(Self::Admin),
+            _ => None,
+        }
+    }
+}

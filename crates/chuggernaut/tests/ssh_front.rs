@@ -277,6 +277,55 @@ async fn user_and_dispatcher_rules() {
     clone.push("main").await;
 }
 
+/// §7.3 platform-admin bypass: an admin-flagged cert with NO role grants clones
+/// and pushes to a job branch in any project, but the default branch stays
+/// dispatcher-only even for an admin.
+#[tokio::test]
+async fn platform_admin_cert_bypasses_roles() {
+    let front = Front::setup().await;
+    let work = tempfile::tempdir().unwrap();
+
+    // No roles at all ({}), but --admin is set: the cert may read the project.
+    let empty_roles = URL_SAFE_NO_PAD.encode("{}");
+    let admin = format!("--kind user --principal admin@e.com --roles {empty_roles} --admin");
+
+    let pull = front.remote("admin-pull.sh", "git-upload-pack", &admin);
+    let (ok, err) = git(work.path(), &["clone", &pull, "co"]);
+    assert!(ok, "admin clone with no role: {err}");
+    let co = work.path().join("co");
+    std::fs::write(co.join("a.txt"), "admin change").unwrap();
+    git(&co, &["add", "."]);
+    git(
+        &co,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "a",
+        ],
+    );
+
+    let admin_push = front.remote("admin-push.sh", "git-receive-pack", &admin);
+    // Job branch: allowed via the admin bypass, despite holding no role.
+    let (ok, err) = git(&co, &["push", &admin_push, "HEAD:refs/heads/job/9"]);
+    assert!(ok, "admin push to job branch: {err}");
+    // Default branch: still dispatcher-only, refused by the pre-receive hook.
+    let (ok, err) = git(&co, &["push", &admin_push, "HEAD:refs/heads/main"]);
+    assert!(!ok);
+    assert!(err.contains("denied"), "{err}");
+
+    // Regression: the SAME identity without --admin and with no roles is fully
+    // refused — clone denied at entry.
+    let no_role = format!("--kind user --principal admin@e.com --roles {empty_roles}");
+    let no_role_pull = front.remote("norole-pull.sh", "git-upload-pack", &no_role);
+    let (ok, err) = git(work.path(), &["clone", &no_role_pull, "co2"]);
+    assert!(!ok);
+    assert!(err.contains("access denied"), "{err}");
+}
+
 #[tokio::test]
 async fn ssh_shell_rejects_garbage() {
     let front = Front::setup().await;

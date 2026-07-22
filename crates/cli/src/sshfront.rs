@@ -35,6 +35,10 @@ pub struct SshShellArgs {
     /// base64url(JSON) of the user's project_roles claim.
     #[arg(long)]
     pub roles: Option<String>,
+    /// Platform-admin cert (§7.3): read any project, push to any job branch
+    /// (never the default branch). Absent on pre-flag certs → non-admin.
+    #[arg(long)]
+    pub admin: bool,
     #[arg(long, env = "REPOS_ROOT", default_value = "/data/repos")]
     pub repos_root: PathBuf,
 }
@@ -67,9 +71,9 @@ pub async fn run_shell(args: SshShellArgs) -> Result<()> {
     let roles = decode_roles(args.roles.as_deref())?;
 
     let allowed = match service {
-        GitService::UploadPack => authorize_pull(&principal, &roles, &owner, &project),
+        GitService::UploadPack => authorize_pull(&principal, args.admin, &roles, &owner, &project),
         GitService::ReceivePack => {
-            authorize_push_entry(&principal, access, &roles, &owner, &project)
+            authorize_push_entry(&principal, access, args.admin, &roles, &owner, &project)
         }
     };
     if !allowed {
@@ -93,6 +97,7 @@ pub async fn run_shell(args: SshShellArgs) -> Result<()> {
         .env(ssh::ENV_PRINCIPAL, &args.principal)
         .env(ssh::ENV_ACCESS, access.as_str())
         .env(ssh::ENV_ROLES, args.roles.as_deref().unwrap_or_default())
+        .env(ssh::ENV_ADMIN, if args.admin { "1" } else { "" })
         .env(ssh::ENV_REPO, format!("{owner}/{project}"))
         .status()
         .await
@@ -118,6 +123,8 @@ pub async fn run_authz() -> Result<()> {
             .filter(|r| !r.is_empty())
             .as_deref(),
     )?;
+    // Old certs (pre-flag) export no admin env → non-admin, current behavior.
+    let admin = std::env::var(ssh::ENV_ADMIN).is_ok_and(|a| a == "1");
     let repo = std::env::var(ssh::ENV_REPO).context(ssh::ENV_REPO)?;
     let (owner, project) = repo
         .split_once('/')
@@ -136,6 +143,7 @@ pub async fn run_authz() -> Result<()> {
         if !authorize_ref_push(
             &principal,
             access,
+            admin,
             &roles,
             owner,
             project,

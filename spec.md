@@ -1255,12 +1255,13 @@ One SSH CA keypair is generated at platform init. The private key is mounted int
 |---|---|---|
 | `job:{owner}/{project}:{seq}` | `refs/heads/job/{seq}` in `{owner}/{project}` only | any ref in `{owner}/{project}` |
 | `dispatcher` | any protected ref (default branch, tags) | any |
+| user email (`platform_admin`) | `refs/heads/job/{seq}` in any project | any ref in any project |
 | user email (Member+ on project) | `refs/heads/job/{seq}` only | any ref on projects where Viewer+ |
 | user email (Viewer on project) | none | any ref on projects where Viewer+ |
 
 Job principals embed the owner and project because job seqs are only unique per project — a bare `job-{seq}` principal could not be authorized against the right repo.
 
-Per-project read authorization is enforced against the user's `project_roles` claim in their SSH cert extension.
+Per-project read authorization is enforced against the user's `project_roles` claim in their SSH cert extension. A `platform_admin` flag rides alongside that claim in the cert (see §7.3): it is treated as Member+ on every project for push and Viewer+ for pull, so an admin can operate any job branch without an explicit role grant — but the default branch stays dispatcher-only even for a platform admin. Certificates issued before the flag existed carry no admin bit and keep the role-only behavior.
 
 For credential issuance details, see §7.3 (User SSH certs) and §7.4 (Per-job SSH certs).
 
@@ -1400,6 +1401,11 @@ GET    /api/v1/projects/{owner}/{project}/jobs                      → 200 OK; 
 PATCH  /api/v1/projects/{owner}/{project}/jobs/{seq}                → 200 OK; body: Job; Member+. Full-field replace of a Draft job's definition (same body shape as create, minus draft); 409 unless the job is Draft (§2.1). Validation identical to create (deferred to release)
 POST   /api/v1/projects                                             body: { owner, name } → 201; platform admins only. Creates repo + hook + Code starter template + counter (§12.2); 409 if it exists.
 POST   /api/v1/projects/link                                        body: { owner, name, origin_url, main_branch? } → 201; platform admins only. Linked-origin creation (§5.3); 422 when the CHUG_ORIGIN_* secrets are missing; 409 if it exists.
+
+# Members (project-role management, §7.3/§7.5)
+GET    /api/v1/projects/{owner}/{project}/members                   → 200 OK; body: { members: [{ email, role }] } — users holding a role on the project. Platform admins only.
+PUT    /api/v1/projects/{owner}/{project}/members/{email}           body: { role: "owner"|"member"|"viewer" } → 200 OK; grants/updates the user's role. Platform admins only; 404 if the user is unknown. (`owner` = the top project role, `admin`.)
+DELETE /api/v1/projects/{owner}/{project}/members/{email}           → 200 OK; clears the user's role on the project. Platform admins only; 404 if the user is unknown.
 
 # Origin (linked projects, §5.3)
 GET    /api/v1/projects/{owner}/{project}/origin                    → 200 OK; body: { origin, release, release_counter, origin_main_sha, integration_sha, ahead_by, held }; 404 on classic projects. Viewer+.
@@ -1629,7 +1635,11 @@ User and project management is CLI-only via `chuggernaut admin ...` — no HTTP 
 
 One SSH CA keypair is generated at platform init. The private key is mounted into the dispatcher at runtime (k8s Secret in k8s deployments, bind-mounted file in Docker deployments). The public key is available to the SSH server configuration (`TrustedUserCAKeys ca.pub`). No per-user key registration required.
 
-**User SSH certs** — `POST /auth/ssh-cert`: user submits `{ "public_key": string }` (their SSH public key, authenticated via JWT cookie); API forwards to dispatcher via `req.ssh.sign-user-cert`; dispatcher signs with the CA private key and returns `{ "certificate": string }` valid for 24 hours, with a principal equal to the user's email. Users interact with git via the `chuggernaut` CLI, which handles cert refresh transparently.
+**User SSH certs** — `POST /auth/ssh-cert`: user submits `{ "public_key": string }` (their SSH public key, authenticated via JWT cookie); API forwards to dispatcher via `req.ssh.sign-user-cert`; dispatcher signs with the CA private key and returns `{ "certificate": string }` valid for 24 hours, with a principal equal to the user's email. The user's `project_roles` and `platform_admin` flag (read from the user record, never a client-supplied value) ride in the cert's forced command so the SSH front and pre-receive hook can authorize per §5.2. Users interact with git via the `chuggernaut` CLI, which handles cert refresh transparently.
+
+**Project-role management** — a user's `project_roles` are granted/revoked out-of-band and take effect on the next cert mint (24h cert lifetime bounds staleness):
+- **CLI**: `chuggernaut admin user role set --email E --project owner/name --role owner|member|viewer`, plus `role list --email E` and `role remove --email E --project owner/name`. `owner` is the operator-facing alias for the top project role (`admin`).
+- **API** (`platform_admin` only): `PUT /api/v1/projects/{owner}/{project}/members/{email}` with `{ "role": "owner"|"member"|"viewer" }`, `DELETE` to remove, and `GET .../members` to list. The API forwards to the dispatcher (`req.members.{set,remove,list}`), which is the single writer of the `users.*` bucket.
 
 SSH ref authorization rules are defined in §5.2.
 
@@ -1699,8 +1709,10 @@ The NATS operator signing key is mounted into the dispatcher at runtime (k8s Sec
 | Read any project endpoint | Viewer+ on that project |
 | Complete / fail a task | Member+ on that project |
 | Manage vars, secrets, knowledge | Admin on that project |
+| Manage project roles (grant/revoke members) | `platform_admin` |
 | Platform-level config | `platform_admin` |
-| Push to default branch | Dispatcher identity only |
+| Push to default branch | Dispatcher identity only (never a user, even `platform_admin`) |
+| Push to any job branch | Member+ on that project, or `platform_admin` (any project) |
 | Issue SSH certs | Authenticated user (any role) |
 
 ---
