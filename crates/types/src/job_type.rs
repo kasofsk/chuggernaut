@@ -1133,4 +1133,48 @@ rework_budget: 1
             }
         )));
     }
+
+    #[test]
+    fn repo_doc_producing_job_types_parse_and_validate() {
+        // The shipped `design`/`docs` job types (spec §9.4) must parse and pass
+        // the §1.1 field rules once the project `_defaults.yaml` is merged in —
+        // exactly as the dispatcher loads them at release. Embedded from the
+        // repo so an edit to either file that breaks the schema fails here, at
+        // the lowest tier, instead of at a live job launch.
+        let defaults =
+            ProjectDefaults::parse(include_str!("../../../jobs/_defaults.yaml")).unwrap();
+        for (name, yaml) in [
+            ("design", include_str!("../../../jobs/design.yaml")),
+            ("docs", include_str!("../../../jobs/docs.yaml")),
+        ] {
+            let jt =
+                JobType::parse(yaml).unwrap_or_else(|e| panic!("{name}.yaml parse error: {e}"));
+            assert_eq!(jt.name, name);
+            let merged = jt
+                .with_defaults(&defaults)
+                .unwrap_or_else(|e| panic!("{name}.yaml default merge error: {e}"));
+            assert_eq!(merged.validate(), vec![], "{name}.yaml field rules");
+            // The shared doc lint is a stage-1 command evaluator, the type's own
+            // reviewer is stage 0, and the appended `ci` default rounds out
+            // stage 1 (it self-skips a doc-only diff).
+            assert!(
+                merged
+                    .eval
+                    .iter()
+                    .any(|e| e.name == "doc-lint" && e.stage == 1),
+                "{name}.yaml should wire doc-lint at stage 1"
+            );
+            assert!(
+                merged
+                    .eval
+                    .iter()
+                    .any(|e| e.name.starts_with("review-") && e.stage == 0),
+                "{name}.yaml should wire its agent reviewer at stage 0"
+            );
+            assert!(
+                merged.eval.iter().any(|e| e.name == "ci"),
+                "{name}.yaml should inherit the project ci default"
+            );
+        }
+    }
 }

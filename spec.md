@@ -1759,6 +1759,19 @@ See §4.4 for the full injection pipeline. Summary:
 
 ---
 
+### 9.4 Documentation Jobs and the Docs Tree
+
+A project's markdown documentation is a first-class output produced by agent jobs, gated through the normal merge path like any code change. Two job types produce documentation, split because their review criteria differ:
+
+- **`design`** — architecture/plan documents that argue a decision's tradeoffs and set direction, written to `docs/design/<slug>.md`. Typical flow: a `design` job lands the document, then `code`/`web` jobs depend on it and cite it. The reviewer judges whether the document addresses the brief, weighs its alternatives and tradeoffs honestly, and stays consistent with `spec.md` and the codebase as they exist.
+- **`docs`** — reference/wiki pages that teach, written anywhere under `docs/`. The reviewer judges accuracy against the current code (spot-checking claims against the source), placement/navigation, and audience fit.
+
+**The docs tree is the wiki.** The repo's `docs/` directory is the project wiki root; `docs/design/` holds design documents. Documentation is versioned with the code it describes and travels with the project repo, exactly like job types and prompts (§1.1) rather than living in a separate control plane. Knowledge tags (§4.4, `tags/{tag}.md`) unify into this tree over time — a tag becomes a `docs/` page marked injectable via front-matter — but that migration is deferred; the two stores coexist today.
+
+**Gating.** Both types stage their evaluators (§3.3): stage 0 is the agent reviewer described above; stage 1 is a shared documentation lint (`tasks/doc-lint.sh` — markdown well-formedness, intra-repo link resolution, and best-effort code-path existence) that runs alongside the appended project `ci` default (§1.1). Both stage-1 checks are diff-aware and self-skip a diff with no relevant files, so a doc-only change is gated in seconds — `ci` skips its build because no `crates/**` path changed, and `doc-lint` runs only over the changed `.md` files.
+
+---
+
 ## Part 10: Security
 
 ### 10.1 Container Isolation
