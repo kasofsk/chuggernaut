@@ -6,7 +6,7 @@
 
 use crate::graph::JobGraph;
 use crate::origin::OriginStatusResponse;
-use crate::queue::{QueuedJob, ReadyQueue};
+use crate::queue::{QueuedJob, QueuedLaunch, ReadyQueue};
 use crate::release::{self, KvNames, ValidationError};
 use crate::state::{InvalidTransition, assert_transition};
 use crate::{escalation, exec, queue};
@@ -628,6 +628,10 @@ pub struct CoreConfig {
     /// Used by the core for `req.projects.link`; `spawn_api_handlers` takes
     /// the same value for `req.projects.create`.
     pub hook_bin: Option<std::path::PathBuf>,
+    /// Maximum time a launch may wait in the capacity queue before it escalates
+    /// as a backstop (spec §3.5). None → [`crate::launch_queue::MAX_QUEUE_WAIT`]
+    /// (30m). Tests shrink it to exercise the timeout without waiting.
+    pub launch_queue_max_wait: Option<std::time::Duration>,
 }
 
 pub struct Core {
@@ -642,6 +646,11 @@ pub struct Core {
     pub(crate) config: CoreConfig,
     pub(crate) graphs: HashMap<String, JobGraph>,
     pub queue: ReadyQueue,
+    /// Container launches deferred because the fleet had no free slot (spec
+    /// §3.5): FIFO, drained when a container exit frees a slot and by the
+    /// periodic scan as a backstop. In-memory like `queue`; restart
+    /// reconciliation re-queues the Pending tasks it finds.
+    pub(crate) launch_queue: std::collections::VecDeque<QueuedLaunch>,
     /// Execution state for jobs in Work/Evaluation (this process's working
     /// memory; restart rebuild is the reconcile slice).
     pub(crate) active: HashMap<(String, String, u64), exec::ExecState>,
@@ -695,6 +704,10 @@ pub fn spawn(mut core: Core) -> CoreHandle {
         }
         if let Err(e) = core.drain_queue().await {
             tracing::error!("post-reconcile drain: {e}");
+        }
+        // Re-attempt launches reconciliation re-queued under capacity pressure.
+        if let Err(e) = core.drain_launch_queue().await {
+            tracing::error!("post-reconcile launch drain: {e}");
         }
         core.run(rx).await
     });
@@ -751,6 +764,7 @@ impl Core {
             artifacts,
             graphs: HashMap::new(),
             queue: ReadyQueue::default(),
+            launch_queue: std::collections::VecDeque::new(),
             active: HashMap::new(),
             merge_queue: HashMap::new(),
             gating: HashMap::new(),
@@ -804,6 +818,11 @@ impl Core {
             self.handle_msg(msg).await;
             if let Err(e) = self.drain_queue().await {
                 tracing::error!("drain_queue: {e}");
+            }
+            // A just-handled container exit may have freed a fleet slot; retry
+            // any launches queued under capacity pressure (spec §3.5).
+            if let Err(e) = self.drain_launch_queue().await {
+                tracing::error!("drain_launch_queue: {e}");
             }
         }
     }

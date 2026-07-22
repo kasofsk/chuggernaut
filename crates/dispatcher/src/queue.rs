@@ -2,6 +2,7 @@
 //! task; rebuilt on restart by the reconciliation scan, so it is never
 //! persisted.
 
+use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -9,6 +10,25 @@ pub struct QueuedJob {
     pub owner: String,
     pub project: String,
     pub seq: u64,
+}
+
+/// A container launch deferred because the fleet had no free slot (spec §3.5).
+/// The task record is already persisted `Pending`; this holds its coordinates
+/// so the launch can be re-attempted when a slot frees (a running container
+/// exits) or by the periodic sweep. FIFO across the whole fleet — fair enough
+/// for the single-writer scheduler, and no retry budget is consumed while it
+/// waits. In-memory like the Ready queue; restart reconciliation re-queues any
+/// `Pending`, container-less command task it finds (§3.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedLaunch {
+    pub owner: String,
+    pub project: String,
+    pub seq: u64,
+    pub task_id: u64,
+    /// When the launch first joined the queue — the anchor for the maximum
+    /// queue-wait backstop (§3.5). Preserved across re-queue attempts so a
+    /// launch that keeps missing a slot still escalates on time.
+    pub queued_at: DateTime<Utc>,
 }
 
 #[derive(Default)]

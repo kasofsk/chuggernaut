@@ -15,6 +15,10 @@ pub(crate) const DEADLINE_MARKER: &str = "[deadline]";
 impl Core {
     pub(crate) async fn run_scans(&mut self) -> Result<()> {
         self.scan_task_timeouts().await?;
+        // Backstop for launches wedged in the capacity queue (§3.5). The
+        // periodic drain that retries them rides `Core::run` after this scan
+        // message, like every other slot-freed retry.
+        self.scan_launch_queue_timeouts().await?;
         self.scan_job_deadlines().await
     }
 

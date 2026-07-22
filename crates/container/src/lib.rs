@@ -21,6 +21,13 @@ pub enum BackendError {
     Unavailable(String),
     #[error("launch failed: {0}")]
     Launch(String),
+    /// Placement found no free slot on any eligible node (spec §3.1). Distinct
+    /// from [`Launch`](BackendError::Launch) because it is transient — a slot
+    /// frees when a running container exits — so the dispatcher queues the
+    /// launch and retries rather than failing the task (§3.5). The message is
+    /// carried verbatim (e.g. `no free slots on any node`).
+    #[error("{0}")]
+    NoCapacity(String),
     #[error("backend error: {0}")]
     Other(String),
 }

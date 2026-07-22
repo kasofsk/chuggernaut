@@ -188,6 +188,7 @@ fn backend_err(e: BackendError) -> WorkerError {
         BackendError::NotFound(id) => WorkerError::NotFound { id },
         BackendError::Unavailable(m) => WorkerError::Unavailable { message: m },
         BackendError::Launch(m) => WorkerError::Launch { message: m },
+        BackendError::NoCapacity(m) => WorkerError::NoCapacity { message: m },
         BackendError::Other(m) => WorkerError::Other { message: m },
     }
 }

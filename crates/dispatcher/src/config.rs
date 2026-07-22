@@ -181,6 +181,8 @@ impl DispatcherConfig {
             triage_image: self.triage_image.clone(),
             nats_account_seed: self.nats_account_seed().await?,
             hook_bin: self.hook_bin.clone(),
+            // Production uses the default 30m backstop (spec §3.5).
+            launch_queue_max_wait: None,
         })
     }
 }

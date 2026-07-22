@@ -10,7 +10,6 @@ use crate::queue::QueuedJob;
 use crate::release;
 use agent::{AgentRunConfig, McpServerConfig};
 use chrono::Utc;
-use container::{ContainerLaunchConfig, bootstrap_cmd};
 use std::collections::HashMap;
 use std::time::Duration;
 use types::{
@@ -350,21 +349,20 @@ impl Core {
             return Ok(()); // operator inbox drives it from here (§1.2)
         }
 
-        let env = self
-            .container_env(
-                owner,
-                project,
-                seq,
-                &job.branch,
-                &job_type,
-                &job_type.work.secrets,
-                ChannelRole::Work { task_id },
-                work_timeout,
-            )
-            .await?;
         match job_type.work.r#type {
             WorkType::Agent => {
-                let mut env = env;
+                let mut env = self
+                    .container_env(
+                        owner,
+                        project,
+                        seq,
+                        &job.branch,
+                        &job_type,
+                        &job_type.work.secrets,
+                        ChannelRole::Work { task_id },
+                        work_timeout,
+                    )
+                    .await?;
                 self.inject_platform_agent_secrets(&mut env).await?;
                 let prompt = self
                     .build_prompt(
@@ -458,58 +456,43 @@ impl Core {
             }
             WorkType::Command => {
                 let run = job_type.work.run.clone().unwrap_or_default();
-                let launch = ContainerLaunchConfig {
-                    image: job_type.image.clone().unwrap_or_default(),
-                    cmd: bootstrap_cmd(&["sh".into(), "-c".into(), run]),
-                    env,
-                    files: self
-                        .ssh_credential_files(
-                            owner,
-                            project,
-                            seq,
-                            ChannelRole::Work { task_id },
-                            work_timeout,
-                        )
-                        .await?,
-                    cpu_limit: job_type.resources.as_ref().and_then(|r| r.cpu),
-                    memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
-                    node: job_type.placement_node().map(String::from),
-                };
-                let id = match self.backend.launch(launch).await {
-                    Ok(id) => id,
-                    Err(e) => {
-                        // Launch failure is a task failure (§3.2): report it
-                        // through the exit fan-in so `on_work_exited` marks the
-                        // task Failed with the launch error and applies
-                        // work_retries → escalation. The agent work path already
-                        // gets this for free (`provider.run` errors surface as
-                        // exit -1); this unifies the command path with it.
-                        self.report_launch_failure(owner, project, seq, task_id, e);
-                        return Ok(());
+                let config = self
+                    .command_launch_config(
+                        owner,
+                        project,
+                        seq,
+                        &job.branch,
+                        &job_type,
+                        &job_type.work.secrets,
+                        job_type.image.clone().unwrap_or_default(),
+                        run,
+                        ChannelRole::Work { task_id },
+                        work_timeout,
+                    )
+                    .await?;
+                match self.backend.launch(config).await {
+                    Ok(id) => {
+                        task.container_id = Some(id.clone());
+                        self.tasks.put(&task).await?;
+                        // Logs are the only record of what a command task printed —
+                        // TaskResult::Command.output has never carried it.
+                        self.spawn_logs_monitor(owner, project, seq, task_id, id);
                     }
-                };
-                task.container_id = Some(id.clone());
-                self.tasks.put(&task).await?;
-                let backend = self.backend.clone();
-                let tx = self.self_tx.clone().expect("spawned core");
-                let (o, p) = (owner.to_string(), project.to_string());
-                let harvest = self.harvester();
-                tokio::spawn(async move {
-                    let exit_code = backend.wait(&id).await.unwrap_or(-1);
-                    // Logs are the only record of what a command task printed —
-                    // TaskResult::Command.output has never carried it.
-                    harvest.collect_logs(&o, &p, seq, task_id, &id).await;
-                    harvest.dispose(seq, task_id, &id).await;
-                    let _ = tx
-                        .send(Msg::TaskExited {
-                            owner: o,
-                            project: p,
-                            seq,
-                            task_id,
-                            exit: TaskExit::code(exit_code),
-                        })
-                        .await;
-                });
+                    // No free slot: queue the launch and retry when one frees,
+                    // rather than failing the task and burning a retry (§3.5).
+                    Err(container::BackendError::NoCapacity(reason)) => {
+                        self.defer_launch(owner, project, seq, &mut task, reason)
+                            .await?;
+                    }
+                    // Any other launch failure is a task failure (§3.2): report it
+                    // through the exit fan-in so `on_work_exited` marks the task
+                    // Failed with the launch error and applies work_retries →
+                    // escalation. The agent work path already gets this for free
+                    // (`provider.run` errors surface as exit -1).
+                    Err(e) => {
+                        self.report_launch_failure(owner, project, seq, task_id, e);
+                    }
+                }
             }
             WorkType::Human => unreachable!(),
         }

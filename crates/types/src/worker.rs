@@ -61,10 +61,23 @@ pub struct WorkerLaunchRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkerError {
-    NotFound { id: String },
-    Unavailable { message: String },
-    Launch { message: String },
-    Other { message: String },
+    NotFound {
+        id: String,
+    },
+    Unavailable {
+        message: String,
+    },
+    Launch {
+        message: String,
+    },
+    /// Placement found no free slot (spec §3.1/§3.5): transient, queued and
+    /// retried by the dispatcher rather than failing the task.
+    NoCapacity {
+        message: String,
+    },
+    Other {
+        message: String,
+    },
 }
 
 /// Reply envelope for every worker op.

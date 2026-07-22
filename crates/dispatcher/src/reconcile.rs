@@ -6,7 +6,7 @@
 use crate::core::{Core, Msg, Result, TaskExit};
 use crate::eval::{EvalRound, EvalSlot, SlotOutcome};
 use chrono::Utc;
-use types::{Job, JobState, Task, TaskPhase, TaskResult, TaskState};
+use types::{Job, JobState, Task, TaskKind, TaskPhase, TaskResult, TaskState};
 
 impl Core {
     pub(crate) async fn reconcile(&mut self) -> Result<()> {
@@ -146,8 +146,25 @@ impl Core {
                 .await;
         };
         match (task.state, work_type) {
-            // Pending human work waits on the inbox; nothing to recover.
-            (TaskState::Pending, _) => Ok(()),
+            (TaskState::Pending, _) => {
+                // A command work task queued under capacity pressure (§3.5) —
+                // Pending, no container, not human-performed — re-queues so the
+                // launch resumes when a slot frees. A Pending human/claimed
+                // attempt (kind Human, or performed_by Human) waits on the inbox.
+                if task.container_id.is_none()
+                    && !matches!(task.kind, TaskKind::Human { .. })
+                    && task.performed_by.is_none()
+                {
+                    self.launch_queue.push_back(crate::queue::QueuedLaunch {
+                        owner: owner.to_string(),
+                        project: project.to_string(),
+                        seq,
+                        task_id: task.id,
+                        queued_at: Utc::now(),
+                    });
+                }
+                Ok(())
+            }
             (TaskState::Running, _) => self.settle_running(owner, project, seq, task).await,
             // Completed before the crash, transition lost: replay it.
             (TaskState::Done, _) => self.enter_evaluation(owner, project, seq).await,
@@ -190,8 +207,12 @@ impl Core {
             return self.recover_wrapup_command(owner, project, seq, task).await;
         }
 
+        // A gate in flight is superseded, whether its task was Running or queued
+        // under capacity pressure (§3.5): refinalize re-opens the gate fresh.
         for t in all.iter().filter(|t| {
-            t.phase == TaskPhase::MergeGate && t.cycle == cycle && t.state == TaskState::Running
+            t.phase == TaskPhase::MergeGate
+                && t.cycle == cycle
+                && matches!(t.state, TaskState::Running | TaskState::Pending)
         }) {
             let mut failed = t.clone();
             if let Some(cid) = &failed.container_id {
@@ -373,10 +394,25 @@ impl Core {
                             structured: result_structured(r),
                         }),
                         (TaskState::Failed, _) => Some(SlotOutcome::Infra),
-                        _ => None, // Pending human or Running container
+                        _ => None, // Pending human, queued command, or Running container
                     };
                     if task.state == TaskState::Running {
                         running.push(task.clone());
+                    }
+                    // A command evaluator queued under capacity pressure (§3.5):
+                    // Pending, no container — re-queue so the launch resumes when
+                    // a slot frees; the slot stays open (outcome None) meanwhile.
+                    if task.state == TaskState::Pending
+                        && task.container_id.is_none()
+                        && matches!(task.kind, types::TaskKind::Command { .. })
+                    {
+                        self.launch_queue.push_back(crate::queue::QueuedLaunch {
+                            owner: owner.to_string(),
+                            project: project.to_string(),
+                            seq,
+                            task_id: task.id,
+                            queued_at: Utc::now(),
+                        });
                     }
                     slots.push(EvalSlot {
                         evaluator,

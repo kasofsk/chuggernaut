@@ -121,12 +121,19 @@ struct Rig {
 }
 
 async fn rig() -> Option<Rig> {
-    rig_with_artifacts(None).await
+    rig_full(None, None).await
 }
 
 /// `artifacts_identity` enables transcript/log capture; the provider then
 /// launches through the backend so runs report a container id to harvest from.
 async fn rig_with_artifacts(artifacts_identity: Option<String>) -> Option<Rig> {
+    rig_full(artifacts_identity, None).await
+}
+
+async fn rig_full(
+    artifacts_identity: Option<String>,
+    launch_queue_max_wait: Option<Duration>,
+) -> Option<Rig> {
     let server = test_utils::nats::NatsTestServer::spawn()?;
     let store = NatsStore::connect(server.url()).await.unwrap();
     store.ensure_topology().await.unwrap();
@@ -173,6 +180,7 @@ async fn rig_with_artifacts(artifacts_identity: Option<String>) -> Option<Rig> {
             artifacts_identity,
             // Enables the operator-dispatched triage action (§1.2).
             triage_image: Some("triage:latest".into()),
+            launch_queue_max_wait,
             ..Default::default()
         },
     )
@@ -583,6 +591,221 @@ async fn crashed_work_attempt_recovers_branch_and_notes_resume() {
         merged.as_deref(),
         Some("partial work"),
         "the recovered commit should land on main"
+    );
+}
+
+// ---- §3.5 capacity queue: no free slots defers the launch, never fails it ----
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Poll the task log for the first task matching `pred`.
+async fn wait_for_task(
+    store: &NatsStore,
+    seq: u64,
+    pred: impl Fn(&types::Task) -> bool,
+) -> types::Task {
+    let tasks = store.tasks().await.unwrap();
+    for _ in 0..100 {
+        if let Some(t) = tasks
+            .list_for_job("acme", "api", seq)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| pred(t))
+        {
+            return t;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for task");
+}
+
+/// A command evaluator that can't be placed (fleet full → `NoCapacity`) is
+/// *queued* Pending, not Failed — no `eval_retries` burned, the job holds in
+/// Evaluation — and launches when a slot frees. The periodic scan drives the
+/// drain once capacity returns (spec §3.5).
+#[tokio::test]
+async fn eval_launch_queues_on_no_capacity_then_launches_when_freed() {
+    let Some(rig) = rig().await else { return };
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone
+            .commit_file("src/new.rs", b"pub fn f() {}", "impl")
+            .await;
+        clone.push(&branch).await;
+    });
+    rig.backend
+        .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
+
+    // Fleet at capacity until we free it. Agent work runs through the provider,
+    // so the only `backend.launch` here is the command evaluator.
+    let full = Arc::new(AtomicBool::new(true));
+    let f = full.clone();
+    rig.backend.fail_launch_no_capacity_if(move |_| {
+        f.load(Ordering::SeqCst)
+            .then(|| "no free slots on any node".to_string())
+    });
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+
+    // The eval task parks Pending (queued), holding the job in Evaluation.
+    let eval = wait_for_task(&rig.store, job.id, |t| {
+        t.phase == TaskPhase::Evaluation && t.state == TaskState::Pending
+    })
+    .await;
+    assert_eq!(eval.attempt, 1, "queueing consumed no eval_retries");
+    assert!(
+        eval.container_id.is_none(),
+        "a queued task holds no container"
+    );
+    let jobs = rig.store.jobs().await.unwrap();
+    assert_eq!(
+        jobs.get("acme", "api", job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        JobState::Evaluation,
+        "queued, not escalated",
+    );
+    assert!(
+        event_types(&rig.store)
+            .await
+            .contains(&"task-queued".into()),
+        "a task-queued event surfaces the wait",
+    );
+
+    // Free a slot; the scan message drives the drain and the eval launches.
+    full.store(false, Ordering::SeqCst);
+    rig.handle.trigger_scan().await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let evals: Vec<_> = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.phase == TaskPhase::Evaluation)
+        .collect();
+    assert_eq!(
+        evals.len(),
+        1,
+        "one eval task launched from the queue — no retry inflation"
+    );
+    assert_eq!(evals[0].state, TaskState::Done);
+}
+
+/// Work-path parity: a command work container that can't be placed queues
+/// Pending — no `work_retries` burned — and launches when a slot frees (§3.5).
+#[tokio::test]
+async fn command_work_queues_on_no_capacity_then_launches_when_freed() {
+    let Some(rig) = rig().await else { return };
+    let full = Arc::new(AtomicBool::new(true));
+    let f = full.clone();
+    rig.backend.fail_launch_no_capacity_if(move |_| {
+        f.load(Ordering::SeqCst)
+            .then(|| "no free slots on any node".to_string())
+    });
+
+    let job = rig.handle.create_job(req("cmd-work")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+
+    let work = wait_for_task(&rig.store, job.id, |t| {
+        t.phase == TaskPhase::Work && t.state == TaskState::Pending
+    })
+    .await;
+    assert_eq!(work.attempt, 1, "queueing consumed no work_retries");
+    assert!(work.container_id.is_none());
+    let jobs = rig.store.jobs().await.unwrap();
+    assert_eq!(
+        jobs.get("acme", "api", job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        JobState::Work,
+    );
+    assert!(
+        event_types(&rig.store)
+            .await
+            .contains(&"task-queued".into())
+    );
+
+    full.store(false, Ordering::SeqCst);
+    rig.handle.trigger_scan().await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let works: Vec<_> = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.phase == TaskPhase::Work)
+        .collect();
+    assert_eq!(works.len(), 1, "one work task launched from the queue");
+    assert_eq!(works[0].state, TaskState::Done);
+}
+
+/// A launch wedged in the queue past the maximum wait escalates with the clear
+/// `no_free_slots_timeout` reason — the backstop for a genuinely stuck fleet
+/// (§3.5). The rig shrinks the max wait so the scan fires it immediately.
+#[tokio::test]
+async fn queued_launch_escalates_after_max_wait() {
+    let Some(rig) = rig_full(None, Some(Duration::from_millis(1))).await else {
+        return;
+    };
+    // Fleet stays full for the whole test — the launch never gets a slot.
+    rig.backend
+        .fail_launch_no_capacity_if(|_| Some("no free slots on any node".to_string()));
+
+    let job = rig.handle.create_job(req("cmd-work")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+
+    // It queues first (Pending), then the backstop scan escalates it.
+    wait_for_task(&rig.store, job.id, |t| {
+        t.phase == TaskPhase::Work && t.state == TaskState::Pending
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    rig.handle.trigger_scan().await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    let events = event_types(&rig.store).await;
+    assert!(events.contains(&"task-queued".into()));
+    assert!(events.contains(&"job-escalated".into()));
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    // The queued work task is Failed (not left Pending) and a Human escalation
+    // task names the wedge.
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t.phase == TaskPhase::Work && t.state == TaskState::Failed),
+        "the queued task is failed on timeout, not left Pending: {tasks:?}",
+    );
+    assert!(
+        tasks
+            .iter()
+            .any(|t| matches!(t.kind, types::TaskKind::Human { .. })
+                && t.state == TaskState::Pending),
+        "an escalation task is raised",
     );
 }
 

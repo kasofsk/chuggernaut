@@ -32,6 +32,15 @@ resources:
   task_timeout: 1s
 "#;
 
+const CMD_WORK: &str = r#"
+name: cmd-work
+image: img:latest
+work:
+  type: command
+  run: ./build.sh
+work_retries: 1
+"#;
+
 const MANUAL_DEADLINE: &str = r#"
 name: manual-deadline
 work:
@@ -628,6 +637,130 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
     assert_eq!(tasks[0].state, TaskState::Failed);
     assert!(!tasks[0].infra_loss, "a real exit is not an infra loss");
     assert_eq!((tasks[1].attempt, tasks[1].state), (2, TaskState::Done));
+}
+
+/// A dispatcher died with a command work task queued under capacity pressure
+/// (§3.5): the job is Work, the task Pending with no container — exactly what
+/// `defer_launch` persists. Reconciliation re-queues it (§3.6), and once the
+/// now-available fleet accepts it, the *same* task launches and the job lands —
+/// no new attempt, no retry consumed.
+#[tokio::test]
+async fn restart_requeues_queued_pending_work_task() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/cmd-work.yaml", CMD_WORK.as_bytes(), "type")
+        .await;
+    clone.push("main").await;
+    let head = repo.head().await;
+    repo.create_job_branch(1, &head).await;
+
+    store
+        .jobs()
+        .await
+        .unwrap()
+        .put(&Job {
+            id: 1,
+            project: "acme/api".into(),
+            r#type: "cmd-work".into(),
+            title: String::new(),
+            description: String::new(),
+            deps: vec![],
+            state: JobState::Work,
+            branch: "job/1".into(),
+            base_ref: Some(head),
+            knowledge_tags: vec![],
+            eval: vec![],
+            timeout: None,
+            model: None,
+            claim_next: false,
+            escalation: None,
+            factory: None,
+            created_at: Utc::now(),
+            ready_at: Some(Utc::now()),
+        })
+        .await
+        .unwrap();
+    // The crash-time task: Pending, no container, not human — a queued launch.
+    store
+        .tasks()
+        .await
+        .unwrap()
+        .put(&Task {
+            id: 1,
+            job_seq: 1,
+            project: "acme/api".into(),
+            phase: TaskPhase::Work,
+            cycle: 1,
+            kind: TaskKind::Command {
+                run: "./build.sh".into(),
+            },
+            state: TaskState::Pending,
+            attempt: 1,
+            evaluator: None,
+            stage: 0,
+            performed_by: None,
+            container_id: None,
+            rework_reason: None,
+            infra_loss: false,
+            session_id: None,
+            result: None,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+        })
+        .await
+        .unwrap();
+
+    // "Restart": a fresh core whose fleet now has capacity.
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        Arc::new(FakeBackend::new()),
+        Arc::new(FakeProvider::new()),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _handle = spawn(core);
+
+    wait_for_state(&store, 1, JobState::Done).await;
+    let tasks = store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", 1)
+        .await
+        .unwrap();
+    let works: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.phase == TaskPhase::Work)
+        .collect();
+    assert_eq!(
+        works.len(),
+        1,
+        "re-queued the existing task, not a new attempt"
+    );
+    assert_eq!(
+        (works[0].id, works[0].attempt, works[0].state),
+        (1, 1, TaskState::Done),
+    );
 }
 
 /// §3.6 startup sweep: exited `chuggernaut.managed` containers left behind by

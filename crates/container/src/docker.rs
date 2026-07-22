@@ -315,10 +315,12 @@ struct Candidate<'a> {
 /// original node list.
 ///
 /// - Unpinned: the in-service node with the most free slots, ties broken by
-///   name; `Launch("no free slots on any node")` if none has a free slot.
-/// - Pinned: the named node or a `Launch` error — never a fallback. A full or
-///   out-of-service pin yields the same "no free slots" shape as the unpinned
-///   case; an unknown pin names the known nodes.
+///   name; `NoCapacity("no free slots on any node")` if none has a free slot
+///   (transient — the dispatcher queues and retries, §3.5).
+/// - Pinned: the named node or an error — never a fallback. A full or
+///   out-of-service pin yields the same `NoCapacity` "no free slots" shape as
+///   the unpinned case; an unknown pin is a hard `Launch` error naming the
+///   known nodes.
 fn choose(candidates: &[Candidate<'_>], pin: Option<&str>) -> Result<usize, BackendError> {
     if let Some(name) = pin {
         let Some(c) = candidates.iter().find(|c| c.name == name) else {
@@ -330,7 +332,7 @@ fn choose(candidates: &[Candidate<'_>], pin: Option<&str>) -> Result<usize, Back
         };
         return match c.free {
             Some(free) if free > 0 => Ok(c.index),
-            _ => Err(BackendError::Launch(format!(
+            _ => Err(BackendError::NoCapacity(format!(
                 "no free slots on node {name}"
             ))),
         };
@@ -348,7 +350,7 @@ fn choose(candidates: &[Candidate<'_>], pin: Option<&str>) -> Result<usize, Back
     }
     match best {
         Some(c) if c.free.unwrap() > 0 => Ok(c.index),
-        _ => Err(BackendError::Launch("no free slots on any node".into())),
+        _ => Err(BackendError::NoCapacity("no free slots on any node".into())),
     }
 }
 

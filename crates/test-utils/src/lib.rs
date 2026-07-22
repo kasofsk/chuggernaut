@@ -29,10 +29,10 @@ pub struct FakeBackend {
 type LaunchHook =
     Box<dyn FnOnce(ContainerLaunchConfig) -> futures::future::BoxFuture<'static, ()> + Send>;
 
-/// Decides whether a launch is rejected: `Some(reason)` makes `launch` return
-/// `BackendError::Launch(reason)` before any container exists — the backend
-/// refusing a container up front (bad image, invalid resource limit).
-type LaunchFail = Box<dyn Fn(&ContainerLaunchConfig) -> Option<String> + Send>;
+/// Decides whether a launch is rejected: `Some(err)` makes `launch` return that
+/// error before any container exists — the backend refusing a container up front
+/// (bad image / invalid limit → `Launch`; fleet at capacity → `NoCapacity`).
+type LaunchFail = Box<dyn Fn(&ContainerLaunchConfig) -> Option<BackendError> + Send>;
 
 #[derive(Default)]
 struct FakeBackendState {
@@ -134,7 +134,20 @@ impl FakeBackend {
     where
         F: Fn(&ContainerLaunchConfig) -> Option<String> + Send + 'static,
     {
-        self.state.lock().unwrap().launch_fail = Some(Box::new(f));
+        self.state.lock().unwrap().launch_fail =
+            Some(Box::new(move |c| f(c).map(BackendError::Launch)));
+    }
+
+    /// Reject launches with `BackendError::NoCapacity` — the fleet-at-capacity
+    /// signal the dispatcher queues on (spec §3.5) instead of failing the task.
+    /// `f` returning `Some(reason)` refuses that launch; flipping it (via shared
+    /// state a test captures) frees capacity so the queued launch can proceed.
+    pub fn fail_launch_no_capacity_if<F>(&self, f: F)
+    where
+        F: Fn(&ContainerLaunchConfig) -> Option<String> + Send + 'static,
+    {
+        self.state.lock().unwrap().launch_fail =
+            Some(Box::new(move |c| f(c).map(BackendError::NoCapacity)));
     }
 
     /// Seed a container as already exited with a specific code, so `inspect`
@@ -166,7 +179,7 @@ impl ContainerBackend for FakeBackend {
     async fn launch(&self, config: ContainerLaunchConfig) -> Result<ContainerId, BackendError> {
         // Rejected before allocating an id or recording the launch: a refused
         // container never exists, exactly as a real backend refusal.
-        if let Some(reason) = self
+        if let Some(err) = self
             .state
             .lock()
             .unwrap()
@@ -174,7 +187,7 @@ impl ContainerBackend for FakeBackend {
             .as_ref()
             .and_then(|f| f(&config))
         {
-            return Err(BackendError::Launch(reason));
+            return Err(err);
         }
         let id = format!("fake-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
         let hook = {

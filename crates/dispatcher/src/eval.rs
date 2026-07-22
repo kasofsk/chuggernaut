@@ -11,7 +11,6 @@ use crate::core::{Core, CoreError, EvalSubmission, Msg, Result, TaskExit};
 use crate::exec::{ChannelRole, eval_image, task_timeout};
 use agent::AgentRunConfig;
 use chrono::Utc;
-use container::{ContainerLaunchConfig, bootstrap_cmd};
 use std::collections::VecDeque;
 use types::{
     EvalResult, Evaluator, EvaluatorType, JobState, ReworkReason, Task, TaskKind, TaskPhase,
@@ -361,96 +360,68 @@ impl Core {
         // Evaluators keep the job type's timeout — the per-job `Job.timeout`
         // override is Work-scoped only (§1.1, §3.5).
         let eval_timeout = task_timeout(&job_type);
-        let env = self
-            .container_env(
-                owner,
-                project,
-                seq,
-                branch,
-                &job_type,
-                &evaluator.secrets,
-                ChannelRole::Eval {
-                    task_id,
-                    evaluator: evaluator.name.clone(),
-                },
-                eval_timeout,
-            )
-            .await?;
-        let tx = self.self_tx.clone().expect("spawned core");
-        let (o, p) = (owner.to_string(), project.to_string());
 
         match evaluator.r#type {
             EvaluatorType::Command => {
                 let run = evaluator.run.clone().unwrap_or_default();
-                let launch = ContainerLaunchConfig {
-                    image: eval_image(&job_type, evaluator),
-                    cmd: bootstrap_cmd(&["sh".into(), "-c".into(), run]),
-                    env,
-                    files: self
-                        .ssh_credential_files(
-                            owner,
-                            project,
-                            seq,
-                            ChannelRole::Eval {
-                                task_id,
-                                evaluator: evaluator.name.clone(),
-                            },
-                            eval_timeout,
-                        )
-                        .await?,
-                    cpu_limit: job_type.resources.as_ref().and_then(|r| r.cpu),
-                    memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
-                    node: job_type.placement_node().map(String::from),
-                };
-                let id = match self.backend.launch(launch).await {
-                    Ok(id) => id,
-                    Err(e) => {
-                        // Launch failure is an infra failure of this slot (§3.3):
-                        // report it through the exit fan-in so `on_eval_exited`
-                        // marks the task Failed with the launch error and applies
-                        // eval_retries → Infra → escalation. Without this the task
-                        // stays `Running` and the job wedges in Evaluation forever
-                        // (the dogfood-#1 bug).
-                        self.report_launch_failure(owner, project, seq, task_id, e);
-                        return Ok(task_id);
-                    }
-                };
-                task.container_id = Some(id.clone());
-                self.tasks.put(&task).await?;
-                let backend = self.backend.clone();
-                let harvest = self.harvester();
-                tokio::spawn(async move {
-                    let exit_code = backend.wait(&id).await.unwrap_or(-1);
-                    // §3.3: extract structured findings after exit.
-                    let eval_json = backend
-                        .copy_file(&id, "/workspace/eval-result.json")
-                        .await
-                        .ok()
-                        .flatten()
-                        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-                    harvest.collect_logs(&o, &p, seq, task_id, &id).await;
-                    // eval-result.json and logs are out — reclaim the overlay.
-                    harvest.dispose(seq, task_id, &id).await;
-                    let _ = tx
-                        .send(Msg::TaskExited {
-                            owner: o,
-                            project: p,
-                            seq,
+                let config = self
+                    .command_launch_config(
+                        owner,
+                        project,
+                        seq,
+                        branch,
+                        &job_type,
+                        &evaluator.secrets,
+                        eval_image(&job_type, evaluator),
+                        run,
+                        ChannelRole::Eval {
                             task_id,
-                            exit: TaskExit {
-                                exit_code,
-                                eval_json,
-                                usage: None,
-                                assessment: None,
-                                launch_error: None,
-                                infra_loss: false,
-                            },
-                        })
-                        .await;
-                });
+                            evaluator: evaluator.name.clone(),
+                        },
+                        eval_timeout,
+                    )
+                    .await?;
+                match self.backend.launch(config).await {
+                    Ok(id) => {
+                        task.container_id = Some(id.clone());
+                        self.tasks.put(&task).await?;
+                        self.spawn_eval_monitor(owner, project, seq, task_id, id);
+                    }
+                    // No free slot: queue the launch and retry when one frees,
+                    // rather than failing the slot and burning eval_retries (§3.5).
+                    Err(container::BackendError::NoCapacity(reason)) => {
+                        self.defer_launch(owner, project, seq, &mut task, reason)
+                            .await?;
+                    }
+                    // Any other launch failure is an infra failure of this slot
+                    // (§3.3): report it through the exit fan-in so `on_eval_exited`
+                    // marks the task Failed with the launch error and applies
+                    // eval_retries → Infra → escalation. Without this the task
+                    // stays `Running` and the job wedges in Evaluation forever
+                    // (the dogfood-#1 bug).
+                    Err(e) => {
+                        self.report_launch_failure(owner, project, seq, task_id, e);
+                    }
+                }
             }
             EvaluatorType::Agent => {
-                let mut env = env;
+                let tx = self.self_tx.clone().expect("spawned core");
+                let (o, p) = (owner.to_string(), project.to_string());
+                let mut env = self
+                    .container_env(
+                        owner,
+                        project,
+                        seq,
+                        branch,
+                        &job_type,
+                        &evaluator.secrets,
+                        ChannelRole::Eval {
+                            task_id,
+                            evaluator: evaluator.name.clone(),
+                        },
+                        eval_timeout,
+                    )
+                    .await?;
                 self.inject_platform_agent_secrets(&mut env).await?;
                 // Evaluators judge against the same brief the author saw.
                 let prompt = format!(
@@ -1525,64 +1496,43 @@ impl Core {
         )
         .await?;
 
-        let env = self
-            .container_env(
-                owner,
-                project,
-                seq,
-                &default_branch,
-                &job_type,
-                &job_type.wrap_up.secrets,
-                ChannelRole::Work { task_id },
-                timeout,
-            )
-            .await?;
         let image = job_type
             .wrap_up
             .image
             .clone()
             .or_else(|| job_type.image.clone())
             .unwrap_or_default();
-        let launch = ContainerLaunchConfig {
-            image,
-            cmd: bootstrap_cmd(&["sh".into(), "-c".into(), run]),
-            env,
-            files: self
-                .ssh_credential_files(owner, project, seq, ChannelRole::Work { task_id }, timeout)
-                .await?,
-            cpu_limit: job_type.resources.as_ref().and_then(|r| r.cpu),
-            memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
-            node: job_type.placement_node().map(String::from),
-        };
-        let id = match self.backend.launch(launch).await {
-            Ok(id) => id,
-            Err(e) => {
-                // Launch failure surfaces through the exit fan-in like every other
-                // task (§3.2): `on_wrapup_exited` records it and escalates.
-                self.report_launch_failure(owner, project, seq, task_id, e);
-                return Ok(());
+        let config = self
+            .command_launch_config(
+                owner,
+                project,
+                seq,
+                &default_branch,
+                &job_type,
+                &job_type.wrap_up.secrets,
+                image,
+                run,
+                ChannelRole::Work { task_id },
+                timeout,
+            )
+            .await?;
+        match self.backend.launch(config).await {
+            Ok(id) => {
+                task.container_id = Some(id.clone());
+                self.tasks.put(&task).await?;
+                self.spawn_logs_monitor(owner, project, seq, task_id, id);
             }
-        };
-        task.container_id = Some(id.clone());
-        self.tasks.put(&task).await?;
-        let backend = self.backend.clone();
-        let tx = self.self_tx.clone().expect("spawned core");
-        let (o, p) = (owner.to_string(), project.to_string());
-        let harvest = self.harvester();
-        tokio::spawn(async move {
-            let exit_code = backend.wait(&id).await.unwrap_or(-1);
-            harvest.collect_logs(&o, &p, seq, task_id, &id).await;
-            harvest.dispose(seq, task_id, &id).await;
-            let _ = tx
-                .send(Msg::TaskExited {
-                    owner: o,
-                    project: p,
-                    seq,
-                    task_id,
-                    exit: TaskExit::code(exit_code),
-                })
-                .await;
-        });
+            // No free slot: queue the publish and retry when one frees (§3.5).
+            Err(container::BackendError::NoCapacity(reason)) => {
+                self.defer_launch(owner, project, seq, &mut task, reason)
+                    .await?;
+            }
+            // Any other launch failure surfaces through the exit fan-in like
+            // every other task (§3.2): `on_wrapup_exited` records it and escalates.
+            Err(e) => {
+                self.report_launch_failure(owner, project, seq, task_id, e);
+            }
+        }
         Ok(())
     }
 

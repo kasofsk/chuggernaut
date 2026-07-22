@@ -189,9 +189,10 @@ impl FleetBackend {
     }
 
     /// §3.1 placement across the fleet. Unpinned: most free slots, ties by
-    /// name, out-of-service workers skipped. Pinned (`pin`): that node or a
-    /// launch error — never a fallback (full/out-of-service → "no free slots on
-    /// node {name}", unknown → names the known nodes).
+    /// name, out-of-service workers skipped. Pinned (`pin`): that node or an
+    /// error — never a fallback (full/out-of-service → `NoCapacity` "no free
+    /// slots on node {name}", queued and retried by the dispatcher; unknown →
+    /// a hard `Launch` naming the known nodes).
     async fn place(&self, pin: Option<&str>) -> Result<&FleetNode, BackendError> {
         if let Some(name) = pin {
             let node = self.nodes.iter().find(|n| n.name == name).ok_or_else(|| {
@@ -203,7 +204,7 @@ impl FleetBackend {
             })?;
             return match self.free_slots(node).await? {
                 Some(free) if free > 0 => Ok(node),
-                _ => Err(BackendError::Launch(format!(
+                _ => Err(BackendError::NoCapacity(format!(
                     "no free slots on node {name}"
                 ))),
             };
@@ -223,7 +224,7 @@ impl FleetBackend {
         }
         match best {
             Some((node, free)) if free > 0 => Ok(node),
-            _ => Err(BackendError::Launch("no free slots on any node".into())),
+            _ => Err(BackendError::NoCapacity("no free slots on any node".into())),
         }
     }
 
@@ -279,6 +280,9 @@ fn rpc_err(id: Option<&ContainerId>, e: WorkerRpcError) -> BackendError {
             BackendError::Unavailable(message)
         }
         WorkerRpcError::Op(WorkerError::Launch { message }) => BackendError::Launch(message),
+        WorkerRpcError::Op(WorkerError::NoCapacity { message }) => {
+            BackendError::NoCapacity(message)
+        }
         WorkerRpcError::Op(WorkerError::Other { message }) => BackendError::Other(message),
         WorkerRpcError::Transport(m) => match id {
             Some(id) => BackendError::Other(format!("worker transport for {id}: {m}")),
