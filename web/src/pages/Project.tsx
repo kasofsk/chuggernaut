@@ -50,16 +50,17 @@ const RANK_UNKNOWN = 1000
 const STATE_RANK: Record<string, number> = {
   Draft: 0, // inert pre-release, alongside Frozen
   Frozen: 1,
-  Revoked: 2, // terminal history
-  Done: 3,
-  Blocked: 4, // queued to run, between Done and Work
-  Ready: 5,
-  Work: 6, // live activity
-  Evaluation: 7,
-  WrapUp: 8,
-  Failed: 9, // attention-needed, adjacent to Escalated
-  Stalled: 10,
-  Escalated: 11,
+  Batched: 2, // inert member absorbed into a batch — adjacent to Frozen
+  Revoked: 3, // terminal history
+  Done: 4,
+  Blocked: 5, // queued to run, between Done and Work
+  Ready: 6,
+  Work: 7, // live activity
+  Evaluation: 8,
+  WrapUp: 9,
+  Failed: 10, // attention-needed, adjacent to Escalated
+  Stalled: 11,
+  Escalated: 12,
 }
 const stateRank = (state: string) => STATE_RANK[state] ?? RANK_UNKNOWN
 
@@ -317,9 +318,23 @@ export function ProjectPage() {
                   <Link className="dim" to={`/p/${owner}/${project}/job-types/${encodeURIComponent(j.type)}`}>
                     {j.type}
                   </Link>
+                  {j.members.length > 0 && (
+                    <span className="chip-batch" title="a batch: implements its member jobs on one branch">
+                      batch ({j.members.length})
+                    </span>
+                  )}
                 </td>
                 <td>
                   <StateBadge state={j.state} />
+                  {j.state === 'Batched' && j.batch_id != null && (
+                    <Link
+                      className="in-batch dim"
+                      to={`/p/${owner}/${project}/jobs/${j.batch_id}`}
+                      title="this job is absorbed into a batch — its work happens there"
+                    >
+                      in batch #{j.batch_id}
+                    </Link>
+                  )}
                   {(j.claim_next || (j.state === 'Work' && claimedInWork.has(j.id))) && (
                     <span
                       className="badge badge-purple"
@@ -386,7 +401,7 @@ export function ProjectPage() {
                       unclaim
                     </button>
                   )}
-                  {j.state !== 'Done' && j.state !== 'Revoked' && (
+                  {j.state !== 'Done' && j.state !== 'Revoked' && j.state !== 'Batched' && (
                     <button
                       className="danger"
                       onClick={() => act(() => api.revoke(owner, project, j.id))}

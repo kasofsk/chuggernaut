@@ -3,6 +3,7 @@ import type { JobState } from '../api'
 const COLORS: Record<JobState, string> = {
   Draft: 'gray',
   Frozen: 'gray',
+  Batched: 'gray', // never read — special-cased below like Draft; kept for exhaustiveness
   Blocked: 'gray',
   Ready: 'blue',
   Work: 'blue',
@@ -18,6 +19,9 @@ export function StateBadge({ state }: { state: JobState }) {
   // Draft is pre-release and editable: a dashed pill sets it apart from the
   // solid Frozen/terminal badges so a work-in-progress ticket reads at a glance.
   if (state === 'Draft') return <span className="badge badge-draft">Draft</span>
+  // Batched: inert member absorbed into a batch — a dashed gray pill sets it
+  // apart from a solid Frozen, mirroring the Draft treatment for pre-scheduling.
+  if (state === 'Batched') return <span className="badge badge-batched">Batched</span>
   return <span className={`badge badge-${COLORS[state]}`}>{state}</span>
 }
 

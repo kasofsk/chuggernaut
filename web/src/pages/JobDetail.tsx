@@ -29,6 +29,9 @@ export function JobDetail() {
   const jobSeq = Number(seq)
   const navigate = useNavigate()
   const [job, setJob] = useState<Job | null>(null)
+  // When this job is a batch, the member jobs it absorbs — fetched from the
+  // project list so the Members section can show their titles and live states.
+  const [members, setMembers] = useState<Job[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [diff, setDiff] = useState<DiffResponse | null>(null)
   const [criteria, setCriteria] = useState<JobCriteria | null>(null)
@@ -62,6 +65,17 @@ export function JobDetail() {
         setTasks(ts)
         setDiff(d)
         setError(null)
+        // A batch: pull the member jobs from the project list (one fetch) so the
+        // Members section stays live with the same debounced refresh. Non-batches
+        // skip the call and clear any stale members.
+        if (j.members.length > 0) {
+          api.jobs(owner, project).then(
+            (all) => setMembers(all.filter((m) => j.members.includes(m.id))),
+            () => {},
+          )
+        } else {
+          setMembers([])
+        }
       })
       .then(() => api.criteria(owner, project, jobSeq).then(setCriteria, () => setCriteria(null)))
       .catch((e) => {
@@ -211,6 +225,18 @@ export function JobDetail() {
             </>
           )}
         </dl>
+        {job.state === 'Batched' ? (
+          <p className="batch-note dim">
+            Absorbed into{' '}
+            {job.batch_id != null ? (
+              <Link to={`/p/${owner}/${project}/jobs/${job.batch_id}`}>batch #{job.batch_id}</Link>
+            ) : (
+              'a batch'
+            )}
+            {' '}— its single branch implements this job, so claim, release, and revoke happen on
+            the batch, not here.
+          </p>
+        ) : (
         <div className="actions">
           {job.state === 'Frozen' && (
             <button
@@ -259,7 +285,30 @@ export function JobDetail() {
             </button>
           )}
         </div>
+        )}
       </section>
+      )}
+
+      {!isDraft && job.members.length > 0 && (
+        <section className="card">
+          <h2>
+            Members <span className="dim">{job.members.length}</span>
+          </h2>
+          <ul className="batch-members">
+            {job.members.map((id) => {
+              const m = members.find((x) => x.id === id)
+              return (
+                <li key={id}>
+                  <Link to={`/p/${owner}/${project}/jobs/${id}`}>#{id}</Link>
+                  <span className="batch-member-title">
+                    {m ? m.title || <span className="dim">—</span> : <span className="dim">…</span>}
+                  </span>
+                  {m && <StateBadge state={m.state} />}
+                </li>
+              )
+            })}
+          </ul>
+        </section>
       )}
 
       {!isDraft && criteria && <CriteriaCard owner={owner} project={project} criteria={criteria} />}

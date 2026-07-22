@@ -4,6 +4,7 @@
 export type JobState =
   | 'Draft'
   | 'Frozen'
+  | 'Batched'
   | 'Blocked'
   | 'Ready'
   | 'Work'
@@ -100,6 +101,12 @@ export interface Job {
   description: string
   /** upstream job ids that must be Done before this job starts */
   deps: number[]
+  /** member job ids this batch absorbs onto one branch; empty for an ordinary
+   *  job — non-empty marks this record as a batch (spec §2.1 batches) */
+  members: number[]
+  /** set on a member absorbed into a batch: the batch job's id (implies the
+   *  record is in the Batched state under it); absent for ordinary jobs/batches */
+  batch_id?: number | null
   state: JobState
   branch: string
   base_ref: string | null

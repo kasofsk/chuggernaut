@@ -688,6 +688,70 @@ table.jobs tbody tr.row-draft td:first-child {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+/* Batched badge: a dashed gray pill for an inert member absorbed into a batch —
+   set apart from a solid Frozen, mirroring the Draft treatment. */
+.badge-batched {
+  --badge: var(--gray);
+  color: var(--badge);
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--badge) 50%, transparent);
+  background: color-mix(in srgb, var(--badge) 10%, transparent);
+}
+
+/* 'batch (N)' chip beside the type of a batch job in the jobs table — flags a
+   job that implements its member jobs on one branch. */
+.chip-batch {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: var(--r-full);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* 'in batch #N' back-link next to a Batched member's state in the jobs table —
+   small and set off; the batch is where its work happens. */
+.in-batch {
+  margin-left: 0.4rem;
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+
+/* Explainer shown in place of the action buttons on a Batched member's detail
+   page: its work lives on the batch's branch, so the actions do too. */
+.batch-note {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
+}
+
+/* Members section of a batch job's detail page: a linked list of the member
+   jobs it absorbs, each with its title and current state. */
+.batch-members {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.batch-members li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: var(--sp-1) 0;
+}
+.batch-members li + li {
+  border-top: 1px solid var(--border-faint);
+}
+.batch-member-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Read-view job description, now rendered as markdown (was a plain <pre>). */
 .job-desc {
   margin: var(--sp-2) 0;
