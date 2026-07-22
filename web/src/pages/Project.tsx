@@ -95,6 +95,8 @@ export function ProjectPage() {
   const navigate = useNavigate()
   const [jobs, setJobs] = useState<Job[]>([])
   const [pending, setPending] = useState<Task[]>([])
+  // Job seqs with a capacity-deferred launch waiting for a fleet slot (§3.5).
+  const [queuedSeqs, setQueuedSeqs] = useState<Set<number>>(new Set())
   const [error, setError] = useState<string | null>(null)
   // Jobs table controls: column sort (default newest-first) and a filter that
   // hides finished jobs by default.
@@ -112,6 +114,13 @@ export function ProjectPage() {
         if (e instanceof ApiError && e.status === 401) navigate('/login')
         else setError(e instanceof Error ? e.message : 'load failed')
       })
+    // Best-effort capacity-queue snapshot (spec §3.5): the seqs with a launch
+    // waiting for a fleet slot, for the subtle "queued" chip. Never blocks the
+    // list — an unreachable dispatcher just drops the chip.
+    api.queue(owner, project).then(
+      (q) => setQueuedSeqs(new Set(q.entries.map((e) => e.seq))),
+      () => setQueuedSeqs(new Set()),
+    )
   }, [owner, project, navigate])
 
   // Latest channel-update message per job, surfaced muted under the title for
@@ -403,6 +412,14 @@ export function ProjectPage() {
                       title="work attempt claimed by a human — no agent will be launched"
                     >
                       claimed
+                    </span>
+                  )}
+                  {queuedSeqs.has(j.id) && (
+                    <span
+                      className="badge badge-orange"
+                      title="a container launch is waiting for a free fleet slot (§3.5)"
+                    >
+                      queued
                     </span>
                   )}
                 </td>

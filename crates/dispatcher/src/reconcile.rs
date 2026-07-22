@@ -41,6 +41,15 @@ impl Core {
             }
         }
 
+        // §3.5: the in-flight recovery above re-queued capacity-deferred launches
+        // as it walked jobs in graph order, not enqueue order. Sort the whole
+        // launch queue by the persisted `queued_at` so FIFO fairness is restored
+        // exactly as it stood before the restart — the launch that waited longest
+        // resumes first, and the max-wait backstop stays honest.
+        self.launch_queue
+            .make_contiguous()
+            .sort_by_key(|q| q.queued_at);
+
         // §3.6: reclaim exited containers orphaned by the crash/restart. Runs
         // last so any container in-flight recovery still needs (Running tasks,
         // re-attached monitors) has been settled and protected first.
@@ -270,7 +279,10 @@ impl Core {
                         project: project.to_string(),
                         seq,
                         task_id: task.id,
-                        queued_at: Utc::now(),
+                        // Restore the persisted enqueue time (§3.5) so the queue's
+                        // FIFO order and the max-wait clock survive this restart;
+                        // fall back to now for records written before it existed.
+                        queued_at: task.queued_at.unwrap_or_else(Utc::now),
                     });
                 }
                 Ok(())
@@ -521,7 +533,9 @@ impl Core {
                             project: project.to_string(),
                             seq,
                             task_id: task.id,
-                            queued_at: Utc::now(),
+                            // Persisted enqueue time (§3.5): stable FIFO + clock
+                            // across restarts. See recover_work for the rationale.
+                            queued_at: task.queued_at.unwrap_or_else(Utc::now),
                         });
                     }
                     slots.push(EvalSlot {

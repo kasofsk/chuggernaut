@@ -229,6 +229,9 @@ async fn restart_recovers_orphaned_running_work_task() {
             container_id: None,
             rework_reason: None,
             infra_loss: false,
+
+            pending_reason: None,
+            queued_at: None,
             session_id: None, // gone with the crashed dispatcher
             result: None,
             created_at: Utc::now(),
@@ -358,6 +361,9 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
             container_id: Some("pruned-work-container".into()),
             rework_reason: None,
             infra_loss: false,
+
+            pending_reason: None,
+            queued_at: None,
             session_id: None,
             result: None,
             created_at: Utc::now(),
@@ -487,6 +493,9 @@ async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
         container_id: container.map(Into::into),
         rework_reason: None,
         infra_loss,
+
+        pending_reason: None,
+        queued_at: None,
         session_id: None,
         result: None,
         created_at: Utc::now(),
@@ -624,6 +633,9 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
             container_id: Some("exited-nonzero".into()),
             rework_reason: None,
             infra_loss: false,
+
+            pending_reason: None,
+            queued_at: None,
             session_id: None,
             result: None,
             created_at: Utc::now(),
@@ -750,6 +762,9 @@ async fn restart_requeues_queued_pending_work_task() {
             container_id: None,
             rework_reason: None,
             infra_loss: false,
+
+            pending_reason: None,
+            queued_at: None,
             session_id: None,
             result: None,
             created_at: Utc::now(),
@@ -802,6 +817,228 @@ async fn restart_requeues_queued_pending_work_task() {
     assert_eq!(
         (works[0].id, works[0].attempt, works[0].state),
         (1, 1, TaskState::Done),
+    );
+    // The launch cleared the queued markers, so the record no longer reads as
+    // waiting (the UI badge disappears live).
+    assert_eq!(works[0].pending_reason, None);
+    assert_eq!(works[0].queued_at, None);
+}
+
+/// Seed a job mid-Work with a single capacity-deferred command work task
+/// (Pending, no container) carrying a persisted `queued_at` — exactly what
+/// `defer_launch` leaves behind before a crash. Used by the restart-fairness and
+/// timeout-clock tests below.
+async fn seed_queued_command_work(
+    store: &NatsStore,
+    seq: u64,
+    base_ref: &str,
+    queued_at: chrono::DateTime<Utc>,
+) {
+    store
+        .jobs()
+        .await
+        .unwrap()
+        .put(&Job {
+            id: seq,
+            project: "acme/api".into(),
+            r#type: "cmd-work".into(),
+            title: String::new(),
+            description: String::new(),
+            cover_html: None,
+            deps: vec![],
+            members: vec![],
+            batch_id: None,
+            state: JobState::Work,
+            branch: format!("job/{seq}"),
+            base_ref: Some(base_ref.into()),
+            knowledge_tags: vec![],
+            eval: vec![],
+            timeout: None,
+            model: None,
+            claim_next: false,
+            escalation: None,
+            factory: None,
+            created_at: queued_at,
+            ready_at: Some(queued_at),
+            completed_at: None,
+        })
+        .await
+        .unwrap();
+    store
+        .tasks()
+        .await
+        .unwrap()
+        .put(&Task {
+            id: 1,
+            job_seq: seq,
+            project: "acme/api".into(),
+            phase: TaskPhase::Work,
+            cycle: 1,
+            kind: TaskKind::Command {
+                run: "./build.sh".into(),
+            },
+            state: TaskState::Pending,
+            attempt: 1,
+            evaluator: None,
+            stage: 0,
+            performed_by: None,
+            container_id: None,
+            rework_reason: None,
+            infra_loss: false,
+            pending_reason: Some(types::PendingReason::QueuedForCapacity),
+            queued_at: Some(queued_at),
+            session_id: None,
+            result: None,
+            created_at: queued_at,
+            started_at: None,
+            completed_at: None,
+        })
+        .await
+        .unwrap();
+}
+
+/// §3.5 restart FIFO fairness (addendum): the launch queue's order lives only in
+/// memory, so a restart must rebuild it from the *persisted* `queued_at`, not
+/// from reconcile's job-iteration order. Three capacity-deferred command work
+/// tasks are seeded so the newest-queued job has the lowest seq — enqueue order
+/// is the reverse of graph order. Once the fleet frees, they must relaunch
+/// oldest-first (job/3, job/2, job/1), matching the original enqueue order.
+#[tokio::test]
+async fn restart_relaunches_queued_tasks_in_persisted_fifo_order() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/cmd-work.yaml", CMD_WORK.as_bytes(), "type")
+        .await;
+    clone.push("main").await;
+    let head = repo.head().await;
+
+    let now = Utc::now();
+    // seq 1 queued most recently, seq 3 the oldest.
+    for (seq, age_secs) in [(1u64, 0i64), (2, 60), (3, 120)] {
+        repo.create_job_branch(seq, &head).await;
+        let queued_at = now - chrono::Duration::seconds(age_secs);
+        seed_queued_command_work(&store, seq, &head, queued_at).await;
+    }
+
+    // "Restart": a fresh core whose fleet has capacity, so the re-queued launches
+    // drain immediately — in whatever order reconciliation left them.
+    let backend = Arc::new(FakeBackend::new());
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        backend.clone(),
+        Arc::new(FakeProvider::new()),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _handle = spawn(core);
+
+    // Drain launches the queue front-to-back, so the first three launches are the
+    // three work commands in FIFO order.
+    for _ in 0..100 {
+        if backend.launches().len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let branches: Vec<String> = backend
+        .launches()
+        .iter()
+        .take(3)
+        .map(|c| c.env.get("JOB_BRANCH").cloned().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        branches,
+        vec!["job/3".to_string(), "job/2".into(), "job/1".into()],
+        "queued launches relaunch oldest-first, from persisted queued_at",
+    );
+}
+
+/// §3.5 restart timeout-clock survival (addendum): the max-queue-wait backstop
+/// must measure from the *persisted* `queued_at`, not process-local time —
+/// otherwise frequent auto-deploys reset the clock every restart and a genuinely
+/// wedged launch never escalates. A task queued 25m before the restart, under a
+/// 20m max wait, escalates on the very first post-restart scan; a reset clock
+/// (wait ~0) would leave it Pending.
+#[tokio::test]
+async fn restart_preserves_queue_wait_clock_for_timeout() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/cmd-work.yaml", CMD_WORK.as_bytes(), "type")
+        .await;
+    clone.push("main").await;
+    let head = repo.head().await;
+    repo.create_job_branch(1, &head).await;
+
+    let queued_at = Utc::now() - chrono::Duration::minutes(25);
+    seed_queued_command_work(&store, 1, &head, queued_at).await;
+
+    // Fleet stays full: the launch never gets a slot, so only the backstop can
+    // retire it.
+    let backend = Arc::new(FakeBackend::new());
+    backend.fail_launch_no_capacity_if(|_| Some("no free slots on any node".into()));
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        backend.clone(),
+        Arc::new(FakeProvider::new()),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            // Below the 25m persisted wait, so a surviving clock fires at once.
+            launch_queue_max_wait: Some(Duration::from_secs(20 * 60)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let handle = spawn(core);
+
+    handle.trigger_scan().await.unwrap();
+    wait_for_state(&store, 1, JobState::Escalated).await;
+    let tasks = store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", 1)
+        .await
+        .unwrap();
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t.phase == TaskPhase::Work && t.state == TaskState::Failed),
+        "the queued task failed on the persisted-clock timeout: {tasks:?}",
     );
 }
 
@@ -879,6 +1116,9 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
         container_id: Some(container.into()),
         rework_reason: None,
         infra_loss: false,
+
+        pending_reason: None,
+        queued_at: None,
         session_id: None,
         result: None,
         created_at: Utc::now(),
@@ -1047,6 +1287,9 @@ fn work_task(id: u64, state: TaskState, container_id: Option<&str>) -> Task {
         container_id: container_id.map(Into::into),
         rework_reason: None,
         infra_loss: false,
+
+        pending_reason: None,
+        queued_at: None,
         session_id: None,
         result: None,
         created_at: Utc::now(),
@@ -1279,6 +1522,9 @@ async fn restart_lands_job_orphaned_in_wrapup() {
             container_id: None,
             rework_reason: None,
             infra_loss: false,
+
+            pending_reason: None,
+            queued_at: None,
             session_id: None,
             result: Some(types::TaskResult::Work {
                 summary: None,
@@ -1408,6 +1654,9 @@ wrap_up:
             container_id: None,
             rework_reason: None,
             infra_loss: false,
+
+            pending_reason: None,
+            queued_at: None,
             session_id: None,
             result: Some(types::TaskResult::Work {
                 summary: None,
@@ -1440,6 +1689,9 @@ wrap_up:
             container_id: Some("dead-publish-container".into()),
             rework_reason: None,
             infra_loss: false,
+
+            pending_reason: None,
+            queued_at: None,
             session_id: None,
             result: None,
             created_at: Utc::now(),
@@ -1741,6 +1993,9 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
             container_id: None,
             rework_reason: None,
             infra_loss: false,
+
+            pending_reason: None,
+            queued_at: None,
             session_id: Some("da08d5f3-844e-430e-8363-39b4882f437b".into()),
             result: Some(types::TaskResult::Work {
                 summary: Some("added f() with tests".into()),

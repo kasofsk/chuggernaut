@@ -80,6 +80,11 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
             "/api/v1/projects/{owner}/{project}/origin/sync",
             post(routes::origin_sync),
         )
+        // Capacity launch-queue snapshot (read-only; Viewer+)
+        .route(
+            "/api/v1/projects/{owner}/{project}/queue",
+            get(routes::queue_get),
+        )
         // Jobs
         .route(
             "/api/v1/projects/{owner}/{project}/jobs",

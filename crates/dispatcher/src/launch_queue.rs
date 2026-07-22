@@ -107,11 +107,18 @@ impl Core {
         task: &mut Task,
         reason: String,
     ) -> Result<()> {
+        let queued_at = Utc::now();
         task.state = TaskState::Pending;
         task.container_id = None;
         // The task-timeout clock starts when the container actually launches,
         // so a queued task must carry no start time (§3.5 excludes Pending).
         task.started_at = None;
+        // Surface *why* it is Pending and *since when*, both persisted: the UI
+        // shows a "queued" badge and queued-for duration, and the same
+        // `queued_at` anchors the FIFO order and the max-wait backstop across a
+        // dispatcher restart (§3.5).
+        task.pending_reason = Some(types::PendingReason::QueuedForCapacity);
+        task.queued_at = Some(queued_at);
         self.tasks.put(task).await?;
         self.publish(
             owner,
@@ -128,9 +135,33 @@ impl Core {
             project: project.to_string(),
             seq,
             task_id: task.id,
-            queued_at: Utc::now(),
+            queued_at,
         });
         Ok(())
+    }
+
+    /// A read-only view of the launch queue scoped to one project (spec §3.5).
+    /// `depth` and each `position` are fleet-wide (the queue is one global FIFO);
+    /// `entries` carries only the requested project's launches so the reply never
+    /// exposes other projects' coordinates. Cheap — a walk of the in-memory
+    /// queue on the actor thread — and the source for the UI's "position N of M".
+    pub(crate) fn queue_snapshot(&self, owner: &str, project: &str) -> types::QueueSnapshot {
+        let entries = self
+            .launch_queue
+            .iter()
+            .enumerate()
+            .filter(|(_, q)| q.owner == owner && q.project == project)
+            .map(|(i, q)| types::QueueEntry {
+                seq: q.seq,
+                task_id: q.task_id,
+                position: i + 1,
+                queued_at: q.queued_at,
+            })
+            .collect();
+        types::QueueSnapshot {
+            depth: self.launch_queue.len(),
+            entries,
+        }
     }
 
     /// Attempt every queued launch once, FIFO (spec §3.5). Called after each
@@ -265,6 +296,10 @@ impl Core {
                 task.container_id = Some(id.clone());
                 task.state = TaskState::Running;
                 task.started_at = Some(Utc::now());
+                // The launch is off the queue: clear the queued markers so the
+                // UI drops the "queued" badge live and no stale reason lingers.
+                task.pending_reason = None;
+                task.queued_at = None;
                 self.tasks.put(&task).await?;
                 self.publish(
                     owner,
@@ -371,6 +406,10 @@ impl Core {
     pub(crate) async fn scan_launch_queue_timeouts(&mut self) -> Result<()> {
         let now = Utc::now();
         let max_wait = self.config.launch_queue_max_wait.unwrap_or(MAX_QUEUE_WAIT);
+        // `queued_at` is the *persisted* enqueue time (`Task::queued_at`, restored
+        // into the queue entry by reconciliation), so the wait accumulates across
+        // dispatcher restarts. Under frequent auto-deploys a process-local clock
+        // would reset every restart and this backstop might never fire (§3.5).
         let expired: Vec<QueuedLaunch> = self
             .launch_queue
             .iter()
@@ -403,6 +442,9 @@ impl Core {
             let waited = (now - q.queued_at).to_std().unwrap_or_default();
             task.state = TaskState::Failed;
             task.completed_at = Some(now);
+            // No longer queued — drop the markers so nothing reads it as waiting.
+            task.pending_reason = None;
+            task.queued_at = None;
             task.result = Some(TaskResult::Command {
                 pass: false,
                 exit_code: -1,

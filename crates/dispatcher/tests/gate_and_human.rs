@@ -922,6 +922,9 @@ async fn list_pending_hides_terminal_job_zombie() {
         container_id: None,
         rework_reason: None,
         infra_loss: false,
+
+        pending_reason: None,
+        queued_at: None,
         session_id: None,
         result: None,
         created_at: job.created_at,

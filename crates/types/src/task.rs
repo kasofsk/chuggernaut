@@ -40,6 +40,27 @@ pub struct Task {
     /// Running — and kept after exit, so operators and artifact tooling can name
     /// a live container, not just a finished one.
     pub container_id: Option<String>,
+    /// Why this task is `Pending`, when the reason is worth surfacing (spec
+    /// §3.5). Set to [`PendingReason::QueuedForCapacity`] when the capacity
+    /// launch queue defers a container launch (no free fleet slot); cleared the
+    /// instant the launch succeeds. Absent for a task Pending for any other
+    /// reason — a parked human/claimed attempt, or a just-created task awaiting
+    /// its first launch — so the UI can distinguish a queued launch from an
+    /// idle Pending. Defaulted + skipped so records written before it existed
+    /// still deserialize and non-queued tasks carry no key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_reason: Option<PendingReason>,
+    /// When this launch first joined the capacity queue (spec §3.5), stamped
+    /// alongside [`Self::pending_reason`] and cleared on launch. Persisted so
+    /// the queue survives a dispatcher restart *faithfully*: reconciliation
+    /// re-queues Pending launches sorted by this timestamp (stable FIFO across
+    /// restarts, not reconcile iteration order), and the max-queue-wait backstop
+    /// measures the total wait from it rather than from process-local time —
+    /// under frequent auto-deploys the in-memory clock would otherwise reset
+    /// every restart and never fire. None for non-queued tasks. Defaulted so
+    /// pre-existing records still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_at: Option<DateTime<Utc>>,
     /// Why a rework cycle created this Work task (spec §3.3): set at rework
     /// re-entry so a Work task appearing after passed evaluations is
     /// self-explaining. None for cycle-1 work, evaluation/gate/wrap-up tasks,
@@ -120,6 +141,17 @@ pub enum TaskState {
     Running,
     Done,
     Failed,
+}
+
+/// Why a task sits `Pending` when the reason is worth showing an operator
+/// (spec §3.5). Kept a distinct enum rather than a bool so later parked-reasons
+/// (e.g. awaiting a claim) can join without another field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PendingReason {
+    /// The capacity launch queue deferred this container launch: the fleet had
+    /// no free slot, so the launch waits rather than failing (§3.5). No retry
+    /// budget is consumed while it waits.
+    QueuedForCapacity,
 }
 
 /// Cause of a rework-created Work task (spec §3.3). Mirrors the
@@ -388,6 +420,37 @@ mod tests {
         let json = serde_json::to_string(&lost).unwrap();
         assert!(json.contains(r#""infra_loss":true"#));
         assert_eq!(serde_json::from_str::<Task>(&json).unwrap(), lost);
+    }
+
+    #[test]
+    fn pending_reason_and_queued_at_default_absent_and_round_trip() {
+        // Old task records (no pending_reason / queued_at keys) deserialize to
+        // None — an idle Pending stays indistinguishable, as before.
+        let json = r#"{
+          "id": 1, "job_seq": 7, "project": "acme/api",
+          "phase": "Work", "cycle": 1,
+          "kind": { "kind": "Command", "run": "cargo test" },
+          "state": "Pending", "attempt": 1,
+          "container_id": null, "result": null,
+          "created_at": "2026-07-21T10:00:00Z", "started_at": null, "completed_at": null
+        }"#;
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert_eq!(task.pending_reason, None);
+        assert_eq!(task.queued_at, None);
+        // Absent stays absent on the wire (skip_serializing_if).
+        let out = serde_json::to_string(&task).unwrap();
+        assert!(!out.contains("pending_reason"));
+        assert!(!out.contains("queued_at"));
+
+        // A capacity-queued launch round-trips both fields.
+        let queued_at = "2026-07-22T09:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let mut queued = task.clone();
+        queued.pending_reason = Some(PendingReason::QueuedForCapacity);
+        queued.queued_at = Some(queued_at);
+        let json = serde_json::to_string(&queued).unwrap();
+        assert!(json.contains(r#""pending_reason":"QueuedForCapacity""#));
+        assert!(json.contains(r#""queued_at":"2026-07-22T09:00:00Z""#));
+        assert_eq!(serde_json::from_str::<Task>(&json).unwrap(), queued);
     }
 
     #[test]

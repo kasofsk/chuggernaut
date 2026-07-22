@@ -339,6 +339,14 @@ pub enum Msg {
     Ping {
         reply: Reply<()>,
     },
+    /// `req.queue.list.{owner}.{project}` (spec §3.5): a read-only snapshot of
+    /// the capacity launch queue, scoped to one project. Served off the actor so
+    /// the reported FIFO order and depth match the live in-memory queue.
+    QueueSnapshot {
+        owner: String,
+        project: String,
+        reply: Reply<types::QueueSnapshot>,
+    },
     /// §3.5 scans; fired by the internal ticker, or with a reply from
     /// [`CoreHandle::trigger_scan`] (tests).
     Scan {
@@ -393,6 +401,18 @@ impl CoreHandle {
     /// state loop accepted and answered a message — i.e. it is not wedged.
     pub async fn ping(&self) -> Result<()> {
         self.call(|reply| Msg::Ping { reply }).await
+    }
+
+    /// A read-only view of the capacity launch queue scoped to one project
+    /// (§3.5), served off the actor so the reported order matches live state.
+    pub async fn queue_snapshot(&self, owner: &str, project: &str) -> Result<types::QueueSnapshot> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::QueueSnapshot {
+            owner,
+            project,
+            reply,
+        })
+        .await
     }
 
     pub async fn create_job(&self, req: CreateJobRequest) -> Result<Job> {
@@ -1008,6 +1028,13 @@ impl Core {
         match msg {
             Msg::Ping { reply } => {
                 let _ = reply.send(Ok(()));
+            }
+            Msg::QueueSnapshot {
+                owner,
+                project,
+                reply,
+            } => {
+                let _ = reply.send(Ok(self.queue_snapshot(&owner, &project)));
             }
             Msg::CreateJob(req, reply) => {
                 let _ = reply.send(self.create_job(req).await);

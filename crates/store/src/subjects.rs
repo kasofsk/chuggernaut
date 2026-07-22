@@ -56,6 +56,13 @@ pub fn health() -> String {
     "req.health".into()
 }
 
+/// Read-only capacity launch-queue snapshot scoped to one project (spec §3.5).
+/// Served off the dispatcher's core actor so the reported FIFO order and depth
+/// match the live in-memory queue; the api forwards it for the queue badge.
+pub fn queue_list(owner: &str, project: &str) -> String {
+    format!("req.queue.list.{owner}.{project}")
+}
+
 pub fn jobs_create(owner: &str, project: &str) -> String {
     format!("req.jobs.create.{owner}.{project}")
 }

@@ -31,6 +31,9 @@ fn running_task(id: u64, container_id: Option<&str>) -> Task {
         container_id: container_id.map(String::from),
         rework_reason: None,
         infra_loss: false,
+
+        pending_reason: None,
+        queued_at: None,
         session_id: None,
         result: None,
         created_at: chrono::Utc::now(),

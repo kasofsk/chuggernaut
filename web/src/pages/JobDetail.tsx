@@ -9,6 +9,7 @@ import {
   type HumanResult,
   type Job,
   type JobCriteria,
+  type QueueSnapshot,
   type ReviewFinding,
   type Task,
   type TaskResult,
@@ -34,6 +35,10 @@ export function JobDetail() {
   const [members, setMembers] = useState<Job[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [diff, setDiff] = useState<DiffResponse | null>(null)
+  // Capacity launch-queue snapshot (spec §3.5): drives the "queued" badge's
+  // "position N of M". Best-effort — null when the dispatcher can't answer, in
+  // which case the badge still renders, just without a position.
+  const [queue, setQueue] = useState<QueueSnapshot | null>(null)
   const [criteria, setCriteria] = useState<JobCriteria | null>(null)
   const [events, setEvents] = useState<JobEvent[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -79,6 +84,9 @@ export function JobDetail() {
         }
       })
       .then(() => api.criteria(owner, project, jobSeq).then(setCriteria, () => setCriteria(null)))
+      // Best-effort: a queue snapshot the badge uses for position, never a
+      // reason to fail the page (dispatcher may be briefly unreachable).
+      .then(() => api.queue(owner, project).then(setQueue, () => setQueue(null)))
       .catch((e) => {
         if (e instanceof ApiError && e.status === 401) navigate('/login')
         else setError(e instanceof Error ? e.message : 'load failed')
@@ -101,16 +109,17 @@ export function JobDetail() {
   )
 
   // Live-ticking durations: a single shared clock that re-renders the duration
-  // cells once a second while any visible task is Running, and is torn down
-  // otherwise (and on unmount). Finished tasks compute from completed_at, so
-  // they don't tick — only the elapsed-since-started_at cells move.
+  // cells once a second while any visible task is Running or capacity-queued,
+  // and is torn down otherwise (and on unmount). Finished tasks compute from
+  // completed_at, so they don't tick — only the elapsed-since-start (or
+  // queued-for) cells move.
   const [now, setNow] = useState(() => Date.now())
-  const anyRunning = tasks.some((t) => t.state === 'Running')
+  const anyTicking = tasks.some((t) => t.state === 'Running' || isQueued(t))
   useEffect(() => {
-    if (!anyRunning) return
+    if (!anyTicking) return
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
-  }, [anyRunning])
+  }, [anyTicking])
 
   if (!job) {
     return (
@@ -431,10 +440,19 @@ export function JobDetail() {
                   {t.performed_by === 'human' && <span className="dim"> · by human</span>}
                 </td>
                 <td>
-                  <TaskBadge state={t.state} />
+                  {isQueued(t) ? (
+                    <span className="badge badge-orange" title={queuedTooltip(t, queue)}>
+                      queued
+                    </span>
+                  ) : (
+                    <TaskBadge state={t.state} />
+                  )}
                 </td>
-                <td className="dim task-time" title={t.started_at ?? undefined}>
-                  {fmtTime(t.started_at)}
+                <td
+                  className="dim task-time"
+                  title={(isQueued(t) ? t.queued_at : t.started_at) ?? undefined}
+                >
+                  {fmtTime(isQueued(t) ? t.queued_at ?? null : t.started_at)}
                 </td>
                 <td className="dim task-time">{taskDuration(t, now)}</td>
                 <td className="dim result-cell">
@@ -946,11 +964,30 @@ function fmtDuration(ms: number): string {
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
 }
 
+// A task parked Pending by the capacity launch queue (spec §3.5) — waiting for
+// a fleet slot, not idle. It carries no container and no start time; `queued_at`
+// anchors the queued-for duration.
+export function isQueued(t: Task): boolean {
+  return t.state === 'Pending' && t.pending_reason === 'QueuedForCapacity'
+}
+
+// The "queued" badge's tooltip: names the wait and, when the queue snapshot is
+// available, this launch's position. Degrades gracefully to just the reason
+// when the snapshot is missing (dispatcher unreachable) or the entry has
+// already drained out of it.
+function queuedTooltip(t: Task, queue: QueueSnapshot | null): string {
+  const base = 'waiting for a fleet slot'
+  const entry = queue?.entries.find((e) => e.seq === t.job_seq && e.task_id === t.id)
+  return entry ? `${base} — position ${entry.position} of ${queue!.depth}` : base
+}
+
 // Finished tasks show completed_at − started_at; Running shows elapsed since
-// started_at, measured against the caller's shared `now` clock so the cell
-// ticks live (JobDetail drives a 1s interval while any task is Running);
-// Pending is blank.
+// started_at; a capacity-queued task shows how long it has waited (now −
+// queued_at). All live cells are measured against the caller's shared `now`
+// clock so they tick (JobDetail drives a 1s interval while any task is Running
+// or queued); an idle Pending is blank.
 function taskDuration(t: Task, now: number): string {
+  if (isQueued(t)) return t.queued_at ? fmtDuration(now - new Date(t.queued_at).getTime()) : ''
   if (!t.started_at) return ''
   const start = new Date(t.started_at).getTime()
   if (t.state === 'Done' || t.state === 'Failed') {

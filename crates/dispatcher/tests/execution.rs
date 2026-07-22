@@ -908,6 +908,20 @@ async fn command_work_queues_on_no_capacity_then_launches_when_freed() {
     .await;
     assert_eq!(work.attempt, 1, "queueing consumed no work_retries");
     assert!(work.container_id.is_none());
+    // The deferred launch is stamped visibly-queued: the UI reads *why* it is
+    // Pending and *since when* off the record, not just a bare Pending.
+    assert_eq!(
+        work.pending_reason,
+        Some(types::PendingReason::QueuedForCapacity)
+    );
+    assert!(work.queued_at.is_some());
+    // The queue snapshot the api forwards reflects the same launch: depth 1, and
+    // this task at position 1 — the "position 1 of 1" the badge shows.
+    let snap = rig.handle.queue_snapshot("acme", "api").await.unwrap();
+    assert_eq!(snap.depth, 1);
+    assert_eq!(snap.entries.len(), 1);
+    assert_eq!(snap.entries[0].position, 1);
+    assert_eq!((snap.entries[0].seq, snap.entries[0].task_id), (job.id, 1));
     let jobs = rig.store.jobs().await.unwrap();
     assert_eq!(
         jobs.get("acme", "api", job.id)
@@ -940,6 +954,17 @@ async fn command_work_queues_on_no_capacity_then_launches_when_freed() {
         .collect();
     assert_eq!(works.len(), 1, "one work task launched from the queue");
     assert_eq!(works[0].state, TaskState::Done);
+    // Launching cleared the queued markers, and the queue drained empty.
+    assert_eq!(works[0].pending_reason, None);
+    assert_eq!(works[0].queued_at, None);
+    assert_eq!(
+        rig.handle
+            .queue_snapshot("acme", "api")
+            .await
+            .unwrap()
+            .depth,
+        0
+    );
 }
 
 /// A launch wedged in the queue past the maximum wait escalates with the clear

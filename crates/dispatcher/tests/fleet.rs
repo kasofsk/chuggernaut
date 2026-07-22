@@ -102,6 +102,8 @@ fn work_task(id: u64, job_seq: u64, state: TaskState, container_id: Option<&str>
         created_at: Utc::now(),
         started_at: Some(Utc::now()),
         completed_at: None,
+        pending_reason: None,
+        queued_at: None,
     }
 }
 

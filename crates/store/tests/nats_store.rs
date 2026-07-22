@@ -55,6 +55,9 @@ fn task(job_seq: u64, id: u64) -> Task {
         container_id: None,
         rework_reason: None,
         infra_loss: false,
+
+        pending_reason: None,
+        queued_at: None,
         session_id: None,
         result: None,
         created_at: Utc::now(),

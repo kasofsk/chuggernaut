@@ -313,6 +313,28 @@ pub async fn spawn_api_handlers(
         }
     });
 
+    // ── req.queue.list.{owner}.{project} — §3.5 capacity launch-queue snapshot.
+    // Round-trips the core actor so the FIFO order and depth reflect live state,
+    // not a stale copy. The api forwards this for the "queued" badge; a wedged
+    // core simply fails the bounded request into a graceful UI omission.
+    let mut queue_sub = store.subscribe_requests("req.queue.list.>").await?;
+    let queue_handle = handle.clone();
+    tokio::spawn(async move {
+        while let Some(req) = queue_sub.next().await {
+            // req.queue.list.{owner}.{project}
+            let parts: Vec<&str> = req.subject.split('.').collect();
+            let (Some(owner), Some(project)) = (parts.get(3), parts.get(4)) else {
+                req.respond(bad_request("malformed subject")).await;
+                continue;
+            };
+            let body = match queue_handle.queue_snapshot(owner, project).await {
+                Ok(snap) => serde_json::to_vec(&snap).unwrap_or_default(),
+                Err(e) => service_unavailable(&e.to_string()),
+            };
+            req.respond(body).await;
+        }
+    });
+
     // ── req.projects.create — bare repo + hook + starter template ───────
     let mut projects_sub = store
         .subscribe_requests(&store::subjects::projects_create())
@@ -1689,6 +1711,8 @@ mod tests {
             rework_reason: None,
             infra_loss: false,
             session_id: None,
+            pending_reason: None,
+            queued_at: None,
             result: None,
             created_at: Utc::now(),
             started_at: None,

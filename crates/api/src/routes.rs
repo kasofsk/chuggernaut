@@ -717,6 +717,25 @@ pub async fn jobs_list(
     .await
 }
 
+/// Read-only snapshot of the capacity launch queue for this project (spec §3.5):
+/// `{ depth, entries: [{ seq, task_id, position, queued_at }] }`. The UI derives
+/// each queued task's "position N of M" from it; it omits the badge gracefully
+/// when the dispatcher is unreachable.
+pub async fn queue_get(
+    State(state): State<SharedState>,
+    Path((owner, project)): Path<(String, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::queue_list(&owner, &project),
+        serde_json::json!({}),
+        StatusCode::OK,
+    )
+    .await
+}
+
 /// One turn of the New Job "job wizard" chat: bridge the conversation to the
 /// dispatcher, which grounds it in repo/job context and calls the LLM. Same
 /// Member+ gate as creating a job — the wizard is a create-job aid.

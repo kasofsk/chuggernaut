@@ -115,6 +115,8 @@ impl Core {
             rework_reason: None,
             infra_loss: false,
             session_id: Some(session_id.clone()),
+            pending_reason: None,
+            queued_at: None,
             result: None,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),

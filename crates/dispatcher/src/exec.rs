@@ -325,6 +325,8 @@ impl Core {
             rework_reason,
             infra_loss: false,
             session_id: session_id.clone(),
+            pending_reason: None,
+            queued_at: None,
             result: None,
             created_at: Utc::now(),
             // A claimed attempt starts now, humanly: the claim was the "I'm

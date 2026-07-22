@@ -10,6 +10,7 @@ pub mod job_type;
 pub mod knowledge;
 pub mod platform;
 pub mod project;
+pub mod queue;
 pub mod resources;
 pub mod step;
 pub mod task;
@@ -29,10 +30,11 @@ pub use job_type::{
 pub use knowledge::{KnowledgeObject, KnowledgeScope};
 pub use platform::{DispatcherConfigSnapshot, FleetNode, FleetStatus, SlotOccupant, WorkerNode};
 pub use project::{OriginLink, ProjectRecord, ReleaseState, ReleaseStatus, github_repo_from_url};
+pub use queue::{QueueEntry, QueueSnapshot};
 pub use resources::{MEMORY_PATTERN, MemoryParseError, parse_memory};
 pub use step::{StepKind, StepRecord, StepStatus};
 pub use task::{
-    EscalationAction, EvalResult, Performer, ReworkReason, Task, TaskKind, TaskPhase,
-    TaskResolution, TaskResult, TaskState, TokenUsage,
+    EscalationAction, EvalResult, PendingReason, Performer, ReworkReason, Task, TaskKind,
+    TaskPhase, TaskResolution, TaskResult, TaskState, TokenUsage,
 };
 pub use user::{Identity, IdentityKind, ProjectRole, User};

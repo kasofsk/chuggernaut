@@ -246,12 +246,38 @@ export interface Task {
   /** set on claimed attempts: the declared kind stays, a human performed it */
   performed_by?: 'human' | null
   container_id: string | null
+  /** why the task is Pending, when worth surfacing (spec §3.5): a
+   *  capacity-deferred container launch waiting for a fleet slot. Absent for an
+   *  idle Pending (a parked human/claimed attempt, a just-created task). */
+  pending_reason?: 'QueuedForCapacity' | null
+  /** when a capacity-deferred launch joined the queue; drives the queued-for
+   *  duration shown while it waits. Absent unless queued. */
+  queued_at?: string | null
   /// Agent tasks only: names the captured session transcript.
   session_id: string | null
   result: TaskResult | null
   created_at: string
   started_at: string | null
   completed_at: string | null
+}
+
+/** One queued launch in the capacity launch-queue snapshot (spec §3.5). */
+export interface QueueEntry {
+  seq: number
+  task_id: number
+  /** 1-indexed position in the global FIFO — the "N" in "position N of M". */
+  position: number
+  queued_at: string
+}
+
+/**
+ * GET .../queue — a read-only view of the capacity launch queue (spec §3.5).
+ * `depth` and each `position` are fleet-wide (one global FIFO); `entries` is
+ * scoped to this project. The tasks table derives "position N of M" from it.
+ */
+export interface QueueSnapshot {
+  depth: number
+  entries: QueueEntry[]
 }
 
 export type ArtifactKind = 'session.jsonl' | 'stdout.log'
@@ -474,6 +500,9 @@ export const api = {
     req<Task[]>('GET', `/api/v1/projects/${owner}/${project}/tasks/pending`),
   tasks: (owner: string, project: string, seq: number) =>
     req<Task[]>('GET', `/api/v1/projects/${owner}/${project}/jobs/${seq}/tasks`),
+  /** Capacity launch-queue snapshot for the "queued" badge (spec §3.5). */
+  queue: (owner: string, project: string) =>
+    req<QueueSnapshot>('GET', `/api/v1/projects/${owner}/${project}/queue`),
   resolve: (owner: string, project: string, seq: number, taskId: number, resolution: TaskResolution) =>
     req<unknown>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/tasks/${taskId}/resolve`, resolution),
 
