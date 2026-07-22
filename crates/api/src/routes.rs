@@ -875,6 +875,89 @@ pub async fn diff(
     .await
 }
 
+// ── Live task output (§4.2): cursor-paged container stdout/stderr ───────────
+//
+// A running task's container is tailed live via the dispatcher (a bounded
+// req/reply, no held-open stream through the core actor); once it exits, this
+// falls back to the harvested `stdout.log` artifact at the SAME byte offsets,
+// so a poller never loses the tail when the container is removed (job #10).
+
+#[derive(serde::Deserialize)]
+pub struct OutputQuery {
+    /// Byte cursor: return output from here on. 0 (default) reads from the start.
+    #[serde(default)]
+    pub since: u64,
+}
+
+/// `GET .../tasks/{id}/output?since=<offset>` → `{ offset, data, running }`.
+/// While the task's container runs the dispatcher returns its live tail
+/// (`running: true`); after exit this serves the harvested `stdout.log` at the
+/// same offsets (`running: false`). A UI/CLI polls with the last `offset`.
+/// Viewer+ (§7.5), same as artifacts. 404 before a container exists; 502 if the
+/// owning node is unreachable.
+pub async fn task_output(
+    State(state): State<SharedState>,
+    Path((owner, project, seq, task_id)): Path<(String, String, u64, u64)>,
+    axum::extract::Query(q): axum::extract::Query<OutputQuery>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    let payload = serde_json::to_vec(&serde_json::json!({ "since": q.since }))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let reply = state
+        .store
+        .request_with_retry(
+            &store::subjects::tasks_output(&owner, &project, seq, task_id),
+            &payload,
+            3,
+            Duration::from_millis(300),
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("dispatcher unavailable: {e}")))?;
+    let value: serde_json::Value = serde_json::from_slice(&reply.payload)
+        .map_err(|e| ApiError::internal(format!("bad dispatcher reply: {e}")))?;
+    // The dispatcher signals errors (404 no container yet, 502 wedged node) in
+    // the §6.5 envelope — propagate its status verbatim.
+    if let Some(err) = value.get("error") {
+        let status = err
+            .get("status")
+            .and_then(|s| s.as_u64())
+            .and_then(|s| StatusCode::from_u16(s as u16).ok())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let message = err.get("message").cloned().unwrap_or_default();
+        return Ok((status, Json(serde_json::json!({ "error": message }))).into_response());
+    }
+    // Live container output: pass the tail through as-is.
+    if value.get("running").and_then(|r| r.as_bool()) == Some(true) {
+        return Ok((StatusCode::OK, Json(value)).into_response());
+    }
+    // Finished (or the container is already gone): serve the harvested
+    // stdout.log from `since` on, so a poller that had offset N off the live
+    // stream continues seamlessly into the artifact.
+    let (offset, data) = match &state.artifacts {
+        Some(artifacts) => {
+            let bytes = artifacts
+                .get(&owner, &project, seq, task_id, store::ArtifactKind::Stdout)
+                .await
+                .map_err(|e| ApiError::internal(e.to_string()))?
+                .unwrap_or_default();
+            let start = (q.since as usize).min(bytes.len());
+            (
+                bytes.len() as u64,
+                String::from_utf8_lossy(&bytes[start..]).into_owned(),
+            )
+        }
+        // No artifact store configured: the task is finished with nothing to
+        // replay. Hold the cursor so a poller sees `running: false` and stops.
+        None => (q.since, String::new()),
+    };
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "offset": offset, "data": data, "running": false })),
+    )
+        .into_response())
+}
+
 // ── Artifacts (§4.2): session transcripts and container logs ────────────────
 //
 // These stream from the object store rather than riding a req/reply through

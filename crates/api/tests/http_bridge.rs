@@ -152,6 +152,7 @@ async fn http_bridge_end_to_end() {
         None,
         None,
         None,
+        Arc::new(FakeBackend::new()),
     )
     .await
     .unwrap();
@@ -741,6 +742,7 @@ async fn ssh_cert_minting() {
         None,
         None,
         Some(ca.clone()),
+        Arc::new(FakeBackend::new()),
     )
     .await
     .unwrap();
@@ -837,6 +839,193 @@ async fn ssh_cert_minting() {
     // Validity window is exactly 24h (spec §7.3).
     let window = cert_validity_seconds(&listing);
     assert_eq!(window, 24 * 3600, "{listing}");
+}
+
+/// Live task output over HTTP (§4.2): the `/output` endpoint tails a running
+/// task's container through the dispatcher, enforces viewer auth, and falls
+/// back to the harvested `stdout.log` artifact once the task has finished.
+#[tokio::test]
+async fn task_output_endpoint() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let repos_root = tempfile::tempdir().unwrap();
+    let backend = Arc::new(FakeBackend::new());
+    backend.put_logs(b"compiling chuggernaut v0.1.0\ncompiling store v0.1.0\n".to_vec());
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root.path()),
+        backend.clone(),
+        Arc::new(FakeProvider::new()),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let handle = spawn(core);
+    spawn_api_handlers(
+        &store,
+        handle,
+        Arc::new(vcs::RepoManager::new(repos_root.path())),
+        None,
+        None,
+        None,
+        backend.clone(),
+    )
+    .await
+    .unwrap();
+
+    // A Member user, JWT keys, and an artifacts identity to serve stdout.log.
+    let users = store.raw_bucket(store::buckets::USERS).await.unwrap();
+    let user = User {
+        id: "op".into(),
+        email: "op@example.com".into(),
+        password_hash: auth::hash_password("hunter2").unwrap(),
+        project_roles: [("acme/api".to_string(), ProjectRole::Member)].into(),
+        platform_admin: false,
+        created_at: chrono::Utc::now(),
+    };
+    users
+        .put_json(&store::keys::user_key(&user.email), &user)
+        .await
+        .unwrap();
+    let (private, public) = gen_jwt_keys(repos_root.path());
+    let (artifacts_identity, _) = store::secrets::generate_age_keypair();
+    let artifacts = store
+        .artifacts(store::ArtifactCrypto::with_identity(&artifacts_identity).unwrap())
+        .await
+        .unwrap();
+    let state: SharedState = Arc::new(ApiState {
+        store: store.clone(),
+        signer: auth::jwt::JwtSigner::from_pem(&private).unwrap(),
+        verifier: auth::jwt::JwtVerifier::from_pem(&public).unwrap(),
+        session_ttl: chrono::Duration::hours(1),
+        artifacts: Some(artifacts),
+    });
+    let router = api::router(state, None);
+
+    let mk_task = |id: u64, container: Option<&str>, state: types::TaskState| types::Task {
+        id,
+        job_seq: 1,
+        project: "acme/api".into(),
+        phase: types::TaskPhase::Work,
+        cycle: 1,
+        kind: types::TaskKind::Command {
+            run: "cargo build".into(),
+        },
+        state,
+        attempt: 1,
+        evaluator: None,
+        stage: 0,
+        performed_by: None,
+        container_id: container.map(String::from),
+        session_id: None,
+        result: None,
+        created_at: chrono::Utc::now(),
+        started_at: Some(chrono::Utc::now()),
+        completed_at: None,
+    };
+    let tasks = store.tasks().await.unwrap();
+    tasks
+        .put(&mk_task(1, Some("fake/c1"), types::TaskState::Running))
+        .await
+        .unwrap();
+
+    // Unauthenticated → 401 (viewer auth, same as artifacts).
+    let (status, _, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/jobs/1/tasks/1/output",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Login for a session cookie.
+    let (_, _, cookie) = call(
+        &router,
+        "POST",
+        "/auth/login",
+        None,
+        Some(serde_json::json!({"email": "op@example.com", "password": "hunter2"})),
+    )
+    .await;
+    let cookie = cookie.unwrap();
+
+    // Running task → live tail, running: true, a non-zero cursor.
+    let (status, body, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/jobs/1/tasks/1/output?since=0",
+        Some(&cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["running"], true);
+    assert!(
+        body["data"].as_str().unwrap().contains("compiling store"),
+        "live tail missing output: {body}"
+    );
+    let offset = body["offset"].as_u64().unwrap();
+    assert!(offset > 0);
+
+    // A task with no container yet → 404.
+    tasks
+        .put(&mk_task(2, None, types::TaskState::Running))
+        .await
+        .unwrap();
+    let (status, _, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/jobs/1/tasks/2/output",
+        Some(&cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Finish task 1 and harvest its stdout.log: the endpoint keeps working,
+    // now running: false, serving the artifact at the same byte offsets.
+    tasks
+        .put(&mk_task(1, Some("fake/c1"), types::TaskState::Done))
+        .await
+        .unwrap();
+    store
+        .artifacts(store::ArtifactCrypto::with_identity(&artifacts_identity).unwrap())
+        .await
+        .unwrap()
+        .put(
+            "acme",
+            "api",
+            1,
+            1,
+            store::ArtifactKind::Stdout,
+            b"compiling chuggernaut v0.1.0\ncompiling store v0.1.0\nFinished\n",
+        )
+        .await
+        .unwrap();
+    let (status, body, _) = call(
+        &router,
+        "GET",
+        "/api/v1/projects/acme/api/jobs/1/tasks/1/output?since=0",
+        Some(&cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["running"], false);
+    assert!(
+        body["data"].as_str().unwrap().contains("Finished"),
+        "post-exit fallback missing artifact content: {body}"
+    );
 }
 
 /// Parse the `Valid: from <ts> to <ts>` line ssh-keygen -L prints and return

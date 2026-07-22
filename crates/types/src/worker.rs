@@ -93,6 +93,14 @@ pub struct CopyFileRequest {
     pub path: String,
 }
 
+/// Payload for `logs_tail`: cursor-paged live output (spec §4.2).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogsTailRequest {
+    pub id: String,
+    /// Byte cursor into the captured log; 0 reads from the start.
+    pub since: u64,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum WireStatus {
@@ -117,6 +125,15 @@ pub struct LogsOk {
     pub data_b64: String,
     /// Set when the worker tailed the logs to fit the payload cap.
     pub truncated: bool,
+}
+
+/// Reply for `logs_tail`: a cursor page of live output. The worker already
+/// capped the chunk (`container::MAX_LOG_TAIL`), so `data_b64` fits the reply
+/// under `max_payload`; `offset` is the next cursor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogsTailOk {
+    pub offset: u64,
+    pub data_b64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

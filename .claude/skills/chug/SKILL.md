@@ -69,6 +69,7 @@ tasks).
 | `GET /api/v1/projects/{o}/{p}/jobs/{seq}/tasks` | Task[] (phase, kind, state, result, model) |
 | `GET /api/v1/projects/{o}/{p}/jobs/{seq}/tasks/{id}/artifacts` | artifact kinds |
 | `GET .../tasks/{id}/artifacts/session.jsonl` or `stdout.log` | transcript / logs (raw bytes) |
+| `GET .../tasks/{id}/output?since=<offset>` | live container stdout: `{offset, data, running}` — cursor-paged (see "watch a running task") |
 | `GET /api/v1/projects/{o}/{p}/diff/{seq}` | the job branch's diff |
 | `GET /api/v1/projects/{o}/{p}/job-types` | [{name, display_name, description}] |
 | `GET /api/v1/projects/{o}/{p}/job-types/{name}` | full type (raw YAML + parsed) |
@@ -128,6 +129,23 @@ task) or `GET .../tasks/pending`.
 - To watch a running job: poll `.../jobs/{seq}` + `.../tasks`, or read SSE
   with `curl -N --max-time 30`. `channel-update` events are the agent
   narrating its own progress.
+- **To watch a running task's raw output** (agent stdout, or a command task's
+  compile progress — the black box `channel-update` doesn't cover): poll
+  `GET .../tasks/{id}/output?since=<offset>`. Start at `since=0`, then pass the
+  returned `offset` back each poll; append `data` and show the last N lines.
+  `running:true` while the container lives; after it exits the same endpoint
+  serves the harvested `stdout.log` (`running:false`) at the same offsets, so
+  the tail is never lost. Bound each call with `--max-time`, e.g.:
+  ```sh
+  off=0; while :; do
+    r=$(curl -s --max-time 10 -H "Authorization: Bearer $TOK" \
+      "$BASE/api/v1/projects/$O/$P/jobs/$SEQ/tasks/$TID/output?since=$off")
+    printf %s "$(echo "$r" | jq -r .data)"
+    off=$(echo "$r" | jq .offset)
+    [ "$(echo "$r" | jq .running)" = "true" ] || break
+    sleep 3
+  done | tail -n 40
+  ```
 - Revoke kills running containers — confirm with the user first.
 - **Shipping this repo (`kasofsk/chuggernaut`)**: it's platform-owned — deploy
   is a **`deploy` job**, not an origin release. Create + release a `deploy` job

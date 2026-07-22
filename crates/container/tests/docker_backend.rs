@@ -45,6 +45,12 @@ async fn logs_capture_both_streams_after_exit() {
 }
 
 #[tokio::test]
+async fn logs_tail_grows_while_running() {
+    let Some(be) = docker() else { return };
+    suite::logs_tail_grows_while_running(&be, "local").await;
+}
+
+#[tokio::test]
 async fn exit_codes_round_trip() {
     let Some(be) = docker() else { return };
     suite::exit_codes_round_trip(&be).await;

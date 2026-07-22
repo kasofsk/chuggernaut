@@ -165,6 +165,14 @@ pub fn tasks_resolve(owner: &str, project: &str, job_seq: u64, task_id: u64) -> 
     format!("req.tasks.resolve.{owner}.{project}.{job_seq}.{task_id}")
 }
 
+/// Live/cursor-paged stdout of a running task's container (spec §4.2). Payload
+/// `{ since }`; reply `{ offset, data, running }` while the container runs.
+/// Served off the dispatcher's core actor (a read-only container tail), and
+/// the api falls back to the harvested `stdout.log` artifact after exit.
+pub fn tasks_output(owner: &str, project: &str, job_seq: u64, task_id: u64) -> String {
+    format!("req.tasks.output.{owner}.{project}.{job_seq}.{task_id}")
+}
+
 pub fn vcs_diff(owner: &str, project: &str, seq: u64) -> String {
     format!("req.vcs.diff.{owner}.{project}.{seq}")
 }

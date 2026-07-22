@@ -144,6 +144,12 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
             get(routes::diff),
         )
         // Artifacts (§4.2): transcripts and container logs
+        // Live/paged container output for a running task, falling back to the
+        // harvested stdout.log artifact after exit (§4.2)
+        .route(
+            "/api/v1/projects/{owner}/{project}/jobs/{seq}/tasks/{task_id}/output",
+            get(routes::task_output),
+        )
         .route(
             "/api/v1/projects/{owner}/{project}/jobs/{seq}/tasks/{task_id}/artifacts",
             get(routes::artifacts_list),

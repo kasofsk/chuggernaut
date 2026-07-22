@@ -8,11 +8,12 @@ pub mod repo;
 use agent::{AgentError, AgentOutput, AgentProvider, AgentRunConfig};
 use async_trait::async_trait;
 use container::{
-    BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
+    BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus, LogTail,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Deterministic, scriptable [`ContainerBackend`]: every launch records its config
 /// and "exits" with the next scripted exit code (default 0).
@@ -45,8 +46,14 @@ struct FakeBackendState {
     exits: HashMap<ContainerId, i32>,
     /// Files retrievable via copy_file, keyed by (container path).
     files: HashMap<String, Vec<u8>>,
-    /// Returned by `logs` for every container.
+    /// Returned by `logs` (and sliced by `logs_tail`) for every container.
     logs: Vec<u8>,
+    /// When set, `logs_tail` sleeps this long before returning — a stand-in
+    /// for a slow/wedged node, to prove one output request never blocks others.
+    logs_tail_stall: Option<Duration>,
+    /// When set, `logs_tail` fails with this error — an unreachable node, so
+    /// the output handler must surface an error envelope rather than hang.
+    logs_tail_fail: Option<String>,
     /// Containers removed via `remove`, in call order.
     removed: Vec<ContainerId>,
     /// Ids returned by `list_managed_exited` (the startup-sweep candidates).
@@ -81,9 +88,22 @@ impl FakeBackend {
             .insert(path.to_string(), contents.into());
     }
 
-    /// Script what `logs` returns for every container.
+    /// Script what `logs` returns for every container (and what `logs_tail`
+    /// slices its cursor pages from).
     pub fn put_logs(&self, contents: impl Into<Vec<u8>>) {
         self.state.lock().unwrap().logs = contents.into();
+    }
+
+    /// Make `logs_tail` sleep before returning — simulate a slow/wedged node so
+    /// a test can prove that one stalled output read never blocks other reads.
+    pub fn stall_logs_tail(&self, delay: Duration) {
+        self.state.lock().unwrap().logs_tail_stall = Some(delay);
+    }
+
+    /// Make `logs_tail` fail with `BackendError::Unavailable` — an unreachable
+    /// node, so the output handler must reply with an error envelope.
+    pub fn fail_logs_tail(&self, reason: impl Into<String>) {
+        self.state.lock().unwrap().logs_tail_fail = Some(reason.into());
     }
 
     pub fn launches(&self) -> Vec<ContainerLaunchConfig> {
@@ -200,6 +220,24 @@ impl ContainerBackend for FakeBackend {
 
     async fn logs(&self, _id: &ContainerId) -> Result<Vec<u8>, BackendError> {
         Ok(self.state.lock().unwrap().logs.clone())
+    }
+
+    async fn logs_tail(&self, _id: &ContainerId, since: u64) -> Result<LogTail, BackendError> {
+        let (logs, stall, fail) = {
+            let st = self.state.lock().unwrap();
+            (
+                st.logs.clone(),
+                st.logs_tail_stall,
+                st.logs_tail_fail.clone(),
+            )
+        };
+        if let Some(delay) = stall {
+            tokio::time::sleep(delay).await;
+        }
+        if let Some(reason) = fail {
+            return Err(BackendError::Unavailable(reason));
+        }
+        Ok(LogTail::slice(&logs, since))
     }
 
     async fn remove(&self, id: &ContainerId) -> Result<(), BackendError> {

@@ -49,6 +49,22 @@ pub trait ContainerBackend: Send + Sync {
     /// orders frames by timestamp, so writes to stdout and stderr in the same
     /// millisecond can come back either way round (measured, not assumed).
     async fn logs(&self, id: &ContainerId) -> Result<Vec<u8>, BackendError>;
+    /// Bounded, non-following read of a container's captured stdout+stderr from
+    /// byte cursor `since` — usable while the container is still **running**,
+    /// unlike [`logs`](ContainerBackend::logs) (which is documented as an
+    /// after-exit read). `follow: false` throughout, so it returns promptly
+    /// with whatever has been captured so far and never hangs. Routes to the
+    /// owning node like every other op, so it works for containers on a remote
+    /// worker.
+    ///
+    /// Byte offsets are stable — container logs are append-only — so a poller
+    /// advances monotonically by passing back the returned `offset`. The chunk
+    /// is capped at [`MAX_LOG_TAIL`] (`offset` is where the returned bytes end,
+    /// so a caller still advances across the cap); a `since` at/past the end
+    /// yields empty `data` and the unchanged length. The same offsets address
+    /// the harvested `stdout.log` after exit, so a live-then-artifact poller
+    /// never loses the tail when the container is removed.
+    async fn logs_tail(&self, id: &ContainerId, since: u64) -> Result<LogTail, BackendError>;
     /// Remove an exited container, reclaiming its writable overlay layer (spec
     /// §3.1: the container lifecycle ends in removal). `force=false` — callers
     /// remove only after `wait`/`logs`/`copy_file` have captured everything the
@@ -101,6 +117,37 @@ pub struct InjectedFile {
 pub enum ContainerStatus {
     Running,
     Exited { exit_code: i32 },
+}
+
+/// Chunk cap for [`ContainerBackend::logs_tail`]. Bounds each poll's reply so a
+/// worker-proxied tail fits NATS's 1MB `max_payload` even after base64 + JSON
+/// overhead, and keeps a single request cheap. A busy build keeps producing
+/// output, so the poller just advances across several capped chunks.
+pub const MAX_LOG_TAIL: usize = 512 * 1024;
+
+/// A cursor-paged slice of a container's captured logs (see
+/// [`ContainerBackend::logs_tail`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogTail {
+    /// Where the returned bytes end in the full log — the next `since` cursor.
+    pub offset: u64,
+    /// The captured bytes from the requested `since` up to `offset`.
+    pub data: Vec<u8>,
+}
+
+impl LogTail {
+    /// Slice a full captured-log buffer into the response for cursor `since`,
+    /// capping the returned chunk at [`MAX_LOG_TAIL`]. `offset` is where the
+    /// returned bytes end (not necessarily the buffer end), so a caller
+    /// advances monotonically even when the tail is capped across polls.
+    pub fn slice(full: &[u8], since: u64) -> Self {
+        let start = (since as usize).min(full.len());
+        let end = start.saturating_add(MAX_LOG_TAIL).min(full.len());
+        LogTail {
+            offset: end as u64,
+            data: full[start..end].to_vec(),
+        }
+    }
 }
 
 /// Wrap a container CMD with the standard workspace bootstrap (spec §4.1):
@@ -158,6 +205,39 @@ mod tests {
         assert_eq!(cmd[1], "-c");
         assert!(cmd[2].starts_with("git clone "));
         assert!(cmd[2].ends_with("exec claude -p 'do the thing'"));
+    }
+
+    /// The cursor slice underpinning live output: monotonic across polls, empty
+    /// at/past the end, and capped so a worker-proxied reply stays bounded.
+    #[test]
+    fn log_tail_slice_is_monotonic_and_capped() {
+        let full = b"line-0\nline-1\nline-2\n";
+        // From the start: the whole buffer, cursor at its end.
+        let t = LogTail::slice(full, 0);
+        assert_eq!(t.offset, full.len() as u64);
+        assert_eq!(t.data, full);
+        // From a mid cursor: only the remainder, cursor unchanged at the end.
+        let t = LogTail::slice(full, 7);
+        assert_eq!(t.data, b"line-1\nline-2\n");
+        assert_eq!(t.offset, full.len() as u64);
+        // At the end: empty, offset holds — a caught-up poll makes no progress.
+        let t = LogTail::slice(full, full.len() as u64);
+        assert!(t.data.is_empty());
+        assert_eq!(t.offset, full.len() as u64);
+        // Past the end (a truncated/rotated log): clamped, never panics.
+        let t = LogTail::slice(full, 9_999);
+        assert!(t.data.is_empty());
+        assert_eq!(t.offset, full.len() as u64);
+
+        // Capped: a chunk larger than MAX_LOG_TAIL returns exactly the cap and
+        // an offset that still advances the caller past it.
+        let big = vec![b'x'; MAX_LOG_TAIL + 4096];
+        let t = LogTail::slice(&big, 0);
+        assert_eq!(t.data.len(), MAX_LOG_TAIL);
+        assert_eq!(t.offset, MAX_LOG_TAIL as u64);
+        let t2 = LogTail::slice(&big, t.offset);
+        assert_eq!(t2.data.len(), 4096);
+        assert_eq!(t2.offset, big.len() as u64);
     }
 
     /// The clone must stay narrow: every task in a job re-clones, so the flags

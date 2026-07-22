@@ -5,8 +5,8 @@
 use crate::{NatsStore, StoreError, subjects};
 use std::time::Duration;
 use types::worker::{
-    ContainerRef, CopyFileOk, CopyFileRequest, InspectOk, LaunchOk, ListExitedOk, LogsOk, PingOk,
-    WorkerError, WorkerLaunchRequest, WorkerReply,
+    ContainerRef, CopyFileOk, CopyFileRequest, InspectOk, LaunchOk, ListExitedOk, LogsOk,
+    LogsTailOk, LogsTailRequest, PingOk, WorkerError, WorkerLaunchRequest, WorkerReply,
 };
 
 /// Requests must fit NATS's default 1MB max_payload with headroom. Launch
@@ -124,6 +124,22 @@ impl WorkerRpc {
     pub async fn logs(&self, id: &str) -> std::result::Result<LogsOk, WorkerRpcError> {
         self.call("logs", &ContainerRef { id: id.into() }, OP_TIMEOUT)
             .await
+    }
+
+    pub async fn logs_tail(
+        &self,
+        id: &str,
+        since: u64,
+    ) -> std::result::Result<LogsTailOk, WorkerRpcError> {
+        self.call(
+            "logs_tail",
+            &LogsTailRequest {
+                id: id.into(),
+                since,
+            },
+            OP_TIMEOUT,
+        )
+        .await
     }
 
     pub async fn ping(&self) -> std::result::Result<PingOk, WorkerRpcError> {

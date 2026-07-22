@@ -13,9 +13,10 @@ use crate::core::{
     ChannelPost, CoreError, CoreHandle, CreateJobRequest, EvalSubmission, WorkSubmission,
 };
 use crate::wizard::{self, JobLine, WizardConfig, WizardError, WizardRequest};
+use container::ContainerBackend;
 use std::sync::Arc;
 use store::NatsStore;
-use types::TaskResolution;
+use types::{TaskResolution, TaskState};
 use vcs::RepoManager;
 
 /// Subscribe the container-facing subjects. Returns after subscriptions are
@@ -204,6 +205,7 @@ struct ResolveBody {
 /// Subscribe the API-facing subject families (spec §6.1): jobs, graph.get,
 /// tasks (pending/list/resolve), vcs.diff. Reads go straight to the store or
 /// repos; mutations go through the core actor.
+#[allow(clippy::too_many_arguments)]
 pub async fn spawn_api_handlers(
     store: &NatsStore,
     handle: CoreHandle,
@@ -216,6 +218,9 @@ pub async fn spawn_api_handlers(
     // SSH CA private key path (§7.3) for user-cert minting; None (no ssh_ca, or
     // `file://` dev repos) → `req.ssh.sign-user-cert` replies 503.
     ssh_ca: Option<std::path::PathBuf>,
+    // Container backend for the read-only live-output tail (`req.tasks.output`).
+    // Served off the core actor, so a slow node never wedges state transitions.
+    backend: Arc<dyn ContainerBackend>,
 ) -> store::Result<()> {
     // ── req.projects.create — bare repo + hook + starter template ───────
     let mut projects_sub = store
@@ -347,7 +352,7 @@ pub async fn spawn_api_handlers(
         }
     });
 
-    spawn_read_handlers(store, handle, repos, wizard).await
+    spawn_read_handlers(store, handle, repos, wizard, backend).await
 }
 
 /// §7.3 user SSH cert minting. Loads the caller's roles from their user record
@@ -455,12 +460,184 @@ async fn create_project(
     ok_reply(&serde_json::json!({ "project": format!("{owner}/{name}") }))
 }
 
+/// `req.tasks.{list.pending,list,resolve,output}` (spec §6.1). `output` is the
+/// live-container tail (§4.2); it needs the container backend, and it must run
+/// **off the core actor** so a slow/wedged node never stalls state transitions
+/// — so it is served here (store + backend reads only), spawned per request so
+/// one hung tail can't block the list/resolve legs either. A single
+/// subscription owns the whole `req.tasks.>` family; a second overlapping
+/// subscription would double-reply under core NATS.
+pub async fn spawn_tasks_handler(
+    store: &NatsStore,
+    handle: CoreHandle,
+    backend: Arc<dyn ContainerBackend>,
+) -> store::Result<()> {
+    let mut tasks_sub = store.subscribe_requests("req.tasks.>").await?;
+    let tasks_store = store.clone();
+    let tasks_handle = handle;
+    tokio::spawn(async move {
+        while let Some(req) = tasks_sub.next().await {
+            let parts: Vec<&str> = req.subject.split('.').collect();
+            // req.tasks.output.{owner}.{project}.{seq}.{task_id} — live output.
+            // Spawned with cloned handles so a wedged node's slow tail neither
+            // blocks other output reads nor the list/resolve legs of this loop.
+            if parts.get(2) == Some(&"output") {
+                let coords = (
+                    parts.get(3).copied().map(String::from),
+                    parts.get(4).copied().map(String::from),
+                    parts.get(5).and_then(|s| s.parse::<u64>().ok()),
+                    parts.get(6).and_then(|s| s.parse::<u64>().ok()),
+                );
+                let since = serde_json::from_slice::<serde_json::Value>(&req.payload)
+                    .ok()
+                    .and_then(|v| v.get("since").and_then(|s| s.as_u64()))
+                    .unwrap_or(0);
+                let store = tasks_store.clone();
+                let backend = backend.clone();
+                tokio::spawn(async move {
+                    let body = match coords {
+                        (Some(owner), Some(project), Some(seq), Some(task_id)) => {
+                            task_output(&store, &backend, &owner, &project, seq, task_id, since)
+                                .await
+                        }
+                        _ => bad_request("malformed subject"),
+                    };
+                    req.respond(body).await;
+                });
+                continue;
+            }
+            let body = match parts.get(2).copied() {
+                // req.tasks.list.pending.{owner}.{project}
+                Some("list") if parts.get(3) == Some(&"pending") => {
+                    match (parts.get(4).copied(), parts.get(5).copied()) {
+                        (Some(owner), Some(project)) => {
+                            list_pending(&tasks_store, owner, project).await
+                        }
+                        _ => bad_request("malformed subject"),
+                    }
+                }
+                // req.tasks.list.{owner}.{project}.{job_seq}
+                Some("list") => {
+                    match (
+                        parts.get(3).copied(),
+                        parts.get(4).copied(),
+                        parts.get(5).and_then(|s| s.parse::<u64>().ok()),
+                    ) {
+                        (Some(owner), Some(project), Some(job_seq)) => {
+                            match tasks_store.tasks().await {
+                                Ok(tasks) => {
+                                    match tasks.list_for_job(owner, project, job_seq).await {
+                                        Ok(list) => ok_reply(&list),
+                                        Err(e) => error_reply(&e.into()),
+                                    }
+                                }
+                                Err(e) => error_reply(&e.into()),
+                            }
+                        }
+                        _ => bad_request("malformed subject"),
+                    }
+                }
+                // req.tasks.resolve.{owner}.{project}.{job_seq}.{task_id}
+                Some("resolve") => {
+                    match (
+                        parts.get(3).copied(),
+                        parts.get(4).copied(),
+                        parts.get(5).and_then(|s| s.parse::<u64>().ok()),
+                        parts.get(6).and_then(|s| s.parse::<u64>().ok()),
+                    ) {
+                        (Some(owner), Some(project), Some(job_seq), Some(task_id)) => {
+                            match serde_json::from_slice::<ResolveBody>(&req.payload) {
+                                Err(e) => bad_request(&e.to_string()),
+                                Ok(b) => match tasks_handle
+                                    .resolve_task(
+                                        owner,
+                                        project,
+                                        job_seq,
+                                        task_id,
+                                        b.resolution,
+                                        &b.operator,
+                                    )
+                                    .await
+                                {
+                                    Ok(()) => br#"{"ok":true}"#.to_vec(),
+                                    Err(e) => error_reply(&e),
+                                },
+                            }
+                        }
+                        _ => bad_request("malformed subject"),
+                    }
+                }
+                _ => bad_request("malformed subject"),
+            };
+            req.respond(body).await;
+        }
+    });
+    Ok(())
+}
+
+/// Serve one `req.tasks.output` request (spec §4.2): the running container's
+/// captured stdout/stderr from byte cursor `since`, or a `running:false` signal
+/// telling the api to fall back to the harvested `stdout.log` artifact once the
+/// container is gone. A read-only container tail — no core-actor involvement.
+///
+/// - Running task with a live container → `{ offset, data, running:true }`.
+/// - Finished task (Done/Failed), or the container removed out from under a
+///   still-Running record (the harvest/dispose race) → `{ running:false }`, the
+///   api's cue to serve the artifact at the same byte offsets.
+/// - Running task with no container yet (agent pre-launch, human/claimed) → 404.
+/// - Unknown task → 404. A wedged/unreachable node → 502, never a hang.
+async fn task_output(
+    store: &NatsStore,
+    backend: &Arc<dyn ContainerBackend>,
+    owner: &str,
+    project: &str,
+    seq: u64,
+    task_id: u64,
+    since: u64,
+) -> Vec<u8> {
+    let task = match store.tasks().await {
+        Ok(tasks) => match tasks.get(owner, project, seq, task_id).await {
+            Ok(Some(t)) => t,
+            Ok(None) => return NOT_FOUND.to_vec(),
+            Err(e) => return error_reply(&e.into()),
+        },
+        Err(e) => return error_reply(&e.into()),
+    };
+    match (&task.container_id, task.state) {
+        (Some(id), TaskState::Running) => match backend.logs_tail(id, since).await {
+            Ok(tail) => ok_reply(&serde_json::json!({
+                "offset": tail.offset,
+                "data": String::from_utf8_lossy(&tail.data),
+                "running": true,
+            })),
+            // The container vanished under a still-Running record (harvest then
+            // dispose, before the exit is recorded): fall back to the artifact.
+            Err(container::BackendError::NotFound(_)) => finished_reply(),
+            // A wedged/unreachable node: an error envelope, not a stall. This
+            // request fails; others are untouched (it runs off the actor).
+            Err(e) => bad_gateway(&format!("container output unavailable: {e}")),
+        },
+        // Finished → the api serves the harvested stdout.log at the same offsets.
+        _ if task.state != TaskState::Running => finished_reply(),
+        // Running, but no container yet (agent pre-launch, human/claimed attempt).
+        _ => NOT_FOUND.to_vec(),
+    }
+}
+
+/// The `running:false` cue: the task has no live container, so the api serves
+/// the harvested `stdout.log` artifact (same byte-offset semantics) instead.
+fn finished_reply() -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({ "running": false }))
+        .unwrap_or_else(|_| br#"{"running":false}"#.to_vec())
+}
+
 /// The read/mutation subject families behind the project-creation handler.
 async fn spawn_read_handlers(
     store: &NatsStore,
     handle: CoreHandle,
     repos: Arc<RepoManager>,
     wizard: Option<Arc<WizardConfig>>,
+    backend: Arc<dyn ContainerBackend>,
 ) -> store::Result<()> {
     // ── req.jobs.{create,get,list,release,revoke,criteria} ──────────────
     let mut jobs_sub = store.subscribe_requests("req.jobs.>").await?;
@@ -571,79 +748,7 @@ async fn spawn_read_handlers(
         }
     });
 
-    // ── req.tasks.{list.pending,list,resolve} ───────────────────────────
-    let mut tasks_sub = store.subscribe_requests("req.tasks.>").await?;
-    let tasks_store = store.clone();
-    let tasks_handle = handle.clone();
-    tokio::spawn(async move {
-        while let Some(req) = tasks_sub.next().await {
-            let parts: Vec<&str> = req.subject.split('.').collect();
-            let body = match parts.get(2).copied() {
-                // req.tasks.list.pending.{owner}.{project}
-                Some("list") if parts.get(3) == Some(&"pending") => {
-                    match (parts.get(4).copied(), parts.get(5).copied()) {
-                        (Some(owner), Some(project)) => {
-                            list_pending(&tasks_store, owner, project).await
-                        }
-                        _ => bad_request("malformed subject"),
-                    }
-                }
-                // req.tasks.list.{owner}.{project}.{job_seq}
-                Some("list") => {
-                    match (
-                        parts.get(3).copied(),
-                        parts.get(4).copied(),
-                        parts.get(5).and_then(|s| s.parse::<u64>().ok()),
-                    ) {
-                        (Some(owner), Some(project), Some(job_seq)) => {
-                            match tasks_store.tasks().await {
-                                Ok(tasks) => {
-                                    match tasks.list_for_job(owner, project, job_seq).await {
-                                        Ok(list) => ok_reply(&list),
-                                        Err(e) => error_reply(&e.into()),
-                                    }
-                                }
-                                Err(e) => error_reply(&e.into()),
-                            }
-                        }
-                        _ => bad_request("malformed subject"),
-                    }
-                }
-                // req.tasks.resolve.{owner}.{project}.{job_seq}.{task_id}
-                Some("resolve") => {
-                    match (
-                        parts.get(3).copied(),
-                        parts.get(4).copied(),
-                        parts.get(5).and_then(|s| s.parse::<u64>().ok()),
-                        parts.get(6).and_then(|s| s.parse::<u64>().ok()),
-                    ) {
-                        (Some(owner), Some(project), Some(job_seq), Some(task_id)) => {
-                            match serde_json::from_slice::<ResolveBody>(&req.payload) {
-                                Err(e) => bad_request(&e.to_string()),
-                                Ok(b) => match tasks_handle
-                                    .resolve_task(
-                                        owner,
-                                        project,
-                                        job_seq,
-                                        task_id,
-                                        b.resolution,
-                                        &b.operator,
-                                    )
-                                    .await
-                                {
-                                    Ok(()) => br#"{"ok":true}"#.to_vec(),
-                                    Err(e) => error_reply(&e),
-                                },
-                            }
-                        }
-                        _ => bad_request("malformed subject"),
-                    }
-                }
-                _ => bad_request("malformed subject"),
-            };
-            req.respond(body).await;
-        }
-    });
+    spawn_tasks_handler(store, handle.clone(), backend).await?;
 
     // ── req.jobtypes.list.{owner}.{project} — String[] (spec §1.1) ──────
     let mut jobtypes_sub = store.subscribe_requests("req.jobtypes.list.>").await?;

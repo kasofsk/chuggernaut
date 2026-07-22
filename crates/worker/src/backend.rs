@@ -12,7 +12,7 @@
 use async_trait::async_trait;
 use container::docker::{DockerBackend, DockerNodeConfig};
 use container::{
-    BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
+    BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus, LogTail,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -359,6 +359,24 @@ impl ContainerBackend for FleetBackend {
                     data = note;
                 }
                 Ok(data)
+            }
+        }
+    }
+
+    async fn logs_tail(&self, id: &ContainerId, since: u64) -> Result<LogTail, BackendError> {
+        let node = self.route(id)?;
+        match &node.handle {
+            NodeHandle::Docker { backend } => backend.logs_tail(id, since).await,
+            NodeHandle::Worker { rpc, .. } => {
+                let ok = rpc
+                    .logs_tail(id, since)
+                    .await
+                    .map_err(|e| rpc_err(Some(id), e))?;
+                let data = b64_decode(&ok.data_b64).map_err(BackendError::Other)?;
+                Ok(LogTail {
+                    offset: ok.offset,
+                    data,
+                })
             }
         }
     }

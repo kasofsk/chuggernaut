@@ -82,6 +82,9 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
     // §7.3 user-cert minting signs with the CA key directly (no job-record
     // write), so it rides the API handlers rather than the single-writer core.
     let ssh_ca = core_config.ssh_ca.clone();
+    // Kept for the read-only live-output tail (`req.tasks.output`), which reads
+    // the backend directly off the core actor.
+    let output_backend = backend.clone();
     let core = Core::new(store.clone(), repos, backend, provider, core_config).await?;
     let handle = spawn(core);
     handlers::spawn_container_handlers(&store, handle.clone()).await?;
@@ -92,6 +95,7 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
         config.hook_bin.clone(),
         config.wizard.clone().map(Arc::new),
         ssh_ca,
+        output_backend,
     )
     .await?;
     tracing::info!(nats = %config.nats_url, repos = %config.repos_root.display(), "dispatcher up");

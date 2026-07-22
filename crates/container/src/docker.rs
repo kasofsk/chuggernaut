@@ -8,7 +8,7 @@
 
 use crate::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
-    InjectedFile,
+    InjectedFile, LogTail,
 };
 use async_trait::async_trait;
 use bollard::Docker;
@@ -478,6 +478,28 @@ impl ContainerBackend for DockerBackend {
             }
         }
         Ok(out)
+    }
+
+    async fn logs_tail(&self, id: &ContainerId, since: u64) -> Result<LogTail, BackendError> {
+        let (node, cid) = self.route(id)?;
+        // `follow: false` on a *running* container: bollard returns what has
+        // been captured so far and the stream ends, so this never blocks (the
+        // hang warning on `logs` is specifically about `follow: true`). Both
+        // streams, same as `logs`, since a build's progress lands on either.
+        let opts = LogsOptionsBuilder::default()
+            .follow(false)
+            .stdout(true)
+            .stderr(true)
+            .build();
+        let mut stream = node.docker.logs(cid, Some(opts));
+        let mut out = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(log) => out.extend_from_slice(log.into_bytes().as_ref()),
+                Err(e) => return Err(map_err(id, e)),
+            }
+        }
+        Ok(LogTail::slice(&out, since))
     }
 
     async fn remove(&self, id: &ContainerId) -> Result<(), BackendError> {

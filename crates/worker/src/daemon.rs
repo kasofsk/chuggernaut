@@ -21,8 +21,9 @@ use std::sync::Arc;
 use store::worker::{encode_reply, op_from_subject};
 use store::{NatsStore, StoreError};
 use types::worker::{
-    ContainerRef, CopyFileOk, CopyFileRequest, FileSource, InspectOk, LaunchOk, LogsOk, PingOk,
-    WireStatus, WorkerError, WorkerLaunchRequest, WorkerReply, b64_decode, b64_encode,
+    ContainerRef, CopyFileOk, CopyFileRequest, FileSource, InspectOk, LaunchOk, LogsOk, LogsTailOk,
+    LogsTailRequest, PingOk, WireStatus, WorkerError, WorkerLaunchRequest, WorkerReply, b64_decode,
+    b64_encode,
 };
 
 /// Logs are tailed to fit the reply under NATS's 1MB max_payload after
@@ -148,6 +149,7 @@ async fn handle(state: &WorkerState, subject: &str, payload: &[u8]) -> Vec<u8> {
         Some("inspect") => encode_reply(&inspect(state, payload).await),
         Some("copy_file") => encode_reply(&copy_file(state, payload).await),
         Some("logs") => encode_reply(&logs(state, payload).await),
+        Some("logs_tail") => encode_reply(&logs_tail(state, payload).await),
         Some("ping") => encode_reply(&ping(state).await),
         Some("remove") => encode_reply(&remove(state, payload).await),
         Some("list_exited") => encode_reply(&list_exited(state).await),
@@ -287,6 +289,26 @@ async fn logs(state: &WorkerState, payload: &[u8]) -> WorkerReply<LogsOk> {
             Ok(LogsOk {
                 data_b64: b64_encode(&data),
                 truncated,
+            })
+        }
+        .await,
+    )
+}
+
+async fn logs_tail(state: &WorkerState, payload: &[u8]) -> WorkerReply<LogsTailOk> {
+    reply(
+        async {
+            let req: LogsTailRequest = parse(payload)?;
+            // The local backend already caps the chunk at MAX_LOG_TAIL, so the
+            // base64 reply fits max_payload — no extra tailing needed here.
+            let tail = state
+                .backend
+                .logs_tail(&req.id, req.since)
+                .await
+                .map_err(backend_err)?;
+            Ok(LogsTailOk {
+                offset: tail.offset,
+                data_b64: b64_encode(&tail.data),
             })
         }
         .await,

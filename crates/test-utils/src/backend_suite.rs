@@ -76,6 +76,72 @@ pub async fn logs_capture_both_streams_after_exit(be: &dyn ContainerBackend, nod
     rm(&id);
 }
 
+/// Live output: `logs_tail` must return a monotonically-growing cursor while
+/// the container is still RUNNING (the whole point of the /output endpoint),
+/// and keep serving the same offsets after exit so a poller never loses the
+/// tail. `follow: false`, so no call ever hangs.
+pub async fn logs_tail_grows_while_running(be: &dyn ContainerBackend, node: &str) {
+    // A line every 100ms, then exit — output accrues across polls.
+    let id = be
+        .launch(cfg(
+            "i=0; while [ $i -lt 15 ]; do echo line-$i; i=$((i+1)); sleep 0.1; done",
+        ))
+        .await
+        .unwrap();
+
+    // Read from the cursor while it runs: output appears, the cursor advances,
+    // and it never goes backwards.
+    let mut cursor = 0u64;
+    let mut seen = String::new();
+    for _ in 0..60 {
+        let tail = be.logs_tail(&id, cursor).await.unwrap();
+        assert!(tail.offset >= cursor, "cursor moved backwards");
+        seen.push_str(&String::from_utf8_lossy(&tail.data));
+        cursor = tail.offset;
+        if seen.contains("line-0") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        seen.contains("line-0"),
+        "no live output while running: {seen:?}"
+    );
+    let mid = cursor;
+
+    // Let it finish and drain the rest from the same cursor.
+    assert_eq!(be.wait(&id).await.unwrap(), 0);
+    for _ in 0..60 {
+        let tail = be.logs_tail(&id, cursor).await.unwrap();
+        seen.push_str(&String::from_utf8_lossy(&tail.data));
+        cursor = tail.offset;
+        if seen.contains("line-14") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(cursor >= mid, "cursor shrank after exit");
+    assert!(
+        seen.contains("line-14"),
+        "tail after exit incomplete: {seen:?}"
+    );
+    // The reconstructed stream is contiguous and ordered per stream.
+    assert!(
+        seen.find("line-0") < seen.find("line-14"),
+        "reassembled output out of order: {seen:?}"
+    );
+
+    // Caught up: a cursor at the end yields empty data and the same offset.
+    let at_end = be.logs_tail(&id, cursor).await.unwrap();
+    assert!(at_end.data.is_empty(), "caught-up read should be empty");
+    assert_eq!(at_end.offset, cursor);
+
+    // Unknown container errors, like `logs`.
+    let unknown = format!("{node}/deadbeefdeadbeef");
+    assert!(be.logs_tail(&unknown, 0).await.is_err());
+    rm(&id);
+}
+
 pub async fn exit_codes_round_trip(be: &dyn ContainerBackend) {
     let ok = be.launch(cfg("exit 0")).await.unwrap();
     let fail = be.launch(cfg("exit 7")).await.unwrap();
@@ -144,6 +210,7 @@ pub async fn inspect_kill_and_not_found(be: &dyn ContainerBackend, node: &str) {
 /// Run the whole contract.
 pub async fn run_all(be: &dyn ContainerBackend, node: &str) {
     logs_capture_both_streams_after_exit(be, node).await;
+    logs_tail_grows_while_running(be, node).await;
     exit_codes_round_trip(be).await;
     env_file_injection_and_copy_out(be).await;
     inspect_kill_and_not_found(be, node).await;
