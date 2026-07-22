@@ -313,7 +313,7 @@ export function JobDetail() {
                   <TaskArtifacts owner={owner} project={project} seq={jobSeq} task={t} />
                 </td>
                 <td className="logs-cell">
-                  {t.container_id ? (
+                  {hasLogs(t) ? (
                     <button
                       className="linklike"
                       onClick={() => setOpenLogs((cur) => (cur === t.id ? null : t.id))}
@@ -321,7 +321,7 @@ export function JobDetail() {
                       {openLogs === t.id ? 'hide' : t.state === 'Running' ? 'live' : 'logs'}
                     </button>
                   ) : (
-                    <span className="dim" title="no container ran for this task yet">
+                    <span className="dim" title="no container output for this task">
                       —
                     </span>
                   )}
@@ -765,6 +765,18 @@ function taskDuration(t: Task, now: number): string {
   }
   if (t.state === 'Running') return fmtDuration(now - start)
   return ''
+}
+
+// Whether the logs button shows for a task. Gate on state, not container_id:
+// the record carries no container_id while an agent task is Running, so gating
+// on it hides the button for the very case the log viewer exists to serve
+// (tailing a live agent). Any container-backed run — Running ('live'), or a
+// finished Done/Failed ('logs') — offers logs; the pane handles a not-yet-
+// spawned container gracefully (404 → muted note, slow re-checks). Human tasks
+// (claimed attempts, human-kind) never spawn a container, so they keep the dash.
+function hasLogs(t: Task): boolean {
+  if (t.performed_by === 'human') return false
+  return t.state === 'Running' || t.state === 'Done' || t.state === 'Failed'
 }
 
 // Plain unified-diff render with line coloring; react-diff-view lands with
