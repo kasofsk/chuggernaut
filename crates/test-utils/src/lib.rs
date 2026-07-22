@@ -9,6 +9,7 @@ use agent::{AgentError, AgentOutput, AgentProvider, AgentRunConfig};
 use async_trait::async_trait;
 use container::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus, LogTail,
+    RunningContainer,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,8 +57,15 @@ struct FakeBackendState {
     logs_tail_fail: Option<String>,
     /// Containers removed via `remove`, in call order.
     removed: Vec<ContainerId>,
+    /// Containers killed via `kill`, in call order (the §3.6 fleet-sweep reaps).
+    killed: Vec<ContainerId>,
     /// Ids returned by `list_managed_exited` (the startup-sweep candidates).
     managed_exited: Vec<ContainerId>,
+    /// Containers returned by `list_managed_running` (the fleet-sweep set).
+    managed_running: Vec<RunningContainer>,
+    /// When set, `list_managed_running` fails with this error — a node the
+    /// sweep must tolerate (log, continue) rather than crash on.
+    list_running_fail: Option<String>,
 }
 
 impl Default for FakeBackend {
@@ -168,9 +176,32 @@ impl FakeBackend {
         self.state.lock().unwrap().managed_exited.extend(ids);
     }
 
+    /// Seed the running managed containers `list_managed_running` reports — the
+    /// §3.6 fleet-sweep set. Each carries the `(project, job, task)` identity a
+    /// real container's labels would (or `None`, for a pre-labels orphan).
+    pub fn seed_managed_running(&self, containers: impl IntoIterator<Item = RunningContainer>) {
+        self.state
+            .lock()
+            .unwrap()
+            .managed_running
+            .extend(containers);
+    }
+
+    /// Make `list_managed_running` fail — an unreachable node the fleet sweep
+    /// must tolerate (log, continue) without crashing the dispatcher.
+    pub fn fail_list_managed_running(&self, reason: impl Into<String>) {
+        self.state.lock().unwrap().list_running_fail = Some(reason.into());
+    }
+
     /// Container ids passed to `remove`, in call order.
     pub fn removed(&self) -> Vec<ContainerId> {
         self.state.lock().unwrap().removed.clone()
+    }
+
+    /// Container ids passed to `kill`, in call order — the §3.6 fleet-sweep
+    /// reaps and any explicit gate/supersede kills.
+    pub fn killed(&self) -> Vec<ContainerId> {
+        self.state.lock().unwrap().killed.clone()
     }
 }
 
@@ -221,7 +252,8 @@ impl ContainerBackend for FakeBackend {
             .ok_or_else(|| BackendError::NotFound(id.clone()))
     }
 
-    async fn kill(&self, _id: &ContainerId) -> Result<(), BackendError> {
+    async fn kill(&self, id: &ContainerId) -> Result<(), BackendError> {
+        self.state.lock().unwrap().killed.push(id.clone());
         Ok(())
     }
 
@@ -277,6 +309,14 @@ impl ContainerBackend for FakeBackend {
 
     async fn list_managed_exited(&self) -> Result<Vec<ContainerId>, BackendError> {
         Ok(self.state.lock().unwrap().managed_exited.clone())
+    }
+
+    async fn list_managed_running(&self) -> Result<Vec<RunningContainer>, BackendError> {
+        let st = self.state.lock().unwrap();
+        if let Some(reason) = &st.list_running_fail {
+            return Err(BackendError::Unavailable(reason.clone()));
+        }
+        Ok(st.managed_running.clone())
     }
 }
 

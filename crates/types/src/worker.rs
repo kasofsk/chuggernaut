@@ -155,6 +155,22 @@ pub struct ListExitedOk {
     pub ids: Vec<String>,
 }
 
+/// A running managed container tagged with its owning task — the wire mirror of
+/// `container::RunningContainer` for the §3.6 fleet sweep proxied over a worker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireRunningContainer {
+    /// `{node}/{docker_id}` id.
+    pub id: String,
+    pub project: Option<String>,
+    pub job: Option<u64>,
+    pub task: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListRunningOk {
+    pub containers: Vec<WireRunningContainer>,
+}
+
 /// Payload for `refresh` (spec §3.1 worker self-refresh): rebuild this node's
 /// images at `sha` and swap the daemon. The node fetches the build context
 /// itself (git archive over the existing ssh front) — the dispatcher ships no

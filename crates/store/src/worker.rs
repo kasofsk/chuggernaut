@@ -5,8 +5,8 @@
 use crate::{NatsStore, StoreError, subjects};
 use std::time::Duration;
 use types::worker::{
-    ContainerRef, CopyFileOk, CopyFileRequest, InspectOk, LaunchOk, ListExitedOk, LogsOk,
-    LogsTailOk, LogsTailRequest, PingOk, RefreshOk, RefreshRequest, WorkerError,
+    ContainerRef, CopyFileOk, CopyFileRequest, InspectOk, LaunchOk, ListExitedOk, ListRunningOk,
+    LogsOk, LogsTailOk, LogsTailRequest, PingOk, RefreshOk, RefreshRequest, WorkerError,
     WorkerLaunchRequest, WorkerReply,
 };
 
@@ -170,6 +170,11 @@ impl WorkerRpc {
 
     pub async fn list_exited(&self) -> std::result::Result<ListExitedOk, WorkerRpcError> {
         self.call("list_exited", &serde_json::json!({}), OP_TIMEOUT)
+            .await
+    }
+
+    pub async fn list_running(&self) -> std::result::Result<ListRunningOk, WorkerRpcError> {
+        self.call("list_running", &serde_json::json!({}), OP_TIMEOUT)
             .await
     }
 }

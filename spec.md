@@ -789,6 +789,10 @@ pub trait ContainerBackend: Send + Sync {
     async fn remove(&self, id: &ContainerId) -> Result<(), BackendError>;
     /// IDs of exited managed containers across every node — the §3.6 sweep set.
     async fn list_managed_exited(&self) -> Result<Vec<ContainerId>, BackendError>;
+    /// Running managed containers across every node, each tagged with the
+    /// `(project, job, task)` it serves — the §3.6 orphan-reap set. Best-effort
+    /// per node: an unreachable node is skipped, not fatal.
+    async fn list_managed_running(&self) -> Result<Vec<RunningContainer>, BackendError>;
 }
 
 pub struct ContainerLaunchConfig {
@@ -953,6 +957,7 @@ On dispatcher startup, apply in order:
 4. Transition any Blocked job whose dependencies are all Done to Ready
 5. Enqueue all jobs currently in Ready state (including those that were Ready before the crash and any newly-Ready jobs from step 4) into the in-memory work queue
 6. **Sweep exited containers**: list exited `chuggernaut.managed` containers (`list_managed_exited`) and `remove` each one whose task is already terminal in KV — or which has no owning task record at all. A container still bound to a live (`Running`/`Pending`) task is kept, since step 2 may re-attach to it. This reclaims overlays orphaned by a crash between a container's exit and the task-exit removal that normally frees it (§3.1). Runs after the in-flight recovery above so any container a live task will resume has been settled and protected first; best-effort, so a Docker error here only warns and never blocks startup.
+7. **Sweep orphaned running containers**: list *running* `chuggernaut.managed` containers across every node (`list_managed_running`) and `kill` each one that no live `Running` task owns. Every launch stamps identity labels (`chuggernaut.project`/`.job`/`.task`, sourced from the container env), so a running container resolves to its owning task from a single list call. A container is **kept** only when it re-attaches to a live task — matched by those identity labels *or* by a live `Running` task's recorded `container_id` — so step-2 recovery's monitor still lands. Anything else is an **orphan** and is killed to free its fleet slot, logging and (when the identity resolves) emitting a `container-reaped` platform event `reaped orphan container {id} for {job}/{task}`; a container predating the identity labels has no resolvable owner and is reaped the same way. This is the durable fix for a crash-restart that fails an in-flight task as container-gone while its container keeps running and holds a slot — left alone, the slot leaks until an operator manually removes it and every retry fails with *no free slots*. Reaping (not re-adoption) is deliberate: the task was already failed, the work is lost either way, and a re-adopted container would run unmonitored. Runs **after** steps 2 and 6, so the `Running`-task set it reads already reflects every task this boot relaunched, and still **before** the message loop and launch-queue drain start — single-writer ordering means no concurrent launch can race the reap. Best-effort per node: an unreachable node is logged and skipped rather than blocking startup or the other nodes' reap.
 
 The task log in `tasks.*` KV is the source of truth for execution state. The configured backend must be reachable at startup, but a multi-node fleet only needs *one* node with slots to answer: unreachable nodes are marked out of service and excluded from placement (§3.1), and the dispatcher fails to start only when the whole fleet is unavailable.
 

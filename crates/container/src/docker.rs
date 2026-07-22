@@ -8,7 +8,7 @@
 
 use crate::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
-    InjectedFile, LogTail,
+    InjectedFile, LogTail, RunningContainer,
 };
 use async_trait::async_trait;
 use bollard::Docker;
@@ -24,6 +24,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Label stamped on every container we launch; placement counts by it.
 const MANAGED_LABEL: &str = "chuggernaut.managed";
+
+/// Identity labels stamped alongside [`MANAGED_LABEL`] so the §3.6 fleet sweep
+/// can match a running container back to its owning task without inspecting the
+/// container. Sourced from the launch env the dispatcher already sets.
+const PROJECT_LABEL: &str = "chuggernaut.project";
+const JOB_LABEL: &str = "chuggernaut.job";
+const TASK_LABEL: &str = "chuggernaut.task";
 
 /// Container-side path of the node-local build cache, when a backend is
 /// configured with one ([`DockerBackend::with_cache_dir`]). Exported so the
@@ -261,6 +268,38 @@ impl DockerBackend {
             .collect())
     }
 
+    /// Running managed containers on one node, tagged with their `(project,
+    /// job, task)` identity from the launch labels — the §3.6 fleet-sweep set.
+    async fn managed_running_list(
+        &self,
+        node: &Node,
+    ) -> Result<Vec<RunningContainer>, BackendError> {
+        let opts = ListContainersOptionsBuilder::default()
+            .filters(&HashMap::from([
+                ("label".to_string(), vec![format!("{MANAGED_LABEL}=true")]),
+                ("status".to_string(), vec!["running".to_string()]),
+            ]))
+            .build();
+        let list = node
+            .docker
+            .list_containers(Some(opts))
+            .await
+            .map_err(|e| BackendError::Other(e.to_string()))?;
+        Ok(list
+            .into_iter()
+            .filter_map(|c| {
+                let id = c.id?;
+                let labels = c.labels.unwrap_or_default();
+                Some(RunningContainer {
+                    id: format!("{}/{}", node.name, id),
+                    project: labels.get(PROJECT_LABEL).cloned(),
+                    job: labels.get(JOB_LABEL).and_then(|v| v.parse().ok()),
+                    task: labels.get(TASK_LABEL).and_then(|v| v.parse().ok()),
+                })
+            })
+            .collect())
+    }
+
     /// §3.1 placement. Every node is (re-)probed here, which updates its
     /// in-service flag, so a node that has recovered since startup rejoins
     /// placement without a dispatcher restart. The decision itself is
@@ -362,10 +401,7 @@ impl ContainerBackend for DockerBackend {
             image: Some(config.image.clone()),
             cmd: Some(config.cmd.clone()),
             env: Some(config.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
-            labels: Some(HashMap::from([(
-                MANAGED_LABEL.to_string(),
-                "true".to_string(),
-            )])),
+            labels: Some(managed_labels(&config)),
             host_config: Some(build_host_config(&config, self.cache_dir.as_deref())?),
             ..Default::default()
         };
@@ -578,6 +614,19 @@ impl ContainerBackend for DockerBackend {
         }
         Ok(ids)
     }
+
+    async fn list_managed_running(&self) -> Result<Vec<RunningContainer>, BackendError> {
+        let mut out = Vec::new();
+        for node in &self.nodes {
+            match self.managed_running_list(node).await {
+                Ok(cs) => out.extend(cs),
+                // One unreachable node must not blank the whole fleet sweep —
+                // the others' orphans still get reaped (§3.6).
+                Err(e) => tracing::warn!(node = %node.name, "list_managed_running skipped: {e}"),
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Build the container's `HostConfig` from the launch limits plus the optional
@@ -601,6 +650,25 @@ fn build_host_config(
         binds: cache_dir.map(|d| vec![format!("{}:{}", d.display(), CACHE_MOUNT_PATH)]),
         ..Default::default()
     })
+}
+
+/// Labels for a launch: the managed marker plus the `(project, job, task)`
+/// identity, lifted from the env the dispatcher already stamps
+/// (`JOB_PROJECT`/`JOB_ID`/`CHUG_TASK_ID`). The identity labels let the §3.6
+/// fleet sweep resolve a running container's owning task from a single
+/// `list_containers` call — no per-container inspect.
+fn managed_labels(config: &ContainerLaunchConfig) -> HashMap<String, String> {
+    let mut labels = HashMap::from([(MANAGED_LABEL.to_string(), "true".to_string())]);
+    for (env_key, label) in [
+        ("JOB_PROJECT", PROJECT_LABEL),
+        ("JOB_ID", JOB_LABEL),
+        ("CHUG_TASK_ID", TASK_LABEL),
+    ] {
+        if let Some(v) = config.env.get(env_key) {
+            labels.insert(label.to_string(), v.clone());
+        }
+    }
+    labels
 }
 
 fn map_err(id: &ContainerId, e: bollard::errors::Error) -> BackendError {
@@ -776,6 +844,33 @@ mod tests {
                 "/var/cache/chuggernaut/sccache:{CACHE_MOUNT_PATH}"
             )])
         );
+    }
+
+    /// Every launch carries the managed marker plus the `(project, job, task)`
+    /// identity lifted from the dispatcher's env, so the §3.6 fleet sweep can
+    /// resolve a running container's owning task from labels alone. A launch
+    /// with no identity env still carries the marker and nothing more (a
+    /// pre-labels container the sweep treats as an unmatchable orphan).
+    #[test]
+    fn managed_labels_carry_task_identity() {
+        let mut cfg = launch_config();
+        cfg.env.insert("JOB_PROJECT".into(), "acme/api".into());
+        cfg.env.insert("JOB_ID".into(), "51".into());
+        cfg.env.insert("CHUG_TASK_ID".into(), "2".into());
+        let labels = managed_labels(&cfg);
+        assert_eq!(labels.get(MANAGED_LABEL).map(String::as_str), Some("true"));
+        assert_eq!(
+            labels.get(PROJECT_LABEL).map(String::as_str),
+            Some("acme/api")
+        );
+        assert_eq!(labels.get(JOB_LABEL).map(String::as_str), Some("51"));
+        assert_eq!(labels.get(TASK_LABEL).map(String::as_str), Some("2"));
+
+        let bare = managed_labels(&launch_config());
+        assert_eq!(bare.get(MANAGED_LABEL).map(String::as_str), Some("true"));
+        assert!(!bare.contains_key(PROJECT_LABEL));
+        assert!(!bare.contains_key(JOB_LABEL));
+        assert!(!bare.contains_key(TASK_LABEL));
     }
 
     #[test]

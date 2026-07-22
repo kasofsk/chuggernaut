@@ -84,6 +84,30 @@ pub trait ContainerBackend: Send + Sync {
     /// the dispatcher's startup sweep (spec §3.6) to reclaim overlays orphaned
     /// by crashes or restarts, which never went through the exit path.
     async fn list_managed_exited(&self) -> Result<Vec<ContainerId>, BackendError>;
+    /// Running `chuggernaut.managed` containers across every node, each tagged
+    /// with the `(project, job, task)` it was launched for. Used by the §3.6
+    /// fleet sweep to reap containers no live task owns — a crash-restart can
+    /// fail a task while its container keeps running and holding a fleet slot.
+    /// Best-effort per node: a node that cannot be listed is logged and skipped
+    /// rather than failing the whole sweep, so one unreachable node never blocks
+    /// the others' reap.
+    async fn list_managed_running(&self) -> Result<Vec<RunningContainer>, BackendError>;
+}
+
+/// A running managed container tagged with the task it serves (spec §3.6 fleet
+/// sweep). The identity is read back from the labels stamped at launch; a field
+/// is `None` for a container launched before those labels existed, which the
+/// sweep treats as unmatchable — exactly the orphan it must reap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningContainer {
+    /// Full `{node}/{docker_id}` id — the handle for `kill`/`remove`.
+    pub id: ContainerId,
+    /// `owner/project` slug, from the `chuggernaut.project` label.
+    pub project: Option<String>,
+    /// Job sequence, from the `chuggernaut.job` label.
+    pub job: Option<u64>,
+    /// Task id, from the `chuggernaut.task` label.
+    pub task: Option<u64>,
 }
 
 #[derive(Debug, Clone)]

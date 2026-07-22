@@ -898,6 +898,259 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
     );
 }
 
+/// Shared fixture for the §3.6 fleet-sweep tests: a store carrying the `flaky`
+/// job type plus one Escalated job (id 51) whose tasks the caller supplies.
+/// Escalated so step-2 recovery leaves it (and its tasks) untouched, isolating
+/// the running-container sweep. Returns the store, the spawned core handle, and
+/// the backend (already seeded by the caller before `spawn`).
+async fn fleet_sweep_core(
+    tasks: Vec<Task>,
+    backend: Arc<FakeBackend>,
+) -> Option<(NatsStore, test_utils::nats::NatsTestServer, CoreHandle)> {
+    let server = test_utils::nats::NatsTestServer::spawn()?;
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/flaky.yaml", FLAKY.as_bytes(), "type")
+        .await;
+    clone
+        .commit_file("prompts/impl.md", b"implement it", "prompt")
+        .await;
+    clone.push("main").await;
+    let head = repo.head().await;
+
+    store
+        .jobs()
+        .await
+        .unwrap()
+        .put(&Job {
+            id: 51,
+            project: "acme/api".into(),
+            r#type: "flaky".into(),
+            title: String::new(),
+            description: String::new(),
+            deps: vec![],
+            state: JobState::Escalated,
+            branch: "job/51".into(),
+            base_ref: Some(head),
+            knowledge_tags: vec![],
+            eval: vec![],
+            timeout: None,
+            model: None,
+            claim_next: false,
+            escalation: None,
+            factory: None,
+            created_at: Utc::now(),
+            ready_at: Some(Utc::now()),
+        })
+        .await
+        .unwrap();
+    let task_store = store.tasks().await.unwrap();
+    for task in &tasks {
+        task_store.put(task).await.unwrap();
+    }
+
+    let provider = Arc::new(FakeProvider::new());
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        backend,
+        provider,
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let handle = spawn(core);
+    Some((store, server, handle))
+}
+
+fn work_task(id: u64, state: TaskState, container_id: Option<&str>) -> Task {
+    Task {
+        id,
+        job_seq: 51,
+        project: "acme/api".into(),
+        phase: TaskPhase::Work,
+        cycle: 1,
+        kind: TaskKind::Agent {
+            provider: "claude".into(),
+            model: None,
+            prompt: "prompts/impl.md".into(),
+        },
+        state,
+        attempt: 1,
+        evaluator: None,
+        stage: 0,
+        performed_by: None,
+        container_id: container_id.map(Into::into),
+        rework_reason: None,
+        infra_loss: false,
+        session_id: None,
+        result: None,
+        created_at: Utc::now(),
+        started_at: Some(Utc::now()),
+        completed_at: None,
+    }
+}
+
+async fn wait_killed(backend: &FakeBackend, want: usize) -> Vec<String> {
+    let mut killed = Vec::new();
+    for _ in 0..100 {
+        killed = backend.killed();
+        if killed.len() >= want {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    killed
+}
+
+/// §3.6 fleet sweep: a container still running after a crash-restart but owned
+/// by no live task is reaped, freeing its slot. This is the durable fix for the
+/// 2026-07-22 incident, where pre-upgrade in-flight tasks were failed as
+/// container-gone while their containers kept running and holding fleet slots
+/// until an operator manually removed them. An identity-bearing orphan emits a
+/// `container-reaped` platform event; an identity-less one (a pre-labels
+/// container, exactly the incident's shape) is still reaped, event or not.
+#[tokio::test]
+async fn startup_fleet_sweep_reaps_orphan_running_container() {
+    let backend = Arc::new(FakeBackend::new());
+    // The pre-upgrade task recovery already failed as container-gone.
+    let tasks = vec![work_task(2, TaskState::Failed, Some("dev-air/c-orphan"))];
+    // Its container is still alive (identity resolves to job 51 / task 2), plus
+    // a legacy container with no identity labels at all.
+    backend.seed_managed_running([
+        container::RunningContainer {
+            id: "dev-air/c-orphan".into(),
+            project: Some("acme/api".into()),
+            job: Some(51),
+            task: Some(2),
+        },
+        container::RunningContainer {
+            id: "dev-air/c-legacy".into(),
+            project: None,
+            job: None,
+            task: None,
+        },
+    ]);
+    let Some((store, _server, _handle)) = fleet_sweep_core(tasks, backend.clone()).await else {
+        return;
+    };
+
+    let mut killed = wait_killed(&backend, 2).await;
+    killed.sort();
+    assert_eq!(
+        killed,
+        vec![
+            "dev-air/c-legacy".to_string(),
+            "dev-air/c-orphan".to_string()
+        ],
+        "both orphan containers reaped to free their slots"
+    );
+
+    // The identity-bearing reap is attributed to its job as a platform event.
+    let reaped: Vec<serde_json::Value> = store
+        .read_stream("job-events", 100)
+        .await
+        .unwrap()
+        .iter()
+        .map(|p| serde_json::from_slice(p).unwrap())
+        .filter(|v: &serde_json::Value| v["event_type"] == "container-reaped")
+        .collect();
+    assert_eq!(
+        reaped.len(),
+        1,
+        "one reap event (only the identified orphan)"
+    );
+    assert_eq!(reaped[0]["job_seq"], 51);
+    assert_eq!(reaped[0]["container_id"], "dev-air/c-orphan");
+    assert!(
+        reaped[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("reaped orphan container dev-air/c-orphan for 51/2"),
+        "detail names the container and job/task: {}",
+        reaped[0]["detail"]
+    );
+}
+
+/// §3.6 fleet-sweep re-attach regression guard: a running container owned by a
+/// live `Running` task must NOT be reaped — step 2 recovery re-attaches its
+/// monitor. Matched either by the `(project, job, task)` identity labels or,
+/// for a container whose task predates those labels, by the task's recorded
+/// `container_id`.
+#[tokio::test]
+async fn startup_fleet_sweep_keeps_container_of_running_task() {
+    let backend = Arc::new(FakeBackend::new());
+    let tasks = vec![
+        work_task(1, TaskState::Running, Some("dev-air/c-live")),
+        work_task(3, TaskState::Running, Some("dev-air/c-live-legacy")),
+    ];
+    backend.seed_managed_running([
+        // Identity resolves to the live task 1 — kept.
+        container::RunningContainer {
+            id: "dev-air/c-live".into(),
+            project: Some("acme/api".into()),
+            job: Some(51),
+            task: Some(1),
+        },
+        // No identity labels, but its id is a live task's container_id — kept.
+        container::RunningContainer {
+            id: "dev-air/c-live-legacy".into(),
+            project: None,
+            job: None,
+            task: None,
+        },
+    ]);
+    let Some((_store, _server, _handle)) = fleet_sweep_core(tasks, backend.clone()).await else {
+        return;
+    };
+
+    // Give the sweep ample time to run, then assert it reaped nothing.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        backend.killed().is_empty(),
+        "containers of live Running tasks are re-attached, never reaped: {:?}",
+        backend.killed()
+    );
+}
+
+/// §3.6 fleet sweep is best-effort: a backend that cannot list running
+/// containers (an unreachable node) is logged and skipped — the dispatcher
+/// still starts and serves work rather than crashing on the error.
+#[tokio::test]
+async fn startup_fleet_sweep_tolerates_backend_error() {
+    let backend = Arc::new(FakeBackend::new());
+    backend.fail_list_managed_running("dev-air unreachable");
+    let tasks = vec![work_task(2, TaskState::Failed, Some("dev-air/c-orphan"))];
+    let Some((store, _server, handle)) = fleet_sweep_core(tasks, backend.clone()).await else {
+        return;
+    };
+
+    // The failing sweep must reap nothing and must not wedge the actor loop:
+    // a freshly created job still runs to completion.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        backend.killed().is_empty(),
+        "a list error reaps nothing (log, continue)"
+    );
+
+    let job = handle.create_job(req("flaky")).await.unwrap();
+    wait_for_state(&store, job.id, JobState::Done).await;
+}
+
 /// A dispatcher died mid-wrap-up: the job record says WrapUp (eval already
 /// passed) and the job was parked in the in-memory merge queue, which is lost
 /// on restart. Reconciliation re-enters it into the queue and it lands

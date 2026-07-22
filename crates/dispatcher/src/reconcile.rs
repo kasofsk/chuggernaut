@@ -45,7 +45,117 @@ impl Core {
         // last so any container in-flight recovery still needs (Running tasks,
         // re-attached monitors) has been settled and protected first.
         self.sweep_exited_containers(&jobs).await;
+        // §3.6: reap *running* containers no live task owns. Runs after the
+        // in-flight recovery above — which may itself have relaunched fresh
+        // containers for the tasks it re-Ran — so the running set it reads
+        // already reflects every task this boot will resume. All of this is
+        // still before the message loop starts, so no concurrent launch can
+        // race the reap (single-writer ordering).
+        self.sweep_orphan_running_containers(&jobs).await;
         Ok(())
+    }
+
+    /// §3.6 fleet sweep: kill running `chuggernaut.managed` containers that no
+    /// live (`Running`) task owns. A crash-restart can fail an in-flight task
+    /// (e.g. its container read as gone) while the container keeps running and
+    /// holding a fleet slot; left alone, that slot leaks until an operator
+    /// manually removes it, and every retry fails with `no free slots`. A
+    /// container is kept only when it re-attaches to a live task — matched by
+    /// its `(project, job, task)` identity labels or by a live task's recorded
+    /// `container_id` — so recovery's monitor still lands. Anything else,
+    /// including a pre-labels container with no resolvable identity, is reaped.
+    ///
+    /// Best-effort: a backend hiccup only warns and never blocks startup.
+    async fn sweep_orphan_running_containers(&self, jobs: &[Job]) {
+        let running = match self.backend.list_managed_running().await {
+            Ok(cs) => cs,
+            Err(e) => {
+                tracing::warn!("startup fleet sweep: listing running containers failed: {e}");
+                return;
+            }
+        };
+        if running.is_empty() {
+            return;
+        }
+
+        // The containers a live task will resume: their `(project, seq, task)`
+        // identity and any recorded container id. Matching either keeps a
+        // container for step-2 recovery to re-attach to.
+        let mut live_tasks = std::collections::HashSet::new();
+        let mut live_cids = std::collections::HashSet::new();
+        for job in jobs {
+            let (owner, project) = split(&job.project);
+            let tasks = match self.tasks.list_for_job(&owner, &project, job.id).await {
+                Ok(tasks) => tasks,
+                Err(e) => {
+                    // Can't prove these containers are disposable — skip the
+                    // whole sweep rather than risk reaping a live one.
+                    tracing::warn!(
+                        "startup fleet sweep: listing tasks for job {} failed: {e}; skipping sweep",
+                        job.id
+                    );
+                    return;
+                }
+            };
+            for task in tasks {
+                if task.state == TaskState::Running {
+                    live_tasks.insert((job.project.clone(), job.id, task.id));
+                    if let Some(cid) = task.container_id {
+                        live_cids.insert(cid);
+                    }
+                }
+            }
+        }
+
+        for rc in running {
+            let matched = live_cids.contains(&rc.id)
+                || match (&rc.project, rc.job, rc.task) {
+                    (Some(p), Some(j), Some(t)) => live_tasks.contains(&(p.clone(), j, t)),
+                    _ => false,
+                };
+            if matched {
+                continue;
+            }
+            // Orphan: kill it to free the slot. The task it belonged to was
+            // already failed by step-2 recovery; the work is lost either way,
+            // so reaping (not re-adoption) is the simple, safe choice.
+            match self.backend.kill(&rc.id).await {
+                Ok(()) => {
+                    let label = match (&rc.project, rc.job, rc.task) {
+                        (Some(_), Some(j), Some(t)) => format!("{j}/{t}"),
+                        _ => "unknown job/task".to_string(),
+                    };
+                    tracing::info!(
+                        "startup fleet sweep: reaped orphan container {} for {label}",
+                        rc.id
+                    );
+                    // Attribute the reap to its job when the identity resolves.
+                    if let (Some(p), Some(j)) = (&rc.project, rc.job) {
+                        let (owner, project) = split(p);
+                        let _ = self
+                            .publish(
+                                &owner,
+                                &project,
+                                j,
+                                "container-reaped",
+                                serde_json::json!({
+                                    "container_id": rc.id,
+                                    "task_id": rc.task,
+                                    "detail": format!(
+                                        "reaped orphan container {} for {label}",
+                                        rc.id
+                                    ),
+                                }),
+                            )
+                            .await;
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    "startup fleet sweep: killing orphan container {} failed: {e}",
+                    rc.id
+                ),
+            }
+        }
     }
 
     /// §3.6 startup sweep: remove exited `chuggernaut.managed` containers whose

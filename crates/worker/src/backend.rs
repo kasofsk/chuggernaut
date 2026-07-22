@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use container::docker::{DockerBackend, DockerNodeConfig};
 use container::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus, LogTail,
+    RunningContainer,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -493,6 +494,29 @@ impl ContainerBackend for FleetBackend {
             }
         }
         Ok(ids)
+    }
+
+    async fn list_managed_running(&self) -> Result<Vec<RunningContainer>, BackendError> {
+        let mut out = Vec::new();
+        for node in &self.nodes {
+            match &node.handle {
+                NodeHandle::Docker { backend } => out.extend(backend.list_managed_running().await?),
+                NodeHandle::Worker { rpc, .. } => match rpc.list_running().await {
+                    Ok(ok) => out.extend(ok.containers.into_iter().map(|c| RunningContainer {
+                        id: c.id,
+                        project: c.project,
+                        job: c.job,
+                        task: c.task,
+                    })),
+                    // An unreachable worker must not fail the whole sweep — its
+                    // orphans get reaped on a later pass.
+                    Err(e) => {
+                        tracing::warn!(node = %node.name, "list_running skipped: {e}");
+                    }
+                },
+            }
+        }
+        Ok(out)
     }
 }
 

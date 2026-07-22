@@ -259,6 +259,7 @@ async fn handle(state: &Arc<WorkerState>, subject: &str, payload: &[u8]) -> Vec<
         Some("ping") => encode_reply(&ping(state).await),
         Some("remove") => encode_reply(&remove(state, payload).await),
         Some("list_exited") => encode_reply(&list_exited(state).await),
+        Some("list_running") => encode_reply(&list_running(state).await),
         Some("refresh") => encode_reply(&refresh(state, payload).await),
         other => encode_reply::<()>(&WorkerReply::Err {
             error: WorkerError::Other {
@@ -473,6 +474,28 @@ async fn list_exited(state: &WorkerState) -> WorkerReply<types::worker::ListExit
                 .await
                 .map_err(backend_err)?;
             Ok(types::worker::ListExitedOk { ids })
+        }
+        .await,
+    )
+}
+
+async fn list_running(state: &WorkerState) -> WorkerReply<types::worker::ListRunningOk> {
+    reply(
+        async {
+            let containers = state
+                .backend
+                .list_managed_running()
+                .await
+                .map_err(backend_err)?
+                .into_iter()
+                .map(|c| types::worker::WireRunningContainer {
+                    id: c.id,
+                    project: c.project,
+                    job: c.job,
+                    task: c.task,
+                })
+                .collect();
+            Ok(types::worker::ListRunningOk { containers })
         }
         .await,
     )
