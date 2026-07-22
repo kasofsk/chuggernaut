@@ -12,6 +12,54 @@
 set -eu
 export CARGO_TERM_COLOR=always
 
+# --- sccache stats -----------------------------------------------------------
+# Agent/CI containers compile through sccache (WORKER_CACHE_DIR, #55/#122). Each
+# container starts a fresh sccache server, so its stats are inherently per-task
+# (no zeroing needed). Surface how the cache performed as a compact one-line
+# block on EVERY exit path that actually ran cargo — success or failure — via an
+# EXIT trap keyed off `cargo_ran`. Early exits that skip the build leave the
+# flag at 0 and print nothing.
+cargo_ran=0
+print_sccache_stats() {
+	[ "${cargo_ran:-0}" -eq 1 ] || return 0
+	command -v sccache >/dev/null 2>&1 || return 0
+	[ -n "${RUSTC_WRAPPER:-}" ] || return 0
+
+	stats="$(sccache --show-stats 2>/dev/null || true)"
+	# Boil the table down to the 3-4 numbers that matter. Match the *total*
+	# "Cache hits"/"Cache misses" rows (a digit follows the label) — not the
+	# per-language "Cache hits (Rust)" rows nor "Cache hits rate". Compute the
+	# rate ourselves so the "-" the table prints for zero compiles is a clean
+	# "0%". "Cache size" may span two tokens ("123 MiB") or be absent when empty.
+	block="$(printf '%s\n' "$stats" | awk '
+		/^Cache hits[[:space:]]+[0-9]/   { hits = $NF }
+		/^Cache misses[[:space:]]+[0-9]/ { misses = $NF }
+		/^Cache size[[:space:]]/ {
+			s = ""
+			for (i = 3; i <= NF; i++) s = s (s == "" ? "" : " ") $i
+			size = s
+		}
+		END {
+			if (hits == "" || misses == "") exit 1
+			total = hits + misses
+			rate = (total > 0) ? sprintf("%d", (hits * 100) / total) : "0"
+			if (size == "") size = "empty"
+			printf "sccache: %s hits / %s misses (%s%% hit rate), cache size %s", \
+				hits, misses, rate, size
+		}
+	' || true)"
+
+	if [ -n "$block" ]; then
+		echo "$block"
+	else
+		# Parsing failed (unexpected table shape) — dump the raw output so the
+		# numbers are never silently lost.
+		echo "sccache stats (raw):"
+		printf '%s\n' "$stats"
+	fi
+}
+trap print_sccache_stats EXIT
+
 # Tier-2 (NATS) integration test files — those that spin up a NatsTestServer
 # (directly or via the require_nats! skip guards). Used for the tier summary
 # and the loud partition warning below.
@@ -62,6 +110,7 @@ announce_tier2() {
 }
 
 run_full_ci() {
+	cargo_ran=1
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets -- -D warnings
 
