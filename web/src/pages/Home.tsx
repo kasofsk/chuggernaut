@@ -37,6 +37,7 @@ export function Home() {
         <span className="who">
           {identity.platform_admin && (
             <>
+              <Link to="/cluster">Cluster</Link>{' · '}
               <Link to="/settings">Settings</Link>{' · '}
             </>
           )}

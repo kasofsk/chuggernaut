@@ -400,6 +400,47 @@ export interface JobPatch {
   model: string | null
 }
 
+/** One busy slot's occupant (spec §3.1): enough to link back to the job/task
+ *  and render what it is running, without a second fetch. */
+export interface SlotOccupant {
+  /** `owner/project` slug the job belongs to (a seq is only unique per project). */
+  project: string
+  job_seq: number
+  task_id: number
+  /** task phase: `work` | `eval` | `gate` | `wrap_up` | `triage` */
+  task_kind: string
+  /** the job type (`Job::type`) */
+  job_type: string
+  /** job phase (`JobState`), lowercased: `work`, `evaluation`, `wrap_up`, … */
+  phase: string
+  /** when the container launched, if known — drives the live running counter */
+  started_at?: string | null
+}
+
+/** One fleet node's live occupancy (spec §3.1). */
+export interface FleetNode {
+  name: string
+  /** total slot capacity; null for a node observed only through a running
+   *  container (not in the configured roster) — its cap is unknown */
+  slots: number | null
+  /** busy slot count (`running.length`), denormalized */
+  occupied: number
+  /** false → out of service, excluded from placement */
+  available: boolean
+  /** build version last reported by the node's ping, if any */
+  version?: string | null
+  /** the occupied slots on this node */
+  running: SlotOccupant[]
+}
+
+/** GET /platform/fleet — the dispatcher's live occupancy snapshot (admins only).
+ *  Empty (`nodes: []`) before the dispatcher has published anything. */
+export interface FleetStatus {
+  nodes: FleetNode[]
+  /** launches parked waiting for a free slot (§3.5); 0 when nothing waits */
+  queue_depth: number
+}
+
 /** GET /platform/config — read-only platform settings (admins only). */
 export interface PlatformConfig {
   /** null when the dispatcher hasn't published a snapshot (offline/older) */
@@ -454,6 +495,9 @@ export const api = {
     req<ProjectConfig>('GET', `/api/v1/projects/${owner}/${project}/config`),
   /** Read-only platform settings (admins only): fleet, defaults, agent creds. */
   platformConfig: () => req<PlatformConfig>('GET', '/api/v1/platform/config'),
+  /** Live fleet occupancy snapshot (admins only): per-node slot usage + queue
+   *  depth (spec §3.1). Empty before the dispatcher publishes; 403 for non-admins. */
+  fleet: () => req<FleetStatus>('GET', '/api/v1/platform/fleet'),
 
   jobTypes: (owner: string, project: string) =>
     req<JobTypeSummary[]>('GET', `/api/v1/projects/${owner}/${project}/job-types`),

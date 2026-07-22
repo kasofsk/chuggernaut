@@ -24,6 +24,7 @@ import { TaskLogPane } from '../components/TaskLogs'
 import { EvaluatorTable } from '../components/EvaluatorTable'
 import { Markdown } from '../components/Markdown'
 import { DraftEditor } from '../components/DraftEditor'
+import { CoverWidget } from '../components/CoverWidget'
 
 export function JobDetail() {
   const { owner = '', project = '', seq = '' } = useParams()
@@ -205,19 +206,7 @@ export function JobDetail() {
         <h2>
           {job.title || job.type} <span className="dim">{job.title ? job.type : ''}</span>
         </h2>
-        {job.cover_html && (
-          <iframe
-            className="job-cover"
-            title="job cover"
-            /* Presentational only (spec §4.3). Fully sandboxed: no scripts,
-               no same-origin, no forms — the cover is untrusted operator HTML
-               and must never run code or reach the parent. Content rides in
-               via srcDoc so nothing is fetched over the network. Authors
-               should ship self-contained styling (inline/embedded CSS). */
-            sandbox=""
-            srcDoc={job.cover_html}
-          />
-        )}
+        {job.cover_html && <CoverWidget html={job.cover_html} title="job cover" />}
         {job.description && <Markdown text={job.description} className="job-desc" />}
         <dl className="meta">
           <dt>branch</dt>

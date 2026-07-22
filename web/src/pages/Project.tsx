@@ -6,6 +6,8 @@ import { StateBadge } from '../components/StateBadge'
 import { ResolveForm } from '../components/ResolveForm'
 import { ProjectTabs } from '../components/ProjectTabs'
 import { OriginPanel } from '../components/OriginPanel'
+import { CapacityWidget } from '../components/CapacityWidget'
+import { useFleet } from '../useFleet'
 
 type SortKey = 'id' | 'state' | 'type' | 'completed'
 
@@ -138,6 +140,13 @@ export function ProjectPage() {
   // page load the stream replays the full history, so debounce to collapse that
   // burst (and any live burst) into a single refetch.
   const debouncedRefresh = useDebouncedCallback(refresh, 250)
+  // Live fleet capacity readout (#148). Every occupancy change rides a task
+  // lifecycle event already on this stream, so bump a tick (debounced against the
+  // load-time replay burst) to refetch the snapshot. Admin-only feed: the widget
+  // hides itself when unavailable.
+  const [fleetTick, setFleetTick] = useState(0)
+  const bumpFleet = useDebouncedCallback(() => setFleetTick((n) => n + 1), 400)
+  const fleet = useFleet({ tick: fleetTick })
   // Every event both feeds the debounced refetch and, when it's a channel-update,
   // updates the latest-message-per-job map. Guard on ts so an out-of-order frame
   // can't overwrite a newer message with an older one.
@@ -155,8 +164,9 @@ export function ProjectPage() {
         })
       }
       debouncedRefresh()
+      bumpFleet()
     },
-    [debouncedRefresh],
+    [debouncedRefresh, bumpFleet],
   )
   useProjectEvents(owner, project, onEvent)
 
@@ -503,6 +513,7 @@ export function ProjectPage() {
           </table>
         </div>
       </section>
+      <CapacityWidget fleet={fleet.fleet} unavailable={fleet.unavailable} />
     </div>
   )
 }

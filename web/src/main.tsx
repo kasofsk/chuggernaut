@@ -12,6 +12,7 @@ import { PromptsPage } from './pages/Prompts'
 import { SettingsPage } from './pages/Settings'
 import { PlatformSettingsPage } from './pages/PlatformSettings'
 import { JobDetail } from './pages/JobDetail'
+import { ClusterPage } from './pages/Cluster'
 import { ThemePicker, applySavedTheme } from './theme'
 import './styles.css'
 
@@ -25,6 +26,7 @@ createRoot(document.getElementById('root')!).render(
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<Home />} />
         <Route path="/settings" element={<PlatformSettingsPage />} />
+        <Route path="/cluster" element={<ClusterPage />} />
         <Route path="/p/:owner/:project" element={<ProjectPage />} />
         <Route path="/p/:owner/:project/job-types" element={<LibraryPage />} />
         <Route path="/p/:owner/:project/job-types/:name" element={<JobTypePage />} />

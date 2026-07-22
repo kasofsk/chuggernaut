@@ -235,31 +235,63 @@ function SystemBlock({ event, raw }: { event: Json; raw: string }) {
   )
 }
 
-// A run of one or more consecutive thinking segments, rendered as a single
-// collapsed entry so a long stream of thinking doesn't drown the readable
-// content. The summary carries the segment count and total size; expanding
-// reveals the segments in order, each in its own bordered box so they stay
-// distinguishable. A lone segment renders like an ordinary thinking block.
-function ThinkingRun({ segments }: { segments: string[] }) {
-  const total = segments.reduce((n, s) => n + s.length, 0)
-  const label =
-    segments.length > 1
-      ? `thinking (${segments.length} segments, ${fmtChars(total)})`
-      : 'thinking'
+// One member of a thinking run: a `thinking` content-block segment, or a
+// thinking-flavored `system` event (a `thinking_tokens` heartbeat). Both are
+// "thinking noise" that shouldn't drown the readable rows, so they bundle
+// together; the raw event is kept so a heartbeat stays individually inspectable.
+type ThinkMember =
+  | { kind: 'seg'; text: string }
+  | { kind: 'sys'; event: Json; raw: string }
+
+// A `system` event is thinking-flavored when its subtype names thinking (e.g.
+// `thinking_tokens` heartbeats emitted while an agent reasons). Matching on the
+// substring tolerates variants without enumerating them.
+function isThinkingSystem(event: Json): boolean {
+  return event.type === 'system' && typeof event.subtype === 'string' && event.subtype.includes('thinking')
+}
+
+function memberChars(m: ThinkMember): number {
+  return m.kind === 'seg' ? m.text.length : m.raw.length
+}
+
+// A run of one or more consecutive thinking-flavored members, rendered as a
+// single collapsed entry so a long stream of thinking (content blocks *and*
+// `thinking_tokens` heartbeats alike) doesn't drown the readable rows. The
+// summary carries the member count and total size; expanding reveals the members
+// in order, each still individually expandable. A lone plain segment renders like
+// an ordinary thinking block (no bundle chrome).
+function ThinkingRun({ members }: { members: ThinkMember[] }) {
+  if (members.length === 1 && members[0].kind === 'seg') {
+    return (
+      <details className="tx-block tx-thinking">
+        <summary>
+          <span className="tx-kind">thinking</span>
+        </summary>
+        <TruncatedPre text={members[0].text} />
+      </details>
+    )
+  }
+  const total = members.reduce((n, m) => n + memberChars(m), 0)
+  const label = `thinking (${members.length} segments, ${fmtChars(total)})`
   return (
     <details className="tx-block tx-thinking">
       <summary>
         <span className="tx-kind">{label}</span>
       </summary>
-      {segments.length > 1 ? (
-        <div className="tx-think-segs">
-          {segments.map((s, i) => (
-            <TruncatedPre key={i} text={s} className="tx-think-seg" />
-          ))}
-        </div>
-      ) : (
-        <TruncatedPre text={segments[0]} />
-      )}
+      <div className="tx-think-segs">
+        {members.map((m, i) =>
+          m.kind === 'seg' ? (
+            <details key={i} className="tx-block tx-thinking tx-think-seg">
+              <summary>
+                <span className="tx-kind">thinking</span>
+              </summary>
+              <TruncatedPre text={m.text} />
+            </details>
+          ) : (
+            <SystemBlock key={i} event={m.event} raw={m.raw} />
+          ),
+        )}
+      </div>
     </details>
   )
 }
@@ -269,21 +301,23 @@ function ThinkingRun({ segments }: { segments: string[] }) {
 // segments coalesce into one item regardless of how the stream chunked them.
 type Item =
   | { kind: 'raw'; text: string }
-  | { kind: 'thinking'; segments: string[] }
+  | { kind: 'thinking'; members: ThinkMember[] }
   | { kind: 'content'; block: Json }
   | { kind: 'result'; event: Json }
   | { kind: 'system'; event: Json; raw: string }
   | { kind: 'unknown'; raw: string; label: string }
 
-// Flatten blocks into render items, coalescing runs of consecutive thinking
-// segments into a single item. Any non-thinking item (assistant text, tool_use,
-// tool_result, result, system, shell output) breaks the run.
+// Flatten blocks into render items, coalescing runs of consecutive thinking-
+// flavored members — `thinking` content blocks and `thinking_tokens` system
+// heartbeats alike — into a single item. Any non-thinking item (assistant text,
+// tool_use, tool_result, result, ordinary system, shell output) breaks the run;
+// a later thinking member opens a fresh bundle.
 function flattenBlocks(blocks: Block[]): Item[] {
   const items: Item[] = []
-  const pushThinking = (text: string) => {
+  const pushThink = (member: ThinkMember) => {
     const last = items[items.length - 1]
-    if (last && last.kind === 'thinking') last.segments.push(text)
-    else items.push({ kind: 'thinking', segments: [text] })
+    if (last && last.kind === 'thinking') last.members.push(member)
+    else items.push({ kind: 'thinking', members: [member] })
   }
   for (const b of blocks) {
     if (b.kind === 'raw') {
@@ -301,7 +335,7 @@ function flattenBlocks(blocks: Block[]): Item[] {
         }
         for (const cb of cblocks) {
           if (cb.type === 'thinking' || cb.type === 'redacted_thinking') {
-            pushThinking(typeof cb.thinking === 'string' ? cb.thinking : '[redacted]')
+            pushThink({ kind: 'seg', text: typeof cb.thinking === 'string' ? cb.thinking : '[redacted]' })
           } else {
             items.push({ kind: 'content', block: cb })
           }
@@ -312,7 +346,10 @@ function flattenBlocks(blocks: Block[]): Item[] {
         items.push({ kind: 'result', event })
         break
       case 'system':
-        items.push({ kind: 'system', event, raw: b.raw })
+        // A thinking-flavored heartbeat joins the current thinking bundle;
+        // ordinary system events render on their own and break the run.
+        if (isThinkingSystem(event)) pushThink({ kind: 'sys', event, raw: b.raw })
+        else items.push({ kind: 'system', event, raw: b.raw })
         break
       default:
         // Unknown / future event type — collapsed raw JSON, never a crash.
@@ -335,7 +372,7 @@ export function Transcript({ text }: { text: string }) {
               </pre>
             )
           case 'thinking':
-            return <ThinkingRun key={i} segments={it.segments} />
+            return <ThinkingRun key={i} members={it.members} />
           case 'content':
             return <ContentBlock key={i} block={it.block} />
           case 'result':
