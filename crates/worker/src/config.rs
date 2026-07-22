@@ -17,6 +17,12 @@ pub struct WorkerConfig {
     /// Node-local copy of the channel MCP binary, substituted into launches
     /// that reference the `"channel"` artifact.
     pub channel_binary: PathBuf,
+    /// Host path of the node-local build cache (`WORKER_CACHE_DIR`). `Some`
+    /// bind-mounts it into every launched container and turns on sccache;
+    /// `None` (unset) disables caching — no bind, no env, no behavior change.
+    /// A node property, provisioned entirely worker-side: it never rides the
+    /// wire or the dispatcher's launch config (spec §3.1).
+    pub cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -52,8 +58,16 @@ impl WorkerConfig {
                 .unwrap_or_else(|_| {
                     PathBuf::from("/usr/local/lib/chuggernaut/chuggernaut-channel")
                 }),
+            cache_dir: parse_cache_dir(std::env::var("WORKER_CACHE_DIR").ok()),
         })
     }
+}
+
+/// Parse `WORKER_CACHE_DIR` into the optional node-local cache path. Absent or
+/// empty ⇒ `None` (caching disabled). Pure over its input so the present/absent
+/// behavior is unit-tested without mutating the process environment.
+fn parse_cache_dir(raw: Option<String>) -> Option<PathBuf> {
+    raw.filter(|s| !s.is_empty()).map(PathBuf::from)
 }
 
 /// Node names ride in NATS subjects — same charset the dispatcher enforces at
@@ -68,6 +82,19 @@ pub fn is_subject_safe(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_dir_parses_present_and_absent() {
+        // Absent ⇒ caching disabled.
+        assert_eq!(parse_cache_dir(None), None);
+        // Present ⇒ the host path, verbatim.
+        assert_eq!(
+            parse_cache_dir(Some("/var/cache/chuggernaut/sccache".into())),
+            Some(PathBuf::from("/var/cache/chuggernaut/sccache"))
+        );
+        // An empty value is treated as unset, not a bind on `/`.
+        assert_eq!(parse_cache_dir(Some(String::new())), None);
+    }
 
     #[test]
     fn subject_safety() {

@@ -38,6 +38,7 @@ async fn setup(
         nats_creds: None,
         docker_endpoint: local_docker_endpoint(),
         channel_binary: artifact_path,
+        cache_dir: None,
     };
     let daemon = tokio::spawn(async move {
         if let Err(e) = worker::run(config).await {

@@ -19,11 +19,18 @@ use bollard::query_parameters::{
 };
 use futures::StreamExt;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Label stamped on every container we launch; placement counts by it.
 const MANAGED_LABEL: &str = "chuggernaut.managed";
+
+/// Container-side path of the node-local build cache, when a backend is
+/// configured with one ([`DockerBackend::with_cache_dir`]). Exported so the
+/// worker daemon points `SCCACHE_DIR` at the same path it bind-mounts here —
+/// one source of truth, no drift between the mount and the env. Carries no job
+/// state: it is a build accelerator only, safe to be empty/cold (spec §3.1).
+pub const CACHE_MOUNT_PATH: &str = "/cache/sccache";
 
 #[derive(Debug, Clone)]
 pub struct DockerNodeConfig {
@@ -46,6 +53,12 @@ struct Node {
 
 pub struct DockerBackend {
     nodes: Vec<Node>,
+    /// Host path of the node-local build cache, bind-mounted into every
+    /// container at [`CACHE_MOUNT_PATH`]. `None` (the dispatcher's construction)
+    /// adds no binds at all — the fleet stays bind-mount-free (spec §3.1). Set
+    /// worker-side via [`with_cache_dir`](DockerBackend::with_cache_dir); it is
+    /// a node property, never carried on the wire or the launch config.
+    cache_dir: Option<PathBuf>,
 }
 
 impl DockerBackend {
@@ -73,7 +86,10 @@ impl DockerBackend {
         if nodes.is_empty() {
             return Err(BackendError::Unavailable("empty node list".into()));
         }
-        Ok(Self { nodes })
+        Ok(Self {
+            nodes,
+            cache_dir: None,
+        })
     }
 
     /// Single local-socket node — the dev and single-node production form.
@@ -87,7 +103,18 @@ impl DockerBackend {
                 docker,
                 in_service: AtomicBool::new(true),
             }],
+            cache_dir: None,
         })
+    }
+
+    /// Enable node-local build caching: bind-mount `host_dir` into every
+    /// launched container at [`CACHE_MOUNT_PATH`]. Worker-daemon-only — the
+    /// dispatcher never calls this, so its fleet stays bind-mount-free (spec
+    /// §3.1). The daemon owns creating/owning `host_dir`; concurrent containers
+    /// on the node share it, which sccache handles by design (it locks).
+    pub fn with_cache_dir(mut self, host_dir: PathBuf) -> Self {
+        self.cache_dir = Some(host_dir);
+        self
     }
 
     /// §3.6 startup, degraded per §3.1: ping every node and mark each
@@ -307,16 +334,7 @@ impl ContainerBackend for DockerBackend {
                 MANAGED_LABEL.to_string(),
                 "true".to_string(),
             )])),
-            host_config: Some(HostConfig {
-                nano_cpus: config.cpu_limit.map(|c| (c * 1e9) as i64),
-                memory: config
-                    .memory_limit
-                    .as_deref()
-                    .map(parse_memory)
-                    .transpose()
-                    .map_err(BackendError::Launch)?,
-                ..Default::default()
-            }),
+            host_config: Some(build_host_config(&config, self.cache_dir.as_deref())?),
             ..Default::default()
         };
         let created = node
@@ -530,6 +548,29 @@ impl ContainerBackend for DockerBackend {
     }
 }
 
+/// Build the container's `HostConfig` from the launch limits plus the optional
+/// node-local cache dir. Factored out of Docker I/O so the produced spec — in
+/// particular whether a cache bind-mount is present — is unit-tested without a
+/// daemon. `cache_dir = None` (the dispatcher's backend) yields `binds: None`:
+/// the fleet stays bind-mount-free (spec §3.1). `Some(dir)` adds exactly one
+/// bind, `{dir}:{CACHE_MOUNT_PATH}`, carrying no job state.
+fn build_host_config(
+    config: &ContainerLaunchConfig,
+    cache_dir: Option<&Path>,
+) -> Result<HostConfig, BackendError> {
+    Ok(HostConfig {
+        nano_cpus: config.cpu_limit.map(|c| (c * 1e9) as i64),
+        memory: config
+            .memory_limit
+            .as_deref()
+            .map(parse_memory)
+            .transpose()
+            .map_err(BackendError::Launch)?,
+        binds: cache_dir.map(|d| vec![format!("{}:{}", d.display(), CACHE_MOUNT_PATH)]),
+        ..Default::default()
+    })
+}
+
 fn map_err(id: &ContainerId, e: bollard::errors::Error) -> BackendError {
     match e {
         bollard::errors::Error::DockerResponseServerError {
@@ -664,6 +705,44 @@ mod tests {
         assert!(
             err.contains("unknown node \"mini\"") && err.contains("local, nuc"),
             "{err}"
+        );
+    }
+
+    fn launch_config() -> ContainerLaunchConfig {
+        ContainerLaunchConfig {
+            image: "img".into(),
+            cmd: vec!["run".into()],
+            env: HashMap::new(),
+            files: vec![],
+            cpu_limit: Some(2.0),
+            memory_limit: Some("4Gi".into()),
+            node: None,
+        }
+    }
+
+    /// The dispatcher's backend (no cache dir) adds NO binds — the fleet stays
+    /// bind-mount-free (spec §3.1). Regression guard: the dispatcher path is
+    /// untouched by node-local caching.
+    #[test]
+    fn host_config_without_cache_has_no_binds() {
+        let hc = build_host_config(&launch_config(), None).unwrap();
+        assert!(hc.binds.is_none(), "dispatcher path must add no binds");
+        // The pre-existing limits are still translated.
+        assert_eq!(hc.nano_cpus, Some(2_000_000_000));
+        assert_eq!(hc.memory, Some(4 * 1024 * 1024 * 1024));
+    }
+
+    /// A worker backend with a cache dir bind-mounts exactly that dir at the
+    /// fixed container path, and nothing else.
+    #[test]
+    fn host_config_with_cache_adds_one_bind() {
+        let dir = PathBuf::from("/var/cache/chuggernaut/sccache");
+        let hc = build_host_config(&launch_config(), Some(dir.as_path())).unwrap();
+        assert_eq!(
+            hc.binds,
+            Some(vec![format!(
+                "/var/cache/chuggernaut/sccache:{CACHE_MOUNT_PATH}"
+            )])
         );
     }
 

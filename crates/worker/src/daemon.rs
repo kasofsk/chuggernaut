@@ -51,6 +51,9 @@ struct WorkerState {
     /// name → sha256 hex, reported in ping.
     artifact_hashes: HashMap<String, String>,
     version: String,
+    /// Node-local build caching is on (`WORKER_CACHE_DIR` was set). When true,
+    /// the backend bind-mounts the cache and every launch gets sccache env.
+    cache_enabled: bool,
 }
 
 /// Run the daemon until ctrl-c. Containers it launched keep running after
@@ -68,12 +71,24 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
 
     // Single-node backend named after this node so returned container ids are
     // already `{node}/{docker_id}` — the fleet backend routes on that prefix.
-    let backend = DockerBackend::new(vec![DockerNodeConfig {
+    let mut backend = DockerBackend::new(vec![DockerNodeConfig {
         name: config.node.clone(),
         endpoint: config.docker_endpoint.clone(),
         // The dispatcher owns slot policy; the worker only reports usage.
         slots: u32::MAX,
     }])?;
+    // Node-local build cache: a worker-side property, added here from the
+    // worker's own config — never from the launch message (spec §3.1). The
+    // daemon owns creating/owning the host dir; concurrent containers share it,
+    // which sccache handles by locking.
+    let cache_enabled = config.cache_dir.is_some();
+    if let Some(dir) = &config.cache_dir {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            WorkerRunError::Config(format!("creating WORKER_CACHE_DIR {}: {e}", dir.display()))
+        })?;
+        backend = backend.with_cache_dir(dir.clone());
+        tracing::info!(cache_dir = %dir.display(), "node-local build cache enabled (sccache)");
+    }
     backend.ping_all().await?;
 
     let mut artifacts = HashMap::new();
@@ -97,6 +112,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         artifacts,
         artifact_hashes,
         version: version_string(),
+        cache_enabled,
     });
 
     let mut sub = store
@@ -212,12 +228,14 @@ async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
                     artifact: None,
                 });
             }
+            let mut env = req.env;
+            inject_cache_env(&mut env, state.cache_enabled);
             let id = state
                 .backend
                 .launch(ContainerLaunchConfig {
                     image: req.image,
                     cmd: req.cmd,
-                    env: req.env,
+                    env,
                     files,
                     cpu_limit: req.cpu_limit,
                     memory_limit: req.memory_limit,
@@ -231,6 +249,23 @@ async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
         }
         .await,
     )
+}
+
+/// When node-local caching is on, point cargo at sccache and sccache at the
+/// bind-mounted node cache. The worker adds this purely from its own config —
+/// the launch message never mentions the cache (spec §3.1). `SCCACHE_DIR` is
+/// [`container::docker::CACHE_MOUNT_PATH`] so the env matches the bind the
+/// backend adds, with no path drift. Degrades gracefully: if `sccache` is
+/// absent from the image, `RUSTC_WRAPPER` points at nothing and cargo still
+/// builds — just uncached — so enabling the cache is never fatal.
+fn inject_cache_env(env: &mut HashMap<String, String>, cache_enabled: bool) {
+    if cache_enabled {
+        env.insert("RUSTC_WRAPPER".into(), "sccache".into());
+        env.insert(
+            "SCCACHE_DIR".into(),
+            container::docker::CACHE_MOUNT_PATH.into(),
+        );
+    }
 }
 
 async fn kill(state: &WorkerState, payload: &[u8]) -> WorkerReply<serde_json::Value> {
@@ -356,4 +391,38 @@ async fn ping(state: &WorkerState) -> WorkerReply<PingOk> {
         }
         .await,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Caching on ⇒ the launch env gains sccache wiring, with `SCCACHE_DIR`
+    /// pinned to the same mount path the backend binds.
+    #[test]
+    fn cache_env_injected_when_enabled() {
+        let mut env = HashMap::from([("JOB_ID".to_string(), "7".to_string())]);
+        inject_cache_env(&mut env, true);
+        assert_eq!(
+            env.get("RUSTC_WRAPPER").map(String::as_str),
+            Some("sccache")
+        );
+        assert_eq!(
+            env.get("SCCACHE_DIR").map(String::as_str),
+            Some(container::docker::CACHE_MOUNT_PATH)
+        );
+        // Untouched request env survives.
+        assert_eq!(env.get("JOB_ID").map(String::as_str), Some("7"));
+    }
+
+    /// Caching off (the dispatcher's construction never sets a cache dir) ⇒ no
+    /// cache env is added. Regression guard: the uncached path is unchanged.
+    #[test]
+    fn no_cache_env_when_disabled() {
+        let mut env = HashMap::from([("JOB_ID".to_string(), "7".to_string())]);
+        inject_cache_env(&mut env, false);
+        assert!(!env.contains_key("RUSTC_WRAPPER"));
+        assert!(!env.contains_key("SCCACHE_DIR"));
+        assert_eq!(env.len(), 1);
+    }
 }
