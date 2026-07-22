@@ -36,6 +36,19 @@ export function JobDetail() {
   // The one task whose live-log pane is expanded, if any. Kept to a single open
   // pane so at most one tail loop polls at a time.
   const [openLogs, setOpenLogs] = useState<number | null>(null)
+  // The platform's triage image (from the config snapshot): a string when triage
+  // is available, null when it isn't (dispatcher rejects triage with 422), and
+  // undefined while unknown — snapshot not yet loaded, offline, or forbidden.
+  // We only disable the button on a confirmed null, so an unknown state keeps
+  // the current behavior (the 422 mapping below still catches a live rejection).
+  const [triageImage, setTriageImage] = useState<string | null | undefined>(undefined)
+
+  useEffect(() => {
+    api.platformConfig().then(
+      (c) => setTriageImage(c.dispatcher ? c.dispatcher.triage_image : undefined),
+      () => setTriageImage(undefined),
+    )
+  }, [])
 
   const refresh = useCallback(() => {
     Promise.all([
@@ -100,6 +113,19 @@ export function JobDetail() {
   const triageTasks = tasks
     .filter((t) => t.phase === 'Triage')
     .sort((a, b) => b.id - a.id)
+
+  // Triage is unavailable when the platform has no TRIAGE_IMAGE configured; the
+  // dispatcher enforces this with a 422, so don't offer the action.
+  const triageUnavailable = triageImage === null
+  const triageMessage = 'triage unavailable — set TRIAGE_IMAGE on the platform'
+  // A 422 means the config changed under us (race): show the friendly message
+  // and reflect the now-known-unavailable state so the button disables too.
+  const onTriageError = (e: unknown) => {
+    if (e instanceof ApiError && e.status === 422) {
+      setTriageImage(null)
+      setError(triageMessage)
+    } else setActionError(setError)(e)
+  }
 
   return (
     <div className="page">
@@ -198,8 +224,13 @@ export function JobDetail() {
           )}
           {(job.state === 'Escalated' || job.state === 'Stalled') && (
             <button
-              title="run an advisory triage agent over the job state — assessment + recommendation, no change to the job"
-              onClick={() => api.triage(owner, project, job.id).then(refresh, setActionError(setError))}
+              disabled={triageUnavailable}
+              title={
+                triageUnavailable
+                  ? triageMessage
+                  : 'run an advisory triage agent over the job state — assessment + recommendation, no change to the job'
+              }
+              onClick={() => api.triage(owner, project, job.id).then(refresh, onTriageError)}
             >
               dispatch triage
             </button>
