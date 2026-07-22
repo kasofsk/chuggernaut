@@ -963,6 +963,15 @@ On dispatcher startup, apply in order:
 
 The task log in `tasks.*` KV is the source of truth for execution state. The configured backend must be reachable at startup, but a multi-node fleet only needs *one* node with slots to answer: unreachable nodes are marked out of service and excluded from placement (§3.1), and the dispatcher fails to start only when the whole fleet is unavailable.
 
+**Graceful shutdown (drain).** The restart above is only lossless if each shutdown leaves records that already match reality — so reconciliation reconciles from truth rather than inferring it. On **SIGTERM** (the deploy path's `launchctl kickstart -k`; SIGINT is treated identically) the dispatcher **drains** before exiting, all inside the single-writer loop so it needs no locks:
+
+1. **Flip into draining mode.** A `Drain` message flips a flag *inside the actor*. While draining the core initiates **no new work** — no container launches, no gate starts, no wrap-up launches (every launch path early-returns), and the §3.5 launch queue simply **holds** its entries — while it keeps **processing** messages already in flight: container exits and resolutions still record to KV normally.
+2. **Sweep the mailbox.** Process every message already queued in the actor's channel (non-blocking: what is present, not what may yet arrive). This lands the writes that lived only in transit — most importantly a just-launched container's id (its `TaskContainerStarted`), which #76 stamps at launch but which can still be in the mailbox when the signal arrives.
+3. **Audit and flush.** For every `Running` task still missing a `container_id`, recover it from the live fleet's identity labels (`list_managed_running`) and stamp it, so the record names the real container. Everything else that lived only in dispatcher memory is already re-derived on restart: the Ready queue (step 5), the launch queue (Pending command tasks, per §3.5), gate/merge-queue state (steps 2–3), and exec state (rebuilt during recovery). A final config snapshot (§3.1) is re-published.
+4. **Exit 0** within a bounded window (default ~10s; launchd sends SIGKILL after regardless). The drain is **robust to being cut short**: each flush is an independent KV write that only ever makes a record *more* accurate, so a truncated drain never leaves records worse than an abrupt kill would.
+
+Running agent/eval **containers are not stopped** — they keep running and are re-attached on restart (step 2, "still running"); that is the entire point. The drain explicitly does **not** wait for tasks or jobs to finish and does not drain the fleet.
+
 ---
 
 ## Part 4: Agent Interface

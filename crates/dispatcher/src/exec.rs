@@ -238,6 +238,11 @@ impl Core {
         attempt: u32,
         resume: bool,
     ) -> Result<()> {
+        // Draining (spec §3.6): initiate no new work container. The job stays in
+        // Work with its prior task record and restart reconciliation re-launches.
+        if self.draining {
+            return Ok(());
+        }
         let key = (owner.to_string(), project.to_string(), seq);
         let exec = self.active.get(&key).expect("exec state");
         let job_type = exec.job_type.clone();

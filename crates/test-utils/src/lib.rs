@@ -45,6 +45,10 @@ struct FakeBackendState {
     /// When set, consulted on every `launch`; a `Some(reason)` rejects it.
     launch_fail: Option<LaunchFail>,
     exits: HashMap<ContainerId, i32>,
+    /// Containers that `inspect` reports as `Running` and `wait` blocks on —
+    /// a still-alive container a restarted dispatcher re-attaches to (§3.6).
+    /// Consulted only when the id is not already in `exits`.
+    running: std::collections::HashSet<ContainerId>,
     /// Files retrievable via copy_file, keyed by (container path).
     files: HashMap<String, Vec<u8>>,
     /// Returned by `logs` (and sliced by `logs_tail`) for every container.
@@ -170,6 +174,14 @@ impl FakeBackend {
             .insert(id.into(), exit_code);
     }
 
+    /// Seed containers as still running: `inspect` reports `Running` and `wait`
+    /// blocks (as a live container would). Lets a test exercise the §3.6 restart
+    /// re-attach path, where reconciliation finds a Running task's container
+    /// still alive and resumes monitoring it rather than failing the task.
+    pub fn seed_running(&self, ids: impl IntoIterator<Item = ContainerId>) {
+        self.state.lock().unwrap().running.extend(ids);
+    }
+
     /// Seed the ids that `list_managed_exited` reports — the exited managed
     /// containers a startup sweep should consider.
     pub fn seed_managed_exited(&self, ids: impl IntoIterator<Item = ContainerId>) {
@@ -243,13 +255,28 @@ impl ContainerBackend for FakeBackend {
     }
 
     async fn wait(&self, id: &ContainerId) -> Result<i32, BackendError> {
-        self.state
-            .lock()
-            .unwrap()
-            .exits
-            .get(id)
-            .copied()
-            .ok_or_else(|| BackendError::NotFound(id.clone()))
+        enum Wait {
+            Exited(i32),
+            Running,
+            Gone,
+        }
+        let outcome = {
+            let st = self.state.lock().unwrap();
+            if let Some(code) = st.exits.get(id).copied() {
+                Wait::Exited(code)
+            } else if st.running.contains(id) {
+                Wait::Running
+            } else {
+                Wait::Gone
+            }
+        };
+        match outcome {
+            Wait::Exited(code) => Ok(code),
+            // A still-running container never exits on its own — a re-attached
+            // monitor parks here, keeping the task Running (spec §3.6).
+            Wait::Running => std::future::pending().await,
+            Wait::Gone => Err(BackendError::NotFound(id.clone())),
+        }
     }
 
     async fn kill(&self, id: &ContainerId) -> Result<(), BackendError> {
@@ -258,13 +285,14 @@ impl ContainerBackend for FakeBackend {
     }
 
     async fn inspect(&self, id: &ContainerId) -> Result<Option<ContainerStatus>, BackendError> {
-        Ok(self
-            .state
-            .lock()
-            .unwrap()
-            .exits
-            .get(id)
-            .map(|&exit_code| ContainerStatus::Exited { exit_code }))
+        let st = self.state.lock().unwrap();
+        if let Some(&exit_code) = st.exits.get(id) {
+            Ok(Some(ContainerStatus::Exited { exit_code }))
+        } else if st.running.contains(id) {
+            Ok(Some(ContainerStatus::Running))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn copy_file(

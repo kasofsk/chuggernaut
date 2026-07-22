@@ -138,6 +138,12 @@ impl Core {
     /// re-queue means the fleet is still full, so draining stops — the remaining
     /// entries would only re-queue; the freed slot is spoken for.
     pub(crate) async fn drain_launch_queue(&mut self) -> Result<()> {
+        // Draining (spec §3.6): the launch queue simply holds its entries. They
+        // are re-derived from the Pending task records on restart (#51), so a
+        // held launch resumes then rather than starting a container as we exit.
+        if self.draining {
+            return Ok(());
+        }
         let mut remaining = self.launch_queue.len();
         while remaining > 0 {
             remaining -= 1;

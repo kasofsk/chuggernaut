@@ -115,6 +115,11 @@ impl Core {
         project: &str,
         seq: u64,
     ) -> Result<()> {
+        // Draining (spec §3.6): launch no evaluator containers. The job stays in
+        // Work with its Done work task; restart reconciliation re-enters here.
+        if self.draining {
+            return Ok(());
+        }
         let key = (owner.to_string(), project.to_string(), seq);
         let (evaluators, cycle) = {
             let exec = self.active.get(&key).expect("exec state");
@@ -790,6 +795,12 @@ impl Core {
         project: &str,
         seq: u64,
     ) -> Result<()> {
+        // Draining (spec §3.6): don't advance to the next stage, run the reduce,
+        // or open the merge gate. Restart reconciliation rebuilds the round from
+        // the task log and replays this decision.
+        if self.draining {
+            return Ok(());
+        }
         let key = (owner.to_string(), project.to_string(), seq);
         let (complete, advance) = {
             let Some(round) = self.active.get(&key).and_then(|e| e.round.as_ref()) else {
@@ -1027,6 +1038,11 @@ impl Core {
     /// job escalates and the queue moves on instead of wedging
     /// (design-lifecycle.md: unexpected wrap-up failure → triage).
     pub(crate) async fn pump_merges(&mut self, owner: &str, project: &str) -> Result<()> {
+        // Draining (spec §3.6): no gate starts, no landing. The merge queue is
+        // in-memory and re-derived on restart, which resumes the gate then.
+        if self.draining {
+            return Ok(());
+        }
         let slug = format!("{owner}/{project}");
         // An Open origin release holds the queue: nothing lands on integration
         // until the release PR resolves (jobs still eval and enqueue). The
@@ -1452,6 +1468,12 @@ impl Core {
         seq: u64,
         attempt: u32,
     ) -> Result<()> {
+        // Draining (spec §3.6): launch no wrap-up publish. The squash has already
+        // landed; restart reconciliation (recover_wrapup_command) relaunches it —
+        // the command is idempotent by contract (§3.2).
+        if self.draining {
+            return Ok(());
+        }
         let key = (owner.to_string(), project.to_string(), seq);
         let job = self.must_get(owner, project, seq)?.clone();
         let job_type = self.active.get(&key).expect("exec state").job_type.clone();

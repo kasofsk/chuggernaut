@@ -1764,3 +1764,220 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
         Some("da08d5f3-844e-430e-8363-39b4882f437b")
     );
 }
+
+/// §3.6 graceful drain: a SIGTERM (deploy `kickstart -k`) drains the actor and
+/// flushes memory-only state to KV so records are true at exit, then a fresh
+/// core re-attaches every still-Running task rather than failing it.
+///
+/// The gap the drain closes: a work container launches and reports its id via a
+/// `TaskContainerStarted` message, but that message can still be in the mailbox
+/// when SIGTERM lands — leaving the task record with `container_id: None`, which
+/// reconciliation reads as container-gone and turns into a synthetic -1. The
+/// drain sweeps the mailbox and then audits every Running task, stamping its real
+/// id from the live fleet. On restart the task re-attaches (same container, still
+/// Running) with zero reconcile-failure and zero synthetic -1.
+#[tokio::test]
+async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/flaky.yaml", FLAKY.as_bytes(), "type")
+        .await;
+    clone
+        .commit_file("prompts/impl.md", b"implement it", "prompt")
+        .await;
+    clone.push("main").await;
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+
+    // A live dispatcher whose work agent hangs, so its work task stays Running
+    // (with a real container id) while we drain it.
+    let backend = Arc::new(FakeBackend::new());
+    let provider = Arc::new(FakeProvider::with_backend(backend.clone()));
+    provider.on_run(|_| async { futures::future::pending::<()>().await });
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root.clone()),
+        backend.clone(),
+        provider.clone(),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let handle = spawn(core);
+
+    let job = handle.create_job(req("flaky")).await.unwrap();
+    handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&store, job.id, JobState::Work).await;
+
+    // Wait until the work task is Running with its container id stamped.
+    let tasks = store.tasks().await.unwrap();
+    let mut work = None;
+    for _ in 0..100 {
+        let log = tasks.list_for_job("acme", "api", job.id).await.unwrap();
+        if let Some(t) = log
+            .into_iter()
+            .find(|t| t.phase == TaskPhase::Work && t.state == TaskState::Running)
+            && t.container_id.is_some()
+        {
+            work = Some(t);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let work = work.expect("running work task with a container id");
+    let real_cid = work.container_id.clone().unwrap();
+
+    // Simulate the in-flight race: its `TaskContainerStarted` had not landed, so
+    // the record carries no id — yet the fleet still reports the container
+    // running under its identity labels.
+    let mut racing = work.clone();
+    racing.container_id = None;
+    tasks.put(&racing).await.unwrap();
+    backend.seed_managed_running([container::RunningContainer {
+        id: real_cid.clone(),
+        project: Some("acme/api".into()),
+        job: Some(job.id),
+        task: Some(work.id),
+    }]);
+
+    // Drain: the audit recovers the id, so the record is true at exit.
+    handle.drain().await.unwrap();
+    let flushed = tasks
+        .get("acme", "api", job.id, work.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(flushed.state, TaskState::Running);
+    assert_eq!(
+        flushed.container_id.as_deref(),
+        Some(real_cid.as_str()),
+        "drain stamped the running container's id back onto the task"
+    );
+
+    // Restart: a fresh core whose fleet still reports the container running.
+    let backend2 = Arc::new(FakeBackend::new());
+    backend2.seed_running([real_cid.clone()]);
+    let core2 = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        backend2.clone(),
+        Arc::new(FakeProvider::new()),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _handle2 = spawn(core2);
+
+    // Reconciliation re-attaches the container: the task stays Running on the
+    // same id, with no retry, no reconcile-failure, and no synthetic -1.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let log = tasks.list_for_job("acme", "api", job.id).await.unwrap();
+    let work_tasks: Vec<&Task> = log.iter().filter(|t| t.phase == TaskPhase::Work).collect();
+    assert_eq!(
+        work_tasks.len(),
+        1,
+        "re-attached the existing task, no relaunch: {log:?}"
+    );
+    assert_eq!(work_tasks[0].state, TaskState::Running);
+    assert_eq!(
+        work_tasks[0].container_id.as_deref(),
+        Some(real_cid.as_str())
+    );
+    assert!(
+        !work_tasks[0].infra_loss,
+        "a re-attached container is not an infra loss: {work_tasks:?}"
+    );
+    let after = store
+        .jobs()
+        .await
+        .unwrap()
+        .get("acme", "api", job.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.state, JobState::Work, "job stays in Work, mid-task");
+    assert_eq!(backend2.killed(), Vec::<String>::new(), "nothing reaped");
+}
+
+/// §3.6 graceful drain: even with a busy mailbox the drain completes well under
+/// its ~10s bound. Draining is non-blocking on the mailbox — it sweeps what is
+/// present and returns — so a backlog of in-flight requests cannot wedge exit.
+#[tokio::test]
+async fn drain_completes_promptly_with_a_busy_mailbox() {
+    let Some(rig) = rig().await else { return };
+
+    // Flood the actor with in-flight requests, then drain immediately.
+    let mut inflight = Vec::new();
+    for _ in 0..64 {
+        let h = rig.handle.clone();
+        inflight.push(tokio::spawn(async move {
+            let _ = h.ping().await;
+        }));
+    }
+    let drained = tokio::time::timeout(Duration::from_secs(5), rig.handle.drain()).await;
+    assert!(
+        matches!(drained, Ok(Ok(()))),
+        "drain did not complete under its bound with a busy mailbox: {drained:?}"
+    );
+}
+
+/// §3.6 graceful drain robustness: a drain cut short (here by a 1ms deadline,
+/// standing in for launchd's SIGKILL) never corrupts or regresses records — a
+/// Running task with an in-flight launch stays Running and parseable, exactly as
+/// it was before the drain (no worse than today). The drain only ever adds truth.
+#[tokio::test]
+async fn cut_short_drain_leaves_records_no_worse() {
+    let Some(rig) = rig().await else { return };
+    rig.provider
+        .on_run(|_| async { futures::future::pending::<()>().await });
+
+    let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Work).await;
+
+    // Cut the drain short almost immediately.
+    let _ = tokio::time::timeout(Duration::from_millis(1), rig.handle.drain()).await;
+
+    // Records remain parseable and the Running task was not regressed.
+    let log = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    assert!(!log.is_empty(), "task log still reads back");
+    assert!(
+        log.iter().all(|t| t.state != TaskState::Failed),
+        "a cut-short drain must never fail a task: {log:?}"
+    );
+    let work = log
+        .iter()
+        .find(|t| t.phase == TaskPhase::Work)
+        .expect("work task");
+    assert_eq!(
+        work.state,
+        TaskState::Running,
+        "the in-flight work task is left exactly as it was"
+    );
+}

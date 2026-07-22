@@ -332,6 +332,14 @@ pub enum Msg {
     Scan {
         reply: Option<Reply<()>>,
     },
+    /// Graceful shutdown (spec §3.6 drain): flip the core into draining mode,
+    /// process the in-flight mailbox so container ids/exits land in KV, audit
+    /// every Running task to KV, then stop the loop. Posted by the SIGTERM
+    /// handler (or a test via [`CoreHandle::drain`]). The reply fires once the
+    /// drain is complete; the loop returns immediately after.
+    Drain {
+        reply: Reply<()>,
+    },
     /// Posted by container monitor tasks — never by anything outside the crate.
     TaskExited {
         owner: String,
@@ -511,6 +519,14 @@ impl CoreHandle {
         self.call(|reply| Msg::Scan { reply: Some(reply) }).await
     }
 
+    /// Graceful shutdown (spec §3.6 drain): drain the actor and flush any
+    /// memory-only state to KV so records are true at exit, then stop the loop.
+    /// Returns once the drain finishes; the core stops processing messages after.
+    /// Driven by the SIGTERM handler in production, or directly in tests.
+    pub async fn drain(&self) -> Result<()> {
+        self.call(|reply| Msg::Drain { reply }).await
+    }
+
     pub async fn link_project(
         &self,
         owner: &str,
@@ -675,6 +691,13 @@ pub struct Core {
     pub(crate) release_holds: HashSet<String>,
     /// Set by [`spawn`]; monitors post `TaskExited` through it.
     pub(crate) self_tx: Option<mpsc::Sender<Msg>>,
+    /// Graceful-shutdown drain mode (spec §3.6): flipped inside the single-writer
+    /// loop by [`Msg::Drain`]. While set, the core initiates NO new work — no
+    /// container launches, no gate starts, no wrap-up launches (the launch paths
+    /// early-return) — but keeps PROCESSING in-flight messages so container exits
+    /// and container-start ids still record. This lets a SIGTERM drain the actor
+    /// and flush memory-only state to KV so records are true at exit.
+    pub(crate) draining: bool,
 }
 
 const SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -772,6 +795,7 @@ impl Core {
             pr_api: Arc::new(crate::github::GithubClient::new()),
             release_holds: HashSet::new(),
             self_tx: None,
+            draining: false,
         };
 
         // Restore merge-queue holds for Open origin releases before reconcile
@@ -815,6 +839,14 @@ impl Core {
 
     async fn run(mut self, mut rx: mpsc::Receiver<Msg>) {
         while let Some(msg) = rx.recv().await {
+            // Graceful shutdown (spec §3.6 drain): quiesce and stop the loop.
+            // Handled here, not in `handle_msg`, because it needs the receiver
+            // to sweep the remaining mailbox.
+            if let Msg::Drain { reply } = msg {
+                let result = self.drain(&mut rx).await;
+                let _ = reply.send(result);
+                return;
+            }
             self.handle_msg(msg).await;
             if let Err(e) = self.drain_queue().await {
                 tracing::error!("drain_queue: {e}");
@@ -823,6 +855,94 @@ impl Core {
             // any launches queued under capacity pressure (spec §3.5).
             if let Err(e) = self.drain_launch_queue().await {
                 tracing::error!("drain_launch_queue: {e}");
+            }
+        }
+    }
+
+    /// Graceful-shutdown drain (spec §3.6): flip into draining mode, process the
+    /// backlog already sitting in the mailbox — so a just-launched container's id
+    /// lands on its task record and any arrived exit records terminally — then
+    /// audit that every Running task carries its real `container_id` before the
+    /// process exits. Initiates no new work: the launch paths early-return while
+    /// draining, so recovered records are re-derived on restart rather than being
+    /// half-launched now. Non-blocking on the mailbox (drains what is present, not
+    /// what may yet arrive) and idempotent — even cut short by launchd it only
+    /// ever makes records MORE accurate, never worse.
+    pub(crate) async fn drain(&mut self, rx: &mut mpsc::Receiver<Msg>) -> Result<()> {
+        self.draining = true;
+        // Sweep the mailbox. `handle_msg` records exits and stamps container ids
+        // as normal; the launch paths it may reach are no-ops while draining.
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                // A second drain: already draining — just ack it.
+                Msg::Drain { reply } => {
+                    let _ = reply.send(Ok(()));
+                }
+                other => self.handle_msg(other).await,
+            }
+        }
+        // Audit + flush: a Running task whose container-start message was still
+        // in flight would carry no id and reconcile as a synthetic -1. Recover
+        // the id from the live fleet so restart re-attaches instead.
+        self.flush_running_container_ids().await;
+        Ok(())
+    }
+
+    /// The drain audit (spec §3.6): stamp any `Running` task still missing its
+    /// `container_id` from the live fleet's identity labels, so restart
+    /// re-attaches its monitor rather than failing it as container-gone. A launch
+    /// records the id via [`Msg::TaskContainerStarted`], but that message can be
+    /// in flight when SIGTERM lands; this closes the gap. Best-effort — a backend
+    /// hiccup only warns, and a missing stamp is no worse than today.
+    async fn flush_running_container_ids(&self) {
+        let running = match self.backend.list_managed_running().await {
+            Ok(cs) => cs,
+            Err(e) => {
+                tracing::warn!("drain: listing running containers failed: {e}");
+                return;
+            }
+        };
+        // Index the live containers by the (project, job, task) identity their
+        // labels carry, so a task with no recorded id can be matched back.
+        let mut by_identity: HashMap<(String, u64, u64), String> = HashMap::new();
+        for rc in running {
+            if let (Some(p), Some(j), Some(t)) = (&rc.project, rc.job, rc.task) {
+                by_identity.insert((p.clone(), j, t), rc.id.clone());
+            }
+        }
+        if by_identity.is_empty() {
+            return;
+        }
+        let jobs: Vec<Job> = self
+            .graphs
+            .values()
+            .flat_map(|g| g.jobs().cloned().collect::<Vec<_>>())
+            .collect();
+        for job in jobs {
+            let Ok((owner, project)) = split_slug(&job.project) else {
+                continue;
+            };
+            let tasks = match self.tasks.list_for_job(&owner, &project, job.id).await {
+                Ok(tasks) => tasks,
+                Err(e) => {
+                    tracing::warn!("drain: listing tasks for job {} failed: {e}", job.id);
+                    continue;
+                }
+            };
+            for mut task in tasks {
+                if task.state == types::TaskState::Running
+                    && task.container_id.is_none()
+                    && let Some(id) = by_identity.get(&(job.project.clone(), job.id, task.id))
+                {
+                    task.container_id = Some(id.clone());
+                    if let Err(e) = self.tasks.put(&task).await {
+                        tracing::warn!(
+                            "drain: stamping container id for {}/{} failed: {e}",
+                            job.id,
+                            task.id
+                        );
+                    }
+                }
             }
         }
     }
@@ -958,6 +1078,11 @@ impl Core {
             } => {
                 let _ = reply.send(self.origin_sync(&owner, &project).await);
             }
+            // Drain is intercepted by `run` (and by `drain`'s own sweep) because
+            // it needs the receiver; it never reaches here. Ack defensively.
+            Msg::Drain { reply } => {
+                let _ = reply.send(Ok(()));
+            }
             Msg::Scan { reply } => {
                 let result = self.run_scans().await;
                 match reply {
@@ -1066,6 +1191,11 @@ impl Core {
     /// §3.1 step 5: launch every queued Ready job. Slot caps live in the
     /// backend (fleet) — the core does not throttle.
     pub(crate) async fn drain_queue(&mut self) -> Result<()> {
+        // Draining (spec §3.6): initiate no new work. Ready jobs stay enqueued in
+        // KV and are re-enqueued on restart, so nothing is lost.
+        if self.draining {
+            return Ok(());
+        }
         while let Some(q) = self.queue.dequeue() {
             self.start_job(q).await?;
         }
