@@ -46,6 +46,18 @@ work_retries: 1
 knowledge: [rust]
 "#;
 
+// Command work + command eval: both launch through the container backend, so
+// each exercises a `backend.launch` failure directly (the agent path already
+// surfaces launch failure via the provider as exit -1).
+const CMD_WORK: &str = r#"
+name: cmd-work
+image: img:latest
+work:
+  type: command
+  run: ./build.sh
+work_retries: 1
+"#;
+
 // Staged evaluation (spec §3.3): a required stage-0 agent review gates a
 // stage-1 command evaluator. review runs first; ci only after it passes.
 const STAGED: &str = r#"
@@ -111,6 +123,7 @@ async fn rig_with_artifacts(artifacts_identity: Option<String>) -> Option<Rig> {
         ("jobs/impl-cmd.yaml", IMPL_CMD_EVAL),
         ("jobs/impl-agent.yaml", IMPL_AGENT_EVAL),
         ("jobs/flaky.yaml", FLAKY),
+        ("jobs/cmd-work.yaml", CMD_WORK),
         ("jobs/staged.yaml", STAGED),
         ("jobs/staged-advisory.yaml", STAGED_ADVISORY),
         ("prompts/impl.md", "implement it"),
@@ -286,6 +299,124 @@ async fn work_failure_retries_with_reset_then_escalates() {
     assert!(matches!(tasks[2].kind, types::TaskKind::Human { .. }));
     assert_eq!(tasks[2].state, TaskState::Pending);
     assert_eq!(rig.provider.runs().len(), 2);
+}
+
+/// Dogfood-#1 regression: an eval container that fails to *launch* must not
+/// leave the task `Running` and the job wedged in `Evaluation`. The launch
+/// error flows through the task-failure machinery: task Failed with the error
+/// in its result → eval_retries → required infra failure → job Escalated.
+#[tokio::test]
+async fn eval_launch_failure_escalates_instead_of_stuck_running() {
+    let Some(rig) = rig().await else { return };
+    // The eval command container is refused at launch (e.g. an invalid resolved
+    // resource limit). Agent work runs through the provider, so the only
+    // `backend.launch` calls in this rig are the eval containers.
+    rig.backend
+        .fail_launch_if(|_| Some("invalid memory limit \"5g\"".into()));
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    // Never stalls in Evaluation with a Running task: after eval_retries the
+    // required evaluator's infra failure escalates.
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    // Work Done; two eval attempts Failed (eval_retries default 1); Human
+    // escalation Pending. No task is left Running.
+    assert_eq!(tasks[0].phase, TaskPhase::Work);
+    assert_eq!(tasks[0].state, TaskState::Done);
+    let evals: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.phase == TaskPhase::Evaluation)
+        .collect();
+    assert_eq!(evals.len(), 2, "eval attempt + one eval_retries");
+    for t in &evals {
+        assert_eq!(t.state, TaskState::Failed);
+        // The launch error is surfaced in the result — single-wrapped, no
+        // spurious `job not found:` / doubled `launch failed:` — so
+        // `GET .../tasks` tells the operator what happened.
+        match &t.result {
+            Some(types::TaskResult::Command {
+                pass: false,
+                output,
+                ..
+            }) => assert_eq!(
+                output,
+                "container launch failed: invalid memory limit \"5g\""
+            ),
+            other => panic!("expected launch-error result, got {other:?}"),
+        }
+    }
+    assert!(
+        tasks.iter().all(|t| t.state != TaskState::Running),
+        "no task left Running: {tasks:?}"
+    );
+    assert!(
+        tasks
+            .iter()
+            .any(|t| matches!(t.kind, types::TaskKind::Human { .. })
+                && t.state == TaskState::Pending),
+        "a Human escalation task names the failure"
+    );
+}
+
+/// Work-path parity: a command work container that fails to launch takes the
+/// same route the agent path already does (provider error → exit -1) — task
+/// Failed with the launch error recorded, work_retries consumed, then Escalated.
+#[tokio::test]
+async fn work_command_launch_failure_retries_then_escalates() {
+    let Some(rig) = rig().await else { return };
+    rig.backend
+        .fail_launch_if(|_| Some("invalid memory limit \"5g\"".into()));
+
+    let job = rig.handle.create_job(req("cmd-work")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let works: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.phase == TaskPhase::Work)
+        .collect();
+    assert_eq!(works.len(), 2, "attempt + one work_retries");
+    for t in &works {
+        assert_eq!(t.state, TaskState::Failed);
+        match &t.result {
+            Some(types::TaskResult::Command {
+                pass: false,
+                output,
+                ..
+            }) => assert_eq!(
+                output,
+                "container launch failed: invalid memory limit \"5g\""
+            ),
+            other => panic!("expected launch-error result, got {other:?}"),
+        }
+    }
+    assert!(
+        tasks.iter().all(|t| t.state != TaskState::Running),
+        "no task left Running: {tasks:?}"
+    );
+    assert!(
+        tasks
+            .iter()
+            .any(|t| matches!(t.kind, types::TaskKind::Human { .. })),
+        "escalation task exists"
+    );
 }
 
 #[tokio::test]

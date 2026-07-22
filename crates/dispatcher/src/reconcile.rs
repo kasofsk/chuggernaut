@@ -377,6 +377,7 @@ impl Core {
                                     eval_json,
                                     usage: None,
                                     assessment: None,
+                                    launch_error: None,
                                 },
                             })
                             .await;

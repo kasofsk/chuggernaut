@@ -394,11 +394,19 @@ impl Core {
                     memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
                     node: job_type.placement_node().map(String::from),
                 };
-                let id = self
-                    .backend
-                    .launch(launch)
-                    .await
-                    .map_err(|e| CoreError::NotFound(format!("launch failed: {e}")))?;
+                let id = match self.backend.launch(launch).await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        // Launch failure is an infra failure of this slot (§3.3):
+                        // report it through the exit fan-in so `on_eval_exited`
+                        // marks the task Failed with the launch error and applies
+                        // eval_retries → Infra → escalation. Without this the task
+                        // stays `Running` and the job wedges in Evaluation forever
+                        // (the dogfood-#1 bug).
+                        self.report_launch_failure(owner, project, seq, task_id, e);
+                        return Ok(task_id);
+                    }
+                };
                 task.container_id = Some(id.clone());
                 self.tasks.put(&task).await?;
                 let backend = self.backend.clone();
@@ -426,6 +434,7 @@ impl Core {
                                 eval_json,
                                 usage: None,
                                 assessment: None,
+                                launch_error: None,
                             },
                         })
                         .await;
@@ -503,6 +512,7 @@ impl Core {
                                 eval_json: None,
                                 usage,
                                 assessment: None,
+                                launch_error: None,
                             },
                         })
                         .await;
@@ -605,6 +615,7 @@ impl Core {
             exit_code,
             eval_json,
             usage,
+            launch_error,
             ..
         } = exit;
         let key = (owner.to_string(), project.to_string(), seq);
@@ -620,6 +631,35 @@ impl Core {
         else {
             return Ok(()); // stale monitor from a superseded round, or duplicate exit
         };
+
+        // The container never launched: an infra failure regardless of the
+        // evaluator's type (a Command exit code or an Agent verdict would need a
+        // container that ran). Record why on the task, then route through the
+        // same eval_retries → Infra path an agent's missing verdict uses.
+        if let Some(reason) = launch_error {
+            task.result = Some(TaskResult::Command {
+                pass: false,
+                exit_code,
+                output: reason,
+                structured: None,
+            });
+            task.state = TaskState::Failed;
+            task.completed_at = Some(Utc::now());
+            self.tasks.put(&task).await?;
+            self.publish(
+                owner,
+                project,
+                seq,
+                "task-failed",
+                serde_json::json!({
+                    "task_id": task.id, "phase": "Evaluation", "reason": "container launch failed",
+                }),
+            )
+            .await?;
+            return self
+                .eval_infra_failure(owner, project, seq, task, slot_idx)
+                .await;
+        }
 
         let outcome = match &task.kind {
             TaskKind::Command { .. } => {
@@ -688,36 +728,9 @@ impl Core {
                             "task_id": failed.id, "phase": "Evaluation", "reason": "no submit_eval",
                         }))
                         .await?;
-                        let eval_retries = self
-                            .active
-                            .get(&key)
-                            .and_then(|e| e.job_type.eval_retries)
-                            .unwrap_or(1);
-                        if failed.attempt <= eval_retries {
-                            let (evaluator, cycle) = {
-                                let exec = self.active.get(&key).expect("exec state");
-                                let slot = &exec.round.as_ref().unwrap().slots[slot_idx];
-                                (slot.evaluator.clone(), exec.cycle)
-                            };
-                            let branch = self.must_get(owner, project, seq)?.branch.clone();
-                            let new_id = self
-                                .launch_evaluator_task(
-                                    owner,
-                                    project,
-                                    seq,
-                                    TaskPhase::Evaluation,
-                                    &branch,
-                                    cycle,
-                                    &evaluator,
-                                    failed.attempt + 1,
-                                )
-                                .await?;
-                            let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
-                            round.slots[slot_idx].task_id = new_id;
-                            round.slots[slot_idx].attempt = failed.attempt + 1;
-                            return Ok(());
-                        }
-                        Some(SlotOutcome::Infra)
+                        return self
+                            .eval_infra_failure(owner, project, seq, failed, slot_idx)
+                            .await;
                     }
                 }
             }
@@ -730,6 +743,54 @@ impl Core {
             return self.stage_complete(owner, project, seq).await;
         }
         Ok(())
+    }
+
+    /// An eval slot failed for infra reasons — the agent produced no verdict, or
+    /// its container never launched (§3.3). Retry per `eval_retries`; once the
+    /// budget is spent, resolve the slot as [`SlotOutcome::Infra`] and run the
+    /// reduce (a required infra failure escalates). The failed task is already
+    /// persisted terminal by the caller.
+    async fn eval_infra_failure(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        failed: Task,
+        slot_idx: usize,
+    ) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        let eval_retries = self
+            .active
+            .get(&key)
+            .and_then(|e| e.job_type.eval_retries)
+            .unwrap_or(1);
+        if failed.attempt <= eval_retries {
+            let (evaluator, cycle) = {
+                let exec = self.active.get(&key).expect("exec state");
+                let slot = &exec.round.as_ref().unwrap().slots[slot_idx];
+                (slot.evaluator.clone(), exec.cycle)
+            };
+            let branch = self.must_get(owner, project, seq)?.branch.clone();
+            let new_id = self
+                .launch_evaluator_task(
+                    owner,
+                    project,
+                    seq,
+                    TaskPhase::Evaluation,
+                    &branch,
+                    cycle,
+                    &evaluator,
+                    failed.attempt + 1,
+                )
+                .await?;
+            let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
+            round.slots[slot_idx].task_id = new_id;
+            round.slots[slot_idx].attempt = failed.attempt + 1;
+            return Ok(());
+        }
+        let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
+        round.slots[slot_idx].outcome = Some(SlotOutcome::Infra);
+        self.stage_complete(owner, project, seq).await
     }
 
     /// Called whenever a slot in the current stage resolves. A no-op while the
@@ -1174,9 +1235,14 @@ impl Core {
         project: &str,
         seq: u64,
         mut task: Task,
-        exit_code: i32,
-        eval_json: Option<serde_json::Value>,
+        exit: TaskExit,
     ) -> Result<()> {
+        let TaskExit {
+            exit_code,
+            eval_json,
+            launch_error,
+            ..
+        } = exit;
         let key = (owner.to_string(), project.to_string(), seq);
         let Some(slot_idx) = self
             .active
@@ -1196,7 +1262,10 @@ impl Core {
         task.result = Some(TaskResult::Command {
             pass,
             exit_code,
-            output: String::new(),
+            // A launch failure has no container output; its result is the only
+            // record of why the gate failed (§3.3). A gate integration failure
+            // re-enters rework on the new base, so the error rides through there.
+            output: launch_error.unwrap_or_default(),
             structured: eval_json.clone(),
         });
         task.state = TaskState::Done;

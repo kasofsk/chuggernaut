@@ -413,6 +413,7 @@ impl Core {
                                 eval_json: None,
                                 usage,
                                 assessment: None,
+                                launch_error: None,
                             },
                         })
                         .await;
@@ -431,11 +432,19 @@ impl Core {
                     memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
                     node: job_type.placement_node().map(String::from),
                 };
-                let id = self
-                    .backend
-                    .launch(launch)
-                    .await
-                    .map_err(|e| CoreError::NotFound(format!("launch failed: {e}")))?;
+                let id = match self.backend.launch(launch).await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        // Launch failure is a task failure (§3.2): report it
+                        // through the exit fan-in so `on_work_exited` marks the
+                        // task Failed with the launch error and applies
+                        // work_retries → escalation. The agent work path already
+                        // gets this for free (`provider.run` errors surface as
+                        // exit -1); this unifies the command path with it.
+                        self.report_launch_failure(owner, project, seq, task_id, e);
+                        return Ok(());
+                    }
+                };
                 task.container_id = Some(id.clone());
                 self.tasks.put(&task).await?;
                 let backend = self.backend.clone();
@@ -471,6 +480,40 @@ impl Core {
         crate::harvest::Harvester::new(self.backend.clone(), self.artifacts.clone())
     }
 
+    /// A just-created task's container failed to launch. The task is already
+    /// persisted `Running`, so we report the failure through the same
+    /// [`Msg::TaskExited`] fan-in a real exit uses — the single-writer exit
+    /// handler then owns the terminal write and runs the retry/infra/escalation
+    /// machinery, instead of the launch error propagating up to be logged and
+    /// dropped while the task stays `Running` (the dogfood-#1 wedge).
+    ///
+    /// The reason is single-wrapped: `container {backend_error}` reads e.g.
+    /// `container launch failed: invalid memory limit "5g"` — no double
+    /// `launch failed: launch failed:` and no spurious `job not found:` prefix.
+    pub(crate) fn report_launch_failure(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task_id: u64,
+        error: container::BackendError,
+    ) {
+        let reason = format!("container {error}");
+        let tx = self.self_tx.clone().expect("spawned core");
+        let (owner, project) = (owner.to_string(), project.to_string());
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Msg::TaskExited {
+                    owner,
+                    project,
+                    seq,
+                    task_id,
+                    exit: TaskExit::launch_failed(reason),
+                })
+                .await;
+        });
+    }
+
     pub(crate) async fn on_task_exited(
         &mut self,
         owner: &str,
@@ -495,10 +538,7 @@ impl Core {
             // before the container exits, and the exit completes the slot.
             // on_eval_exited drops anything not in the current round.
             TaskPhase::Evaluation => self.on_eval_exited(owner, project, seq, task, exit).await,
-            TaskPhase::MergeGate => {
-                self.on_gate_exited(owner, project, seq, task, exit.exit_code, exit.eval_json)
-                    .await
-            }
+            TaskPhase::MergeGate => self.on_gate_exited(owner, project, seq, task, exit).await,
             // Advisory triage (§1.2): record the assessment; never touch job state.
             TaskPhase::Triage => {
                 if task.state != TaskState::Running {
@@ -518,7 +558,10 @@ impl Core {
         exit: TaskExit,
     ) -> Result<()> {
         let TaskExit {
-            exit_code, usage, ..
+            exit_code,
+            usage,
+            launch_error,
+            ..
         } = exit;
         let key = (owner.to_string(), project.to_string(), seq);
         task.completed_at = Some(Utc::now());
@@ -559,6 +602,17 @@ impl Core {
         }
 
         task.state = TaskState::Failed;
+        // A container that never launched has no logs to harvest, so its result
+        // is the only record of why it failed — surface the launch error there
+        // (visible via `GET .../tasks`) instead of leaving an empty result.
+        if let Some(reason) = &launch_error {
+            task.result = Some(TaskResult::Command {
+                pass: false,
+                exit_code,
+                output: reason.clone(),
+                structured: None,
+            });
+        }
         self.tasks.put(&task).await?;
         self.publish(
             owner,
@@ -567,6 +621,7 @@ impl Core {
             "task-failed",
             serde_json::json!({
                 "task_id": task.id, "phase": "Work", "exit_code": exit_code,
+                "launch_error": launch_error,
             }),
         )
         .await?;

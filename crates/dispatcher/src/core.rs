@@ -125,6 +125,13 @@ pub struct TaskExit {
     /// by triage runs (spec §1.2), which have no channel MCP and so report
     /// their assessment through the CLI's JSON result rather than `submit_result`.
     pub assessment: Option<String>,
+    /// Set when the container never launched — the backend rejected it (bad
+    /// image, invalid resource limit, node pressure). Reported through the same
+    /// [`Msg::TaskExited`] fan-in as a real exit so launch failure flows into
+    /// the task-failure/escalation machinery instead of leaving the task
+    /// `Running` forever. Carries the single-wrapped, human-readable reason
+    /// (e.g. `container launch failed: invalid memory limit "5g"`).
+    pub launch_error: Option<String>,
 }
 
 impl TaskExit {
@@ -132,6 +139,18 @@ impl TaskExit {
     pub fn code(exit_code: i32) -> Self {
         Self {
             exit_code,
+            ..Default::default()
+        }
+    }
+
+    /// A container that never launched: reported through the exit fan-in so the
+    /// launch failure lands in the task-failure path (retry/infra/escalation)
+    /// rather than wedging the task at `Running`. Exit code -1 mirrors the
+    /// agent path, which already surfaces a failed run that way.
+    pub fn launch_failed(reason: String) -> Self {
+        Self {
+            exit_code: -1,
+            launch_error: Some(reason),
             ..Default::default()
         }
     }
