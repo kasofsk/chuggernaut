@@ -7,6 +7,7 @@ import {
   type JobTypeSummary,
 } from '../api'
 import { useDebouncedCallback } from '../useEvents'
+import { prefersReducedMotion, useTypewriter } from '../useTypewriter'
 import { Markdown } from './Markdown'
 import { RichSelect } from './RichSelect'
 
@@ -84,28 +85,80 @@ export function DraftEditor({
     }), 1200)
   }
 
+  // Remote-edit animation: text fields type the delta in (typewriter hook),
+  // select/multi-select fields pulse the control and flash the newly chosen
+  // value(s). A small wizard indicator rides the label of any animating field.
+  // All motion is skipped under prefers-reduced-motion (the flash wash stays).
+  const { textActive, typewrite } = useTypewriter()
+  const [pulsing, setPulsing] = useState<Set<Field>>(new Set())
+  const [valFlash, setValFlash] = useState<Set<string>>(new Set())
+  const pulseField = (f: Field) => {
+    setPulsing((s) => new Set(s).add(f))
+    setTimeout(() => setPulsing((s) => {
+      const n = new Set(s)
+      n.delete(f)
+      return n
+    }), 900)
+  }
+  const flashValue = (key: string) => {
+    setValFlash((s) => new Set(s).add(key))
+    setTimeout(() => setValFlash((s) => {
+      const n = new Set(s)
+      n.delete(key)
+      return n
+    }), 1200)
+  }
+
   // Merge an incoming server snapshot. Per field: if the server matches local,
   // our edit landed — clear its dirty flag. Otherwise adopt the remote value and
   // flash — unless the operator is on that field, or it holds an un-echoed local
   // edit (dirty), in which case we keep the operator's version.
   useEffect(() => {
     const cur = localRef.current
-    const merge = (f: Field, equal: boolean, apply: () => void) => {
+    const reduced = prefersReducedMotion()
+    // Only fields the operator isn't touching are ever adopted or animated.
+    const canAdopt = (f: Field, equal: boolean) => {
       if (equal) {
         dirtyRef.current.delete(f)
-        return
+        return false
       }
-      if (focusedRef.current === f || dirtyRef.current.has(f)) return
-      apply()
+      return focusedRef.current !== f && !dirtyRef.current.has(f)
+    }
+    // Text field: type the delta in (the hook degrades to an instant set under
+    // reduced motion), then flash the field so the change is legible.
+    const adoptText = (f: Field, from: string, to: string, set: (v: string) => void) => {
+      if (!canAdopt(f, from === to)) return
+      typewrite(f, from, to, set)
       flashField(f)
     }
-    merge('title', job.title === cur.title, () => setTitle(job.title))
-    merge('description', job.description === cur.description, () => setDescription(job.description))
-    merge('type', job.type === cur.type, () => setType(job.type))
-    merge('knowledge_tags', sameStrs(job.knowledge_tags, cur.tags), () => setTags(job.knowledge_tags))
-    merge('deps', sameNums(job.deps, cur.deps), () => setDeps(job.deps))
-    merge('timeout', (job.timeout ?? '') === cur.timeout, () => setTimeoutVal(job.timeout ?? ''))
-    merge('model', (job.model ?? '') === cur.model, () => setModel(job.model ?? ''))
+    // Select / multi-select: snap the value (we don't drive dropdown internals),
+    // flash the field, pulse the control, and flash the newly chosen value(s).
+    const adoptChoice = (f: Field, equal: boolean, apply: () => void, added: string[]) => {
+      if (!canAdopt(f, equal)) return
+      apply()
+      flashField(f)
+      if (!reduced) {
+        pulseField(f)
+        added.forEach(flashValue)
+      }
+    }
+    adoptText('title', cur.title, job.title, setTitle)
+    adoptText('description', cur.description, job.description, setDescription)
+    adoptText('timeout', cur.timeout, job.timeout ?? '', setTimeoutVal)
+    adoptText('model', cur.model, job.model ?? '', setModel)
+    adoptChoice('type', job.type === cur.type, () => setType(job.type), [])
+    adoptChoice(
+      'knowledge_tags',
+      sameStrs(job.knowledge_tags, cur.tags),
+      () => setTags(job.knowledge_tags),
+      job.knowledge_tags.filter((t) => !cur.tags.includes(t)).map((t) => `tag:${t}`),
+    )
+    adoptChoice(
+      'deps',
+      sameNums(job.deps, cur.deps),
+      () => setDeps(job.deps),
+      job.deps.filter((d) => !cur.deps.includes(d)).map((d) => `dep:${d}`),
+    )
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job])
 
@@ -146,7 +199,15 @@ export function DraftEditor({
     focusedRef.current = null
     patchNow()
   }
-  const fieldClass = (f: Field) => `field${flash.has(f) ? ' draft-flash' : ''}`
+  const fieldClass = (f: Field) =>
+    `field${flash.has(f) ? ' draft-flash' : ''}${pulsing.has(f) ? ' draft-pulse' : ''}`
+  // A small wand on the label of any field a remote edit is animating.
+  const wiz = (f: Field) =>
+    textActive.has(f) || pulsing.has(f) ? (
+      <span className="draft-wiz" title="updating from chat" aria-hidden="true">
+        ✦
+      </span>
+    ) : null
 
   // Discrete edits (tags, deps, type) go through the debounced PATCH, not an
   // immediate one: the debounced call fires after the state update has
@@ -190,7 +251,7 @@ export function DraftEditor({
       {saveError && <div className="error banner">{saveError}</div>}
 
       <label className={fieldClass('title')}>
-        <span>Title <span className="dim">(what this run is for)</span></span>
+        <span>Title <span className="dim">(what this run is for)</span>{wiz('title')}</span>
         <input
           value={title}
           onFocus={() => (focusedRef.current = 'title')}
@@ -204,7 +265,7 @@ export function DraftEditor({
 
       <div className={fieldClass('description')}>
         <span>
-          Description <span className="dim">(the ticket — markdown; injected into the work and eval prompts)</span>
+          Description <span className="dim">(the ticket — markdown; injected into the work and eval prompts)</span>{wiz('description')}
           <button type="button" className="link draft-preview-toggle" onClick={() => setPreview((p) => !p)}>
             {preview ? 'edit' : 'preview'}
           </button>
@@ -231,7 +292,7 @@ export function DraftEditor({
       </div>
 
       <div className={fieldClass('type')}>
-        <span>Job type</span>
+        <span>Job type{wiz('type')}</span>
         <div className="type-select">
           <RichSelect
             value={type}
@@ -262,7 +323,7 @@ export function DraftEditor({
       </div>
 
       <div className={fieldClass('deps')}>
-        <span>Depends on <span className="dim">(jobs that must finish first)</span></span>
+        <span>Depends on <span className="dim">(jobs that must finish first)</span>{wiz('deps')}</span>
         {deps.length > 0 && (
           <div className="tag-row">
             {deps.map((d) => {
@@ -271,7 +332,7 @@ export function DraftEditor({
                 <button
                   type="button"
                   key={d}
-                  className="tag tag-on"
+                  className={`tag tag-on${valFlash.has(`dep:${d}`) ? ' draft-val-flash' : ''}`}
                   title="remove"
                   onClick={() => removeDep(d)}
                 >
@@ -304,7 +365,7 @@ export function DraftEditor({
       <div className={fieldClass('knowledge_tags')}>
         <span>
           Knowledge tags{' '}
-          <span className="dim">(a tag's meaning lives in tags/&#123;tag&#125;.md)</span>
+          <span className="dim">(a tag's meaning lives in tags/&#123;tag&#125;.md)</span>{wiz('knowledge_tags')}
         </span>
         {tagOptions.length > 0 ? (
           <div className="tag-row">
@@ -312,7 +373,9 @@ export function DraftEditor({
               <button
                 type="button"
                 key={t}
-                className={tags.includes(t) ? 'tag tag-on' : 'tag'}
+                className={`${tags.includes(t) ? 'tag tag-on' : 'tag'}${
+                  valFlash.has(`tag:${t}`) ? ' draft-val-flash' : ''
+                }`}
                 onClick={() => toggleTag(t)}
               >
                 {t}
@@ -329,7 +392,7 @@ export function DraftEditor({
         <label className={fieldClass('timeout')}>
           <span>
             Work timeout{' '}
-            <span className="dim">(overrides the type default for this job's work)</span>
+            <span className="dim">(overrides the type default for this job's work)</span>{wiz('timeout')}
           </span>
           <input
             value={timeout}
@@ -345,7 +408,7 @@ export function DraftEditor({
         <label className={fieldClass('model')}>
           <span>
             Work model{' '}
-            <span className="dim">(overrides the type, project and platform defaults)</span>
+            <span className="dim">(overrides the type, project and platform defaults)</span>{wiz('model')}
           </span>
           <input
             value={model}

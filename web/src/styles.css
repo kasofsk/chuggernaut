@@ -618,6 +618,60 @@ td.actions button {
     background: transparent;
   }
 }
+/* A remote edit typing/pulsing into a field marks its label with a small wand
+   so the operator can tell the change came from the chat side, not a ghost. */
+.draft-wiz {
+  display: inline-block;
+  margin-left: 0.35rem;
+  color: var(--accent);
+  font-size: var(--fs-sm);
+  animation: draft-wiz 1s ease-in-out infinite;
+}
+@keyframes draft-wiz {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+/* Selects/multi-selects can't type, so the remote change pulses the whole
+   control (a paint-only ring — no layout shift, safe near the screen edge). */
+.draft-pulse {
+  animation: draft-pulse 0.9s ease-out;
+  border-radius: var(--r-sm);
+}
+@keyframes draft-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+/* …and the specific tag/dep chip the remote side just chose gets its own ring
+   flash so the operator's eye lands on the new value, not just the control. */
+.draft-val-flash {
+  animation: draft-val-flash 1.2s ease-out;
+}
+@keyframes draft-val-flash {
+  0% {
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+/* prefers-reduced-motion: keep the flash wash (instant change + flash only),
+   drop the wand pulse, control pulse, and chip ring. */
+@media (prefers-reduced-motion: reduce) {
+  .draft-wiz,
+  .draft-pulse,
+  .draft-val-flash {
+    animation: none;
+  }
+}
 
 /* Draft badge: dashed pill so an editable pre-release ticket reads apart from
    the solid Frozen/terminal states. */
