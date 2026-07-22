@@ -30,8 +30,16 @@ Then:
    the brief (`update_status("plan: ...")`, one line), after each meaningful
    step (file written, tests run), and just before you submit.
 6. When done, call `submit_result` with:
-   - `summary`: one paragraph describing what you built (this becomes the
-     merge commit body),
+   - `summary`: a short markdown report of what you built (this becomes the
+     merge commit body). Structure it:
+     - Open with **one plain sentence** stating the outcome — markdown-free; it
+       is the readable first line of the squash commit body.
+     - Then short `###` sections — `### What changed` (bulleted, per file or
+       concern, inline code for paths/symbols), `### How verified` (commands run
+       and their outcomes), `### Notes` (caveats, follow-ups, surprises). Omit
+       any section that would be empty.
+     - Prefer bullets to prose; no multi-sentence run-on paragraphs. Keep it
+       brief — structure replaces neither brevity nor substance.
    - `structured`: `{ "files_changed": [...], "notes": "..." }`.
 7. Exit 0.
 

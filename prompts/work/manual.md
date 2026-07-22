@@ -17,6 +17,14 @@ title/URL).
    Push whatever you like to `job/{N}` — that branch is this job's work; the
    platform diffs and (on pass) merges it. Reach `:2222` over LAN/Tailscale.
 
+   Write the commit message that becomes the squash body in the same shape a
+   work agent's summary uses: open with **one plain sentence** stating the
+   outcome (markdown-free — the readable first line of the commit body), then
+   short `###` sections — `### What changed` (bulleted, inline code for
+   paths/symbols), `### How verified` (commands run and their outcomes),
+   `### Notes` (caveats, follow-ups) — omitting any empty section. Prefer
+   bullets to prose; keep it brief.
+
 2. **Resolve this task `Pass`** once your commits are on `job/{N}`.
 
 ## What happens next

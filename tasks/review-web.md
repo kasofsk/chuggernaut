@@ -30,3 +30,8 @@ Hard rules, regardless of depth:
 Submit your verdict with `submit_eval`: `pass: true/false` and structured
 findings — what you checked, how (read-only vs. built vs. exercised), and
 what, if anything, must change.
+
+Write any prose in that verdict — a summary or a finding's notes — as
+structured markdown: open with **one plain sentence** stating the outcome, then
+short `###` sections or bullets (not a run-on paragraph), inline code for
+paths/symbols, omitting any empty section. Keep it brief and actionable.

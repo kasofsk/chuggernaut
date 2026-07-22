@@ -29,6 +29,11 @@ violations of those as findings.
    - Fixable problems → `{ "pass": false, "findings": [ { "file": "...",
      "issue": "...", "suggestion": "..." } ] }`. The author is re-invoked
      with your findings verbatim — make them actionable.
+   - Write any prose you submit — a finding's `issue`/`suggestion`, or an
+     overall summary/notes field — as structured markdown: open with **one
+     plain sentence** stating the verdict, then short `###` sections or bullets
+     (not a run-on paragraph), inline code for paths/symbols, omitting any empty
+     section. Keep it brief and actionable.
 4. Exit 0.
 
 Your verdict is advisory — the outer CI evaluator is the gate. Do not commit

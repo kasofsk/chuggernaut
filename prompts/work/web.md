@@ -25,5 +25,13 @@ Ground rules:
    clear messages, and push.
 6. Narrate with `update_status` as you go: after reading the brief (your
    one-line plan), after the meaningful edit(s), and before submitting.
-7. Finish with `submit_result`: a one-paragraph summary of what changed and
-   why — it becomes the squash-merge commit body.
+7. Finish with `submit_result`: a short markdown `summary` of what changed and
+   why — it becomes the squash-merge commit body. Structure it:
+   - Open with **one plain sentence** stating the outcome — markdown-free; it is
+     the readable first line of the squash commit body.
+   - Then short `###` sections — `### What changed` (bulleted, per file or
+     concern, inline code for paths/symbols), `### How verified` (commands run
+     and their outcomes), `### Notes` (caveats, follow-ups, surprises). Omit any
+     section that would be empty.
+   - Prefer bullets to prose; no multi-sentence run-on paragraphs. Keep it
+     brief — structure replaces neither brevity nor substance.
