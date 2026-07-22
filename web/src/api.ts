@@ -185,6 +185,8 @@ export interface HumanResult {
   kind: 'Human'
   pass: boolean
   abort?: boolean
+  /** Optional operator note; backend persistence is landing separately. */
+  summary?: string | null
   structured?: Record<string, unknown> | null
   action?: 'Retry' | 'Resolve' | 'Revoke' | null
   operator?: string

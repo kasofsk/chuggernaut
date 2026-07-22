@@ -9,6 +9,7 @@ import {
   type HumanResult,
   type Job,
   type JobCriteria,
+  type ReviewFinding,
   type Task,
   type TaskResult,
   type TokenUsage,
@@ -447,8 +448,10 @@ function TaskReportBody({ task }: { task: Task }) {
 // Work agent: the summary paragraph up front, files_changed as a compact list,
 // notes below.
 function WorkReport({ r }: { r: WorkResult }) {
-  const files = r.structured?.files_changed
-  const notes = r.structured?.notes
+  const parsed = parseStructured(r.structured)
+  const obj = parsed?.kind === 'object' ? parsed.value : null
+  const files = Array.isArray(obj?.files_changed) ? (obj.files_changed as string[]) : null
+  const notes = typeof obj?.notes === 'string' ? obj.notes : null
   return (
     <div className="report-body">
       {r.summary ? (
@@ -471,10 +474,104 @@ function WorkReport({ r }: { r: WorkResult }) {
   )
 }
 
-// Agent evaluator (e.g. review): pass → notes; fail → findings, each finding
-// tappable to reveal its issue + suggestion. An abort flag rides alongside.
+// A structured payload as it arrives on the wire: an object, a JSON-encoded
+// string (agent evaluators emit this), or absent. Parsing is tolerant — a
+// string that is valid JSON *object* unwraps; anything else (parse failure, a
+// bare string, an array/number) is surfaced verbatim rather than dropped.
+type ParsedStructured =
+  | { kind: 'object'; value: Record<string, unknown> }
+  | { kind: 'raw'; text: string }
+  | null
+
+function parseStructured(structured: unknown): ParsedStructured {
+  if (structured == null) return null
+  if (typeof structured === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(structured)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { kind: 'object', value: parsed as Record<string, unknown> }
+      }
+    } catch {
+      // not JSON — fall through and show the raw string
+    }
+    return { kind: 'raw', text: structured }
+  }
+  if (typeof structured === 'object' && !Array.isArray(structured)) {
+    return { kind: 'object', value: structured as Record<string, unknown> }
+  }
+  return { kind: 'raw', text: JSON.stringify(structured, null, 2) }
+}
+
+// Findings list: each finding tappable to reveal its issue + suggestion. Every
+// field is optional, so an unexpected finding shape degrades to a bare row
+// rather than crashing.
+function FindingList({ findings }: { findings: ReviewFinding[] }) {
+  return (
+    <ul className="report-findings">
+      {findings.map((f, i) => (
+        <li key={i}>
+          <details>
+            <summary>
+              {f?.file ? <code>{f.file}</code> : 'finding'}
+              {f?.issue ? ` — ${f.issue}` : ''}
+            </summary>
+            {f?.issue && <p className="report-finding-issue">{f.issue}</p>}
+            {f?.suggestion && <p className="report-finding-suggestion">{f.suggestion}</p>}
+          </details>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+// Renders a parsed structured payload generically, keys open-ended: a
+// `summary`/`notes` string becomes the readable body up front, a `findings`
+// array becomes the expandable finding list, and every remaining key (verdict,
+// scope_check, how_checked, anything unknown) collapses into a small details
+// JSON block. An unparseable payload shows its raw text in the same block.
+function StructuredBody({ parsed }: { parsed: ParsedStructured }) {
+  if (!parsed) return null
+  if (parsed.kind === 'raw') {
+    return (
+      <details className="report-output">
+        <summary>details</summary>
+        <pre className="output">{parsed.text}</pre>
+      </details>
+    )
+  }
+  const value = parsed.value
+  const consumed = new Set<string>()
+  let body: string | null = null
+  if (typeof value.summary === 'string') {
+    body = value.summary
+    consumed.add('summary')
+  } else if (typeof value.notes === 'string') {
+    body = value.notes
+    consumed.add('notes')
+  }
+  const findings = Array.isArray(value.findings) ? (value.findings as ReviewFinding[]) : null
+  if (findings) consumed.add('findings')
+  const rest = Object.entries(value).filter(([k]) => !consumed.has(k))
+  return (
+    <>
+      {body && <p className="report-summary">{body}</p>}
+      {findings && findings.length > 0 && <FindingList findings={findings} />}
+      {rest.length > 0 && (
+        <details className="report-output">
+          <summary>details</summary>
+          <pre className="output">{JSON.stringify(Object.fromEntries(rest), null, 2)}</pre>
+        </details>
+      )}
+    </>
+  )
+}
+
+// Agent evaluator (e.g. review): the verdict badge, then the structured payload
+// rendered generically — the reviewer's summary is readable without expanding,
+// findings stay tappable, and scope-check/verdict/unknown keys tuck into a
+// collapsed details block. Handles both object and JSON-string wire shapes.
 function EvalReport({ r }: { r: EvalResult }) {
-  const findings = r.structured?.findings
+  const parsed = parseStructured(r.structured)
   return (
     <div className="report-body">
       <div className="report-verdict">
@@ -487,25 +584,7 @@ function EvalReport({ r }: { r: EvalResult }) {
           </span>
         )}
       </div>
-      {r.pass
-        ? r.structured?.notes && <p className="report-notes">{r.structured.notes}</p>
-        : findings &&
-          findings.length > 0 && (
-            <ul className="report-findings">
-              {findings.map((f, i) => (
-                <li key={i}>
-                  <details>
-                    <summary>
-                      {f.file ? <code>{f.file}</code> : 'finding'}
-                      {f.issue ? ` — ${f.issue}` : ''}
-                    </summary>
-                    {f.issue && <p className="report-finding-issue">{f.issue}</p>}
-                    {f.suggestion && <p className="report-finding-suggestion">{f.suggestion}</p>}
-                  </details>
-                </li>
-              ))}
-            </ul>
-          )}
+      <StructuredBody parsed={parsed} />
       <TokenChip usage={r.token_usage} />
     </div>
   )
@@ -514,6 +593,7 @@ function EvalReport({ r }: { r: EvalResult }) {
 // Command / CI evaluator: pass/fail + exit code, with the (long) output in a
 // collapsed details that scrolls inside its own box — never widens the page.
 function CommandReport({ r }: { r: CommandResult }) {
+  const parsed = parseStructured(r.structured)
   return (
     <div className="report-body">
       <div className="report-verdict">
@@ -522,19 +602,24 @@ function CommandReport({ r }: { r: CommandResult }) {
         </span>
         <span className="dim">exit {r.exit_code}</span>
       </div>
-      {r.output && (
+      <StructuredBody parsed={parsed} />
+      {r.output ? (
         <details className="report-output">
           <summary>output</summary>
           <pre className="output">{r.output}</pre>
         </details>
+      ) : (
+        <div className="dim">(no output)</div>
       )}
     </div>
   )
 }
 
-// A human resolution mirrored back as a result: the verdict, plus any
-// structured payload as collapsed JSON.
+// A human resolution mirrored back as a result: the verdict, an operator note
+// (render-if-present — backend persistence is landing separately), and any
+// structured payload rendered the same generic way as an agent report.
 function HumanReport({ r }: { r: HumanResult }) {
+  const parsed = parseStructured(r.structured)
   return (
     <div className="report-body">
       <div className="report-verdict">
@@ -545,12 +630,8 @@ function HumanReport({ r }: { r: HumanResult }) {
         {r.action && <span className="badge badge-blue">{r.action}</span>}
         {r.operator && <span className="dim">by {r.operator}</span>}
       </div>
-      {r.structured != null && (
-        <details className="report-output">
-          <summary>details</summary>
-          <pre className="output">{JSON.stringify(r.structured, null, 2)}</pre>
-        </details>
-      )}
+      {r.summary && <p className="report-summary">{r.summary}</p>}
+      <StructuredBody parsed={parsed} />
     </div>
   )
 }
@@ -558,11 +639,15 @@ function HumanReport({ r }: { r: HumanResult }) {
 // Shape drift / kinds this UI doesn't model: show the payload verbatim rather
 // than crash.
 function RawReport({ r }: { r: TaskResult }) {
+  const parsed = parseStructured((r as { structured?: unknown }).structured)
   return (
-    <details className="report-output">
-      <summary>result</summary>
-      <pre className="output">{JSON.stringify(r, null, 2)}</pre>
-    </details>
+    <div className="report-body">
+      <StructuredBody parsed={parsed} />
+      <details className="report-output">
+        <summary>result</summary>
+        <pre className="output">{JSON.stringify(r, null, 2)}</pre>
+      </details>
+    </div>
   )
 }
 
