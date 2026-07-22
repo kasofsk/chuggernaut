@@ -234,14 +234,59 @@ and release it, exactly like any other job.
    to `chuggernaut.prev`, `cargo build --release` (host dispatcher **and** api —
    one binary), `build.sh` (ssh-front image + channel binary only), builds `web/`
    and seeds `UI_ROOT`, idempotent `chug init`, rebuilds + restarts the `ssh`
-   container, `kickstart`s the dispatcher **and** the native api, then
-   health-checks `http://127.0.0.1:8080/` (non-zero fails the deploy job). No
-   cargo build runs inside the VM.
+   container, then hands off to **`restart-verify.sh`** (below), which restarts
+   the host services and gates the deploy on a real dispatcher health check.
+   `.deployed-sha` is only advanced once that check passes. No cargo build runs
+   inside the VM.
 
 **Self-restart is by design.** `update.sh` `kickstart`s the dispatcher that
 supervises the very `deploy` job running it. The restart drops in-memory state;
 §3.6 reconciliation re-attaches to the still-running work container on the next
 tick and processes its exit normally. Don't "fix" this.
+
+### Post-restart health check + rollback (`restart-verify.sh`)
+
+The last thing a deploy does is restart the dispatcher that supervises it — so a
+bad binary/config used to crash-loop with nothing watching (the **2026-07-22
+fleet-startup outage**: launchd retried a doomed dispatcher every 10s for ~40 min
+until a human diagnosed it over ssh). `deploy/prod/restart-verify.sh` closes
+that gap, on the Mini, before `update.sh` reports success:
+
+1. `kickstart`s the dispatcher **and** the native api onto the new binary.
+2. **Polls for genuine dispatcher health** for ~60s: a NATS `req.jobs.list`
+   request (via `nats-box` on the NATS network, `dispatcher.creds` — the same
+   pattern as `backup.sh`) that **only a live dispatcher answers**. This is
+   deliberately *not* a curl to the api: the api is a separate launchd service
+   and can answer HTTP while the dispatcher crash-loops beside it (on 2026-07-22
+   the api returned `dispatcher unavailable: no responders`). Success → the
+   deploy passes as before.
+3. **On health-check failure it rolls back**: restores `chuggernaut.prev`
+   (snapshotted by `update.sh` before the overwrite; it pairs with the previous
+   `.deployed-sha`), restarts, and re-verifies. If the rollback is healthy it
+   prints `new build failed health check, rolled back to <sha>, now healthy` and
+   **exits non-zero**, so the deploy job goes red while **prod stays up**. A
+   rollback that is *itself* unhealthy — or a missing `.prev` — exits with the
+   loudest possible message (launchd is left retrying; a human is needed *now*).
+
+The whole transcript streams back through the ssh session into the deploy task's
+log (visible in the UI log viewer), so a failed deploy reads as a story.
+
+**It survives its own supervisor's restart.** `restart-verify.sh` runs on the
+Mini (invoked over ssh by the deploy task) and `trap '' HUP`s, so the health
+check + rollback run to completion even if §3.6 reconciliation reaps the deploy
+container mid-run and drops the ssh session. Reconciliation marks the deploy
+task on the dispatcher's next start; the script keeps prod up independently.
+
+Exit codes (also the deploy job's failure mode): `0` healthy · `1` rolled back,
+prod healthy on the old binary · `2` rollback also unhealthy (prod down) · `3`
+no `.prev` to roll back to.
+
+**Test it** (no NATS/Docker/launchd needed — fakes `launchctl` and injects a
+probe that reads a GOOD/BAD marker "binary"):
+
+```sh
+deploy/prod/restart-verify.test.sh   # exits 0 iff all four cases pass
+```
 
 **The deploy key.** `tasks/deploy.sh` ssh's in with the `MINI_DEPLOY_KEY` project
 secret (injected as an env var — the private-key value; the script writes it to a

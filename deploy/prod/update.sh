@@ -50,6 +50,9 @@ echo "update: deploying $TARGET_SHA"
 git checkout --quiet --force "$TARGET_SHA"
 
 # Rollback snapshot of the currently-running binary before we overwrite it.
+# restart-verify.sh (step 6) restores this if the new build fails its health
+# check. It pairs with $MARK/.deployed-sha (still the PREVIOUS sha until step 6
+# succeeds), so the snapshot and the sha we roll back to always match.
 if [ -f target/release/chuggernaut ]; then
   cp -f target/release/chuggernaut target/release/chuggernaut.prev
 fi
@@ -109,26 +112,25 @@ target/release/chuggernaut init --keys-dir "$KEYS_DIR" --repos-root "$REPOS_ROOT
 #    nats runs unchanged, brought up by boot.sh).
 GIT_UID="$(id -u)" docker compose -f deploy/prod/compose.yaml up -d --build ssh
 
-# 6. Restart the dispatcher (host service; restart is safe — §3.6 reconciles
-#    in-memory state from KV).
-launchctl kickstart -k "gui/$(id -u)/com.chuggernaut.dispatcher"
-
-# 6b. Restart the native api onto the freshly built binary + seeded UI. KeepAlive
-#     rebinds :8080; the health check below tolerates the brief gap.
-launchctl kickstart -k "gui/$(id -u)/com.chuggernaut.api"
-
-# 7. Health check — non-zero exit here fails the deploy job. The native api
-#    binds loopback :8080 (run-api.sh).
-HEALTH_URL="http://127.0.0.1:8080/"
-ok=""
-for _ in $(seq 1 30); do
-  if curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then ok=1; break; fi
-  sleep 2
-done
-if [ -z "$ok" ]; then
-  echo "update: health check FAILED at $HEALTH_URL" >&2
-  exit 1
+# 6. Restart the host services (dispatcher + api — one binary, two launchd
+#    services; restart is safe, §3.6 reconciles in-memory state from KV) onto
+#    the new build, PROVE the dispatcher answered on NATS, and roll back to the
+#    previous binary if it didn't. restart-verify.sh does the health check +
+#    rollback ON the Mini and ignores SIGHUP, so a bad build never leaves
+#    launchd crash-looping unwatched even if this ssh session drops when the
+#    deploy container is reaped (§3.6 then marks the deploy task). Its transcript
+#    streams back through the ssh session into the deploy task's log. A non-zero
+#    exit here fails the deploy job — but prod is already back on the old binary.
+PREV_SHA="unknown"
+[ -f "$MARK" ] && PREV_SHA="$(cat "$MARK")"
+if deploy/prod/restart-verify.sh "$TARGET_SHA" "$PREV_SHA"; then
+  # Only record success once the dispatcher has genuinely come up on the new SHA.
+  echo "$TARGET_SHA" > "$MARK"
+  echo "update: deployed $TARGET_SHA OK"
+else
+  rc=$?
+  # restart-verify.sh already printed the story (rolled back, or shouting for
+  # help). Leave .deployed-sha untouched: prod is NOT on $TARGET_SHA.
+  echo "update: deploy of $TARGET_SHA FAILED health check (exit $rc)" >&2
+  exit "$rc"
 fi
-
-echo "$TARGET_SHA" > "$MARK"
-echo "update: deployed $TARGET_SHA OK"
