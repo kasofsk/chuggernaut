@@ -155,6 +155,57 @@ deploy/prod/install-launchd.sh uninstall  # remove all agents
 tail -f ~/Library/Logs/chuggernaut/*.log
 ```
 
+### Cloning a platform repo (SSH front)
+
+Platform repos live behind the SSH front (port 2222). Access is by a **CA-signed
+user certificate** (§7.3), not a registered key — no per-user key upload. Mint a
+24h cert for your existing SSH key with the `chuggernaut` CLI, authenticated by a
+bearer token (`admin user token --email you@example.com --ttl 720h`, saved to a
+file):
+
+```sh
+# One 24h cert; re-run when it expires (v1 UX is manual refresh, spec §7.5).
+chuggernaut ssh-cert \
+  --base-url https://<api-host> \
+  --token-file ~/.config/chuggernaut/token
+# → writes ~/.ssh/id_ed25519-cert-chug.pub next to ~/.ssh/id_ed25519.pub
+```
+
+<details><summary>curl equivalent (no CLI)</summary>
+
+```sh
+curl -sf https://<api-host>/auth/ssh-cert \
+  -H "Authorization: Bearer $(cat ~/.config/chuggernaut/token)" \
+  -H 'Content-Type: application/json' \
+  --data "$(jq -Rn --arg k "$(cat ~/.ssh/id_ed25519.pub)" '{public_key:$k}')" \
+  | jq -r .certificate > ~/.ssh/id_ed25519-cert-chug.pub
+```
+</details>
+
+Point git at the SSH front with an `~/.ssh/config` `Host` block so the cert is
+presented automatically (`IdentitiesOnly yes` stops the agent from offering other
+keys first):
+
+```
+Host chug-mini
+    HostName <mini>            # the Tailscale name of the Mini
+    Port 2222
+    User git
+    IdentityFile ~/.ssh/id_ed25519
+    CertificateFile ~/.ssh/id_ed25519-cert-chug.pub
+    IdentitiesOnly yes
+```
+
+```sh
+# Clone / fetch any repo you have Viewer+ on (owner/project → the repo path):
+git clone ssh://git@chug-mini/kasofsk/chuggernaut.git
+git -C chuggernaut fetch origin integration    # e.g. pull the integration branch
+```
+
+Authorization is by role (spec §5.2): pull needs Viewer+, push needs Member+ and
+only `refs/heads/job/N`. A push to any other ref (e.g. `main`, `integration`) is
+refused by the pre-receive hook.
+
 ---
 
 ## 3. Deployment (a `deploy` job) + the GitHub mirror

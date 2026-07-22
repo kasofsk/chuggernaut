@@ -229,6 +229,47 @@ pub async fn me(Auth(identity): Auth) -> Json<Identity> {
     Json(identity)
 }
 
+#[derive(serde::Deserialize)]
+pub struct SshCertBody {
+    pub public_key: String,
+}
+
+/// §7.3: mint a 24h user SSH certificate for the caller's public key. Any
+/// authenticated user (§7.5). The email and roles are taken from the session
+/// server-side — never the request body — so the dispatcher signs a cert whose
+/// principal is the caller's email and whose forced command carries the caller's
+/// roles as of signing time. Junk keys are rejected here (422) before they ever
+/// reach the CA.
+pub async fn ssh_cert(
+    State(state): State<SharedState>,
+    Auth(identity): Auth,
+    Json(body): Json<SshCertBody>,
+) -> ApiResult<Response> {
+    // Size-cap: a public-key line is a few hundred bytes; anything larger is
+    // not a key we would sign.
+    if body.public_key.len() > 8 * 1024 {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "public key too large",
+        ));
+    }
+    if !auth::ssh::valid_public_key_line(&body.public_key) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unparseable SSH public key",
+        ));
+    }
+    // The dispatcher loads the caller's roles from their user record and signs;
+    // we forward only the authenticated email, never a client-supplied identity.
+    forward(
+        &state,
+        &store::subjects::ssh_sign_user_cert(),
+        serde_json::json!({ "public_key": body.public_key, "email": identity.sub }),
+        StatusCode::OK,
+    )
+    .await
+}
+
 // ── Projects ─────────────────────────────────────────────────────────────
 
 /// Projects visible to the caller. Platform admins see the whole registry

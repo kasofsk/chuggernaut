@@ -363,6 +363,44 @@ impl SshCa {
     }
 }
 
+/// §7.3: structurally validate an OpenSSH public-key line
+/// (`<algo> <base64> [comment]`) without shelling out, so the mint endpoint can
+/// reject junk with a 422 before it ever reaches the CA (a failed `ssh-keygen
+/// -s` would otherwise surface as an opaque 500). The base64 blob's first field
+/// is the algorithm name and must match the leading token — the same shape
+/// `ssh-keygen` verifies.
+pub fn valid_public_key_line(line: &str) -> bool {
+    use base64::Engine;
+    // OpenSSH public-key algorithm names (the leading token, and the blob's
+    // first embedded string).
+    const ALGOS: &[&str] = &[
+        "ssh-ed25519",
+        "ssh-rsa",
+        "ssh-dss",
+        "ecdsa-sha2-nistp256",
+        "ecdsa-sha2-nistp384",
+        "ecdsa-sha2-nistp521",
+        "sk-ssh-ed25519@openssh.com",
+        "sk-ecdsa-sha2-nistp256@openssh.com",
+    ];
+    let mut fields = line.split_whitespace();
+    let (Some(algo), Some(b64)) = (fields.next(), fields.next()) else {
+        return false;
+    };
+    if !ALGOS.contains(&algo) {
+        return false;
+    }
+    let Ok(blob) = base64::engine::general_purpose::STANDARD.decode(b64) else {
+        return false;
+    };
+    // First field: u32 big-endian length, then that many bytes = the algo name.
+    let Some(len_bytes) = blob.get(0..4) else {
+        return false;
+    };
+    let len = u32::from_be_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
+    blob.get(4..4 + len) == Some(algo.as_bytes())
+}
+
 fn path_str(path: &std::path::Path) -> Result<&str, AuthError> {
     path.to_str()
         .ok_or_else(|| AuthError::Internal(format!("non-utf8 path {}", path.display())))
@@ -626,5 +664,24 @@ mod tests {
         let listing = String::from_utf8_lossy(&out.stdout).into_owned();
         assert!(listing.contains("d@e.com"), "{listing}");
         assert!(listing.contains("--kind user"), "{listing}");
+    }
+
+    #[test]
+    fn public_key_line_validation() {
+        // A real ed25519 public key (algo token matches the embedded name).
+        let ed25519 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ3BSouHtkAsuz5DdZynOoj3uotqptzsQ+Ws0Huk+jIS me@host";
+        assert!(valid_public_key_line(ed25519));
+        // Trailing comment is optional.
+        assert!(valid_public_key_line(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ3BSouHtkAsuz5DdZynOoj3uotqptzsQ+Ws0Huk+jIS"
+        ));
+        // Junk: not two whitespace fields, unknown algo, non-base64 body, or a
+        // blob whose embedded algo name disagrees with the token.
+        assert!(!valid_public_key_line(""));
+        assert!(!valid_public_key_line("not-a-key"));
+        assert!(!valid_public_key_line("ssh-magic AAAAC3NzaC1lZDI1NTE5AAAA"));
+        assert!(!valid_public_key_line("ssh-ed25519 @@@not-base64@@@"));
+        // Valid base64, but the embedded name is `ssh-rsa`, not `ssh-ed25519`.
+        assert!(!valid_public_key_line("ssh-ed25519 AAAAB3NzaC1yc2E="));
     }
 }

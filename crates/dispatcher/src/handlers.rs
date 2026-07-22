@@ -213,6 +213,9 @@ pub async fn spawn_api_handlers(
     hook_bin: Option<std::path::PathBuf>,
     // The New Job job-wizard LLM config; None → the wizard subject replies 503.
     wizard: Option<Arc<WizardConfig>>,
+    // SSH CA private key path (§7.3) for user-cert minting; None (no ssh_ca, or
+    // `file://` dev repos) → `req.ssh.sign-user-cert` replies 503.
+    ssh_ca: Option<std::path::PathBuf>,
 ) -> store::Result<()> {
     // ── req.projects.create — bare repo + hook + starter template ───────
     let mut projects_sub = store
@@ -319,7 +322,73 @@ pub async fn spawn_api_handlers(
             }
         });
     }
+    // ── req.ssh.sign-user-cert — §7.3 user SSH cert minting. The API forwards
+    // the authenticated caller's email + submitted public key; we load the
+    // user's roles from their record (never a client-supplied map) and sign a
+    // 24h cert with the CA key.
+    let mut ssh_sub = store
+        .subscribe_requests(&store::subjects::ssh_sign_user_cert())
+        .await?;
+    let ssh_store = store.clone();
+    tokio::spawn(async move {
+        while let Some(req) = ssh_sub.next().await {
+            #[derive(serde::Deserialize)]
+            struct Body {
+                public_key: String,
+                email: String,
+            }
+            let body = match serde_json::from_slice::<Body>(&req.payload) {
+                Err(e) => bad_request(&e.to_string()),
+                Ok(b) => {
+                    sign_user_cert(&ssh_store, ssh_ca.as_deref(), &b.email, &b.public_key).await
+                }
+            };
+            req.respond(body).await;
+        }
+    });
+
     spawn_read_handlers(store, handle, repos, wizard).await
+}
+
+/// §7.3 user SSH cert minting. Loads the caller's roles from their user record
+/// — the roles map baked into the cert is the user's current grants, never a
+/// client-supplied one — and signs a 24h cert with the CA key. 503 when the CA
+/// key is not mounted; 404 when the user record is missing.
+async fn sign_user_cert(
+    store: &NatsStore,
+    ssh_ca: Option<&std::path::Path>,
+    email: &str,
+    public_key: &str,
+) -> Vec<u8> {
+    let Some(ca_key) = ssh_ca else {
+        return service_unavailable("ssh certificate authority not configured");
+    };
+    let users = match store.raw_bucket(store::buckets::USERS).await {
+        Ok(b) => b,
+        Err(e) => return error_reply(&e.into()),
+    };
+    let user: Option<types::User> = match users.get_json(&store::keys::user_key(email)).await {
+        Ok(u) => u,
+        Err(e) => return error_reply(&e.into()),
+    };
+    let Some(user) = user else {
+        return NOT_FOUND.to_vec();
+    };
+    let ca = auth::ssh::SshCa::new(ca_key);
+    match ca
+        .sign_user_cert(
+            public_key,
+            &user.email,
+            &user.project_roles,
+            chrono::Duration::hours(24),
+        )
+        .await
+    {
+        Ok(certificate) => ok_reply(&serde_json::json!({ "certificate": certificate })),
+        // A bad key that slipped past the API's structural check, or a CA
+        // failure — 500; the API validated parseability, so this is unexpected.
+        Err(e) => error_reply(&CoreError::Config(e.to_string())),
+    }
 }
 
 /// §12.2 project creation, dispatcher-side (the API path; `admin project

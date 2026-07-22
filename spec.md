@@ -1277,7 +1277,7 @@ req.eval.submit.{owner}.{project}.{seq}.{task_id}
 req.step.report.{owner}.{project}.{seq}.{task_id}            harness-only; appends StepRecord (see §4.5)
 req.usage.query.{owner}.{project}
 req.usage.query.{owner}.{project}.{seq}
-req.ssh.sign-user-cert              payload: { "public_key": string }
+req.ssh.sign-user-cert              payload: { public_key, email }; response: { certificate } — §7.3 user cert. `email` is the authenticated caller's, injected by the API from the JWT (never client-supplied); the dispatcher loads that user's roles from the record and signs a 24h cert (principal = email, roles in the forced command). 503 when the CA key isn't mounted; 404 when the user record is missing.
 ```
 
 Push subscription management (`POST /api/v1/push/subscribe`, `DELETE /api/v1/push/subscribe/{subscription_id}`) is handled by the API layer directly via `push.*` KV writes/deletes — no NATS request-reply intermediary. The API layer reads the user identity from the JWT cookie to construct the KV key.

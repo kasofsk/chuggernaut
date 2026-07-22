@@ -175,6 +175,14 @@ pub fn wizard_chat(owner: &str, project: &str) -> String {
     format!("req.wizard.chat.{owner}.{project}")
 }
 
+/// §7.3: mint a 24h user SSH certificate. Payload: `{ public_key, email }` —
+/// the email is the authenticated caller's, read from the JWT by the API; a
+/// client-supplied identity is never forwarded. No owner/project token: the
+/// signed cert spans whatever roles the user holds at signing time.
+pub fn ssh_sign_user_cert() -> String {
+    "req.ssh.sign-user-cert".into()
+}
+
 // ── Worker-node protocol (spec §3.1) ────────────────────────────────────────
 // Published by the dispatcher's fleet backend, served by the `chuggernaut
 // worker` daemon on the node. Node names are validated subject-safe at

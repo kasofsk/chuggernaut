@@ -39,6 +39,8 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
         .route("/auth/login", post(routes::login))
         .route("/auth/logout", post(routes::logout))
         .route("/auth/me", get(routes::me))
+        // User SSH cert minting (§7.3): any authenticated user.
+        .route("/auth/ssh-cert", post(routes::ssh_cert))
         // Projects
         .route(
             "/api/v1/projects",

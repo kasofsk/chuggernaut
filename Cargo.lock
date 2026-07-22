@@ -642,6 +642,7 @@ dependencies = [
  "chrono",
  "clap",
  "nkeys",
+ "reqwest",
  "schemars 1.2.1",
  "serde_json",
  "serde_yaml",

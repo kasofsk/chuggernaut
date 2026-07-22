@@ -151,6 +151,7 @@ async fn http_bridge_end_to_end() {
         Arc::new(vcs::RepoManager::new(&repos_root)),
         None,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -677,4 +678,180 @@ async fn http_bridge_end_to_end() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// Generate an ed25519 keypair with ssh-keygen; return its public-key line.
+fn keygen(path: &std::path::Path, comment: &str) -> String {
+    assert!(
+        std::process::Command::new("ssh-keygen")
+            .args([
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                comment,
+                "-f",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::read_to_string(path.with_extension("pub")).unwrap()
+}
+
+/// §7.3 user SSH cert minting: `POST /auth/ssh-cert` signs the caller's public
+/// key into a 24h cert whose principals are `{email},git` and whose forced
+/// command embeds the caller's roles as read from their user record.
+#[tokio::test]
+async fn ssh_cert_minting() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+
+    // A CA keypair for the dispatcher's user-cert handler, and JWT keys + user.
+    let keys_dir = tempfile::tempdir().unwrap();
+    let ca = keys_dir.path().join("ssh_ca");
+    keygen(&ca, "ca");
+    let (private, public) = gen_jwt_keys(keys_dir.path());
+
+    let repos_root = tempfile::tempdir().unwrap();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root.path()),
+        Arc::new(FakeBackend::new()),
+        Arc::new(FakeProvider::new()),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let handle = spawn(core);
+    spawn_api_handlers(
+        &store,
+        handle,
+        Arc::new(vcs::RepoManager::new(repos_root.path())),
+        None,
+        None,
+        Some(ca.clone()),
+    )
+    .await
+    .unwrap();
+
+    let users = store.raw_bucket(store::buckets::USERS).await.unwrap();
+    let user = User {
+        id: "op".into(),
+        email: "op@example.com".into(),
+        password_hash: auth::hash_password("hunter2").unwrap(),
+        project_roles: [("acme/api".to_string(), ProjectRole::Member)].into(),
+        platform_admin: false,
+        created_at: chrono::Utc::now(),
+    };
+    users
+        .put_json(&store::keys::user_key(&user.email), &user)
+        .await
+        .unwrap();
+
+    let state: SharedState = Arc::new(ApiState {
+        store: store.clone(),
+        signer: auth::jwt::JwtSigner::from_pem(&private).unwrap(),
+        verifier: auth::jwt::JwtVerifier::from_pem(&public).unwrap(),
+        session_ttl: chrono::Duration::hours(1),
+        artifacts: None,
+    });
+    let router = api::router(state, None);
+
+    // The caller's SSH public key to be signed.
+    let user_key = keys_dir.path().join("id_ed25519");
+    let pubkey = keygen(&user_key, "op@example.com");
+
+    // Unauthenticated → 401.
+    let (status, _, _) = call(
+        &router,
+        "POST",
+        "/auth/ssh-cert",
+        None,
+        Some(serde_json::json!({ "public_key": pubkey })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (_, _, cookie) = call(
+        &router,
+        "POST",
+        "/auth/login",
+        None,
+        Some(serde_json::json!({"email": "op@example.com", "password": "hunter2"})),
+    )
+    .await;
+    let cookie = cookie.unwrap();
+
+    // Junk public key → 422 (rejected before it reaches the CA).
+    let (status, _, _) = call(
+        &router,
+        "POST",
+        "/auth/ssh-cert",
+        Some(&cookie),
+        Some(serde_json::json!({ "public_key": "not-a-real-key" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Authed with a real key → 200 + a signed certificate.
+    let (status, body, _) = call(
+        &router,
+        "POST",
+        "/auth/ssh-cert",
+        Some(&cookie),
+        Some(serde_json::json!({ "public_key": pubkey })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let cert = body["certificate"].as_str().unwrap();
+    assert!(cert.starts_with("ssh-ed25519-cert-v01@openssh.com"));
+
+    // Inspect the cert: principals `op@example.com` + `git`, roles from the
+    // user record baked into the forced command, and a 24h validity window.
+    let cert_path = keys_dir.path().join("cert.pub");
+    std::fs::write(&cert_path, cert).unwrap();
+    let out = std::process::Command::new("ssh-keygen")
+        .args(["-L", "-f", cert_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let listing = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(listing.contains("op@example.com"), "{listing}");
+    assert!(listing.contains("git"), "{listing}");
+    assert!(listing.contains("--kind user"), "{listing}");
+    // base64url(no-pad) of {"acme/api":"member"} — the user's roles at signing.
+    assert!(
+        listing.contains("--roles eyJhY21lL2FwaSI6Im1lbWJlciJ9"),
+        "{listing}"
+    );
+    // Validity window is exactly 24h (spec §7.3).
+    let window = cert_validity_seconds(&listing);
+    assert_eq!(window, 24 * 3600, "{listing}");
+}
+
+/// Parse the `Valid: from <ts> to <ts>` line ssh-keygen -L prints and return
+/// the window in seconds.
+fn cert_validity_seconds(listing: &str) -> i64 {
+    let line = listing
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("Valid:"))
+        .expect("no Valid: line");
+    let mut parts = line.split_whitespace();
+    // "Valid:" "from" <from> "to" <to>
+    let from = parts.nth(2).unwrap();
+    let to = parts.nth(1).unwrap();
+    let parse =
+        |s: &str| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").expect("timestamp");
+    (parse(to) - parse(from)).num_seconds()
 }

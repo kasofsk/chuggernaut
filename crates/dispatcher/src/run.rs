@@ -65,6 +65,9 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
     // Best-effort: a failed write must not stop the dispatcher from starting.
     publish_config_snapshot(&store, &config, core_config.age_identity.is_some()).await;
 
+    // §7.3 user-cert minting signs with the CA key directly (no job-record
+    // write), so it rides the API handlers rather than the single-writer core.
+    let ssh_ca = core_config.ssh_ca.clone();
     let core = Core::new(store.clone(), repos, backend, provider, core_config).await?;
     let handle = spawn(core);
     handlers::spawn_container_handlers(&store, handle.clone()).await?;
@@ -74,6 +77,7 @@ pub async fn run(config: DispatcherConfig) -> Result<CoreHandle> {
         Arc::new(RepoManager::new(&config.repos_root)),
         config.hook_bin.clone(),
         config.wizard.clone().map(Arc::new),
+        ssh_ca,
     )
     .await?;
     tracing::info!(nats = %config.nats_url, repos = %config.repos_root.display(), "dispatcher up");
