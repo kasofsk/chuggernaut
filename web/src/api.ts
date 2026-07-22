@@ -126,6 +126,90 @@ export type TaskKind =
   | { kind: 'Agent'; provider: string; model: string | null; prompt: string }
   | { kind: 'Human'; prompt: string }
 
+/** Token accounting on agent-run results (Work, Agent eval, Triage). */
+export interface TokenUsage {
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens?: number | null
+  cache_write_tokens?: number | null
+}
+
+/** submit_result structured payload from a Work agent. */
+export interface WorkStructured {
+  files_changed?: string[]
+  notes?: string
+}
+
+/** One issue a review evaluator raised (structured.findings on a fail). */
+export interface ReviewFinding {
+  file?: string
+  issue?: string
+  suggestion?: string
+}
+
+/** Agent evaluator structured payload: notes on a pass, findings on a fail. */
+export interface EvalStructured {
+  notes?: string
+  findings?: ReviewFinding[]
+}
+
+/** Closing report of a Work-phase task (agent, or a human-claimed attempt). */
+export interface WorkResult {
+  kind: 'Work'
+  summary?: string | null
+  structured?: WorkStructured | null
+  token_usage?: TokenUsage | null
+}
+
+/** Verdict of an agent evaluator (e.g. `review`): pass/fail + structured. */
+export interface EvalResult {
+  kind: 'Agent'
+  pass: boolean
+  /** "not satisfiable by rework" — implies pass:false, skips remaining budget. */
+  abort?: boolean
+  structured?: EvalStructured | null
+  token_usage?: TokenUsage | null
+}
+
+/** Verdict of a command/CI evaluator: exit code + (possibly long) output. */
+export interface CommandResult {
+  kind: 'Command'
+  pass: boolean
+  exit_code: number
+  output: string
+  structured?: Record<string, unknown> | null
+}
+
+/** An operator's resolution of a human task, mirrored back as the result. */
+export interface HumanResult {
+  kind: 'Human'
+  pass: boolean
+  abort?: boolean
+  structured?: Record<string, unknown> | null
+  action?: 'Retry' | 'Resolve' | 'Revoke' | null
+  operator?: string
+  resolved_at?: string
+}
+
+/** An advisory triage agent's written assessment (its own JobDetail section). */
+export interface TriageResult {
+  kind: 'Triage'
+  assessment: string
+  token_usage?: TokenUsage | null
+}
+
+/**
+ * A task's closing report (types::TaskResult, §6.2). Discriminated on `kind`;
+ * every field is optional-tolerant so shape drift never crashes the UI, and an
+ * unrecognized `kind` falls through to a raw-JSON render at the call site.
+ */
+export type TaskResult =
+  | WorkResult
+  | EvalResult
+  | CommandResult
+  | HumanResult
+  | TriageResult
+
 export interface Task {
   id: number
   job_seq: number
@@ -141,7 +225,7 @@ export interface Task {
   container_id: string | null
   /// Agent tasks only: names the captured session transcript.
   session_id: string | null
-  result: Record<string, unknown> | null
+  result: TaskResult | null
   created_at: string
   started_at: string | null
   completed_at: string | null

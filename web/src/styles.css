@@ -665,6 +665,103 @@ td.actions button {
   padding: 0.15rem 0;
 }
 
+/* Reports: each task's closing report as a top-to-bottom thread. Everything
+   wide (long summaries, file paths, findings, command output) must scroll or
+   wrap inside its own report — the page body never moves sideways. */
+.reports {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.report {
+  border-top: 1px solid var(--border);
+  padding: var(--sp-3) 0;
+}
+.report:first-child {
+  border-top: none;
+}
+.report-head {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--fs-sm);
+  color: var(--dim);
+}
+.report-body {
+  margin-top: var(--sp-2);
+}
+.report-summary {
+  margin: 0 0 var(--sp-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.report-notes,
+.report-finding-issue,
+.report-finding-suggestion {
+  margin: var(--sp-1) 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.report-finding-suggestion {
+  color: var(--dim);
+}
+.report-files {
+  list-style: none;
+  margin: 0 0 var(--sp-2);
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.report-files li {
+  padding: 0.1rem 0;
+  overflow-wrap: anywhere;
+}
+.report-verdict {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+  margin-bottom: var(--sp-2);
+}
+.report-findings {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+.report-findings li {
+  padding: 0.1rem 0;
+}
+.report-findings summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+/* Command output can run long: bound it and scroll both axes inside the box. */
+.report-output {
+  margin-top: var(--sp-2);
+}
+.report-output summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: var(--fs-sm);
+}
+.report-output .output {
+  background: var(--inset);
+  border-radius: var(--r-sm);
+  padding: 0.6rem;
+  margin: var(--sp-2) 0 0;
+  max-height: 50vh;
+  overflow: auto;
+  white-space: pre;
+  font-size: var(--fs-xs);
+}
+.report-empty {
+  font-style: italic;
+}
+.report-tokens {
+  margin-top: var(--sp-2);
+  font-size: var(--fs-xs);
+}
+
 /* Artifacts: transcripts and container logs (§4.2). */
 .linklike {
   background: none;
@@ -907,6 +1004,12 @@ td.actions button {
   .artifact-head {
     flex-wrap: wrap;
     row-gap: 0.2rem;
+  }
+  /* Report headers (task label + state badge) wrap instead of colliding when
+     an evaluator name is long. */
+  .report-head {
+    flex-wrap: wrap;
+    row-gap: 0.15rem;
   }
 }
 

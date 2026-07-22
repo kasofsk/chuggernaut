@@ -1,6 +1,19 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ApiError, api, type DiffResponse, type Job, type JobCriteria, type Task } from '../api'
+import {
+  ApiError,
+  api,
+  type CommandResult,
+  type DiffResponse,
+  type EvalResult,
+  type HumanResult,
+  type Job,
+  type JobCriteria,
+  type Task,
+  type TaskResult,
+  type TokenUsage,
+  type WorkResult,
+} from '../api'
 import { useDebouncedCallback, useProjectEvents, type JobEvent } from '../useEvents'
 import { StateBadge, TaskBadge } from '../components/StateBadge'
 import { ResolveForm } from '../components/ResolveForm'
@@ -220,8 +233,7 @@ export function JobDetail() {
         <section className="card">
           <h2>Triage <span className="dim">advisory — nothing changed on the job</span></h2>
           {triageTasks.map((t) => {
-            const r = t.result as Record<string, unknown> | null
-            const assessment = r && typeof r.assessment === 'string' ? r.assessment : null
+            const assessment = t.result?.kind === 'Triage' ? t.result.assessment : null
             return (
               <div className="triage-task" key={t.id}>
                 <div className="inbox-head">
@@ -294,6 +306,8 @@ export function JobDetail() {
         </div>
       </section>
 
+      <TaskReports tasks={tasks} />
+
       <ChannelLog events={events} />
 
       {diff && diff.diff && (
@@ -354,18 +368,212 @@ function setActionError(setError: (s: string) => void) {
   return (e: unknown) => setError(e instanceof Error ? e.message : 'action failed')
 }
 
+// One-line gloss for the tasks table's detail column; the full report renders
+// in the Reports thread below. Triage prose lives in its own section.
 function resultSummary(t: Task): string {
-  const r = t.result as Record<string, unknown> | null
+  const r = t.result
   if (!r) return ''
-  const parts: string[] = []
-  if ('pass' in r) parts.push(r.pass ? 'pass' : 'fail')
-  if ('exit_code' in r && typeof r.exit_code === 'number') parts.push(`exit ${r.exit_code}`)
-  if ('summary' in r && r.summary) parts.push(String(r.summary))
-  if ('action' in r && r.action) parts.push(String(r.action))
-  // Triage carries prose; the full text renders in the assessments section.
-  if ('assessment' in r && typeof r.assessment === 'string') parts.push('assessment ↓')
-  else if ('structured' in r && r.structured) parts.push(JSON.stringify(r.structured))
-  return parts.join(' · ').slice(0, 200)
+  switch (r.kind) {
+    case 'Work':
+      return r.summary ? String(r.summary).slice(0, 200) : ''
+    case 'Agent':
+      return [r.pass ? 'pass' : 'fail', r.abort ? 'abort' : ''].filter(Boolean).join(' · ')
+    case 'Command':
+      return `${r.pass ? 'pass' : 'fail'} · exit ${r.exit_code}`
+    case 'Human':
+      return [r.pass ? 'pass' : 'fail', r.action ?? ''].filter(Boolean).join(' · ')
+    case 'Triage':
+      return 'assessment ↓'
+    default:
+      return ''
+  }
+}
+
+/**
+ * The Work→Evaluation→WrapUp thread, in task order (chronological): each task's
+ * closing report rendered top-to-bottom so an operator can read what every
+ * work/review/CI step actually said. Triage runs are advisory and render in
+ * their own section above, so they're skipped here.
+ */
+function TaskReports({ tasks }: { tasks: Task[] }) {
+  const thread = tasks.filter((t) => t.phase !== 'Triage')
+  if (thread.length === 0) return null
+  return (
+    <section className="card">
+      <h2>Reports</h2>
+      <ol className="reports">
+        {thread.map((t) => (
+          <li className="report" key={t.id}>
+            <div className="report-head">
+              <span>
+                task {t.id} · {t.phase}
+                {t.evaluator ? ` · ${t.evaluator}` : ''}
+                {t.performed_by === 'human' && <span className="dim"> · by human</span>}
+              </span>
+              <TaskBadge state={t.state} />
+            </div>
+            <TaskReportBody task={t} />
+          </li>
+        ))}
+      </ol>
+    </section>
+  )
+}
+
+// Dispatches on the result's discriminant; an absent result is the crashed /
+// never-ran case (e.g. a launch that found no free slot) — say so plainly
+// rather than rendering blank. Unknown kinds fall through to raw JSON.
+function TaskReportBody({ task }: { task: Task }) {
+  const r = task.result
+  if (!r) {
+    if (task.state === 'Running') return <div className="dim">running…</div>
+    if (task.state === 'Pending') return <div className="dim">not started</div>
+    return <div className="report-empty dim">no report — task did not produce output</div>
+  }
+  switch (r.kind) {
+    case 'Work':
+      return <WorkReport r={r} />
+    case 'Agent':
+      return <EvalReport r={r} />
+    case 'Command':
+      return <CommandReport r={r} />
+    case 'Human':
+      return <HumanReport r={r} />
+    default:
+      return <RawReport r={r} />
+  }
+}
+
+// Work agent: the summary paragraph up front, files_changed as a compact list,
+// notes below.
+function WorkReport({ r }: { r: WorkResult }) {
+  const files = r.structured?.files_changed
+  const notes = r.structured?.notes
+  return (
+    <div className="report-body">
+      {r.summary ? (
+        <p className="report-summary">{r.summary}</p>
+      ) : (
+        <div className="dim">no summary</div>
+      )}
+      {files && files.length > 0 && (
+        <ul className="report-files">
+          {files.map((f, i) => (
+            <li key={i}>
+              <code>{f}</code>
+            </li>
+          ))}
+        </ul>
+      )}
+      {notes && <p className="report-notes">{notes}</p>}
+      <TokenChip usage={r.token_usage} />
+    </div>
+  )
+}
+
+// Agent evaluator (e.g. review): pass → notes; fail → findings, each finding
+// tappable to reveal its issue + suggestion. An abort flag rides alongside.
+function EvalReport({ r }: { r: EvalResult }) {
+  const findings = r.structured?.findings
+  return (
+    <div className="report-body">
+      <div className="report-verdict">
+        <span className={`badge ${r.pass ? 'badge-green' : 'badge-red'}`}>
+          {r.pass ? 'passed' : 'failed'}
+        </span>
+        {r.abort && (
+          <span className="badge badge-orange" title="not satisfiable by rework — escalates">
+            abort
+          </span>
+        )}
+      </div>
+      {r.pass
+        ? r.structured?.notes && <p className="report-notes">{r.structured.notes}</p>
+        : findings &&
+          findings.length > 0 && (
+            <ul className="report-findings">
+              {findings.map((f, i) => (
+                <li key={i}>
+                  <details>
+                    <summary>
+                      {f.file ? <code>{f.file}</code> : 'finding'}
+                      {f.issue ? ` — ${f.issue}` : ''}
+                    </summary>
+                    {f.issue && <p className="report-finding-issue">{f.issue}</p>}
+                    {f.suggestion && <p className="report-finding-suggestion">{f.suggestion}</p>}
+                  </details>
+                </li>
+              ))}
+            </ul>
+          )}
+      <TokenChip usage={r.token_usage} />
+    </div>
+  )
+}
+
+// Command / CI evaluator: pass/fail + exit code, with the (long) output in a
+// collapsed details that scrolls inside its own box — never widens the page.
+function CommandReport({ r }: { r: CommandResult }) {
+  return (
+    <div className="report-body">
+      <div className="report-verdict">
+        <span className={`badge ${r.pass ? 'badge-green' : 'badge-red'}`}>
+          {r.pass ? 'passed' : 'failed'}
+        </span>
+        <span className="dim">exit {r.exit_code}</span>
+      </div>
+      {r.output && (
+        <details className="report-output">
+          <summary>output</summary>
+          <pre className="output">{r.output}</pre>
+        </details>
+      )}
+    </div>
+  )
+}
+
+// A human resolution mirrored back as a result: the verdict, plus any
+// structured payload as collapsed JSON.
+function HumanReport({ r }: { r: HumanResult }) {
+  return (
+    <div className="report-body">
+      <div className="report-verdict">
+        <span className={`badge ${r.pass ? 'badge-green' : 'badge-red'}`}>
+          {r.pass ? 'passed' : 'failed'}
+        </span>
+        {r.abort && <span className="badge badge-orange">abort</span>}
+        {r.action && <span className="badge badge-blue">{r.action}</span>}
+        {r.operator && <span className="dim">by {r.operator}</span>}
+      </div>
+      {r.structured != null && (
+        <details className="report-output">
+          <summary>details</summary>
+          <pre className="output">{JSON.stringify(r.structured, null, 2)}</pre>
+        </details>
+      )}
+    </div>
+  )
+}
+
+// Shape drift / kinds this UI doesn't model: show the payload verbatim rather
+// than crash.
+function RawReport({ r }: { r: TaskResult }) {
+  return (
+    <details className="report-output">
+      <summary>result</summary>
+      <pre className="output">{JSON.stringify(r, null, 2)}</pre>
+    </details>
+  )
+}
+
+// Token accounting, small and muted; absent when the runner didn't measure it.
+function TokenChip({ usage }: { usage?: TokenUsage | null }) {
+  if (!usage) return null
+  return (
+    <div className="report-tokens dim">
+      {usage.input_tokens.toLocaleString()} in · {usage.output_tokens.toLocaleString()} out
+    </div>
+  )
 }
 
 // A task's start time as a compact local HH:MM:SS; blank until it starts. The
