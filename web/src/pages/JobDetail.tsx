@@ -272,7 +272,7 @@ export function JobDetail() {
             {tasks.map((t) => (
               <tr key={t.id}>
                 <td>{t.id}</td>
-                <td>{t.phase}</td>
+                <td><PhaseLabel phase={t.phase} /></td>
                 <td>
                   {t.cycle}
                   {t.attempt > 1 ? ` (attempt ${t.attempt})` : ''}
@@ -367,6 +367,25 @@ function CriteriaCard({ owner, project, criteria }: { owner: string; project: st
 
 function setActionError(setError: (s: string) => void) {
   return (e: unknown) => setError(e instanceof Error ? e.message : 'action failed')
+}
+
+// The task's phase. MergeGate gets a labelled badge with the "why is a CI task
+// running after evaluation passed?" explanation — it only appears when the
+// default branch moved since Ready and the type has required command evaluators,
+// so the gate re-runs them against the squash candidate. Every other phase
+// (including future ones like WrapUp) renders its name as-is with no styling.
+function PhaseLabel({ phase }: { phase: string }) {
+  if (phase === 'MergeGate') {
+    return (
+      <span
+        className="badge badge-purple"
+        title="CI re-run against the squash candidate because the default branch moved"
+      >
+        merge gate
+      </span>
+    )
+  }
+  return <>{phase}</>
 }
 
 // One-line gloss for the tasks table's detail column; the full report renders

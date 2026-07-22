@@ -216,7 +216,10 @@ export interface Task {
   id: number
   job_seq: number
   project: string
-  phase: 'Work' | 'Evaluation' | 'MergeGate' | 'Triage'
+  /** the lifecycle phase that spawned the task. The named values are the ones
+   *  the UI treats specially; the `string` arm keeps a future phase (e.g. a
+   *  WrapUp command task, job #63) from being a type error — it renders as-is. */
+  phase: 'Work' | 'Evaluation' | 'MergeGate' | 'Triage' | (string & {})
   cycle: number
   kind: TaskKind
   state: 'Pending' | 'Running' | 'Done' | 'Failed'
