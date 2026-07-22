@@ -248,6 +248,28 @@ pub async fn spawn_api_handlers(
     // Served off the core actor, so a slow node never wedges state transitions.
     backend: Arc<dyn ContainerBackend>,
 ) -> store::Result<()> {
+    // ── req.health — §6.x liveness probe. Round-trips the core actor so a
+    // wedged state loop (not just a dead process) reads as unhealthy, and
+    // replies {"dispatcher":"ok","version"}. A crash-looping dispatcher has no
+    // responder, so the api's bounded probe fails into a 503 rather than being
+    // fooled by the SPA fallback answering 200 (the 2026-07-22 masquerade).
+    let mut health_sub = store.subscribe_requests(&store::subjects::health()).await?;
+    let health_handle = handle.clone();
+    tokio::spawn(async move {
+        while let Some(req) = health_sub.next().await {
+            let body = match health_handle.ping().await {
+                Ok(()) => serde_json::json!({
+                    "dispatcher": "ok",
+                    "version": env!("CARGO_PKG_VERSION"),
+                })
+                .to_string()
+                .into_bytes(),
+                Err(e) => service_unavailable(&e.to_string()),
+            };
+            req.respond(body).await;
+        }
+    });
+
     // ── req.projects.create — bare repo + hook + starter template ───────
     let mut projects_sub = store
         .subscribe_requests(&store::subjects::projects_create())

@@ -302,6 +302,12 @@ pub enum Msg {
         project: String,
         reply: Reply<OriginStatusResponse>,
     },
+    /// `req.health` (spec §6.x): a no-op round-trip through the core actor. A
+    /// reply proves the single-threaded state loop is draining messages, not
+    /// merely that the process is up — the strongest cheap liveness signal.
+    Ping {
+        reply: Reply<()>,
+    },
     /// §3.5 scans; fired by the internal ticker, or with a reply from
     /// [`CoreHandle::trigger_scan`] (tests).
     Scan {
@@ -342,6 +348,12 @@ impl CoreHandle {
             .await
             .map_err(|_| CoreError::Stopped)?;
         rx.await.map_err(|_| CoreError::Stopped)?
+    }
+
+    /// Round-trip the core actor for the §6.x health probe. `Ok(())` means the
+    /// state loop accepted and answered a message — i.e. it is not wedged.
+    pub async fn ping(&self) -> Result<()> {
+        self.call(|reply| Msg::Ping { reply }).await
     }
 
     pub async fn create_job(&self, req: CreateJobRequest) -> Result<Job> {
@@ -779,6 +791,9 @@ impl Core {
 
     async fn handle_msg(&mut self, msg: Msg) {
         match msg {
+            Msg::Ping { reply } => {
+                let _ = reply.send(Ok(()));
+            }
             Msg::CreateJob(req, reply) => {
                 let _ = reply.send(self.create_job(req).await);
             }

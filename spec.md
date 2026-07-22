@@ -1274,6 +1274,7 @@ Implementation: axum. URL prefix: `/api/v1/`.
 The API layer publishes to these subjects and awaits a reply. Services subscribe and handle.
 
 ```
+req.health                                                   no payload; response: { dispatcher: "ok", version } — round-trips the core actor; the api's GET /api/v1/health (§6.6) bridges it. No responder / wedged actor → no reply → the api returns 503.
 req.jobs.create.{owner}.{project}
 req.jobs.get.{owner}.{project}.{seq}
 req.jobs.list.{owner}.{project}
@@ -1546,6 +1547,19 @@ Standard HTTP status codes:
 - `409` — conflict (e.g. revoke on a Done job)
 - `422` — validation failure (dependency wiring errors, static config errors)
 - `500` — internal error (NATS unavailable, git command failure)
+
+---
+
+### 6.6 Health
+
+```
+GET /api/v1/health   → 200 { "dispatcher": "ok", "version": string }   (dispatcher answered)
+                     → 503 { "dispatcher": "error", "error": string }  (no responder / wedged)
+```
+
+A liveness probe that proves the **dispatcher**, not just the api process. The api issues a bounded (`~3s`) `req.health` NATS request (§6.1) that round-trips the dispatcher's single-writer core actor; a genuine `{"dispatcher":"ok","version"}` reply returns `200`, anything else — no responder (a crash-looping dispatcher), a timeout (a wedged actor), or an unexpected body — returns `503`. Because it round-trips the actor, a dispatcher whose HTTP-answering api is up while its state loop is dead reads as **unhealthy**, which is the case the api-only probe missed on the 2026-07-22 outage.
+
+**Unauthenticated by design.** The endpoint is exempt from §7.1 auth: the body leaks only liveness and the build version, never any project data. This is what lets an outside client (and the `deploy` job's `tasks/deploy-health.sh` gate) confirm a release came up. The gate requires all of a `200`, an `application/json` content-type, and the health JSON — a `text/html` body is an automatic fail, so the SPA fallback (which answers `200 index.html` for any unknown route) can never masquerade as health. If project-liveness detail is ever added, gate the endpoint and update the deploy gate to authenticate.
 
 ---
 

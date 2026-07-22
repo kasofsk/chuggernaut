@@ -48,6 +48,14 @@ pub fn channel_reply(owner: &str, project: &str, seq: u64) -> String {
 // ── API-facing request subjects (spec §6.1) ─────────────────────────────────
 // Published by the api crate, handled by the dispatcher.
 
+/// §6.x liveness probe: a project-agnostic request that only a live dispatcher
+/// answers, and that round-trips the core actor (so a *wedged* state loop reads
+/// as unhealthy, not merely a dead process). The api's `GET /api/v1/health`
+/// bridges it; a crash-looping dispatcher has no responder.
+pub fn health() -> String {
+    "req.health".into()
+}
+
 pub fn jobs_create(owner: &str, project: &str) -> String {
     format!("req.jobs.create.{owner}.{project}")
 }

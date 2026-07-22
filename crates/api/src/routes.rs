@@ -168,6 +168,48 @@ fn map_reply(reply: &[u8], success: StatusCode) -> ApiResult<Response> {
     Ok((success, Json(value)).into_response())
 }
 
+// ── Health (§6.x) ──────────────────────────────────────────────────────────
+
+/// `GET /api/v1/health` (spec §6.x): unauthenticated liveness probe that proves
+/// the *dispatcher*, not just this api process. It issues a bounded `req.health`
+/// NATS request that round-trips the dispatcher's core actor and echoes its
+/// `{"dispatcher":"ok","version"}` reply as `200`. A crash-looping or wedged
+/// dispatcher yields no responder / no reply, so the probe fails into a `503`
+/// with the error — the deploy gate can never be fooled by the SPA fallback
+/// answering `200` (the 2026-07-22 masquerade).
+///
+/// Deliberately unauthenticated: the body leaks only liveness and the build
+/// version, never any project data (spec §6.x).
+pub async fn health(State(state): State<SharedState>) -> Response {
+    match state
+        .store
+        .request_timeout(&store::subjects::health(), b"{}", Duration::from_secs(3))
+        .await
+    {
+        Ok(reply) => match serde_json::from_slice::<serde_json::Value>(&reply.payload) {
+            // Only a genuine {"dispatcher":"ok",..} reply is healthy; anything
+            // else (e.g. the actor's 503 envelope) maps to 503, never 200.
+            Ok(body) if body.get("dispatcher").and_then(|d| d.as_str()) == Some("ok") => {
+                (StatusCode::OK, Json(body)).into_response()
+            }
+            Ok(body) => (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response(),
+            Err(e) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "dispatcher": "error",
+                    "error": format!("bad dispatcher health reply: {e}"),
+                })),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "dispatcher": "error", "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 // ── Auth (§7.1) ──────────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]

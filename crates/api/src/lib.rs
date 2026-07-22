@@ -35,6 +35,8 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
     use axum::routing::{get, post};
 
     let mut router = axum::Router::new()
+        // Health (§6.x): unauthenticated dispatcher-liveness probe.
+        .route("/api/v1/health", get(routes::health))
         // Auth (§7.1)
         .route("/auth/login", post(routes::login))
         .route("/auth/logout", post(routes::logout))

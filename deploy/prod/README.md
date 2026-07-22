@@ -533,6 +533,13 @@ deploy/prod/install-launchd.sh
 launchctl print gui/$(id -u)/com.chuggernaut.api | grep -E 'state|program'
 
 # 5. Health check — retry, since a KeepAlive (re)bind can lag a second or two.
+#    This hits the SPA root ON PURPOSE: the only claim here is "the api process
+#    bound its port", and the SPA root answers 200 as soon as it does. It is NOT
+#    a dispatcher proof — the SPA fallback answers 200 for any route, so a 200
+#    says nothing about the dispatcher (that's the #77/#81 masquerade). For real
+#    dispatcher liveness use /api/v1/health, which round-trips the core actor
+#    (§6.6); that's what tasks/deploy-health.sh gates on and restart-verify.sh
+#    proves over NATS.
 for _ in $(seq 1 30); do
   curl -fsS http://127.0.0.1:8080/ >/dev/null 2>&1 && { echo "api OK"; break; }
   sleep 2

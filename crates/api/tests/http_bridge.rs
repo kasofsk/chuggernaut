@@ -681,6 +681,100 @@ async fn http_bridge_end_to_end() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
+/// §6.x health probe: `GET /api/v1/health` proves the *dispatcher*, not just
+/// the api. With the dispatcher's `req.health` handler on the bus it answers
+/// `200 {"dispatcher":"ok","version"}` as `application/json`; with no responder
+/// it answers `503` — never a masquerading `200`. Unauthenticated by design.
+#[tokio::test]
+async fn health_endpoint() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let keys_dir = tempfile::tempdir().unwrap();
+    let (private, public) = gen_jwt_keys(keys_dir.path());
+    let mk_state = || -> SharedState {
+        Arc::new(ApiState {
+            store: store.clone(),
+            signer: auth::jwt::JwtSigner::from_pem(&private).unwrap(),
+            verifier: auth::jwt::JwtVerifier::from_pem(&public).unwrap(),
+            session_ttl: chrono::Duration::hours(1),
+            artifacts: None,
+        })
+    };
+
+    // GET /api/v1/health → (status, content-type, json body). No cookie: the
+    // probe is unauthenticated (it leaks only liveness + version, spec §6.x).
+    async fn get_health(router: &axum::Router) -> (StatusCode, String, serde_json::Value) {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/health")
+            .body(Body::empty())
+            .unwrap();
+        let res = router.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let ctype = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, ctype, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    // No dispatcher on the bus yet → no responder → 503 (not a fake 200).
+    let router = api::router(mk_state(), None);
+    let (status, ctype, body) = get_health(&router).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(ctype.starts_with("application/json"), "ctype: {ctype}");
+    assert_eq!(body["dispatcher"], "error", "{body}");
+
+    // Bring the dispatcher up with its req.health handler → 200 + health JSON.
+    let repos_root = tempfile::tempdir().unwrap();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root.path()),
+        Arc::new(FakeBackend::new()),
+        Arc::new(FakeProvider::new()),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let handle = spawn(core);
+    spawn_api_handlers(
+        &store,
+        handle,
+        Arc::new(vcs::RepoManager::new(repos_root.path())),
+        None,
+        None,
+        None,
+        Arc::new(FakeBackend::new()),
+    )
+    .await
+    .unwrap();
+
+    let router = api::router(mk_state(), None);
+    let (status, ctype, body) = get_health(&router).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Content-type MUST be JSON: a text/html body is exactly the SPA fallback
+    // masquerade the deploy gate now rejects (spec §6.x, #77/#81).
+    assert!(ctype.starts_with("application/json"), "ctype: {ctype}");
+    assert_eq!(body["dispatcher"], "ok", "{body}");
+    assert!(
+        body["version"].as_str().is_some(),
+        "version missing: {body}"
+    );
+}
+
 /// Generate an ed25519 keypair with ssh-keygen; return its public-key line.
 fn keygen(path: &std::path::Path, comment: &str) -> String {
     assert!(
