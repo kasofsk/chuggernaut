@@ -443,6 +443,11 @@ async fn rebase_conflict_falls_through_to_wrapup_conflict_path() {
     // work c1, eval c1 (old base), work c2, eval c2 — no gate task.
     assert_eq!(tasks.len(), 4);
     assert_eq!(tasks[2].cycle, 2);
+    // The conflict-driven rework Work task records why it exists.
+    assert_eq!(
+        tasks[2].rework_reason,
+        Some(types::ReworkReason::MergeConflict)
+    );
     assert!(tasks.iter().all(|t| t.phase != TaskPhase::MergeGate));
     // The reworked change is what landed.
     assert_eq!(
@@ -505,6 +510,11 @@ async fn merge_gate_failure_reworks_on_new_base_without_budget() {
     // work c1, eval c1, gate c1 (fail), work c2, eval c2
     assert_eq!(tasks.len(), 5);
     assert_eq!(tasks[3].cycle, 2);
+    // The gate-failure rework Work task records its cause.
+    assert_eq!(
+        tasks[3].rework_reason,
+        Some(types::ReworkReason::GateCiFailure)
+    );
     assert!(
         rig.repo
             .manager
@@ -899,6 +909,7 @@ async fn list_pending_hides_terminal_job_zombie() {
         stage: 0,
         performed_by: None,
         container_id: None,
+        rework_reason: None,
         session_id: None,
         result: None,
         created_at: job.created_at,

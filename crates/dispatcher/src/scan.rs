@@ -163,6 +163,7 @@ impl Core {
                         "{DEADLINE_MARKER} Job {seq} exceeded its job_deadline ({dl}) \
                          before starting. Retry to re-enable pacing under your control."
                     ),
+                    None,
                 )
                 .await?;
             } else {
@@ -175,6 +176,7 @@ impl Core {
                         "{DEADLINE_MARKER} Job {seq} exceeded its job_deadline ({dl}). \
                          Resolve to re-enable pacing under your control."
                     ),
+                    None,
                 )
                 .await?;
             }

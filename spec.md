@@ -24,12 +24,20 @@ pub struct Job {
     pub claim_next: bool,                  // a human has claimed the job's NEXT work attempt (§1.2 claims): instead of launching, the dispatcher parks that attempt as a Pending task with the declared kind and performed_by: human, then clears the flag — a claim covers exactly one attempt. Defaults false on old records
     pub timeout: Option<String>,           // optional per-job work-task timeout override (duration string, e.g. "45m"), layering over the type's resources.task_timeout exactly like `eval` layers over the type's evaluators — but Work-phase tasks only; evaluators keep the type default. Any valid duration. Parseability validated at release. None → the type default applies
     pub model: Option<String>,             // optional per-job model override for the Work agent (§12.4). The most specific choice, so it wins over every other layer: the job type's work.model, the project default (jobs/_defaults.yaml), and the platform default. Work-phase agent tasks only — evaluators keep the type/project/platform resolution, exactly as `timeout` scopes to Work. None → the resolution chain applies. Defaults None on old records
+    pub escalation: Option<Escalation>,    // structured record of the job's most recent escalation/stall: reason code, human-readable detail, failing task (when one exists), and timestamp — written at every escalate/stall site so operators diagnose from the record the API serves, not from dispatcher logs. Advisory; no transition consults it. None until the job first escalates. Defaults None on old records
     pub factory: Option<String>,           // factory name when created by a factory triage agent (see §13); None for operator-created jobs
     pub created_at: DateTime<Utc>,
     pub ready_at: Option<DateTime<Utc>>,   // set once (immutably) when job first enters Ready; anchor for job_deadline; None until then
 }
 
 pub enum JobState { Draft, Frozen, Blocked, Ready, Work, Evaluation, WrapUp, Escalated, Stalled, Done, Revoked }
+
+pub struct Escalation {
+    pub reason: String,             // machine reason code, matching the job-escalated / job-stalled event reason (e.g. "launch_validation_failed", "work_retries_exhausted", "eval_abort", "job_deadline_exceeded")
+    pub detail: String,             // human-readable explanation — the same text shown in the operator's intervention task prompt
+    pub failing_task: Option<u64>,  // the task whose failure triggered the escalation, when one exists; None for pre-work escalations (launch validation, a deadline elapsed while Ready) and evaluation-phase escalations with no single culprit
+    pub at: DateTime<Utc>,          // when the escalation was recorded
+}
 ```
 
 `retry_count` and `rework_count` are not stored on the job record — they are derived from the task log (`attempt` on work tasks and `cycle` on tasks respectively). `ready_at` is set once, immutably, when the job first transitions to Ready (Frozen→Ready or Blocked→Ready); it anchors `job_deadline` enforcement.
@@ -321,7 +329,8 @@ pub struct Task {
     pub attempt: u32,                     // 1-indexed; each retry is a new task record with attempt+1
     pub evaluator: Option<String>,        // evaluator name for Evaluation/MergeGate tasks; None for work and escalation tasks
     pub performed_by: Option<Performer>,  // who actually performed a claimed attempt (claims, below): the declared kind stays immutable; a claim records the human performer here. None for every normally-executed attempt and for old records
-    pub container_id: Option<String>,     // backend-assigned container ID (Docker or k8s); None for Human tasks
+    pub container_id: Option<String>,     // backend-assigned container ID (Docker or k8s); None for Human tasks. Persisted the instant the container launches — while the task is still Running — and kept after exit, so a live container (not just a finished one) is nameable for logs and artifact tooling
+    pub rework_reason: Option<ReworkReason>,  // why a rework cycle created this Work task (§3.3): set at rework re-entry so a Work task appearing after passed evaluations self-explains. None for cycle-1 work, evaluation/gate/wrap-up tasks, and every non-Work task. Defaults None on old records
     pub result: Option<TaskResult>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
@@ -337,6 +346,8 @@ pub enum TaskKind {
 }
 
 pub enum Performer { Human }  // absence of performed_by = executed per the declared kind
+
+pub enum ReworkReason { EvalFailure, MergeConflict, GateCiFailure }  // cause of a rework-created Work task (§3.3); mirrors the job-rework-started event reason, persisted on the task so the tasks list self-explains
 
 pub enum TaskState { Pending, Running, Done, Failed }
 

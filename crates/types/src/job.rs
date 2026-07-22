@@ -67,6 +67,15 @@ pub struct Job {
     /// so records that predate claims deserialize.
     #[serde(default)]
     pub claim_next: bool,
+    /// Structured record of the job's most recent escalation or stall (spec
+    /// §1.2, §3.4): the reason code, a human-readable detail, the failing task
+    /// (when one exists), and when it happened — so operators see WHY on the
+    /// record instead of reconstructing it from dispatcher logs. Written at
+    /// every escalate/stall call site; advisory, no transition consults it.
+    /// None until the job first escalates; defaulted so older records
+    /// deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<Escalation>,
     /// Factory name when created by a factory triage agent (spec §13); None for
     /// operator-created jobs.
     pub factory: Option<String>,
@@ -108,6 +117,29 @@ impl JobState {
     pub fn is_terminal(self) -> bool {
         matches!(self, JobState::Done | JobState::Revoked)
     }
+}
+
+/// Why the dispatcher escalated (→Escalated) or stalled (→Stalled) a job,
+/// carried on the job record so operators diagnose from what the API serves
+/// rather than from dispatcher logs (spec §1.2, §3.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Escalation {
+    /// Machine reason code, matching the `job-escalated`/`job-stalled` event
+    /// reason (e.g. `launch_validation_failed`, `work_retries_exhausted`,
+    /// `eval_abort`, `job_deadline_exceeded`).
+    pub reason: String,
+    /// Human-readable explanation — the same text shown in the operator's
+    /// intervention task prompt.
+    pub detail: String,
+    /// The task whose failure triggered the escalation, when one exists. None
+    /// for pre-work escalations that fail before any task runs (launch
+    /// validation, a deadline that elapsed while still Ready) and for
+    /// evaluation-phase escalations with no single culprit task. Defaulted so
+    /// records without it deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failing_task: Option<u64>,
+    /// When the escalation was recorded.
+    pub at: DateTime<Utc>,
 }
 
 #[cfg(test)]
@@ -190,6 +222,47 @@ mod tests {
         assert!(back.contains(r#""state":"Draft""#));
         let again: Job = serde_json::from_str(&back).unwrap();
         assert_eq!(job, again);
+    }
+
+    #[test]
+    fn job_round_trips_with_escalation_and_stays_backward_compat() {
+        // Old records (no escalation key) deserialize to None and omit it on
+        // the wire.
+        let json = r#"{
+          "id": 9,
+          "project": "acme/api",
+          "type": "implement-endpoint",
+          "deps": [],
+          "state": "Frozen",
+          "branch": "job/9",
+          "base_ref": null,
+          "knowledge_tags": [],
+          "factory": null,
+          "created_at": "2026-07-22T10:00:00Z",
+          "ready_at": null
+        }"#;
+        let job: Job = serde_json::from_str(json).unwrap();
+        assert_eq!(job.escalation, None);
+        assert!(!serde_json::to_string(&job).unwrap().contains("escalation"));
+
+        // A populated escalation round-trips, with and without a failing task.
+        let at = "2026-07-22T11:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let mut escalated = job.clone();
+        escalated.escalation = Some(Escalation {
+            reason: "launch_validation_failed".into(),
+            detail: "Job 9 failed launch-time validation: missing secret".into(),
+            failing_task: None,
+            at,
+        });
+        let back = serde_json::to_string(&escalated).unwrap();
+        assert!(back.contains("launch_validation_failed"));
+        assert!(!back.contains("failing_task")); // None is skipped
+        assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), escalated);
+
+        escalated.escalation.as_mut().unwrap().failing_task = Some(4);
+        let back = serde_json::to_string(&escalated).unwrap();
+        assert!(back.contains("\"failing_task\":4"));
+        assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), escalated);
     }
 
     #[test]

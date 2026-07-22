@@ -393,7 +393,20 @@ async fn work_command_launch_failure_retries_then_escalates() {
 
     let job = rig.handle.create_job(req("cmd-work")).await.unwrap();
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
-    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+    let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    // The escalation is self-describing on the job record: reason code, a
+    // human-readable detail, and the failing task — no log archaeology (#69).
+    let esc = escalated
+        .escalation
+        .expect("escalation recorded on the job");
+    assert_eq!(esc.reason, "work_retries_exhausted");
+    assert!(
+        esc.detail.contains("no retries left"),
+        "detail: {}",
+        esc.detail
+    );
+    assert!(esc.failing_task.is_some(), "failing task recorded");
 
     let tasks = rig
         .store
@@ -407,6 +420,8 @@ async fn work_command_launch_failure_retries_then_escalates() {
         .iter()
         .filter(|t| t.phase == TaskPhase::Work)
         .collect();
+    // The failing task named on the escalation is the last failed work attempt.
+    assert_eq!(esc.failing_task, works.last().map(|t| t.id));
     assert_eq!(works.len(), 2, "attempt + one work_retries");
     for t in &works {
         assert_eq!(t.state, TaskState::Failed);
@@ -511,6 +526,12 @@ async fn eval_failure_reworks_with_context_then_passes() {
         .unwrap();
     assert_eq!(tasks.len(), 4);
     assert_eq!(tasks[2].cycle, 2);
+    // The rework-created Work task self-explains its cause; cycle 1 has none.
+    assert_eq!(tasks[0].rework_reason, None);
+    assert_eq!(
+        tasks[2].rework_reason,
+        Some(types::ReworkReason::EvalFailure)
+    );
     let events = event_types(&rig.store).await;
     assert!(events.contains(&"job-rework-started".to_string()));
 }
@@ -1861,4 +1882,99 @@ async fn work_task_model_none_without_any_default() {
         types::TaskKind::Agent { model, .. } => assert_eq!(model, None),
         other => panic!("expected an agent work task, got {other:?}"),
     }
+}
+
+/// #71/#72 regression: an agent work container's id lands on the task record
+/// while it is still Running — not only in `AgentOutput` after exit — and
+/// survives on the finished record.
+#[tokio::test]
+async fn work_container_id_recorded_while_running_and_kept_after_exit() {
+    // Artifacts identity makes the fake provider launch through the backend, so
+    // the run reports a container id (as the real ClaudeProvider does).
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let Some(rig) = rig_with_artifacts(Some(identity)).await else {
+        return;
+    };
+    let bare = rig.repo.bare_path();
+    let store = rig.store.clone();
+    rig.provider.on_run(move |cfg| async move {
+        // The "container" is alive until this hook returns: the id must already
+        // be on the Running task record by now.
+        let tasks = store.tasks().await.unwrap();
+        let mut recorded = None;
+        for _ in 0..100 {
+            if let Some(t) = tasks.get("acme", "api", 1, 1).await.unwrap()
+                && t.state == TaskState::Running
+                && t.container_id.is_some()
+            {
+                recorded = t.container_id.clone();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            recorded.is_some(),
+            "container_id must be set while the work task is Running"
+        );
+        // Commit so the job lands real content.
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone
+            .commit_file("src/x.rs", b"pub fn x() {}", "impl")
+            .await;
+        clone.push(&branch).await;
+    });
+
+    let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    // Kept after exit: the completed record still names its container.
+    let work = wait_for_work_task(&rig.store, job.id).await;
+    assert_eq!(work.state, TaskState::Done);
+    assert!(
+        work.container_id.is_some(),
+        "container_id must survive on the completed record"
+    );
+}
+
+/// A required agent evaluator's abort verdict escalates immediately, and the
+/// job records the reason code + human-readable detail (#69-class diagnosis on
+/// the record, not in the logs). Evaluation-phase escalations have no single
+/// culprit task, so `failing_task` is None.
+#[tokio::test]
+async fn abort_verdict_escalates_with_recorded_reason() {
+    let Some(rig) = rig().await else { return };
+    let handle = rig.handle.clone();
+    rig.provider.on_run(|_| async {}); // work c1
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: false,
+                abort: true,
+                structured: Some(serde_json::json!({"why": "spec is unbuildable"})),
+                token_usage: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    let esc = escalated.escalation.expect("abort records an escalation");
+    assert_eq!(esc.reason, "eval_abort");
+    assert!(
+        esc.detail.contains("not satisfiable by rework"),
+        "detail: {}",
+        esc.detail
+    );
+    assert_eq!(esc.failing_task, None);
 }

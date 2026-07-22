@@ -315,6 +315,16 @@ pub enum Msg {
         task_id: u64,
         exit: TaskExit,
     },
+    /// Posted by the launch forwarder the instant an agent container launches,
+    /// so the id lands on the Running task record — providers only surface it in
+    /// `AgentOutput` after exit. Never posted by anything outside the crate.
+    TaskContainerStarted {
+        owner: String,
+        project: String,
+        seq: u64,
+        task_id: u64,
+        container_id: String,
+    },
 }
 
 /// Cloneable façade over the core channel; the only way other components
@@ -931,7 +941,73 @@ impl Core {
                     tracing::error!("task exit handling for {owner}/{project}#{seq}: {e}");
                 }
             }
+            Msg::TaskContainerStarted {
+                owner,
+                project,
+                seq,
+                task_id,
+                container_id,
+            } => {
+                if let Err(e) = self
+                    .on_container_started(&owner, &project, seq, task_id, container_id)
+                    .await
+                {
+                    tracing::error!("container-start handling for {owner}/{project}#{seq}: {e}");
+                }
+            }
         }
+    }
+
+    /// Stamp a just-launched container's id onto its task record (§3.2). Runs on
+    /// the single-writer loop so it never races the exit handler; a no-op if the
+    /// task vanished or already carries an id (a retry reused the slot).
+    pub(crate) async fn on_container_started(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task_id: u64,
+        container_id: String,
+    ) -> Result<()> {
+        let Some(mut task) = self.tasks.get(owner, project, seq, task_id).await? else {
+            return Ok(());
+        };
+        if task.container_id.is_some() {
+            return Ok(());
+        }
+        task.container_id = Some(container_id);
+        self.tasks.put(&task).await?;
+        Ok(())
+    }
+
+    /// Build a [`agent::LaunchReporter`] wired back into the core: it spawns a
+    /// tiny forwarder that turns the provider's launch signal into a
+    /// [`Msg::TaskContainerStarted`], so the container id reaches the task
+    /// record through the single-writer loop rather than a direct mutation.
+    pub(crate) fn launch_reporter(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task_id: u64,
+    ) -> agent::LaunchReporter {
+        let (tx_id, mut rx_id) = mpsc::unbounded_channel();
+        let tx = self.self_tx.clone().expect("spawned core");
+        let (owner, project) = (owner.to_string(), project.to_string());
+        tokio::spawn(async move {
+            if let Some(container_id) = rx_id.recv().await {
+                let _ = tx
+                    .send(Msg::TaskContainerStarted {
+                        owner,
+                        project,
+                        seq,
+                        task_id,
+                        container_id,
+                    })
+                    .await;
+            }
+        });
+        agent::LaunchReporter::new(tx_id)
     }
 
     /// §3.1 step 5: launch every queued Ready job. Slot caps live in the
@@ -967,6 +1043,7 @@ impl Core {
             timeout: req.timeout,
             model: req.model,
             claim_next: false,
+            escalation: None,
             factory: req.factory,
             created_at: Utc::now(),
             ready_at: None,
@@ -1150,7 +1227,7 @@ impl Core {
                     .join("\n");
                 let prompt =
                     format!("Job {seq} failed Ready-transition re-validation at {head}:\n{detail}");
-                self.stall(owner, project, seq, "revalidation_failed", prompt)
+                self.stall(owner, project, seq, "revalidation_failed", prompt, None)
                     .await?;
             }
         }
@@ -1437,14 +1514,19 @@ impl Core {
         }
     }
 
-    /// Create a Human escalation task and move the job to Escalated.
+    /// Create a Human escalation task and move the job to Escalated. `reason` is
+    /// the machine code (also the event reason); `detail` is the human-readable
+    /// explanation shown in the intervention task and mirrored onto the job's
+    /// [`types::Escalation`] record; `failing_task` names the task whose failure
+    /// triggered this, when one exists.
     pub(crate) async fn escalate(
         &mut self,
         owner: &str,
         project: &str,
         seq: u64,
         reason: &str,
-        prompt: String,
+        detail: String,
+        failing_task: Option<u64>,
     ) -> Result<()> {
         let mut job = self.must_get(owner, project, seq)?.clone();
         let task_id = self.next_task_id(owner, project, seq).await?;
@@ -1453,8 +1535,16 @@ impl Core {
             .get(&(owner.to_string(), project.to_string(), seq))
             .map(|e| e.cycle)
             .unwrap_or(1);
-        let task = escalation::escalation_task(task_id, seq, &job.project, cycle, prompt);
+        let task = escalation::escalation_task(task_id, seq, &job.project, cycle, detail.clone());
         self.tasks.put(&task).await?;
+        // Record WHY on the job itself (§1.2), so operators see the reason in the
+        // header instead of digging through dispatcher logs (#69).
+        job.escalation = Some(types::Escalation {
+            reason: reason.to_string(),
+            detail,
+            failing_task,
+            at: Utc::now(),
+        });
         self.set_state(&mut job, JobState::Escalated).await?;
         self.publish(
             owner,
@@ -1478,13 +1568,20 @@ impl Core {
         project: &str,
         seq: u64,
         reason: &str,
-        prompt: String,
+        detail: String,
+        failing_task: Option<u64>,
     ) -> Result<()> {
         let mut job = self.must_get(owner, project, seq)?.clone();
         let task_id = self.next_task_id(owner, project, seq).await?;
         // Pre-work: cycle 1, no exec state.
-        let task = escalation::escalation_task(task_id, seq, &job.project, 1, prompt);
+        let task = escalation::escalation_task(task_id, seq, &job.project, 1, detail.clone());
         self.tasks.put(&task).await?;
+        job.escalation = Some(types::Escalation {
+            reason: reason.to_string(),
+            detail,
+            failing_task,
+            at: Utc::now(),
+        });
         self.set_state(&mut job, JobState::Stalled).await?;
         self.publish(
             owner,

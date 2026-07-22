@@ -36,7 +36,17 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub performed_by: Option<Performer>,
     /// Backend-assigned container ID (Docker or k8s); None for Human tasks.
+    /// Persisted the instant the container launches — while the task is still
+    /// Running — and kept after exit, so operators and artifact tooling can name
+    /// a live container, not just a finished one.
     pub container_id: Option<String>,
+    /// Why a rework cycle created this Work task (spec §3.3): set at rework
+    /// re-entry so a Work task appearing after passed evaluations is
+    /// self-explaining. None for cycle-1 work, evaluation/gate/wrap-up tasks,
+    /// and every non-Work task. Defaulted so records written before rework
+    /// causes were recorded still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rework_reason: Option<ReworkReason>,
     /// Agent tasks only: the session id handed to the agent CLI, which names
     /// its transcript. Recorded at task creation so the artifact stays
     /// addressable across a dispatcher restart, and so a later cycle can resume
@@ -101,6 +111,21 @@ pub enum TaskState {
     Running,
     Done,
     Failed,
+}
+
+/// Cause of a rework-created Work task (spec §3.3). Mirrors the
+/// `job-rework-started` event's `reason`, but persisted on the task record so
+/// the tasks list explains itself — a Work task after passed evaluations is no
+/// longer a mystery — without event-stream archaeology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReworkReason {
+    /// Evaluation failed and rework budget remained (§3.3 product failure).
+    EvalFailure,
+    /// A squash-merge conflict against a default branch that moved while the
+    /// job was in flight (§3.2 step 12).
+    MergeConflict,
+    /// A required command evaluator failed at the merge gate (§3.3 merge gate).
+    GateCiFailure,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -298,6 +323,40 @@ mod tests {
         let json = serde_json::to_string(&claimed).unwrap();
         assert!(json.contains(r#""performed_by":"human""#));
         assert_eq!(serde_json::from_str::<Task>(&json).unwrap(), claimed);
+    }
+
+    #[test]
+    fn rework_reason_defaults_absent_and_round_trips() {
+        // Old task records (no rework_reason key) deserialize to None.
+        let json = r#"{
+          "id": 3, "job_seq": 7, "project": "acme/api",
+          "phase": "Work", "cycle": 2,
+          "kind": { "kind": "Agent", "provider": "claude", "model": null, "prompt": "p.md" },
+          "state": "Running", "attempt": 1,
+          "container_id": "fake/c1", "result": null,
+          "created_at": "2026-07-21T10:00:00Z", "started_at": null, "completed_at": null
+        }"#;
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert_eq!(task.rework_reason, None);
+        // Absent stays absent on the wire (skip_serializing_if).
+        assert!(
+            !serde_json::to_string(&task)
+                .unwrap()
+                .contains("rework_reason")
+        );
+
+        // Each cause round-trips through JSON.
+        for reason in [
+            ReworkReason::EvalFailure,
+            ReworkReason::MergeConflict,
+            ReworkReason::GateCiFailure,
+        ] {
+            let mut reworked = task.clone();
+            reworked.rework_reason = Some(reason);
+            let json = serde_json::to_string(&reworked).unwrap();
+            assert!(json.contains("\"rework_reason\""));
+            assert_eq!(serde_json::from_str::<Task>(&json).unwrap(), reworked);
+        }
     }
 
     #[test]

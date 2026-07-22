@@ -22,9 +22,47 @@ pub trait AgentProvider: Send + Sync {
     /// Launch the agent container via the dispatcher's backend, monitor it until
     /// exit, return the result. The declared job `image` provides the full dev
     /// environment including the agent CLI binary.
-    async fn run(&self, config: AgentRunConfig) -> Result<AgentOutput, AgentError>;
+    ///
+    /// `on_launch` is fired with the container id the instant the container is
+    /// launched — before the (blocking) wait — so the caller can persist the id
+    /// onto the task record while it is still Running, instead of only learning
+    /// it from [`AgentOutput`] after exit. Firing it is best-effort: a provider
+    /// that launches no container (fakes) simply never calls it.
+    async fn run(
+        &self,
+        config: AgentRunConfig,
+        on_launch: LaunchReporter,
+    ) -> Result<AgentOutput, AgentError>;
     /// Governs which mode the channel MCP server starts in (spec §4.2).
     fn supports_push_notifications(&self) -> bool;
+}
+
+/// One-shot side-channel a provider uses to hand its container id back the
+/// instant the container launches, so the dispatcher can write it onto the
+/// Running task record (previously the id only surfaced in [`AgentOutput`]
+/// after exit, leaving `container_id: null` for the whole run). Cloneable and
+/// cheap; reporting more than once or never is harmless. `none()` is the
+/// no-op used where nobody is listening.
+#[derive(Clone, Default)]
+pub struct LaunchReporter(Option<tokio::sync::mpsc::UnboundedSender<container::ContainerId>>);
+
+impl LaunchReporter {
+    pub fn new(tx: tokio::sync::mpsc::UnboundedSender<container::ContainerId>) -> Self {
+        Self(Some(tx))
+    }
+
+    /// A reporter nobody listens to — for provider stubs and tests.
+    pub fn none() -> Self {
+        Self(None)
+    }
+
+    /// Report the launched container's id. Never blocks and never errors: the
+    /// receiver may have gone away (task already resolved), which is fine.
+    pub fn report(&self, id: &container::ContainerId) {
+        if let Some(tx) = &self.0 {
+            let _ = tx.send(id.clone());
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

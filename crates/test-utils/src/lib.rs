@@ -333,7 +333,11 @@ impl FakeProvider {
 
 #[async_trait]
 impl AgentProvider for FakeProvider {
-    async fn run(&self, config: AgentRunConfig) -> Result<AgentOutput, AgentError> {
+    async fn run(
+        &self,
+        config: AgentRunConfig,
+        on_launch: agent::LaunchReporter,
+    ) -> Result<AgentOutput, AgentError> {
         let (exit_code, hook) = {
             let mut st = self.state.lock().unwrap();
             let exit = if st.scripted_exits.is_empty() {
@@ -364,6 +368,11 @@ impl AgentProvider for FakeProvider {
             ),
             None => None,
         };
+        // Report the id the instant the "container" launches, mirroring a real
+        // provider — so the dispatcher stamps it onto the Running task record.
+        if let Some(id) = &container_id {
+            on_launch.report(id);
+        }
         if let Some(hook) = hook {
             hook(config.clone()).await;
         }

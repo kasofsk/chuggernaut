@@ -10,7 +10,10 @@
 //! `/proc/*/cmdline`, and crash reports (spec §4.3). Supports push notifications
 //! (`claude/channel` experimental capability).
 
-use crate::{AgentError, AgentOutput, AgentProvider, AgentRunConfig, McpServerConfig, PROMPT_PATH};
+use crate::{
+    AgentError, AgentOutput, AgentProvider, AgentRunConfig, LaunchReporter, McpServerConfig,
+    PROMPT_PATH,
+};
 use async_trait::async_trait;
 use container::{ContainerBackend, ContainerLaunchConfig, InjectedFile, bootstrap_cmd};
 use std::sync::Arc;
@@ -84,7 +87,11 @@ impl ClaudeProvider {
 
 #[async_trait]
 impl AgentProvider for ClaudeProvider {
-    async fn run(&self, config: AgentRunConfig) -> Result<AgentOutput, AgentError> {
+    async fn run(
+        &self,
+        config: AgentRunConfig,
+        on_launch: LaunchReporter,
+    ) -> Result<AgentOutput, AgentError> {
         let invocation = Self::claude_invocation(&config);
 
         let mut files = vec![InjectedFile {
@@ -109,6 +116,9 @@ impl AgentProvider for ClaudeProvider {
             node: config.node.clone(),
         };
         let id = self.backend.launch(launch).await?;
+        // Hand the id back before we block on the container's exit, so the task
+        // record carries it while Running (#71/#72).
+        on_launch.report(&id);
         let out = |exit_code| AgentOutput {
             exit_code,
             container_id: Some(id.clone()),

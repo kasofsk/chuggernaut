@@ -14,8 +14,8 @@ use chrono::Utc;
 use container::{ContainerLaunchConfig, bootstrap_cmd};
 use std::collections::VecDeque;
 use types::{
-    EvalResult, Evaluator, EvaluatorType, JobState, Task, TaskKind, TaskPhase, TaskResult,
-    TaskState, WorkType, WrapUpMode,
+    EvalResult, Evaluator, EvaluatorType, JobState, ReworkReason, Task, TaskKind, TaskPhase,
+    TaskResult, TaskState, WorkType, WrapUpMode,
 };
 use vcs::{ConflictRebaseOutcome, MergeOutcome, RebaseOutcome};
 
@@ -333,6 +333,7 @@ impl Core {
             stage: evaluator.stage,
             performed_by: None,
             container_id: None,
+            rework_reason: None,
             session_id: session_id.clone(),
             result: None,
             created_at: Utc::now(),
@@ -487,8 +488,9 @@ impl Core {
                 };
                 let provider = self.provider.clone();
                 let harvest = self.harvester();
+                let on_launch = self.launch_reporter(owner, project, seq, task_id);
                 tokio::spawn(async move {
-                    let (exit_code, usage) = match provider.run(config).await {
+                    let (exit_code, usage) = match provider.run(config, on_launch).await {
                         Ok(out) => {
                             let usage = harvest.collect(&o, &p, seq, task_id, &out).await;
                             if let Some(id) = &out.container_id {
@@ -922,6 +924,7 @@ impl Core {
                     seq,
                     "eval_infra_failure",
                     format!("Job {seq}: a required evaluator exhausted eval_retries"),
+                    None,
                 )
                 .await;
         }
@@ -950,7 +953,7 @@ impl Core {
                 format!(
                     "Job {seq}: evaluator(s) {} declared cycle {cycle} not satisfiable by rework:\n\n{findings}",
                     aborted.join(", ")
-                ))
+                ), None)
                 .await;
         }
 
@@ -968,8 +971,16 @@ impl Core {
                 }),
             )
             .await?;
-            self.enter_work(owner, project, seq, cycle + 1, results, None)
-                .await
+            self.enter_work(
+                owner,
+                project,
+                seq,
+                cycle + 1,
+                results,
+                None,
+                Some(ReworkReason::EvalFailure),
+            )
+            .await
         } else {
             self.active.remove(&key);
             self.escalate(
@@ -978,6 +989,7 @@ impl Core {
                 seq,
                 "rework_budget_exhausted",
                 format!("Job {seq}: evaluation failed in cycle {cycle} with no rework budget left"),
+                None,
             )
             .await
         }
@@ -1080,6 +1092,7 @@ impl Core {
                 seq,
                 "finalize_failed",
                 format!("Job {seq}: wrap-up failed unexpectedly: {error}"),
+                None,
             )
             .await
         {
@@ -1401,8 +1414,16 @@ impl Core {
                 }),
             )
             .await?;
-            self.enter_work(owner, project, seq, cycle + 1, failures, Some(context))
-                .await?;
+            self.enter_work(
+                owner,
+                project,
+                seq,
+                cycle + 1,
+                failures,
+                Some(context),
+                Some(ReworkReason::GateCiFailure),
+            )
+            .await?;
         }
         self.pump_merges(owner, project).await
     }
@@ -1472,6 +1493,7 @@ impl Core {
             stage: 0,
             performed_by: None,
             container_id: None,
+            rework_reason: None,
             session_id: None,
             result: None,
             created_at: Utc::now(),
@@ -1622,6 +1644,7 @@ impl Core {
                  only the publish did not run. Re-run the publish (jobs/web-publish.yaml) \
                  or resolve."
             ),
+            Some(task.id),
         )
         .await
     }
@@ -1667,6 +1690,7 @@ impl Core {
                  on job/{seq} and commit before finalizing.",
                 files.join(", ")
             ),
+            None,
         )
         .await
     }
@@ -1714,8 +1738,16 @@ impl Core {
             }),
         )
         .await?;
-        self.enter_work(owner, project, seq, cycle + 1, Vec::new(), Some(context))
-            .await
+        self.enter_work(
+            owner,
+            project,
+            seq,
+            cycle + 1,
+            Vec::new(),
+            Some(context),
+            Some(ReworkReason::MergeConflict),
+        )
+        .await
     }
 }
 

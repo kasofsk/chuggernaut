@@ -14,8 +14,8 @@ use container::{ContainerLaunchConfig, bootstrap_cmd};
 use std::collections::HashMap;
 use std::time::Duration;
 use types::{
-    EscalationAction, EvalResult, Evaluator, JobState, JobType, Task, TaskKind, TaskPhase,
-    TaskResolution, TaskResult, TaskState, WorkType, parse_duration,
+    EscalationAction, EvalResult, Evaluator, JobState, JobType, ReworkReason, Task, TaskKind,
+    TaskPhase, TaskResolution, TaskResult, TaskState, WorkType, parse_duration,
 };
 
 /// Working memory for a job in Work/Evaluation. Restart rebuild is the
@@ -34,6 +34,10 @@ pub struct ExecState {
     /// §4.3 context for the current cycle's work task.
     pub eval_context: Vec<EvalResult>,
     pub merge_conflict: Option<String>,
+    /// Why this cycle's Work tasks exist, when the cycle is a rework re-entry
+    /// (§3.3). Stamped onto every Work task launched in the cycle — including
+    /// retries — so the record self-explains. None for cycle 1.
+    pub rework_reason: Option<ReworkReason>,
     /// Per-job work-task timeout override (`Job.timeout`, §1.1), resolved once
     /// at Work entry. Applies to Work-phase tasks only — evaluators keep the
     /// type default. None → the type's `resources.task_timeout` applies.
@@ -56,13 +60,16 @@ impl Core {
         if job.state != JobState::Ready {
             return Ok(()); // revoked or escalated while queued
         }
-        self.enter_work(&q.owner, &q.project, q.seq, 1, Vec::new(), None)
+        self.enter_work(&q.owner, &q.project, q.seq, 1, Vec::new(), None, None)
             .await
     }
 
     /// Shared Work entry for cycle 1, retries, rework, and conflict re-entry.
     /// Creates or resets `job/{seq}` at `base_ref`, then launches attempt 1 of
-    /// the cycle's work task.
+    /// the cycle's work task. `rework_reason` is `None` for cycle 1 and set by
+    /// each of the three rework callers (§3.3), stamped onto the cycle's Work
+    /// tasks so the record self-explains.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn enter_work(
         &mut self,
         owner: &str,
@@ -71,6 +78,7 @@ impl Core {
         cycle: u32,
         eval_context: Vec<EvalResult>,
         merge_conflict: Option<String>,
+        rework_reason: Option<ReworkReason>,
     ) -> Result<()> {
         let mut job = self.must_get(owner, project, seq)?.clone();
         let base_ref = job.base_ref.clone().ok_or_else(|| {
@@ -103,6 +111,7 @@ impl Core {
                         seq,
                         "launch_validation_failed",
                         format!("Job {seq} failed launch-time validation:\n{detail}"),
+                        None,
                     )
                     .await;
             }
@@ -132,6 +141,7 @@ impl Core {
                     seq,
                     "launch_validation_failed",
                     format!("Job {seq}: missing at launch: {}", missing.join(", ")),
+                    None,
                 )
                 .await;
         }
@@ -189,6 +199,7 @@ impl Core {
                 gate: None,
                 eval_context,
                 merge_conflict,
+                rework_reason,
                 work_timeout,
             },
         );
@@ -218,6 +229,7 @@ impl Core {
         let work_timeout = exec.work_timeout();
         let (eval_context, merge_conflict) =
             (exec.eval_context.clone(), exec.merge_conflict.clone());
+        let rework_reason = exec.rework_reason;
         let job = self.must_get(owner, project, seq)?.clone();
         let base_ref = job.base_ref.clone().expect("base_ref set in Work");
 
@@ -287,6 +299,7 @@ impl Core {
             stage: 0,
             performed_by: claimed.then_some(types::Performer::Human),
             container_id: None,
+            rework_reason,
             session_id: session_id.clone(),
             result: None,
             created_at: Utc::now(),
@@ -387,8 +400,9 @@ impl Core {
                 let tx = self.self_tx.clone().expect("spawned core");
                 let (o, p) = (owner.to_string(), project.to_string());
                 let harvest = self.harvester();
+                let on_launch = self.launch_reporter(owner, project, seq, task_id);
                 tokio::spawn(async move {
-                    let (exit_code, usage) = match provider.run(config).await {
+                    let (exit_code, usage) = match provider.run(config, on_launch).await {
                         Ok(out) => {
                             // Harvest before reporting the exit: once the task
                             // completes the job may advance, and the artifacts
@@ -661,6 +675,7 @@ impl Core {
                 seq,
                 "work_retries_exhausted",
                 format!("Job {seq}: work task failed (exit {exit_code}) with no retries left"),
+                Some(task.id),
             )
             .await
         }
@@ -908,6 +923,7 @@ impl Core {
                             "Job {seq}: work attempt failed (declined by operator) \
                              with no retries left"
                         ),
+                        Some(task.id),
                     )
                     .await
                 }
@@ -1103,6 +1119,8 @@ impl Core {
                 gate: None,
                 eval_context: vec![],
                 merge_conflict: None,
+                // Operator-driven Retry re-runs work fresh — not a rework cycle.
+                rework_reason: None,
                 work_timeout: job.timeout.as_deref().and_then(|s| parse_duration(s).ok()),
             },
         );

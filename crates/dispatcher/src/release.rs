@@ -336,6 +336,7 @@ resources:
             timeout: None,
             model: None,
             claim_next: false,
+            escalation: None,
             factory: None,
             created_at: Utc::now(),
             ready_at: None,

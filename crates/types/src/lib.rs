@@ -19,7 +19,7 @@ pub mod worker;
 pub use channel::{AgentReply, ChannelEntry, ChannelStatus, ChannelUpdate, OperatorMessage};
 pub use duration::{DurationParseError, parse_duration};
 pub use ingest::IngestEvent;
-pub use job::{Job, JobState};
+pub use job::{Escalation, Job, JobState};
 pub use job_type::{
     Evaluator, EvaluatorType, JobType, Placement, ProjectDefaults, ReviewSpec, WorkSpec, WorkType,
     WrapUpMode, WrapUpSpec,
@@ -30,7 +30,7 @@ pub use project::{OriginLink, ProjectRecord, ReleaseState, ReleaseStatus, github
 pub use resources::{MEMORY_PATTERN, MemoryParseError, parse_memory};
 pub use step::{StepKind, StepRecord, StepStatus};
 pub use task::{
-    EscalationAction, EvalResult, Performer, Task, TaskKind, TaskPhase, TaskResolution, TaskResult,
-    TaskState, TokenUsage,
+    EscalationAction, EvalResult, Performer, ReworkReason, Task, TaskKind, TaskPhase,
+    TaskResolution, TaskResult, TaskState, TokenUsage,
 };
 pub use user::{Identity, IdentityKind, ProjectRole, User};

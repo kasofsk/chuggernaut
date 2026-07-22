@@ -237,6 +237,7 @@ impl Core {
                          The squash already landed — the merge is final; only the publish \
                          did not run. Re-run the publish (jobs/web-publish.yaml) or resolve."
                     ),
+                    Some(task.id),
                 )
                 .await
             }
@@ -468,7 +469,8 @@ impl Core {
                 // verdict (command eval) — all reachable via a -1 exit.
                 Ok(None) | Err(_) => -1,
             },
-            // Provider-run tasks don't record container ids yet: not found.
+            // No recorded container id (Human task, or a launch that never
+            // reported one): nothing to re-attach to — treat as not found.
             None => -1,
         };
         self.on_task_exited(owner, project, seq, task.id, TaskExit::code(backend_exit))
@@ -511,6 +513,7 @@ impl Core {
                 seq,
                 "work_retries_exhausted",
                 format!("Job {seq}: work task failed with no retries left (found on restart)"),
+                Some(task.id),
             )
             .await
         }

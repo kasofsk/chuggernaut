@@ -112,6 +112,7 @@ impl Core {
             stage: 0,
             performed_by: None,
             container_id: None,
+            rework_reason: None,
             session_id: Some(session_id.clone()),
             result: None,
             created_at: Utc::now(),
@@ -175,8 +176,9 @@ impl Core {
         let tx = self.self_tx.clone().expect("spawned core");
         let (o, p) = (owner.to_string(), project.to_string());
         let harvest = self.harvester();
+        let on_launch = self.launch_reporter(owner, project, seq, task_id);
         tokio::spawn(async move {
-            let (exit_code, assessment, usage) = match provider.run(config).await {
+            let (exit_code, assessment, usage) = match provider.run(config, on_launch).await {
                 Ok(out) => {
                     // The assessment rides the CLI's JSON result on stdout, so
                     // harvest it before reporting the exit.
