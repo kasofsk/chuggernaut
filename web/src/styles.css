@@ -58,6 +58,8 @@
   /* zebra-stripe tint: a low-contrast wash derived from the theme's text,
      kept transparent so it layers over whatever surface sits behind the row. */
   --stripe: color-mix(in srgb, var(--text) 4%, transparent);
+  /* site backdrop artwork opacity — kept subtle, tuned per theme's darkness */
+  --backdrop-opacity: 0.06;
 }
 
 [data-theme='midnight'] {
@@ -79,6 +81,8 @@
   --blue: #6ea8fe;
   --gray: #6b7183;
   --stripe: color-mix(in srgb, var(--text) 4%, transparent);
+  /* darkest theme — a touch more art comes through before it reads as noise */
+  --backdrop-opacity: 0.07;
 }
 
 [data-theme='gruvbox'] {
@@ -100,6 +104,7 @@
   --blue: #83a598;
   --gray: #928374;
   --stripe: color-mix(in srgb, var(--text) 4%, transparent);
+  --backdrop-opacity: 0.06;
 }
 
 [data-theme='nord'] {
@@ -121,6 +126,8 @@
   --blue: #81a1c1;
   --gray: #6b7689;
   --stripe: color-mix(in srgb, var(--text) 4%, transparent);
+  /* lightest-toned theme — keep the art fainter so it never fights text */
+  --backdrop-opacity: 0.05;
 }
 
 * {
@@ -141,6 +148,27 @@ body {
   background-attachment: fixed;
   color: var(--text);
   font: var(--fs-md) / 1.5 var(--font);
+}
+
+/* ── Site backdrop ───────────────────────────────────────────────────────
+   The locomotive artwork as a whisper-faint, full-viewport backdrop. A
+   fixed-position pseudo-element (not background-attachment: fixed, which is
+   broken on iOS Safari) keeps it pinned without repainting per scroll frame.
+   z-index: -1 sits above the body background colour but behind all #root
+   content, so cards/tables (which carry their own --card background) stay
+   fully readable and the art only peeks through page gutters and empty
+   areas. Opacity is tuned per theme so it stays equally subtle everywhere. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: url('/chuggernaut-art.webp');
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+  opacity: var(--backdrop-opacity, 0.06);
 }
 
 code,
