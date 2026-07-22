@@ -4,7 +4,8 @@ The operator UI. React 19 + React Router 7 + Vite + TypeScript. No component lib
 CSS framework.
 
 ```sh
-npm run dev      # vite dev server
+npm run dev      # vite dev server (proxies to a local `chuggernaut api` on :8080)
+CHUG_API=https://gumbo-mini-0.tail20c474.ts.net npm run dev   # …or against a live deployment
 npm run build    # tsc -b && vite build  — run before calling a change done
 ```
 
