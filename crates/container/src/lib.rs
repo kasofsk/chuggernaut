@@ -92,6 +92,25 @@ pub trait ContainerBackend: Send + Sync {
     /// rather than failing the whole sweep, so one unreachable node never blocks
     /// the others' reap.
     async fn list_managed_running(&self) -> Result<Vec<RunningContainer>, BackendError>;
+    /// Live per-node fleet status for the platform config snapshot (spec §3.1):
+    /// health and last-reported build version per node. Empty by default —
+    /// backends without fleet-health tracking (e.g. the test fake) report
+    /// nothing; Docker fills health, the worker fleet fills both. The dispatcher
+    /// republishes this each scan so the UI sees live fleet state and deploy
+    /// drift.
+    fn fleet_status(&self) -> Vec<NodeStatus> {
+        Vec::new()
+    }
+}
+
+/// One fleet node's live health and build version for the platform config
+/// snapshot (spec §3.1). `version` is `None` for docker-endpoint nodes (they
+/// carry no chuggernaut version) and for workers that have not answered yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeStatus {
+    pub name: String,
+    pub available: bool,
+    pub version: Option<String>,
 }
 
 /// A running managed container tagged with the task it serves (spec §3.6 fleet

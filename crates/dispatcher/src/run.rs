@@ -105,30 +105,23 @@ pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
     // placement-inert 0-slot node never vetoes a fleet with slots elsewhere.
     // A plain Docker fleet (no worker nodes) keeps the exact single-backend
     // path below.
-    // Per-node health captured at startup for the platform snapshot (spec
-    // §3.1). Placement keeps it fresh as nodes drop/recover, but the snapshot
-    // is written once, so this is the boot-time view.
-    let node_availability: Vec<(String, bool)>;
-    // Per-node build version at boot for the snapshot (spec §3.1); empty for a
-    // pure Docker fleet (docker endpoints carry no chuggernaut version).
-    let node_versions: Vec<(String, Option<String>)>;
     let backend: Arc<dyn container::ContainerBackend> =
         if worker::backend::has_worker_nodes(&config.docker_nodes) {
             let fleet = worker::FleetBackend::new(config.docker_nodes.clone(), store.clone())?;
             // Fleet-level rule: refuses only when no reachable node has slots > 0.
             fleet.startup_check().await?;
-            node_availability = fleet.availability();
-            node_versions = fleet.node_versions();
             Arc::new(fleet)
         } else {
             let docker = DockerBackend::new(config.docker_nodes.clone())?;
             // §3.1/§3.6: start as long as one node with slots responds; any
             // unreachable node is logged and excluded until it answers again.
             docker.ping_all().await?;
-            node_availability = docker.availability();
-            node_versions = Vec::new();
             Arc::new(docker)
         };
+    // Per-node health and build version as of the boot probe, for the platform
+    // snapshot (spec §3.1). The scan tick keeps it fresh as nodes drop/recover
+    // and workers self-refresh (see `crate::cd`).
+    let fleet_status = backend.fleet_status();
 
     let provider: Arc<dyn AgentProvider> = match config.agent_provider_default.as_str() {
         "claude" => Arc::new(ClaudeProvider::new(backend.clone())),
@@ -169,18 +162,22 @@ pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
     }
 
     // Publish a read-only snapshot of the runtime config (fleet + agent
-    // defaults + resolved paths) to the `platform` bucket so the api/UI can
-    // display it — this config otherwise lives only in this process's env.
-    // Best-effort: a failed write must not stop the dispatcher from starting.
-    // Kept so the graceful-shutdown drain (§3.6) can re-publish it at exit.
-    let snapshot = build_config_snapshot(
+    // defaults + resolved paths + deploy drift) to the `platform` bucket so the
+    // api/UI can display it — this config otherwise lives only in this process's
+    // env. Best-effort: a failed write must not stop the dispatcher from
+    // starting. The returned state lets the scan tick republish it live
+    // (`crate::cd`).
+    let snapshot = publish_config_snapshot(
+        &store,
         &config,
-        &node_availability,
-        &node_versions,
+        &fleet_status,
         core_config.age_identity.is_some(),
         wizard.is_some(),
-    );
-    write_config_snapshot(&store, &snapshot).await;
+    )
+    .await;
+    // The boot snapshot the graceful-shutdown drain (§3.6) re-publishes at exit;
+    // the live copy moves into the core, which republishes it from the scan tick.
+    let boot_snapshot = snapshot.base.clone();
 
     // §7.3 user-cert minting signs with the CA key directly (no job-record
     // write), so it rides the API handlers rather than the single-writer core.
@@ -188,7 +185,9 @@ pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
     // Kept for the read-only live-output tail (`req.tasks.output`), which reads
     // the backend directly off the core actor.
     let output_backend = backend.clone();
-    let core = Core::new(store.clone(), repos, backend, provider, core_config).await?;
+    let core = Core::new(store.clone(), repos, backend, provider, core_config)
+        .await?
+        .with_config_snapshot(snapshot);
     let handle = spawn(core);
     handlers::spawn_container_handlers(&store, handle.clone()).await?;
     handlers::spawn_api_handlers(
@@ -205,61 +204,57 @@ pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
     Ok(Dispatcher {
         handle,
         store,
-        snapshot,
+        snapshot: boot_snapshot,
     })
 }
 
-/// Build the runtime config snapshot (fleet + agent defaults + resolved paths)
-/// the api/UI reads (`types::DispatcherConfigSnapshot`). Pure — the caller
-/// publishes it at startup and re-publishes it on graceful shutdown (§3.6).
-fn build_config_snapshot(
+/// Write the boot-time runtime config snapshot to the `platform` bucket for the
+/// api/UI to read (see `types::DispatcherConfigSnapshot`), and return the
+/// republish state the scan tick uses to keep it fresh (`crate::cd`).
+/// Best-effort — logs and returns on any write failure so a missing bucket
+/// never blocks startup; `last_published` is left unset on failure so the first
+/// scan retries the write.
+async fn publish_config_snapshot(
+    store: &NatsStore,
     config: &DispatcherConfig,
-    node_availability: &[(String, bool)],
-    node_versions: &[(String, Option<String>)],
+    fleet_status: &[container::NodeStatus],
     secrets_encryption: bool,
     wizard_available: bool,
-) -> types::DispatcherConfigSnapshot {
-    types::DispatcherConfigSnapshot {
-        nodes: config
-            .docker_nodes
-            .iter()
-            .map(|n| types::WorkerNode {
-                name: n.name.clone(),
-                endpoint: n.endpoint.clone(),
-                slots: n.slots,
-                // Absent from the availability list ⇒ assume up (the list is
-                // built from the same node set, so this is belt-and-suspenders).
-                available: node_availability
-                    .iter()
-                    .find(|(name, _)| name == &n.name)
-                    .map(|(_, up)| *up)
-                    .unwrap_or(true),
-                version: node_versions
-                    .iter()
-                    .find(|(name, _)| name == &n.name)
-                    .and_then(|(_, v)| v.clone()),
-            })
-            .collect(),
-        agent_provider_default: config.agent_provider_default.clone(),
-        agent_model_default: config.agent_model_default.clone(),
-        triage_image: config.triage_image.clone(),
-        repos_root: config.repos_root.display().to_string(),
-        repo_url_base: config.repo_url_base.clone(),
-        nats_url: config.nats_url.clone(),
-        nats_url_container: config.nats_url_container.clone(),
-        channel_binary: config
-            .channel_binary
-            .as_ref()
-            .map(|p| p.display().to_string()),
-        hook_bin: config.hook_bin.as_ref().map(|p| p.display().to_string()),
+) -> crate::cd::ConfigSnapshot {
+    let deployed_sha = crate::cd::deployed_sha();
+    let base = crate::cd::build_base_snapshot(
+        config,
+        fleet_status,
+        deployed_sha.clone(),
         secrets_encryption,
         wizard_available,
+    );
+    let last_published = match store.raw_bucket(store::buckets::PLATFORM).await {
+        Ok(bucket) => match bucket.put_json("dispatcher.config", &base).await {
+            Ok(()) => serde_json::to_vec(&base).ok(),
+            Err(e) => {
+                tracing::warn!("config snapshot write failed: {e}");
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!("config snapshot: platform bucket unavailable: {e}");
+            None
+        }
+    };
+    crate::cd::ConfigSnapshot {
+        base,
+        deployed_sha,
+        self_repo: config.self_repo.clone(),
+        commits_behind_cache: None,
+        last_published,
     }
 }
 
-/// Write the config snapshot to the `platform` bucket for the api/UI to read.
+/// Write a config snapshot to the `platform` bucket for the api/UI to read.
 /// Best-effort — logs and returns on any failure so a missing bucket never
-/// blocks startup or shutdown.
+/// blocks startup or shutdown. The graceful-shutdown drain (§3.6) uses this to
+/// re-publish the boot snapshot at exit.
 async fn write_config_snapshot(store: &NatsStore, snapshot: &types::DispatcherConfigSnapshot) {
     match store.raw_bucket(store::buckets::PLATFORM).await {
         Ok(bucket) => {

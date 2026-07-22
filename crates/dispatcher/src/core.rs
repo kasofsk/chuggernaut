@@ -698,6 +698,10 @@ pub struct Core {
     /// and container-start ids still record. This lets a SIGTERM drain the actor
     /// and flush memory-only state to KV so records are true at exit.
     pub(crate) draining: bool,
+    /// Config-snapshot republish state (CD deploy-drift visibility, see
+    /// [`crate::cd`]). `None` when snapshot publishing isn't wired (most tests);
+    /// the scan tick republishes it when the serialized bytes change.
+    pub(crate) snapshot: Option<crate::cd::ConfigSnapshot>,
 }
 
 const SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -796,6 +800,7 @@ impl Core {
             release_holds: HashSet::new(),
             self_tx: None,
             draining: false,
+            snapshot: None,
         };
 
         // Restore merge-queue holds for Open origin releases before reconcile
@@ -834,6 +839,14 @@ impl Core {
     /// Swap the PR client — integration tests inject a scripted fake.
     pub fn with_pr_api(mut self, pr_api: Arc<dyn crate::github::PullRequestApi>) -> Self {
         self.pr_api = pr_api;
+        self
+    }
+
+    /// Attach the config-snapshot republish state so the scan tick keeps the
+    /// `platform` bucket fresh (CD deploy-drift, see [`crate::cd`]). Wired by
+    /// [`crate::run`] after the boot-time publish.
+    pub(crate) fn with_config_snapshot(mut self, snapshot: crate::cd::ConfigSnapshot) -> Self {
+        self.snapshot = Some(snapshot);
         self
     }
 

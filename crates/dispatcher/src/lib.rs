@@ -5,6 +5,7 @@
 //! via an mpsc channel. There is no lock to misuse because there is no shared
 //! mutable state.
 
+pub mod cd;
 pub mod channel;
 pub mod config;
 pub mod core;

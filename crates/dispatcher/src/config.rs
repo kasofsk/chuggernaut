@@ -45,6 +45,12 @@ pub struct DispatcherConfig {
     /// `/usr/local/bin/chuggernaut` inside the sshd container). Unset → this
     /// process's own path.
     pub hook_bin: Option<PathBuf>,
+    /// `SELF_REPO` — the platform's own source repo as `owner/project`, hosted
+    /// as a chuggernaut project. When set, the config snapshot resolves its
+    /// `main` tip and how many commits the deployed dispatcher SHA is behind it,
+    /// so operators get live "is prod in sync" deploy-drift visibility. Unset →
+    /// the drift fields stay `None`.
+    pub self_repo: Option<(String, String)>,
 }
 
 fn env_opt(name: &str) -> Option<String> {
@@ -98,6 +104,10 @@ impl DispatcherConfig {
             triage_image: env_opt("TRIAGE_IMAGE"),
             docker_nodes,
             hook_bin: env_opt("HOOK_BIN").map(PathBuf::from),
+            self_repo: env_opt("SELF_REPO").and_then(|s| {
+                s.split_once('/')
+                    .map(|(owner, project)| (owner.to_string(), project.to_string()))
+            }),
         })
     }
 

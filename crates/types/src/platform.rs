@@ -35,6 +35,78 @@ fn default_available() -> bool {
     true
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> DispatcherConfigSnapshot {
+        DispatcherConfigSnapshot {
+            nodes: vec![WorkerNode {
+                name: "local".into(),
+                endpoint: "unix:///var/run/docker.sock".into(),
+                slots: 4,
+                available: true,
+                version: Some("0.1.0+abc123".into()),
+            }],
+            agent_provider_default: "claude".into(),
+            agent_model_default: None,
+            triage_image: None,
+            repos_root: "/data/repos".into(),
+            repo_url_base: "file:///data/repos".into(),
+            nats_url: "nats://localhost:4222".into(),
+            nats_url_container: None,
+            channel_binary: None,
+            hook_bin: None,
+            secrets_encryption: true,
+            wizard_available: false,
+            dispatcher_sha: Some("abc123".into()),
+            main_tip_sha: Some("def456".into()),
+            commits_behind: Some(3),
+            auto_deploy: None,
+        }
+    }
+
+    #[test]
+    fn new_fields_roundtrip() {
+        let snap = sample();
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("dispatcher_sha"));
+        assert!(json.contains("main_tip_sha"));
+        assert!(json.contains("commits_behind"));
+        assert!(json.contains("auto_deploy"));
+        let back: DispatcherConfigSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, back);
+    }
+
+    /// A snapshot serialized before the CD/deploy-drift fields existed must
+    /// still deserialize (the api reads it back from the platform bucket).
+    #[test]
+    fn old_snapshot_deserializes() {
+        let old = r#"{
+            "nodes": [{"name":"local","endpoint":"unix:///var/run/docker.sock","slots":4}],
+            "agent_provider_default": "claude",
+            "agent_model_default": null,
+            "repos_root": "/data/repos",
+            "repo_url_base": "file:///data/repos",
+            "nats_url": "nats://localhost:4222",
+            "nats_url_container": null,
+            "channel_binary": null,
+            "hook_bin": null,
+            "secrets_encryption": true
+        }"#;
+        let snap: DispatcherConfigSnapshot = serde_json::from_str(old).unwrap();
+        // Pre-existing optional fields default.
+        assert!(snap.nodes[0].available);
+        assert_eq!(snap.nodes[0].version, None);
+        assert!(!snap.wizard_available);
+        // New CD fields default to None.
+        assert_eq!(snap.dispatcher_sha, None);
+        assert_eq!(snap.main_tip_sha, None);
+        assert_eq!(snap.commits_behind, None);
+        assert_eq!(snap.auto_deploy, None);
+    }
+}
+
 /// A snapshot of the dispatcher's runtime configuration for display. Contains
 /// no secrets — only names, endpoints, and resolved paths an operator needs to
 /// see. Written by the dispatcher at startup, read by the api.
@@ -71,4 +143,27 @@ pub struct DispatcherConfigSnapshot {
     /// description entry.
     #[serde(default)]
     pub wizard_available: bool,
+    /// The running dispatcher binary's own build SHA (`CHUG_GIT_SHA`, baked at
+    /// build time — the SHA that `version_string()` embeds). `None` for local/
+    /// dev builds with no SHA baked in. Compared against `main_tip_sha` to show
+    /// whether prod is in sync. Defaults to `None` for snapshots written before
+    /// this field existed.
+    #[serde(default)]
+    pub dispatcher_sha: Option<String>,
+    /// Current `main` tip SHA of the platform's own source repo (`SELF_REPO`),
+    /// re-resolved each scan tick. `None` when `SELF_REPO` is unset or the tip
+    /// can't be resolved. This is the deploy target the running dispatcher is
+    /// measured against.
+    #[serde(default)]
+    pub main_tip_sha: Option<String>,
+    /// How many commits `dispatcher_sha` is behind `main_tip_sha`
+    /// (`rev-list --count`, cached per tip). `Some(0)` = in sync; `None` when
+    /// drift can't be computed (no self repo, or the deployed SHA is absent
+    /// from its history).
+    #[serde(default)]
+    pub commits_behind: Option<u64>,
+    /// CD auto-deploy posture, populated once the CD engine lands (`Some(true)`
+    /// = deploys land automatically, `Some(false)` = manual). `None` until then.
+    #[serde(default)]
+    pub auto_deploy: Option<bool>,
 }

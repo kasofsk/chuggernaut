@@ -8,7 +8,7 @@
 
 use crate::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
-    InjectedFile, LogTail, RunningContainer,
+    InjectedFile, LogTail, NodeStatus, RunningContainer,
 };
 use async_trait::async_trait;
 use bollard::Docker;
@@ -626,6 +626,18 @@ impl ContainerBackend for DockerBackend {
             }
         }
         Ok(out)
+    }
+
+    fn fleet_status(&self) -> Vec<NodeStatus> {
+        // Docker endpoints carry no chuggernaut version — health only.
+        self.availability()
+            .into_iter()
+            .map(|(name, available)| NodeStatus {
+                name,
+                available,
+                version: None,
+            })
+            .collect()
     }
 }
 

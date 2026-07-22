@@ -19,7 +19,12 @@ impl Core {
         // periodic drain that retries them rides `Core::run` after this scan
         // message, like every other slot-freed retry.
         self.scan_launch_queue_timeouts().await?;
-        self.scan_job_deadlines().await
+        self.scan_job_deadlines().await?;
+        // Keep the platform config snapshot fresh: republish only when live
+        // fleet state or deploy drift moved (spec §3.1, CD plan C). Best-effort
+        // — never fails the scan.
+        self.refresh_config_snapshot().await;
+        Ok(())
     }
 
     /// Running non-Human tasks past `task_timeout`: kill the container and

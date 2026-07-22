@@ -103,6 +103,8 @@ dispatcher/
   escalation.rs  — escalation task creation, resolution actions incl. pre-Work rules (§1.2)
   launch.rs      — launch-time validation, secret/var injection, credential issuance, container config
   scan.rs        — task-timeout and one-shot job-deadline scans (§3.5)
+  cd.rs          — config-snapshot freshness: republish live fleet/deploy-drift
+                   state from the scan tick when serialized bytes change
   factory.rs     — factory reload from default-branch HEAD, durable ingest consumers,
                    batching, triage job creation, auto-release policy (§13)
   reconcile.rs   — restart reconciliation (§3.6)

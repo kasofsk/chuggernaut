@@ -138,6 +138,10 @@ async fn config_endpoints() {
                 hook_bin: None,
                 secrets_encryption: true,
                 wizard_available: true,
+                dispatcher_sha: None,
+                main_tip_sha: None,
+                commits_behind: None,
+                auto_deploy: None,
             },
         )
         .await

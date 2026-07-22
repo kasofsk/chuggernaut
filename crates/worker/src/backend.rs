@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use container::docker::{DockerBackend, DockerNodeConfig};
 use container::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus, LogTail,
-    RunningContainer,
+    NodeStatus, RunningContainer,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -517,6 +517,24 @@ impl ContainerBackend for FleetBackend {
             }
         }
         Ok(out)
+    }
+
+    fn fleet_status(&self) -> Vec<NodeStatus> {
+        let versions = self.node_versions();
+        self.availability()
+            .into_iter()
+            .map(|(name, available)| {
+                let version = versions
+                    .iter()
+                    .find(|(n, _)| n == &name)
+                    .and_then(|(_, v)| v.clone());
+                NodeStatus {
+                    name,
+                    available,
+                    version,
+                }
+            })
+            .collect()
     }
 }
 
