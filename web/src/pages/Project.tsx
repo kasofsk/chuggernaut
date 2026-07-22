@@ -9,6 +9,28 @@ import { OriginPanel } from '../components/OriginPanel'
 
 type SortKey = 'id' | 'state' | 'type'
 
+// State-column sort order. Alphabetical scatters related states, so rank them by
+// lifecycle instead: inert pre-release first, terminal history next, live activity,
+// then attention-needed at the very end — so the default descending click surfaces
+// Escalated/Failed on top and sinks Frozen/Revoked to the bottom. Unknown/future
+// states rank after everything (RANK_UNKNOWN) and still render their name as-is.
+const RANK_UNKNOWN = 1000
+const STATE_RANK: Record<string, number> = {
+  Draft: 0, // inert pre-release, alongside Frozen
+  Frozen: 1,
+  Revoked: 2, // terminal history
+  Done: 3,
+  Blocked: 4, // queued to run, between Done and Work
+  Ready: 5,
+  Work: 6, // live activity
+  Evaluation: 7,
+  WrapUp: 8,
+  Failed: 9, // attention-needed, adjacent to Escalated
+  Stalled: 10,
+  Escalated: 11,
+}
+const stateRank = (state: string) => STATE_RANK[state] ?? RANK_UNKNOWN
+
 export function ProjectPage() {
   const { owner = '', project = '' } = useParams()
   const navigate = useNavigate()
@@ -99,7 +121,7 @@ export function ProjectPage() {
       sort.key === 'id'
         ? a.id - b.id
         : sort.key === 'state'
-          ? a.state.localeCompare(b.state)
+          ? stateRank(a.state) - stateRank(b.state)
           : a.type.localeCompare(b.type)
     if (r === 0) r = a.id - b.id // stable tiebreak
     return sort.dir === 'asc' ? r : -r
