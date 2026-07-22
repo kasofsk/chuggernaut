@@ -12,8 +12,8 @@ use std::sync::Arc;
 use store::NatsStore;
 use tower::ServiceExt;
 use types::{
-    DispatcherConfigSnapshot, Identity, IdentityKind, OriginLink, ProjectRecord, ProjectRole,
-    WorkerNode,
+    DispatcherConfigSnapshot, FleetNode, FleetStatus, Identity, IdentityKind, OriginLink,
+    ProjectRecord, ProjectRole, SlotOccupant, WorkerNode,
 };
 
 fn gen_jwt_keys(dir: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
@@ -233,4 +233,90 @@ async fn config_endpoints() {
         !pc.to_string().contains("TOPSECRET"),
         "agent secret value leaked into platform config: {pc}"
     );
+}
+
+/// `GET /platform/fleet` serves the dispatcher's live occupancy snapshot: it is
+/// admin-gated like `/platform/config`, reads the `fleet.status` KV entry
+/// verbatim, and returns an empty fleet (never a 404) before the dispatcher has
+/// published anything.
+#[tokio::test]
+async fn platform_fleet_endpoint() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+
+    // JWT signer + router (no Core — this route is a pure KV read).
+    let keys_dir = tempfile::tempdir().unwrap();
+    let (private, public) = gen_jwt_keys(keys_dir.path());
+    let signer = auth::jwt::JwtSigner::from_pem(&private).unwrap();
+    let state: SharedState = Arc::new(ApiState {
+        store: store.clone(),
+        signer: auth::jwt::JwtSigner::from_pem(&private).unwrap(),
+        verifier: auth::jwt::JwtVerifier::from_pem(&public).unwrap(),
+        session_ttl: chrono::Duration::hours(1),
+        artifacts: None,
+    });
+    let router = api::router(state, None);
+    let token = |admin: bool| {
+        signer
+            .issue(
+                &Identity {
+                    sub: "u@example.com".into(),
+                    kind: IdentityKind::User,
+                    project_roles: Default::default(),
+                    platform_admin: admin,
+                },
+                chrono::Duration::hours(1),
+            )
+            .unwrap()
+    };
+
+    // Before any publish: an admin gets an empty fleet, not a 404.
+    let admin = token(true);
+    let (status, fleet) = get(&router, "/api/v1/platform/fleet", &admin).await;
+    assert_eq!(status, StatusCode::OK, "{fleet}");
+    assert_eq!(fleet, serde_json::json!({ "nodes": [], "queue_depth": 0 }));
+
+    // Seed a snapshot as the dispatcher would, then read it back verbatim.
+    let platform = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
+    platform
+        .put_json(
+            "fleet.status",
+            &FleetStatus {
+                nodes: vec![FleetNode {
+                    name: "air".into(),
+                    slots: Some(4),
+                    occupied: 1,
+                    available: true,
+                    version: Some("0.1.0+air".into()),
+                    running: vec![SlotOccupant {
+                        project: "acme/api".into(),
+                        job_seq: 42,
+                        task_id: 3,
+                        task_kind: "work".into(),
+                        job_type: "implement-endpoint".into(),
+                        phase: "work".into(),
+                        started_at: None,
+                    }],
+                }],
+                queue_depth: 2,
+            },
+        )
+        .await
+        .unwrap();
+
+    let (status, fleet) = get(&router, "/api/v1/platform/fleet", &admin).await;
+    assert_eq!(status, StatusCode::OK, "{fleet}");
+    assert_eq!(fleet["queue_depth"], 2);
+    assert_eq!(fleet["nodes"][0]["name"], "air");
+    assert_eq!(fleet["nodes"][0]["occupied"], 1);
+    assert_eq!(fleet["nodes"][0]["running"][0]["job_seq"], 42);
+    assert_eq!(fleet["nodes"][0]["running"][0]["task_kind"], "work");
+
+    // A non-admin is refused, like the platform config view.
+    let member = token(false);
+    let (status, _) = get(&router, "/api/v1/platform/fleet", &member).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }

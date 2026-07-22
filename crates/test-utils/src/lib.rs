@@ -199,6 +199,13 @@ impl FakeBackend {
             .extend(containers);
     }
 
+    /// Replace the running managed containers `list_managed_running` reports.
+    /// Unlike [`seed_managed_running`] (which appends), this sets the whole set —
+    /// the way to simulate a container exiting (drop it) after a launch.
+    pub fn set_managed_running(&self, containers: impl IntoIterator<Item = RunningContainer>) {
+        self.state.lock().unwrap().managed_running = containers.into_iter().collect();
+    }
+
     /// Make `list_managed_running` fail — an unreachable node the fleet sweep
     /// must tolerate (log, continue) without crashing the dispatcher.
     pub fn fail_list_managed_running(&self, reason: impl Into<String>) {

@@ -481,6 +481,37 @@ pub async fn platform_config_get(
     .into_response())
 }
 
+/// Live fleet occupancy for the platform view: the dispatcher's `fleet.status`
+/// snapshot (per-node slot usage + the running job/task in each busy slot, plus
+/// the launch-queue depth — spec §3.1). Cross-project data, so platform admins
+/// only, matching `platform_config_get`. An empty fleet is served before the
+/// dispatcher has published anything (never a 404, so the UI needn't special-
+/// case a cold start). Change events reach the UI over the existing SSE path:
+/// every occupancy change coincides with a task lifecycle event already on the
+/// job-event stream, on which the client refetches this snapshot.
+pub async fn platform_fleet_get(
+    State(state): State<SharedState>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    if !identity.platform_admin {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "platform admin required",
+        ));
+    }
+    let platform = state
+        .store
+        .raw_bucket(store::buckets::PLATFORM)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let fleet: types::FleetStatus = platform
+        .get_json("fleet.status")
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .unwrap_or_default();
+    Ok(Json(fleet).into_response())
+}
+
 /// Create a project (§12.2 via the API): bare repo, pre-receive hook, the
 /// Code starter template, and the job counter. Platform admins only — role
 /// grants for other users remain an admin-CLI concern.

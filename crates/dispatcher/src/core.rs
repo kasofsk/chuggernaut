@@ -714,6 +714,14 @@ pub struct Core {
     /// [`crate::cd`]). `None` when snapshot publishing isn't wired (most tests);
     /// the scan tick republishes it when the serialized bytes change.
     pub(crate) snapshot: Option<crate::cd::ConfigSnapshot>,
+    /// The fleet roster (node names + slot caps + boot health) for live
+    /// occupancy publishing (see [`crate::fleet`]). Mirrors the config
+    /// snapshot's `nodes`; empty in tests that don't wire a fleet. Live
+    /// health/version comes from the backend, slot caps from here.
+    pub(crate) fleet_roster: Vec<types::WorkerNode>,
+    /// Last-published `fleet.status` bytes, for change detection — a launch/exit
+    /// that leaves occupancy unchanged republishes nothing.
+    pub(crate) last_fleet_status: Option<Vec<u8>>,
 }
 
 const SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -748,6 +756,10 @@ pub fn spawn(mut core: Core) -> CoreHandle {
         if let Err(e) = core.drain_launch_queue().await {
             tracing::error!("post-reconcile launch drain: {e}");
         }
+        // Publish live fleet occupancy once reconciliation settled the running
+        // set (re-attached survivors, reaped orphans) — the first snapshot is
+        // rebuilt from live containers, not stale state (spec §3.1/§3.6).
+        core.refresh_fleet_status().await;
         core.run(rx).await
     });
     CoreHandle { tx }
@@ -813,6 +825,8 @@ impl Core {
             self_tx: None,
             draining: false,
             snapshot: None,
+            fleet_roster: Vec::new(),
+            last_fleet_status: None,
         };
 
         // Restore merge-queue holds for Open origin releases before reconcile
@@ -862,6 +876,15 @@ impl Core {
         self
     }
 
+    /// Attach the fleet roster (node names + slot caps) so live occupancy
+    /// publishing reports every node — idle ones included — with its capacity
+    /// (see [`crate::fleet`]). Wired by [`crate::run`] from the config snapshot's
+    /// nodes; tests set it to assert per-node slots.
+    pub fn with_fleet_roster(mut self, roster: Vec<types::WorkerNode>) -> Self {
+        self.fleet_roster = roster;
+        self
+    }
+
     async fn run(mut self, mut rx: mpsc::Receiver<Msg>) {
         while let Some(msg) = rx.recv().await {
             // Graceful shutdown (spec §3.6 drain): quiesce and stop the loop.
@@ -872,6 +895,12 @@ impl Core {
                 let _ = reply.send(result);
                 return;
             }
+            // Any message but a bare liveness ping can move fleet occupancy or
+            // the launch-queue depth (a launch, an exit, a queued/resumed
+            // launch); republish after the drains so the `platform` bucket
+            // stays current (spec §3.1). Pings are excluded so a busy
+            // health-check path never triggers a fleet recompute.
+            let occupancy_relevant = !matches!(msg, Msg::Ping { .. });
             self.handle_msg(msg).await;
             if let Err(e) = self.drain_queue().await {
                 tracing::error!("drain_queue: {e}");
@@ -880,6 +909,9 @@ impl Core {
             // any launches queued under capacity pressure (spec §3.5).
             if let Err(e) = self.drain_launch_queue().await {
                 tracing::error!("drain_launch_queue: {e}");
+            }
+            if occupancy_relevant {
+                self.refresh_fleet_status().await;
             }
         }
     }

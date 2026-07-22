@@ -27,7 +27,7 @@ pub use job_type::{
     WrapUpMode, WrapUpSpec,
 };
 pub use knowledge::{KnowledgeObject, KnowledgeScope};
-pub use platform::{DispatcherConfigSnapshot, WorkerNode};
+pub use platform::{DispatcherConfigSnapshot, FleetNode, FleetStatus, SlotOccupant, WorkerNode};
 pub use project::{OriginLink, ProjectRecord, ReleaseState, ReleaseStatus, github_repo_from_url};
 pub use resources::{MEMORY_PATTERN, MemoryParseError, parse_memory};
 pub use step::{StepKind, StepRecord, StepStatus};

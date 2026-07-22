@@ -51,6 +51,8 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
         .route("/api/v1/projects/link", post(routes::projects_link))
         // Platform-wide config (read-only settings; platform admins only)
         .route("/api/v1/platform/config", get(routes::platform_config_get))
+        // Live fleet occupancy (read-only; platform admins only)
+        .route("/api/v1/platform/fleet", get(routes::platform_fleet_get))
         // Per-project config (read-only settings; Viewer+)
         .route(
             "/api/v1/projects/{owner}/{project}/config",

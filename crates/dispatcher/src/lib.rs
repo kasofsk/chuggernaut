@@ -13,6 +13,7 @@ pub mod escalation;
 pub mod eval;
 pub mod exec;
 pub mod factory;
+pub mod fleet;
 pub mod github;
 pub mod graph;
 pub mod handlers;

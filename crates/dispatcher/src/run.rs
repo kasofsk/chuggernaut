@@ -187,6 +187,7 @@ pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
     let output_backend = backend.clone();
     let core = Core::new(store.clone(), repos, backend, provider, core_config)
         .await?
+        .with_fleet_roster(boot_snapshot.nodes.clone())
         .with_config_snapshot(snapshot);
     let handle = spawn(core);
     handlers::spawn_container_handlers(&store, handle.clone()).await?;
