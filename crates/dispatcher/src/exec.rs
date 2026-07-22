@@ -44,6 +44,11 @@ pub struct ExecState {
     /// Eval-failure reworks consumed (`rework_budget` accounting). Conflict
     /// cycles increment `cycle` but not this counter (spec §2.1).
     pub reworks_used: u32,
+    /// Gate-fix fast-path rounds used this landing (spec §3.3, job #154),
+    /// counted separately from `reworks_used`. Bounded by [`GATE_FIX_BUDGET`];
+    /// on exhaustion a further gate compile failure falls back to the full
+    /// rework loop. Rebuilt from the task log on restart.
+    pub gate_fix_used: u32,
     /// Latest `submit_result` payload — commit-message summary + rework context.
     pub work_submission: Option<WorkSubmission>,
     pub round: Option<crate::eval::EvalRound>,
@@ -212,6 +217,11 @@ impl Core {
                     .get(&(owner.to_string(), project.to_string(), seq))
                     .map(|e| e.reworks_used)
                     .unwrap_or(0),
+                gate_fix_used: self
+                    .active
+                    .get(&(owner.to_string(), project.to_string(), seq))
+                    .map(|e| e.gate_fix_used)
+                    .unwrap_or(0),
                 work_submission: None,
                 round: None,
                 gate: None,
@@ -319,7 +329,10 @@ impl Core {
             },
             attempt,
             evaluator: None,
-            label: None,
+            // A gate-fix work task carries its own label so the story reads
+            // `gate-fix` rather than a bare Work row (job #154/#146).
+            label: (rework_reason == Some(ReworkReason::GateCompileFix))
+                .then(|| "gate-fix".to_string()),
             stage: 0,
             performed_by: claimed.then_some(types::Performer::Human),
             container_id: None,
@@ -328,6 +341,7 @@ impl Core {
             session_id: session_id.clone(),
             pending_reason: None,
             queued_at: None,
+            reviewed_tip: None,
             result: None,
             created_at: Utc::now(),
             // A claimed attempt starts now, humanly: the claim was the "I'm
@@ -465,6 +479,7 @@ impl Core {
                                 usage,
                                 assessment: None,
                                 launch_error: None,
+                                log_tail: None,
                                 infra_loss: false,
                             },
                         })
@@ -641,6 +656,7 @@ impl Core {
                 task.result = Some(TaskResult::Work {
                     summary: sub.as_ref().and_then(|s| s.summary.clone()),
                     structured: sub.as_ref().and_then(|s| s.structured.clone()),
+                    cover_html: sub.as_ref().and_then(|s| s.cover_html.clone()),
                     token_usage: sub.and_then(|s| s.token_usage),
                 });
             }
@@ -686,6 +702,7 @@ impl Core {
             }
 
             task.state = TaskState::Done;
+            let gate_fix = task.rework_reason == Some(ReworkReason::GateCompileFix);
             self.tasks.put(&task).await?;
             self.publish(
                 owner,
@@ -697,6 +714,11 @@ impl Core {
                 }),
             )
             .await?;
+            // A gate-fix task (job #154) returns straight to the merge gate —
+            // no re-review, no eval CI — where gate CI is the final authority.
+            if gate_fix {
+                return self.reenter_gate_after_fix(owner, project, seq).await;
+            }
             return self.enter_evaluation(owner, project, seq).await;
         }
 
@@ -989,6 +1011,7 @@ impl Core {
                 summary: submission.summary,
                 structured: submission.structured,
                 token_usage: submission.token_usage,
+                cover_html: submission.cover_html,
             });
             self.tasks.put(&task).await?;
         }
@@ -1154,6 +1177,8 @@ impl Core {
                             summary,
                             structured,
                             token_usage: None,
+                            // Operator-completed work carries no agent cover.
+                            cover_html: None,
                         });
                     }
                 }
@@ -1446,20 +1471,19 @@ impl Core {
         )
         .await?;
         let job_type = release::with_job_evaluators(job_type, &job)?;
-        let cycle = self
-            .tasks
-            .list_for_job(owner, project, seq)
-            .await?
+        let all_tasks = self.tasks.list_for_job(owner, project, seq).await?;
+        let cycle = all_tasks.iter().map(|t| t.cycle).max().unwrap_or(1);
+        // Gate-fix rounds are counted from the persisted task log so the budget
+        // survives restart (job #154): one Work task per gate-fix round.
+        let gate_fix_used = all_tasks
             .iter()
-            .map(|t| t.cycle)
-            .max()
-            .unwrap_or(1);
+            .filter(|t| {
+                t.phase == TaskPhase::Work && t.rework_reason == Some(ReworkReason::GateCompileFix)
+            })
+            .count() as u32;
         // Recover the submission from the task log rather than starting blank:
         // it is what the squash-merge commit message is built from.
-        let work_submission = self
-            .tasks
-            .list_for_job(owner, project, seq)
-            .await?
+        let work_submission = all_tasks
             .iter()
             .filter(|t| t.phase == TaskPhase::Work && t.cycle == cycle && t.evaluator.is_none())
             .max_by_key(|t| t.id)
@@ -1468,10 +1492,12 @@ impl Core {
                     summary,
                     structured,
                     token_usage,
+                    cover_html,
                 }) => Some(WorkSubmission {
                     summary: summary.clone(),
                     structured: structured.clone(),
                     token_usage: *token_usage,
+                    cover_html: cover_html.clone(),
                 }),
                 _ => None,
             });
@@ -1481,6 +1507,7 @@ impl Core {
                 job_type,
                 cycle,
                 reworks_used: 0,
+                gate_fix_used,
                 work_submission,
                 round: None,
                 gate: None,

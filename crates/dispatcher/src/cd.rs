@@ -71,6 +71,7 @@ pub(crate) fn build_base_snapshot(
         commits_behind: None,
         // Populated once the CD engine lands.
         auto_deploy: None,
+        placement_policy: config.placement_policy.as_str().to_string(),
     }
 }
 
@@ -207,6 +208,7 @@ mod tests {
             }],
             hook_bin: None,
             self_repo: None,
+            placement_policy: container::PlacementPolicy::Busyness,
         }
     }
 

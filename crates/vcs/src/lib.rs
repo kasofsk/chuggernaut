@@ -1263,6 +1263,47 @@ impl RepoManager {
         Ok(DiffResponse { files, diff })
     }
 
+    /// Public two-ref diff `{from}..{to}` — the delta a re-review focuses on
+    /// (spec §3.3, job #155). Same shape as [`diff_for_job`], but between two
+    /// arbitrary refs the caller supplies (e.g. the last-reviewed tip and the
+    /// branch HEAD).
+    pub async fn diff_between(
+        &self,
+        owner: &str,
+        project: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<DiffResponse> {
+        self.diff_range(owner, project, from, to).await
+    }
+
+    /// `git merge-base --is-ancestor {ancestor} {descendant}` — true when
+    /// `ancestor` is reachable from `descendant`. Used by re-review to tell a
+    /// linear delta (`last_reviewed_tip..HEAD` is meaningful) from a rebase
+    /// (the branch was replayed onto a moved base, so the delta is bogus and the
+    /// full diff is shown instead — job #155). A missing ref is treated as "not
+    /// an ancestor" (fall back to the full diff) rather than an error.
+    pub async fn is_ancestor(
+        &self,
+        owner: &str,
+        project: &str,
+        ancestor: &str,
+        descendant: &str,
+    ) -> Result<bool> {
+        let repo = self.repo_path(owner, project);
+        let out = self
+            .exec(
+                &repo,
+                &["merge-base", "--is-ancestor", ancestor, descendant],
+                None,
+            )
+            .await?;
+        // Exit 0 = ancestor, exit 1 = not an ancestor; anything else (e.g. a bad
+        // rev) is also treated as "not an ancestor" so re-review degrades to the
+        // full diff rather than failing the whole eval launch.
+        Ok(out.status.success())
+    }
+
     // ── git plumbing ────────────────────────────────────────────────────────
 
     async fn run(&self, repo: &Path, args: &[&str]) -> Result<String> {

@@ -21,6 +21,10 @@ Then:
    - `summary`: one paragraph describing what you built (this becomes the
      merge commit body),
    - `structured`: `{ "files_changed": [...], "notes": "..." }`.
+   - `cover_html` (optional): a small self-contained HTML cover page — a visual
+     changelog, before/after, or diagram — shown beside the summary in the UI.
+     Only if it helps tell the story; never required, presentational only, and
+     never a substitute for `summary`. Keep it compact (rejected over 64KB).
 6. Exit 0.
 
 An independent reviewer will judge your change against the same brief; if it

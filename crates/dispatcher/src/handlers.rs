@@ -40,12 +40,18 @@ pub async fn spawn_container_handlers(store: &NatsStore, handle: CoreHandle) -> 
             };
             let submission: WorkSubmission =
                 serde_json::from_slice(&req.payload).unwrap_or_default();
-            let body = match work_handle
-                .submit_result(owner, project, seq, submission)
-                .await
-            {
-                Ok(()) => r#"{"ok":true}"#.to_string(),
-                Err(e) => format!(r#"{{"error":{}}}"#, serde_json::json!(e.to_string())),
+            // Reject an oversized cover at ingest, before the record is stored
+            // (job #143) — the text summary still lands only via a resubmission.
+            let body = if let Some(err) = agent_cover_rejection(&submission.cover_html) {
+                format!(r#"{{"error":{}}}"#, serde_json::json!(err))
+            } else {
+                match work_handle
+                    .submit_result(owner, project, seq, submission)
+                    .await
+                {
+                    Ok(()) => r#"{"ok":true}"#.to_string(),
+                    Err(e) => format!(r#"{{"error":{}}}"#, serde_json::json!(e.to_string())),
+                }
             };
             req.respond(body.into_bytes()).await;
         }
@@ -72,6 +78,10 @@ pub async fn spawn_container_handlers(store: &NatsStore, handle: CoreHandle) -> 
             // rejected, not defaulted.
             let body = match serde_json::from_slice::<EvalSubmission>(&req.payload) {
                 Err(e) => format!(r#"{{"error":{}}}"#, serde_json::json!(e.to_string())),
+                Ok(submission) if agent_cover_rejection(&submission.cover_html).is_some() => {
+                    let err = agent_cover_rejection(&submission.cover_html).unwrap();
+                    format!(r#"{{"error":{}}}"#, serde_json::json!(err))
+                }
                 Ok(submission) => {
                     match handle
                         .submit_eval(owner, project, seq, task_id, submission)
@@ -173,6 +183,30 @@ fn cover_too_large(cover_html: &Option<String>) -> bool {
     cover_html
         .as_ref()
         .is_some_and(|h| h.len() > COVER_HTML_MAX_BYTES)
+}
+
+/// Byte cap on an agent-authored `cover_html` attached to a work/eval
+/// submission (job #143). Tighter than a job brief's cover: an agent cover is a
+/// compact "what I did" visual, not a whole authored page, and it rides on
+/// every task record. Over → the submission is rejected (never truncated) with
+/// an actionable error the agent can react to.
+const AGENT_COVER_HTML_MAX_BYTES: usize = 64 * 1024;
+
+/// `Some(error)` when a submitted `cover_html` is over
+/// [`AGENT_COVER_HTML_MAX_BYTES`]; `None` when absent or within bound. The text
+/// summary is canonical, so an oversized cover is rejected rather than dropped
+/// silently — the agent learns to omit or shrink it.
+fn agent_cover_rejection(cover_html: &Option<String>) -> Option<String> {
+    cover_html
+        .as_ref()
+        .filter(|h| h.len() > AGENT_COVER_HTML_MAX_BYTES)
+        .map(|_| {
+            format!(
+                "cover_html exceeds the {AGENT_COVER_HTML_MAX_BYTES}-byte limit \
+                 (cover pages are presentational — omit it or shrink it; the text \
+                 summary is what matters)"
+            )
+        })
 }
 
 fn service_unavailable(message: &str) -> Vec<u8> {
@@ -1619,8 +1653,8 @@ async fn list_pending(store: &NatsStore, owner: &str, project: &str) -> Vec<u8> 
 #[cfg(test)]
 mod tests {
     use super::{
-        COVER_HTML_MAX_BYTES, CreateJobBody, UpdateJobBody, cover_too_large,
-        job_reply_with_awaiting, unprocessable,
+        AGENT_COVER_HTML_MAX_BYTES, COVER_HTML_MAX_BYTES, CreateJobBody, UpdateJobBody,
+        agent_cover_rejection, cover_too_large, job_reply_with_awaiting, unprocessable,
     };
     use chrono::Utc;
     use types::{Job, JobState, Task, TaskKind, TaskPhase, TaskState};
@@ -1629,6 +1663,22 @@ mod tests {
         serde_json::from_slice::<serde_json::Value>(body).unwrap()["error"]["status"]
             .as_i64()
             .unwrap()
+    }
+
+    /// Agent-authored cover cap (job #143): absent is always fine (full back-
+    /// compat), at the cap is fine, one byte over is rejected with an actionable
+    /// error the agent can react to — never truncated.
+    #[test]
+    fn agent_cover_over_limit_rejected_with_actionable_error() {
+        assert!(agent_cover_rejection(&None).is_none());
+        assert!(agent_cover_rejection(&Some("x".repeat(AGENT_COVER_HTML_MAX_BYTES))).is_none());
+        let err = agent_cover_rejection(&Some("x".repeat(AGENT_COVER_HTML_MAX_BYTES + 1)))
+            .expect("over-limit cover rejected");
+        // The message names the field and the fact it's optional/presentational.
+        assert!(err.contains("cover_html"), "{err}");
+        assert!(err.contains("summary"), "{err}");
+        // The agent cap is tighter than a job brief's cover cap.
+        const { assert!(AGENT_COVER_HTML_MAX_BYTES < COVER_HTML_MAX_BYTES) };
     }
 
     /// The §1.1 cover cap: a body at/under the limit is accepted, one over it is
@@ -1714,6 +1764,7 @@ mod tests {
             session_id: None,
             pending_reason: None,
             queued_at: None,
+            reviewed_tip: None,
             result: None,
             created_at: Utc::now(),
             started_at: None,

@@ -3,6 +3,7 @@
 //! behavioral contract as DockerBackend, through the proxy.
 
 use container::ContainerBackend;
+use container::PlacementPolicy;
 use container::docker::DockerNodeConfig;
 use test_utils::backend_suite as suite;
 use test_utils::nats::NatsTestServer;
@@ -57,6 +58,7 @@ async fn setup(
             slots: 8,
         }],
         store,
+        PlacementPolicy::default(),
     )
     .unwrap();
 
@@ -208,6 +210,7 @@ async fn worker_capacity_starts_fleet_and_dead_worker_fails_placement() {
             },
         ],
         store,
+        PlacementPolicy::default(),
     )
     .unwrap();
 
@@ -251,6 +254,7 @@ async fn zero_slot_docker_does_not_veto_live_worker_fleet() {
             },
         ],
         store,
+        PlacementPolicy::default(),
     )
     .unwrap();
     fleet.startup_check().await.unwrap();
@@ -277,6 +281,7 @@ async fn no_reachable_capacity_fails_startup() {
             },
         ],
         store,
+        PlacementPolicy::default(),
     )
     .unwrap();
     assert!(fleet.startup_check().await.is_err());
@@ -358,6 +363,7 @@ async fn fleet_over(store: store::NatsStore, node: &str, slots: u32) -> FleetBac
             slots,
         }],
         store,
+        PlacementPolicy::default(),
     )
     .unwrap()
 }

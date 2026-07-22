@@ -60,6 +60,7 @@ fn task(job_seq: u64, id: u64) -> Task {
         pending_reason: None,
         queued_at: None,
         session_id: None,
+        reviewed_tip: None,
         result: None,
         created_at: Utc::now(),
         started_at: None,

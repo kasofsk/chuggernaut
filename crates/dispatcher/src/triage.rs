@@ -118,6 +118,7 @@ impl Core {
             session_id: Some(session_id.clone()),
             pending_reason: None,
             queued_at: None,
+            reviewed_tip: None,
             result: None,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -215,6 +216,7 @@ impl Core {
                         usage,
                         assessment,
                         launch_error: None,
+                        log_tail: None,
                         infra_loss: false,
                     },
                 })
@@ -431,7 +433,7 @@ fn render_task_result(result: &TaskResult) -> String {
 
 /// The last `max` bytes of `s`, on a char boundary, prefixed with an elision
 /// marker when it was truncated.
-fn tail(s: &str, max: usize) -> String {
+pub(crate) fn tail(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }

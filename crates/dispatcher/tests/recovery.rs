@@ -10,7 +10,8 @@ use store::NatsStore;
 use test_utils::repo::{TempRepo, clone_branch_from};
 use test_utils::{FakeBackend, FakeProvider};
 use types::{
-    EscalationAction, Job, JobState, Task, TaskKind, TaskPhase, TaskResolution, TaskState,
+    EscalationAction, Job, JobState, Task, TaskKind, TaskPhase, TaskResolution, TaskResult,
+    TaskState,
 };
 
 const FLAKY: &str = r#"
@@ -61,6 +62,22 @@ work:
   type: human
   prompt: prompts/manual.md
 job_deadline: 1s
+"#;
+
+// Agent work + agent eval with a rework budget (job #155): a cycle-1 review can
+// fail and drive a rework, so a cycle-2 evaluator relaunched after a restart
+// must rebuild its re-review context from the persisted task log.
+const REWORK_AGENT: &str = r#"
+name: rework-agent
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+rework_budget: 1
+eval:
+  - name: reviewer
+    type: agent
+    prompt: prompts/eval.md
 "#;
 
 struct Rig {
@@ -248,6 +265,7 @@ async fn restart_recovers_orphaned_running_work_task() {
             pending_reason: None,
             queued_at: None,
             session_id: None, // gone with the crashed dispatcher
+            reviewed_tip: None,
             result: None,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -293,6 +311,224 @@ async fn restart_recovers_orphaned_running_work_task() {
     assert_eq!(tasks[0].state, TaskState::Failed); // the orphan
     assert_eq!((tasks[1].attempt, tasks[1].state), (2, TaskState::Done));
     assert_eq!(provider.runs().len(), 1); // only the retry ran here
+}
+
+/// Job #155: the re-review context block is rebuilt from persisted records, not
+/// in-memory state. We construct the crash state a dispatcher would leave after
+/// cycle 1 (work + a FAILING reviewer that recorded its `reviewed_tip`) and a
+/// completed cycle-2 work task, then a fresh core reconciles: recovering the
+/// Done cycle-2 work re-enters Evaluation and launches the cycle-2 reviewer,
+/// whose prompt must still carry the prior findings, the last-reviewed SHA, and
+/// the delta — proving nothing depended on the crashed dispatcher's memory.
+#[tokio::test]
+async fn restart_rebuilds_re_review_context_from_persisted_records() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+        return;
+    };
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/rework-agent.yaml", REWORK_AGENT.as_bytes(), "type")
+        .await;
+    clone
+        .commit_file("prompts/impl.md", b"implement it", "prompt")
+        .await;
+    clone
+        .commit_file("prompts/eval.md", b"review it", "prompt")
+        .await;
+    clone.push("main").await;
+    let head = repo.head().await;
+    repo.create_job_branch(1, &head).await;
+
+    // Cycle-1 commit — the tip the cycle-1 reviewer saw (its `reviewed_tip`).
+    let c1 = clone_branch_from(&repo.bare_path(), "job/1").await;
+    c1.commit_file("src/a.rs", b"pub fn a() {}", "cycle 1")
+        .await;
+    c1.push("job/1").await;
+    let tip1 = repo
+        .manager
+        .resolve_ref("acme", "api", "job/1")
+        .await
+        .unwrap();
+    // Cycle-2 commit — the rework the restarted reviewer must diff as the delta.
+    let c2 = clone_branch_from(&repo.bare_path(), "job/1").await;
+    c2.commit_file("src/b.rs", b"pub fn b() {}", "cycle 2")
+        .await;
+    c2.push("job/1").await;
+    let tip2 = repo
+        .manager
+        .resolve_ref("acme", "api", "job/1")
+        .await
+        .unwrap();
+
+    let jobs = store.jobs().await.unwrap();
+    jobs.put(&Job {
+        id: 1,
+        project: "acme/api".into(),
+        r#type: "rework-agent".into(),
+        title: String::new(),
+        description: String::new(),
+        cover_html: None,
+        deps: vec![],
+        members: vec![],
+        batch_id: None,
+        state: JobState::Work,
+        branch: "job/1".into(),
+        base_ref: Some(head.clone()),
+        knowledge_tags: vec![],
+        eval: vec![],
+        timeout: None,
+        model: None,
+        claim_next: false,
+        escalation: None,
+        factory: None,
+        created_at: Utc::now(),
+        ready_at: Some(Utc::now()),
+        completed_at: None,
+    })
+    .await
+    .unwrap();
+
+    let tasks = store.tasks().await.unwrap();
+    let base_task = |id: u64, cycle: u32| Task {
+        id,
+        job_seq: 1,
+        project: "acme/api".into(),
+        phase: TaskPhase::Work,
+        cycle,
+        kind: TaskKind::Agent {
+            provider: "claude".into(),
+            model: None,
+            prompt: "prompts/impl.md".into(),
+        },
+        state: TaskState::Done,
+        attempt: 1,
+        evaluator: None,
+        label: None,
+        stage: 0,
+        performed_by: None,
+        container_id: None,
+        rework_reason: None,
+        infra_loss: false,
+        pending_reason: None,
+        queued_at: None,
+        session_id: None,
+        reviewed_tip: None,
+        result: None,
+        created_at: Utc::now(),
+        started_at: Some(Utc::now()),
+        completed_at: Some(Utc::now()),
+    };
+    // Cycle-1 work (Done).
+    tasks
+        .put(&Task {
+            result: Some(TaskResult::Work {
+                summary: Some("cycle 1 work".into()),
+                structured: None,
+                token_usage: None,
+                cover_html: None,
+            }),
+            ..base_task(1, 1)
+        })
+        .await
+        .unwrap();
+    // Cycle-1 reviewer (Done, FAILED) — records the SHA it reviewed (tip1).
+    tasks
+        .put(&Task {
+            phase: TaskPhase::Evaluation,
+            evaluator: Some("reviewer".into()),
+            kind: TaskKind::Agent {
+                provider: "claude".into(),
+                model: None,
+                prompt: "prompts/eval.md".into(),
+            },
+            reviewed_tip: Some(tip1.clone()),
+            result: Some(TaskResult::Agent {
+                pass: false,
+                abort: false,
+                structured: Some(serde_json::json!({"issues": ["needs docstrings"]})),
+                token_usage: None,
+                cover_html: None,
+            }),
+            ..base_task(2, 1)
+        })
+        .await
+        .unwrap();
+    // Cycle-2 work (Done) — an eval-failure rework (linear, not a rebase).
+    tasks
+        .put(&Task {
+            cycle: 2,
+            rework_reason: Some(types::ReworkReason::EvalFailure),
+            result: Some(TaskResult::Work {
+                summary: Some("cycle 2 work".into()),
+                structured: None,
+                token_usage: None,
+                cover_html: None,
+            }),
+            ..base_task(3, 2)
+        })
+        .await
+        .unwrap();
+
+    // "Restart": a fresh core reconciles and launches the cycle-2 reviewer.
+    // The reviewer run needs no side effect — recording its prompt via runs()
+    // is enough; we assert on the prompt, not on the job reaching Done.
+    let provider = Arc::new(FakeProvider::new());
+    provider.on_run(|_cfg| async {});
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        Arc::new(FakeBackend::new()),
+        provider.clone(),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _handle = spawn(core);
+
+    // Wait for the reconciled dispatcher to launch the cycle-2 reviewer.
+    let mut prompt = None;
+    for _ in 0..100 {
+        if let Some(run) = provider.runs().first() {
+            prompt = Some(run.prompt.clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let prompt = prompt.expect("cycle-2 reviewer must launch after restart");
+
+    // The re-review block was rebuilt entirely from the persisted task log.
+    assert!(
+        prompt.contains("Re-Review Context"),
+        "re-review context missing after restart: {prompt}"
+    );
+    assert!(
+        prompt.contains("needs docstrings"),
+        "prior findings not rebuilt from records: {prompt}"
+    );
+    assert!(
+        prompt.contains(&tip1) && prompt.contains("Last-reviewed tip"),
+        "last-reviewed SHA not rebuilt from records: {prompt}"
+    );
+    assert!(
+        prompt.contains("```diff") && prompt.contains("src/b.rs"),
+        "delta diff (tip1..tip2) not rebuilt from records: {prompt}"
+    );
+    // Sanity: the delta really is tip1..tip2 and not a stale in-memory value.
+    assert_ne!(tip1, tip2);
 }
 
 /// §3.6 infra-loss accounting: a dispatcher died mid-Work and, by the time it
@@ -381,6 +617,7 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
             pending_reason: None,
             queued_at: None,
             session_id: None,
+            reviewed_tip: None,
             result: None,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -514,6 +751,7 @@ async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
         pending_reason: None,
         queued_at: None,
         session_id: None,
+        reviewed_tip: None,
         result: None,
         created_at: Utc::now(),
         started_at: Some(Utc::now()),
@@ -655,6 +893,7 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
             pending_reason: None,
             queued_at: None,
             session_id: None,
+            reviewed_tip: None,
             result: None,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -785,6 +1024,7 @@ async fn restart_requeues_queued_pending_work_task() {
             pending_reason: None,
             queued_at: None,
             session_id: None,
+            reviewed_tip: None,
             result: None,
             created_at: Utc::now(),
             started_at: None,
@@ -908,6 +1148,7 @@ async fn seed_queued_command_work(
             pending_reason: Some(types::PendingReason::QueuedForCapacity),
             queued_at: Some(queued_at),
             session_id: None,
+            reviewed_tip: None,
             result: None,
             created_at: queued_at,
             started_at: None,
@@ -1139,6 +1380,7 @@ async fn restart_requeues_queued_pending_agent_eval() {
             rework_reason: None,
             infra_loss: false,
             session_id: None,
+            reviewed_tip: None,
             result: Some(types::TaskResult::Command {
                 pass: true,
                 exit_code: 0,
@@ -1177,6 +1419,7 @@ async fn restart_requeues_queued_pending_agent_eval() {
             rework_reason: None,
             infra_loss: false,
             session_id: Some("sess-eval-1".into()),
+            reviewed_tip: None,
             result: None,
             created_at: Utc::now(),
             started_at: None,
@@ -1237,6 +1480,7 @@ async fn restart_requeues_queued_pending_agent_eval() {
                     abort: false,
                     structured: None,
                     token_usage: None,
+                    cover_html: None,
                 },
             )
             .await
@@ -1348,6 +1592,7 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
         pending_reason: None,
         queued_at: None,
         session_id: None,
+        reviewed_tip: None,
         result: None,
         created_at: Utc::now(),
         started_at: Some(Utc::now()),
@@ -1520,6 +1765,7 @@ fn work_task(id: u64, state: TaskState, container_id: Option<&str>) -> Task {
         pending_reason: None,
         queued_at: None,
         session_id: None,
+        reviewed_tip: None,
         result: None,
         created_at: Utc::now(),
         started_at: Some(Utc::now()),
@@ -1756,10 +2002,12 @@ async fn restart_lands_job_orphaned_in_wrapup() {
             pending_reason: None,
             queued_at: None,
             session_id: None,
+            reviewed_tip: None,
             result: Some(types::TaskResult::Work {
                 summary: None,
                 structured: None,
                 token_usage: None,
+                cover_html: None,
             }),
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -1889,10 +2137,12 @@ wrap_up:
             pending_reason: None,
             queued_at: None,
             session_id: None,
+            reviewed_tip: None,
             result: Some(types::TaskResult::Work {
                 summary: None,
                 structured: None,
                 token_usage: None,
+                cover_html: None,
             }),
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -1925,6 +2175,7 @@ wrap_up:
             pending_reason: None,
             queued_at: None,
             session_id: None,
+            reviewed_tip: None,
             result: None,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -2230,10 +2481,12 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
             pending_reason: None,
             queued_at: None,
             session_id: Some("da08d5f3-844e-430e-8363-39b4882f437b".into()),
+            reviewed_tip: None,
             result: Some(types::TaskResult::Work {
                 summary: Some("added f() with tests".into()),
                 structured: None,
                 token_usage: None,
+                cover_html: None,
             }),
             created_at: Utc::now(),
             started_at: Some(Utc::now()),

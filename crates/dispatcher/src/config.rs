@@ -2,6 +2,7 @@
 //! the dispatcher refuses to start without it.
 
 use crate::core::{CoreConfig, CoreError, Result};
+use container::PlacementPolicy;
 use container::docker::DockerNodeConfig;
 use std::path::PathBuf;
 
@@ -40,6 +41,9 @@ pub struct DispatcherConfig {
     /// `DOCKER_NODES` — comma-separated `name|endpoint|slots` entries.
     /// Unset → single local-socket node with `DOCKER_SLOTS` slots (default 4).
     pub docker_nodes: Vec<DockerNodeConfig>,
+    /// `PLACEMENT_POLICY` (`busyness` | `headroom`, §3.1). Platform-level: it
+    /// applies to the whole fleet, not per job type. Unset → `busyness`.
+    pub placement_policy: PlacementPolicy,
     /// `HOOK_BIN` — chuggernaut binary path baked into new repos' pre-receive
     /// hooks (§5.2), as seen from the SSH host (e.g.
     /// `/usr/local/bin/chuggernaut` inside the sshd container). Unset → this
@@ -75,6 +79,11 @@ impl DispatcherConfig {
             )));
         }
 
+        let placement_policy = match env_opt("PLACEMENT_POLICY") {
+            Some(v) => PlacementPolicy::parse(&v).map_err(CoreError::Config)?,
+            None => PlacementPolicy::default(),
+        };
+
         let docker_nodes = match env_opt("DOCKER_NODES") {
             Some(spec) => parse_docker_nodes(&spec)?,
             None => {
@@ -103,6 +112,7 @@ impl DispatcherConfig {
             agent_model_default: env_opt("AGENT_MODEL_DEFAULT"),
             triage_image: env_opt("TRIAGE_IMAGE"),
             docker_nodes,
+            placement_policy,
             hook_bin: env_opt("HOOK_BIN").map(PathBuf::from),
             self_repo: env_opt("SELF_REPO").and_then(|s| {
                 s.split_once('/')
@@ -261,5 +271,25 @@ mod tests {
         assert!(parse_docker_nodes("|worker|4").is_err());
         // Unknown endpoint schemes rejected at parse, not at backend construction.
         assert!(parse_docker_nodes("a|ssh://host|4").is_err());
+    }
+
+    #[test]
+    fn placement_policy_parses_defaults_and_rejects_unknown() {
+        // Unset defaults to busyness (the new §3.1 default).
+        assert_eq!(PlacementPolicy::default(), PlacementPolicy::Busyness);
+        assert_eq!(
+            PlacementPolicy::parse("busyness").unwrap(),
+            PlacementPolicy::Busyness
+        );
+        assert_eq!(
+            PlacementPolicy::parse("headroom").unwrap(),
+            PlacementPolicy::Headroom
+        );
+        // Unknown value is a hard config error naming the accepted values.
+        let err = PlacementPolicy::parse("random").unwrap_err();
+        assert!(
+            err.contains("busyness") && err.contains("headroom"),
+            "{err}"
+        );
     }
 }

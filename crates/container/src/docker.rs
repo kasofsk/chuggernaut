@@ -8,7 +8,8 @@
 
 use crate::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
-    InjectedFile, LogTail, NodeStatus, RunningContainer,
+    InjectedFile, LogTail, NodeLoad, NodeStatus, PlacementCandidate, PlacementPolicy,
+    RunningContainer, choose_placement,
 };
 use async_trait::async_trait;
 use bollard::Docker;
@@ -81,6 +82,11 @@ pub struct DockerBackend {
     /// worker-side via [`with_cache_dir`](DockerBackend::with_cache_dir); it is
     /// a node property, never carried on the wire or the launch config.
     cache_dir: Option<PathBuf>,
+    /// Platform placement policy (spec §3.1). Defaults to
+    /// [`PlacementPolicy::Busyness`]; the dispatcher sets it from
+    /// `PLACEMENT_POLICY` via [`with_placement_policy`](DockerBackend::with_placement_policy).
+    /// Irrelevant on the single-node dev/worker path (one candidate).
+    policy: PlacementPolicy,
 }
 
 impl DockerBackend {
@@ -111,6 +117,7 @@ impl DockerBackend {
         Ok(Self {
             nodes,
             cache_dir: None,
+            policy: PlacementPolicy::default(),
         })
     }
 
@@ -126,7 +133,15 @@ impl DockerBackend {
                 in_service: AtomicBool::new(true),
             }],
             cache_dir: None,
+            policy: PlacementPolicy::default(),
         })
+    }
+
+    /// Set the platform placement policy (spec §3.1). The dispatcher wires this
+    /// from `PLACEMENT_POLICY` for a directly-driven multi-node Docker fleet.
+    pub fn with_placement_policy(mut self, policy: PlacementPolicy) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Enable node-local build caching: bind-mount `host_dir` into every
@@ -221,6 +236,18 @@ impl DockerBackend {
         Ok(out)
     }
 
+    /// `(name, running, free)` per node — placement input for the fleet
+    /// backend, which needs the running count as well as free slots to apply
+    /// the busyness policy (spec §3.1). `free = slots − running`.
+    pub async fn load_by_node(&self) -> Result<Vec<(String, i64, i64)>, BackendError> {
+        let mut out = Vec::with_capacity(self.nodes.len());
+        for node in &self.nodes {
+            let running = self.managed_running(node).await? as i64;
+            out.push((node.name.clone(), running, node.slots as i64 - running));
+        }
+        Ok(out)
+    }
+
     /// Running `chuggernaut.managed` containers across all nodes.
     pub async fn managed_running_total(&self) -> Result<u32, BackendError> {
         let mut total = 0;
@@ -303,32 +330,35 @@ impl DockerBackend {
     /// §3.1 placement. Every node is (re-)probed here, which updates its
     /// in-service flag, so a node that has recovered since startup rejoins
     /// placement without a dispatcher restart. The decision itself is
-    /// [`choose`] — a pure function over the probed slot counts, honoring the
-    /// optional `pin`.
+    /// [`choose_placement`] — a pure function over the probed loads under the
+    /// configured [`PlacementPolicy`], honoring the optional `pin`.
     async fn place(&self, pin: Option<&str>) -> Result<&Node, BackendError> {
         let mut candidates = Vec::with_capacity(self.nodes.len());
         for (i, node) in self.nodes.iter().enumerate() {
-            let free = self.probe_free(node).await; // None ⇒ out of service
-            candidates.push(Candidate {
+            let load = self.probe_load(node).await; // None ⇒ out of service
+            candidates.push(PlacementCandidate {
                 index: i,
                 name: &node.name,
-                free,
+                load,
             });
         }
-        let index = choose(&candidates, pin)?;
+        let index = choose_placement(self.policy, &candidates, pin)?;
         Ok(&self.nodes[index])
     }
 
-    /// Free slots on a node, re-marking its in-service state as a side effect.
-    /// `None` when the node is unreachable (out of service) — placement skips it
-    /// and it is re-probed on the next launch.
-    async fn probe_free(&self, node: &Node) -> Option<i64> {
+    /// Live load on a node (running + free slots), re-marking its in-service
+    /// state as a side effect. `None` when the node is unreachable (out of
+    /// service) — placement skips it and it is re-probed on the next launch.
+    async fn probe_load(&self, node: &Node) -> Option<NodeLoad> {
         match self.managed_running(node).await {
             Ok(running) => {
                 if !node.in_service.swap(true, Ordering::Relaxed) {
                     tracing::info!(node = %node.name, "docker node back in service");
                 }
-                Some(node.slots as i64 - running as i64)
+                Some(NodeLoad {
+                    running: running as i64,
+                    free: node.slots as i64 - running as i64,
+                })
             }
             Err(e) => {
                 if node.in_service.swap(false, Ordering::Relaxed) {
@@ -337,59 +367,6 @@ impl DockerBackend {
                 None
             }
         }
-    }
-}
-
-/// A probed node for the placement decision: `free` is `None` when the node is
-/// out of service (unreachable), which excludes it from unpinned placement and
-/// fails a pin onto it.
-struct Candidate<'a> {
-    index: usize,
-    name: &'a str,
-    free: Option<i64>,
-}
-
-/// The §3.1 placement decision, factored out of Docker I/O so the policy is
-/// unit-tested without a daemon. Returns the chosen node's index into the
-/// original node list.
-///
-/// - Unpinned: the in-service node with the most free slots, ties broken by
-///   name; `NoCapacity("no free slots on any node")` if none has a free slot
-///   (transient — the dispatcher queues and retries, §3.5).
-/// - Pinned: the named node or an error — never a fallback. A full or
-///   out-of-service pin yields the same `NoCapacity` "no free slots" shape as
-///   the unpinned case; an unknown pin is a hard `Launch` error naming the
-///   known nodes.
-fn choose(candidates: &[Candidate<'_>], pin: Option<&str>) -> Result<usize, BackendError> {
-    if let Some(name) = pin {
-        let Some(c) = candidates.iter().find(|c| c.name == name) else {
-            let known: Vec<&str> = candidates.iter().map(|c| c.name).collect();
-            return Err(BackendError::Launch(format!(
-                "placement pinned to unknown node {name:?}; known nodes: {}",
-                known.join(", ")
-            )));
-        };
-        return match c.free {
-            Some(free) if free > 0 => Ok(c.index),
-            _ => Err(BackendError::NoCapacity(format!(
-                "no free slots on node {name}"
-            ))),
-        };
-    }
-    let mut best: Option<&Candidate> = None;
-    for c in candidates.iter().filter(|c| c.free.is_some()) {
-        let free = c.free.unwrap();
-        let better = match best {
-            None => true,
-            Some(b) => free > b.free.unwrap() || (free == b.free.unwrap() && c.name < b.name),
-        };
-        if better {
-            best = Some(c);
-        }
-    }
-    match best {
-        Some(c) if c.free.unwrap() > 0 => Ok(c.index),
-        _ => Err(BackendError::NoCapacity("no free slots on any node".into())),
     }
 }
 
@@ -767,53 +744,67 @@ mod tests {
         }
     }
 
-    fn cand<'a>(name: &'a str, free: Option<i64>, index: usize) -> Candidate<'a> {
-        Candidate { index, name, free }
+    fn cand<'a>(name: &'a str, free: Option<i64>, index: usize) -> PlacementCandidate<'a> {
+        // running is irrelevant under Headroom (these tests exercise it); model
+        // a node with `free` slots and no running load.
+        PlacementCandidate {
+            index,
+            name,
+            load: free.map(|free| NodeLoad { running: 0, free }),
+        }
     }
 
-    /// Unpinned placement is unchanged: most free slots, ties broken by name,
+    /// Headroom placement is unchanged: most free slots, ties broken by name,
     /// out-of-service nodes skipped, and empty/full fleets error identically.
     #[test]
     fn choose_unpinned_is_most_free_then_name() {
+        let hr = PlacementPolicy::Headroom;
         let nodes = [
             cand("local", Some(1), 0),
             cand("nuc", Some(4), 1),
             cand("aaa", Some(4), 2),
         ];
         // Most free wins; the 4==4 tie breaks to the lexicographically-first name.
-        assert_eq!(choose(&nodes, None).unwrap(), 2);
+        assert_eq!(choose_placement(hr, &nodes, None).unwrap(), 2);
 
         // An out-of-service node (free = None) is skipped even with more slots.
         let nodes = [cand("local", Some(2), 0), cand("nuc", None, 1)];
-        assert_eq!(choose(&nodes, None).unwrap(), 0);
+        assert_eq!(choose_placement(hr, &nodes, None).unwrap(), 0);
 
         // No free slots anywhere ⇒ the unchanged fleet-wide message.
         let nodes = [cand("local", Some(0), 0), cand("nuc", None, 1)];
-        let err = choose(&nodes, None).unwrap_err().to_string();
+        let err = choose_placement(hr, &nodes, None).unwrap_err().to_string();
         assert!(err.contains("no free slots on any node"), "{err}");
     }
 
     /// A pin places on the named node even when another has more free slots,
-    /// and never spills over: a full or unknown pin errors.
+    /// and never spills over: a full or unknown pin errors. Policy-independent.
     #[test]
     fn choose_pin_honored_and_never_falls_back() {
+        let hr = PlacementPolicy::Headroom;
         let nodes = [cand("local", Some(1), 0), cand("nuc", Some(4), 1)];
         // `nuc` has more slots, but the pin to `local` wins.
-        assert_eq!(choose(&nodes, Some("local")).unwrap(), 0);
+        assert_eq!(choose_placement(hr, &nodes, Some("local")).unwrap(), 0);
 
         // Pinned node full ⇒ launch error naming it, no fallback to `nuc`.
         let nodes = [cand("local", Some(0), 0), cand("nuc", Some(4), 1)];
-        let err = choose(&nodes, Some("local")).unwrap_err().to_string();
+        let err = choose_placement(hr, &nodes, Some("local"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no free slots on node local"), "{err}");
 
         // Pinned node out of service ⇒ same "no free slots" shape.
         let nodes = [cand("local", None, 0), cand("nuc", Some(4), 1)];
-        let err = choose(&nodes, Some("local")).unwrap_err().to_string();
+        let err = choose_placement(hr, &nodes, Some("local"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no free slots on node local"), "{err}");
 
         // Unknown pin ⇒ error naming the known nodes.
         let nodes = [cand("local", Some(1), 0), cand("nuc", Some(4), 1)];
-        let err = choose(&nodes, Some("mini")).unwrap_err().to_string();
+        let err = choose_placement(hr, &nodes, Some("mini"))
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("unknown node \"mini\"") && err.contains("local, nuc"),
             "{err}"

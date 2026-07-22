@@ -2,8 +2,9 @@
 //! docker-endpoint nodes (driven directly, exactly as before) and worker nodes
 //! (proxied over NATS to the node's `chuggernaut worker` daemon).
 //!
-//! Placement follows the §3.1 rule across all in-service nodes: most free
-//! slots, ties broken by name. Worker free slots come from the ping reply
+//! Placement follows the §3.1 policy (`PLACEMENT_POLICY`) across all in-service
+//! nodes — busyness (fewest running) or headroom (most free slots). Worker load
+//! (running + free slots) comes from the ping reply
 //! (the worker counts its own managed containers); a worker that fails its
 //! ping is out-of-service — skipped by placement, re-probed on the next
 //! placement attempt, and NEVER fatal at startup. Startup capacity is a
@@ -16,7 +17,7 @@ use async_trait::async_trait;
 use container::docker::{DockerBackend, DockerNodeConfig};
 use container::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus, LogTail,
-    NodeStatus, RunningContainer,
+    NodeLoad, NodeStatus, PlacementCandidate, PlacementPolicy, RunningContainer, choose_placement,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -61,6 +62,9 @@ struct FleetNode {
 
 pub struct FleetBackend {
     nodes: Vec<FleetNode>,
+    /// Platform placement policy (spec §3.1), applied across the whole fleet.
+    /// Set from `PLACEMENT_POLICY`; defaults to [`PlacementPolicy::Busyness`].
+    policy: PlacementPolicy,
 }
 
 /// One fleet node's boot-time capacity, transport-agnostic: its configured
@@ -90,7 +94,11 @@ fn evaluate_startup(nodes: &[NodeCapacity]) -> Result<(), BackendError> {
 impl FleetBackend {
     /// Partition `DOCKER_NODES` entries: `worker` endpoints become NATS-proxied
     /// nodes; everything else gets its own single-node [`DockerBackend`].
-    pub fn new(configs: Vec<DockerNodeConfig>, store: NatsStore) -> Result<Self, BackendError> {
+    pub fn new(
+        configs: Vec<DockerNodeConfig>,
+        store: NatsStore,
+        policy: PlacementPolicy,
+    ) -> Result<Self, BackendError> {
         let mut nodes = Vec::new();
         for c in configs {
             let handle = if c.endpoint == WORKER_ENDPOINT {
@@ -114,7 +122,7 @@ impl FleetBackend {
         if nodes.is_empty() {
             return Err(BackendError::Unavailable("empty node list".into()));
         }
-        Ok(Self { nodes })
+        Ok(Self { nodes, policy })
     }
 
     /// §3.6 startup as a fleet-level property (spec §3.1): probe every node,
@@ -158,8 +166,9 @@ impl FleetBackend {
         evaluate_startup(&caps)
     }
 
-    /// Ping a worker node; updates in_service and returns free slots when live.
-    async fn probe_worker(&self, node: &FleetNode) -> Option<i64> {
+    /// Ping a worker node; updates in_service and returns its live load
+    /// (running + free slots) when live.
+    async fn probe_worker(&self, node: &FleetNode) -> Option<NodeLoad> {
         let NodeHandle::Worker {
             rpc,
             slots,
@@ -196,7 +205,10 @@ impl FleetBackend {
                         "worker version differs from dispatcher — artifacts may be stale"
                     );
                 }
-                Some(*slots as i64 - ping.running as i64)
+                Some(NodeLoad {
+                    running: ping.running as i64,
+                    free: *slots as i64 - ping.running as i64,
+                })
             }
             Err(e) => {
                 if in_service.swap(false, Ordering::Relaxed) {
@@ -207,56 +219,36 @@ impl FleetBackend {
         }
     }
 
-    /// §3.1 placement across the fleet. Unpinned: most free slots, ties by
-    /// name, out-of-service workers skipped. Pinned (`pin`): that node or an
-    /// error — never a fallback (full/out-of-service → `NoCapacity` "no free
-    /// slots on node {name}", queued and retried by the dispatcher; unknown →
-    /// a hard `Launch` naming the known nodes).
+    /// §3.1 placement across the fleet under the configured [`PlacementPolicy`].
+    /// Out-of-service workers are skipped, full/0-slot nodes never chosen (#60).
+    /// Pinned (`pin`): that node or an error — never a fallback (full/out-of-
+    /// service → `NoCapacity` "no free slots on node {name}", queued and retried
+    /// by the dispatcher; unknown → a hard `Launch` naming the known nodes). The
+    /// decision itself is [`choose_placement`].
     async fn place(&self, pin: Option<&str>) -> Result<&FleetNode, BackendError> {
-        if let Some(name) = pin {
-            let node = self.nodes.iter().find(|n| n.name == name).ok_or_else(|| {
-                let known: Vec<&str> = self.nodes.iter().map(|n| n.name.as_str()).collect();
-                BackendError::Launch(format!(
-                    "placement pinned to unknown node {name:?}; known nodes: {}",
-                    known.join(", ")
-                ))
-            })?;
-            return match self.free_slots(node).await? {
-                Some(free) if free > 0 => Ok(node),
-                _ => Err(BackendError::NoCapacity(format!(
-                    "no free slots on node {name}"
-                ))),
-            };
+        let mut candidates = Vec::with_capacity(self.nodes.len());
+        for (i, node) in self.nodes.iter().enumerate() {
+            let load = self.node_load(node).await?; // None ⇒ out of service
+            candidates.push(PlacementCandidate {
+                index: i,
+                name: node.name.as_str(),
+                load,
+            });
         }
-        let mut best: Option<(&FleetNode, i64)> = None;
-        for node in &self.nodes {
-            let Some(free) = self.free_slots(node).await? else {
-                continue; // out-of-service worker — skipped, re-probed next time
-            };
-            let better = match best {
-                None => true,
-                Some((b, bf)) => free > bf || (free == bf && node.name < b.name),
-            };
-            if better {
-                best = Some((node, free));
-            }
-        }
-        match best {
-            Some((node, free)) if free > 0 => Ok(node),
-            _ => Err(BackendError::NoCapacity("no free slots on any node".into())),
-        }
+        let index = choose_placement(self.policy, &candidates, pin)?;
+        Ok(&self.nodes[index])
     }
 
-    /// Free slots on a fleet node: `Ok(Some)` when live, `Ok(None)` for an
+    /// Live load on a fleet node: `Ok(Some)` when live, `Ok(None)` for an
     /// out-of-service worker (skipped by placement), `Err` for an unreachable
     /// docker-endpoint node (strict, spec §3.1).
-    async fn free_slots(&self, node: &FleetNode) -> Result<Option<i64>, BackendError> {
+    async fn node_load(&self, node: &FleetNode) -> Result<Option<NodeLoad>, BackendError> {
         match &node.handle {
             NodeHandle::Docker { backend } => Ok(backend
-                .free_slots_by_node()
+                .load_by_node()
                 .await?
                 .into_iter()
-                .map(|(_, f)| f)
+                .map(|(_, running, free)| NodeLoad { running, free })
                 .next()),
             NodeHandle::Worker { .. } => Ok(self.probe_worker(node).await),
         }

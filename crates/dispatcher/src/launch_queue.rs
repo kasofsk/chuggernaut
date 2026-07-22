@@ -18,6 +18,7 @@
 use crate::core::{Core, Msg, Result, TaskExit};
 use crate::exec::{ChannelRole, eval_image, task_timeout};
 use crate::queue::{LaunchPriority, QueuedLaunch};
+use crate::triage::tail;
 use chrono::Utc;
 use container::{BackendError, ContainerLaunchConfig, bootstrap_cmd};
 use std::time::Duration;
@@ -27,6 +28,11 @@ use types::{JobState, JobType, Task, TaskKind, TaskPhase, TaskResult, TaskState}
 /// backstop (spec §3.5). Generous: capacity pressure is expected to clear in
 /// minutes as running tasks exit, so this fires only on a genuinely stuck fleet.
 pub(crate) const MAX_QUEUE_WAIT: Duration = Duration::from_secs(30 * 60);
+
+/// How much of a command eval / merge-gate container's captured output to carry
+/// back on the exit as `TaskExit::log_tail`. The tail is where a compiler's
+/// error output lands; bounding it keeps the gate-fix brief (job #154) small.
+const GATE_LOG_TAIL_BYTES: usize = 8_000;
 
 /// Escalation reason for a launch that outwaited the queue (spec §3.5). A
 /// stable, clear code a later structured-escalation pass (job #76) can adopt.
@@ -509,7 +515,14 @@ impl Core {
                 .ok()
                 .flatten()
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-            harvest.collect_logs(&o, &p, seq, task_id, &id).await;
+            // Keep a tail of the container output on the exit so a failing gate
+            // build stage's compiler errors can ride into the gate-fix brief
+            // (job #154) — collect_logs already fetches (and stores) the bytes.
+            let log_tail = harvest
+                .collect_logs(&o, &p, seq, task_id, &id)
+                .await
+                .map(|bytes| tail(&String::from_utf8_lossy(&bytes), GATE_LOG_TAIL_BYTES))
+                .filter(|s| !s.trim().is_empty());
             harvest.dispose(seq, task_id, &id).await;
             let _ = tx
                 .send(Msg::TaskExited {
@@ -523,6 +536,7 @@ impl Core {
                         usage: None,
                         assessment: None,
                         launch_error: None,
+                        log_tail,
                         infra_loss: false,
                     },
                 })

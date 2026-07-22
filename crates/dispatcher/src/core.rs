@@ -128,6 +128,12 @@ pub struct WorkSubmission {
     pub summary: Option<String>,
     pub structured: Option<serde_json::Value>,
     pub token_usage: Option<TokenUsage>,
+    /// Optional agent-authored HTML cover page (job #143). Presentational only:
+    /// size-capped and rejected (never truncated) at ingest, stored on the task
+    /// record, and ignored by the merge gate/squash body. Text `summary` stays
+    /// canonical and required.
+    #[serde(default)]
+    pub cover_html: Option<String>,
 }
 
 /// `req.eval.submit.*` payload (spec §4.2). `pass` is the authoritative verdict.
@@ -140,6 +146,10 @@ pub struct EvalSubmission {
     pub abort: bool,
     pub structured: Option<serde_json::Value>,
     pub token_usage: Option<TokenUsage>,
+    /// Optional agent-authored HTML cover page for the verdict summary (job
+    /// #143), same handling as [`WorkSubmission::cover_html`].
+    #[serde(default)]
+    pub cover_html: Option<String>,
 }
 
 /// What a container monitor observed when its task exited. These three always
@@ -165,6 +175,12 @@ pub struct TaskExit {
     /// `Running` forever. Carries the single-wrapped, human-readable reason
     /// (e.g. `container launch failed: invalid memory limit "5g"`).
     pub launch_error: Option<String>,
+    /// A tail of the container's captured stdout+stderr, harvested by the
+    /// monitor alongside the exit. Only carried by command eval / merge-gate
+    /// containers ([`Core::spawn_eval_monitor`]); it is what lets a failing gate
+    /// stage's compiler output reach the gate-fix brief (job #154). `None`
+    /// elsewhere (agent runs report through `submit_result`, not stdout).
+    pub log_tail: Option<String>,
     /// Set only by restart reconciliation (§3.6, `settle_running`) when a task's
     /// container is GONE at restart — docker pruned it, the node rebooted,
     /// colima restarted. This is an infrastructure loss, not a real nonzero

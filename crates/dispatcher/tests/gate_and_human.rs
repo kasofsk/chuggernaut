@@ -23,6 +23,26 @@ eval:
     run: ./ci.sh
 "#;
 
+// Agent work + a STAGED command gate (job #154): build at stage 0, tests at
+// stage 1. A gate failure at stage 0 (build) is a compile-class failure eligible
+// for the gate-fix fast path; a stage-1 (test) failure takes the full loop.
+const GATEFIX: &str = r#"
+name: gatefix
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+eval:
+  - name: build
+    type: command
+    run: ./build.sh
+    stage: 0
+  - name: test
+    type: command
+    run: ./test.sh
+    stage: 1
+"#;
+
 const HUMAN_EVAL: &str = r#"
 name: human-gated
 image: img:latest
@@ -98,6 +118,7 @@ async fn rig() -> Option<Rig> {
     let clone = repo.clone_branch("main").await;
     for (path, content) in [
         ("jobs/impl-cmd.yaml", IMPL_CMD),
+        ("jobs/gatefix.yaml", GATEFIX),
         ("jobs/human-gated.yaml", HUMAN_EVAL),
         ("jobs/manual.yaml", HUMAN_WORK),
         ("jobs/flaky.yaml", FLAKY),
@@ -532,6 +553,238 @@ async fn merge_gate_failure_reworks_on_new_base_without_budget() {
     );
 }
 
+/// Job #154 gate-fix fast path: a compile-only gate failure (stage-0 build) on
+/// an approved branch launches a scoped gate-fix task that returns straight to
+/// the gate — no re-review, no eval-phase CI — and lands once the re-gate passes.
+#[tokio::test]
+async fn gate_compile_failure_takes_fast_path_and_relands() {
+    let Some(rig) = rig().await else { return };
+    // eval build(0) pass, eval test(0) pass, gate build FAIL(1) → compile;
+    // after the fix, re-gate build(0) pass, re-gate test(0) pass → land.
+    rig.backend.script_exits([0, 0, 1, 0, 0]);
+    // The gate build container's captured output — the exact compiler errors the
+    // gate-fix brief must surface (job #154). Every fake container returns this,
+    // but only the failed gate build's copy is threaded into the fix brief.
+    rig.backend
+        .put_logs(b"error[E0433]: failed to resolve: use of undeclared crate `foo`".to_vec());
+    commit_branch(&rig, "src/a.rs");
+    move_main_during_eval(&rig);
+    // Gate-fix hook: a scoped compile repair on the rebased branch.
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let brief = cfg
+            .merge_conflict
+            .clone()
+            .expect("gate-fix context must be injected");
+        // The failing gate build stage's compiler output rode into the brief.
+        assert!(
+            brief.contains("error[E0433]") && brief.contains("Gate build output"),
+            "gate-fix brief must include the captured compiler output: {brief}"
+        );
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone
+            .commit_file("src/a.rs", b"job change fixed", "repair compile")
+            .await;
+        clone.push(&branch).await;
+    });
+
+    let job = rig.handle.create_job(req("gatefix")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    // Exactly one gate-fix Work task, labelled and cause-stamped.
+    let fixes: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.rework_reason == Some(types::ReworkReason::GateCompileFix))
+        .collect();
+    assert_eq!(fixes.len(), 1, "one gate-fix round: {tasks:#?}");
+    assert_eq!(fixes[0].phase, TaskPhase::Work);
+    assert_eq!(fixes[0].cycle, 2);
+    assert_eq!(fixes[0].label.as_deref(), Some("gate-fix"));
+    // The fast path skipped the eval phase entirely on cycle 2 — no reviewer, no
+    // eval CI ran between the fix and the re-gate.
+    assert!(
+        !tasks
+            .iter()
+            .any(|t| t.phase == TaskPhase::Evaluation && t.cycle == 2),
+        "no cycle-2 evaluation tasks: {tasks:#?}"
+    );
+    // The fix re-entered the gate directly (cycle-2 MergeGate tasks exist).
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t.phase == TaskPhase::MergeGate && t.cycle == 2),
+        "re-gate must run: {tasks:#?}"
+    );
+    // The change landed and the squash body records the gate-fix round.
+    assert!(
+        rig.repo
+            .manager
+            .read_file_at("acme", "api", "main", "src/a.rs")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let log = rig.repo.manager.log("acme", "api", None, 1).await.unwrap();
+    assert!(
+        format!("{log:?}").contains("gate-fix round"),
+        "squash body must note the gate-fix round: {log:?}"
+    );
+}
+
+/// Job #154: a gate failure at a LATER stage (tests, not build) is not the
+/// mechanical compile case — it takes the full rework loop (a Work task the
+/// reviewer/eval phase sees again), not the gate-fix fast path.
+#[tokio::test]
+async fn gate_test_stage_failure_takes_full_rework() {
+    let Some(rig) = rig().await else { return };
+    // eval build(0) pass, eval test(0) pass, gate build(0) PASS, gate test FAIL,
+    // then rework: eval build pass, eval test pass, (base caught up, no gate).
+    rig.backend.script_exits([0, 0, 0, 1, 0, 0]);
+    commit_branch(&rig, "src/a.rs");
+    move_main_during_eval(&rig);
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone
+            .commit_file("src/a.rs", b"job change v2", "rework")
+            .await;
+        clone.push(&branch).await;
+    });
+
+    let job = rig.handle.create_job(req("gatefix")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    // A test-stage gate failure is a FULL rework (GateCiFailure), not a gate-fix,
+    // and the eval phase re-runs on cycle 2.
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t.rework_reason == Some(types::ReworkReason::GateCiFailure)),
+        "test-stage failure must take the full rework loop: {tasks:#?}"
+    );
+    assert!(
+        !tasks
+            .iter()
+            .any(|t| t.rework_reason == Some(types::ReworkReason::GateCompileFix)),
+        "no gate-fix fast path for a test-stage failure: {tasks:#?}"
+    );
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t.phase == TaskPhase::Evaluation && t.cycle == 2),
+        "the eval phase re-runs on the full loop: {tasks:#?}"
+    );
+}
+
+/// Job #154: the gate-fix budget is bounded. A branch that keeps failing the
+/// build across two gate-fix rounds falls back to the full rework loop on the
+/// third — the failure wasn't the one-shot mechanical fix the fast path assumes.
+#[tokio::test]
+async fn gate_fix_budget_exhaustion_falls_back_to_full_rework() {
+    let Some(rig) = rig().await else { return };
+    // eval build/test pass; gate build fails 3× (2 gate-fixes, then fallback);
+    // the full-rework cycle's eval build/test pass and it lands (base caught up).
+    rig.backend.script_exits([0, 0, 1, 1, 1, 0, 0]);
+    commit_branch(&rig, "src/a.rs");
+    move_main_during_eval(&rig);
+
+    let job = rig.handle.create_job(req("gatefix")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let gate_fixes = tasks
+        .iter()
+        .filter(|t| t.rework_reason == Some(types::ReworkReason::GateCompileFix))
+        .count();
+    assert_eq!(
+        gate_fixes, 2,
+        "exactly the budget of gate-fix rounds: {tasks:#?}"
+    );
+    // On exhaustion the failure escalates through the existing full rework loop.
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t.rework_reason == Some(types::ReworkReason::GateCiFailure)),
+        "budget exhaustion falls back to full rework: {tasks:#?}"
+    );
+}
+
+/// Job #154 safety rail: a SINGLE-stage (opaque) gate cannot be classified —
+/// there is no distinct build stage to attribute the failure to — so it takes
+/// the full rework loop (GateCiFailure) and never the gate-fix fast path. This
+/// is the deterministic-or-full-loop guarantee: never mis-route on ambiguity.
+#[tokio::test]
+async fn single_stage_gate_failure_is_unclassifiable_full_rework() {
+    let Some(rig) = rig().await else { return };
+    // impl-cmd has ONE eval stage: eval c1 pass, gate c1 FAIL, eval c2 pass.
+    rig.backend.script_exits([0, 1, 0]);
+    commit_branch(&rig, "src/a.rs");
+    move_main_during_eval(&rig);
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone
+            .commit_file("src/a.rs", b"job change v2", "rework")
+            .await;
+        clone.push(&branch).await;
+    });
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    // An unclassifiable (single opaque stage) failure is Test-class → full loop.
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t.rework_reason == Some(types::ReworkReason::GateCiFailure)),
+        "single-stage gate failure must take the full rework loop: {tasks:#?}"
+    );
+    assert!(
+        !tasks
+            .iter()
+            .any(|t| t.rework_reason == Some(types::ReworkReason::GateCompileFix)),
+        "no gate-fix fast path when the gate cannot be classified: {tasks:#?}"
+    );
+}
+
 /// Change A: an eval-failure rework PRESERVES the branch. Cycle 1 commits file
 /// A; cycle 2 commits only file B — under the old reset-on-re-entry both would
 /// need re-doing, so A surviving on the merge proves the commits carry forward
@@ -927,6 +1180,7 @@ async fn list_pending_hides_terminal_job_zombie() {
         pending_reason: None,
         queued_at: None,
         session_id: None,
+        reviewed_tip: None,
         result: None,
         created_at: job.created_at,
         started_at: None,

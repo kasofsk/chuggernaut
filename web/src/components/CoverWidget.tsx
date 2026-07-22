@@ -1,19 +1,29 @@
 import { useEffect, useState } from 'react'
 
 /**
- * A sanitized `cover_html` widget (spec §4.3, job #125): untrusted operator/agent
- * HTML rendered in a fully-sandboxed iframe. Inline it is a bounded preview (a
- * max-height card with a bottom fade) so a long cover can't dominate its host;
- * an expand affordance pops it out into a full-viewport lightbox rendering the
- * same content at full size through the *same* sandbox (no scripts, no
- * same-origin, no network — content rides in via `srcDoc`). Esc, a click on the
- * backdrop, or the close button dismiss the pop-out.
+ * A sanitized `cover_html` widget (spec §4.3, jobs #125/#143): untrusted
+ * operator/agent HTML rendered in a fully-sandboxed iframe. Inline it is a
+ * bounded preview (a max-height card with a bottom fade) so a long cover can't
+ * dominate its host; an expand affordance pops it out into a full-viewport
+ * lightbox rendering the same content at full size through the *same* sandbox.
+ * Esc, a click on the backdrop, or the close button dismiss the pop-out.
  *
- * One shared component so job covers and (once they land) agent-authored covers
- * on task summaries/reports behave identically everywhere they render.
+ * Containment is at render, not ingest: cover HTML is stored verbatim (only
+ * size-capped) and neutralized here, the single shared choke point. `sandbox=""`
+ * blocks scripts, forms, and same-origin access; the injected CSP
+ * (`default-src 'none'`, only inline styles + `data:` images/fonts) additionally
+ * blocks the passive external fetches a bare sandbox still allows — an external
+ * `<img>`, a CSS `url()`/`@import` — so a hostile cover can neither execute nor
+ * phone home. Content rides in via `srcDoc`, so nothing else is fetched.
+ *
+ * One shared component so job covers and agent-authored covers on task
+ * summaries/reports behave identically everywhere they render.
  */
 export function CoverWidget({ html, title = 'cover' }: { html: string; title?: string }) {
   const [open, setOpen] = useState(false)
+  // Presentational-only CSP (job #143): no network of any kind, inline styles
+  // and data: images/fonts only. Prepended so it is parsed before any resource.
+  const sandboxed = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'">${html}`
 
   useEffect(() => {
     if (!open) return
@@ -37,10 +47,10 @@ export function CoverWidget({ html, title = 'cover' }: { html: string; title?: s
           className="cover-frame"
           title={title}
           /* Presentational only (spec §4.3). Fully sandboxed: no scripts, no
-             same-origin, no forms. Content rides in via srcDoc so nothing is
-             fetched over the network. Same policy inline and popped out. */
+             same-origin, no forms. The injected CSP blocks all network fetches
+             (job #143). Content rides in via srcDoc. Same policy popped out. */
           sandbox=""
-          srcDoc={html}
+          srcDoc={sandboxed}
         />
         {/* Transparent full-preview hit target: click anywhere on the collapsed
             preview to expand. The iframe below never receives the click. */}
@@ -68,7 +78,7 @@ export function CoverWidget({ html, title = 'cover' }: { html: string; title?: s
             <button type="button" className="cover-close" aria-label="close" onClick={() => setOpen(false)}>
               ✕
             </button>
-            <iframe className="cover-frame-full" title={title} sandbox="" srcDoc={html} />
+            <iframe className="cover-frame-full" title={title} sandbox="" srcDoc={sandboxed} />
           </div>
         </div>
       )}

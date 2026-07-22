@@ -96,6 +96,28 @@ eval:
     stage: 1
 "#;
 
+// Two AGENT evaluators at distinct stages (job #155): review (stage 0) gates
+// review2 (stage 1). A required stage-0 failure reworks the job before review2
+// ever launches, so on cycle 2 review carries re-review context while review2 —
+// appearing for the first time — gets the unchanged cycle-1 (no-context) form.
+const STAGED_AGENTS: &str = r#"
+name: staged-agents
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+rework_budget: 1
+eval:
+  - name: review
+    type: agent
+    prompt: prompts/eval.md
+    stage: 0
+  - name: review2
+    type: agent
+    prompt: prompts/eval.md
+    stage: 1
+"#;
+
 // A web-style job with a post-merge wrap-up command (spec §3.2): agent work,
 // no evaluators (auto-pass), and a `wrap_up.run` publish that ships the merged
 // result. The publish is the only container that launches through the backend.
@@ -177,6 +199,7 @@ async fn rig_full(
         ("jobs/cmd-work.yaml", CMD_WORK),
         ("jobs/cmd-agent-eval.yaml", CMD_WORK_AGENT_EVAL),
         ("jobs/staged.yaml", STAGED),
+        ("jobs/staged-agents.yaml", STAGED_AGENTS),
         ("jobs/staged-advisory.yaml", STAGED_ADVISORY),
         ("jobs/webpub.yaml", WEBPUB),
         ("jobs/webpub-named.yaml", WEBPUB_NAMED),
@@ -472,6 +495,7 @@ async fn work_exit0_empty_branch_with_summary_proceeds() {
                 summary: Some("no code change is the correct outcome here".into()),
                 structured: None,
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await
@@ -693,6 +717,7 @@ async fn eval_failure_reworks_with_context_then_passes() {
                 abort: false,
                 structured: Some(serde_json::json!({"issues": ["missing tests"]})),
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await
@@ -711,6 +736,7 @@ async fn eval_failure_reworks_with_context_then_passes() {
                 abort: false,
                 structured: None,
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await
@@ -758,6 +784,309 @@ async fn eval_failure_reworks_with_context_then_passes() {
     );
     let events = event_types(&rig.store).await;
     assert!(events.contains(&"job-rework-started".to_string()));
+}
+
+/// Job #155: a cycle-2 agent evaluator receives a re-review context block —
+/// its prior verdict/findings, the SHA it last reviewed, the delta diff since,
+/// and a job-history digest — while the cycle-1 review is unchanged.
+#[tokio::test]
+async fn cycle2_evaluator_gets_prior_review_context() {
+    let Some(rig) = rig().await else { return };
+    let handle = rig.handle.clone();
+    let bare = rig.repo.bare_path();
+
+    // work c1: commit src/a.rs.
+    let b = bare.clone();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&b, &branch).await;
+        clone.commit_file("src/a.rs", b"pub fn a() {}", "a").await;
+        clone.push(&branch).await;
+    });
+    // eval c1: fail with a distinctive finding.
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: false,
+                abort: false,
+                structured: Some(serde_json::json!({"issues": ["needs docstrings"]})),
+                token_usage: None,
+                cover_html: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+    // work c2 (rework): commit a NEW file so the delta is non-empty.
+    let b = bare.clone();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&b, &branch).await;
+        clone.commit_file("src/b.rs", b"pub fn b() {}", "b").await;
+        clone.push(&branch).await;
+    });
+    // eval c2: pass.
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            4,
+            EvalSubmission {
+                pass: true,
+                abort: false,
+                structured: None,
+                token_usage: None,
+                cover_html: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let runs = rig.provider.runs();
+    assert_eq!(runs.len(), 4, "work c1, eval c1, work c2, eval c2");
+    // Cycle-1 review is unchanged — no re-review block.
+    let eval_c1 = &runs[1];
+    assert!(
+        !eval_c1.prompt.contains("Re-Review Context"),
+        "cycle-1 eval must not carry re-review context: {}",
+        eval_c1.prompt
+    );
+    // Cycle-2 review carries the full re-review block.
+    let eval_c2 = &runs[3];
+    let p = &eval_c2.prompt;
+    assert!(p.contains("Re-Review Context"), "{p}");
+    assert!(
+        p.contains("needs docstrings"),
+        "prior findings missing: {p}"
+    );
+    assert!(p.contains("Last-reviewed tip"), "reviewed SHA missing: {p}");
+    assert!(p.contains("```diff"), "delta diff block missing: {p}");
+    assert!(
+        p.contains("src/b.rs"),
+        "delta should mention the new file: {p}"
+    );
+    assert!(
+        p.contains("Job history at a glance"),
+        "history digest missing: {p}"
+    );
+    // The digest records cycle 1's failing review.
+    assert!(p.contains("reviewer=fail"), "history verdict missing: {p}");
+}
+
+/// Job #155 rebase fallback: when the cycle-2 review follows a conflict rework
+/// (the branch was rebased onto a moved base), the re-review block says so and
+/// omits a bogus delta rather than diffing across the rebase.
+#[tokio::test]
+async fn cycle2_evaluator_after_rebase_gets_full_diff_note() {
+    let Some(rig) = rig().await else { return };
+    let handle = rig.handle.clone();
+    let bare = rig.repo.bare_path();
+
+    // work c1: commit src/a.rs on the branch AND land a conflicting src/a.rs on
+    // main, so the wrap-up squash cannot replay cleanly → conflict rework.
+    let b = bare.clone();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&b, &branch).await;
+        clone
+            .commit_file("src/a.rs", b"job change", "implement")
+            .await;
+        clone.push(&branch).await;
+        let main = clone_branch_from(&b, "main").await;
+        main.commit_file("src/a.rs", b"conflicting land", "other")
+            .await;
+        main.push("main").await;
+    });
+    // eval c1: pass, so the job proceeds to wrap-up where the conflict fires.
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: true,
+                abort: false,
+                structured: Some(serde_json::json!({"issues": ["nit: naming"]})),
+                token_usage: None,
+                cover_html: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+    // work c2 (conflict rework): re-commit on the freshly pinned base.
+    let b = bare.clone();
+    rig.provider.on_run(move |cfg| async move {
+        assert!(cfg.merge_conflict.is_some(), "conflict context expected");
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&b, &branch).await;
+        clone
+            .commit_file("src/a.rs", b"job change v2", "again")
+            .await;
+        clone.push(&branch).await;
+    });
+    // eval c2: pass.
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            4,
+            EvalSubmission {
+                pass: true,
+                abort: false,
+                structured: None,
+                token_usage: None,
+                cover_html: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let runs = rig.provider.runs();
+    assert_eq!(runs.len(), 4);
+    let eval_c2 = &runs[3];
+    let p = &eval_c2.prompt;
+    // Re-review context is present (prior findings carried over)…
+    assert!(p.contains("Re-Review Context"), "{p}");
+    assert!(p.contains("nit: naming"), "prior findings missing: {p}");
+    // …but the delta is suppressed in favor of a rebase note.
+    assert!(p.contains("rebased"), "rebase note missing: {p}");
+    assert!(
+        !p.contains("```diff"),
+        "delta diff must be suppressed across a rebase: {p}"
+    );
+}
+
+/// Job #155: an evaluator that first appears on cycle 2 gets the unchanged
+/// cycle-1 (no-context) form — there is no prior review of its own to carry.
+/// staged-agents fails its stage-0 `review` on cycle 1, so the stage-1 `review2`
+/// never runs that cycle; on cycle 2 `review` carries re-review context while
+/// `review2`, appearing for the first time, does not.
+#[tokio::test]
+async fn evaluator_first_appearing_on_cycle2_gets_no_context() {
+    let Some(rig) = rig().await else { return };
+    let handle = rig.handle.clone();
+    let bare = rig.repo.bare_path();
+
+    // work c1: commit src/a.rs.
+    let b = bare.clone();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&b, &branch).await;
+        clone.commit_file("src/a.rs", b"pub fn a() {}", "a").await;
+        clone.push(&branch).await;
+    });
+    // eval c1 stage-0 review (task 2): FAIL → rework; stage-1 review2 never runs.
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: false,
+                abort: false,
+                structured: Some(serde_json::json!({"issues": ["fix stage 0"]})),
+                token_usage: None,
+                cover_html: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+    // work c2 (rework): commit a new file so the delta is non-empty.
+    let b = bare.clone();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&b, &branch).await;
+        clone.commit_file("src/b.rs", b"pub fn b() {}", "b").await;
+        clone.push(&branch).await;
+    });
+    // eval c2 stage-0 review (task 4): PASS → stage 1 launches.
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            4,
+            EvalSubmission {
+                pass: true,
+                abort: false,
+                structured: None,
+                token_usage: None,
+                cover_html: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+    // eval c2 stage-1 review2 (task 5): its first appearance — PASS.
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            5,
+            EvalSubmission {
+                pass: true,
+                abort: false,
+                structured: None,
+                token_usage: None,
+                cover_html: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let job = rig.handle.create_job(req("staged-agents")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let runs = rig.provider.runs();
+    assert_eq!(
+        runs.len(),
+        5,
+        "work c1, review c1, work c2, review c2, review2 c2"
+    );
+    // The pre-existing evaluator (review) carries re-review context on cycle 2…
+    let review_c2 = &runs[3];
+    assert!(
+        review_c2.prompt.contains("Re-Review Context"),
+        "pre-existing evaluator must carry re-review context: {}",
+        review_c2.prompt
+    );
+    // …while review2, appearing for the first time on cycle 2, does not.
+    let review2_c2 = &runs[4];
+    assert!(
+        !review2_c2.prompt.contains("Re-Review Context"),
+        "an evaluator first appearing on cycle 2 gets the cycle-1 (no-context) form: {}",
+        review2_c2.prompt
+    );
 }
 
 /// §3.2 crash recovery: an attempt that pushes commits then crashes is retried
@@ -1199,6 +1528,7 @@ async fn agent_eval_queues_on_no_capacity_then_launches_when_freed() {
                 abort: false,
                 structured: None,
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await
@@ -1349,6 +1679,7 @@ async fn agent_eval_redefer_preserves_queue_time_and_burns_no_retries() {
                 abort: false,
                 structured: None,
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await
@@ -2225,6 +2556,7 @@ async fn eval_abort_escalates_without_consuming_rework_budget() {
                     serde_json::json!({"reason": "endpoint spec references a retired API"}),
                 ),
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await
@@ -2296,6 +2628,7 @@ async fn staged_eval_review_passes_then_ci_runs_and_merges() {
                 abort: false,
                 structured: None,
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await
@@ -2351,6 +2684,7 @@ async fn staged_eval_required_review_fail_skips_ci_and_reworks_from_stage0() {
                 abort: false,
                 structured: Some(serde_json::json!({"issues": ["needs tests"]})),
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await
@@ -2370,6 +2704,7 @@ async fn staged_eval_required_review_fail_skips_ci_and_reworks_from_stage0() {
                 abort: false,
                 structured: None,
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await
@@ -2428,6 +2763,7 @@ async fn staged_eval_advisory_review_fail_still_runs_ci() {
                 abort: false,
                 structured: None,
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await
@@ -2476,6 +2812,7 @@ async fn staged_eval_stage0_abort_escalates_without_ci() {
                 abort: true,
                 structured: Some(serde_json::json!({"reason": "wrong premise"})),
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await
@@ -2635,6 +2972,7 @@ async fn finalize_hard_failure_escalates_instead_of_wedging() {
                 abort: false,
                 structured: None,
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await
@@ -2686,6 +3024,7 @@ async fn work_timeout_override_applies_to_work_not_eval() {
                 abort: false,
                 structured: None,
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await
@@ -3027,6 +3366,7 @@ async fn abort_verdict_escalates_with_recorded_reason() {
                 abort: true,
                 structured: Some(serde_json::json!({"why": "spec is unbuildable"})),
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await

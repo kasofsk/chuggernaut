@@ -622,6 +622,7 @@ impl Core {
                                     usage: None,
                                     assessment: None,
                                     launch_error: None,
+                                    log_tail: None,
                                     infra_loss: false,
                                 },
                             })

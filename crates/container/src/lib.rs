@@ -32,6 +32,130 @@ pub enum BackendError {
     Other(String),
 }
 
+/// Platform-level fleet placement policy (spec §3.1), set once for the whole
+/// fleet by `PLACEMENT_POLICY`. Per-job-type `placement.node` pinning overrides
+/// placement entirely and is unaffected by the policy. Kept as a single enum so
+/// the choice lives in one place ([`choose_placement`]) and future policies
+/// (weighted, cache-affinity) drop in beside these two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlacementPolicy {
+    /// Fewest running jobs wins; ties broken by most free slots, then by name.
+    /// An idle node always beats a busy one regardless of slot counts. The
+    /// default — on an asymmetric fleet the idle small node takes the next job
+    /// rather than always trailing the big one.
+    #[default]
+    Busyness,
+    /// Most free slots (`slots − running`) wins; ties broken by name. The
+    /// original rule — maximizes absolute headroom for burst absorption.
+    Headroom,
+}
+
+impl PlacementPolicy {
+    /// Parse the `PLACEMENT_POLICY` env value. `Err` names the accepted values
+    /// so an unknown setting fails config load loudly (spec §12.4).
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "busyness" => Ok(Self::Busyness),
+            "headroom" => Ok(Self::Headroom),
+            other => Err(format!(
+                "unknown placement policy {other:?} (expected busyness | headroom)"
+            )),
+        }
+    }
+
+    /// The canonical string form, for the config snapshot and diagnostics.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Busyness => "busyness",
+            Self::Headroom => "headroom",
+        }
+    }
+}
+
+/// A fleet node's live load for placement (spec §3.1): running managed
+/// containers and free slots (`slots − running`). Both policies read from this
+/// same ping-provided pair — no policy needs a new RPC.
+#[derive(Debug, Clone, Copy)]
+pub struct NodeLoad {
+    pub running: i64,
+    pub free: i64,
+}
+
+/// A probed node for the placement decision. `load` is `None` when the node is
+/// out of service (unreachable / failed its ping), which excludes it from
+/// unpinned placement and fails a pin onto it.
+pub struct PlacementCandidate<'a> {
+    pub index: usize,
+    pub name: &'a str,
+    pub load: Option<NodeLoad>,
+}
+
+/// The §3.1 placement decision, factored out of backend I/O so both policies are
+/// unit-tested without a daemon. Returns the chosen candidate's `index`.
+///
+/// - Unpinned: the winning in-service node under `policy` (see [`PlacementPolicy`]).
+///   Out-of-service (`load: None`) and full/0-slot (`free <= 0`) nodes are never
+///   chosen — the #60 rule holds under both policies. `NoCapacity("no free slots
+///   on any node")` if none is eligible (transient — the dispatcher queues and
+///   retries, §3.5).
+/// - Pinned: the named node or an error — never a fallback. A full or
+///   out-of-service pin yields the same `NoCapacity` "no free slots" shape as
+///   the unpinned case; an unknown pin is a hard `Launch` error naming the
+///   known nodes.
+pub fn choose_placement(
+    policy: PlacementPolicy,
+    candidates: &[PlacementCandidate<'_>],
+    pin: Option<&str>,
+) -> Result<usize, BackendError> {
+    if let Some(name) = pin {
+        let Some(c) = candidates.iter().find(|c| c.name == name) else {
+            let known: Vec<&str> = candidates.iter().map(|c| c.name).collect();
+            return Err(BackendError::Launch(format!(
+                "placement pinned to unknown node {name:?}; known nodes: {}",
+                known.join(", ")
+            )));
+        };
+        return match c.load {
+            Some(load) if load.free > 0 => Ok(c.index),
+            _ => Err(BackendError::NoCapacity(format!(
+                "no free slots on node {name}"
+            ))),
+        };
+    }
+    let mut best: Option<&PlacementCandidate> = None;
+    for c in candidates {
+        let Some(load) = c.load else { continue }; // out of service — skipped
+        if load.free <= 0 {
+            continue; // full or 0-slot node — never chosen (#60)
+        }
+        let better = match best {
+            None => true,
+            Some(b) => {
+                let bl = b.load.expect("best always has load");
+                match policy {
+                    PlacementPolicy::Headroom => {
+                        load.free > bl.free || (load.free == bl.free && c.name < b.name)
+                    }
+                    PlacementPolicy::Busyness => {
+                        load.running < bl.running
+                            || (load.running == bl.running && load.free > bl.free)
+                            || (load.running == bl.running
+                                && load.free == bl.free
+                                && c.name < b.name)
+                    }
+                }
+            }
+        };
+        if better {
+            best = Some(c);
+        }
+    }
+    match best {
+        Some(c) => Ok(c.index),
+        None => Err(BackendError::NoCapacity("no free slots on any node".into())),
+    }
+}
+
 #[async_trait]
 pub trait ContainerBackend: Send + Sync {
     /// Launch a container; returns an opaque ID used for subsequent calls.
@@ -247,6 +371,83 @@ fn shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cand<'a>(name: &'a str, running: i64, free: i64, index: usize) -> PlacementCandidate<'a> {
+        PlacementCandidate {
+            index,
+            name,
+            load: Some(NodeLoad { running, free }),
+        }
+    }
+
+    /// Busyness (the default, §3.1): fewest running wins outright — an idle
+    /// small node beats a busy big node regardless of slot counts. The air/nuc
+    /// scenario from #153: air (1 running / 3 free) vs nuc (0 running / 2 free)
+    /// → nuc, even though air has more free slots.
+    #[test]
+    fn busyness_idle_small_beats_busy_big() {
+        let by = PlacementPolicy::Busyness;
+        let nodes = [cand("air", 1, 3, 0), cand("nuc", 0, 2, 1)];
+        assert_eq!(choose_placement(by, &nodes, None).unwrap(), 1);
+        // Headroom on the SAME fleet keeps the old behavior: air's 3 free wins.
+        assert_eq!(
+            choose_placement(PlacementPolicy::Headroom, &nodes, None).unwrap(),
+            0
+        );
+    }
+
+    /// Busyness tie-break chain: equal running → most free wins → then name.
+    #[test]
+    fn busyness_ties_break_by_free_then_name() {
+        let by = PlacementPolicy::Busyness;
+        // Equal running (2 each): the one with more free slots wins.
+        let nodes = [cand("air", 2, 2, 0), cand("nuc", 2, 4, 1)];
+        assert_eq!(choose_placement(by, &nodes, None).unwrap(), 1);
+        // Equal running AND equal free: lexicographically-first name wins.
+        let nodes = [cand("nuc", 2, 3, 0), cand("air", 2, 3, 1)];
+        assert_eq!(choose_placement(by, &nodes, None).unwrap(), 1);
+    }
+
+    /// The #60 rule holds under both policies: a 0-slot (or full) node is never
+    /// chosen even when it has the fewest running jobs, and an out-of-service
+    /// node (`load: None`) is skipped.
+    #[test]
+    fn zero_slot_and_out_of_service_skipped_under_both_policies() {
+        for policy in [PlacementPolicy::Busyness, PlacementPolicy::Headroom] {
+            // idle 0-slot node (0 running) must lose to the busy node with a slot.
+            let nodes = [cand("zero", 0, 0, 0), cand("nuc", 3, 1, 1)];
+            assert_eq!(
+                choose_placement(policy, &nodes, None).unwrap(),
+                1,
+                "{policy:?}"
+            );
+
+            // Out-of-service node skipped; the only live node wins.
+            let nodes = [
+                PlacementCandidate {
+                    index: 0,
+                    name: "down",
+                    load: None,
+                },
+                cand("nuc", 1, 1, 1),
+            ];
+            assert_eq!(
+                choose_placement(policy, &nodes, None).unwrap(),
+                1,
+                "{policy:?}"
+            );
+
+            // No eligible node ⇒ the shared no-capacity message.
+            let nodes = [cand("full", 4, 0, 0)];
+            let err = choose_placement(policy, &nodes, None)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("no free slots on any node"),
+                "{policy:?}: {err}"
+            );
+        }
+    }
 
     #[test]
     fn bootstrap_wraps_and_quotes() {

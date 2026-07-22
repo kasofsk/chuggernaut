@@ -37,6 +37,7 @@ pub fn escalation_task(
         infra_loss: false,
         pending_reason: None,
         queued_at: None,
+        reviewed_tip: None,
         result: None,
         created_at: Utc::now(),
         started_at: None,

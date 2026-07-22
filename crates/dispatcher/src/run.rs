@@ -107,12 +107,17 @@ pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
     // path below.
     let backend: Arc<dyn container::ContainerBackend> =
         if worker::backend::has_worker_nodes(&config.docker_nodes) {
-            let fleet = worker::FleetBackend::new(config.docker_nodes.clone(), store.clone())?;
+            let fleet = worker::FleetBackend::new(
+                config.docker_nodes.clone(),
+                store.clone(),
+                config.placement_policy,
+            )?;
             // Fleet-level rule: refuses only when no reachable node has slots > 0.
             fleet.startup_check().await?;
             Arc::new(fleet)
         } else {
-            let docker = DockerBackend::new(config.docker_nodes.clone())?;
+            let docker = DockerBackend::new(config.docker_nodes.clone())?
+                .with_placement_policy(config.placement_policy);
             // §3.1/§3.6: start as long as one node with slots responds; any
             // unreachable node is logged and excluded until it answers again.
             docker.ping_all().await?;

@@ -735,6 +735,7 @@ function WorkReport({ r }: { r: WorkResult }) {
       ) : (
         <div className="dim">no summary</div>
       )}
+      {r.cover_html && <CoverWidget html={r.cover_html} title="work cover" />}
       {files && files.length > 0 && (
         <ul className="report-files">
           {files.map((f, i) => (
@@ -861,6 +862,7 @@ function EvalReport({ r }: { r: EvalResult }) {
         )}
       </div>
       <StructuredBody parsed={parsed} />
+      {r.cover_html && <CoverWidget html={r.cover_html} title="review cover" />}
       <TokenChip usage={r.token_usage} />
     </div>
   )

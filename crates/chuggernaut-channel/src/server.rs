@@ -158,7 +158,9 @@ impl Server {
                         "pass": { "type": "boolean" },
                         "abort": { "type": "boolean" },
                         "structured": {},
-                        "token_usage": {} },
+                        "token_usage": {},
+                        "cover_html": { "type": "string",
+                            "description": "Optional. A small self-contained HTML cover page for this verdict (a visual before/after or diagram) shown beside your text summary. Never required; omit it unless a visual genuinely helps." } },
                     "required": ["pass"] }),
             )),
             _ => tools.push(tool(
@@ -168,7 +170,9 @@ impl Server {
                     "properties": {
                         "summary": { "type": "string" },
                         "structured": {},
-                        "token_usage": {} } }),
+                        "token_usage": {},
+                        "cover_html": { "type": "string",
+                            "description": "Optional. A small self-contained HTML cover page showing what you did (visual changelog, before/after, diagram) shown beside your text summary. Never required; omit it unless a visual genuinely helps. Presentational only — the text summary remains canonical." } } }),
             )),
         }
         tools

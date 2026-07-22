@@ -18,6 +18,37 @@ use types::{
 };
 use vcs::{ConflictRebaseOutcome, MergeOutcome, RebaseOutcome};
 
+/// Gate-fix fast-path rounds allowed per landing (spec §3.3, job #154). Beyond
+/// this, a repeated gate compile failure falls back to the full rework loop —
+/// the failure wasn't the mechanical one-shot the fast path assumes.
+pub(crate) const GATE_FIX_BUDGET: u32 = 2;
+
+/// Scoped framing for a gate-fix task's prompt (job #154): the branch was
+/// already approved by review; a rebase onto moved main broke compilation only.
+/// The task is a narrow repair, not a fresh work cycle.
+const GATE_FIX_FRAMING: &str = "\n\n---\n## Gate-Fix (compile only, job #154)\n\
+    This branch was **already approved by review**. After rebasing onto the \
+    updated main it no longer **compiles** — a mechanical collision (a moved or \
+    renamed symbol, a changed signature), not a design problem. Make the \
+    **minimal** change to restore compilation and nothing more: do **not** add \
+    features, refactor, or restructure. Run the project's build/compile step to \
+    reproduce the exact errors, fix them in place, then commit. This goes \
+    straight back to the merge gate — gate CI is the final authority — so no \
+    re-review runs; keep the change small and obviously-correct.\n";
+
+/// How a merge-gate failure was classified (spec §3.3, job #154), determined
+/// deterministically from *which gate stage* failed — never by parsing output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GateFailureClass {
+    /// The first (build/compile) stage failed while a distinct later stage was
+    /// still queued: the branch no longer compiles. Eligible for the scoped
+    /// gate-fix fast path.
+    Compile,
+    /// A later stage failed (the build passed), or the gate is a single opaque
+    /// stage that can't be classified. Always takes the full rework loop.
+    Test,
+}
+
 /// One cycle's evaluation, run as an ascending sequence of stages (spec §3.3
 /// staged evaluation). Only the current stage has live tasks: `slots` is the
 /// stage in flight, `pending` the stages not yet created, `done` the outcomes
@@ -263,6 +294,43 @@ impl Core {
         Ok(slots)
     }
 
+    /// Launch one merge-gate stage against the candidate branch (job #154): the
+    /// gate runs its required command evaluators grouped by `stage`, ascending
+    /// and one stage at a time, so a failure's class falls out of *which* stage
+    /// failed (build vs test) rather than output parsing.
+    async fn launch_gate_stage(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        gate_branch: &str,
+        cycle: u32,
+        evaluators: Vec<Evaluator>,
+    ) -> Result<Vec<EvalSlot>> {
+        let mut slots = Vec::new();
+        for evaluator in evaluators {
+            let task_id = self
+                .launch_evaluator_task(
+                    owner,
+                    project,
+                    seq,
+                    TaskPhase::MergeGate,
+                    gate_branch,
+                    cycle,
+                    &evaluator,
+                    1,
+                )
+                .await?;
+            slots.push(EvalSlot {
+                evaluator,
+                task_id,
+                attempt: 1,
+                outcome: None,
+            });
+        }
+        Ok(slots)
+    }
+
     /// Create + launch one evaluator task (§3.3 evaluator types). Shared by the
     /// Evaluation fan-out (job branch) and the merge gate (candidate branch).
     #[allow(clippy::too_many_arguments)]
@@ -319,6 +387,11 @@ impl Core {
         // is exactly the reasoning an operator wants to read back.
         let session_id = matches!(evaluator.r#type, EvaluatorType::Agent)
             .then(|| uuid::Uuid::new_v4().to_string());
+        // Record the branch tip this evaluator round is judging (spec §3.3, job
+        // #155): a later cycle's re-review shows the reviewer "what you reviewed"
+        // and diffs `reviewed_tip..HEAD`. Best-effort — a resolve failure just
+        // omits the delta, never blocks the launch.
+        let reviewed_tip = self.repos.resolve_ref(owner, project, branch).await.ok();
         let mut task = Task {
             id: task_id,
             job_seq: seq,
@@ -345,6 +418,7 @@ impl Core {
             session_id: session_id.clone(),
             pending_reason: None,
             queued_at: None,
+            reviewed_tip,
             result: None,
             created_at: Utc::now(),
             started_at: (!pending_human).then(Utc::now),
@@ -443,6 +517,131 @@ impl Core {
     /// erased error surface as a verdict-less exit that burns `eval_retries` —
     /// the #125/#130 saturated-fleet escalation this closes (#140). Any other
     /// outcome reports through the normal exit fan-in.
+    /// The §3.3 re-review context block (job #155) for an agent evaluator on
+    /// cycle `cycle > 1`, or `None` for a first review / an evaluator that did
+    /// not run on a prior cycle / a non-agent prior result. Assembled entirely
+    /// from persisted records (the task log + the bare repo), so it is rebuilt
+    /// faithfully after a dispatcher restart.
+    async fn prior_review_block(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        branch: &str,
+        evaluator: &Evaluator,
+        cycle: u32,
+    ) -> Result<Option<String>> {
+        if cycle <= 1 {
+            return Ok(None);
+        }
+        let tasks = self.tasks.list_for_job(owner, project, seq).await?;
+        // This evaluator's most-recent completed review on an earlier cycle.
+        let Some(prior) = tasks
+            .iter()
+            .filter(|t| {
+                t.phase == TaskPhase::Evaluation
+                    && t.cycle < cycle
+                    && t.evaluator.as_deref() == Some(evaluator.name.as_str())
+                    && t.result.is_some()
+            })
+            .max_by_key(|t| (t.cycle, t.id))
+        else {
+            // Evaluator added to the job between cycles: no prior review → it
+            // gets the unchanged cycle-1 form.
+            return Ok(None);
+        };
+        let (prior_pass, prior_findings) = match &prior.result {
+            Some(TaskResult::Agent {
+                pass, structured, ..
+            }) => (*pass, structured.clone()),
+            _ => return Ok(None), // command/human prior — not a re-review case
+        };
+
+        let mut block = String::from("\n\n---\n## Re-Review Context (job #155)\n");
+        block.push_str(&format!(
+            "You are reviewing this branch again (cycle {cycle}). Verify your previous \
+             findings are addressed and review the delta closely; the full diff remains \
+             available and authoritative — spot-check beyond the delta at your judgment. \
+             Your pass verdict still asserts the **whole** branch meets the bar, not just \
+             the delta.\n"
+        ));
+
+        block.push_str("\n### Your previous review\n");
+        block.push_str(&format!(
+            "Verdict: **{}**\n",
+            if prior_pass { "pass" } else { "fail" }
+        ));
+        let findings = prior_findings
+            .as_ref()
+            .and_then(|v| serde_json::to_string_pretty(v).ok())
+            .unwrap_or_else(|| "(no structured findings)".into());
+        block.push_str(&format!("Findings:\n```json\n{findings}\n```\n"));
+
+        // Was the branch rebased since the prior review? A conflict/gate rework
+        // replays it onto a moved base, so the delta from the last-reviewed tip
+        // is not meaningful. Signalled by the current cycle's work
+        // `rework_reason` (persisted, restart-safe) and double-checked by an
+        // ancestry test below.
+        let rebased = tasks
+            .iter()
+            .filter(|t| t.phase == TaskPhase::Work && t.cycle == cycle && t.evaluator.is_none())
+            .max_by_key(|t| t.id)
+            .and_then(|t| t.rework_reason)
+            .is_some_and(|r| {
+                matches!(
+                    r,
+                    ReworkReason::MergeConflict
+                        | ReworkReason::GateCiFailure
+                        | ReworkReason::GateCompileFix
+                )
+            });
+
+        // What you reviewed + the delta since — or a rebase note.
+        let current_tip = self.repos.resolve_ref(owner, project, branch).await.ok();
+        match (prior.reviewed_tip.as_deref(), current_tip.as_deref()) {
+            (Some(last), Some(now)) => {
+                block.push_str("\n### What you reviewed\n");
+                block.push_str(&format!(
+                    "Last-reviewed tip: `{last}`\nCurrent tip: `{now}`\n"
+                ));
+                let linear = !rebased
+                    && self
+                        .repos
+                        .is_ancestor(owner, project, last, now)
+                        .await
+                        .unwrap_or(false);
+                if last == now && !rebased {
+                    block.push_str(
+                        "\n### What changed since\nNothing new since your last review — the \
+                         branch tip is unchanged.\n",
+                    );
+                } else if linear {
+                    let delta = self.repos.diff_between(owner, project, last, now).await?;
+                    block.push_str(&format!(
+                        "\n### What changed since (delta `{last}..{now}`)\n{}\n",
+                        fenced_delta(&delta.diff)
+                    ));
+                } else {
+                    block.push_str(
+                        "\n### What changed since\nThe branch was **rebased** since your last \
+                         review (a conflict/gate rework replayed it onto a moved base), so a \
+                         delta from your last-reviewed tip is not meaningful. Re-review the \
+                         full diff in your workspace.\n",
+                    );
+                }
+            }
+            _ => {
+                block.push_str(
+                    "\n### What you reviewed\nThe previously-reviewed tip wasn't recorded; \
+                     review the full diff in your workspace.\n",
+                );
+            }
+        }
+
+        block.push_str(&history_digest(&tasks, cycle));
+        Ok(Some(block))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn spawn_eval_agent(
         &mut self,
@@ -478,7 +677,7 @@ impl Core {
             .await?;
         self.inject_platform_agent_secrets(&mut env).await?;
         // Evaluators judge against the same brief the author saw.
-        let prompt = format!(
+        let mut prompt = format!(
             "{}{}",
             self.repos
                 .read_file_at(
@@ -491,6 +690,17 @@ impl Core {
                 .unwrap_or_default(),
             self.work_brief(owner, project, &job)
         );
+        // Re-review context (spec §3.3, job #155): on cycle N > 1, if this same
+        // evaluator ran on a prior cycle, prepend its prior verdict/findings, the
+        // SHA it reviewed, the delta since, and a compact job-history digest — so
+        // it focuses on what changed rather than re-deriving the whole review.
+        let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
+        if let Some(block) = self
+            .prior_review_block(owner, project, seq, branch, evaluator, cycle)
+            .await?
+        {
+            prompt.push_str(&block);
+        }
         let (mcp_servers, mut files) = self.channel_mcp(&env);
         files.extend(
             self.ssh_credential_files(
@@ -544,6 +754,7 @@ impl Core {
                                 usage,
                                 assessment: None,
                                 launch_error: None,
+                                log_tail: None,
                                 infra_loss: false,
                             },
                         })
@@ -577,6 +788,7 @@ impl Core {
                                 usage: None,
                                 assessment: None,
                                 launch_error: None,
+                                log_tail: None,
                                 infra_loss: false,
                             },
                         })
@@ -610,6 +822,7 @@ impl Core {
             abort: submission.abort,
             structured: submission.structured,
             token_usage: submission.token_usage,
+            cover_html: submission.cover_html,
         });
         task.state = TaskState::Done;
         task.completed_at = Some(Utc::now());
@@ -1181,11 +1394,40 @@ impl Core {
             return Ok(FinalizeStep::Completed); // revoked while queued
         }
         let base_ref = job.base_ref.clone().expect("base_ref set");
+        // Was this landing's current cycle a gate-fix round (job #154)? If so the
+        // fix was never reviewed, so the gate MUST re-run against the fixed
+        // candidate — even when HEAD hasn't moved again (the usual fast-path
+        // squash condition) — because gate CI is the only validation it gets.
+        // Read from the persisted task log so it holds across a restart.
+        let cycle_now = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
+        let force_gate = self
+            .tasks
+            .list_for_job(owner, project, seq)
+            .await?
+            .iter()
+            .any(|t| {
+                t.phase == TaskPhase::Work
+                    && t.cycle == cycle_now
+                    && t.evaluator.is_none()
+                    && t.rework_reason == Some(ReworkReason::GateCompileFix)
+            });
         let mut summary = self
             .active
             .get(&key)
             .and_then(|e| e.work_submission.as_ref())
             .and_then(|s| s.summary.clone());
+        // Audit trail (job #154): note the gate-fix round in the squash body so
+        // the landed commit records that a mechanical compile fix was applied
+        // after review, not that the branch was re-reviewed.
+        if force_gate {
+            let note = "Includes a gate-fix round (job #154): a compile-only merge-gate \
+                        failure was repaired by a scoped fix task and re-gated, without \
+                        re-review.";
+            summary = Some(match summary {
+                Some(prose) if !prose.is_empty() => format!("{prose}\n\n{note}"),
+                _ => note.to_string(),
+            });
+        }
 
         // A batch lands as one squash that completes every member, so open the
         // commit body with the member list — otherwise git history records only
@@ -1214,7 +1456,7 @@ impl Core {
             .resolve_ref(owner, project, &default_branch)
             .await?;
 
-        if head == base_ref {
+        if head == base_ref && !force_gate {
             // Fast path: evaluators already ran against exactly what lands.
             return match self
                 .repos
@@ -1312,32 +1554,24 @@ impl Core {
                     serde_json::json!({ "cycle": cycle }),
                 )
                 .await?;
+                // Run the gate staged (job #154): ascending `stage`, one stage at
+                // a time, so a failure's class (compile vs test) falls out of
+                // which stage failed. A single-stage gate is the unchanged
+                // fan-out — and is treated as unclassifiable at reduce.
                 let gate_branch = format!("merge-gate/{seq}");
-                let mut slots = Vec::new();
-                for evaluator in gate_evaluators {
-                    let task_id = self
-                        .launch_evaluator_task(
-                            owner,
-                            project,
-                            seq,
-                            TaskPhase::MergeGate,
-                            &gate_branch,
-                            cycle,
-                            &evaluator,
-                            1,
-                        )
-                        .await?;
-                    slots.push(EvalSlot {
-                        evaluator,
-                        task_id,
-                        attempt: 1,
-                        outcome: None,
-                    });
-                }
+                let mut pending = group_stages(gate_evaluators);
+                let first = pending.pop_front().expect("non-empty gate evaluators");
+                let slots = self
+                    .launch_gate_stage(owner, project, seq, &gate_branch, cycle, first)
+                    .await?;
                 self.active.get_mut(&key).expect("exec state").gate = Some(GateState {
                     commit,
                     old_head: head,
-                    round: EvalRound::single(slots),
+                    round: EvalRound {
+                        slots,
+                        pending,
+                        done: Vec::new(),
+                    },
                 });
                 Ok(FinalizeStep::Gating)
             }
@@ -1358,6 +1592,7 @@ impl Core {
             exit_code,
             eval_json,
             launch_error,
+            log_tail,
             ..
         } = exit;
         let key = (owner.to_string(), project.to_string(), seq);
@@ -1379,10 +1614,11 @@ impl Core {
         task.result = Some(TaskResult::Command {
             pass,
             exit_code,
-            // A launch failure has no container output; its result is the only
-            // record of why the gate failed (§3.3). A gate integration failure
-            // re-enters rework on the new base, so the error rides through there.
-            output: launch_error.unwrap_or_default(),
+            // The captured container output (compiler errors for a failed build
+            // stage) is the record of why the gate failed — a compile-class
+            // failure threads it into the gate-fix brief (job #154). A launch
+            // failure has no container output, so its reason stands in instead.
+            output: log_tail.clone().or(launch_error).unwrap_or_default(),
             structured: eval_json.clone(),
         });
         task.state = TaskState::Done;
@@ -1408,6 +1644,27 @@ impl Core {
         if gate.round.slots.iter().any(|s| s.outcome.is_none()) {
             return Ok(());
         }
+        // The current gate stage completed. If it passed and a later stage is
+        // queued, launch it and keep waiting (job #154 staged gate). Only reduce
+        // when a stage fails, or the last stage passes.
+        if stage_passed(&gate.round.slots) && !gate.round.pending.is_empty() {
+            let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
+            let gate_branch = format!("merge-gate/{seq}");
+            // Retire the passed stage into `done` and pull the next stage.
+            let (passed, next) = {
+                let g = self.active.get_mut(&key).unwrap().gate.as_mut().unwrap();
+                let passed: Vec<EvalSlot> = g.round.slots.drain(..).collect();
+                let next = g.round.pending.pop_front().expect("pending checked");
+                (passed, next)
+            };
+            let slots = self
+                .launch_gate_stage(owner, project, seq, &gate_branch, cycle, next)
+                .await?;
+            let g = self.active.get_mut(&key).unwrap().gate.as_mut().unwrap();
+            g.round.done.extend(passed);
+            g.round.slots = slots;
+            return Ok(());
+        }
         // Same triage rule as pump_merges: a hard error in gate resolution
         // (promote, rework re-entry) escalates rather than wedging the queue.
         if let Err(e) = self.gate_reduce(owner, project, seq).await {
@@ -1430,6 +1687,17 @@ impl Core {
             .gate
             .take()
             .expect("gate state");
+        let failed_ids: Vec<(String, u64)> = gate
+            .round
+            .slots
+            .iter()
+            .filter_map(|s| match s.outcome.as_ref() {
+                Some(SlotOutcome::Product { pass: false, .. }) => {
+                    Some((s.evaluator.name.clone(), s.task_id))
+                }
+                _ => None,
+            })
+            .collect();
         let failures: Vec<EvalResult> = gate
             .round
             .slots
@@ -1448,8 +1716,43 @@ impl Core {
             })
             .collect();
 
+        // Classify the failure deterministically from *which stage* failed (job
+        // #154): the first stage failing while a distinct later stage was queued
+        // is a build/compile failure; anything else (a later stage, or a single
+        // opaque stage that can't be told apart) takes the full rework loop.
+        let class = if gate.round.done.is_empty() && !gate.round.pending.is_empty() {
+            GateFailureClass::Compile
+        } else {
+            GateFailureClass::Test
+        };
+        let gate_fix_used = self.active.get(&key).map(|e| e.gate_fix_used).unwrap_or(0);
+
         self.gating.remove(&slug);
         let gate_branch = format!("merge-gate/{seq}");
+
+        if !failures.is_empty()
+            && class == GateFailureClass::Compile
+            && gate_fix_used < GATE_FIX_BUDGET
+        {
+            // Gate-fix fast path (job #154): a compile-only failure on an
+            // already-approved branch gets a scoped fix task that returns
+            // straight to the gate — no re-review, no eval CI. Pull the failed
+            // build stage's captured compiler output so the brief shows the
+            // exact errors (its output was stored on the task by on_gate_exited).
+            let compiler_output = self
+                .gate_stage_output(owner, project, seq, &failed_ids)
+                .await;
+            self.launch_gate_fix(
+                owner,
+                project,
+                seq,
+                gate.old_head.clone(),
+                failures,
+                compiler_output,
+            )
+            .await?;
+            return self.pump_merges(owner, project).await;
+        }
 
         if failures.is_empty() {
             // Promote: the candidate commit IS the merge (§3.3). A failed CAS
@@ -1520,6 +1823,128 @@ impl Core {
             .await?;
         }
         self.pump_merges(owner, project).await
+    }
+
+    /// Launch a scoped gate-fix task (job #154) for a compile-only gate failure.
+    /// Rebases `job/{seq}` onto the gated head (the collision the fix must
+    /// resolve), bumps the gate-fix budget, and re-enters Work with a narrow
+    /// "restore compilation" brief and [`ReworkReason::GateCompileFix`] — which
+    /// routes the completed fix straight back to the gate, not to re-review.
+    /// Gather the captured container output of the failing gate stage(s) —
+    /// the compiler errors [`Core::on_gate_exited`] stored on each failed
+    /// command task — so the gate-fix brief (job #154) can show the agent the
+    /// exact errors it must repair. Reads the persisted task records, so it is
+    /// robust to a restart between the gate failure and the fix launch.
+    async fn gate_stage_output(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        failed: &[(String, u64)],
+    ) -> String {
+        let mut out = String::new();
+        for (name, task_id) in failed {
+            let Ok(Some(task)) = self.tasks.get(owner, project, seq, *task_id).await else {
+                continue;
+            };
+            if let Some(TaskResult::Command { output, .. }) = &task.result {
+                let trimmed = output.trim();
+                if !trimmed.is_empty() {
+                    out.push_str(&format!(
+                        "### `{name}` stage output\n```\n{trimmed}\n```\n\n"
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    async fn launch_gate_fix(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        new_base: String,
+        failures: Vec<EvalResult>,
+        compiler_output: String,
+    ) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        let _ = self
+            .repos
+            .delete_branch(owner, project, &format!("merge-gate/{seq}"))
+            .await;
+        let job = self.must_get(owner, project, seq)?.clone();
+        let old_base = job.base_ref.clone().expect("base_ref set");
+        let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
+        let outcome = self
+            .repos
+            .rebase_onto_with_conflict(owner, project, seq, &new_base)
+            .await?;
+        // Scoped brief: the gate-fix framing, the exact compiler errors the gate
+        // build stage emitted (job #154 requirement), then the rebase/conflict
+        // context. Embedding the captured output means the agent sees the errors
+        // without having to reproduce the build first.
+        let mut context = String::from(GATE_FIX_FRAMING);
+        if !compiler_output.trim().is_empty() {
+            context.push_str("\n### Gate build output (the errors to fix)\n\n");
+            context.push_str(&compiler_output);
+        }
+        let conflict_ctx = self
+            .repos
+            .conflict_context(owner, project, &old_base, &new_base, &[])
+            .await?;
+        context.push_str(&conflict_ctx);
+        augment_conflict_context(&mut context, &outcome);
+
+        let mut job = job;
+        job.base_ref = Some(new_base.clone());
+        self.jobs.put(&job).await?;
+        self.graphs
+            .entry(job.project.clone())
+            .or_default()
+            .insert(job.clone());
+        // Count this round against the gate-fix budget (in-memory; enter_work
+        // preserves it, and it is rebuilt from the task log on restart).
+        if let Some(e) = self.active.get_mut(&key) {
+            e.gate_fix_used += 1;
+        }
+        self.publish(
+            owner,
+            project,
+            seq,
+            "job-rework-started",
+            serde_json::json!({
+                "cycle": cycle + 1, "reason": "gate_compile_fix", "eval_context": failures,
+            }),
+        )
+        .await?;
+        self.enter_work(
+            owner,
+            project,
+            seq,
+            cycle + 1,
+            failures,
+            Some(context),
+            Some(ReworkReason::GateCompileFix),
+        )
+        .await
+    }
+
+    /// A gate-fix task finished (job #154): re-enter the merge gate directly,
+    /// skipping re-review and eval-phase CI. Transitions Work→Evaluation→WrapUp
+    /// (both allowed, §2.1) without launching any evaluator, so `finalize_pass`
+    /// rebuilds the candidate and re-runs gate CI — the final authority.
+    pub(crate) async fn reenter_gate_after_fix(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+    ) -> Result<()> {
+        let mut job = self.must_get(owner, project, seq)?.clone();
+        if job.state == JobState::Work {
+            self.set_state(&mut job, JobState::Evaluation).await?;
+        }
+        self.finalize_pass(owner, project, seq).await
     }
 
     /// The squash has landed on the default branch (spec §3.2 step 12). If the
@@ -1601,6 +2026,7 @@ impl Core {
             session_id: None,
             pending_reason: None,
             queued_at: None,
+            reviewed_tip: None,
             result: None,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -1902,6 +2328,113 @@ fn augment_conflict_context(context: &mut String, outcome: &ConflictRebaseOutcom
     }
 }
 
+/// Byte cap on the re-review delta diff embedded in an evaluator prompt (job
+/// #155). The delta is *focus*, not the authoritative source — the full diff is
+/// in the evaluator's workspace — so an outsized delta is truncated with a note
+/// rather than bloating the prompt.
+const DELTA_DIFF_MAX_BYTES: usize = 24 * 1024;
+
+/// Wrap a delta diff in a fenced block, truncated to [`DELTA_DIFF_MAX_BYTES`]
+/// with a pointer to the workspace when it overflows.
+fn fenced_delta(diff: &str) -> String {
+    if diff.trim().is_empty() {
+        return "(no textual delta — see your workspace)".to_string();
+    }
+    if diff.len() <= DELTA_DIFF_MAX_BYTES {
+        return format!("```diff\n{diff}\n```");
+    }
+    let mut cut = DELTA_DIFF_MAX_BYTES;
+    while cut > 0 && !diff.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!(
+        "```diff\n{}\n```\n_(delta truncated at {DELTA_DIFF_MAX_BYTES} bytes — run git in \
+         your workspace for the full delta.)_",
+        &diff[..cut]
+    )
+}
+
+/// A compact per-cycle job-history digest (job #155): the same story the job
+/// page tells a human skimming it — a few lines per cycle with each round's
+/// verdicts, rework reasons, and the work agent's summary first line — built
+/// from the persisted task log so it survives restart.
+fn history_digest(tasks: &[types::Task], cycles: u32) -> String {
+    let first_line = |s: &str| {
+        let line = s
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        if line.chars().count() > 120 {
+            format!("{}…", line.chars().take(120).collect::<String>())
+        } else {
+            line.to_string()
+        }
+    };
+    let verdict = |t: &types::Task| -> &'static str {
+        match &t.result {
+            Some(TaskResult::Agent { pass, abort, .. }) => {
+                if *abort {
+                    "abort"
+                } else if *pass {
+                    "pass"
+                } else {
+                    "fail"
+                }
+            }
+            Some(TaskResult::Command { pass, .. }) => {
+                if *pass {
+                    "pass"
+                } else {
+                    "fail"
+                }
+            }
+            Some(TaskResult::Human { pass, .. }) => {
+                if *pass {
+                    "pass"
+                } else {
+                    "fail"
+                }
+            }
+            _ => "…",
+        }
+    };
+    let mut s = String::from("\n### Job history at a glance\n");
+    for c in 1..=cycles {
+        s.push_str(&format!("- **Cycle {c}**"));
+        if let Some(w) = tasks
+            .iter()
+            .filter(|t| t.phase == TaskPhase::Work && t.cycle == c && t.evaluator.is_none())
+            .max_by_key(|t| t.id)
+        {
+            if let Some(reason) = w.rework_reason {
+                s.push_str(&format!(" [rework: {reason:?}]"));
+            }
+            if let Some(TaskResult::Work {
+                summary: Some(sm), ..
+            }) = &w.result
+            {
+                s.push_str(&format!(" — work: {}", first_line(sm)));
+            }
+        }
+        let verdicts: Vec<String> = tasks
+            .iter()
+            .filter(|t| {
+                matches!(t.phase, TaskPhase::Evaluation | TaskPhase::MergeGate)
+                    && t.cycle == c
+                    && t.evaluator.is_some()
+                    && t.result.is_some()
+            })
+            .map(|t| format!("{}={}", t.evaluator.as_deref().unwrap_or("?"), verdict(t)))
+            .collect();
+        if !verdicts.is_empty() {
+            s.push_str(&format!("\n    - reviews: {}", verdicts.join(", ")));
+        }
+        s.push('\n');
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     //! Unit coverage for the staged-evaluation decision core (spec §3.3): how
@@ -2024,5 +2557,106 @@ mod tests {
             slot("adv-infra", 0, Some(false), SlotOutcome::Infra),
         ];
         assert!(stage_passed(&slots));
+    }
+
+    // ── re-review context helpers (job #155) ────────────────────────────────
+
+    fn eval_task(id: u64, cycle: u32, name: &str, pass: bool) -> types::Task {
+        review_task(id, cycle, TaskPhase::Evaluation, Some(name), pass, None)
+    }
+
+    fn review_task(
+        id: u64,
+        cycle: u32,
+        phase: TaskPhase,
+        evaluator: Option<&str>,
+        pass: bool,
+        result: Option<TaskResult>,
+    ) -> types::Task {
+        types::Task {
+            id,
+            job_seq: 1,
+            project: "acme/api".into(),
+            phase,
+            cycle,
+            kind: TaskKind::Command { run: "true".into() },
+            state: TaskState::Done,
+            attempt: 1,
+            evaluator: evaluator.map(String::from),
+            label: evaluator.map(String::from),
+            stage: 0,
+            performed_by: None,
+            container_id: None,
+            pending_reason: None,
+            queued_at: None,
+            rework_reason: None,
+            infra_loss: false,
+            session_id: None,
+            reviewed_tip: None,
+            result: result.or(Some(TaskResult::Agent {
+                pass,
+                abort: false,
+                structured: None,
+                token_usage: None,
+                cover_html: None,
+            })),
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    fn work_task(id: u64, cycle: u32, summary: &str, reason: Option<ReworkReason>) -> types::Task {
+        let mut t = review_task(
+            id,
+            cycle,
+            TaskPhase::Work,
+            None,
+            true,
+            Some(TaskResult::Work {
+                summary: Some(summary.into()),
+                structured: None,
+                token_usage: None,
+                cover_html: None,
+            }),
+        );
+        t.rework_reason = reason;
+        t
+    }
+
+    #[test]
+    fn history_digest_summarizes_each_cycle() {
+        let tasks = vec![
+            work_task(1, 1, "first pass at the feature\nmore detail", None),
+            eval_task(2, 1, "reviewer", false),
+            work_task(3, 2, "addressed findings", Some(ReworkReason::EvalFailure)),
+            eval_task(4, 2, "reviewer", true),
+        ];
+        let d = history_digest(&tasks, 2);
+        assert!(d.contains("Cycle 1"), "{d}");
+        assert!(d.contains("first pass at the feature"), "{d}");
+        // Only the first non-empty line of the work summary is kept.
+        assert!(!d.contains("more detail"), "{d}");
+        assert!(d.contains("reviewer=fail"), "{d}");
+        assert!(d.contains("Cycle 2"), "{d}");
+        assert!(d.contains("[rework: EvalFailure]"), "{d}");
+        assert!(d.contains("reviewer=pass"), "{d}");
+    }
+
+    #[test]
+    fn fenced_delta_wraps_and_truncates() {
+        assert_eq!(
+            fenced_delta("   \n"),
+            "(no textual delta — see your workspace)"
+        );
+        let small = fenced_delta("+added line");
+        assert!(small.starts_with("```diff") && small.contains("+added line"));
+        assert!(!small.contains("truncated"));
+        // Over the cap → truncated with a workspace pointer, and never split a
+        // char boundary (the cut is byte-safe).
+        let big = "x".repeat(DELTA_DIFF_MAX_BYTES + 500);
+        let out = fenced_delta(&big);
+        assert!(out.contains("truncated"), "{}", &out[out.len() - 80..]);
+        assert!(out.len() < big.len() + 200);
     }
 }

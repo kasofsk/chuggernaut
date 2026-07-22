@@ -142,6 +142,7 @@ async fn config_endpoints() {
                 main_tip_sha: None,
                 commits_behind: None,
                 auto_deploy: None,
+                placement_policy: "busyness".into(),
             },
         )
         .await

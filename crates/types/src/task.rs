@@ -91,6 +91,14 @@ pub struct Task {
     /// the conversation.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Evaluation/MergeGate tasks only: the branch tip SHA this evaluator round
+    /// judged, resolved at launch (spec §3.3, job #155). Persisted so a later
+    /// cycle's re-review can show the reviewer "what you reviewed last time" and
+    /// compute the `last_reviewed_tip..HEAD` delta — and so that context
+    /// survives a dispatcher restart (rebuilt from the task log, not memory).
+    /// None for work/escalation/triage tasks and pre-#155 records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_tip: Option<String>,
     pub result: Option<TaskResult>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
@@ -182,6 +190,11 @@ pub enum ReworkReason {
     MergeConflict,
     /// A required command evaluator failed at the merge gate (§3.3 merge gate).
     GateCiFailure,
+    /// The merge gate failed on a **compile/build** stage only (spec §3.3
+    /// gate-fix fast path, job #154): an already-approved branch that no longer
+    /// compiles after rebasing onto moved main. A narrowly-scoped fix task that
+    /// returns straight to the merge gate — no re-review, no eval-phase CI.
+    GateCompileFix,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -191,6 +204,14 @@ pub enum TaskResult {
         summary: Option<String>,
         structured: Option<serde_json::Value>,
         token_usage: Option<TokenUsage>,
+        /// Optional agent-authored HTML cover page for this result (spec §1.1,
+        /// §4.3, job #143). Purely presentational — a visual changelog/before-
+        /// after the operator UI renders in a sandboxed frame beside the text
+        /// `summary`. Sanitized (size-capped) at ingest; **never** enters the
+        /// squash body or any downstream prompt, and its absence is never
+        /// penalized. Defaults None so pre-#143 records still deserialize.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cover_html: Option<String>,
     },
     Command {
         pass: bool,
@@ -207,6 +228,10 @@ pub enum TaskResult {
         abort: bool,
         structured: Option<serde_json::Value>,
         token_usage: Option<TokenUsage>,
+        /// Optional agent-authored HTML cover page for an evaluator's verdict
+        /// summary (job #143), same semantics as [`TaskResult::Work::cover_html`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cover_html: Option<String>,
     },
     Human {
         pass: bool,
@@ -551,6 +576,49 @@ mod tests {
             }
         );
         assert!(!serde_json::to_string(&legacy).unwrap().contains("summary"));
+    }
+
+    #[test]
+    fn work_result_cover_html_round_trips_and_back_compat() {
+        // A pre-#143 Work result (no cover_html key) deserializes to None, and
+        // None is omitted on the wire (skip_serializing_if).
+        let legacy = r#"{"kind":"Work","summary":"did it","structured":null,"token_usage":null}"#;
+        let r: TaskResult = serde_json::from_str(legacy).unwrap();
+        assert!(matches!(
+            &r,
+            TaskResult::Work {
+                cover_html: None,
+                ..
+            }
+        ));
+        assert!(!serde_json::to_string(&r).unwrap().contains("cover_html"));
+
+        // A cover survives the round trip verbatim (sanitized at ingest, stored
+        // and served as-is — job #143).
+        let with_cover = TaskResult::Work {
+            summary: Some("did it".into()),
+            structured: None,
+            token_usage: None,
+            cover_html: Some("<h1>before/after</h1>".into()),
+        };
+        let json = serde_json::to_string(&with_cover).unwrap();
+        assert!(json.contains(r#""cover_html":"<h1>before/after</h1>""#));
+        assert_eq!(
+            serde_json::from_str::<TaskResult>(&json).unwrap(),
+            with_cover
+        );
+
+        // Same for an evaluator verdict (Agent) cover.
+        let agent = TaskResult::Agent {
+            pass: true,
+            abort: false,
+            structured: None,
+            token_usage: None,
+            cover_html: Some("<p>ok</p>".into()),
+        };
+        let back: TaskResult =
+            serde_json::from_str(&serde_json::to_string(&agent).unwrap()).unwrap();
+        assert_eq!(back, agent);
     }
 
     #[test]

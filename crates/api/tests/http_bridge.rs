@@ -1222,6 +1222,7 @@ async fn task_output_endpoint() {
         pending_reason: None,
         queued_at: None,
         session_id: None,
+        reviewed_tip: None,
         result: None,
         created_at: chrono::Utc::now(),
         started_at: Some(chrono::Utc::now()),

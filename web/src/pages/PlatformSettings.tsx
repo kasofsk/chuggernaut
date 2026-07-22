@@ -72,6 +72,16 @@ export function PlatformSettingsPage() {
             ) : (
               <div className="dim">Dispatcher offline.</div>
             )}
+            {d && (
+              <dl className="meta">
+                <dt title="fleet placement policy (§3.1): busyness = fewest running jobs; headroom = most free slots">
+                  placement
+                </dt>
+                <dd>
+                  <code>{d.placement_policy ?? 'busyness'}</code>
+                </dd>
+              </dl>
+            )}
           </section>
 
           {d && (

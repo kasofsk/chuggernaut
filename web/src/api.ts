@@ -177,6 +177,9 @@ export interface WorkResult {
   summary?: string | null
   structured?: WorkStructured | null
   token_usage?: TokenUsage | null
+  /** Optional agent-authored HTML cover page (job #143), rendered beside the
+   *  summary in a sandboxed frame. Presentational only. */
+  cover_html?: string | null
 }
 
 /** Verdict of an agent evaluator (e.g. `review`): pass/fail + structured. */
@@ -187,6 +190,8 @@ export interface EvalResult {
   abort?: boolean
   structured?: EvalStructured | null
   token_usage?: TokenUsage | null
+  /** Optional agent-authored HTML cover page for the verdict (job #143). */
+  cover_html?: string | null
 }
 
 /** Verdict of a command/CI evaluator: exit code + (possibly long) output. */
@@ -259,6 +264,10 @@ export interface Task {
   queued_at?: string | null
   /// Agent tasks only: names the captured session transcript.
   session_id: string | null
+  /** Evaluation/MergeGate tasks only (job #155): the branch tip SHA this
+   *  evaluator round judged, used to build a later cycle's re-review delta.
+   *  Absent on work/escalation/triage tasks and pre-#155 records. */
+  reviewed_tip?: string | null
   result: TaskResult | null
   created_at: string
   started_at: string | null
@@ -383,6 +392,9 @@ export interface DispatcherSnapshot {
   /** Whether the New Job "job wizard" LLM chat is configured; false → the UI
    *  falls back to manual title/description entry. */
   wizard_available?: boolean
+  /** Active fleet placement policy (§3.1): `busyness` (fewest running) or
+   *  `headroom` (most free slots). Absent on snapshots predating the field. */
+  placement_policy?: string
 }
 
 /**

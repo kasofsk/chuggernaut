@@ -99,6 +99,7 @@ fn work_task(id: u64, job_seq: u64, state: TaskState, container_id: Option<&str>
         rework_reason: None,
         infra_loss: false,
         session_id: None,
+        reviewed_tip: None,
         result: None,
         created_at: Utc::now(),
         started_at: Some(Utc::now()),

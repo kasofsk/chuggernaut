@@ -607,6 +607,7 @@ async fn batch_has_one_rework_budget() {
                 abort: false,
                 structured: Some(serde_json::json!({"issues": ["ticket 2 unaddressed"]})),
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await
@@ -625,6 +626,7 @@ async fn batch_has_one_rework_budget() {
                 abort: false,
                 structured: None,
                 token_usage: None,
+                cover_html: None,
             },
         )
         .await

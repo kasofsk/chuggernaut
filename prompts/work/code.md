@@ -59,6 +59,12 @@ Then:
      - Prefer bullets to prose; no multi-sentence run-on paragraphs. Keep it
        brief — structure replaces neither brevity nor substance.
    - `structured`: `{ "files_changed": [...], "notes": "..." }`.
+   - `cover_html` (**optional**): a small, self-contained HTML cover page telling
+     the story of what you did — a visual changelog, a before/after, a little
+     diagram — shown in the operator UI beside the text summary. Include it only
+     *if it helps tell the story*; it is never required, purely presentational,
+     and never a substitute for the `summary`. Keep it compact (well under 64KB;
+     larger is rejected).
 7. Exit 0.
 
 **Finish-line rules (this is a headless run — respect them or the work is lost):**

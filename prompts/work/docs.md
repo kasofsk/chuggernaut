@@ -49,6 +49,10 @@ Then:
      - Prefer bullets to prose; no multi-sentence run-on paragraphs. Keep it
        brief — structure replaces neither brevity nor substance.
    - `structured`: `{ "files_changed": [...], "notes": "..." }`.
+   - `cover_html` (optional): a small self-contained HTML cover page shown beside
+     the summary in the UI. Only if it helps tell the story; never required,
+     presentational only, never a substitute for `summary`. Keep it compact
+     (rejected over 64KB).
 7. Exit 0.
 
 A reviewer will judge your page against the same brief — accuracy against the

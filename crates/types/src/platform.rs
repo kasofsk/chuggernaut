@@ -64,6 +64,7 @@ mod tests {
             main_tip_sha: Some("def456".into()),
             commits_behind: Some(3),
             auto_deploy: None,
+            placement_policy: "busyness".into(),
         }
     }
 
@@ -75,6 +76,7 @@ mod tests {
         assert!(json.contains("main_tip_sha"));
         assert!(json.contains("commits_behind"));
         assert!(json.contains("auto_deploy"));
+        assert!(json.contains("placement_policy"));
         let back: DispatcherConfigSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(snap, back);
     }
@@ -105,6 +107,9 @@ mod tests {
         assert_eq!(snap.main_tip_sha, None);
         assert_eq!(snap.commits_behind, None);
         assert_eq!(snap.auto_deploy, None);
+        // Snapshots predating the configurable policy default to the old
+        // hardcoded behavior (headroom), not the new busyness default.
+        assert_eq!(snap.placement_policy, "headroom");
     }
 }
 
@@ -167,6 +172,18 @@ pub struct DispatcherConfigSnapshot {
     /// = deploys land automatically, `Some(false)` = manual). `None` until then.
     #[serde(default)]
     pub auto_deploy: Option<bool>,
+    /// `PLACEMENT_POLICY` — the active fleet placement policy (`busyness` |
+    /// `headroom`, §3.1), so the UI can show how the fleet schedules. Defaults
+    /// to `busyness` for snapshots written before this field existed.
+    #[serde(default = "default_placement_policy")]
+    pub placement_policy: String,
+}
+
+/// Back-compat default for [`DispatcherConfigSnapshot::placement_policy`]:
+/// snapshots written before the field existed predate the configurable policy,
+/// when placement was hardcoded to headroom.
+fn default_placement_policy() -> String {
+    "headroom".to_string()
 }
 
 /// Live fleet occupancy (spec §3.1): which slots on which node are busy and what
