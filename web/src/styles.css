@@ -408,6 +408,11 @@ table.jobs th.sortable:hover {
 table.jobs tbody tr.row-stripe {
   background: var(--stripe);
 }
+/* The resolving row of an escalation band carries a faint amber wash to mark
+   the "a human decided" moment. Placed before :hover so hover still wins. */
+table.jobs tbody tr.row-escalation-lead {
+  background: color-mix(in srgb, var(--orange) 8%, transparent);
+}
 /* Hover sits above the stripe (equal specificity, later in source) and is
    pitched stronger than --stripe so it stays legible on striped rows too. */
 table.jobs tbody tr:hover {
@@ -420,6 +425,13 @@ table.jobs tr:last-child td {
    space them so they don't touch. */
 table.jobs td .badge + .badge {
   margin-left: 0.35rem;
+}
+/* Escalation band left edge: the resolving row and the failed attempts above it
+   share an amber inset edge (a shadow, so no layout shift and no misaligned
+   first column) so they read as one group — "these failed → a human stepped
+   in". The edge is a shadow, not a background, so it survives the hover wash. */
+table.jobs tbody tr.row-escalation td:first-child {
+  box-shadow: inset 3px 0 0 var(--orange);
 }
 td.actions {
   white-space: nowrap;

@@ -147,6 +147,18 @@ export function JobDetail() {
   // task/criteria/diff sections are empty (nothing has run) so they're hidden.
   const isDraft = job.state === 'Draft'
 
+  // Tasks banded with an escalation resolution: the resolving Human task and the
+  // failed attempts in the same cycle above it. They share an amber left edge in
+  // the table so the story reads "these failed → a human stepped in".
+  const escalationBand = new Set<number>()
+  for (const t of tasks) {
+    if (!isEscalationResolution(t)) continue
+    escalationBand.add(t.id)
+    for (const p of tasks) {
+      if (p.id < t.id && p.cycle === t.cycle && p.state === 'Failed') escalationBand.add(p.id)
+    }
+  }
+
   return (
     <div className="page">
       <header className="topbar">
@@ -385,14 +397,20 @@ export function JobDetail() {
             </tr>
           </thead>
           <tbody>
-            {tasks.map((t, i) => (
+            {tasks.map((t, i) => {
+              const esc = isEscalationResolution(t)
+              const rowClass =
+                [i % 2 ? 'row-stripe' : '', escalationBand.has(t.id) ? 'row-escalation' : '', esc ? 'row-escalation-lead' : '']
+                  .filter(Boolean)
+                  .join(' ') || undefined
+              return (
               <Fragment key={t.id}>
-              <tr className={i % 2 ? 'row-stripe' : undefined}>
+              <tr className={rowClass}>
                 <td>{t.id}</td>
-                <td><PhaseLabel phase={t.phase} /></td>
+                <td><PhaseLabel phase={t.phase} escalation={esc} /></td>
                 <td>
                   {t.cycle}
-                  {t.attempt > 1 ? ` (attempt ${t.attempt})` : ''}
+                  {t.attempt > 1 ? <span className="dim"> (attempt {t.attempt})</span> : ''}
                 </td>
                 <td>
                   {t.kind.kind}
@@ -406,7 +424,15 @@ export function JobDetail() {
                   {fmtTime(t.started_at)}
                 </td>
                 <td className="dim task-time">{taskDuration(t, now)}</td>
-                <td className="dim result-cell">{resultSummary(t)}</td>
+                <td className="dim result-cell">
+                  {esc ? (
+                    escalationDetail(t)
+                  ) : neverLaunched(t) ? (
+                    <span title="the attempt was never launched — no container ran">never launched</span>
+                  ) : (
+                    resultSummary(t)
+                  )}
+                </td>
                 <td>
                   <TaskArtifacts owner={owner} project={project} seq={jobSeq} task={t} />
                 </td>
@@ -439,7 +465,8 @@ export function JobDetail() {
                 </tr>
               )}
               </Fragment>
-            ))}
+              )
+            })}
             {tasks.length === 0 && (
               <tr>
                 <td colSpan={10} className="dim">
@@ -515,12 +542,38 @@ function setActionError(setError: (s: string) => void) {
   return (e: unknown) => setError(e instanceof Error ? e.message : 'action failed')
 }
 
-// The task's phase. MergeGate gets a labelled badge with the "why is a CI task
-// running after evaluation passed?" explanation — it only appears when the
-// default branch moved since Ready and the type has required command evaluators,
-// so the gate re-runs them against the squash candidate. Every other phase
-// (including future ones like WrapUp) renders its name as-is with no styling.
-function PhaseLabel({ phase }: { phase: string }) {
+// Per-phase hue so the task table reads as a sequence of distinct phases at a
+// glance rather than near-uniform rows. Hues match the app-wide state badges
+// (Work=blue, Evaluation=purple) so the phase language is consistent
+// everywhere. Merge gate is the evaluation family — a CI re-run against the
+// squash candidate — so it shares evaluation's purple, set apart by its label +
+// tooltip. WrapUp/Triage are the muted housekeeping/advisory phases. Escalation
+// is amber and handled separately (see PhaseLabel's escalation branch).
+const PHASE_HUE: Record<string, string> = {
+  Work: 'blue',
+  Evaluation: 'purple',
+  MergeGate: 'purple',
+  WrapUp: 'gray',
+  Triage: 'gray',
+}
+
+// The task's phase, as a hued pill. An escalation resolution (a human stepping
+// in to decide a run of failed attempts) renders as an amber `escalation` pill
+// regardless of the phase the record was stamped under — old records carry the
+// resolution under Work; see isEscalationResolution. MergeGate keeps its
+// "why is a CI task running after evaluation passed?" tooltip. Unknown/future
+// phases fall back to a neutral pill so they still read as a phase.
+function PhaseLabel({ phase, escalation = false }: { phase: string; escalation?: boolean }) {
+  if (escalation) {
+    return (
+      <span
+        className="badge badge-orange"
+        title="a human resolved the escalation for the failed attempt(s) above"
+      >
+        escalation
+      </span>
+    )
+  }
   if (phase === 'MergeGate') {
     return (
       <span
@@ -531,7 +584,35 @@ function PhaseLabel({ phase }: { phase: string }) {
       </span>
     )
   }
-  return <>{phase}</>
+  const hue = PHASE_HUE[phase] ?? 'gray'
+  return <span className={`badge badge-${hue}`}>{phase}</span>
+}
+
+// Whether a task record is a human resolving an escalation, rather than an
+// attempt of its stamped phase. The code side stamps these under a dedicated
+// `Escalation` phase; older records carry them as a Human-kind result whose
+// `action` (Retry/Resolve/Revoke) is the resolving decision — both are treated
+// as escalation events so the table tells the story consistently.
+function isEscalationResolution(t: Task): boolean {
+  if (t.phase === 'Escalation') return true
+  return t.result?.kind === 'Human' && !!t.result.action
+}
+
+// The escalation-event detail line: the resolving action and the operator who
+// made the call, e.g. "escalation resolved: Retry — david@…".
+function escalationDetail(t: Task): string {
+  const r = t.result?.kind === 'Human' ? t.result : null
+  const action = r?.action ?? '—'
+  const op = r?.operator
+  return `escalation resolved: ${action}${op ? ` — ${op}` : ''}`
+}
+
+// A Failed task that never got a container is a launch that never happened (no
+// free slot, rejected before spawn) — 0s and no output, otherwise identical to
+// a real agent crash (which spawns a container that then dies). Human tasks
+// never spawn a container, so exclude them.
+function neverLaunched(t: Task): boolean {
+  return t.state === 'Failed' && !t.container_id && t.performed_by !== 'human' && !t.result
 }
 
 // One-line gloss for the tasks table's detail column; the full report renders
@@ -573,7 +654,7 @@ function TaskReports({ tasks }: { tasks: Task[] }) {
             <div className="report-head">
               <div className="report-id">
                 <span className="report-task">task {t.id}</span>
-                <PhaseLabel phase={t.phase} />
+                <PhaseLabel phase={t.phase} escalation={isEscalationResolution(t)} />
                 {t.evaluator && <span className="report-eval">{t.evaluator}</span>}
                 <span className="dim">
                   cycle {t.cycle}
