@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, type Job, type Task } from '../api'
-import { useDebouncedCallback, useProjectEvents } from '../useEvents'
+import { useDebouncedCallback, useProjectEvents, type JobEvent } from '../useEvents'
 import { StateBadge } from '../components/StateBadge'
 import { ResolveForm } from '../components/ResolveForm'
 import { ProjectTabs } from '../components/ProjectTabs'
@@ -40,6 +40,32 @@ function completedTip(j: Job): string | undefined {
   if (!j.completed_at) return undefined
   return `${j.completed_at} · took ${fmtDuration(Date.parse(j.completed_at) - Date.parse(j.created_at))}`
 }
+
+// Compact "N ago" for a channel post's age. Coarse on purpose — the exact
+// instant rides in the tooltip; here we only want a cheap glance ('2m ago').
+function fmtAge(iso: string): string {
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return ''
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000))
+  if (s < 60) return `${s}s ago`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ago`
+  return `${Math.floor(h / 24)}d ago`
+}
+
+// Collapse a channel message to a single line for the muted under-title glance
+// (the full multi-line text rides in the tooltip). Runs of whitespace —
+// including the newlines in markdown prose — become single spaces.
+function oneLine(s: string): string {
+  return s.replace(/\s+/g, ' ').trim()
+}
+
+// Jobs whose latest channel-update is worth surfacing under the title: the two
+// live, agent-driven phases. Evaluation shares Work's channel stream, so it
+// costs nothing extra to include (per the brief).
+const CHANNEL_STATES = new Set(['Work', 'Evaluation'])
 
 // State-column sort order. Alphabetical scatters related states, so rank them by
 // lifecycle instead: inert pre-release first, terminal history next, live activity,
@@ -88,12 +114,42 @@ export function ProjectPage() {
       })
   }, [owner, project, navigate])
 
+  // Latest channel-update message per job, surfaced muted under the title for
+  // live jobs. Seeded for free from the SSE history replay (the per-project feed
+  // replays every channel-update on connect — no N+1 per-job fetch), then kept
+  // current from live events. Reset on project change so stale rows don't bleed
+  // across navigations.
+  const [channelMsgs, setChannelMsgs] = useState<Map<number, { message: string; ts: string }>>(
+    new Map(),
+  )
+  useEffect(() => setChannelMsgs(new Map()), [owner, project])
+
   useEffect(refresh, [refresh])
   // The SSE stream is the source of truth (Part 11): any event → refetch. On
   // page load the stream replays the full history, so debounce to collapse that
   // burst (and any live burst) into a single refetch.
   const debouncedRefresh = useDebouncedCallback(refresh, 250)
-  useProjectEvents(owner, project, debouncedRefresh)
+  // Every event both feeds the debounced refetch and, when it's a channel-update,
+  // updates the latest-message-per-job map. Guard on ts so an out-of-order frame
+  // can't overwrite a newer message with an older one.
+  const onEvent = useCallback(
+    (e: JobEvent) => {
+      if (e.event_type === 'channel-update' && typeof e.message === 'string' && e.message) {
+        const message = e.message
+        const ts = String(e.ts)
+        setChannelMsgs((prev) => {
+          const cur = prev.get(e.job_seq)
+          if (cur && Date.parse(cur.ts) >= Date.parse(ts)) return prev
+          const next = new Map(prev)
+          next.set(e.job_seq, { message, ts })
+          return next
+        })
+      }
+      debouncedRefresh()
+    },
+    [debouncedRefresh],
+  )
+  useProjectEvents(owner, project, onEvent)
 
   const jobBySeq = new Map(jobs.map((j) => [j.id, j]))
 
@@ -313,6 +369,12 @@ export function ProjectPage() {
                   <Link to={`/p/${owner}/${project}/jobs/${j.id}`}>
                     {j.title || <span className="dim">—</span>}
                   </Link>
+                  {CHANNEL_STATES.has(j.state) && channelMsgs.has(j.id) && (
+                    <div className="job-channel dim" title={channelMsgs.get(j.id)!.message}>
+                      <span className="job-channel-msg">{oneLine(channelMsgs.get(j.id)!.message)}</span>
+                      <span className="job-channel-age">{fmtAge(channelMsgs.get(j.id)!.ts)}</span>
+                    </div>
+                  )}
                 </td>
                 <td>
                   <Link className="dim" to={`/p/${owner}/${project}/job-types/${encodeURIComponent(j.type)}`}>

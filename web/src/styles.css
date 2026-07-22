@@ -433,6 +433,29 @@ td.actions button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Latest channel-update under a live job's title: muted, one line, bounded so
+   it never widens the column. The message ellipsizes; the age stays pinned at
+   the end. Full text rides in the cell's title tooltip. */
+.job-channel {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  max-width: 320px;
+  margin-top: 0.15rem;
+  font-size: var(--fs-xs);
+  line-height: 1.3;
+}
+.job-channel-msg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.job-channel-age {
+  flex: none;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
 
 .badge {
   display: inline-block;
@@ -1080,6 +1103,18 @@ table.jobs tbody tr.row-draft td:first-child {
   font-family: var(--font);
   font-size: var(--fs-sm);
 }
+/* Inside the log pane, nothing scrolls sideways — long lines wrap (#118). The
+   global markdown rule lets code fences scroll on x within their own box, but in
+   this pane (esp. at 375px) that reads as horizontal scroll, so force wrapping
+   for markdown code fences in transcript prose/results. The .tx-pre/.tx-shell
+   blocks already wrap via pre-wrap + overflow-wrap:anywhere. */
+.log-transcript .md pre {
+  overflow-x: hidden;
+}
+.log-transcript .md pre code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .transcript {
   display: flex;
   flex-direction: column;
@@ -1508,6 +1543,10 @@ table.jobs tbody tr.row-draft td:first-child {
   }
   .result-cell {
     max-width: 140px;
+  }
+  /* Keep the under-title channel line from widening the title column on phones. */
+  .job-channel {
+    max-width: 200px;
   }
   /* evaluator rows and resolve controls stack instead of overflowing */
   .kv-row {
