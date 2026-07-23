@@ -235,6 +235,13 @@ self-hosted runner in the deploy path, and no push-triggered deploy. Deploying i
 now an **explicit chuggernaut `deploy` job** (`jobs/deploy.yaml`) — you create it
 and release it, exactly like any other job.
 
+> **When the normal deploy job can't run or finish** — a broken build toolchain
+> on a node, a stranded/stale worker daemon, the dispatcher down, image loss —
+> follow the [ad-hoc deploy runbook](../../docs/runbooks/adhoc-deploy.md): the
+> sanctioned by-hand interventions, each with verification, and the paper-trail
+> norm (file + claim a `deploy` job, resolve `Pass` with a machine-shaped
+> record) so a manual deploy still lands in deploy history.
+
 ### Shipping a build
 
 `main` is the source of truth on the platform. Once your change is on `main`
