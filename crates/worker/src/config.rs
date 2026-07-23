@@ -128,11 +128,14 @@ fn parse_slots(raw: Option<String>) -> Result<u32, ConfigError> {
     }
 }
 
-/// Parse `WORKER_REFRESH_GIT_URL` into the optional git URL. Absent or empty ⇒
-/// `None` (no git credential — refresh requests are reported as skipped). Pure
-/// over its input for unit testing.
+/// Parse `WORKER_REFRESH_GIT_URL` into the optional git URL. Absent, empty, or
+/// whitespace-only ⇒ `None` (no git credential — refresh requests are reported
+/// as skipped). `build-worker.sh`'s `REFRESH_ENV` passthrough injects an empty
+/// string when the operator's shell has the var unset, so an empty/blank value
+/// must normalize to unset here rather than being taken as a configured URL the
+/// refresh then dies on. Pure over its input for unit testing.
 fn parse_git_url(raw: Option<String>) -> Option<String> {
-    raw.filter(|s| !s.is_empty())
+    raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 /// Node names ride in NATS subjects — same charset the dispatcher enforces at
@@ -168,6 +171,11 @@ mod tests {
         // An empty value is treated as unset, the exact prod condition (#114:
         // WORKER_REFRESH_GIT_URL empty) that must surface as a skip.
         assert_eq!(parse_git_url(Some(String::new())), None);
+        // Whitespace-only is likewise unset — build-worker.sh's REFRESH_ENV can
+        // inject a blank value when the operator's shell has the var unset, and
+        // a blank string must not be taken as a configured URL.
+        assert_eq!(parse_git_url(Some("   ".into())), None);
+        assert_eq!(parse_git_url(Some("\t\n".into())), None);
         // Present ⇒ the URL, verbatim.
         assert_eq!(
             parse_git_url(Some("ssh://git@front:2222/acme/chug.git".into())),

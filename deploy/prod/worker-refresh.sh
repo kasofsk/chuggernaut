@@ -25,12 +25,29 @@ case "$PHASE" in
 build)
   SHA="${2:?build needs a SHA}"
   TAG="${3:?build needs a tag}"
+  # Validate-first (spec §3.1): a refresh must be ATOMIC — every prerequisite is
+  # checked here, BEFORE any docker mutation, so a misconfigured node fails with
+  # its working images intact. The 2026-07-23 incident stranded the nuc worker
+  # with NO agent images because a refresh mutated before it validated its own
+  # config; nothing below this block may touch a live image until the new one is
+  # built to completion.
   GIT_URL="${WORKER_REFRESH_GIT_URL:?set WORKER_REFRESH_GIT_URL (ssh://git@<ssh-front>:2222/<owner>/<repo>.git)}"
   KEY="${WORKER_GIT_KEY:-/data/keys/worker_git}"
+  if [ ! -f "$KEY" ]; then
+    echo "worker-refresh: git key $KEY missing — refusing build (live images untouched)" >&2
+    exit 2
+  fi
   export GIT_SSH_COMMAND="ssh -i $KEY -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes"
 
+  # Build every image under a TEMP tag first; only once all three build to
+  # completion do we retag-swap them onto the live $TAG (below). A build that
+  # dies part-way therefore leaves each live tag exactly as it was — a node that
+  # had working images keeps them. The temp tags are dropped on exit; after a
+  # successful retag they share an image id with the live tag, so `rmi` only
+  # untags the temp name and the live image survives.
+  NEW="$TAG-refresh"
   TMP="$(mktemp -d)"
-  trap 'rm -rf "$TMP"' EXIT
+  trap 'rm -rf "$TMP"; docker rmi -f "chuggernaut/worker:$NEW" "chuggernaut/agent:$NEW" "chuggernaut/agent-rust:$NEW" >/dev/null 2>&1 || true' EXIT
   # Fetch the repo's advertised HEAD (its default branch tip) over the ssh
   # front, then verify it resolves to the requested SHA before building.
   #
@@ -55,18 +72,29 @@ build)
     exit 1
   fi
 
+  # Build the three images to their TEMP tags. Any failure here aborts under
+  # `set -e` with the live tags untouched (the temp leftovers are pruned by the
+  # trap on exit).
+  #
   # Worker daemon image (repo-root context; bakes chuggernaut + channel binary
   # at this SHA — native on the node).
   git -C "$TMP" archive --format=tar FETCH_HEAD \
-    | docker build -q -t "chuggernaut/worker:$TAG" \
+    | docker build -q -t "chuggernaut/worker:$NEW" \
         -f deploy/prod/Dockerfile.worker --build-arg "CHUG_GIT_SHA=$SHA" -
 
   # Agent images the job types run in.
   git -C "$TMP" archive --format=tar FETCH_HEAD:deploy/dev \
-    | docker build -q -t "chuggernaut/agent:$TAG" -f Dockerfile.agent -
+    | docker build -q -t "chuggernaut/agent:$NEW" -f Dockerfile.agent -
   git -C "$TMP" archive --format=tar FETCH_HEAD \
-    | docker build -q -t "chuggernaut/agent-rust:$TAG" \
+    | docker build -q -t "chuggernaut/agent-rust:$NEW" \
         -f deploy/prod/Dockerfile.agent-rust -
+
+  # All three built to completion — retag-swap onto the live tag. `docker tag`
+  # is local and instant, so the live images flip to the new build only now,
+  # and only after we know every image is buildable.
+  docker tag "chuggernaut/worker:$NEW"     "chuggernaut/worker:$TAG"
+  docker tag "chuggernaut/agent:$NEW"      "chuggernaut/agent:$TAG"
+  docker tag "chuggernaut/agent-rust:$NEW" "chuggernaut/agent-rust:$TAG"
 
   echo "worker-refresh: built chuggernaut/{worker,agent,agent-rust}:$TAG ($SHA)"
   ;;

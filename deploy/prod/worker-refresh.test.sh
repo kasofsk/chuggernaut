@@ -49,19 +49,34 @@ case "\$*" in
   inspect*data/keys*)   echo "/home/worksalot/chuggernaut-worker/keys" ;;
   inspect*docker.sock*) echo "/var/run/docker.sock" ;;
 esac
+# Build-failure injection: FAIL_BUILD names an image (e.g. agent-rust) whose
+# \`docker build -t chuggernaut/<img>:...\` should fail, to exercise the atomic
+# refresh guarantee — a build that dies part-way must leave the live tags
+# untouched (no retag-swap reached).
+if [ -n "\${FAIL_BUILD:-}" ]; then
+  case "\$*" in
+    build*chuggernaut/\$FAIL_BUILD:*) exit 1 ;;
+  esac
+fi
 exit 0
 EOF
 
 chmod +x "$BIN/git" "$BIN/docker"
 
+# A real git key file: the build phase now validates its presence before any
+# docker mutation, so the success cases must point WORKER_GIT_KEY at a file that
+# exists.
+KEY="$WORK/key"
+: > "$KEY"
+
 fail() { echo "FAIL: $1" >&2; exit 1; }
 grep_log() { grep -qF "$1" "$LOG" || fail "expected in log: $1"; }
 
-# ── Case 1: build fetches an advertised ref + builds the three images ─────────
+# ── Case 1: build fetches an advertised ref + builds temp tags + retag-swaps ──
 : > "$LOG"
 PATH="$BIN:$PATH" \
   WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
-  WORKER_GIT_KEY="$WORK/key" \
+  WORKER_GIT_KEY="$KEY" \
   FAKE_FETCH_HEAD=abc123 \
   sh "$SUT" build abc123 prod
 
@@ -73,10 +88,20 @@ if grep -F "fetch" "$LOG" | grep -qF "abc123"; then
   fail "build must not fetch a raw SHA (ssh front rejects want <sha>)"
 fi
 grep_log "git rev-parse FETCH_HEAD"   # verifies HEAD resolves to the requested SHA
-grep_log "docker build -q -t chuggernaut/worker:prod"
-grep_log "docker build -q -t chuggernaut/agent:prod"
-grep_log "docker build -q -t chuggernaut/agent-rust:prod"
-echo "ok: build fetches advertised ref, verifies SHA + builds worker/agent/agent-rust"
+# Atomic refresh: the three images build to TEMP tags first...
+grep_log "docker build -q -t chuggernaut/worker:prod-refresh"
+grep_log "docker build -q -t chuggernaut/agent:prod-refresh"
+grep_log "docker build -q -t chuggernaut/agent-rust:prod-refresh"
+# ...then retag-swap onto the live tag only after all three succeed.
+grep_log "docker tag chuggernaut/worker:prod-refresh chuggernaut/worker:prod"
+grep_log "docker tag chuggernaut/agent:prod-refresh chuggernaut/agent:prod"
+grep_log "docker tag chuggernaut/agent-rust:prod-refresh chuggernaut/agent-rust:prod"
+# The live tag is NEVER built onto directly — a failed build must never leave a
+# half-swapped live image, so builds only ever target the temp tag.
+if grep -F "docker build" "$LOG" | grep -qE 'chuggernaut/(worker|agent|agent-rust):prod([[:space:]]|$)'; then
+  fail "build must target temp tags, never build directly onto the live :prod tag"
+fi
+echo "ok: build verifies SHA, builds temp tags, then atomically retag-swaps to :prod"
 
 # ── Case 1b: build refuses when remote HEAD != requested SHA (no wrong build) ──
 : > "$LOG"
@@ -92,11 +117,49 @@ if grep -qF "docker build" "$LOG"; then
 fi
 echo "ok: build refuses when remote HEAD != requested SHA (drift stays, no wrong build)"
 
-# ── Case 2: build without a git URL fails loudly (no silent stale image) ──────
+# ── Case 2: build without a git URL is rejected before any docker mutation ────
+# The refresh must validate its config FIRST: no git URL ⇒ no build, no retag —
+# the node's existing images are left exactly as they were (the incident: a
+# refresh that mutated before it validated stranded the node with no images).
+: > "$LOG"
 if PATH="$BIN:$PATH" sh "$SUT" build abc123 prod 2>/dev/null; then
   fail "build should fail when WORKER_REFRESH_GIT_URL is unset"
 fi
-echo "ok: build refuses to run without WORKER_REFRESH_GIT_URL"
+if grep -qE "docker (build|tag)" "$LOG"; then
+  fail "missing git URL must be rejected before any docker mutation (images untouched)"
+fi
+echo "ok: build without WORKER_REFRESH_GIT_URL is rejected before any docker mutation"
+
+# ── Case 2b: build with a missing git key is rejected before any mutation ─────
+: > "$LOG"
+if PATH="$BIN:$PATH" \
+     WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+     WORKER_GIT_KEY="$WORK/absent-key" \
+     sh "$SUT" build abc123 prod 2>/dev/null; then
+  fail "build should fail when the git key file is missing"
+fi
+if grep -qE "docker (build|tag)" "$LOG"; then
+  fail "missing git key must be rejected before any docker mutation (images untouched)"
+fi
+echo "ok: build with a missing git key is rejected before any docker mutation"
+
+# ── Case 2c: a build that fails mid-way never retag-swaps the live tag ─────────
+# FAIL_BUILD makes the agent-rust build fail after worker+agent already built to
+# their temp tags. Because the retag-swap onto :prod runs only after ALL three
+# temp builds succeed, a mid-way failure must leave every live :prod tag intact.
+: > "$LOG"
+if PATH="$BIN:$PATH" \
+     WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+     WORKER_GIT_KEY="$KEY" \
+     FAKE_FETCH_HEAD=abc123 \
+     FAIL_BUILD=agent-rust \
+     sh "$SUT" build abc123 prod 2>/dev/null; then
+  fail "build should fail when one image build fails"
+fi
+if grep -qF "docker tag" "$LOG"; then
+  fail "a failed build must not reach the retag-swap (live :prod images stay intact)"
+fi
+echo "ok: a build that fails mid-way leaves the live :prod images untouched"
 
 # ── Case 3: swap schedules a detached sibling that recreates chug-worker ──────
 : > "$LOG"
