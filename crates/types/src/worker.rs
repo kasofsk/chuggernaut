@@ -205,6 +205,24 @@ pub struct RefreshOk {
     pub from_version: String,
 }
 
+/// A worker daemon's announce/heartbeat (spec §3.1 dynamic registration).
+/// Published periodically by `chuggernaut worker` on [`crate::worker`]'s announce
+/// subject; the dispatcher merges it into the live fleet without a restart. It is
+/// a plain fire-and-forget publish (no reply) — a missed one is covered by the
+/// next heartbeat, and losing the heartbeat stream is what marks the node
+/// unschedulable. The node advertises its *own* capacity (`slots`); the live
+/// announcement wins over any static `DOCKER_NODES` seed for the same name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerAnnounce {
+    /// Node name — subject-safe, and matches the `req.worker.{node}.>` the same
+    /// daemon serves its RPCs on.
+    pub node: String,
+    /// Concurrent-container capacity the node advertises for itself (`WORKER_SLOTS`).
+    pub slots: u32,
+    /// Worker build version (+ git SHA when baked), same string `ping` reports.
+    pub version: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PingOk {
     /// Running `chuggernaut.managed` containers on the node (slot accounting).

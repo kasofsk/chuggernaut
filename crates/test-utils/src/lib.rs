@@ -70,6 +70,15 @@ struct FakeBackendState {
     /// When set, `list_managed_running` fails with this error — a node the
     /// sweep must tolerate (log, continue) rather than crash on.
     list_running_fail: Option<String>,
+    /// Announces applied via `register_worker`, in call order (spec §3.1 dynamic
+    /// registration) — the way a test asserts an announce reached the backend.
+    registered: Vec<(String, u32, Option<String>)>,
+    /// Workers deregistered via `mark_worker_unschedulable`, in call order.
+    unschedulable: Vec<String>,
+    /// When set, the fake reports `supports_dynamic_workers() == false` — a
+    /// stand-in for a non-fleet backend (single-node Docker) that cannot route to
+    /// announced nodes, so the dispatcher must drop stray announces.
+    no_dynamic_workers: bool,
 }
 
 impl Default for FakeBackend {
@@ -222,6 +231,24 @@ impl FakeBackend {
     pub fn killed(&self) -> Vec<ContainerId> {
         self.state.lock().unwrap().killed.clone()
     }
+
+    /// Announces the backend received via `register_worker`, in call order
+    /// (spec §3.1 dynamic registration).
+    pub fn registered(&self) -> Vec<(String, u32, Option<String>)> {
+        self.state.lock().unwrap().registered.clone()
+    }
+
+    /// Workers the backend was told to deregister via `mark_worker_unschedulable`.
+    pub fn unschedulable(&self) -> Vec<String> {
+        self.state.lock().unwrap().unschedulable.clone()
+    }
+
+    /// Model a non-fleet backend (single-node Docker): `supports_dynamic_workers`
+    /// then reports `false`, so the dispatcher drops stray worker announces
+    /// instead of inserting a phantom node into the roster.
+    pub fn disable_dynamic_workers(&self) {
+        self.state.lock().unwrap().no_dynamic_workers = true;
+    }
 }
 
 #[async_trait]
@@ -352,6 +379,38 @@ impl ContainerBackend for FakeBackend {
             return Err(BackendError::Unavailable(reason.clone()));
         }
         Ok(st.managed_running.clone())
+    }
+
+    /// Model a worker announce (spec §3.1 dynamic registration): record it and,
+    /// as the fake's stand-in for capacity appearing, clear any `launch_fail` so
+    /// a launch the fleet was refusing for NoCapacity now proceeds. Returns
+    /// `true` (membership/capacity changed) so the caller re-drains the queue.
+    fn register_worker(&self, name: &str, slots: u32, version: Option<String>) -> bool {
+        let mut st = self.state.lock().unwrap();
+        st.registered.push((name.to_string(), slots, version));
+        st.launch_fail = None;
+        true
+    }
+
+    /// The fake models a dynamic worker fleet (it records registrations and
+    /// clears NoCapacity), so it opts into dynamic registration by default —
+    /// matching the real [`FleetBackend`] and letting the dispatcher apply its
+    /// roster mutation. [`FakeBackend::disable_dynamic_workers`] flips it off to
+    /// model a non-fleet backend.
+    fn supports_dynamic_workers(&self) -> bool {
+        !self.state.lock().unwrap().no_dynamic_workers
+    }
+
+    /// Model heartbeat loss (spec §3.1): record the deregistration and, as the
+    /// fake's stand-in for the announced capacity vanishing, refuse new launches
+    /// with NoCapacity again — so a test sees new placements queue while any
+    /// already-running container (seeded in `managed_running`) stays tracked.
+    fn mark_worker_unschedulable(&self, name: &str) {
+        let mut st = self.state.lock().unwrap();
+        st.unschedulable.push(name.to_string());
+        st.launch_fail = Some(Box::new(|_| {
+            Some(BackendError::NoCapacity("worker heartbeat lost".into()))
+        }));
     }
 }
 

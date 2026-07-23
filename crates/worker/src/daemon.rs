@@ -243,7 +243,19 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
     let mut sub = store
         .subscribe_requests(&store::subjects::worker_all(&config.node))
         .await?;
-    tracing::info!(node = %config.node, nats = %config.nats_url, version = %state.version, "worker up");
+    tracing::info!(node = %config.node, nats = %config.nats_url, version = %state.version, slots = config.slots, "worker up");
+
+    // Announce heartbeat (spec §3.1 dynamic registration): tell the dispatcher
+    // this node is live — name, self-advertised slots, build version — so it
+    // joins the live fleet with no dispatcher restart. Fire-and-forget on a
+    // plain subject; a missed one is covered by the next tick, and losing the
+    // stream is what marks the node unschedulable dispatcher-side.
+    spawn_announce(
+        store.clone(),
+        config.node.clone(),
+        config.slots,
+        state.version.clone(),
+    );
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT));
     let tasks = tokio::task::JoinSet::new();
@@ -274,6 +286,38 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
     })
     .await;
     Ok(())
+}
+
+/// How often the daemon re-announces itself (spec §3.1 dynamic registration).
+/// Comfortably shorter than the dispatcher's heartbeat timeout so an occasional
+/// dropped publish never trips a spurious deregistration.
+const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Publish the announce heartbeat immediately, then on every [`ANNOUNCE_INTERVAL`]
+/// tick, for the life of the daemon. Detached: the daemon keeps serving RPCs
+/// regardless, and a transient publish failure just logs and waits for the next
+/// tick.
+fn spawn_announce(store: NatsStore, node: String, slots: u32, version: String) {
+    tokio::spawn(async move {
+        let subject = store::subjects::worker_announce();
+        let mut interval = tokio::time::interval(ANNOUNCE_INTERVAL);
+        loop {
+            let announce = types::worker::WorkerAnnounce {
+                node: node.clone(),
+                slots,
+                version: version.clone(),
+            };
+            match serde_json::to_vec(&announce) {
+                Ok(bytes) => {
+                    if let Err(e) = store.publish(&subject, &bytes).await {
+                        tracing::warn!(node = %node, "worker announce publish failed: {e}");
+                    }
+                }
+                Err(e) => tracing::warn!(node = %node, "worker announce serialize failed: {e}"),
+            }
+            interval.tick().await;
+        }
+    });
 }
 
 fn version_string() -> String {

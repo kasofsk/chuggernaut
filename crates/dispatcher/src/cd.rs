@@ -75,6 +75,37 @@ pub(crate) fn build_base_snapshot(
     }
 }
 
+/// Reconcile the config snapshot's node list with live fleet state, in place.
+///
+/// For each existing node, refresh health/version from the backend probe
+/// (`fleet`). Slots and membership come from the announce roster (spec §3.1
+/// dynamic registration): a seeded worker that re-announced with a changed slot
+/// count (the "air 4→5" case) has its live count in the roster, so the snapshot
+/// tracks `fleet.status` rather than the boot `DOCKER_NODES` value; and workers
+/// announced after boot that aren't in the static seed are appended so the
+/// settings page reflects live membership.
+pub(crate) fn merge_live_fleet(
+    nodes: &mut Vec<WorkerNode>,
+    fleet: &[NodeStatus],
+    roster: &[WorkerNode],
+) {
+    for node in nodes.iter_mut() {
+        if let Some(status) = fleet.iter().find(|s| s.name == node.name) {
+            node.available = status.available;
+            node.version = status.version.clone();
+        }
+        // The live announcement wins on slots for a seeded worker.
+        if let Some(r) = roster.iter().find(|r| r.name == node.name) {
+            node.slots = r.slots;
+        }
+    }
+    for r in roster {
+        if !nodes.iter().any(|n| n.name == r.name) {
+            nodes.push(r.clone());
+        }
+    }
+}
+
 /// Republish state for the config snapshot. Holds the static base, the deployed
 /// SHA, the self-repo to measure drift against, a per-tip commits-behind cache
 /// (so the `rev-list` runs only when `main` moves), and the last-published
@@ -100,14 +131,14 @@ impl Core {
 
         let mut next = snap.base.clone();
 
-        // Live per-node health and worker versions.
-        let fleet = self.backend.fleet_status();
-        for node in &mut next.nodes {
-            if let Some(status) = fleet.iter().find(|s| s.name == node.name) {
-                node.available = status.available;
-                node.version = status.version.clone();
-            }
-        }
+        // Reconcile the snapshot's node list with the live fleet: per-node
+        // health/version from the backend probe, and slots/membership from the
+        // announce roster (spec §3.1 dynamic registration).
+        merge_live_fleet(
+            &mut next.nodes,
+            &self.backend.fleet_status(),
+            &self.fleet_roster,
+        );
         next.dispatcher_sha = snap.deployed_sha.clone();
 
         // Self-repo deploy drift: current `main` tip and commits-behind.
@@ -257,5 +288,52 @@ mod tests {
         behind.main_tip_sha = Some("def456".into());
         behind.commits_behind = Some(2);
         assert_ne!(published, serde_json::to_vec(&behind).unwrap());
+    }
+
+    fn worker(name: &str, slots: u32) -> WorkerNode {
+        WorkerNode {
+            name: name.into(),
+            endpoint: worker::backend::WORKER_ENDPOINT.into(),
+            slots,
+            available: true,
+            version: Some("0.1.0".into()),
+        }
+    }
+
+    /// A seeded worker that re-announces with a changed slot count (air 4→5):
+    /// `merge_live_fleet` takes the live roster's slots, so the config snapshot
+    /// matches `fleet.status` instead of keeping the boot `DOCKER_NODES` count.
+    #[test]
+    fn seed_worker_reannounce_updates_snapshot_slots() {
+        // Snapshot node still carries the boot slot count of 4.
+        let mut nodes = vec![worker("air", 4)];
+        // Backend probe reports it healthy with a live version.
+        let fleet = vec![NodeStatus {
+            name: "air".into(),
+            available: true,
+            version: Some("0.2.0+air".into()),
+        }];
+        // Roster reflects the re-announce at 5 slots (announce wins).
+        let roster = vec![WorkerNode {
+            version: Some("0.2.0+air".into()),
+            ..worker("air", 5)
+        }];
+        merge_live_fleet(&mut nodes, &fleet, &roster);
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].slots, 5, "roster slot count wins over the seed");
+        assert_eq!(nodes[0].version.as_deref(), Some("0.2.0+air"));
+    }
+
+    /// A worker announced after boot (not in the static seed) is appended so the
+    /// settings page reflects live fleet membership.
+    #[test]
+    fn dynamic_worker_appended_to_snapshot() {
+        let mut nodes = vec![worker("air", 4)];
+        let roster = vec![worker("air", 4), worker("nuc", 2)];
+        merge_live_fleet(&mut nodes, &[], &roster);
+
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.iter().any(|n| n.name == "nuc" && n.slots == 2));
     }
 }

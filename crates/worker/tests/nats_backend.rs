@@ -35,6 +35,7 @@ async fn setup(
 
     let config = WorkerConfig {
         node: "w1".into(),
+        slots: 4,
         nats_url: server.url().to_string(),
         nats_creds: None,
         docker_endpoint: local_docker_endpoint(),
@@ -319,6 +320,7 @@ fn spawn_daemon(
     };
     let config = WorkerConfig {
         node: node.into(),
+        slots: 4,
         nats_url: server.url().to_string(),
         nats_creds: None,
         docker_endpoint: local_docker_endpoint(),
@@ -530,6 +532,7 @@ async fn refresh_reports_skip_without_git_credential() {
     std::fs::write(&channel, b"x").unwrap();
     let config = WorkerConfig {
         node: "w1".into(),
+        slots: 4,
         nats_url: server.url().to_string(),
         nats_creds: None,
         docker_endpoint: local_docker_endpoint(),

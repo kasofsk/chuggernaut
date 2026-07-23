@@ -8,6 +8,11 @@ pub struct WorkerConfig {
     /// Node name — must match the `DOCKER_NODES` entry on the dispatcher
     /// (`{name}|worker|{slots}`) and be subject-safe.
     pub node: String,
+    /// Concurrent-container capacity this node advertises for itself in its
+    /// announce heartbeat (`WORKER_SLOTS`, spec §3.1 dynamic registration).
+    /// Default 4. The dispatcher's live fleet uses it as the node's slot cap;
+    /// re-announcing with a new value changes capacity at runtime, no restart.
+    pub slots: u32,
     pub nats_url: String,
     /// `.creds` file minted by `chuggernaut admin worker-creds`; None connects
     /// plain (open dev server).
@@ -65,8 +70,10 @@ impl WorkerConfig {
                 let default = PathBuf::from("/data/keys/worker.creds");
                 default.exists().then_some(default)
             });
+        let slots = parse_slots(std::env::var("WORKER_SLOTS").ok())?;
         Ok(Self {
             node,
+            slots,
             nats_url,
             nats_creds,
             docker_endpoint: std::env::var("WORKER_DOCKER_ENDPOINT")
@@ -107,6 +114,18 @@ fn resolve_refresh_script(raw: Option<String>) -> Option<PathBuf> {
 /// behavior is unit-tested without mutating the process environment.
 fn parse_cache_dir(raw: Option<String>) -> Option<PathBuf> {
     raw.filter(|s| !s.is_empty()).map(PathBuf::from)
+}
+
+/// Parse `WORKER_SLOTS` into the node's advertised capacity. Absent or empty ⇒
+/// the default 4; a non-numeric value is a hard config error. Pure over its
+/// input for unit testing without mutating the process environment.
+fn parse_slots(raw: Option<String>) -> Result<u32, ConfigError> {
+    match raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        Some(s) => s
+            .parse()
+            .map_err(|_| ConfigError(format!("WORKER_SLOTS must be a number, got {s:?}"))),
+        None => Ok(4),
+    }
 }
 
 /// Parse `WORKER_REFRESH_GIT_URL` into the optional git URL. Absent or empty ⇒
@@ -167,6 +186,19 @@ mod tests {
         // self-refresh is cleanly unconfigured rather than pointing at nothing.
         assert_eq!(resolve_refresh_script(Some(String::new())), None);
         assert_eq!(resolve_refresh_script(None), None);
+    }
+
+    #[test]
+    fn slots_parses_default_and_value() {
+        // Absent / empty ⇒ the default capacity.
+        assert_eq!(parse_slots(None).unwrap(), 4);
+        assert_eq!(parse_slots(Some(String::new())).unwrap(), 4);
+        assert_eq!(parse_slots(Some("  ".into())).unwrap(), 4);
+        // A number is taken verbatim (the air 4→5 re-announce case).
+        assert_eq!(parse_slots(Some("5".into())).unwrap(), 5);
+        assert_eq!(parse_slots(Some(" 2 ".into())).unwrap(), 2);
+        // Non-numeric is a hard config error.
+        assert!(parse_slots(Some("lots".into())).is_err());
     }
 
     #[test]

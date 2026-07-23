@@ -11,7 +11,7 @@ use crate::release::{self, KvNames, ValidationError};
 use crate::state::{InvalidTransition, assert_transition};
 use crate::{escalation, exec, queue};
 use agent::AgentProvider;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use container::ContainerBackend;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -406,6 +406,16 @@ pub enum Msg {
         task_id: u64,
         reason: String,
     },
+    /// A worker daemon's announce heartbeat (spec §3.1 dynamic registration),
+    /// forwarded from the `event.worker.announce` subscriber. Merges the node
+    /// into the live fleet *inside the actor* — the fleet's single writer — so
+    /// scheduling and the NoCapacity launch queue see the capacity immediately.
+    /// One-way: a heartbeat carries no reply.
+    WorkerAnnounce {
+        node: String,
+        slots: u32,
+        version: String,
+    },
 }
 
 /// Cloneable façade over the core channel; the only way other components
@@ -445,6 +455,20 @@ impl CoreHandle {
 
     pub async fn create_job(&self, req: CreateJobRequest) -> Result<Job> {
         self.call(|reply| Msg::CreateJob(req, reply)).await
+    }
+
+    /// Forward a worker announce heartbeat into the actor (spec §3.1 dynamic
+    /// registration). One-way — the announce subscriber does not wait for a
+    /// reply; the actor merges the node into the live fleet on its own turn.
+    pub async fn announce_worker(&self, node: String, slots: u32, version: String) -> Result<()> {
+        self.tx
+            .send(Msg::WorkerAnnounce {
+                node,
+                slots,
+                version,
+            })
+            .await
+            .map_err(|_| CoreError::Stopped)
     }
 
     pub async fn release_job(&self, owner: &str, project: &str, seq: u64) -> Result<JobState> {
@@ -708,6 +732,11 @@ pub struct CoreConfig {
     /// as a backstop (spec §3.5). None → [`crate::launch_queue::MAX_QUEUE_WAIT`]
     /// (30m). Tests shrink it to exercise the timeout without waiting.
     pub launch_queue_max_wait: Option<std::time::Duration>,
+    /// How long a dynamically-announced worker may go without an announce
+    /// heartbeat before it is marked unschedulable (spec §3.1 dynamic
+    /// registration). None → [`crate::scan::WORKER_HEARTBEAT_TIMEOUT`]. Tests
+    /// shrink it to exercise heartbeat loss without waiting.
+    pub worker_heartbeat_timeout: Option<std::time::Duration>,
 }
 
 pub struct Core {
@@ -770,6 +799,16 @@ pub struct Core {
     /// Last-published `fleet.status` bytes, for change detection — a launch/exit
     /// that leaves occupancy unchanged republishes nothing.
     pub(crate) last_fleet_status: Option<Vec<u8>>,
+    /// Dynamically-announced workers → last heartbeat time (spec §3.1 dynamic
+    /// registration). The scan tick marks a node whose heartbeat lapsed past the
+    /// timeout unschedulable; a fresh announce refreshes the entry and re-admits
+    /// it. Only in-actor state — the backend holds the live schedulability flag.
+    pub(crate) announced_workers: HashMap<String, DateTime<Utc>>,
+    /// Names of the boot-time (`DOCKER_NODES`) fleet seed. These never get
+    /// heartbeat-gated: static nodes rely on the ping-based health path, so a
+    /// seed that also re-announces (e.g. to change its slot count) is not removed
+    /// from scheduling just because it stops announcing.
+    pub(crate) seed_node_names: HashSet<String>,
 }
 
 const SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -875,6 +914,8 @@ impl Core {
             snapshot: None,
             fleet_roster: Vec::new(),
             last_fleet_status: None,
+            announced_workers: HashMap::new(),
+            seed_node_names: HashSet::new(),
         };
 
         // Restore merge-queue holds for Open origin releases before reconcile
@@ -929,8 +970,57 @@ impl Core {
     /// (see [`crate::fleet`]). Wired by [`crate::run`] from the config snapshot's
     /// nodes; tests set it to assert per-node slots.
     pub fn with_fleet_roster(mut self, roster: Vec<types::WorkerNode>) -> Self {
+        // The seed set is the boot roster's names: these stay ping-managed and
+        // are never heartbeat-gated (spec §3.1 dynamic registration).
+        self.seed_node_names = roster.iter().map(|n| n.name.clone()).collect();
         self.fleet_roster = roster;
         self
+    }
+
+    /// Merge a worker announce into the live fleet (spec §3.1 dynamic
+    /// registration). Runs on the single-writer actor, so it is the fleet's sole
+    /// writer. Records the heartbeat for the timeout scan, hands the node to the
+    /// backend (which applies the announce-wins precedence), and reflects the
+    /// membership/capacity in the roster the UI reads (`fleet.status` / the
+    /// config snapshot). The `Core::run` loop then re-drains the launch queue and
+    /// republishes fleet status, so newly-announced capacity is used at once.
+    pub(crate) fn on_worker_announce(&mut self, node: String, slots: u32, version: String) {
+        // Only a fleet-capable backend can route to an announced node. On a
+        // single-node Docker deployment (no announcing workers by design) a stray
+        // or misconfigured announce would otherwise insert a phantom worker into
+        // the roster that nothing can ever route to — and which would then show
+        // permanently "down" after the heartbeat scan. Drop it before it can
+        // touch the heartbeat table or the roster.
+        if !self.backend.supports_dynamic_workers() {
+            tracing::debug!(node = %node, "ignoring worker announce — backend has no dynamic fleet");
+            return;
+        }
+        self.announced_workers.insert(node.clone(), Utc::now());
+        let joined = self
+            .backend
+            .register_worker(&node, slots, Some(version.clone()));
+        if joined {
+            tracing::info!(node = %node, slots, version = %version, "worker joined the live fleet");
+        }
+        match self.fleet_roster.iter_mut().find(|n| n.name == node) {
+            // A worker (seed or previously-announced) of this name: the live
+            // announcement wins on slots/version and re-admits it.
+            Some(n) if n.endpoint == worker::backend::WORKER_ENDPOINT => {
+                n.slots = slots;
+                n.available = true;
+                n.version = Some(version);
+            }
+            // The name is held by a docker-endpoint node — the backend already
+            // refused it; leave the roster untouched.
+            Some(_) => {}
+            None => self.fleet_roster.push(types::WorkerNode {
+                name: node,
+                endpoint: worker::backend::WORKER_ENDPOINT.to_string(),
+                slots,
+                available: true,
+                version: Some(version),
+            }),
+        }
     }
 
     async fn run(mut self, mut rx: mpsc::Receiver<Msg>) {
@@ -1258,6 +1348,13 @@ impl Core {
                 {
                     tracing::error!("deferring launch for {owner}/{project}#{seq}: {e}");
                 }
+            }
+            Msg::WorkerAnnounce {
+                node,
+                slots,
+                version,
+            } => {
+                self.on_worker_announce(node, slots, version);
             }
         }
     }

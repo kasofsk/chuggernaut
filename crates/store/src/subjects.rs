@@ -238,3 +238,13 @@ pub fn worker_op(node: &str, op: &str) -> String {
 pub fn worker_all(node: &str) -> String {
     format!("req.worker.{node}.>")
 }
+
+/// Worker announce/heartbeat (spec §3.1 dynamic registration): the daemon
+/// publishes its [`types::worker::WorkerAnnounce`] here periodically and the
+/// dispatcher subscribes, merging the node into the live fleet with no restart.
+/// A plain (non-JetStream) subject — heartbeats are transient, so there is no
+/// need to durably retain them; the current fleet is whichever nodes are still
+/// announcing.
+pub fn worker_announce() -> String {
+    "event.worker.announce".into()
+}

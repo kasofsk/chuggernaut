@@ -12,6 +12,12 @@ use types::{JobState, TaskKind, TaskPhase, TaskResult, TaskState, parse_duration
 /// (§3.5) excludes jobs whose task log contains a *resolved* one.
 pub(crate) const DEADLINE_MARKER: &str = "[deadline]";
 
+/// How long a dynamically-announced worker may go without an announce heartbeat
+/// before the scan marks it unschedulable (spec §3.1 dynamic registration).
+/// Generous relative to the daemon's 15s announce interval so a couple of
+/// dropped heartbeats never trip a spurious deregistration.
+pub(crate) const WORKER_HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl Core {
     pub(crate) async fn run_scans(&mut self) -> Result<()> {
         self.scan_task_timeouts().await?;
@@ -19,12 +25,54 @@ impl Core {
         // periodic drain that retries them rides `Core::run` after this scan
         // message, like every other slot-freed retry.
         self.scan_launch_queue_timeouts().await?;
+        // Dynamically-announced workers whose heartbeat lapsed (§3.1): stop
+        // placing on them. Runs before the deadline scan so a lost node's queued
+        // launches simply wait for other capacity this same tick.
+        self.scan_worker_heartbeats();
         self.scan_job_deadlines().await?;
         // Keep the platform config snapshot fresh: republish only when live
         // fleet state or deploy drift moved (spec §3.1, CD plan C). Best-effort
         // — never fails the scan.
         self.refresh_config_snapshot().await;
         Ok(())
+    }
+
+    /// Mark dynamically-announced workers whose announce heartbeat lapsed past
+    /// the timeout unschedulable (spec §3.1 dynamic registration): the backend
+    /// stops placing on them and the roster shows them down, but their running
+    /// containers are untouched — `route` still reaches them and the poll-based
+    /// `wait` re-attaches. Seed (`DOCKER_NODES`) nodes are never gated here; they
+    /// use the ping-based health path. A fresh announce re-admits the node.
+    fn scan_worker_heartbeats(&mut self) {
+        let now = Utc::now();
+        let timeout = self
+            .config
+            .worker_heartbeat_timeout
+            .unwrap_or(crate::scan::WORKER_HEARTBEAT_TIMEOUT);
+        let stale: Vec<String> = self
+            .announced_workers
+            .iter()
+            .filter(|(name, _)| !self.seed_node_names.contains(*name))
+            .filter(|(_, last)| (now - **last).to_std().unwrap_or_default() > timeout)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in stale {
+            // Idempotent: an already-gated node stays gated until it re-announces.
+            if self
+                .fleet_roster
+                .iter()
+                .any(|n| n.name == name && n.available)
+            {
+                tracing::warn!(
+                    node = %name,
+                    "worker announce heartbeat lapsed — marking unschedulable (running containers keep running)"
+                );
+            }
+            self.backend.mark_worker_unschedulable(&name);
+            if let Some(n) = self.fleet_roster.iter_mut().find(|n| n.name == name) {
+                n.available = false;
+            }
+        }
     }
 
     /// Running non-Human tasks past `task_timeout`: kill the container and

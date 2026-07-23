@@ -225,6 +225,38 @@ pub trait ContainerBackend: Send + Sync {
     fn fleet_status(&self) -> Vec<NodeStatus> {
         Vec::new()
     }
+
+    /// Apply a worker's announce heartbeat (spec §3.1 dynamic registration):
+    /// add it to the live fleet, or update the slot count / build version of an
+    /// existing entry. The live announcement wins over a static `DOCKER_NODES`
+    /// seed of the same name. Returns whether this *changed* fleet membership
+    /// or capacity (a new node, or a slot-count change) — so the caller can log
+    /// a join and only re-drain the launch queue when new capacity appeared.
+    ///
+    /// Default no-op returning `false`: only the worker fleet backend acts on
+    /// announcements; single-node Docker, k8s, and the test fake ignore them.
+    /// Called only from the dispatcher's single-writer actor, so implementations
+    /// are the fleet's sole writer even though the method takes `&self`.
+    fn register_worker(&self, _name: &str, _slots: u32, _version: Option<String>) -> bool {
+        false
+    }
+
+    /// Whether this backend acts on worker announcements at all (spec §3.1
+    /// dynamic registration). Only the worker fleet backend routes to announced
+    /// nodes; single-node/multi-node Docker, k8s, and the test fake cannot, so
+    /// they return `false` (the default) and the dispatcher drops stray announces
+    /// rather than inserting a phantom node into the fleet roster that nothing can
+    /// ever route to. Distinct from [`Self::register_worker`]'s bool, which
+    /// conflates "no-op backend" with "membership unchanged".
+    fn supports_dynamic_workers(&self) -> bool {
+        false
+    }
+
+    /// Mark an announced worker unschedulable after its heartbeat lapses (spec
+    /// §3.1): placement skips it, but its already-running containers stay
+    /// routable — they keep running and the poll-based `wait` re-attaches (spec
+    /// §3.1 semantics unchanged). A later announce re-admits it. Default no-op.
+    fn mark_worker_unschedulable(&self, _name: &str) {}
 }
 
 /// One fleet node's live health and build version for the platform config

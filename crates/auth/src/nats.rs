@@ -263,11 +263,19 @@ fn common_container(perms: &mut Permissions, owner: &str, project: &str, seq: u6
 }
 
 /// Worker-daemon allow-list (spec §3.1): serve its own node's op subjects and
-/// answer request-reply inboxes — nothing else. No KV, no JetStream: the
+/// answer request-reply inboxes, plus the announce heartbeat that dynamic fleet
+/// registration rides on — nothing else. No KV, no JetStream: the
 /// node-local-artifact design keeps bulk data off NATS entirely.
+///
+/// The `store::subjects::worker_announce()` grant is load-bearing: in an
+/// operator-mode NATS server a non-empty publish list is a strict allow-list, so
+/// without it the daemon's periodic announce is DENIED and the fleet never gains
+/// capacity dynamically. Keep it sourced from the subject helper so it cannot
+/// drift. Existing worker creds must be re-minted (`chuggernaut admin
+/// worker-creds`) on deploy for this grant to take effect.
 pub fn worker_permissions(node: &str) -> Permissions {
     Permissions {
-        publish: vec!["_INBOX.>".into()],
+        publish: vec!["_INBOX.>".into(), store::subjects::worker_announce()],
         subscribe: vec![format!("req.worker.{node}.>")],
     }
 }
@@ -469,6 +477,26 @@ mod tests {
                 "found {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn worker_allow_list_includes_the_announce_heartbeat() {
+        let p = worker_permissions("gumbo-nuc-0");
+        // Serves its own node's op subjects and answers inbox replies.
+        assert!(
+            p.subscribe
+                .contains(&"req.worker.gumbo-nuc-0.>".to_string())
+        );
+        assert!(p.publish.contains(&"_INBOX.>".to_string()));
+        // The dynamic-registration heartbeat (spec §3.1): without this grant an
+        // operator-mode NATS server denies the announce and the fleet never
+        // gains capacity dynamically. Sourced from the subject helper so it
+        // cannot drift from what the daemon actually publishes to.
+        assert!(
+            p.publish.contains(&store::subjects::worker_announce()),
+            "worker must be allowed to publish its announce heartbeat: {:?}",
+            p.publish
+        );
     }
 
     #[test]

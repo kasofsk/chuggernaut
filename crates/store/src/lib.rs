@@ -309,6 +309,16 @@ impl NatsStore {
         }
     }
 
+    /// Fire-and-forget publish on a plain core-NATS subject (no JetStream, no
+    /// reply) — the worker announce heartbeat (spec §3.1 dynamic registration).
+    /// A dropped message is covered by the next heartbeat, so this does not flush.
+    pub async fn publish(&self, subject: &str, payload: &[u8]) -> Result<()> {
+        self.client
+            .publish(subject.to_string(), payload.to_vec().into())
+            .await
+            .map_err(nats_err)
+    }
+
     /// Request-reply with bounded retry (spec §4.2 reliability): retries until
     /// an ack is received or attempts are exhausted, with linear backoff.
     pub async fn request_with_retry(

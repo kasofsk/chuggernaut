@@ -19,8 +19,8 @@ use container::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus, LogTail,
     NodeLoad, NodeStatus, PlacementCandidate, PlacementPolicy, RunningContainer, choose_placement,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use store::NatsStore;
 use store::worker::{WorkerRpc, WorkerRpcError};
 use types::worker::{
@@ -43,10 +43,19 @@ enum NodeHandle {
     },
     Worker {
         rpc: Box<WorkerRpc>,
-        slots: u32,
+        /// Slot cap. `Atomic` because a runtime re-announce (spec §3.1 dynamic
+        /// registration) can change it (e.g. air 4→5) without replacing the node.
+        slots: AtomicU32,
         /// Cleared on ping failure, restored on success; placement skips
         /// out-of-service nodes but always re-probes them.
         in_service: AtomicBool,
+        /// Cleared when the node's announce heartbeat lapses (spec §3.1 dynamic
+        /// registration): placement skips it, but `route` still reaches it so
+        /// running containers keep being waited on. Re-set by a fresh announce.
+        /// Static (`DOCKER_NODES`-seeded) nodes stay `true` and rely on the
+        /// ping-based `in_service` instead — the dispatcher only heartbeat-gates
+        /// nodes it learned about dynamically.
+        schedulable: AtomicBool,
         version_warned: AtomicBool,
         /// Last version reported by a successful ping (spec §3.1), surfaced in
         /// the platform config snapshot so the UI can show fleet versions and
@@ -61,10 +70,55 @@ struct FleetNode {
 }
 
 pub struct FleetBackend {
-    nodes: Vec<FleetNode>,
+    /// The live node set. Behind an `RwLock` because a worker announce can add or
+    /// update a node at runtime (spec §3.1 dynamic registration), while `wait`/
+    /// `inspect` monitors read it concurrently. Each node is an `Arc` so a reader
+    /// snapshots (clones the `Arc`s, drops the guard) and then does its awaits
+    /// with no lock held. The dispatcher's single-writer actor is the *only*
+    /// writer — announcements reach it as mailbox messages — so the lock guards
+    /// memory safety for concurrent readers, not multi-writer coordination.
+    nodes: RwLock<Vec<Arc<FleetNode>>>,
+    /// The store, kept so a newly-announced worker can be given its own
+    /// [`WorkerRpc`] on the spot without threading it through every call.
+    store: NatsStore,
     /// Platform placement policy (spec §3.1), applied across the whole fleet.
     /// Set from `PLACEMENT_POLICY`; defaults to [`PlacementPolicy::Busyness`].
     policy: PlacementPolicy,
+}
+
+/// The precedence decision for one announce against the current roster (spec
+/// §3.1 dynamic registration). Pure over the roster shape so precedence is
+/// unit-tested without NATS or Docker. The live announcement wins: a matching
+/// worker is updated in place, an unknown name is added, and a name already held
+/// by a *docker-endpoint* node is rejected (an announce can't repurpose a
+/// directly-driven daemon into a NATS-proxied one).
+#[derive(Debug, PartialEq, Eq)]
+enum RegisterAction {
+    Update(usize),
+    Add,
+    RejectDockerName,
+}
+
+fn plan_register(nodes: &[(&str, bool)], name: &str) -> RegisterAction {
+    match nodes.iter().position(|(n, _)| *n == name) {
+        Some(i) if nodes[i].1 => RegisterAction::Update(i),
+        Some(_) => RegisterAction::RejectDockerName,
+        None => RegisterAction::Add,
+    }
+}
+
+/// Build a fresh NATS-proxied worker node handle for the fleet — used both by
+/// the static seed (`DOCKER_NODES` `worker` entries) and by a first-time
+/// announce (spec §3.1 dynamic registration).
+fn worker_handle(store: NatsStore, name: &str, slots: u32) -> NodeHandle {
+    NodeHandle::Worker {
+        rpc: Box::new(WorkerRpc::new(store, name.to_string())),
+        slots: AtomicU32::new(slots),
+        in_service: AtomicBool::new(true),
+        schedulable: AtomicBool::new(true),
+        version_warned: AtomicBool::new(false),
+        last_version: Mutex::new(None),
+    }
 }
 
 /// One fleet node's boot-time capacity, transport-agnostic: its configured
@@ -102,27 +156,34 @@ impl FleetBackend {
         let mut nodes = Vec::new();
         for c in configs {
             let handle = if c.endpoint == WORKER_ENDPOINT {
-                NodeHandle::Worker {
-                    rpc: Box::new(WorkerRpc::new(store.clone(), c.name.clone())),
-                    slots: c.slots,
-                    in_service: AtomicBool::new(true),
-                    version_warned: AtomicBool::new(false),
-                    last_version: Mutex::new(None),
-                }
+                worker_handle(store.clone(), &c.name, c.slots)
             } else {
                 NodeHandle::Docker {
                     backend: Box::new(DockerBackend::new(vec![c.clone()])?),
                 }
             };
-            nodes.push(FleetNode {
+            nodes.push(Arc::new(FleetNode {
                 name: c.name,
                 handle,
-            });
+            }));
         }
-        if nodes.is_empty() {
-            return Err(BackendError::Unavailable("empty node list".into()));
-        }
-        Ok(Self { nodes, policy })
+        // An empty node set is legal: a dynamic fleet may boot with zero seeds
+        // (`DOCKER_NODES` empty) and gain capacity when workers announce (spec
+        // §3.1 dynamic registration). Launches queue via the NoCapacity path
+        // until the first announce arrives (`startup_check` permits it).
+        Ok(Self {
+            nodes: RwLock::new(nodes),
+            store,
+            policy,
+        })
+    }
+
+    /// A cheap snapshot of the node set: clone the `Arc`s under a brief read
+    /// lock, then release it so callers do their awaits lock-free. Registration
+    /// (the sole writer, the single-threaded dispatcher actor) may append or
+    /// mutate a node in between, which a reader simply sees on its next snapshot.
+    fn snapshot(&self) -> Vec<Arc<FleetNode>> {
+        self.nodes.read().unwrap().clone()
     }
 
     /// §3.6 startup as a fleet-level property (spec §3.1): probe every node,
@@ -137,8 +198,19 @@ impl FleetBackend {
     /// The pure-`DockerBackend` single-node path (`run.rs`) still fails fast via
     /// [`DockerBackend::ping_all`].
     pub async fn startup_check(&self) -> Result<(), BackendError> {
-        let mut caps = Vec::with_capacity(self.nodes.len());
-        for node in &self.nodes {
+        let nodes = self.snapshot();
+        // Zero seeds is a dynamic fleet awaiting announcements (spec §3.1): start
+        // successfully and let launches queue via NoCapacity until the first
+        // worker announces. Only a *configured* fleet with no live capacity is a
+        // fatal misconfiguration (the crash-loop guard `evaluate_startup` keeps).
+        if nodes.is_empty() {
+            tracing::warn!(
+                "no fleet nodes configured — starting with zero capacity; launches queue until a worker announces (spec §3.1 dynamic registration)"
+            );
+            return Ok(());
+        }
+        let mut caps = Vec::with_capacity(nodes.len());
+        for node in &nodes {
             match &node.handle {
                 NodeHandle::Docker { backend } => {
                     for probe in backend.probe_all().await {
@@ -157,7 +229,7 @@ impl FleetBackend {
                         );
                     }
                     caps.push(NodeCapacity {
-                        slots: *slots,
+                        slots: slots.load(Ordering::Relaxed),
                         reachable,
                     });
                 }
@@ -173,12 +245,19 @@ impl FleetBackend {
             rpc,
             slots,
             in_service,
+            schedulable,
             version_warned,
             last_version,
         } = &node.handle
         else {
             return None;
         };
+        // Heartbeat lapsed (spec §3.1 dynamic registration): skip placement
+        // without even pinging. `route` ignores this flag, so containers already
+        // running on the node keep being waited on.
+        if !schedulable.load(Ordering::Relaxed) {
+            return None;
+        }
         match rpc.ping().await {
             Ok(ping) => {
                 if !in_service.swap(true, Ordering::Relaxed) {
@@ -207,7 +286,7 @@ impl FleetBackend {
                 }
                 Some(NodeLoad {
                     running: ping.running as i64,
-                    free: *slots as i64 - ping.running as i64,
+                    free: slots.load(Ordering::Relaxed) as i64 - ping.running as i64,
                 })
             }
             Err(e) => {
@@ -225,9 +304,10 @@ impl FleetBackend {
     /// service → `NoCapacity` "no free slots on node {name}", queued and retried
     /// by the dispatcher; unknown → a hard `Launch` naming the known nodes). The
     /// decision itself is [`choose_placement`].
-    async fn place(&self, pin: Option<&str>) -> Result<&FleetNode, BackendError> {
-        let mut candidates = Vec::with_capacity(self.nodes.len());
-        for (i, node) in self.nodes.iter().enumerate() {
+    async fn place(&self, pin: Option<&str>) -> Result<Arc<FleetNode>, BackendError> {
+        let nodes = self.snapshot();
+        let mut candidates = Vec::with_capacity(nodes.len());
+        for (i, node) in nodes.iter().enumerate() {
             let load = self.node_load(node).await?; // None ⇒ out of service
             candidates.push(PlacementCandidate {
                 index: i,
@@ -236,7 +316,7 @@ impl FleetBackend {
             });
         }
         let index = choose_placement(self.policy, &candidates, pin)?;
-        Ok(&self.nodes[index])
+        Ok(nodes[index].clone())
     }
 
     /// Live load on a fleet node: `Ok(Some)` when live, `Ok(None)` for an
@@ -257,7 +337,7 @@ impl FleetBackend {
     /// Per-node health for the platform snapshot (spec §3.1): `(name, in_service)`
     /// as of the last ping/placement probe.
     pub fn availability(&self) -> Vec<(String, bool)> {
-        self.nodes
+        self.snapshot()
             .iter()
             .map(|n| {
                 let up = match &n.handle {
@@ -266,7 +346,14 @@ impl FleetBackend {
                         .first()
                         .map(|(_, a)| *a)
                         .unwrap_or(true),
-                    NodeHandle::Worker { in_service, .. } => in_service.load(Ordering::Relaxed),
+                    // A worker counts as available only while both reachable
+                    // (ping) and schedulable (heartbeat live) — a deregistered
+                    // node shows down in the UI, matching that placement skips it.
+                    NodeHandle::Worker {
+                        in_service,
+                        schedulable,
+                        ..
+                    } => in_service.load(Ordering::Relaxed) && schedulable.load(Ordering::Relaxed),
                 };
                 (n.name.clone(), up)
             })
@@ -278,7 +365,7 @@ impl FleetBackend {
     /// nodes (they carry no chuggernaut version) and for workers that have not
     /// answered yet. Lets the UI show fleet versions and spot deploy drift.
     pub fn node_versions(&self) -> Vec<(String, Option<String>)> {
-        self.nodes
+        self.snapshot()
             .iter()
             .map(|n| {
                 let version = match &n.handle {
@@ -290,13 +377,14 @@ impl FleetBackend {
             .collect()
     }
 
-    fn route(&self, id: &ContainerId) -> Result<&FleetNode, BackendError> {
+    fn route(&self, id: &ContainerId) -> Result<Arc<FleetNode>, BackendError> {
         let (name, _) = id
             .split_once('/')
             .ok_or_else(|| BackendError::NotFound(id.clone()))?;
-        self.nodes
+        self.snapshot()
             .iter()
             .find(|n| n.name == name)
+            .cloned()
             .ok_or_else(|| BackendError::NotFound(id.clone()))
     }
 }
@@ -472,7 +560,7 @@ impl ContainerBackend for FleetBackend {
 
     async fn list_managed_exited(&self) -> Result<Vec<ContainerId>, BackendError> {
         let mut ids = Vec::new();
-        for node in &self.nodes {
+        for node in &self.snapshot() {
             match &node.handle {
                 NodeHandle::Docker { backend } => ids.extend(backend.list_managed_exited().await?),
                 NodeHandle::Worker { rpc, .. } => match rpc.list_exited().await {
@@ -490,7 +578,7 @@ impl ContainerBackend for FleetBackend {
 
     async fn list_managed_running(&self) -> Result<Vec<RunningContainer>, BackendError> {
         let mut out = Vec::new();
-        for node in &self.nodes {
+        for node in &self.snapshot() {
             match &node.handle {
                 NodeHandle::Docker { backend } => out.extend(backend.list_managed_running().await?),
                 NodeHandle::Worker { rpc, .. } => match rpc.list_running().await {
@@ -528,6 +616,93 @@ impl ContainerBackend for FleetBackend {
             })
             .collect()
     }
+
+    /// Apply a worker announce (spec §3.1 dynamic registration). The live
+    /// announcement wins: an existing worker of the same name has its slot cap,
+    /// build version, schedulability, and reachability refreshed; a new name is
+    /// added with its own [`WorkerRpc`]; a name already held by a docker-endpoint
+    /// node is refused (an announce can't repurpose a directly-driven daemon).
+    /// Returns whether fleet membership or capacity changed (a join, or a slot
+    /// change) so the caller logs a join and re-drains the launch queue only when
+    /// it matters. Runs on the single-writer actor — the fleet's only writer.
+    fn register_worker(&self, name: &str, slots: u32, version: Option<String>) -> bool {
+        let mut nodes = self.nodes.write().unwrap();
+        let shape: Vec<(&str, bool)> = nodes
+            .iter()
+            .map(|n| {
+                (
+                    n.name.as_str(),
+                    matches!(n.handle, NodeHandle::Worker { .. }),
+                )
+            })
+            .collect();
+        match plan_register(&shape, name) {
+            RegisterAction::RejectDockerName => {
+                tracing::warn!(
+                    node = %name,
+                    "worker announce ignored — name is held by a docker-endpoint node"
+                );
+                false
+            }
+            RegisterAction::Update(i) => {
+                let NodeHandle::Worker {
+                    slots: slot_cell,
+                    in_service,
+                    schedulable,
+                    last_version,
+                    ..
+                } = &nodes[i].handle
+                else {
+                    return false;
+                };
+                // A live announcement re-admits the node to scheduling and marks
+                // it reachable; the next placement ping refines load. Only a slot
+                // change (or re-admitting a heartbeat-dropped node) is "capacity
+                // moved" for the caller's drain.
+                let changed = slot_cell.swap(slots, Ordering::Relaxed) != slots
+                    || !schedulable.swap(true, Ordering::Relaxed);
+                in_service.store(true, Ordering::Relaxed);
+                if let Some(v) = version {
+                    *last_version.lock().unwrap() = Some(v);
+                }
+                changed
+            }
+            RegisterAction::Add => {
+                let handle = worker_handle(self.store.clone(), name, slots);
+                if let NodeHandle::Worker { last_version, .. } = &handle
+                    && let Some(v) = version
+                {
+                    *last_version.lock().unwrap() = Some(v);
+                }
+                nodes.push(Arc::new(FleetNode {
+                    name: name.to_string(),
+                    handle,
+                }));
+                true
+            }
+        }
+    }
+
+    /// The fleet backend is the one backend that routes to announced workers, so
+    /// it accepts dynamic registration (spec §3.1). Lets the dispatcher gate its
+    /// roster mutation on real acceptance rather than the ambiguous
+    /// [`Self::register_worker`] bool.
+    fn supports_dynamic_workers(&self) -> bool {
+        true
+    }
+
+    /// Mark an announced worker unschedulable after its heartbeat lapses (spec
+    /// §3.1): placement skips it (`probe_worker` short-circuits), but `route`
+    /// still reaches it, so containers already running there keep being waited on
+    /// and the poll-based `wait` re-attaches. A no-op for a docker node or an
+    /// unknown name. A later announce re-admits it via [`register_worker`].
+    fn mark_worker_unschedulable(&self, name: &str) {
+        if let Some(node) = self.snapshot().iter().find(|n| n.name == name)
+            && let NodeHandle::Worker { schedulable, .. } = &node.handle
+        {
+            schedulable.store(false, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Convenience for `run.rs`: does this fleet contain any worker nodes?
@@ -543,10 +718,32 @@ mod tests {
     //! Fleet-level startup capacity (spec §3.1/§3.6) — the pure decision, no
     //! docker daemon or NATS needed. `(reachable, slots)` faithfully models each
     //! node's boot probe regardless of transport (docker or worker).
-    use super::{NodeCapacity, evaluate_startup};
+    use super::{NodeCapacity, RegisterAction, evaluate_startup, plan_register};
 
     fn node(reachable: bool, slots: u32) -> NodeCapacity {
         NodeCapacity { slots, reachable }
+    }
+
+    /// The announce precedence decision (spec §3.1 dynamic registration), the
+    /// pure core of `register_worker`: an unknown name is added, a matching
+    /// worker is updated in place (so its slot count/version can move — the
+    /// live announcement wins), and a name already held by a docker-endpoint
+    /// node is refused.
+    #[test]
+    fn plan_register_precedence() {
+        // Static + dynamic merge: a seeded worker of the same name is updated,
+        // not duplicated — the announce's slot count then wins.
+        let roster = [("air", true), ("local", false)];
+        assert_eq!(plan_register(&roster, "air"), RegisterAction::Update(0));
+        // A brand-new node joins.
+        assert_eq!(plan_register(&roster, "nuc"), RegisterAction::Add);
+        // An announce can't repurpose a docker-endpoint node of the same name.
+        assert_eq!(
+            plan_register(&roster, "local"),
+            RegisterAction::RejectDockerName
+        );
+        // Zero-seed fleet: the first announce is always an Add.
+        assert_eq!(plan_register(&[], "air"), RegisterAction::Add);
     }
 
     /// The outage case: a reachable 0-slot docker placeholder plus a responding

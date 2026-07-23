@@ -84,9 +84,14 @@ impl DispatcherConfig {
             None => PlacementPolicy::default(),
         };
 
-        let docker_nodes = match env_opt("DOCKER_NODES") {
-            Some(spec) => parse_docker_nodes(&spec)?,
-            None => {
+        // `DOCKER_NODES` present but empty is an explicit *zero-seed* dynamic
+        // fleet (spec §3.1 dynamic registration): the dispatcher boots with no
+        // capacity and gains it when workers announce. Unset (the `Err` arm) keeps
+        // the single local-socket default. A non-empty value parses as before.
+        let docker_nodes = match std::env::var("DOCKER_NODES") {
+            Ok(spec) if spec.trim().is_empty() => Vec::new(),
+            Ok(spec) => parse_docker_nodes(&spec)?,
+            Err(_) => {
                 let slots = match env_opt("DOCKER_SLOTS") {
                     Some(s) => s.parse().map_err(|_| {
                         CoreError::Config(format!("DOCKER_SLOTS must be a number, got {s:?}"))
@@ -198,6 +203,8 @@ impl DispatcherConfig {
             hook_bin: self.hook_bin.clone(),
             // Production uses the default 30m backstop (spec §3.5).
             launch_queue_max_wait: None,
+            // Production uses the default 60s heartbeat timeout (spec §3.1).
+            worker_heartbeat_timeout: None,
         })
     }
 }
