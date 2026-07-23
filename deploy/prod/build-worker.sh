@@ -19,16 +19,23 @@ cd "$(dirname "$0")/../.."             # workspace root
 TAG="${CHUG_IMAGE_TAG:-prod}"
 SHA="$(git rev-parse HEAD)"
 
+# DOCKER_BUILDKIT=1 requests the in-daemon BuildKit builder so the Dockerfiles'
+# RUN --mount=type=cache dependency caches take effect (#115). It is a no-op on
+# engines that already default to BuildKit and harmless where BuildKit is
+# unavailable (the mounts are simply ignored, build stays cold). No buildx CLI
+# plugin is required — the engine's built-in BuildKit is enough for cache mounts.
+BK="DOCKER_BUILDKIT=1"
+
 # Worker daemon image (repo-root context; bakes chuggernaut + channel binary).
 git archive --format=tar HEAD \
-  | ssh "$WORKER_SSH" "docker build -q -t chuggernaut/worker:$TAG \
+  | ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/worker:$TAG \
       -f deploy/prod/Dockerfile.worker --build-arg CHUG_GIT_SHA=$SHA -"
 
 # Agent images the job types run in, native on the node.
 git archive --format=tar HEAD:deploy/dev \
-  | ssh "$WORKER_SSH" "docker build -q -t chuggernaut/agent:$TAG -f Dockerfile.agent -"
+  | ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/agent:$TAG -f Dockerfile.agent -"
 git archive --format=tar HEAD \
-  | ssh "$WORKER_SSH" "docker build -q -t chuggernaut/agent-rust:$TAG \
+  | ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/agent-rust:$TAG \
       -f deploy/prod/Dockerfile.agent-rust -"
 
 # (Re)start the worker daemon on the new image. Safe mid-job: containers

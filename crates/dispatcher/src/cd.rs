@@ -72,6 +72,7 @@ pub(crate) fn build_base_snapshot(
         // Populated once the CD engine lands.
         auto_deploy: None,
         placement_policy: config.placement_policy.as_str().to_string(),
+        schema_epoch: types::CONFIG_SCHEMA_EPOCH,
     }
 }
 

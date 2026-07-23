@@ -143,6 +143,7 @@ async fn config_endpoints() {
                 commits_behind: None,
                 auto_deploy: None,
                 placement_policy: "busyness".into(),
+                schema_epoch: 1,
             },
         )
         .await

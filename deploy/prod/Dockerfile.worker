@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Worker-node daemon image (spec §3.1) — built ON the worker node (its native
 # arch) with the repo root as context, so the chuggernaut binary and the
 # channel binary it injects into job containers come from the same git SHA.
@@ -10,12 +11,30 @@
 #     -e WORKER_NODE=nuc -e NATS_URL=nats://<dispatcher-host>:4222 \
 #     chuggernaut/worker:prod
 
+# The `# syntax` directive (line 1) + `DOCKER_BUILDKIT=1` on the build
+# (build-worker.sh, worker-refresh.sh) unlock the RUN --mount=type=cache mounts
+# below, which keep the cargo registry and the compiled dependency graph warm
+# across SHA changes (#115). Without BuildKit these mounts are ignored and the
+# build still works, just cold — so the Dockerfile degrades safely on a legacy
+# builder.
 FROM rust:1.96-bookworm AS build
-ARG CHUG_GIT_SHA=
-ENV CHUG_GIT_SHA=$CHUG_GIT_SHA
 WORKDIR /src
 COPY . .
-RUN cargo build --release --bin chuggernaut --bin chuggernaut-channel
+# ARG/ENV CHUG_GIT_SHA is placed AFTER the COPY and immediately before the build
+# so a SHA bump alone never invalidates the dependency cache (#115): the cache
+# mounts persist compiled deps regardless, and this keeps the layer ordering
+# honest. The registry cache is shared-safe (cargo locks it); the target cache
+# gets a per-image id + sharing=locked so concurrent builds on the node don't
+# collide. Compiled binaries are copied OUT of the (ephemeral) target cache
+# mount into /out so the next stage's COPY --from finds them in the layer.
+ARG CHUG_GIT_SHA=
+ENV CHUG_GIT_SHA=$CHUG_GIT_SHA
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/src/target,id=chug-worker-target,sharing=locked \
+    cargo build --release --bin chuggernaut --bin chuggernaut-channel \
+ && mkdir -p /out \
+ && cp target/release/chuggernaut target/release/chuggernaut-channel /out/
 
 FROM debian:bookworm-slim
 # git + openssh-client + docker CLI let the daemon self-refresh (spec §3.1):
@@ -25,10 +44,10 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates git openssh-client docker.io \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=build /src/target/release/chuggernaut /usr/local/bin/chuggernaut
+COPY --from=build /out/chuggernaut /usr/local/bin/chuggernaut
 # The worker substitutes this node-local copy into launches that reference the
 # "channel" artifact — the dispatcher never ships the bytes (spec §3.1).
-COPY --from=build /src/target/release/chuggernaut-channel /usr/local/lib/chuggernaut/chuggernaut-channel
+COPY --from=build /out/chuggernaut-channel /usr/local/lib/chuggernaut/chuggernaut-channel
 # Self-refresh script (spec §3.1). The daemon auto-detects it at this default
 # path (WORKER_REFRESH_SCRIPT) and runs it on a `refresh` RPC. It ships in the
 # image so a refreshed daemon runs the refreshed script.

@@ -15,6 +15,7 @@ pub mod resources;
 pub mod step;
 pub mod task;
 pub mod user;
+pub mod version;
 pub mod worker;
 
 pub use channel::{
@@ -24,8 +25,8 @@ pub use duration::{DurationParseError, parse_duration};
 pub use ingest::IngestEvent;
 pub use job::{Escalation, Job, JobState};
 pub use job_type::{
-    Evaluator, EvaluatorType, JobType, Placement, ProjectDefaults, ReviewSpec, WorkSpec, WorkType,
-    WrapUpMode, WrapUpSpec,
+    ConfigWarning, Evaluator, EvaluatorType, JobType, Placement, ProjectDefaults, ReviewSpec,
+    WorkSpec, WorkType, WrapUpMode, WrapUpSpec,
 };
 pub use knowledge::{KnowledgeObject, KnowledgeScope};
 pub use platform::{DispatcherConfigSnapshot, FleetNode, FleetStatus, SlotOccupant, WorkerNode};
@@ -38,3 +39,4 @@ pub use task::{
     TaskPhase, TaskResolution, TaskResult, TaskState, TokenUsage,
 };
 pub use user::{Identity, IdentityKind, ProjectRole, User};
+pub use version::{CHANNEL_PROTOCOL_VERSION, CONFIG_SCHEMA_EPOCH, WORKER_RPC_VERSION};

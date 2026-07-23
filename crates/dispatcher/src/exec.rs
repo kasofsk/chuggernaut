@@ -127,6 +127,31 @@ impl Core {
                     .map(|e| format!("- {}: {}", e.field, e.message))
                     .collect::<Vec<_>>()
                     .join("\n");
+                // Config-ahead-of-binary (spec §14.2): a first launch (cycle 1,
+                // job still Ready) that trips the `min_dispatcher` version-skew
+                // gate parks pre-Work as Stalled — Retry/Revoke only, one park —
+                // instead of burning the launch into an Escalated storm the way
+                // every `web` job did on 2026-07-22. Rework re-entries (cycle > 1)
+                // read the already-pinned, already-validated base_ref and are
+                // post-work, so a skew that somehow surfaces there keeps the
+                // Escalated path (and Ready→Stalled is the only valid pre-work
+                // park anyway; Evaluation/WrapUp→Stalled is not in the §2.1 table).
+                if cycle == 1 && errs.iter().any(|e| e.is_schema_skew()) {
+                    return self
+                        .stall(
+                            owner,
+                            project,
+                            seq,
+                            "config_schema_skew",
+                            format!(
+                                "Job {seq} parked: its job-type config requires a newer \
+                                 dispatcher than is deployed (config ahead of binary). Deploy \
+                                 the newer dispatcher, then Retry.\n{detail}"
+                            ),
+                            None,
+                        )
+                        .await;
+                }
                 return self
                     .escalate(
                         owner,
@@ -201,6 +226,21 @@ impl Core {
                 serde_json::json!({ "cycle": cycle }),
             )
             .await?;
+            // Surface tolerated unknown-field warnings (spec §14.2) on the job
+            // event stream so an operator sees a "feature quietly off" config
+            // (a section this dispatcher predates) without grepping dispatcher
+            // logs. Loud once per job, at first launch; the fields are also
+            // logged in `load_job_type`.
+            for w in job_type.config_warnings() {
+                self.publish(
+                    owner,
+                    project,
+                    seq,
+                    "config-warning",
+                    serde_json::json!({ "field": w.field, "message": w.to_string() }),
+                )
+                .await?;
+            }
         }
 
         // §1.1 per-job override: parseability is validated at release, so a

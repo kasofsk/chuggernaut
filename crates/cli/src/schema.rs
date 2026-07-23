@@ -76,12 +76,23 @@ mod tests {
         }
     }
 
-    /// Spot-check the schema actually encodes the contract: unknown fields
-    /// rejected, finalize enumerates merge|none, doc comments surface.
+    /// Spot-check the schema actually encodes the contract: the top level is
+    /// tolerant of unknown fields (schema-evolution laxity, spec §14) while the
+    /// gate-relevant `Evaluator` block stays strict; finalize enumerates
+    /// merge|none.
     #[test]
     fn job_type_schema_shape() {
         let v: serde_json::Value = serde_json::from_str(&generate(SchemaKind::JobType)).unwrap();
-        assert_eq!(v["additionalProperties"], serde_json::json!(false));
+        // Top level tolerates unknown fields (no `additionalProperties: false`)
+        // so a config that runs ahead of the dispatcher is a warning, not a
+        // hard editor error.
+        assert_ne!(v["additionalProperties"], serde_json::json!(false));
+        // The Evaluator block, by contrast, stays strict: an unknown key there
+        // could silently skip a gate.
+        assert_eq!(
+            v["$defs"]["Evaluator"]["additionalProperties"],
+            serde_json::json!(false)
+        );
         let finalize = &v["$defs"]["WrapUpMode"];
         let variants: Vec<&str> = finalize["oneOf"]
             .as_array()

@@ -170,6 +170,85 @@ run_full_ci() {
 	return "$test_status"
 }
 
+# --- config/binary version-skew gate (spec §14, job #110) --------------------
+# Job-type config is read LIVE from the default branch, so a config that needs a
+# newer dispatcher than the one deployed would otherwise merge and then escalate
+# every job of the type at launch (the 2026-07-22 wrap_up incident). This gate
+# fails a config's OWN CI when it declares `min_dispatcher` greater than the
+# DEPLOYED dispatcher's schema epoch — "deploy first or gate it" — before it can
+# merge. Pure shell so a config-only change (which skips the Rust build below)
+# is still gated in seconds.
+#
+# The deployed epoch is read from the running dispatcher's config snapshot
+# (`GET $CHUG_API_URL/api/v1/platform/config` → .dispatcher.schema_epoch). When
+# that is not reachable (no CHUG_API_URL / no token / offline CI) the gate falls
+# back to comparing against this checkout's own epoch — still catching a config
+# that requires an epoch newer than the code it ships beside. It never blocks on
+# an unreachable API.
+config_schema_gate() {
+	# The job-type files to gate: the changed ones when the diff is known, else
+	# every jobs/*.yaml as a safe superset.
+	_files=""
+	if [ "${1:-}" = "all" ]; then
+		for f in jobs/*.yaml; do
+			[ -f "$f" ] && _files="$_files$f
+"
+		done
+	else
+		IFS='
+'
+		for f in $changed; do
+			case "$f" in
+			jobs/*.yaml) [ -f "$f" ] && _files="$_files$f
+" ;;
+			esac
+		done
+		unset IFS
+	fi
+	[ -n "$_files" ] || return 0
+
+	# Deployed epoch: best-effort fetch, else this checkout's compiled default.
+	_deployed=""
+	if [ -n "${CHUG_API_URL:-}" ] && command -v curl >/dev/null 2>&1; then
+		_url="${CHUG_API_URL%/}/api/v1/platform/config"
+		if [ -n "${CHUG_API_TOKEN:-}" ]; then
+			_snap="$(curl -fsS -H "Authorization: Bearer ${CHUG_API_TOKEN}" "$_url" 2>/dev/null || true)"
+		else
+			_snap="$(curl -fsS "$_url" 2>/dev/null || true)"
+		fi
+		_deployed="$(printf '%s' "$_snap" \
+			| sed -n 's/.*"schema_epoch"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+			| head -n1)"
+	fi
+	if [ -n "$_deployed" ]; then
+		echo "ci: config-skew gate — deployed dispatcher schema epoch is $_deployed"
+	else
+		# CONFIG_SCHEMA_EPOCH in crates/types/src/version.rs — the epoch this
+		# checkout ships. Grep it so the gate needs no compiled binary.
+		_deployed="$(sed -n 's/^pub const CONFIG_SCHEMA_EPOCH:[^=]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+			crates/types/src/version.rs 2>/dev/null | head -n1)"
+		_deployed="${_deployed:-1}"
+		echo "ci: config-skew gate — dispatcher not reachable; comparing against this checkout's epoch $_deployed"
+	fi
+
+	_gate_failed=0
+	IFS='
+'
+	for f in $_files; do
+		[ -n "$f" ] || continue
+		_need="$(sed -n 's/^min_dispatcher:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$f" | head -n1)"
+		[ -n "$_need" ] || continue
+		if [ "$_need" -gt "$_deployed" ]; then
+			echo "!!! ci: $f declares min_dispatcher: $_need but the dispatcher is at epoch $_deployed"
+			echo "!!!     requires a coordinated deploy — deploy the newer dispatcher first,"
+			echo "!!!     or land this config behind a version gate. (spec §14)"
+			_gate_failed=1
+		fi
+	done
+	unset IFS
+	[ "$_gate_failed" -eq 0 ] || exit 1
+}
+
 # Diff-aware gate: only run the (slow) Rust build/test when the change
 # actually touches Rust-relevant paths. This lets docs/web/prompt/job-type
 # changes pass CI in seconds. Rust-relevant globs (see case list below):
@@ -195,6 +274,14 @@ fi
 if [ "$diff_ok" -eq 1 ] && [ -z "$changed" ]; then
 	echo "ci: HEAD identical to origin/$BASE_BRANCH — nothing to gate, skipping"
 	exit 0
+fi
+# Run the config/binary version-skew gate before the Rust early-exit, so a
+# config-only change (which skips the cargo build) is still gated. Gate the
+# changed job yamls when the diff is known, else every jobs/*.yaml.
+if [ "$diff_ok" -eq 1 ]; then
+	config_schema_gate
+else
+	config_schema_gate all
 fi
 if [ "$diff_ok" -eq 1 ]; then
 	rust_changed=0

@@ -54,6 +54,20 @@ eval:
     run: ./scripts/ci.sh
 "#;
 
+/// A job type that declares `min_dispatcher` far above this binary's
+/// `CONFIG_SCHEMA_EPOCH` (spec §14.2): a config that would only ever be launched
+/// by an older dispatcher than the one that validated it — the N-1 deploy-skew
+/// window. Otherwise a valid command type, so the version-skew gate is the sole
+/// failure `load_job_type` hits.
+const SKEWED_YAML: &str = r#"
+name: skewed
+image: img:latest
+min_dispatcher: 999
+work:
+  type: command
+  run: ./x.sh
+"#;
+
 async fn seed_repo(repo: &TempRepo) {
     let clone = repo.clone_branch("main").await;
     clone
@@ -389,6 +403,82 @@ async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
         cleared,
         "Retry after the fix must clear the stall toward Ready"
     );
+}
+
+/// spec §14.2 launch park: a job whose pinned config requires a newer dispatcher
+/// than the running binary parks **pre-Work (Stalled)** with reason
+/// `config_schema_skew` — a single park, Retry/Revoke only — instead of burning
+/// the launch into `Escalated` one job at a time (the 2026-07-22 `launch_
+/// validation_failed` storm this ticket exists to eliminate). Distinct from an
+/// ordinary launch validation failure, which stays `launch_validation_failed`.
+#[tokio::test]
+async fn version_skewed_config_parks_stalled_not_escalated_at_launch() {
+    let Some((_server, store, repo, mut core)) = setup().await else {
+        return;
+    };
+
+    // Land a config that outranks this binary's schema epoch, then pin a Ready
+    // job to it directly — release itself would reject the skew up front, so we
+    // simulate a config that passed validation under a newer dispatcher and is
+    // now reached by an older one at launch (the N-1 skew window, spec §14.1).
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file(
+            "jobs/skewed.yaml",
+            SKEWED_YAML.as_bytes(),
+            "add skewed type",
+        )
+        .await;
+    clone.push("main").await;
+    let skewed_sha = repo.head().await;
+
+    let job = core.create_job(req("skewed", &[])).await.unwrap();
+    let jobs = store.jobs().await.unwrap();
+    let mut ready = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
+    ready.state = JobState::Ready;
+    ready.base_ref = Some(skewed_sha);
+    jobs.put(&ready).await.unwrap();
+
+    // A fresh core enqueues the Ready job at construction; spawning drains the
+    // queue, launching it through `enter_work`.
+    let core2 = new_core(&store, core_repos_root(&repo)).await;
+    let _handle = dispatcher::core::spawn(core2);
+
+    let mut parked = None;
+    for _ in 0..100 {
+        let rec = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
+        if rec.state != JobState::Ready {
+            parked = Some(rec);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let rec = parked.expect("the skewed job must leave Ready");
+
+    // Parked pre-Work (Stalled), never Escalated — no per-launch storm.
+    assert_eq!(
+        rec.state,
+        JobState::Stalled,
+        "version-skewed config must park Stalled, not Escalated"
+    );
+    let esc = rec.escalation.expect("stall records why on the job");
+    assert_eq!(esc.reason, "config_schema_skew");
+
+    // Exactly one park: a single Human escalation task, not one per launch.
+    let tasks = store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        tasks.len(),
+        1,
+        "one park, not an escalation storm: {tasks:?}"
+    );
+    assert!(matches!(tasks[0].kind, TaskKind::Human { .. }));
+    assert_eq!(tasks[0].state, TaskState::Pending);
 }
 
 #[tokio::test]

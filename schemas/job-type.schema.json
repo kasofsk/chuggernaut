@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "JobType",
+  "description": "The top-level job-type struct deliberately does **not** carry\n`deny_unknown_fields` (unlike every nested block below): an unknown\ntop-level key is captured into [`JobType::unknown`] and surfaced as a\n*warning*, not a parse error. This is the schema-tolerance half of the\nconfig/binary version-skew contract (spec §14): job-type config is read\nlive from the default branch, so a config change can land ahead of the\nrunning dispatcher. A newly-added top-level section (a future `wrap_up`,\n`deploy`, …) an older binary doesn't know about means \"a feature is quietly\noff\" — acceptable when flagged loudly, and vastly preferable to the\n2026-07-22 incident where the strict parser rejected the whole config and\nescalated every job.\n\nLaxity is safe *only* at the top level. The nested blocks keep\n`deny_unknown_fields` because an unknown field inside a security-relevant\nsection is not benign: an ignored key inside an [`Evaluator`] could silently\nskip a *gate* (a typo'd `required: flase`, a mis-nested check), turning\n\"config ahead of binary\" into \"a merge gate quietly disabled\". Those stay\nhard errors; see [`JobType::validate`].",
   "type": "object",
   "properties": {
     "description": {
@@ -51,6 +52,15 @@
       "items": {
         "type": "string"
       }
+    },
+    "min_dispatcher": {
+      "description": "Minimum dispatcher schema epoch this config requires (spec §14). When\nset and greater than the running dispatcher's\n[`crate::version::CONFIG_SCHEMA_EPOCH`], the config is ahead of the\nbinary: the dispatcher parks the job with a platform-level diagnostic\n(\"config requires dispatcher >= X\") instead of launching it, and the\nmerge-time CI check fails the config's own build if it can reach a\ndeployed dispatcher advertising an older epoch. Author it in the same\ncommit that relies on a schema feature the previous generation lacks, so\n\"merging config\" can never silently become \"deploying config\".",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
     },
     "name": {
       "type": "string"
@@ -110,7 +120,6 @@
       }
     }
   },
-  "additionalProperties": false,
   "required": [
     "name",
     "work"

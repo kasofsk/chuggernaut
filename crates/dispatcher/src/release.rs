@@ -18,6 +18,15 @@ pub struct ValidationError {
     pub message: String,
 }
 
+/// The `field` value [`load_job_type`] stamps on a version-skew error — the
+/// config declares a `min_dispatcher` newer than this binary's
+/// `CONFIG_SCHEMA_EPOCH` (spec §14.2). It is the one launch-validation failure
+/// class that means "config ahead of binary" rather than "config is wrong", so
+/// the launch path routes it to a pre-Work park (Stalled) instead of an
+/// Escalated storm. Kept as a named constant so the producer and the
+/// [`ValidationError::is_schema_skew`] consumer can never drift.
+pub(crate) const SCHEMA_SKEW_FIELD: &str = "min_dispatcher";
+
 impl ValidationError {
     pub(crate) fn new(
         job_seq: Option<u64>,
@@ -29,6 +38,14 @@ impl ValidationError {
             field: field.into(),
             message: message.into(),
         }
+    }
+
+    /// True when this error is the config-ahead-of-binary version-skew gate
+    /// (spec §14.2). The launch path uses this to distinguish a skewed config
+    /// (park pre-Work as Stalled) from an ordinary launch validation failure
+    /// (Escalated).
+    pub(crate) fn is_schema_skew(&self) -> bool {
+        self.field == SCHEMA_SKEW_FIELD
     }
 }
 
@@ -111,6 +128,40 @@ pub async fn load_job_type(
             format!("'{path}' failed to parse: {e}"),
         )]
     })?;
+
+    // Schema-tolerance (spec §14): unknown top-level fields are accepted, not
+    // rejected. Surface each loudly so a config that ran ahead of this
+    // dispatcher (a new section this binary predates) is visible platform-wide
+    // instead of silently ignored — but the job still launches. This is the
+    // 2026-07-22 incident's fix: a benign unknown field no longer escalates
+    // every job of the type.
+    for w in job_type.config_warnings() {
+        tracing::warn!(
+            file = %path,
+            field = %w.field,
+            "job-type config warning: {w} (deploy the dispatcher to enable it)"
+        );
+    }
+
+    // Version-skew gate (spec §14): a config declaring a `min_dispatcher` newer
+    // than this binary's schema epoch is config-ahead-of-binary. Refuse it here
+    // with a clear, platform-level diagnostic naming the file, field, and
+    // needed version. At launch this parks the job pre-Work (Stalled) with the
+    // reason rather than burning a launch into a generic validation escalation;
+    // at release it blocks the same way. The merge-time CI check
+    // (`chuggernaut validate --deployed-epoch`) is the first line of defense so
+    // this rarely fires.
+    if let Some(needed) = job_type.requires_dispatcher(types::CONFIG_SCHEMA_EPOCH) {
+        return Err(vec![ValidationError::new(
+            job_seq,
+            SCHEMA_SKEW_FIELD,
+            format!(
+                "'{path}' requires dispatcher schema epoch >= {needed} but this dispatcher is at \
+                 {}: deploy the newer dispatcher, or land the config behind a version gate",
+                types::CONFIG_SCHEMA_EPOCH
+            ),
+        )]);
+    }
 
     let merged = match read(repo, owner, project, reference, "jobs/_defaults.yaml").await? {
         Some(defaults_yaml) => {

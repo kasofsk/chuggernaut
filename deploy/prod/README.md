@@ -27,6 +27,26 @@ the Mini (§3). Chuggernaut is developed *on the platform* — create a `code` o
 - **Config** is one gitignored file: `deploy/prod/chuggernaut.env` (from
   `env.example`). The launchd wrappers and scripts source it.
 
+## Automated install (`chug-install.sh` / `/chug-install`)
+
+New in job #80: the hand-run parts of this runbook are scripted and idempotent.
+For a fresh single host, prefer the streamlined path — the sections below remain
+the reference each script composes and the fallback when a step needs a human.
+
+- **`deploy/prod/chug-install.sh`** — `preflight` (deps + config check),
+  `platform` (stand up dispatcher + api + NATS + ssh front, §0–§2), `project-import`
+  (bring an existing repo in as a platform-owned project and mirror `main` back
+  to GitHub, §3 + §12.2), `worker-join` (provision a worker node, §6). Every
+  subcommand takes `--dry-run` and is safe to re-run.
+- **`/chug-install`** — the Claude Code skill (`.claude/skills/chug-install/`)
+  that drives the above interactively, detects existing state, asks the
+  platform-owned-vs-linked-origin question, and verifies each stage.
+- **`INSTALL.md`** (repo root) — the 15-minute quickstart.
+
+The per-project GitHub mirror is now a scripted artifact too
+(`deploy/prod/chug-mirror-install.sh`), replacing the hand-built
+`com.chuggernaut.mirror` agent (§3) with a per-project launchd job.
+
 ---
 
 ## 0. Prerequisites (one-time, on the Mini)
@@ -478,6 +498,46 @@ Notes:
   (`docker ps --filter label=chuggernaut.managed`).
 - The daemon's version is reported in its ping; the dispatcher logs a warning
   when it drifts from the dispatcher's own (stale node artifacts).
+
+### Fast image builds (BuildKit dependency caching, #115)
+
+The worker/agent-rust image builds are the slow leg of a deploy: `Dockerfile.worker`
+and `Dockerfile.agent-rust` compile the whole Rust workspace, so a cold Docker
+build rebuilds all dependencies on every SHA change (~10 min observed on
+dev-air). Both Dockerfiles now use **BuildKit `RUN --mount=type=cache`** mounts
+for the cargo registry/git and the compiled target, so a SHA bump recompiles
+only the changed crates. `CHUG_GIT_SHA` in `Dockerfile.worker` is placed *after*
+the dependency layer so a SHA-only change never invalidates the deps.
+
+- **Enable BuildKit on the node.** `build-worker.sh` and `worker-refresh.sh`
+  both prefix the build with `DOCKER_BUILDKIT=1`, which turns on the engine's
+  built-in BuildKit — **no `buildx` CLI plugin is required** for cache mounts.
+  If the node's build log still shows the *legacy* builder ("Install the buildx
+  component…"), the engine is too old for BuildKit; on colima, `colima start`
+  with a recent Docker engine (23+) has BuildKit available. Cache mounts are
+  ignored (build stays cold, still correct) on a legacy builder, so this
+  degrades safely.
+- **Cache safety.** The registry/git caches are shared-safe (cargo locks them);
+  each target cache uses a per-image `id` (`chug-worker-target`,
+  `chug-agent-rust-target`) with `sharing=locked` so concurrent node builds
+  never collide. `agent-rust` still **bakes** its warm-target seed (#123) into
+  the image — it compiles into the cache mount, then `cp -a`s the result into
+  the baked `/opt/chug-prebuilt-target`.
+- **MEASURE cold vs warm (manual, run on the node).** CI cannot build images, so
+  the warm-cache win is a manual measurement — capture it once on dev-air:
+
+  ```sh
+  # cold: clear the BuildKit cache, then time a full build
+  docker builder prune -af
+  time (git archive --format=tar HEAD | DOCKER_BUILDKIT=1 docker build \
+    -t chuggernaut/agent-rust:measure -f deploy/prod/Dockerfile.agent-rust -)
+  # warm: touch a single crate's source, rebuild — deps should be cached
+  time (git archive --format=tar HEAD | DOCKER_BUILDKIT=1 docker build \
+    -t chuggernaut/agent-rust:measure -f deploy/prod/Dockerfile.agent-rust -)
+  ```
+
+  Repeat with `Dockerfile.worker` (add `--build-arg CHUG_GIT_SHA=$(git rev-parse HEAD)`).
+  Expect the warm build to skip dependency compilation entirely.
 
 ---
 

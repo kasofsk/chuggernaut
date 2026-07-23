@@ -2187,6 +2187,83 @@ Creating zero jobs is a normal, successful triage outcome (event batch judged no
 
 ---
 
+## Part 14: Config & Version Skew
+
+Job-type config is read **live** from a project's default branch (a per-consumer
+forge, repo-versioned by design — CLAUDE.md). Auto-deploy (#108) also gives
+every rollout a mixed-version window: all services build from **one SHA** per
+deploy, but `update.sh` refreshes workers and restarts the dispatcher in leg
+order, not atomically. Both facts mean the platform must tolerate the running
+binary and the config/peer services being **one deploy generation** out of step.
+
+On 2026-07-22 they were not: job #63 merged a `wrap_up` section into
+`jobs/web.yaml`; the running dispatcher's strict parser rejected the unknown key
+and escalated every `web` job at launch (`launch_validation_failed`, first
+victim #69) until an operator deployed. Merging config had silently become
+deploying config. This part defines the rules that make that a *detected,
+explained, non-destructive* condition.
+
+### 14.1 The N±1 wire contract
+
+Every cross-service wire surface — the worker RPC (`crates/store/src/worker.rs`
+ops), the channel protocol, and the job-type config schema — must tolerate one
+generation of skew in **either** direction:
+
+- **Additive-only.** New fields/ops are optional; the old side ignores what it
+  does not recognize.
+- **Graceful degradation, never a crash or escalation storm.** An unknown worker
+  op logs and falls back; an unknown config field is ignored with a warning. The
+  2026-07-22 `logs_tail` (unknown worker op) and `wrap_up` (unknown config
+  field) incidents are the counterexamples.
+- **Declared versions.** `types::version` holds one monotonic integer per
+  surface (`CONFIG_SCHEMA_EPOCH`, `WORKER_RPC_VERSION`, `CHANNEL_PROTOCOL_VERSION`).
+  A change that genuinely **cannot** satisfy N-1 compat bumps the relevant
+  constant *in the same commit* as the breaking code, and must fail its own CI
+  (§14.3) rather than merge a coordinated-deploy requirement silently.
+
+### 14.2 Schema tolerance (config ahead of binary)
+
+Job-type YAML validation distinguishes two laxity classes:
+
+- **Unknown *top-level* fields are tolerated** — the config is accepted, the
+  field is ignored, and a warning names the file and field. Rationale: an ignored
+  top-level section (a future `wrap_up`, `deploy`, …) means *a feature is quietly
+  off* until the dispatcher is deployed — acceptable when flagged. `JobType`
+  therefore drops `deny_unknown_fields`, capturing unknowns into
+  `JobType::unknown` and surfacing them via `config_warnings()`. The warning is
+  both logged (`tracing::warn!` in `load_job_type`) and published once per
+  affected job, at first launch, as a `config-warning` event on the job event
+  stream — so it shows in the UI's per-job feed without grepping dispatcher logs.
+  A dedicated platform-level health/settings surface (all active config warnings
+  in one place) is a follow-up, not yet wired.
+- **Unknown fields inside gate-relevant blocks stay hard errors.** An unknown
+  key inside an `Evaluator` (a typo'd `required`, a mis-nested check) could
+  silently **skip a merge gate** — "config ahead of binary" becoming "a gate
+  quietly disabled". Every nested block (`work`, `eval`, `wrap_up`, `resources`,
+  …) keeps `deny_unknown_fields`; such a config is refused outright at parse.
+
+A job type may also declare `min_dispatcher: <epoch>`. When it exceeds the
+running dispatcher's `CONFIG_SCHEMA_EPOCH`, the config is ahead of the binary:
+`load_job_type` refuses it with a diagnostic naming the file, field, and needed
+version. At launch this parks the job **pre-Work (Stalled)** with that reason —
+Retry/Revoke only, one park, no per-launch escalation storm — rather than
+burning launches into `Escalated` one job at a time.
+
+### 14.3 Merge-time gate
+
+The dispatcher publishes its `CONFIG_SCHEMA_EPOCH` in the config snapshot
+(`GET /api/v1/platform/config` → `dispatcher.schema_epoch`). `tasks/ci.sh`'s
+config-skew gate — and `chuggernaut validate --deployed-epoch <N>` — compare a
+config's declared `min_dispatcher` against the **deployed** dispatcher's epoch
+and **fail the config's own CI** ("requires dispatcher >= X; deploy first or gate
+it") before it can merge. The gate is pure shell so a config-only change stays
+fast, is best-effort about reaching the API (falling back to the checkout's own
+epoch), and never blocks on an unreachable dispatcher. This is the first line of
+defense; the runtime park (§14.2) is the fallback if a skewed config reaches a
+launch anyway.
+
+---
+
 ## Appendix: Infrastructure Summary
 
 | Component | Default (self-hosted) | Cloud alternative |

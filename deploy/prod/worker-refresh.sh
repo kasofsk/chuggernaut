@@ -76,6 +76,15 @@ build)
   # `set -e` with the live tags untouched (the temp leftovers are pruned by the
   # trap on exit).
   #
+  # DOCKER_BUILDKIT=1 turns on the in-daemon BuildKit builder so the
+  # Dockerfiles' RUN --mount=type=cache dependency caches take effect (#115),
+  # keeping the daemon self-refresh build (every deploy) warm across SHA bumps.
+  # No-op where BuildKit is already default; harmless (mounts ignored, cold
+  # build) where unavailable. This mirrors build-worker.sh's laptop path so both
+  # benefit identically.
+  export DOCKER_BUILDKIT=1
+
+
   # Worker daemon image (repo-root context; bakes chuggernaut + channel binary
   # at this SHA — native on the node).
   git -C "$TMP" archive --format=tar FETCH_HEAD \

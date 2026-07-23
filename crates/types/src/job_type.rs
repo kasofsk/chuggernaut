@@ -6,10 +6,28 @@
 
 use crate::duration::parse_duration;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
+/// The top-level job-type struct deliberately does **not** carry
+/// `deny_unknown_fields` (unlike every nested block below): an unknown
+/// top-level key is captured into [`JobType::unknown`] and surfaced as a
+/// *warning*, not a parse error. This is the schema-tolerance half of the
+/// config/binary version-skew contract (spec §14): job-type config is read
+/// live from the default branch, so a config change can land ahead of the
+/// running dispatcher. A newly-added top-level section (a future `wrap_up`,
+/// `deploy`, …) an older binary doesn't know about means "a feature is quietly
+/// off" — acceptable when flagged loudly, and vastly preferable to the
+/// 2026-07-22 incident where the strict parser rejected the whole config and
+/// escalated every job.
+///
+/// Laxity is safe *only* at the top level. The nested blocks keep
+/// `deny_unknown_fields` because an unknown field inside a security-relevant
+/// section is not benign: an ignored key inside an [`Evaluator`] could silently
+/// skip a *gate* (a typo'd `required: flase`, a mis-nested check), turning
+/// "config ahead of binary" into "a merge gate quietly disabled". Those stay
+/// hard errors; see [`JobType::validate`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct JobType {
     pub name: String,
@@ -40,6 +58,47 @@ pub struct JobType {
     pub knowledge: Vec<String>,
     #[serde(default)]
     pub vars: Vec<String>,
+    /// Minimum dispatcher schema epoch this config requires (spec §14). When
+    /// set and greater than the running dispatcher's
+    /// [`crate::version::CONFIG_SCHEMA_EPOCH`], the config is ahead of the
+    /// binary: the dispatcher parks the job with a platform-level diagnostic
+    /// ("config requires dispatcher >= X") instead of launching it, and the
+    /// merge-time CI check fails the config's own build if it can reach a
+    /// deployed dispatcher advertising an older epoch. Author it in the same
+    /// commit that relies on a schema feature the previous generation lacks, so
+    /// "merging config" can never silently become "deploying config".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_dispatcher: Option<u32>,
+    /// Unknown top-level fields, captured rather than rejected (see the type
+    /// doc). Populated by serde's flatten catch-all; each key surfaces as a
+    /// [`ConfigWarning`] from [`JobType::config_warnings`]. Skipped from the
+    /// generated JSON Schema (`serde_yaml::Value` has no `JsonSchema` impl, and
+    /// the schema advertises tolerance via an absent top-level
+    /// `additionalProperties: false`).
+    #[serde(flatten, default)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub unknown: BTreeMap<String, serde_yaml::Value>,
+}
+
+/// A non-fatal job-type config warning (spec §14): the config is accepted and
+/// will run, but something in it the running dispatcher does not understand was
+/// ignored. Emitted as a loud platform-level event so an operator sees the
+/// silently-off feature rather than discovering it job-by-job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigWarning {
+    /// The unknown top-level field name that was ignored.
+    pub field: String,
+}
+
+impl std::fmt::Display for ConfigWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unknown top-level field '{}' ignored (config is ahead of this dispatcher; \
+             the feature it configures is off until the dispatcher is deployed)",
+            self.field
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -572,6 +631,28 @@ impl JobType {
     /// The fleet node this job type pins onto, if any (spec §3.1 placement).
     pub fn placement_node(&self) -> Option<&str> {
         self.placement.as_ref().and_then(|p| p.node.as_deref())
+    }
+
+    /// Non-fatal config warnings (spec §14): unknown top-level fields that were
+    /// tolerated (config accepted, field ignored) rather than rejected. The
+    /// dispatcher emits these as a loud platform event; they never block a
+    /// launch. Deterministically ordered (the backing map is a `BTreeMap`).
+    pub fn config_warnings(&self) -> Vec<ConfigWarning> {
+        self.unknown
+            .keys()
+            .map(|field| ConfigWarning {
+                field: field.clone(),
+            })
+            .collect()
+    }
+
+    /// If this config requires a newer dispatcher than `dispatcher_epoch`
+    /// (usually [`crate::version::CONFIG_SCHEMA_EPOCH`]), the epoch it needs.
+    /// `Some(needed)` means the config is ahead of the binary: the dispatcher
+    /// must park the job with a diagnostic naming the needed version rather than
+    /// launch it, and the merge-time CI check must fail the config's build.
+    pub fn requires_dispatcher(&self, dispatcher_epoch: u32) -> Option<u32> {
+        self.min_dispatcher.filter(|&need| need > dispatcher_epoch)
     }
 
     /// Append project default evaluators (`jobs/_defaults.yaml`, spec §1.1) and
@@ -1259,6 +1340,93 @@ eval:
         assert_eq!(merged.eval[1].name, "ci");
         assert_eq!(merged.eval[1].stage, 1);
         assert_eq!(merged.validate(), vec![]);
+    }
+
+    #[test]
+    fn unknown_top_level_field_is_tolerated_with_a_warning() {
+        // The 2026-07-22 incident, in regression form: a config that adds a
+        // top-level section the running dispatcher predates (here a stand-in
+        // `future_section`) must PARSE and VALIDATE — the field is ignored and
+        // surfaced as a warning, not rejected. Under the old
+        // `deny_unknown_fields` this was a hard parse error that escalated every
+        // job of the type.
+        let yaml = r#"
+name: web
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+future_section:
+  some_new_knob: true
+another_unknown: 42
+"#;
+        let jt = JobType::parse(yaml).expect("unknown top-level fields must not fail parsing");
+        assert_eq!(
+            jt.validate(),
+            vec![],
+            "unknown fields are not field-rule errors"
+        );
+        let warnings = jt.config_warnings();
+        let fields: Vec<&str> = warnings.iter().map(|w| w.field.as_str()).collect();
+        // BTreeMap ordering makes this deterministic.
+        assert_eq!(fields, vec!["another_unknown", "future_section"]);
+        assert!(warnings[0].to_string().contains("ignored"));
+        // A clean config produces no warnings.
+        assert!(
+            JobType::parse(SPEC_EXAMPLE)
+                .unwrap()
+                .config_warnings()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn unknown_field_inside_evaluator_is_still_a_hard_error() {
+        // Gate-relevant laxity is NOT safe: an unknown key inside an evaluator
+        // (a typo'd `required`, a mis-nested check) could silently skip a merge
+        // gate, so the nested block keeps `deny_unknown_fields` and the config
+        // is refused outright at parse.
+        let yaml = r#"
+name: code
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+eval:
+  - name: ci
+    type: command
+    run: ./ci.sh
+    requird: false
+"#;
+        let err = JobType::parse(yaml).expect_err("unknown evaluator field must fail parsing");
+        assert!(err.to_string().contains("requird"), "{err}");
+    }
+
+    #[test]
+    fn min_dispatcher_gates_config_ahead_of_binary() {
+        let yaml = r#"
+name: web
+image: img:latest
+work:
+  type: agent
+  prompt: p.md
+min_dispatcher: 5
+"#;
+        let jt = JobType::parse(yaml).unwrap();
+        assert_eq!(jt.min_dispatcher, Some(5));
+        // Round-trips and still passes the field rules (it's metadata, not a
+        // gate itself).
+        assert_eq!(jt.validate(), vec![]);
+        // A dispatcher at epoch 1 is too old → it must park with a diagnostic.
+        assert_eq!(jt.requires_dispatcher(1), Some(5));
+        // A dispatcher at the needed epoch (or newer) is fine.
+        assert_eq!(jt.requires_dispatcher(5), None);
+        assert_eq!(jt.requires_dispatcher(6), None);
+        // No declaration → never gated.
+        assert_eq!(
+            JobType::parse(SPEC_EXAMPLE).unwrap().requires_dispatcher(0),
+            None
+        );
     }
 
     #[test]

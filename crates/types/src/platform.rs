@@ -65,6 +65,7 @@ mod tests {
             commits_behind: Some(3),
             auto_deploy: None,
             placement_policy: "busyness".into(),
+            schema_epoch: 1,
         }
     }
 
@@ -77,6 +78,7 @@ mod tests {
         assert!(json.contains("commits_behind"));
         assert!(json.contains("auto_deploy"));
         assert!(json.contains("placement_policy"));
+        assert!(json.contains("schema_epoch"));
         let back: DispatcherConfigSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(snap, back);
     }
@@ -110,6 +112,8 @@ mod tests {
         // Snapshots predating the configurable policy default to the old
         // hardcoded behavior (headroom), not the new busyness default.
         assert_eq!(snap.placement_policy, "headroom");
+        // Snapshots predating the schema-epoch field default to epoch 1.
+        assert_eq!(snap.schema_epoch, 1);
     }
 }
 
@@ -177,6 +181,20 @@ pub struct DispatcherConfigSnapshot {
     /// to `busyness` for snapshots written before this field existed.
     #[serde(default = "default_placement_policy")]
     pub placement_policy: String,
+    /// The job-type config schema epoch this dispatcher understands
+    /// ([`crate::CONFIG_SCHEMA_EPOCH`], spec §14). Exposed so the merge-time CI
+    /// check can compare a config's `min_dispatcher` against the *deployed*
+    /// dispatcher and fail a config that would otherwise merge ahead of the
+    /// binary. Defaults to `1` (the epoch before this field existed) for older
+    /// snapshots.
+    #[serde(default = "default_schema_epoch")]
+    pub schema_epoch: u32,
+}
+
+/// Back-compat default for [`DispatcherConfigSnapshot::schema_epoch`]: `1`, the
+/// only epoch that existed before the field was added.
+fn default_schema_epoch() -> u32 {
+    1
 }
 
 /// Back-compat default for [`DispatcherConfigSnapshot::placement_policy`]:
