@@ -101,6 +101,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
  && cargo clippy --workspace --all-targets --locked \
  && mkdir -p /opt/chug-prebuilt-target \
  && cp -a /build-target/. /opt/chug-prebuilt-target/ \
+ # incremental/ is session-bound rustc state (query caches keyed to this
+ # build's mtimes) — a fresh runtime clone can't reuse it, and it's ~2.2G of
+ # the baked seed (the 2026-07-23 air ENOSPC). The .rlib/dep reuse the seed
+ # exists for lives in deps/ and build/, which stay.
+ && rm -rf /opt/chug-prebuilt-target/debug/incremental \
  && cd / && rm -rf /workspace
 
 # Headless agents run as root inside a disposable container; IS_SANDBOX lets

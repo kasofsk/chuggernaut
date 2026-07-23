@@ -105,6 +105,13 @@ build)
   docker tag "chuggernaut/agent:$NEW"      "chuggernaut/agent:$TAG"
   docker tag "chuggernaut/agent-rust:$NEW" "chuggernaut/agent-rust:$TAG"
 
+  # Bound the node's docker disk after every refresh (the 2026-07-23 air
+  # ENOSPC incident): the retag-swap just stranded the previous generation as
+  # dangling — prune those (NEVER -a: live tags must survive, #183) and cap
+  # the BuildKit cache at 15G, keeping the hot #115 cache-mounts warm.
+  docker image prune -f >/dev/null
+  docker builder prune -f --keep-storage 15GB >/dev/null 2>&1 || true
+
   echo "worker-refresh: built chuggernaut/{worker,agent,agent-rust}:$TAG ($SHA)"
   ;;
 

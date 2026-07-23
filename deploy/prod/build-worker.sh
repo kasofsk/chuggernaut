@@ -70,4 +70,12 @@ docker run -d --restart=always --name chug-worker \
   chuggernaut/worker:$TAG >/dev/null"
 ssh "$WORKER_SSH" "$REMOTE"
 
+# Bound the node's docker disk (the 2026-07-23 air incident: 27G of BuildKit
+# cache + dangling image generations filled the colima partition and an image
+# build died ENOSPC mid-deploy). Each rebuild strands the previous image
+# generation as dangling — prune those (NEVER -a: tagged agent images must
+# survive, the #183 lesson) and cap the BuildKit cache at 15G, which keeps the
+# hot cargo/sccache cache-mounts (#115) while shedding stale layers.
+ssh "$WORKER_SSH" "docker image prune -f >/dev/null; docker builder prune -f --keep-storage 15GB >/dev/null 2>&1 || true"
+
 echo "build-worker: chuggernaut/{worker,agent,agent-rust}:$TAG deployed on $WORKER_SSH ($SHA)"
