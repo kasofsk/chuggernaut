@@ -13,7 +13,7 @@ use std::time::Duration;
 use store::NatsStore;
 use test_utils::repo::{TempRepo, clone_branch_from};
 use test_utils::{FakeBackend, FakeProvider};
-use types::JobState;
+use types::{Evaluator, EvaluatorType, JobState};
 
 /// A plain agent job, no evaluators: a clean exit takes it straight to Done,
 /// so the harness can assert lifecycle without scripting eval side effects.
@@ -147,6 +147,19 @@ fn commit_work(rig: &Rig) {
             .await;
         clone.push(&branch).await;
     });
+}
+
+async fn event_types(store: &NatsStore) -> Vec<String> {
+    store
+        .read_stream("job-events", 200)
+        .await
+        .unwrap()
+        .iter()
+        .map(|payload| {
+            let v: serde_json::Value = serde_json::from_slice(payload).unwrap();
+            v["event_type"].as_str().unwrap_or_default().to_string()
+        })
+        .collect()
 }
 
 async fn state_of(store: &NatsStore, seq: u64) -> JobState {
@@ -421,6 +434,153 @@ async fn edit_dropping_upstream_prunes_revoke_cascade() {
         state_of(&rig.store, draft.id).await,
         JobState::Blocked,
         "job re-pointed away from U must survive U's revoke"
+    );
+}
+
+/// #166: finalize an edited Draft → Frozen. The edits are preserved, the job
+/// parks unscheduled (no queue entry), `job-finalized` is emitted, and the
+/// resulting Frozen job can then be batched — the gap that stranded edited jobs
+/// outside batching (release was Draft's only exit).
+#[tokio::test]
+async fn draft_finalize_parks_frozen_preserves_edits_and_is_batchable() {
+    let Some(rig) = rig().await else { return };
+
+    // Two drafts, each edited then finalized back to Frozen.
+    let a = rig
+        .handle
+        .create_job(create(true, &[], "ORIGINAL A"))
+        .await
+        .unwrap();
+    rig.handle
+        .update_job(update(a.id, &[], "EDITED A"))
+        .await
+        .unwrap();
+    rig.handle.finalize_job("acme", "api", a.id).await.unwrap();
+
+    let frozen_a = rig
+        .store
+        .jobs()
+        .await
+        .unwrap()
+        .get("acme", "api", a.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(frozen_a.state, JobState::Frozen, "finalize parks Frozen");
+    assert_eq!(
+        frozen_a.description, "EDITED A",
+        "the edited definition is preserved through finalize"
+    );
+
+    assert!(
+        event_types(&rig.store)
+            .await
+            .contains(&"job-finalized".into()),
+        "finalize emits job-finalized"
+    );
+
+    let b = rig.handle.create_job(create(true, &[], "")).await.unwrap();
+    rig.handle.finalize_job("acme", "api", b.id).await.unwrap();
+
+    // Both members are Frozen, so a batch over them is accepted (a Draft member
+    // would be rejected — the strand this ticket closes).
+    let mut batch = create(false, &[], "");
+    batch.members = vec![a.id, b.id];
+    rig.handle
+        .create_job(batch)
+        .await
+        .expect("two finalized Frozen jobs are batchable");
+}
+
+/// #166: finalize is Draft-only. On any non-Draft state (here a Frozen job that
+/// was never drafted) it is an invalid transition (409).
+#[tokio::test]
+async fn finalize_on_non_draft_conflicts() {
+    let Some(rig) = rig().await else { return };
+
+    let job = rig.handle.create_job(create(false, &[], "")).await.unwrap();
+    assert_eq!(job.state, JobState::Frozen);
+    let err = rig.handle.finalize_job("acme", "api", job.id).await;
+    assert!(
+        matches!(err, Err(CoreError::Transition(_))),
+        "finalize of a non-Draft job must be an invalid transition, got {err:?}"
+    );
+    assert_eq!(
+        state_of(&rig.store, job.id).await,
+        JobState::Frozen,
+        "a rejected finalize leaves the state untouched"
+    );
+}
+
+/// #166: a definition that fails validation cannot be finalized — the field
+/// errors surface and the job stays Draft (mirrors release's validation, which
+/// would reject the same edit).
+#[tokio::test]
+async fn finalize_validation_failure_stays_draft() {
+    let Some(rig) = rig().await else { return };
+
+    let job = rig.handle.create_job(create(true, &[], "")).await.unwrap();
+    // A command evaluator with no `run` fails the §1.1 field rules.
+    let mut bad = update(job.id, &[], "");
+    bad.eval = vec![Evaluator {
+        name: "broken".into(),
+        r#type: EvaluatorType::Command,
+        image: None,
+        run: None,
+        prompt: None,
+        provider: None,
+        model: None,
+        secrets: vec![],
+        required: None,
+        stage: 0,
+    }];
+    rig.handle.update_job(bad).await.unwrap();
+
+    let err = rig.handle.finalize_job("acme", "api", job.id).await;
+    assert!(
+        matches!(&err, Err(CoreError::Validation(errs)) if errs.iter().any(|e| e.message.contains("run"))),
+        "finalize must reject the malformed evaluator with a field error, got {err:?}"
+    );
+    assert_eq!(
+        state_of(&rig.store, job.id).await,
+        JobState::Draft,
+        "a failed finalize leaves the job editable in Draft"
+    );
+}
+
+/// #166: Frozen → Draft → finalize → Frozen round-trips idempotently — a
+/// never-released job can be reopened, finalized untouched, and remain Frozen.
+#[tokio::test]
+async fn frozen_draft_finalize_round_trip() {
+    let Some(rig) = rig().await else { return };
+
+    let job = rig
+        .handle
+        .create_job(create(false, &[], "BODY"))
+        .await
+        .unwrap();
+    assert_eq!(job.state, JobState::Frozen);
+
+    rig.handle.draft_job("acme", "api", job.id).await.unwrap();
+    assert_eq!(state_of(&rig.store, job.id).await, JobState::Draft);
+
+    rig.handle
+        .finalize_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let back = rig
+        .store
+        .jobs()
+        .await
+        .unwrap()
+        .get("acme", "api", job.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(back.state, JobState::Frozen, "round-trips back to Frozen");
+    assert_eq!(
+        back.description, "BODY",
+        "an untouched finalize preserves the record"
     );
 }
 

@@ -8,7 +8,7 @@
 //! the default branch untested against the exact tree that lands.
 
 use crate::core::{Core, CoreError, EvalSubmission, Msg, Result, TaskExit};
-use crate::exec::{ChannelRole, eval_image, task_timeout};
+use crate::exec::{ChannelRole, INFRA_RELAUNCH_CAP, eval_image, task_timeout};
 use agent::AgentRunConfig;
 use chrono::Utc;
 use std::collections::VecDeque;
@@ -22,6 +22,14 @@ use vcs::{ConflictRebaseOutcome, MergeOutcome, RebaseOutcome};
 /// this, a repeated gate compile failure falls back to the full rework loop —
 /// the failure wasn't the mechanical one-shot the fast path assumes.
 pub(crate) const GATE_FIX_BUDGET: u32 = 2;
+
+/// Machine code for an evaluator that exited without producing any evidence
+/// (#167): a Command exiting non-zero with an empty captured stream, or an
+/// Agent ending without a `submit_eval` verdict. Distinct from a product
+/// failure — the code was never actually judged. Surfaced on the
+/// `task-failed`/`job-escalated` event `reason`; the retire path stamps the
+/// task `infra_loss` (reusing the §3.6/#83 no-retry-burned machinery).
+pub(crate) const EVAL_NO_OUTPUT_REASON: &str = "evaluator_no_output";
 
 /// Scoped framing for a gate-fix task's prompt (job #154): the branch was
 /// already approved by review; a rebase onto moved main broke compilation only.
@@ -117,6 +125,10 @@ pub enum SlotOutcome {
         /// evaluator's abort escalates at reduce instead of consuming budget.
         abort: bool,
         structured: Option<serde_json::Value>,
+        /// A command evaluator's captured output tail (#167), threaded into the
+        /// rework/re-review context as the failure evidence. `None` for agent
+        /// evaluators, which report through `structured` findings.
+        output: Option<String>,
     },
     /// Agent eval exhausted `eval_retries` without a `submit_eval` (§3.3).
     Infra,
@@ -701,6 +713,26 @@ impl Core {
         {
             prompt.push_str(&block);
         }
+        // #168: a relaunched evaluator (a prior attempt in this same round died —
+        // #167 no-output invalid fail, container loss, crash) leads with the
+        // predecessor's partial output, so it doesn't re-review blind. Distinct
+        // from the cross-cycle re-review above (#155): this is same-round
+        // attempt-to-attempt continuity. Evaluators push no commits.
+        if let Some(pred) = self
+            .predecessor_block(
+                owner,
+                project,
+                seq,
+                TaskPhase::Evaluation,
+                cycle,
+                Some(&evaluator.name),
+                task_id,
+                false,
+            )
+            .await
+        {
+            prompt = format!("{pred}{prompt}");
+        }
         let (mcp_servers, mut files) = self.channel_mcp(&env);
         files.extend(
             self.ssh_credential_files(
@@ -873,6 +905,7 @@ impl Core {
             pass,
             abort,
             structured,
+            output: None, // agents report through structured findings
         });
         self.stage_complete(owner, project, seq).await
     }
@@ -893,6 +926,7 @@ impl Core {
             eval_json,
             usage,
             launch_error,
+            log_tail,
             ..
         } = exit;
         let key = (owner.to_string(), project.to_string(), seq);
@@ -941,10 +975,52 @@ impl Core {
         let outcome = match &task.kind {
             TaskKind::Command { .. } => {
                 let pass = exit_code == 0;
+                // #167: embed the captured output tail (last ~8 KB, harvested by
+                // the eval monitor) as the result's evidence — the failure reason
+                // for the job page, rework context, and #155's re-review. The full
+                // stream stays in the logs.
+                let output = log_tail.clone().unwrap_or_default();
+                // #167: a non-zero exit with a completely empty captured stream is
+                // evidence-free — infrastructure loss, not a verdict (backend
+                // hiccup, container died pre-exec, stream lost). Retry via the
+                // infra-loss machinery (no `eval_retries` burned, no rework, no
+                // cycle consumed); on exhaustion escalate `evaluator_no_output` so
+                // a human sees "the evaluator can't produce evidence" rather than
+                // "the code failed review".
+                if !pass && output.trim().is_empty() {
+                    task.result = Some(TaskResult::Command {
+                        pass: false,
+                        exit_code,
+                        output,
+                        structured: eval_json.clone(),
+                    });
+                    task.state = TaskState::Failed;
+                    task.infra_loss = true;
+                    task.completed_at = Some(Utc::now());
+                    self.tasks.put(&task).await?;
+                    self.publish(
+                        owner,
+                        project,
+                        seq,
+                        "task-failed",
+                        serde_json::json!({
+                            "task_id": task.id, "phase": "Evaluation",
+                            "reason": EVAL_NO_OUTPUT_REASON,
+                        }),
+                    )
+                    .await?;
+                    return self
+                        .eval_no_output_failure(owner, project, seq, task, slot_idx)
+                        .await;
+                }
+                // The captured tail rides along as the failure evidence for the
+                // rework/re-review context (#167) — a non-empty output on a fail
+                // is what the next work agent reads to see WHY ci failed.
+                let slot_output = (!output.is_empty()).then(|| output.clone());
                 task.result = Some(TaskResult::Command {
                     pass,
                     exit_code,
-                    output: String::new(), // log capture: backend slice
+                    output,
                     structured: eval_json.clone(),
                 });
                 task.state = TaskState::Done;
@@ -965,6 +1041,7 @@ impl Core {
                     pass,
                     abort: false,
                     structured: eval_json,
+                    output: slot_output,
                 })
             }
             TaskKind::Agent { .. } => {
@@ -994,19 +1071,35 @@ impl Core {
                         pass: *pass,
                         abort: *abort,
                         structured: structured.clone(),
+                        output: None, // agents report through structured findings
                     }),
                     _ => {
-                        // Infra error: no verdict recorded (§3.3).
+                        // #167: an agent evaluator that ended without a
+                        // `submit_eval` verdict produced no evidence — the same
+                        // invalid-fail class as a Command with an empty stream.
+                        // Route it through the no-output path (infra-loss
+                        // semantics: no `eval_retries` burned, escalates
+                        // `evaluator_no_output`) rather than a plain infra retry,
+                        // so the reason distinguishes "no verdict" from a real
+                        // infra loss and the round is never failed on nothing.
                         let mut failed = current;
                         failed.state = TaskState::Failed;
+                        failed.infra_loss = true;
                         failed.completed_at = Some(Utc::now());
                         self.tasks.put(&failed).await?;
-                        self.publish(owner, project, seq, "task-failed", serde_json::json!({
-                            "task_id": failed.id, "phase": "Evaluation", "reason": "no submit_eval",
-                        }))
+                        self.publish(
+                            owner,
+                            project,
+                            seq,
+                            "task-failed",
+                            serde_json::json!({
+                                "task_id": failed.id, "phase": "Evaluation",
+                                "reason": EVAL_NO_OUTPUT_REASON,
+                            }),
+                        )
                         .await?;
                         return self
-                            .eval_infra_failure(owner, project, seq, failed, slot_idx)
+                            .eval_no_output_failure(owner, project, seq, failed, slot_idx)
                             .await;
                     }
                 }
@@ -1068,6 +1161,82 @@ impl Core {
         let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
         round.slots[slot_idx].outcome = Some(SlotOutcome::Infra);
         self.stage_complete(owner, project, seq).await
+    }
+
+    /// #167: an evaluator exited without producing evidence — a Command exiting
+    /// non-zero with an empty captured stream, or an Agent ending without a
+    /// `submit_eval` verdict. This is infrastructure loss, not a product verdict:
+    /// relaunch the SAME attempt WITHOUT spending an `eval_retries` budget (the
+    /// §3.6/#83 infra-loss semantics — no rework, no cycle consumed), bounded by
+    /// [`INFRA_RELAUNCH_CAP`] over the evaluator's lineage. On exhaustion escalate
+    /// with reason `evaluator_no_output`, so a human sees the evaluator cannot
+    /// produce evidence rather than the round failing on nothing. The failed task
+    /// is already persisted terminal (stamped `infra_loss`) by the caller.
+    async fn eval_no_output_failure(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        failed: Task,
+        slot_idx: usize,
+    ) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        // Count evidence-free losses for this evaluator's lineage (same cycle +
+        // evaluator): the freshly-stamped attempt is included, so the Nth loss
+        // sees count N. Shares the `infra_loss` marker and cap with §3.6 restart
+        // losses — both are infrastructure, both escalate to a human.
+        let losses = self
+            .tasks
+            .list_for_job(owner, project, seq)
+            .await?
+            .iter()
+            .filter(|t| {
+                t.infra_loss
+                    && t.phase == TaskPhase::Evaluation
+                    && t.cycle == failed.cycle
+                    && t.evaluator == failed.evaluator
+            })
+            .count();
+        if losses > INFRA_RELAUNCH_CAP as usize {
+            self.active.remove(&key);
+            return self
+                .escalate(
+                    owner,
+                    project,
+                    seq,
+                    EVAL_NO_OUTPUT_REASON,
+                    format!(
+                        "Job {seq}: evaluator '{}' exited without producing any output \
+                         {losses} times — it cannot produce evidence of a verdict. A human \
+                         should review the evaluator itself rather than the code.",
+                        failed.evaluator.as_deref().unwrap_or("?")
+                    ),
+                    Some(failed.id),
+                )
+                .await;
+        }
+        let (evaluator, cycle) = {
+            let exec = self.active.get(&key).expect("exec state");
+            let slot = &exec.round.as_ref().unwrap().slots[slot_idx];
+            (slot.evaluator.clone(), exec.cycle)
+        };
+        let branch = self.must_get(owner, project, seq)?.branch.clone();
+        // Same attempt: `eval_retries` untouched (infra loss, not a real failure).
+        let new_id = self
+            .launch_evaluator_task(
+                owner,
+                project,
+                seq,
+                TaskPhase::Evaluation,
+                &branch,
+                cycle,
+                &evaluator,
+                failed.attempt,
+            )
+            .await?;
+        let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
+        round.slots[slot_idx].task_id = new_id;
+        Ok(())
     }
 
     /// Called whenever a slot in the current stage resolves. A no-op while the
@@ -1159,11 +1328,13 @@ impl Core {
                         pass: p,
                         abort,
                         structured,
+                        output,
                     } => {
                         results.push(EvalResult {
                             evaluator: slot.evaluator.name.clone(),
                             pass: *p,
                             structured: structured.clone(),
+                            output: output.clone(),
                         });
                         if required && !*p {
                             pass = false;
@@ -1177,6 +1348,7 @@ impl Core {
                             evaluator: slot.evaluator.name.clone(),
                             pass: false,
                             structured: None,
+                            output: None,
                         });
                         if required {
                             infra = true;
@@ -1640,6 +1812,9 @@ impl Core {
             pass,
             abort: false,
             structured: eval_json,
+            // The gate threads its captured compiler output into the gate-fix
+            // brief from the task record directly (job #154), not via the slot.
+            output: None,
         });
         if gate.round.slots.iter().any(|s| s.outcome.is_none()) {
             return Ok(());
@@ -1711,6 +1886,7 @@ impl Core {
                     evaluator: s.evaluator.name.clone(),
                     pass: false,
                     structured: structured.clone(),
+                    output: None,
                 }),
                 _ => None,
             })
@@ -2474,6 +2650,7 @@ mod tests {
             pass,
             abort,
             structured: None,
+            output: None,
         }
     }
 

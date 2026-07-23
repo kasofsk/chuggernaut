@@ -118,6 +118,12 @@ pub fn jobs_draft(owner: &str, project: &str, seq: u64) -> String {
     format!("req.jobs.draft.{owner}.{project}.{seq}")
 }
 
+/// Finalize an edited Draft back to Frozen (#166): validate the definition
+/// like release, but park it (re-batchable) instead of scheduling. Draft-only.
+pub fn jobs_finalize(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.jobs.finalize.{owner}.{project}.{seq}")
+}
+
 /// Claim the job's next work attempt for a human (spec §1.2 claims).
 pub fn jobs_claim(owner: &str, project: &str, seq: u64) -> String {
     format!("req.jobs.claim.{owner}.{project}.{seq}")

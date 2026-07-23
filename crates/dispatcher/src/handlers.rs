@@ -1019,6 +1019,14 @@ async fn spawn_read_handlers(
                     Err(e) => error_reply(&e),
                     Ok(_) => fetch_job(&jobs_store, owner, project, seq).await,
                 },
+                // #166 Draft → Frozen: finalize the edited definition (validate
+                // like release, park re-batchable). 409 in any non-Draft state.
+                ("finalize", Some(seq)) => {
+                    match jobs_handle.finalize_job(owner, project, seq).await {
+                        Err(e) => error_reply(&e),
+                        Ok(_) => fetch_job(&jobs_store, owner, project, seq).await,
+                    }
+                }
                 ("get", Some(seq)) => fetch_job(&jobs_store, owner, project, seq).await,
                 ("list", None) => match jobs_store.jobs().await {
                     Ok(jobs) => match jobs.list(owner, project).await {

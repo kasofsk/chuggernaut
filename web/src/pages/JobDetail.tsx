@@ -227,6 +227,7 @@ export function JobDetail() {
           project={project}
           job={job}
           onRelease={() => api.release(owner, project, job.id).then(refresh, setActionError(setError))}
+          onFinalize={() => api.finalize(owner, project, job.id).then(refresh, setActionError(setError))}
           onRevoke={() => api.revoke(owner, project, job.id).then(refresh, setActionError(setError))}
           onLeftDraft={refresh}
         />

@@ -15,10 +15,12 @@ pub fn assert_transition(from: JobState, to: JobState) -> Result<(), InvalidTran
     use JobState::*;
     let valid = match (from, to) {
         // Draft→Ready|Blocked: release finalizes the edited definition in one
-        // step (same as a Frozen release). Frozen→Draft: a never-released job
-        // moves back to Draft for editing (§2.1). Draft→Revoked is covered by
-        // the generic Revoked row below (Draft is non-terminal).
-        (Draft, Ready | Blocked) => true,
+        // step (same as a Frozen release). Draft→Frozen: finalize parks the
+        // edited definition Frozen (re-batchable) instead of scheduling it
+        // (#166). Frozen→Draft: a never-released job moves back to Draft for
+        // editing (§2.1). Draft→Revoked is covered by the generic Revoked row
+        // below (Draft is non-terminal).
+        (Draft, Ready | Blocked | Frozen) => true,
         (Frozen, Draft) => true,
         (Frozen, Ready | Blocked) => true,
         // Batches (spec §2.1). Frozen→Batched: a member is absorbed at batch
@@ -71,6 +73,7 @@ mod tests {
         for (from, to) in [
             (Draft, Ready),
             (Draft, Blocked),
+            (Draft, Frozen),
             (Draft, Revoked),
             (Frozen, Draft),
             (Frozen, Ready),
@@ -104,12 +107,12 @@ mod tests {
             assert!(assert_transition(from, to).is_ok(), "{from:?}→{to:?}");
         }
         for (from, to) in [
-            // Draft leaves only via release (Ready/Blocked) or revoke — never
-            // straight into execution, and Frozen is a one-way door out of it
-            // (release, not un-draft, is the only forward path once finalized).
+            // Draft leaves via release (Ready/Blocked), finalize (Frozen), or
+            // revoke — never straight into execution. Frozen is a one-way door
+            // out of it (release, not un-draft, is the only forward path once
+            // finalized).
             (Draft, Work),
             (Draft, Evaluation),
-            (Draft, Frozen),
             (Frozen, Work),
             (Frozen, Done),
             // Batched is invisible to scheduling: it never jumps into execution

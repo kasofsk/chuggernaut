@@ -25,6 +25,21 @@ eval:
     run: ./ci.sh
 "#;
 
+// Agent work + command eval WITH a rework budget: a failing ci triggers a
+// rework cycle (#167 rework-context threading) instead of escalating.
+const IMPL_CMD_REWORK: &str = r#"
+name: impl-cmd-rework
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+rework_budget: 1
+eval:
+  - name: ci
+    type: command
+    run: ./ci.sh
+"#;
+
 const IMPL_AGENT_EVAL: &str = r#"
 name: impl-agent
 image: img:latest
@@ -194,6 +209,7 @@ async fn rig_full(
     let clone = repo.clone_branch("main").await;
     for (path, content) in [
         ("jobs/impl-cmd.yaml", IMPL_CMD_EVAL),
+        ("jobs/impl-cmd-rework.yaml", IMPL_CMD_REWORK),
         ("jobs/impl-agent.yaml", IMPL_AGENT_EVAL),
         ("jobs/flaky.yaml", FLAKY),
         ("jobs/cmd-work.yaml", CMD_WORK),
@@ -3385,4 +3401,326 @@ async fn abort_verdict_escalates_with_recorded_reason() {
         esc.detail
     );
     assert_eq!(esc.failing_task, None);
+}
+
+// ── #167: evaluator failures carry evidence ─────────────────────────────────
+
+/// #167 fix 1: a failing command evaluator embeds the captured output tail in
+/// `result.output` (was hardcoded empty), and the tail is size-capped and
+/// stderr-biased — the LAST bytes survive the cap, the head is dropped. This is
+/// the evidence the job page, rework brief, and re-review read inline.
+#[tokio::test]
+async fn failing_command_eval_embeds_size_capped_output_tail() {
+    let Some(rig) = rig().await else { return };
+    commit_work(&rig); // agent work produces output → Evaluation
+
+    // A large captured stream: a unique HEAD marker at the very start, a unique
+    // TAIL marker at the very end, padded past the ~8 KB cap in between.
+    let big = format!(
+        "HEAD_MARKER_dropped_by_cap\n{}\nTAIL_MARKER_assertion_failed_at_foo_rs_42",
+        "x".repeat(20_000)
+    );
+    rig.backend.put_logs(big.clone().into_bytes());
+    rig.backend.script_exits([101]); // the ci container exits non-zero
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    // impl-cmd has no rework budget: a product failure escalates.
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let eval = tasks
+        .iter()
+        .find(|t| t.phase == TaskPhase::Evaluation)
+        .expect("an eval task ran");
+    match &eval.result {
+        Some(types::TaskResult::Command {
+            pass: false,
+            output,
+            ..
+        }) => {
+            assert!(
+                output.contains("TAIL_MARKER_assertion_failed_at_foo_rs_42"),
+                "the failure tail must be embedded: {output:.200?}"
+            );
+            assert!(
+                !output.contains("HEAD_MARKER_dropped_by_cap"),
+                "the head must be dropped by the size cap (tail-biased)"
+            );
+            assert!(
+                output.len() < big.len(),
+                "the embedded output must be capped below the full stream ({} vs {})",
+                output.len(),
+                big.len()
+            );
+        }
+        other => panic!("expected a failing command result with a tail, got {other:?}"),
+    }
+}
+
+/// #167 fix 2: a command evaluator that exits non-zero with a completely empty
+/// captured stream is evidence-free — infrastructure loss, not a verdict. It is
+/// relaunched automatically WITHOUT burning `eval_retries` (every attempt stays
+/// attempt 1, stamped `infra_loss`) and never triggers rework; once the infra
+/// relaunch cap is exhausted the job escalates with reason `evaluator_no_output`
+/// rather than failing the round on nothing.
+#[tokio::test]
+async fn no_output_command_eval_retries_without_burning_retries_then_escalates() {
+    let Some(rig) = rig().await else { return };
+    commit_work(&rig);
+
+    // Every ci launch exits non-zero; logs stay empty (never call put_logs), so
+    // every attempt is an evidence-free no-output failure.
+    rig.backend.script_exits([101, 101, 101, 101, 101]);
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    assert_eq!(
+        escalated.escalation.expect("escalation recorded").reason,
+        "evaluator_no_output",
+        "an evidence-free evaluator escalates as no-output, not a code failure"
+    );
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let evals: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.phase == TaskPhase::Evaluation)
+        .collect();
+    assert!(
+        evals.len() >= 2,
+        "the evaluator must be relaunched, not resolved on the first empty fail: {evals:?}"
+    );
+    for t in &evals {
+        assert_eq!(
+            t.attempt, 1,
+            "a no-output relaunch burns no eval_retries (stays attempt 1)"
+        );
+        assert!(t.infra_loss, "each no-output loss is stamped infra_loss");
+    }
+    // No rework was triggered: the single Work task is the only one.
+    assert_eq!(
+        tasks.iter().filter(|t| t.phase == TaskPhase::Work).count(),
+        1,
+        "an evidence-free eval fail must not trigger rework"
+    );
+    let no_output_events: Vec<_> = job_events(&rig.store, job.id)
+        .await
+        .into_iter()
+        .filter(|e| e["reason"] == "evaluator_no_output")
+        .collect();
+    assert!(
+        !no_output_events.is_empty(),
+        "the evaluator_no_output reason must ride the event stream"
+    );
+}
+
+/// #167 fix 1, passing path: a passing command evaluator behaves exactly as
+/// before — the job reaches Done — and the (small) tail is embedded harmlessly.
+#[tokio::test]
+async fn passing_command_eval_embeds_tail_and_reaches_done_unchanged() {
+    let Some(rig) = rig().await else { return };
+    commit_work(&rig);
+    rig.backend.put_logs(b"all 42 tests passed".to_vec());
+    // No scripted exit → the ci container exits 0 (pass).
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let eval = tasks
+        .iter()
+        .find(|t| t.phase == TaskPhase::Evaluation)
+        .expect("an eval task ran");
+    match &eval.result {
+        Some(types::TaskResult::Command {
+            pass: true, output, ..
+        }) => assert_eq!(output, "all 42 tests passed", "the small tail is embedded"),
+        other => panic!("expected a passing command result, got {other:?}"),
+    }
+}
+
+/// #167 fix 1 → rework: a failing command evaluator's embedded tail is threaded
+/// into the next work cycle's rework context, clearly fenced and labelled as the
+/// evaluator's output (a `command` result carries no structured findings, so the
+/// tail is the only evidence the rework agent can fix against).
+#[tokio::test]
+async fn rework_context_carries_command_eval_output_tail() {
+    let Some(rig) = rig().await else { return };
+    commit_work(&rig); // first work cycle produces output → Evaluation
+
+    rig.backend
+        .put_logs(b"FAILING_CI: assertion failed at src/lib.rs:99".to_vec());
+    rig.backend.script_exits([101]); // first ci fails; the rework's ci defaults to 0
+
+    let job = rig.handle.create_job(req("impl-cmd-rework")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+
+    // Wait for the rework work cycle to launch (a second provider run).
+    let mut rework_prompt = None;
+    for _ in 0..100 {
+        let runs = rig.provider.runs();
+        if runs.len() >= 2 {
+            rework_prompt = Some(runs[1].prompt.clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let prompt = rework_prompt.expect("a rework work cycle must launch after the ci failure");
+    assert!(
+        prompt.contains("FAILING_CI: assertion failed at src/lib.rs:99"),
+        "the ci output tail must reach the rework prompt: {prompt}"
+    );
+    assert!(
+        prompt.contains("Output (tail) from **ci**"),
+        "the tail must be fenced/labelled as the evaluator's output: {prompt}"
+    );
+}
+
+// ── #168: task retries see their predecessor ────────────────────────────────
+
+/// #168: a work retry (attempt > 1) leads with a predecessor block carrying the
+/// prior attempt's captured output tail — size-capped (tail kept, head dropped)
+/// and fenced/labelled as the predecessor's output. Attempt 1's prompt is
+/// unchanged (nothing precedes it).
+#[tokio::test]
+async fn work_retry_prepends_predecessor_block_with_capped_tail() {
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let Some(rig) = rig_with_artifacts(Some(identity)).await else {
+        return;
+    };
+    // flaky: work_retries 1 → attempt 1 (exit 2) retries as attempt 2 (exit 3).
+    rig.provider.script_exits([2, 3]);
+    // The predecessor's captured stdout: a HEAD marker the cap drops, a TAIL
+    // marker it keeps, padded past PREDECESSOR_TAIL_BYTES between them.
+    let log = format!(
+        "PRED_HEAD_dropped_by_cap\n{}\nPRED_TAIL_diagnosis_stack_overflow_at_lib_rs_88",
+        "y".repeat(20_000)
+    );
+    rig.backend.put_logs(log.into_bytes());
+
+    let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    let runs = rig.provider.runs();
+    assert_eq!(runs.len(), 2, "attempt 1 + one retry");
+    assert!(
+        !runs[0].prompt.contains("Previous Attempt (#168)"),
+        "attempt 1 prompt is unchanged: {}",
+        runs[0].prompt
+    );
+    let p = &runs[1].prompt;
+    assert!(
+        p.contains("## Previous Attempt (#168)"),
+        "the retry leads with the predecessor block: {p:.400}"
+    );
+    assert!(
+        p.contains("You are attempt 2"),
+        "names the attempt ordinal: {p:.400}"
+    );
+    assert!(
+        p.contains("PRED_TAIL_diagnosis_stack_overflow_at_lib_rs_88"),
+        "carries the predecessor's tail"
+    );
+    assert!(
+        !p.contains("PRED_HEAD_dropped_by_cap"),
+        "the head is dropped by the size cap (tail-biased)"
+    );
+    assert!(p.contains("…(truncated)…"), "the cap marks the truncation");
+    assert!(p.contains("```"), "the tail is fenced");
+}
+
+/// #168: an agent evaluator relaunched after a #167 no-output invalid fail
+/// carries the predecessor block. Its predecessor produced no captured output,
+/// so the block says so explicitly (rather than being omitted) — the relaunch
+/// still knows a predecessor existed. The first eval attempt has no block.
+#[tokio::test]
+async fn agent_eval_relaunch_prepends_empty_noted_predecessor_block() {
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let Some(rig) = rig_with_artifacts(Some(identity)).await else {
+        return;
+    };
+    commit_work(&rig); // agent work commits (run 0) → Evaluation
+    // No put_logs: each agent evaluator produces no captured output, and never
+    // submits a verdict → #167 no-output invalid fail → relaunch loop.
+
+    let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    let runs = rig.provider.runs();
+    let eval_runs: Vec<_> = runs
+        .iter()
+        .filter(|r| r.prompt.contains("review it"))
+        .collect();
+    assert!(
+        eval_runs.len() >= 2,
+        "the evaluator must relaunch, giving a predecessor to describe: {}",
+        eval_runs.len()
+    );
+    assert!(
+        !eval_runs[0].prompt.contains("Previous Attempt (#168)"),
+        "the first eval attempt has no predecessor: {}",
+        eval_runs[0].prompt
+    );
+    let relaunch = &eval_runs[1].prompt;
+    assert!(
+        relaunch.contains("## Previous Attempt (#168)"),
+        "the eval relaunch leads with the predecessor block: {relaunch}"
+    );
+    assert!(
+        relaunch.contains("produced no captured output"),
+        "an empty predecessor is noted, not omitted: {relaunch}"
+    );
+}
+
+/// #168: command (ci) evaluator retries are deterministic scripts that read no
+/// prompt — the predecessor-block machinery never touches them. A command eval
+/// that no-outputs and relaunches produces no agent prompt at all.
+#[tokio::test]
+async fn command_eval_retry_gets_no_predecessor_prompt() {
+    let Some(rig) = rig().await else { return };
+    commit_work(&rig); // agent work (the only provider run) → Evaluation
+    rig.backend.script_exits([101, 101, 101, 101, 101]); // ci no-outputs, relaunches
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    // Only the single agent WORK run went through the provider; every command
+    // eval relaunch is a bare backend container with no agent prompt.
+    let runs = rig.provider.runs();
+    assert_eq!(
+        runs.len(),
+        1,
+        "a command eval retry builds no agent prompt: {runs:?}"
+    );
+    assert!(
+        !runs[0].prompt.contains("Previous Attempt (#168)"),
+        "the work prompt is untouched by command-eval retries"
+    );
 }

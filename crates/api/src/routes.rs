@@ -925,6 +925,24 @@ pub async fn jobs_update(
     .await
 }
 
+/// Finalize an edited Draft back to Frozen (#166): validate the definition
+/// like release, but park it (re-batchable) instead of scheduling. Member+;
+/// the dispatcher rejects (409) anything but a Draft job.
+pub async fn jobs_finalize(
+    State(state): State<SharedState>,
+    Path((owner, project, seq)): Path<(String, String, u64)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    member_on(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::jobs_finalize(&owner, &project, seq),
+        serde_json::json!({}),
+        StatusCode::OK,
+    )
+    .await
+}
+
 /// Move a Frozen (never-released) job back to Draft for editing (§2.1).
 /// Member+; the dispatcher rejects (409) anything but a Frozen job.
 pub async fn jobs_draft(

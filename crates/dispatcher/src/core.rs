@@ -259,6 +259,15 @@ pub enum Msg {
         seq: u64,
         reply: Reply<()>,
     },
+    /// `req.jobs.finalize.*` (#166): finalize an edited Draft back to Frozen —
+    /// validates the definition like release but parks it (re-batchable)
+    /// instead of scheduling. Only Draft → Frozen.
+    FinalizeJob {
+        owner: String,
+        project: String,
+        seq: u64,
+        reply: Reply<()>,
+    },
     /// `req.jobs.claim.*` (spec §1.2 claims): a human claims the job's next
     /// work attempt. 409 while an attempt is in flight.
     ClaimJob {
@@ -500,6 +509,17 @@ impl CoreHandle {
     pub async fn draft_job(&self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let (owner, project) = (owner.to_string(), project.to_string());
         self.call(|reply| Msg::DraftJob {
+            owner,
+            project,
+            seq,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn finalize_job(&self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::FinalizeJob {
             owner,
             project,
             seq,
@@ -1183,6 +1203,14 @@ impl Core {
                 reply,
             } => {
                 let _ = reply.send(self.draft_job(&owner, &project, seq).await);
+            }
+            Msg::FinalizeJob {
+                owner,
+                project,
+                seq,
+                reply,
+            } => {
+                let _ = reply.send(self.finalize_job(&owner, &project, seq).await);
             }
             Msg::TriageJob {
                 owner,
@@ -2020,6 +2048,43 @@ impl Core {
         let mut job = self.must_get(owner, project, seq)?.clone();
         self.set_state(&mut job, JobState::Draft).await?;
         self.publish(owner, project, seq, "job-drafted", serde_json::json!({}))
+            .await
+    }
+
+    /// Handle `req.jobs.finalize.*` (#166): Draft → Frozen. Finalizes an edited
+    /// Draft's definition — validating the field rules and evaluator collisions
+    /// exactly as release does — but parks the job Frozen (re-batchable) instead
+    /// of scheduling it. Draft-only: any other state is a 409 (`InvalidTransition`).
+    /// Wiring and static config (deps, prompt files, KV) stay deferred to
+    /// release, matching a freshly-created Frozen job (§2.1); validation failure
+    /// returns field errors (422) and the job stays Draft.
+    pub async fn finalize_job(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
+        let job = self.must_get(owner, project, seq)?.clone();
+        if job.state != JobState::Draft {
+            return Err(InvalidTransition {
+                from: job.state,
+                to: JobState::Frozen,
+            }
+            .into());
+        }
+
+        // Validate the edited definition against the current default HEAD: the
+        // job type's §1.1 field rules (via `load_job_type`) plus the additive
+        // evaluators' name-collision / field rules (`with_job_evaluators`). Any
+        // error returns before the state write, so the job stays Draft.
+        let default_branch = self.repos.default_branch(owner, project).await?;
+        let head = self
+            .repos
+            .resolve_ref(owner, project, &default_branch)
+            .await?;
+        let job_type =
+            release::load_job_type(&self.repos, owner, project, &head, &job.r#type, Some(seq))
+                .await?;
+        release::with_job_evaluators(job_type, &job)?;
+
+        let mut updated = job;
+        self.set_state(&mut updated, JobState::Frozen).await?;
+        self.publish(owner, project, seq, "job-finalized", serde_json::json!({}))
             .await
     }
 

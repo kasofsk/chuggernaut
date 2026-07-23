@@ -131,6 +131,10 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
             post(routes::jobs_revoke),
         )
         .route(
+            "/api/v1/projects/{owner}/{project}/jobs/{seq}/finalize",
+            post(routes::jobs_finalize),
+        )
+        .route(
             "/api/v1/projects/{owner}/{project}/jobs/{seq}/draft",
             post(routes::jobs_draft),
         )

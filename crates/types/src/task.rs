@@ -307,6 +307,12 @@ pub struct EvalResult {
     pub evaluator: String,
     pub pass: bool,
     pub structured: Option<serde_json::Value>,
+    /// A command evaluator's captured output tail (#167): the failure evidence
+    /// (compiler/test stderr) threaded into the rework brief and #155's
+    /// re-review, since a `command` result carries no structured findings.
+    /// `None` for agent evaluators (which report through structured findings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 #[cfg(test)]

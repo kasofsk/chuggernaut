@@ -556,6 +556,9 @@ export const api = {
     req<JobCriteria>('GET', `/api/v1/projects/${owner}/${project}/jobs/${seq}/criteria`),
   release: (owner: string, project: string, seq: number) =>
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/release`),
+  /** Finalize an edited Draft back to Frozen (#166): validation runs, then it parks re-batchable; 409 outside Draft. */
+  finalize: (owner: string, project: string, seq: number) =>
+    req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/finalize`),
   revoke: (owner: string, project: string, seq: number) =>
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/revoke`),
   /** Claim the next work attempt for a human (spec §1.2 claims); 409 while an attempt is in flight. */

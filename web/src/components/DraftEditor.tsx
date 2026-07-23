@@ -33,6 +33,7 @@ export function DraftEditor({
   project,
   job,
   onRelease,
+  onFinalize,
   onRevoke,
   onLeftDraft,
 }: {
@@ -40,6 +41,7 @@ export function DraftEditor({
   project: string
   job: Job
   onRelease: () => void
+  onFinalize: () => void
   onRevoke: () => void
   /** called on a 409 so the parent refetches and flips to the read view */
   onLeftDraft: () => void
@@ -426,10 +428,18 @@ export function DraftEditor({
       <div className="create-actions">
         <button
           type="button"
-          title="finalize and release this draft: validation runs, then the dispatcher takes over"
+          title="release this draft: validation runs, then the dispatcher takes over"
           onClick={onRelease}
         >
           release
+        </button>
+        <button
+          type="button"
+          className="link"
+          title="finalize this draft to Frozen: validation runs, then it parks unscheduled (re-batchable) until you release it"
+          onClick={onFinalize}
+        >
+          finalize
         </button>
         <button type="button" className="danger" onClick={onRevoke}>
           revoke

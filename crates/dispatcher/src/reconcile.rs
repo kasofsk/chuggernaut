@@ -467,6 +467,7 @@ impl Core {
                                 pass: result_pass(r),
                                 abort: result_abort(r),
                                 structured: result_structured(r),
+                                output: result_output(r),
                             },
                             _ => SlotOutcome::Infra,
                         },
@@ -515,6 +516,7 @@ impl Core {
                             pass: result_pass(r),
                             abort: result_abort(r),
                             structured: result_structured(r),
+                            output: result_output(r),
                         }),
                         (TaskState::Failed, _) => Some(SlotOutcome::Infra),
                         _ => None, // Pending human, queued command, or Running container
@@ -726,5 +728,15 @@ pub(crate) fn result_structured(result: &TaskResult) -> Option<serde_json::Value
         | TaskResult::Work { structured, .. } => structured.clone(),
         // Triage carries prose, not structured findings.
         TaskResult::Triage { .. } => None,
+    }
+}
+
+/// A command evaluator's captured output tail (#167), for rebuilding a slot
+/// outcome from the persisted task record on restart. Only `command` results
+/// embed the tail; every other result reports through structured findings.
+pub(crate) fn result_output(result: &TaskResult) -> Option<String> {
+    match result {
+        TaskResult::Command { output, .. } if !output.is_empty() => Some(output.clone()),
+        _ => None,
     }
 }
