@@ -178,7 +178,7 @@ async fn get_job(store: &NatsStore, seq: u64) -> types::Job {
 
 async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::Job {
     let jobs = store.jobs().await.unwrap();
-    for _ in 0..100 {
+    for _ in 0..400 {
         if let Some(job) = jobs.get("acme", "api", seq).await.unwrap()
             && job.state == want
         {

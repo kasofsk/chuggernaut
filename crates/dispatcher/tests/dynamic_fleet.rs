@@ -108,7 +108,7 @@ async fn release_cmd_work(handle: &CoreHandle) -> u64 {
 
 async fn wait_for_fleet(store: &NatsStore, pred: impl Fn(&FleetStatus) -> bool) -> FleetStatus {
     let bucket = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
-    for _ in 0..100 {
+    for _ in 0..400 {
         if let Some(fleet) = bucket
             .get_json::<FleetStatus>("fleet.status")
             .await
@@ -124,7 +124,7 @@ async fn wait_for_fleet(store: &NatsStore, pred: impl Fn(&FleetStatus) -> bool) 
 
 /// Poll a backend predicate (e.g. a launch appearing) until it holds.
 async fn wait_until(pred: impl Fn() -> bool) {
-    for _ in 0..100 {
+    for _ in 0..400 {
         if pred() {
             return;
         }

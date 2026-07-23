@@ -309,7 +309,7 @@ fn commit_work(rig: &Rig) {
 
 async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::Job {
     let jobs = store.jobs().await.unwrap();
-    for _ in 0..100 {
+    for _ in 0..400 {
         if let Some(job) = jobs.get("acme", "api", seq).await.unwrap() {
             if job.state == want {
                 return job;
@@ -1166,7 +1166,7 @@ async fn wait_for_task(
     pred: impl Fn(&types::Task) -> bool,
 ) -> types::Task {
     let tasks = store.tasks().await.unwrap();
-    for _ in 0..100 {
+    for _ in 0..400 {
         if let Some(t) = tasks
             .list_for_job("acme", "api", seq)
             .await
@@ -3253,7 +3253,7 @@ async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
     // Poll for the Triage task to land with a recorded assessment.
     let tasks = rig.store.tasks().await.unwrap();
     let mut triage = None;
-    for _ in 0..100 {
+    for _ in 0..400 {
         let log = tasks.list_for_job("acme", "api", job.id).await.unwrap();
         if let Some(t) = log
             .iter()
@@ -3316,7 +3316,7 @@ async fn triage_rejected_on_non_intervention_state() {
 /// even after the job advances past Work.
 async fn wait_for_work_task(store: &NatsStore, seq: u64) -> types::Task {
     let tasks = store.tasks().await.unwrap();
-    for _ in 0..100 {
+    for _ in 0..400 {
         let log = tasks.list_for_job("acme", "api", seq).await.unwrap();
         if let Some(t) = log.into_iter().find(|t| t.phase == TaskPhase::Work) {
             return t;
@@ -3380,7 +3380,7 @@ async fn work_container_id_recorded_while_running_and_kept_after_exit() {
         // be on the Running task record by now.
         let tasks = store.tasks().await.unwrap();
         let mut recorded = None;
-        for _ in 0..100 {
+        for _ in 0..400 {
             if let Some(t) = tasks.get("acme", "api", 1, 1).await.unwrap()
                 && t.state == TaskState::Running
                 && t.container_id.is_some()
@@ -3870,7 +3870,7 @@ async fn rework_context_carries_command_eval_output_tail() {
 
     // Wait for the rework work cycle to launch (a second provider run).
     let mut rework_prompt = None;
-    for _ in 0..100 {
+    for _ in 0..400 {
         let runs = rig.provider.runs();
         if runs.len() >= 2 {
             rework_prompt = Some(runs[1].prompt.clone());

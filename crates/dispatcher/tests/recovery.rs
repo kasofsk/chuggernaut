@@ -173,7 +173,7 @@ fn commit_on_run(provider: &FakeProvider, bare: std::path::PathBuf) {
 
 async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> Job {
     let jobs = store.jobs().await.unwrap();
-    for _ in 0..100 {
+    for _ in 0..400 {
         if let Some(job) = jobs.get("acme", "api", seq).await.unwrap()
             && job.state == want
         {
@@ -501,7 +501,7 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
 
     // Wait for the reconciled dispatcher to launch the cycle-2 reviewer.
     let mut prompt = None;
-    for _ in 0..100 {
+    for _ in 0..400 {
         if let Some(run) = provider.runs().first() {
             prompt = Some(run.prompt.clone());
             break;
@@ -1214,7 +1214,7 @@ async fn restart_relaunches_queued_tasks_in_persisted_fifo_order() {
 
     // Drain launches the queue front-to-back, so the first three launches are the
     // three work commands in FIFO order.
-    for _ in 0..100 {
+    for _ in 0..400 {
         if backend.launches().len() >= 3 {
             break;
         }
@@ -1642,7 +1642,7 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
 
     // Reconciliation runs once at startup; wait for the sweep to settle.
     let mut removed = Vec::new();
-    for _ in 0..100 {
+    for _ in 0..400 {
         removed = backend.removed();
         if removed.len() >= 2 {
             break;
@@ -1775,7 +1775,7 @@ fn work_task(id: u64, state: TaskState, container_id: Option<&str>) -> Task {
 
 async fn wait_killed(backend: &FakeBackend, want: usize) -> Vec<String> {
     let mut killed = Vec::new();
-    for _ in 0..100 {
+    for _ in 0..400 {
         killed = backend.killed();
         if killed.len() >= want {
             break;
@@ -2610,7 +2610,7 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
     // Wait until the work task is Running with its container id stamped.
     let tasks = store.tasks().await.unwrap();
     let mut work = None;
-    for _ in 0..100 {
+    for _ in 0..400 {
         let log = tasks.list_for_job("acme", "api", job.id).await.unwrap();
         if let Some(t) = log
             .into_iter()

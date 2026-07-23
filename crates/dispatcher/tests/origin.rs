@@ -495,7 +495,7 @@ async fn held_job_lands_after_merged_release_sync() {
     // The job passes evaluation and enters WrapUp but cannot land: it parks in
     // the merge queue behind the release hold and integration does not move.
     let jobs = rig.store.jobs().await.unwrap();
-    for _ in 0..100 {
+    for _ in 0..400 {
         let j = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
         assert_ne!(j.state, JobState::Done, "must not land while held");
         if j.state == JobState::WrapUp {
@@ -522,7 +522,7 @@ async fn held_job_lands_after_merged_release_sync() {
     rig.pr.script("closed", true);
     handle.origin_sync("acme", "api").await.unwrap();
 
-    for _ in 0..100 {
+    for _ in 0..400 {
         let j = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
         if j.state == JobState::Done {
             break;

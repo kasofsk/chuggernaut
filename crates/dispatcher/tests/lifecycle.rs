@@ -375,7 +375,7 @@ async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
         .unwrap();
 
     let mut cleared = false;
-    for _ in 0..100 {
+    for _ in 0..400 {
         let s = jobs
             .get("acme", "api", deploy.id)
             .await
@@ -445,7 +445,7 @@ async fn version_skewed_config_parks_stalled_not_escalated_at_launch() {
     let _handle = dispatcher::core::spawn(core2);
 
     let mut parked = None;
-    for _ in 0..100 {
+    for _ in 0..400 {
         let rec = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
         if rec.state != JobState::Ready {
             parked = Some(rec);

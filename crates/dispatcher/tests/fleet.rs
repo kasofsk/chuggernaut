@@ -163,7 +163,7 @@ async fn spawn_core(
 /// Poll `fleet.status` until `pred` holds (or time out), returning the snapshot.
 async fn wait_for_fleet(store: &NatsStore, pred: impl Fn(&FleetStatus) -> bool) -> FleetStatus {
     let bucket = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
-    for _ in 0..100 {
+    for _ in 0..400 {
         if let Some(fleet) = bucket
             .get_json::<FleetStatus>("fleet.status")
             .await

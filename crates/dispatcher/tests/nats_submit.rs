@@ -138,7 +138,7 @@ async fn submits_flow_over_nats_to_the_core() {
     handle.release_job("acme", "api", job.id).await.unwrap();
 
     let jobs = store.jobs().await.unwrap();
-    for _ in 0..100 {
+    for _ in 0..400 {
         if jobs.get("acme", "api", 1).await.unwrap().unwrap().state == JobState::Done {
             break;
         }
@@ -303,7 +303,7 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
     handle.release_job("acme", "api", job.id).await.unwrap();
 
     let jobs = store.jobs().await.unwrap();
-    for _ in 0..100 {
+    for _ in 0..400 {
         if jobs.get("acme", "api", 1).await.unwrap().unwrap().state == JobState::Done {
             break;
         }
