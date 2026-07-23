@@ -209,12 +209,6 @@ pub fn vcs_diff(owner: &str, project: &str, seq: u64) -> String {
     format!("req.vcs.diff.{owner}.{project}.{seq}")
 }
 
-/// One turn of the New Job "job wizard" chat: the conversation rides in the
-/// payload, the dispatcher grounds it in repo/job context and calls the LLM.
-pub fn wizard_chat(owner: &str, project: &str) -> String {
-    format!("req.wizard.chat.{owner}.{project}")
-}
-
 /// §7.5 project-role management: the dispatcher (single writer of `users.*`)
 /// mutates a user record's `project_roles`. `verb` is `set` | `remove` | `list`;
 /// the target email rides in the payload (`{ email, role? }`) — emails are not

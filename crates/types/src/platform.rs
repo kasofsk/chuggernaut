@@ -59,7 +59,6 @@ mod tests {
             channel_binary: None,
             hook_bin: None,
             secrets_encryption: true,
-            wizard_available: false,
             dispatcher_sha: Some("abc123".into()),
             main_tip_sha: Some("def456".into()),
             commits_behind: Some(3),
@@ -103,7 +102,6 @@ mod tests {
         // Pre-existing optional fields default.
         assert!(snap.nodes[0].available);
         assert_eq!(snap.nodes[0].version, None);
-        assert!(!snap.wizard_available);
         // New CD fields default to None.
         assert_eq!(snap.dispatcher_sha, None);
         assert_eq!(snap.main_tip_sha, None);
@@ -148,11 +146,6 @@ pub struct DispatcherConfigSnapshot {
     /// Whether the dispatcher loaded the age identity — i.e. secrets are
     /// encrypted at rest rather than injected raw (§8.2 dev mode).
     pub secrets_encryption: bool,
-    /// Whether the New Job "job wizard" LLM chat is configured (`WIZARD_API_KEY`
-    /// / `ANTHROPIC_API_KEY`). False → the UI falls back to manual title/
-    /// description entry.
-    #[serde(default)]
-    pub wizard_available: bool,
     /// The running dispatcher binary's own build SHA (`CHUG_GIT_SHA`, baked at
     /// build time — the SHA that `version_string()` embeds). `None` for local/
     /// dev builds with no SHA baked in. Compared against `main_tip_sha` to show

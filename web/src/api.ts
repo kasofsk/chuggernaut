@@ -389,9 +389,6 @@ export interface DispatcherSnapshot {
   channel_binary: string | null
   hook_bin: string | null
   secrets_encryption: boolean
-  /** Whether the New Job "job wizard" LLM chat is configured; false → the UI
-   *  falls back to manual title/description entry. */
-  wizard_available?: boolean
   /** Active fleet placement policy (§3.1): `busyness` (fewest running) or
    *  `headroom` (most free slots). Absent on snapshots predating the field. */
   placement_policy?: string

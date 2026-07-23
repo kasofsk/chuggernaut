@@ -32,7 +32,6 @@ pub(crate) fn build_base_snapshot(
     fleet: &[NodeStatus],
     deployed_sha: Option<String>,
     secrets_encryption: bool,
-    wizard_available: bool,
 ) -> DispatcherConfigSnapshot {
     DispatcherConfigSnapshot {
         nodes: config
@@ -64,7 +63,6 @@ pub(crate) fn build_base_snapshot(
             .map(|p| p.display().to_string()),
         hook_bin: config.hook_bin.as_ref().map(|p| p.display().to_string()),
         secrets_encryption,
-        wizard_available,
         dispatcher_sha: deployed_sha,
         // Filled by the scan tick from the self-repo, if configured.
         main_tip_sha: None,
@@ -253,7 +251,7 @@ mod tests {
             available: false,
             version: Some("0.1.0+abc".into()),
         }];
-        let snap = build_base_snapshot(&config(), &fleet, Some("abc".into()), true, false);
+        let snap = build_base_snapshot(&config(), &fleet, Some("abc".into()), true);
         assert_eq!(snap.nodes.len(), 1);
         assert!(!snap.nodes[0].available);
         assert_eq!(snap.nodes[0].version.as_deref(), Some("0.1.0+abc"));
@@ -272,7 +270,7 @@ mod tests {
             available: true,
             version: Some("0.1.0+abc".into()),
         }];
-        let base = build_base_snapshot(&config(), &fleet, Some("abc".into()), true, false);
+        let base = build_base_snapshot(&config(), &fleet, Some("abc".into()), true);
         let published = serde_json::to_vec(&base).unwrap();
 
         // Same content ⇒ identical bytes ⇒ skip.

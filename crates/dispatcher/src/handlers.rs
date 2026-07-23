@@ -13,7 +13,6 @@ use crate::core::{
     ChannelPost, CoreError, CoreHandle, CreateJobRequest, EvalSubmission, UpdateJobRequest,
     WorkSubmission,
 };
-use crate::wizard::{self, JobLine, WizardConfig, WizardError, WizardRequest};
 use container::ContainerBackend;
 use std::sync::Arc;
 use store::NatsStore;
@@ -250,16 +249,6 @@ fn bad_gateway(message: &str) -> Vec<u8> {
     .unwrap()
 }
 
-/// 429 for a transient "model is busy" reply: kept distinct from the 502 used
-/// for hard upstream failures and the 503 used for "unconfigured" so the UI can
-/// tell a retry-worthy busy apart from a permanent fallback.
-fn too_many_requests(message: &str) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({
-        "error": { "status": 429, "message": message }
-    }))
-    .unwrap()
-}
-
 const NOT_FOUND: &[u8] = br#"{"error":{"status":404,"message":"not found"}}"#;
 
 /// Wire body for `req.jobs.create` (spec §6.2 POST .../jobs).
@@ -335,7 +324,6 @@ struct ResolveBody {
 /// Subscribe the API-facing subject families (spec §6.1): jobs, graph.get,
 /// tasks (pending/list/resolve), vcs.diff. Reads go straight to the store or
 /// repos; mutations go through the core actor.
-#[allow(clippy::too_many_arguments)]
 pub async fn spawn_api_handlers(
     store: &NatsStore,
     handle: CoreHandle,
@@ -343,8 +331,6 @@ pub async fn spawn_api_handlers(
     // Binary path baked into new repos' pre-receive hooks (§5.2) — the path
     // the binary has on the SSH host (`HOOK_BIN`); None → this process's own.
     hook_bin: Option<std::path::PathBuf>,
-    // The New Job job-wizard LLM config; None → the wizard subject replies 503.
-    wizard: Option<Arc<WizardConfig>>,
     // SSH CA private key path (§7.3) for user-cert minting; None (no ssh_ca, or
     // `file://` dev repos) → `req.ssh.sign-user-cert` replies 503.
     ssh_ca: Option<std::path::PathBuf>,
@@ -568,7 +554,7 @@ pub async fn spawn_api_handlers(
         }
     });
 
-    spawn_read_handlers(store, handle, repos, wizard, backend).await
+    spawn_read_handlers(store, handle, repos, backend).await
 }
 
 /// §7.5 project-role management, dispatcher-side (single writer of `users.*`).
@@ -934,7 +920,6 @@ async fn spawn_read_handlers(
     store: &NatsStore,
     handle: CoreHandle,
     repos: Arc<RepoManager>,
-    wizard: Option<Arc<WizardConfig>>,
     backend: Arc<dyn ContainerBackend>,
 ) -> store::Result<()> {
     // ── req.jobs.{create,get,list,release,revoke,criteria} ──────────────
@@ -1230,134 +1215,7 @@ async fn spawn_read_handlers(
         }
     });
 
-    // ── req.wizard.chat.{owner}.{project} — one turn of the New Job job-wizard
-    // chat. Read-only: grounds the conversation in repo/job context and calls
-    // the LLM; never touches job state.
-    let mut wizard_sub = store.subscribe_requests("req.wizard.chat.>").await?;
-    let wizard_store = store.clone();
-    let wizard_repos = repos.clone();
-    tokio::spawn(async move {
-        while let Some(req) = wizard_sub.next().await {
-            let parts: Vec<&str> = req.subject.split('.').collect();
-            let (Some(owner), Some(project)) = (parts.get(3).copied(), parts.get(4).copied())
-            else {
-                req.respond(bad_request("malformed subject")).await;
-                continue;
-            };
-            let Some(config) = wizard.as_deref() else {
-                req.respond(service_unavailable("job wizard is not configured"))
-                    .await;
-                continue;
-            };
-            let body = match serde_json::from_slice::<WizardRequest>(&req.payload) {
-                Err(e) => bad_request(&e.to_string()),
-                Ok(request) => {
-                    wizard_reply(
-                        config,
-                        &wizard_store,
-                        &wizard_repos,
-                        owner,
-                        project,
-                        request,
-                    )
-                    .await
-                }
-            };
-            req.respond(body).await;
-        }
-    });
-
     Ok(())
-}
-
-/// Gather grounding context (recent jobs + repo file layout), run one wizard
-/// turn, and encode the reply envelope.
-async fn wizard_reply(
-    config: &WizardConfig,
-    store: &NatsStore,
-    repos: &RepoManager,
-    owner: &str,
-    project: &str,
-    request: WizardRequest,
-) -> Vec<u8> {
-    // Recent jobs (newest first) so the wizard matches house style and avoids
-    // proposing duplicates. Best-effort: an empty list is still useful context.
-    let jobs: Vec<JobLine> = match store.jobs().await {
-        Ok(js) => match js.list(owner, project).await {
-            Ok(mut list) => {
-                list.sort_by_key(|j| std::cmp::Reverse(j.id));
-                list.into_iter()
-                    .map(|j| JobLine {
-                        id: j.id,
-                        r#type: j.r#type,
-                        title: j.title,
-                        state: format!("{:?}", j.state),
-                    })
-                    .collect()
-            }
-            Err(_) => Vec::new(),
-        },
-        Err(_) => Vec::new(),
-    };
-    // The repo file layout (blob paths at default HEAD), so the wizard can cite
-    // real files. Best-effort — a fresh repo may not resolve yet.
-    let files: Vec<String> = repo_file_paths(repos, owner, project)
-        .await
-        .unwrap_or_default();
-
-    // The live job-type library (already sorted by name) so the wizard picks a
-    // real type and never invents one, and the knowledge-tag vocabulary so it
-    // suggests real tags. Best-effort — same served view as the create form.
-    let job_types: Vec<wizard::JobTypeLine> = list_job_types(repos, owner, project)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|v| wizard::JobTypeLine {
-            name: v["name"].as_str().unwrap_or_default().to_string(),
-            description: v["description"].as_str().unwrap_or_default().to_string(),
-        })
-        .collect();
-    let tags: Vec<String> = list_tags(repos, owner, project).await.unwrap_or_default();
-
-    let context = wizard::build_context(
-        &format!("{owner}/{project}"),
-        &files,
-        &jobs,
-        &job_types,
-        &tags,
-    );
-    match wizard::run(config, &context, &request.messages).await {
-        Ok(turn) => ok_reply(&turn),
-        Err(WizardError::EmptyConversation) => {
-            bad_request(&WizardError::EmptyConversation.to_string())
-        }
-        Err(WizardError::Unconfigured) => {
-            service_unavailable(&WizardError::Unconfigured.to_string())
-        }
-        // Transient capacity limit: 429 (not 503 — that's the "unconfigured →
-        // fall back to manual entry" signal). The friendly message is shown as
-        // the wizard's reply so the operator knows to retry, never a bare code.
-        Err(e @ WizardError::Busy) => too_many_requests(&e.to_string()),
-        // Upstream model failures surface as 502 — the request was well-formed,
-        // the dependency failed. Covers AuthInvalid, Status, and Http.
-        Err(e) => bad_gateway(&e.to_string()),
-    }
-}
-
-/// Blob paths in the repo at default-branch HEAD (files only, no tree entries).
-async fn repo_file_paths(
-    repos: &RepoManager,
-    owner: &str,
-    project: &str,
-) -> Result<Vec<String>, vcs::VcsError> {
-    let branch = repos.default_branch(owner, project).await?;
-    let head = repos.resolve_ref(owner, project, &branch).await?;
-    let entries = repos.tree(owner, project, &head).await?;
-    Ok(entries
-        .into_iter()
-        .filter(|e| e.r#type == "blob")
-        .map(|e| e.path)
-        .collect())
 }
 
 /// Resolved evaluation criteria for one job: the type's evaluators (with

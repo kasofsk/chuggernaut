@@ -91,10 +91,6 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
             get(routes::jobs_list).post(routes::jobs_create),
         )
         .route(
-            "/api/v1/projects/{owner}/{project}/wizard",
-            post(routes::wizard_chat),
-        )
-        .route(
             "/api/v1/projects/{owner}/{project}/job-types",
             get(routes::job_types_list),
         )

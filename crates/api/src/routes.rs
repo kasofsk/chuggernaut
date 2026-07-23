@@ -126,25 +126,6 @@ async fn forward(
     map_reply(&reply.payload, success)
 }
 
-/// Like [`forward`] but with a single attempt and a caller-owned timeout — for
-/// requests that are slow and NOT cheap to repeat (the job wizard's LLM call),
-/// where the default short timeout + 3× retry would fire duplicate model calls.
-async fn forward_slow(
-    state: &SharedState,
-    subject: &str,
-    payload: serde_json::Value,
-    success: StatusCode,
-    timeout: Duration,
-) -> ApiResult<Response> {
-    let payload = serde_json::to_vec(&payload).map_err(|e| ApiError::internal(e.to_string()))?;
-    let reply = state
-        .store
-        .request_timeout(subject, &payload, timeout)
-        .await
-        .map_err(|e| ApiError::internal(format!("dispatcher unavailable: {e}")))?;
-    map_reply(&reply.payload, success)
-}
-
 /// Map a dispatcher reply envelope (resource JSON, or the §6.5 error shape) to
 /// an HTTP response.
 fn map_reply(reply: &[u8], success: StatusCode) -> ApiResult<Response> {
@@ -732,29 +713,6 @@ pub async fn queue_get(
         &store::subjects::queue_list(&owner, &project),
         serde_json::json!({}),
         StatusCode::OK,
-    )
-    .await
-}
-
-/// One turn of the New Job "job wizard" chat: bridge the conversation to the
-/// dispatcher, which grounds it in repo/job context and calls the LLM. Same
-/// Member+ gate as creating a job — the wizard is a create-job aid.
-pub async fn wizard_chat(
-    State(state): State<SharedState>,
-    Path((owner, project)): Path<(String, String)>,
-    Auth(identity): Auth,
-    Json(body): Json<serde_json::Value>,
-) -> ApiResult<Response> {
-    member_on(&identity, &owner, &project)?;
-    // The dispatcher gathers context and calls the LLM inline — well over the
-    // default request timeout, and not idempotent-cheap, so: one attempt,
-    // generous deadline (a touch above the model's own 60s timeout).
-    forward_slow(
-        &state,
-        &store::subjects::wizard_chat(&owner, &project),
-        body,
-        StatusCode::OK,
-        Duration::from_secs(75),
     )
     .await
 }

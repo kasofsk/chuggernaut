@@ -2085,23 +2085,9 @@ PLACEMENT_POLICY         busyness | headroom  Optional. Fleet placement policy (
 
 If a job type declares `provider` and/or `model` at the `work:` level or per evaluator, those override the project/platform defaults for that job or evaluator. If neither the job type, the project default, nor the platform config specifies a provider, the dispatcher fails to start with a configuration error. Triage runs at the platform defaults (§1.2) — it is not tied to a job type and does not consult the project or per-job model.
 
-### 12.5 Job Wizard Credential
+### 12.5 Job Wizard Credential *(retired)*
 
-The New Job screen's optional "job wizard" (a short chatbot conversation that shapes a rough goal into a ticket) calls the Anthropic Messages API directly. Its credential is resolved **once at dispatcher startup**, in this order:
-
-1. `WIZARD_API_KEY` — explicit override.
-2. `ANTHROPIC_API_KEY` — the conventional env var.
-3. The age-encrypted `CLAUDE_CODE_OAUTH_TOKEN` secret under the reserved `global/agents` scope (§8.2) — **the same credential injected into agent containers for the `claude` CLI.** The dispatcher already holds the age identity to decrypt it at launch; the wizard reuses that path.
-
-Nothing resolved → the wizard is unavailable (`wizard_available: false` in the platform config snapshot, §3.1) and the UI falls back to manual title/description entry. It is never a startup error.
-
-**Auth mode follows the token shape:** a Claude Code OAuth token (`sk-ant-oat…`) authenticates with `Authorization: Bearer <token>` plus the required `anthropic-beta: oauth-2025-04-20` header (the `/v1/messages` endpoint rejects the token without it); a standard key (`sk-ant-api…`, or a custom gateway key) uses `x-api-key` as before. `WIZARD_MODEL` and `WIZARD_BASE_URL` overrides apply regardless of key source.
-
-**Sharing implication:** because the wizard reuses the `global/agents` agent credential by default, **wizard usage bills the same Claude subscription/account as the agent containers** — and, more sharply, **contends for the same rate limits.** When agents are mid-run the account can be rate-limited, so the wizard's request may be throttled (429) or the platform overloaded (529). The wizard therefore retries transient capacity errors with exponential backoff (honoring the `retry-after` header, total sleep capped at ~20s so the synchronous chat turn never blocks for minutes) and, if still limited, returns a friendly *"the platform model is busy — try again in a moment"* message rather than the bare status code; a 401 instead surfaces as *"wizard credential invalid; check `CLAUDE_CODE_OAUTH_TOKEN`"*. A cheaper `WIZARD_MODEL` reduces cost but not contention (same account, same limits); set `WIZARD_API_KEY` to a separate credential to isolate the wizard from agent load entirely.
-
-**Security:** the token is a live credential — it is redacted from all `Debug`/`Display` output, never logged, never placed in an error message, and never passed as a process argument. It leaves the dispatcher only as an HTTP header, from process memory.
-
-Because resolution happens at startup, setting the `CLAUDE_CODE_OAUTH_TOKEN` secret after boot requires a dispatcher restart before the wizard picks it up. (On a deployment where the agent credential is already set at init, §12.1, this is moot.)
+The New Job screen's optional "job wizard" — a short chatbot conversation that shaped a rough goal into a ticket, calling the Anthropic Messages API from the dispatcher — has been **retired.** Its role is served by the collaborative draft editor. The `/wizard` route, the dispatcher `wizard` module, the `req.wizard.chat.*` subject, and the `wizard_available` config-snapshot field have been removed. `WIZARD_API_KEY` / `ANTHROPIC_API_KEY` / `WIZARD_MODEL` / `WIZARD_BASE_URL` no longer have any effect.
 
 ---
 

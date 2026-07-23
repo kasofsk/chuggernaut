@@ -151,7 +151,6 @@ async fn http_bridge_end_to_end() {
         Arc::new(vcs::RepoManager::new(&repos_root)),
         None,
         None,
-        None,
         Arc::new(FakeBackend::new()),
     )
     .await
@@ -944,7 +943,6 @@ async fn health_endpoint() {
         Arc::new(vcs::RepoManager::new(repos_root.path())),
         None,
         None,
-        None,
         Arc::new(FakeBackend::new()),
     )
     .await
@@ -1021,7 +1019,6 @@ async fn ssh_cert_minting() {
         &store,
         handle,
         Arc::new(vcs::RepoManager::new(repos_root.path())),
-        None,
         None,
         Some(ca.clone()),
         Arc::new(FakeBackend::new()),
@@ -1163,7 +1160,6 @@ async fn task_output_endpoint() {
         &store,
         handle,
         Arc::new(vcs::RepoManager::new(repos_root.path())),
-        None,
         None,
         None,
         backend.clone(),

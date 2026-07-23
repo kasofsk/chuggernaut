@@ -137,7 +137,6 @@ async fn config_endpoints() {
                 channel_binary: None,
                 hook_bin: None,
                 secrets_encryption: true,
-                wizard_available: true,
                 dispatcher_sha: None,
                 main_tip_sha: None,
                 commits_behind: None,

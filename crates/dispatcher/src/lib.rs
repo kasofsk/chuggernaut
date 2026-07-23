@@ -29,4 +29,3 @@ pub mod scan;
 pub mod seed;
 pub mod state;
 pub mod triage;
-pub mod wizard;
