@@ -1520,7 +1520,8 @@ async fn queued_eval_escalates_after_max_wait_not_retry_exhaustion() {
 async fn agent_eval_queues_on_no_capacity_then_launches_when_freed() {
     // The provider launches through the backend (artifacts capture on), so an
     // agent eval's launch actually reaches NoCapacity — mirroring ClaudeProvider.
-    let Some(rig) = rig_full(Some("acme/api".into()), None).await else {
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let Some(rig) = rig_full(Some(identity), None).await else {
         return;
     };
     // Command work launches fine; only the agent eval container (cmd `["agent"]`)
@@ -1664,7 +1665,8 @@ async fn agent_eval_escalates_after_max_wait_not_retry_exhaustion() {
 /// burned), and the resumed record drops its `QueuedForCapacity` badge.
 #[tokio::test]
 async fn agent_eval_redefer_preserves_queue_time_and_burns_no_retries() {
-    let Some(rig) = rig_full(Some("acme/api".into()), None).await else {
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let Some(rig) = rig_full(Some(identity), None).await else {
         return;
     };
     // The agent eval container (cmd `["agent"]`) is refused while the fleet is
