@@ -25,6 +25,7 @@ import { EvaluatorTable } from '../components/EvaluatorTable'
 import { Markdown } from '../components/Markdown'
 import { DraftEditor } from '../components/DraftEditor'
 import { CoverWidget } from '../components/CoverWidget'
+import { Skeleton, SkeletonLines } from '../components/Skeleton'
 
 export function JobDetail() {
   const { owner = '', project = '', seq = '' } = useParams()
@@ -42,6 +43,9 @@ export function JobDetail() {
   const [queue, setQueue] = useState<QueueSnapshot | null>(null)
   const [criteria, setCriteria] = useState<JobCriteria | null>(null)
   const [events, setEvents] = useState<JobEvent[]>([])
+  // Initial load only: skeleton until the first fetch answers. SSE-driven
+  // refreshes never re-skeleton; a seq/project change resets it (effect below).
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   // The one task whose live-log pane is expanded, if any. Kept to a single open
   // pane so at most one tail loop polls at a time.
@@ -92,8 +96,10 @@ export function JobDetail() {
         if (e instanceof ApiError && e.status === 401) navigate('/login')
         else setError(e instanceof Error ? e.message : 'load failed')
       })
+      .finally(() => setLoading(false))
   }, [owner, project, jobSeq, navigate])
 
+  useEffect(() => setLoading(true), [owner, project, jobSeq])
   useEffect(refresh, [refresh])
   // Keep the per-event log immediate, but debounce the refetch: the SSE stream
   // replays the full history on load, so a naive refresh() per event fires a
@@ -122,10 +128,33 @@ export function JobDetail() {
     return () => clearInterval(id)
   }, [anyTicking])
 
-  if (!job) {
+  // `loading` also covers a seq change while a stale job is still in state.
+  if (!job || loading) {
     return (
       <div className="page">
-        {error ? <div className="error banner">{error}</div> : 'loading…'}
+        {error ? (
+          <div className="error banner">{error}</div>
+        ) : (
+          <>
+            <header className="topbar">
+              <Link to="/">Chuggernaut</Link>
+              <Link to={`/p/${owner}/${project}`}>
+                {owner}/{project}
+              </Link>
+              <h1>
+                #{seq} <Skeleton width="4rem" height="1em" />
+              </h1>
+            </header>
+            <section className="card">
+              <Skeleton width="16rem" height="1.3em" />
+              <SkeletonLines n={5} />
+            </section>
+            <section className="card">
+              <Skeleton width="8rem" height="1.2em" />
+              <SkeletonLines n={4} />
+            </section>
+          </>
+        )}
       </div>
     )
   }

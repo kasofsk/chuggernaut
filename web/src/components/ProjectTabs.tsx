@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom'
 
-/** Project-level navigation: running jobs vs. the job type library. */
+/** Project-level navigation, plus platform-level links right-aligned. */
 export function ProjectTabs({ owner, project }: { owner: string; project: string }) {
   return (
     <nav className="tabs">
@@ -11,6 +11,7 @@ export function ProjectTabs({ owner, project }: { owner: string; project: string
       <NavLink to={`/p/${owner}/${project}/prompts`}>Prompts</NavLink>
       <NavLink to={`/p/${owner}/${project}/tags`}>Tags</NavLink>
       <NavLink to={`/p/${owner}/${project}/files`}>Files</NavLink>
+      <NavLink to={`/p/${owner}/${project}/stats`}>Stats</NavLink>
       <NavLink to={`/p/${owner}/${project}/settings`}>Settings</NavLink>
     </nav>
   )

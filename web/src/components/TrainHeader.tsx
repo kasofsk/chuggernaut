@@ -131,7 +131,6 @@ export function TrainHeader() {
         {prev !== null && scenes[prev] && <SceneView key={`p-${prev}`} scene={scenes[prev]} fading />}
         {scene && <SceneView key={`c-${cur}`} scene={scene} />}
       </div>
-      <Locomotive onClick={advance} />
       <div className="train-scrim" />
       <span className="train-scene-name">{scene?.name}</span>
     </div>
@@ -213,42 +212,3 @@ function MatrixRain() {
   )
 }
 
-// The locomotive: sits left-of-centre, wheels turning, an occasional smoke puff.
-// A hidden delight — click it to jump to the next world.
-function Locomotive({ onClick }: { onClick: () => void }) {
-  return (
-    <button type="button" className="loco" onClick={onClick} title="chug on to the next world" aria-label="Next scene">
-      <span className="loco-smoke loco-smoke-1" />
-      <span className="loco-smoke loco-smoke-2" />
-      <span className="loco-smoke loco-smoke-3" />
-      <svg className="loco-svg" viewBox="0 0 150 90" width="150" height="90" fill="none" aria-hidden="true">
-        {/* body */}
-        <path d="M12 62V34a4 4 0 0 1 4-4h58l14 18h20a6 6 0 0 1 6 6v8H12Z" className="loco-body" />
-        <rect x="18" y="20" width="30" height="16" rx="3" className="loco-cab" />
-        <rect x="94" y="30" width="12" height="18" rx="2" className="loco-cab" />
-        {/* chimney */}
-        <rect x="30" y="10" width="12" height="12" rx="2" className="loco-chimney" />
-        <ellipse cx="36" cy="10" rx="9" ry="4" className="loco-chimney" />
-        {/* headlamp */}
-        <circle cx="120" cy="52" r="4" className="loco-lamp" />
-        {/* wheels */}
-        <g className="loco-wheel">
-          <circle cx="34" cy="68" r="13" className="loco-wheel-rim" />
-          <line x1="34" y1="57" x2="34" y2="79" className="loco-spoke" />
-          <line x1="23" y1="68" x2="45" y2="68" className="loco-spoke" />
-          <line x1="26" y1="60" x2="42" y2="76" className="loco-spoke" />
-          <line x1="26" y1="76" x2="42" y2="60" className="loco-spoke" />
-        </g>
-        <g className="loco-wheel">
-          <circle cx="92" cy="68" r="13" className="loco-wheel-rim" />
-          <line x1="92" y1="57" x2="92" y2="79" className="loco-spoke" />
-          <line x1="81" y1="68" x2="103" y2="68" className="loco-spoke" />
-          <line x1="84" y1="60" x2="100" y2="76" className="loco-spoke" />
-          <line x1="84" y1="76" x2="100" y2="60" className="loco-spoke" />
-        </g>
-        {/* connecting rod */}
-        <line x1="34" y1="68" x2="92" y2="68" className="loco-rod" />
-      </svg>
-    </button>
-  )
-}

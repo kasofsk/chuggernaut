@@ -2386,7 +2386,7 @@ table.jobs tbody tr.row-draft td:first-child {
   min-height: 100vh;
 }
 .shell-main {
-  padding-left: var(--rail-w);
+  padding-left: 0; /* rail removed */
 }
 .rail {
   position: fixed;
@@ -3258,7 +3258,7 @@ tr[data-state='Batched'] {
 /* Locomotive */
 .loco {
   position: absolute;
-  left: 7%;
+  right: 6%;
   bottom: 12px;
   z-index: 3;
   padding: 0;
@@ -3778,4 +3778,101 @@ tr[data-state='Batched'] {
   .switch {
     width: 100%;
   }
+}
+
+/* ── Stats page (overview moved off the jobs page) ─────────────────────────── */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 360px));
+  gap: var(--sp-4);
+  align-items: start;
+}
+.jobs-layout-full {
+  grid-template-columns: minmax(0, 1fr);
+}
+.tabs-spacer { flex: 1; }
+.tabs-platform { opacity: 0.7; }
+
+/* ── Skeleton loading (src/components/Skeleton.tsx) ────────────────────────
+   Initial-load placeholders: card-toned rounded rects with a subtle
+   background-position sweep. Both themes come free via the surface tokens. */
+.skel {
+  display: inline-block;
+  border-radius: var(--r-sm);
+  background: linear-gradient(
+    100deg,
+    var(--inset) 35%,
+    var(--btn-bg) 50%,
+    var(--inset) 65%
+  );
+  background-size: 300% 100%;
+  animation: skel-shimmer 1.4s linear infinite;
+}
+@keyframes skel-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+.skel-lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0;
+}
+.skel-table { margin: var(--sp-2) 0; }
+.skel-table-row {
+  display: flex;
+  gap: var(--sp-4);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--border-faint);
+}
+.skel-table-row:last-child { border-bottom: none; }
+@media (prefers-reduced-motion: reduce) {
+  .skel {
+    animation: none;
+    background: var(--inset);
+  }
+}
+.proj-titleline { justify-content: space-between; }
+.proj-header-links {
+  display: inline-flex;
+  gap: var(--sp-3);
+  margin-left: auto;
+}
+.proj-header-links a {
+  color: var(--text-dim, inherit);
+  opacity: 0.75;
+  font-size: 0.9em;
+}
+.proj-header-links a:hover,
+.proj-header-links a.active { opacity: 1; }
+
+/* ── Header layout: full-bleed scene; links pinned top-right; loco right ──── */
+.proj-header-links {
+  position: absolute;
+  top: var(--sp-3);
+  right: var(--sp-4);
+  z-index: 4;
+}
+
+
+/* three-way initial-state selector on the create form */
+.mode-seg {
+  display: inline-flex;
+  border: 1px solid var(--border-faint);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.mode-seg-opt {
+  padding: 6px 14px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  color: var(--dim);
+  font: inherit;
+}
+.mode-seg-opt + .mode-seg-opt { border-left: 1px solid var(--border-faint); }
+.mode-seg-on {
+  color: inherit;
+  background: var(--inset);
+  box-shadow: inset 0 0 8px 0 var(--glow);
 }

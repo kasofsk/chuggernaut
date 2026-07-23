@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ApiError, api } from '../api'
-import { ProjectTabs } from '../components/ProjectTabs'
+import { ProjectHeader } from '../components/ProjectHeader'
 import { YamlView } from '../components/YamlView'
+import { SkeletonLines, SkeletonTable } from '../components/Skeleton'
 
 type TreeEntry = { path: string; type: string; size: number | null }
 
@@ -22,6 +23,7 @@ export function FileViewPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    setTree(null) // param change: back to skeletons until the new fetch lands
     api.tree(owner, project).then(
       (t) => {
         setTree(t)
@@ -35,10 +37,8 @@ export function FileViewPage() {
   }, [owner, project, navigate])
 
   useEffect(() => {
-    if (!path) {
-      setFile(null)
-      return
-    }
+    setFile(null) // path change: back to the skeleton until the new fetch lands
+    if (!path) return
     api.file(owner, project, path).then(
       (f) => setFile(f),
       (e) => {
@@ -100,18 +100,12 @@ export function FileViewPage() {
 
   return (
     <div className="page">
-      <header className="topbar">
-        <Link to="/">Chuggernaut</Link>
-        <h1>
-          {owner}/{project}
-        </h1>
-        {tree && (
-          <span className="dim">
-            {tree.branch} @ {tree.ref.slice(0, 10)}
-          </span>
-        )}
-      </header>
-      <ProjectTabs owner={owner} project={project} />
+      <ProjectHeader owner={owner} project={project} />
+      {tree && (
+        <div className="dim" style={{ margin: '4px 0 8px' }}>
+          {tree.branch} @ {tree.ref.slice(0, 10)}
+        </div>
+      )}
       {error && <div className="error banner">{error}</div>}
 
       {path ? (
@@ -124,12 +118,14 @@ export function FileViewPage() {
               <pre className="prompt yaml-full">{file.content}</pre>
             )
           ) : (
-            !error && 'loading…'
+            !error && <SkeletonLines n={8} />
           )}
         </section>
       ) : (
         <section className="card">
           <h2>{crumbs(dir)}</h2>
+          {!tree && !error && <SkeletonTable rows={6} widths={['14rem', '4rem']} />}
+          {tree && (
           <div className="table-scroll">
             <table className="jobs">
             <tbody>
@@ -176,6 +172,7 @@ export function FileViewPage() {
             </tbody>
             </table>
           </div>
+          )}
         </section>
       )}
     </div>

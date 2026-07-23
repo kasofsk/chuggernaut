@@ -4,6 +4,7 @@ import { ApiError, api, type FleetNode, type PlatformConfig, type SlotOccupant }
 import { useFleet } from '../useFleet'
 import { fmtDuration, phaseToState } from '../format'
 import { StateBadge } from '../components/StateBadge'
+import { Skeleton } from '../components/Skeleton'
 
 // Poll cadence for the occupancy snapshot. The top-level cluster view has no
 // per-project SSE to ride, so it polls; the running counters tick every second
@@ -22,17 +23,26 @@ export function ClusterPage() {
   const navigate = useNavigate()
   const { fleet, unavailable, loaded } = useFleet({ pollMs: POLL_MS })
   const [cfg, setCfg] = useState<PlatformConfig | null>(null)
+  const [cfgLoaded, setCfgLoaded] = useState(false)
   const [forbidden, setForbidden] = useState(false)
 
   useEffect(() => {
     api.platformConfig().then(
-      (c) => setCfg(c),
+      (c) => {
+        setCfg(c)
+        setCfgLoaded(true)
+      },
       (e) => {
         if (e instanceof ApiError && e.status === 401) navigate('/login')
         else if (e instanceof ApiError && e.status === 403) setForbidden(true)
+        setCfgLoaded(true)
       },
     )
   }, [navigate])
+
+  // Initial load only: skeleton until both the occupancy snapshot and the
+  // config roster have answered once. Poll refreshes never re-skeleton.
+  const loading = !loaded || !cfgLoaded
 
   // A 1s clock so the running-duration counters advance while slots are busy.
   const [now, setNow] = useState(() => Date.now())
@@ -91,7 +101,25 @@ export function ClusterPage() {
         </section>
       )}
 
-      {!forbidden && (
+      {!forbidden && loading && (
+        <section className="card cluster-card">
+          <div className="cluster-graph">
+            <div className="cl-tier">
+              <Skeleton width="8rem" height="3.2rem" />
+            </div>
+            <Edge />
+            <div className="cl-tier">
+              <Skeleton width="8rem" height="3.2rem" />
+            </div>
+            <Edge />
+            <div className="cl-fan">
+              <Skeleton width="12rem" height="5rem" />
+              <Skeleton width="12rem" height="5rem" />
+            </div>
+          </div>
+        </section>
+      )}
+      {!forbidden && !loading && (
         <section className="card cluster-card">
           <div className="cluster-graph">
             <div className="cl-tier">

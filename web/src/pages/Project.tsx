@@ -7,9 +7,9 @@ import { ResolveForm } from '../components/ResolveForm'
 import { ProjectHeader } from '../components/ProjectHeader'
 import { OriginPanel } from '../components/OriginPanel'
 import { CapacityWidget } from '../components/CapacityWidget'
-import { JobsSidebar } from '../components/JobsSidebar'
 import { StatusFooter } from '../components/StatusFooter'
 import { IconSearch } from '../components/icons'
+import { SkeletonTable } from '../components/Skeleton'
 import { useFleet } from '../useFleet'
 import {
   filtersFromParams,
@@ -114,6 +114,9 @@ export function ProjectPage() {
   const [pending, setPending] = useState<Task[]>([])
   // Job seqs with a capacity-deferred launch waiting for a fleet slot (§3.5).
   const [queuedSeqs, setQueuedSeqs] = useState<Set<number>>(new Set())
+  // Initial load only: skeleton until the first jobs fetch answers. SSE-driven
+  // refreshes never re-skeleton; a project change resets it (effect below).
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   // Jobs table controls: column sort (default newest-first). The filter model
   // (#162) lives in the URL so a filtered view is shareable.
@@ -131,10 +134,12 @@ export function ProjectPage() {
         setJobs(js)
         setPending(ts)
         setError(null)
+        setLoading(false)
       })
       .catch((e) => {
         if (e instanceof ApiError && e.status === 401) navigate('/login')
         else setError(e instanceof Error ? e.message : 'load failed')
+        setLoading(false)
       })
     // Best-effort capacity-queue snapshot (spec §3.5): the seqs with a launch
     // waiting for a fleet slot, for the subtle "queued" chip. Never blocks the
@@ -154,6 +159,7 @@ export function ProjectPage() {
     new Map(),
   )
   useEffect(() => setChannelMsgs(new Map()), [owner, project])
+  useEffect(() => setLoading(true), [owner, project])
 
   useEffect(refresh, [refresh])
   // The SSE stream is the source of truth (Part 11): any event → refetch. On
@@ -353,8 +359,7 @@ export function ProjectPage() {
         </section>
       )}
 
-      <div className="jobs-layout">
-        <JobsSidebar jobs={jobs} claimed={claimedInWork} filters={filters} setFilters={setFilters} />
+      <div className="jobs-layout jobs-layout-full">
         <section className="card jobs-main">
           <div className="jobs-toolbar">
             <div className="jobs-toolbar-title">
@@ -411,7 +416,6 @@ export function ProjectPage() {
                 state{sortIndicator('state')}
               </th>
               <th>deps</th>
-              <th>created</th>
               <th className="sortable" onClick={() => toggleSort('completed')}>
                 completed{sortIndicator('completed')}
               </th>
@@ -419,7 +423,17 @@ export function ProjectPage() {
             </tr>
           </thead>
           <tbody>
-            {sorted.map((j, i) => {
+            {loading && !error && (
+              <tr>
+                <td colSpan={9}>
+                  <SkeletonTable
+                    rows={6}
+                    widths={['1rem', '2rem', '16rem', '5rem', '5rem', '3rem', '4rem', '6rem', '8rem']}
+                  />
+                </td>
+              </tr>
+            )}
+            {!loading && sorted.map((j, i) => {
               const gate = j.state === 'Frozen' ? depGate(j) : null
               return (
               <tr
@@ -487,9 +501,6 @@ export function ProjectPage() {
                 <td className="dim">
                   {j.deps.map((d) => `#${d}`).join(', ')}
                 </td>
-                <td className="dim" title={j.created_at}>
-                  {fmtStamp(j.created_at)}
-                </td>
                 <td className="dim" title={completedTip(j)}>
                   {j.completed_at ? (
                     <>
@@ -553,7 +564,7 @@ export function ProjectPage() {
               </tr>
               )
             })}
-            {sorted.length === 0 && (
+            {!loading && sorted.length === 0 && (
               <tr>
                 <td colSpan={9} className="dim">
                   {jobs.length === 0 ? 'no jobs yet' : 'no jobs match — adjust filters'}

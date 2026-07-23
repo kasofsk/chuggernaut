@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, type JobTypeDetail } from '../api'
-import { ProjectTabs } from '../components/ProjectTabs'
+import { ProjectHeader } from '../components/ProjectHeader'
+import { Skeleton, SkeletonLines } from '../components/Skeleton'
 
 type PromptEntry = {
   /** which task uses it: "work" or the evaluator's name */
@@ -24,6 +25,7 @@ export function PromptsPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    setLoaded(false) // param change: back to skeletons until the new fetch lands
     async function load() {
       const summaries = await api.jobTypes(owner, project)
       const details = await Promise.all(summaries.map((s) => api.jobType(owner, project, s.name)))
@@ -82,48 +84,51 @@ export function PromptsPage() {
 
   return (
     <div className="page">
-      <header className="topbar">
-        <Link to="/">Chuggernaut</Link>
-        <h1>
-          {owner}/{project}
-        </h1>
-      </header>
-      <ProjectTabs owner={owner} project={project} />
+      <ProjectHeader owner={owner} project={project} />
       {error && <div className="error banner">{error}</div>}
 
-      {groups.map(({ t, prompts }) => (
-        <section className="card" key={t.name} id={t.name}>
-          <div className="row-head">
-            <div>
-              <h2 className="type-title">
-                <Link to={`/p/${owner}/${project}/job-types/${encodeURIComponent(t.name)}`}>
-                  {t.job_type?.display_name || t.name}
-                </Link>
-              </h2>
-              <div className="dim type-slug">{t.name}</div>
+      {!loaded &&
+        !error &&
+        [0, 1].map((i) => (
+          <section className="card" key={i}>
+            <Skeleton width="10rem" height="1.2em" />
+            <SkeletonLines n={5} />
+          </section>
+        ))}
+      {loaded &&
+        groups.map(({ t, prompts }) => (
+          <section className="card" key={t.name} id={t.name}>
+            <div className="row-head">
+              <div>
+                <h2 className="type-title">
+                  <Link to={`/p/${owner}/${project}/job-types/${encodeURIComponent(t.name)}`}>
+                    {t.job_type?.display_name || t.name}
+                  </Link>
+                </h2>
+                <div className="dim type-slug">{t.name}</div>
+              </div>
             </div>
-          </div>
-          {prompts.length === 0 && <div className="dim">no prompts — command tasks only</div>}
-          {prompts.map((p) => (
-            <div key={`${p.role}:${p.path}`}>
-              <h3 className="subhead">
-                {p.role} <span className="dim">· {p.kind} · </span>
-                <Link
-                  className="type-slug"
-                  to={`/p/${owner}/${project}/files?path=${encodeURIComponent(p.path)}`}
-                >
-                  {p.path} ↗
-                </Link>
-              </h3>
-              {p.content !== null ? (
-                <pre className="prompt">{p.content}</pre>
-              ) : (
-                <div className="error">{p.path}: not found on the default branch</div>
-              )}
-            </div>
-          ))}
-        </section>
-      ))}
+            {prompts.length === 0 && <div className="dim">no prompts — command tasks only</div>}
+            {prompts.map((p) => (
+              <div key={`${p.role}:${p.path}`}>
+                <h3 className="subhead">
+                  {p.role} <span className="dim">· {p.kind} · </span>
+                  <Link
+                    className="type-slug"
+                    to={`/p/${owner}/${project}/files?path=${encodeURIComponent(p.path)}`}
+                  >
+                    {p.path} ↗
+                  </Link>
+                </h3>
+                {p.content !== null ? (
+                  <pre className="prompt">{p.content}</pre>
+                ) : (
+                  <div className="error">{p.path}: not found on the default branch</div>
+                )}
+              </div>
+            ))}
+          </section>
+        ))}
       {loaded && groups.length === 0 && !error && (
         <section className="card">
           <div className="dim">no job types yet</div>

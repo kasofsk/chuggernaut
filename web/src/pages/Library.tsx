@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, type JobTypeDetail } from '../api'
-import { ProjectTabs } from '../components/ProjectTabs'
+import { ProjectHeader } from '../components/ProjectHeader'
 import { EvaluatorTable } from '../components/EvaluatorTable'
 import { YamlView } from '../components/YamlView'
+import { Skeleton, SkeletonLines } from '../components/Skeleton'
 
 /**
  * The job type library: every jobs/{type}.yaml at default-branch HEAD, shown
@@ -14,15 +15,18 @@ export function LibraryPage() {
   const { owner = '', project = '' } = useParams()
   const navigate = useNavigate()
   const [types, setTypes] = useState<JobTypeDetail[]>([])
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    setLoading(true) // param change: back to skeletons until the new fetch lands
     api
       .jobTypes(owner, project)
       .then((summaries) => Promise.all(summaries.map((s) => api.jobType(owner, project, s.name))))
       .then((ts) => {
         setTypes(ts)
         setError(null)
+        setLoading(false)
         // Cards render after the fetch, so a #type anchor (e.g. the create
         // form's peek links) must scroll once they exist.
         const anchor = decodeURIComponent(window.location.hash.slice(1))
@@ -33,24 +37,19 @@ export function LibraryPage() {
       .catch((e) => {
         if (e instanceof ApiError && e.status === 401) navigate('/login')
         else setError(e instanceof Error ? e.message : 'load failed')
+        setLoading(false)
       })
   }, [owner, project, navigate])
 
   return (
     <div className="page">
-      <header className="topbar">
-        <Link to="/">Chuggernaut</Link>
-        <h1>
-          {owner}/{project}
-        </h1>
-      </header>
-      <ProjectTabs owner={owner} project={project} />
+      <ProjectHeader owner={owner} project={project} />
       {error && <div className="error banner">{error}</div>}
 
-      {types.map((t) => (
-        <TypeCard key={t.name} t={t} owner={owner} project={project} />
-      ))}
-      {types.length === 0 && !error && (
+      {loading && !error && <TypeCardSkeletons />}
+      {!loading &&
+        types.map((t) => <TypeCard key={t.name} t={t} owner={owner} project={project} />)}
+      {!loading && types.length === 0 && !error && (
         <section className="card">
           <div className="dim">
             no job types yet — add <code>jobs/&#123;type&#125;.yaml</code> on the default branch
@@ -58,6 +57,27 @@ export function LibraryPage() {
         </section>
       )}
     </div>
+  )
+}
+
+/** Initial-load placeholders shaped like a pair of type cards. */
+function TypeCardSkeletons({ n = 2 }: { n?: number }) {
+  return (
+    <>
+      {Array.from({ length: n }, (_, i) => (
+        <section className="card" key={i}>
+          <div className="row-head">
+            <div>
+              <Skeleton width="11rem" height="1.2em" />
+              <div className="type-slug">
+                <Skeleton width="6rem" height="0.8em" />
+              </div>
+            </div>
+          </div>
+          <SkeletonLines n={5} />
+        </section>
+      ))}
+    </>
   )
 }
 
@@ -186,6 +206,7 @@ export function JobTypePage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    setT(null) // param change: back to the skeleton until the new fetch lands
     api.jobType(owner, project, name).then(
       (d) => {
         setT(d)
@@ -200,16 +221,13 @@ export function JobTypePage() {
 
   return (
     <div className="page">
-      <header className="topbar">
-        <Link to="/">Chuggernaut</Link>
-        <Link to={`/p/${owner}/${project}`}>
-          {owner}/{project}
-        </Link>
-        <Link to={`/p/${owner}/${project}/job-types`}>Job types</Link>
-      </header>
-      <ProjectTabs owner={owner} project={project} />
+      <ProjectHeader owner={owner} project={project} />
       {error && <div className="error banner">{error}</div>}
-      {t ? <TypeCard t={t} owner={owner} project={project} expanded /> : !error && 'loading…'}
+      {t ? (
+        <TypeCard t={t} owner={owner} project={project} expanded />
+      ) : (
+        !error && <TypeCardSkeletons n={1} />
+      )}
     </div>
   )
 }

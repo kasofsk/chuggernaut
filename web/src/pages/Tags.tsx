@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api } from '../api'
-import { ProjectTabs } from '../components/ProjectTabs'
+import { ProjectHeader } from '../components/ProjectHeader'
+import { Skeleton, SkeletonLines } from '../components/Skeleton'
 
 /**
  * Knowledge tags: every tags/{tag}.md at default-branch HEAD, with its
@@ -15,6 +16,7 @@ export function TagsPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    setLoaded(false) // param change: back to skeletons until the new fetch lands
     api
       .tags(owner, project)
       .then((names) =>
@@ -40,30 +42,33 @@ export function TagsPage() {
 
   return (
     <div className="page">
-      <header className="topbar">
-        <Link to="/">Chuggernaut</Link>
-        <h1>
-          {owner}/{project}
-        </h1>
-      </header>
-      <ProjectTabs owner={owner} project={project} />
+      <ProjectHeader owner={owner} project={project} />
       {error && <div className="error banner">{error}</div>}
 
-      {tags.map((t) => (
-        <section className="card" key={t.name} id={t.name}>
-          <div className="row-head">
-            <div>
-              <h2 className="type-title">{t.name}</h2>
-              <div className="dim type-slug">
-                <Link to={`/p/${owner}/${project}/files?path=${encodeURIComponent(`tags/${t.name}.md`)}`}>
-                  tags/{t.name}.md
-                </Link>
+      {!loaded &&
+        !error &&
+        [0, 1].map((i) => (
+          <section className="card" key={i}>
+            <Skeleton width="8rem" height="1.2em" />
+            <SkeletonLines n={4} />
+          </section>
+        ))}
+      {loaded &&
+        tags.map((t) => (
+          <section className="card" key={t.name} id={t.name}>
+            <div className="row-head">
+              <div>
+                <h2 className="type-title">{t.name}</h2>
+                <div className="dim type-slug">
+                  <Link to={`/p/${owner}/${project}/files?path=${encodeURIComponent(`tags/${t.name}.md`)}`}>
+                    tags/{t.name}.md
+                  </Link>
+                </div>
               </div>
             </div>
-          </div>
-          <pre className="prompt">{t.content}</pre>
-        </section>
-      ))}
+            <pre className="prompt">{t.content}</pre>
+          </section>
+        ))}
       {loaded && tags.length === 0 && !error && (
         <section className="card">
           <div className="dim">

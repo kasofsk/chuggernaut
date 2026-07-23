@@ -11,24 +11,16 @@ import {
 import { ProjectHeader } from '../components/ProjectHeader'
 import { RichSelect } from '../components/RichSelect'
 import { TicketStub } from '../components/TicketStub'
+import { SkeletonLines } from '../components/Skeleton'
 
 const reducedMotion = () =>
   typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
 
-// A stable little glyph per job type so the type cards read as distinct at a
-// glance (purely decorative — derived from the name, no config needed).
-const GLYPHS = ['⚙️', '🧩', '🚀', '🛠️', '🔭', '📦', '🧪', '⚡', '🌐', '🧭']
-function glyphFor(name: string): string {
-  let h = 0
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0
-  return GLYPHS[h % GLYPHS.length]
-}
-
 /**
- * Create-job page as a departure (#171): a form beside a live train-ticket stub
- * that materialises the job as you compose it, type cards instead of a plain
- * select, deps rendered as coupled cars, and a track-switch for the draft/
- * release choice. `?type=` preselects a job type (linked from the Library).
+ * Create-job page (#171): a form beside a live train-ticket stub that
+ * materialises the job as you compose it; deps render as coupled cars, and a
+ * Draft/Frozen/Ready selector picks the initial state. `?type=` preselects a
+ * job type (linked from the Library).
  */
 export function NewJobPage() {
   const { owner = '', project = '' } = useParams()
@@ -37,9 +29,13 @@ export function NewJobPage() {
   const [jobTypes, setJobTypes] = useState<JobTypeSummary[]>([])
   const [availableTags, setAvailableTags] = useState<string[]>([])
   const [jobs, setJobs] = useState<Job[]>([])
+  // Initial pickers fetch: the form itself renders immediately; only the
+  // type/deps pickers skeleton while this is in flight.
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    setLoading(true)
     Promise.all([api.jobTypes(owner, project), api.tags(owner, project), api.jobs(owner, project)])
       .then(([types, tags, js]) => {
         setJobTypes(types)
@@ -51,6 +47,7 @@ export function NewJobPage() {
         if (e instanceof ApiError && e.status === 401) navigate('/login')
         else setError(e instanceof Error ? e.message : 'load failed')
       })
+      .finally(() => setLoading(false))
   }, [owner, project, navigate])
 
   return (
@@ -60,6 +57,7 @@ export function NewJobPage() {
       <CreateJob
         owner={owner}
         project={project}
+        loading={loading}
         jobTypes={jobTypes}
         availableTags={availableTags}
         jobs={jobs}
@@ -75,6 +73,7 @@ type EvalRow = { name: string; type: Evaluator['type']; action: string; required
 function CreateJob({
   owner,
   project,
+  loading,
   jobTypes,
   availableTags,
   jobs,
@@ -83,6 +82,8 @@ function CreateJob({
 }: {
   owner: string
   project: string
+  /** pickers fetch still in flight — skeleton the type cards / dep search */
+  loading: boolean
   jobTypes: JobTypeSummary[]
   availableTags: string[]
   jobs: Job[]
@@ -119,7 +120,7 @@ function CreateJob({
   const [model, setModel] = useState('')
   const typeModel = typeDetail?.job_type?.work?.model ?? null
   // Departure switch: 'release' schedules the run; 'draft' parks it on the siding.
-  const [mode, setMode] = useState<'release' | 'draft'>('release')
+  const [mode, setMode] = useState<'draft' | 'frozen' | 'ready'>('frozen')
   // Create-time flourish for the ticket stub.
   const [anim, setAnim] = useState<'none' | 'depart' | 'siding'>('none')
   const [error, setError] = useState<string | null>(null)
@@ -191,8 +192,9 @@ function CreateJob({
         draft: draft || undefined,
       })
       .then(
-        (job) => {
-          // Punch + depart (release) / slide to siding (draft), then route.
+        async (job) => {
+          // Ready = create + immediate release; Frozen parks; Draft stays editable.
+          if (mode === 'ready') await api.release(owner, project, job.id).catch(() => {})
           const go = () => navigate(`/p/${owner}/${project}/jobs/${job.id}`)
           if (reducedMotion()) return go()
           setAnim(draft ? 'siding' : 'depart')
@@ -234,38 +236,19 @@ function CreateJob({
 
         <div className="field">
           <span>Job type</span>
-          <div className="type-cards">
-            {jobTypes.map((t) => (
-              <button
-                type="button"
-                key={t.name}
-                className={`type-card${t.name === type ? ' type-card-on' : ''}`}
-                aria-pressed={t.name === type}
-                onClick={() => setType(t.name)}
-              >
-                <span className="type-card-glyph">{glyphFor(t.name)}</span>
-                <span className="type-card-name">{t.display_name}</span>
-                {t.description && <span className="type-card-desc">{t.description}</span>}
-              </button>
-            ))}
+          <div className="type-select">
+            <RichSelect
+              value={type}
+              onChange={setType}
+              placeholder="pick a job type…"
+              options={jobTypes.map((t) => ({
+                value: t.name,
+                label: t.display_name,
+                description: t.description || undefined,
+                detail: t.display_name !== t.name ? t.name : undefined,
+              }))}
+            />
           </div>
-          {/* RichSelect stays under the hood for keyboard/a11y (#171). */}
-          <details className="type-list-fallback">
-            <summary>Pick from a list</summary>
-            <div className="type-select">
-              <RichSelect
-                value={type}
-                onChange={setType}
-                placeholder="pick a job type…"
-                options={jobTypes.map((t) => ({
-                  value: t.name,
-                  label: t.display_name,
-                  description: t.description || undefined,
-                  detail: t.display_name !== t.name ? t.name : undefined,
-                }))}
-              />
-            </div>
-          </details>
           {typeDetail?.job_type && (
             <div className="dim prompt-links">
               {typeDetail.job_type.work.prompt && (
@@ -282,7 +265,14 @@ function CreateJob({
               )}
               {typeDetail.job_type.work.run && (
                 <span>
-                  work command: <code>{typeDetail.job_type.work.run}</code>
+                  work command:{' '}
+                  <a
+                    href={`/p/${owner}/${project}/files?path=${encodeURIComponent(typeDetail.job_type.work.run)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {typeDetail.job_type.work.run} ↗
+                  </a>
                 </span>
               )}
               {typeDetail.job_type.eval.map((e) => (
@@ -296,9 +286,15 @@ function CreateJob({
                     >
                       {e.prompt} ↗
                     </a>
-                  ) : (
-                    <code>{e.run}</code>
-                  )}
+                  ) : e.run ? (
+                    <a
+                      href={`/p/${owner}/${project}/files?path=${encodeURIComponent(e.run)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {e.run} ↗
+                    </a>
+                  ) : null}
                 </span>
               ))}
             </div>
@@ -351,7 +347,8 @@ function CreateJob({
                   </span>
                 </button>
               ))}
-              {depMatches.length === 0 && <div className="dim">no matching jobs</div>}
+              {loading && depMatches.length === 0 && <SkeletonLines n={2} />}
+              {!loading && depMatches.length === 0 && <div className="dim">no matching jobs</div>}
             </div>
           )}
         </div>
@@ -474,27 +471,29 @@ function CreateJob({
         </label>
 
         <div className="departure">
-          <div
-            className="switch"
-            data-mode={mode}
-            role="switch"
-            aria-checked={mode === 'release'}
-            tabIndex={0}
-            title="park as an editable Draft, or release to the dispatcher"
-            onClick={() => setMode((m) => (m === 'release' ? 'draft' : 'release'))}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault()
-                setMode((m) => (m === 'release' ? 'draft' : 'release'))
-              }
-            }}
-          >
-            <span className="switch-knob" />
-            <span className="switch-opt">Park on siding</span>
-            <span className="switch-opt">Release</span>
+          <div className="mode-seg" role="radiogroup" aria-label="Initial state">
+            {(
+              [
+                ['draft', 'Draft', 'editable — finish writing it in the live editor'],
+                ['frozen', 'Frozen', 'parked — release it later (batchable)'],
+                ['ready', 'Ready', 'released to the dispatcher immediately'],
+              ] as const
+            ).map(([m, label, tip]) => (
+              <button
+                key={m}
+                type="button"
+                role="radio"
+                aria-checked={mode === m}
+                className={`mode-seg-opt${mode === m ? ' mode-seg-on' : ''}`}
+                title={tip}
+                onClick={() => setMode(m)}
+              >
+                {label}
+              </button>
+            ))}
           </div>
           <button type="submit" className="btn-primary-glow" disabled={busy.current}>
-            {mode === 'draft' ? 'Park on siding' : 'Release job'} <span className="dim">⌘⏎</span>
+            {mode === 'draft' ? 'Create draft' : mode === 'frozen' ? 'Create frozen' : 'Create ready'}
           </button>
         </div>
         {error && <div className="error">{error}</div>}
@@ -511,7 +510,7 @@ function CreateJob({
             deps,
             evals: evalRows.map((r) => r.name.trim()).filter(Boolean),
             tags: allTags,
-            destination: mode === 'draft' ? 'siding' : 'release',
+            destination: mode,
           }}
         />
       </div>

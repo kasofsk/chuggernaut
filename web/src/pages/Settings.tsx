@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, type ProjectConfig } from '../api'
-import { ProjectTabs } from '../components/ProjectTabs'
+import { ProjectHeader } from '../components/ProjectHeader'
+import { SkeletonLines } from '../components/Skeleton'
 
 /** Read-only project settings: git origin, environment vars, secret names. */
 export function SettingsPage() {
@@ -11,6 +12,7 @@ export function SettingsPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    setCfg(null) // param change: back to skeletons until the new fetch lands
     api
       .projectConfig(owner, project)
       .then((c) => {
@@ -25,15 +27,19 @@ export function SettingsPage() {
 
   return (
     <div className="page">
-      <header className="topbar">
-        <Link to="/">Chuggernaut</Link>
-        <h1>
-          {owner}/{project}
-        </h1>
-      </header>
-      <ProjectTabs owner={owner} project={project} />
+      <ProjectHeader owner={owner} project={project} />
       {error && <div className="error banner">{error}</div>}
 
+      {!cfg &&
+        !error &&
+        ['Git origin', 'Environment variables', 'Secrets'].map((h) => (
+          <section className="card" key={h}>
+            <div className="row-head">
+              <h2>{h}</h2>
+            </div>
+            <SkeletonLines n={3} />
+          </section>
+        ))}
       {cfg && (
         <>
           <section className="card">

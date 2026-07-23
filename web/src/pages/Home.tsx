@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api, type Identity } from '../api'
+import { Skeleton, SkeletonLines } from '../components/Skeleton'
 
 // Project chooser: lists the projects visible to the caller (platform
 // admins see the whole registry), plus a free-form owner/project field.
@@ -8,6 +9,7 @@ export function Home() {
   const [identity, setIdentity] = useState<Identity | null>(null)
   const [projects, setProjects] = useState<string[]>([])
   const [slug, setSlug] = useState('')
+  const [loading, setLoading] = useState(true)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -19,9 +21,25 @@ export function Home() {
       .projects()
       .then(setProjects)
       .catch(() => {})
+      .finally(() => setLoading(false))
   }, [navigate])
 
-  if (!identity) return null
+  // Identity gates the whole page (admin links, roles), so skeleton until it lands.
+  if (!identity)
+    return (
+      <div className="page">
+        <header className="topbar">
+          <h1>Chuggernaut</h1>
+          <span className="who">
+            <Skeleton width="10rem" height="0.9em" />
+          </span>
+        </header>
+        <div className="card">
+          <h2>Projects</h2>
+          <SkeletonLines n={4} />
+        </div>
+      </div>
+    )
 
   const last = localStorage.getItem('last-project')
 
@@ -47,6 +65,7 @@ export function Home() {
       </header>
       <div className="card">
         <h2>Projects</h2>
+        {loading && projects.length === 0 && <SkeletonLines n={4} />}
         {projects.length > 0 && (
           <ul className="project-list">
             {projects.map((p) => (

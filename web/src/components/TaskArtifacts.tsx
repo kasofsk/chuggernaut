@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, type ArtifactKind, type Task } from '../api'
+import { SkeletonLines } from './Skeleton'
 
 const LABELS: Record<ArtifactKind, string> = {
   'session.jsonl': 'transcript',
@@ -80,7 +81,7 @@ export function TaskArtifacts({
             </button>
           </div>
           {error && <p className="error">{error}</p>}
-          {!text && !error && <p className="dim">loading…</p>}
+          {!text && !error && <SkeletonLines n={4} />}
           {text && <pre className="artifact-body">{text}</pre>}
         </div>
       )}
