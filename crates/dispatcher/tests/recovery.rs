@@ -1665,7 +1665,12 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
 async fn fleet_sweep_core(
     tasks: Vec<Task>,
     backend: Arc<FakeBackend>,
-) -> Option<(NatsStore, test_utils::nats::NatsTestServer, CoreHandle)> {
+) -> Option<(
+    NatsStore,
+    test_utils::nats::NatsTestServer,
+    CoreHandle,
+    TempRepo,
+)> {
     let server = test_utils::nats::NatsTestServer::spawn()?;
     let store = NatsStore::connect(server.url()).await.unwrap();
     store.ensure_topology().await.unwrap();
@@ -1716,6 +1721,9 @@ async fn fleet_sweep_core(
     }
 
     let provider = Arc::new(FakeProvider::new());
+    // Any job a sweep test creates must produce output, or the §3.2 finish-line
+    // guard fails its empty work run instead of letting it reach Done.
+    commit_on_run(&provider, repo.bare_path());
     let repos_root = repo
         .bare_path()
         .parent()
@@ -1737,7 +1745,7 @@ async fn fleet_sweep_core(
     .await
     .unwrap();
     let handle = spawn(core);
-    Some((store, server, handle))
+    Some((store, server, handle, repo))
 }
 
 fn work_task(id: u64, state: TaskState, container_id: Option<&str>) -> Task {
@@ -1813,7 +1821,8 @@ async fn startup_fleet_sweep_reaps_orphan_running_container() {
             task: None,
         },
     ]);
-    let Some((store, _server, _handle)) = fleet_sweep_core(tasks, backend.clone()).await else {
+    let Some((store, _server, _handle, _repo)) = fleet_sweep_core(tasks, backend.clone()).await
+    else {
         return;
     };
 
@@ -1882,7 +1891,8 @@ async fn startup_fleet_sweep_keeps_container_of_running_task() {
             task: None,
         },
     ]);
-    let Some((_store, _server, _handle)) = fleet_sweep_core(tasks, backend.clone()).await else {
+    let Some((_store, _server, _handle, _repo)) = fleet_sweep_core(tasks, backend.clone()).await
+    else {
         return;
     };
 
@@ -1903,7 +1913,8 @@ async fn startup_fleet_sweep_tolerates_backend_error() {
     let backend = Arc::new(FakeBackend::new());
     backend.fail_list_managed_running("dev-air unreachable");
     let tasks = vec![work_task(2, TaskState::Failed, Some("dev-air/c-orphan"))];
-    let Some((store, _server, handle)) = fleet_sweep_core(tasks, backend.clone()).await else {
+    let Some((store, _server, handle, _repo)) = fleet_sweep_core(tasks, backend.clone()).await
+    else {
         return;
     };
 
@@ -1916,6 +1927,7 @@ async fn startup_fleet_sweep_tolerates_backend_error() {
     );
 
     let job = handle.create_job(req("flaky")).await.unwrap();
+    handle.release_job("acme", "api", job.id).await.unwrap();
     wait_for_state(&store, job.id, JobState::Done).await;
 }
 
