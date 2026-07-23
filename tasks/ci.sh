@@ -125,7 +125,10 @@ run_full_ci() {
 	# survives the pipe to tee.
 	set +e
 	{
-		cargo test --workspace
+		# --no-fail-fast: a failing suite must not hide every suite after it.
+		# The born-red tests behind #150/#160 stayed invisible for days because
+		# the default fail-fast aborted each CI run at the first red binary.
+		cargo test --workspace --no-fail-fast
 		echo "$?" >"$status_file"
 	} 2>&1 | tee "$test_log"
 	set -e

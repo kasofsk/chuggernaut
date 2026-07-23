@@ -353,17 +353,24 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
     }
 
     // The merge gate/squash body is unaffected: the summary rode into the commit
-    // body but no part of the (hostile) cover HTML did.
-    let log = repo.manager.log("acme", "api", None, 1).await.unwrap();
-    let body = format!("{log:?}");
+    // body but no part of the (hostile) cover HTML did. The body lives below
+    // the subject line; `RepoManager::log` reads only `--format=%s`, so read
+    // the full message straight from git.
+    let out = tokio::process::Command::new("git")
+        .args(["log", "-1", "--format=%B", "main"])
+        .current_dir(repo.bare_path())
+        .output()
+        .await
+        .unwrap();
+    let body = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(
         body.contains("added f()"),
-        "summary missing from squash: {body}"
+        "summary missing from squash: {body:?}"
     );
     for leaked in ["COVERMARKER", "evil.example", "<script>"] {
         assert!(
             !body.contains(leaked),
-            "cover_html must never reach the squash body ({leaked}): {body}"
+            "cover_html must never reach the squash body ({leaked}): {body:?}"
         );
     }
 }
