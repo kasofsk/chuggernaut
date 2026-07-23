@@ -163,10 +163,13 @@ export function ProjectPage() {
   // Live fleet capacity readout (#148). Every occupancy change rides a task
   // lifecycle event already on this stream, so bump a tick (debounced against the
   // load-time replay burst) to refetch the snapshot. Admin-only feed: the widget
-  // hides itself when unavailable.
+  // hides itself when unavailable. The tick only fires on *this* project's events,
+  // but the fleet is shared across projects (#177) — so also poll on an interval,
+  // catching a sibling project's occupancy changes and the end-of-burst quiescence
+  // after which no further event fires. Same-project activity still updates instantly.
   const [fleetTick, setFleetTick] = useState(0)
   const bumpFleet = useDebouncedCallback(() => setFleetTick((n) => n + 1), 400)
-  const fleet = useFleet({ tick: fleetTick })
+  const fleet = useFleet({ tick: fleetTick, pollMs: 5000 })
   // Every event both feeds the debounced refetch and, when it's a channel-update,
   // updates the latest-message-per-job map. Guard on ts so an out-of-order frame
   // can't overwrite a newer message with an older one.
