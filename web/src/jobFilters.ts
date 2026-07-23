@@ -28,6 +28,23 @@ export const OVERVIEW_GROUPS: { key: string; label: string; color: string; state
 
 const isTerminal = (s: JobState) => s === 'Done' || s === 'Revoked'
 
+/**
+ * The "recent tail": ids of the `n` most recently completed Done jobs. The
+ * default view hides finished jobs but lets these through, so the bottom of
+ * the list doubles as a what-just-landed digest (they sink below live jobs
+ * under the default state sort). Revoked jobs stay hidden — they were
+ * cancelled, not delivered.
+ */
+export function recentDoneIds(jobs: Job[], n = 5): Set<number> {
+  return new Set(
+    jobs
+      .filter((j) => j.state === 'Done' && j.completed_at)
+      .sort((a, b) => Date.parse(b.completed_at!) - Date.parse(a.completed_at!))
+      .slice(0, n)
+      .map((j) => j.id),
+  )
+}
+
 export function textMatch(j: Job, q: string): boolean {
   const s = q.trim().toLowerCase()
   if (!s) return true
@@ -69,13 +86,19 @@ function quickPred(k: QuickKey, j: Job, claimed: Set<number>): boolean {
  * The composed jobs-table predicate. Search AND state-group AND every active
  * quick filter; the finished-hiding gate applies only when nothing explicit is
  * selected, so choosing "Completed" or "Failed" reveals its terminal jobs.
+ * `recentTail` (see recentDoneIds) is exempt from that gate.
  */
-export function matchesFilters(j: Job, f: JobFilters, claimed: Set<number>): boolean {
+export function matchesFilters(
+  j: Job,
+  f: JobFilters,
+  claimed: Set<number>,
+  recentTail?: Set<number>,
+): boolean {
   if (!textMatch(j, f.q)) return false
   if (f.states.length && !f.states.includes(j.state)) return false
   if (!f.quick.every((k) => quickPred(k, j, claimed))) return false
   const explicit = f.states.length > 0 || f.quick.length > 0
-  if (!explicit && !f.showFinished && isTerminal(j.state)) return false
+  if (!explicit && !f.showFinished && isTerminal(j.state) && !recentTail?.has(j.id)) return false
   return true
 }
 

@@ -823,6 +823,65 @@ table.jobs tbody tr.row-draft td:first-child {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
+/* The chip doubles as the expand/collapse toggle for the batch's member rows —
+   same look as the plain chip, plus button-reset and a pointer. */
+.chip-batch-toggle {
+  appearance: none;
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: inherit;
+  cursor: pointer;
+}
+.chip-batch-toggle:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+/* A member row nested under its expanded batch in the jobs table: indented
+   title with a ↳ marker so the group reads as one unit. */
+.row-batch-member td:nth-child(3) {
+  padding-left: 1.4rem;
+}
+.batch-indent {
+  margin-right: 0.35rem;
+}
+
+/* Recent-tail rows: the few most recently completed Done jobs the default view
+   lets through (jobFilters.recentDoneIds). Dimmed so the working set reads
+   first; full opacity when an explicit filter reveals finished jobs. */
+.row-recent-done {
+  opacity: 0.65;
+}
+.row-recent-done:hover {
+  opacity: 1;
+}
+
+/* Collapsible card header (e.g. the job page's Channel section): the whole
+   heading is the toggle, styled as plain heading text with a ▸/▾ caret. */
+.card-fold {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Unread marker on a collapsed card header: channel posts arrived while the
+   operator was on the page. */
+.notif-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: var(--r-full);
+  background: var(--orange);
+  flex: none;
+}
+
 /* 'in batch #N' back-link next to a Batched member's state in the jobs table —
    small and set off; the batch is where its work happens. */
 .in-batch {

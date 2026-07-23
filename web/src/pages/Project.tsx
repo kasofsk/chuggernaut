@@ -12,9 +12,11 @@ import { IconSearch } from '../components/icons'
 import { SkeletonTable } from '../components/Skeleton'
 import { useFleet } from '../useFleet'
 import {
+  filtersActive,
   filtersFromParams,
   filtersToParams,
   matchesFilters,
+  recentDoneIds,
   type JobFilters,
 } from '../jobFilters'
 
@@ -118,9 +120,12 @@ export function ProjectPage() {
   // refreshes never re-skeleton; a project change resets it (effect below).
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  // Jobs table controls: column sort (default newest-first). The filter model
-  // (#162) lives in the URL so a filtered view is shareable.
-  const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'id', dir: 'desc' })
+  // Jobs table controls: column sort (default state-descending, so live and
+  // attention-needed jobs surface on top). The filter model (#162) lives in
+  // the URL so a filtered view is shareable.
+  const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'state', dir: 'desc' })
+  // Batches whose member rows are unfolded in the table (collapsed by default).
+  const [expandedBatches, setExpandedBatches] = useState<Set<number>>(new Set())
   const [params, setParams] = useSearchParams()
   const filters = filtersFromParams(params)
   const setFilters = useCallback(
@@ -283,7 +288,16 @@ export function ProjectPage() {
     filterKeyRef.current = filterKey
     pinnedRef.current = new Set()
   }
-  const passesFilter = (j: Job) => matchesFilters(j, filters, claimedInWork)
+  // The last few Done jobs ride along in the default view (dimmed, sinking to
+  // the bottom under the state sort) so recent completions stay glanceable. The
+  // exemption applies ONLY when no filter is active — any explicit filter
+  // (state, quick, search, show-finished) hides the tail again, so search
+  // behaves exactly as before. `tailRow` (the dimming) uses the same gate.
+  const recentTail = recentDoneIds(jobs)
+  const showTail = !filtersActive(filters)
+  const tailRow = (j: Job) => showTail && recentTail.has(j.id)
+  const passesFilter = (j: Job) =>
+    matchesFilters(j, filters, claimedInWork, showTail ? recentTail : undefined)
   const visible = jobs.filter((j) => passesFilter(j) || pinnedRef.current.has(j.id))
   pinnedRef.current = new Set(visible.map((j) => j.id))
 
@@ -309,6 +323,28 @@ export function ProjectPage() {
     if (r === 0) r = a.id - b.id // stable tiebreak
     return sort.dir === 'asc' ? r : -r
   })
+
+  // Group batch members under their batch so they always travel as one unit:
+  // while a batch is on screen its members never float free in the list — they
+  // render indented directly beneath it, and only when the batch is expanded
+  // (members come from the full jobs list, so expanding shows all of them even
+  // if the current filter would hide Batched rows). A member whose batch is
+  // filtered out falls back to an ordinary top-level row.
+  const byId = new Map(jobs.map((j) => [j.id, j]))
+  const visibleBatchIds = new Set(
+    sorted.filter((j) => (j.members ?? []).length > 0).map((j) => j.id),
+  )
+  const rows: { job: Job; member?: boolean }[] = []
+  for (const j of sorted) {
+    if (j.batch_id != null && visibleBatchIds.has(j.batch_id)) continue
+    rows.push({ job: j })
+    if ((j.members ?? []).length > 0 && expandedBatches.has(j.id)) {
+      for (const mid of j.members ?? []) {
+        const m = byId.get(mid)
+        if (m) rows.push({ job: m, member: true })
+      }
+    }
+  }
 
   const stateDropdownValue =
     filters.states.length === 1 ? filters.states[0] : filters.states.length ? '__multi' : ''
@@ -433,13 +469,19 @@ export function ProjectPage() {
                 </td>
               </tr>
             )}
-            {!loading && sorted.map((j, i) => {
+            {!loading && rows.map(({ job: j, member }, i) => {
               const gate = j.state === 'Frozen' ? depGate(j) : null
               return (
               <tr
                 key={j.id}
                 data-state={j.state}
-                className={['row-accent', i % 2 ? 'row-stripe' : '', j.state === 'Draft' ? 'row-draft' : '']
+                className={[
+                  'row-accent',
+                  i % 2 ? 'row-stripe' : '',
+                  j.state === 'Draft' ? 'row-draft' : '',
+                  member ? 'row-batch-member' : '',
+                  tailRow(j) ? 'row-recent-done' : '',
+                ]
                   .filter(Boolean)
                   .join(' ')}
               >
@@ -450,6 +492,11 @@ export function ProjectPage() {
                   <Link to={`/p/${owner}/${project}/jobs/${j.id}`}>{j.id}</Link>
                 </td>
                 <td>
+                  {member && (
+                    <span className="batch-indent dim" aria-hidden="true">
+                      ↳
+                    </span>
+                  )}
                   <Link to={`/p/${owner}/${project}/jobs/${j.id}`}>
                     {j.title || <span className="dim">—</span>}
                   </Link>
@@ -465,14 +512,26 @@ export function ProjectPage() {
                     {j.type}
                   </Link>
                   {(j.members ?? []).length > 0 && (
-                    <span className="chip-batch" title="a batch: implements its member jobs on one branch">
-                      batch ({(j.members ?? []).length})
-                    </span>
+                    <button
+                      type="button"
+                      className="chip-batch chip-batch-toggle"
+                      title="a batch: implements its member jobs on one branch — click to show/hide them"
+                      onClick={() =>
+                        setExpandedBatches((prev) => {
+                          const next = new Set(prev)
+                          if (next.has(j.id)) next.delete(j.id)
+                          else next.add(j.id)
+                          return next
+                        })
+                      }
+                    >
+                      {expandedBatches.has(j.id) ? '▾' : '▸'} batch ({(j.members ?? []).length})
+                    </button>
                   )}
                 </td>
                 <td>
                   <StateBadge state={j.state} />
-                  {j.state === 'Batched' && j.batch_id != null && (
+                  {j.state === 'Batched' && j.batch_id != null && !member && (
                     <Link
                       className="in-batch dim"
                       to={`/p/${owner}/${project}/jobs/${j.batch_id}`}
@@ -564,7 +623,7 @@ export function ProjectPage() {
               </tr>
               )
             })}
-            {!loading && sorted.length === 0 && (
+            {!loading && rows.length === 0 && (
               <tr>
                 <td colSpan={9} className="dim">
                   {jobs.length === 0 ? 'no jobs yet' : 'no jobs match — adjust filters'}

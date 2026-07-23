@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ApiError,
@@ -530,9 +530,9 @@ export function JobDetail() {
       </section>
       )}
 
-      <TaskReports tasks={tasks} />
-
       <ChannelLog events={events} />
+
+      <TaskReports tasks={tasks} />
 
       {diff && diff.diff && (
         <section className="card">
@@ -687,13 +687,13 @@ function resultSummary(t: Task): string {
 }
 
 /**
- * The Work→Evaluation→WrapUp thread, in task order (chronological): each task's
- * closing report rendered top-to-bottom so an operator can read what every
- * work/review/CI step actually said. Triage runs are advisory and render in
- * their own section above, so they're skipped here.
+ * The Work→Evaluation→WrapUp thread, newest first: the latest task's closing
+ * report sits on top (it's usually why the operator is here), with history
+ * below it. Triage runs are advisory and render in their own section above,
+ * so they're skipped here.
  */
 function TaskReports({ tasks }: { tasks: Task[] }) {
-  const thread = tasks.filter((t) => t.phase !== 'Triage')
+  const thread = tasks.filter((t) => t.phase !== 'Triage').reverse()
   if (thread.length === 0) return null
   return (
     <section className="card">
@@ -1066,15 +1066,43 @@ function DiffView({ diff }: { diff: string }) {
  * `job-events` stream, which is also what feeds this page over SSE.
  */
 function ChannelLog({ events }: { events: JobEvent[] }) {
-  const posts = events.filter(
-    (e) => e.event_type === 'channel-update' || e.event_type === 'channel-reply',
-  )
+  // Newest first: the latest post is why the operator opens the section.
+  const posts = events
+    .filter((e) => e.event_type === 'channel-update' || e.event_type === 'channel-reply')
+    .reverse()
+  // Collapsed by default; the header toggles. While collapsed, a dot flags
+  // posts that arrived after the page was opened — the SSE stream replays the
+  // durable history on load, so replayed posts (ts before mount) never count
+  // as "new", and opening the section acknowledges everything seen so far.
+  const [open, setOpen] = useState(false)
+  const [seen, setSeen] = useState(0)
+  const mountTs = useRef(Date.now())
+  useEffect(() => {
+    if (open && seen !== posts.length) setSeen(posts.length)
+  }, [open, seen, posts.length])
   if (posts.length === 0) return null
+  const unread =
+    !open &&
+    posts.length > seen &&
+    // newest-first: the unacknowledged posts are at the head of the list
+    posts.slice(0, posts.length - seen).some((e) => Date.parse(String(e.ts)) > mountTs.current)
   return (
     <section className="card">
       <h2>
-        Channel <span className="dim">{posts.length}</span>
+        <button
+          type="button"
+          className="card-fold"
+          aria-expanded={open}
+          onClick={() => setOpen((o) => !o)}
+        >
+          <span aria-hidden="true">{open ? '▾' : '▸'}</span> Channel{' '}
+          <span className="dim">{posts.length}</span>
+          {unread && (
+            <span className="notif-dot" title="new channel activity since you opened this page" />
+          )}
+        </button>
       </h2>
+      {open && (
       <ul className="channel-log">
         {posts.map((e, i) => {
           const reply = e.event_type === 'channel-reply'
@@ -1098,6 +1126,7 @@ function ChannelLog({ events }: { events: JobEvent[] }) {
           )
         })}
       </ul>
+      )}
     </section>
   )
 }
