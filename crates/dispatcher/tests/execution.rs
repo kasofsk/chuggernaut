@@ -3465,20 +3465,22 @@ async fn failing_command_eval_embeds_size_capped_output_tail() {
     }
 }
 
-/// #167 fix 2: a command evaluator that exits non-zero with a completely empty
-/// captured stream is evidence-free — infrastructure loss, not a verdict. It is
-/// relaunched automatically WITHOUT burning `eval_retries` (every attempt stays
+/// #167 fix 2 (narrowed #198): a command evaluator whose container dies before it
+/// can judge — an ABNORMAL exit (a signal kill `>= 128`) — with a completely
+/// empty captured stream is evidence-free: infrastructure loss, not a verdict. It
+/// is relaunched automatically WITHOUT burning `eval_retries` (every attempt stays
 /// attempt 1, stamped `infra_loss`) and never triggers rework; once the infra
 /// relaunch cap is exhausted the job escalates with reason `evaluator_no_output`
-/// rather than failing the round on nothing.
+/// rather than failing the round on nothing. (A *normal* non-zero exit is a real
+/// verdict and reworks — see `normal_nonzero_command_eval_empty_output_reworks`.)
 #[tokio::test]
 async fn no_output_command_eval_retries_without_burning_retries_then_escalates() {
     let Some(rig) = rig().await else { return };
     commit_work(&rig);
 
-    // Every ci launch exits non-zero; logs stay empty (never call put_logs), so
-    // every attempt is an evidence-free no-output failure.
-    rig.backend.script_exits([101, 101, 101, 101, 101]);
+    // Every ci launch is SIGKILLed (137) before it can judge; logs stay empty
+    // (never call put_logs), so every attempt is an evidence-free no-output loss.
+    rig.backend.script_exits([137, 137, 137, 137, 137]);
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
@@ -3528,6 +3530,238 @@ async fn no_output_command_eval_retries_without_burning_retries_then_escalates()
         !no_output_events.is_empty(),
         "the evaluator_no_output reason must ride the event stream"
     );
+}
+
+/// #198 ticket test (a): an AGENT evaluator that submits a FAIL verdict with
+/// structured findings but whose captured stream is empty follows the NORMAL eval
+/// flow — it reworks. A submitted verdict is a verdict regardless of log volume;
+/// the #167 no-output invalid path is NOT taken and the failure is never
+/// discarded. (This is the prod scenario the #198 hotfix protects: a failing
+/// review with empty log capture must rework, not silently retry into a pass.)
+#[tokio::test]
+async fn agent_eval_fail_with_findings_empty_output_reworks_not_invalid() {
+    let Some(rig) = rig().await else { return };
+    let handle = rig.handle.clone();
+    commit_work(&rig); // work c1 commits → Evaluation (provider run 0)
+    // eval c1 (task 2): FAIL with findings. Agent evals carry no captured output,
+    // so this is precisely "a delivered verdict with an empty stream".
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: false,
+                abort: false,
+                structured: Some(serde_json::json!({"issues": ["missing tests"]})),
+                token_usage: None,
+                cover_html: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+    // work c2 (rework): commit a distinct file so the branch diffs.
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone
+            .commit_file("src/rework.rs", b"rework", "rework")
+            .await;
+        clone.push(&branch).await;
+    });
+    // eval c2 (task 4): PASS → Done.
+    let h = handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            4,
+            EvalSubmission {
+                pass: true,
+                abort: false,
+                structured: None,
+                token_usage: None,
+                cover_html: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    // The FAIL verdict reworked: a cycle-2 work task exists.
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t.phase == TaskPhase::Work && t.cycle == 2 && t.evaluator.is_none()),
+        "an agent FAIL verdict must rework, not retry: {tasks:#?}"
+    );
+    // The cycle-1 eval recorded a real product FAIL verdict — never an infra loss.
+    let eval1 = tasks
+        .iter()
+        .find(|t| t.phase == TaskPhase::Evaluation && t.cycle == 1)
+        .expect("cycle-1 eval task");
+    assert!(
+        matches!(
+            eval1.result,
+            Some(types::TaskResult::Agent { pass: false, .. })
+        ),
+        "the delivered FAIL verdict is preserved: {:?}",
+        eval1.result
+    );
+    assert!(
+        !eval1.infra_loss,
+        "a delivered verdict is never stamped infra_loss"
+    );
+    assert_eq!(
+        eval1.attempt, 1,
+        "the verdict is taken on attempt 1, no relaunch"
+    );
+    // The invalid no-output path was never taken.
+    let no_output = job_events(&rig.store, job.id)
+        .await
+        .into_iter()
+        .filter(|e| e["reason"] == "evaluator_no_output")
+        .count();
+    assert_eq!(
+        no_output, 0,
+        "a delivered verdict must not trigger the evidence-free path"
+    );
+}
+
+/// #198 ticket test (b): an AGENT evaluator that ends WITHOUT a `submit_eval`
+/// verdict and with no captured output is genuinely evidence-free — the #167 case
+/// this hotfix preserves. It is relaunched WITHOUT burning `eval_retries` (every
+/// attempt stays attempt 1, stamped `infra_loss`) and never reworks; once the
+/// infra relaunch cap is exhausted the job escalates `evaluator_no_output`.
+#[tokio::test]
+async fn agent_eval_no_verdict_no_output_retries_without_burning_eval_retries_then_escalates() {
+    let Some(rig) = rig().await else { return };
+    commit_work(&rig); // work c1 commits → Evaluation
+    // No eval hooks registered: every agent eval run exits without a submit_eval
+    // and carries no output → an evidence-free no-verdict loss each time.
+
+    let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+    assert_eq!(
+        escalated.escalation.expect("escalation recorded").reason,
+        "evaluator_no_output",
+        "a verdict-less, output-less agent eval escalates as no-output"
+    );
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let evals: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.phase == TaskPhase::Evaluation)
+        .collect();
+    assert!(
+        evals.len() >= 2,
+        "the evaluator must relaunch on the missing verdict: {evals:?}"
+    );
+    for t in &evals {
+        assert_eq!(t.attempt, 1, "a no-verdict relaunch burns no eval_retries");
+        assert!(t.infra_loss, "each no-verdict loss is stamped infra_loss");
+    }
+    assert_eq!(
+        tasks.iter().filter(|t| t.phase == TaskPhase::Work).count(),
+        1,
+        "a verdict-less eval must not trigger rework"
+    );
+}
+
+/// #198 ticket test (c counterpart): a COMMAND evaluator that exits with a NORMAL
+/// non-zero code (a real fail verdict) and an empty captured stream REWORKS — it
+/// is not mislabelled evidence-free. This is the core regression: #167 auto-
+/// retried it, converting a real fail into a pass. The evidence-free invalid path
+/// is reserved for an abnormal/signal exit (see
+/// `no_output_command_eval_retries_without_burning_retries_then_escalates`).
+#[tokio::test]
+async fn normal_nonzero_command_eval_empty_output_reworks() {
+    let Some(rig) = rig().await else { return };
+    commit_work(&rig); // work c1 commits → Evaluation (provider run 0)
+    // work c2 (rework): commit a distinct file so the reworked branch diffs.
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone
+            .commit_file("src/rework.rs", b"rework", "rework")
+            .await;
+        clone.push(&branch).await;
+    });
+    // ci c1 exits 1 (a real fail, empty output) → rework; ci c2 exits 0 → pass.
+    rig.backend.script_exits([1, 0]);
+
+    let job = rig.handle.create_job(req("impl-cmd-rework")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    // The exit-1 fail reworked: a cycle-2 work task exists.
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t.phase == TaskPhase::Work && t.cycle == 2 && t.evaluator.is_none()),
+        "a normal non-zero command exit must rework, not retry: {tasks:#?}"
+    );
+    // The cycle-1 eval recorded a real product FAIL (exit 1), never an infra loss.
+    let eval1 = tasks
+        .iter()
+        .find(|t| t.phase == TaskPhase::Evaluation && t.cycle == 1)
+        .expect("cycle-1 eval task");
+    assert!(
+        matches!(
+            eval1.result,
+            Some(types::TaskResult::Command {
+                pass: false,
+                exit_code: 1,
+                ..
+            })
+        ),
+        "a normal non-zero exit is a verdict: {:?}",
+        eval1.result
+    );
+    assert!(
+        !eval1.infra_loss,
+        "a normal non-zero exit is a verdict, not infra loss"
+    );
+    let no_output = job_events(&rig.store, job.id)
+        .await
+        .into_iter()
+        .filter(|e| e["reason"] == "evaluator_no_output")
+        .count();
+    assert_eq!(no_output, 0, "the evidence-free path must not be taken");
 }
 
 /// #167 fix 1, passing path: a passing command evaluator behaves exactly as
@@ -3705,7 +3939,8 @@ async fn agent_eval_relaunch_prepends_empty_noted_predecessor_block() {
 async fn command_eval_retry_gets_no_predecessor_prompt() {
     let Some(rig) = rig().await else { return };
     commit_work(&rig); // agent work (the only provider run) → Evaluation
-    rig.backend.script_exits([101, 101, 101, 101, 101]); // ci no-outputs, relaunches
+    // ci is SIGKILLed (137) with empty output → evidence-free no-output relaunch.
+    rig.backend.script_exits([137, 137, 137, 137, 137]);
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
     rig.handle.release_job("acme", "api", job.id).await.unwrap();

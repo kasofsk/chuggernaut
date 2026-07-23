@@ -23,12 +23,15 @@ use vcs::{ConflictRebaseOutcome, MergeOutcome, RebaseOutcome};
 /// the failure wasn't the mechanical one-shot the fast path assumes.
 pub(crate) const GATE_FIX_BUDGET: u32 = 2;
 
-/// Machine code for an evaluator that exited without producing any evidence
-/// (#167): a Command exiting non-zero with an empty captured stream, or an
-/// Agent ending without a `submit_eval` verdict. Distinct from a product
-/// failure — the code was never actually judged. Surfaced on the
-/// `task-failed`/`job-escalated` event `reason`; the retire path stamps the
-/// task `infra_loss` (reusing the §3.6/#83 no-retry-burned machinery).
+/// Machine code for an evaluator that exited without ever delivering a verdict
+/// (#167, narrowed #198): a Command whose container died before it could judge —
+/// an ABNORMAL exit (a signal kill `>= 128`, or the negative backend-`wait`
+/// sentinel) with an empty captured stream — or an Agent ending without a
+/// `submit_eval` verdict. Distinct from a product failure — the code was never
+/// actually judged. A *normal* non-zero command exit (1..=127) IS a verdict and
+/// reworks like any product fail, even with empty output (#198). Surfaced on the
+/// `task-failed`/`job-escalated` event `reason`; the retire path stamps the task
+/// `infra_loss` (reusing the §3.6/#83 no-retry-burned machinery).
 pub(crate) const EVAL_NO_OUTPUT_REASON: &str = "evaluator_no_output";
 
 /// Scoped framing for a gate-fix task's prompt (job #154): the branch was
@@ -980,14 +983,26 @@ impl Core {
                 // for the job page, rework context, and #155's re-review. The full
                 // stream stays in the logs.
                 let output = log_tail.clone().unwrap_or_default();
-                // #167: a non-zero exit with a completely empty captured stream is
-                // evidence-free — infrastructure loss, not a verdict (backend
-                // hiccup, container died pre-exec, stream lost). Retry via the
-                // infra-loss machinery (no `eval_retries` burned, no rework, no
-                // cycle consumed); on exhaustion escalate `evaluator_no_output` so
-                // a human sees "the evaluator can't produce evidence" rather than
-                // "the code failed review".
-                if !pass && output.trim().is_empty() {
+                // #167/#198: a command's EXIT CODE is its verdict. A normal
+                // non-zero exit (1..=127) is a real product failure the job must
+                // rework against — even with a completely empty captured stream (a
+                // legitimately silent failure, e.g. `test -f x || exit 1`). #167's
+                // original guard mislabelled every empty-output fail as evidence-
+                // free and auto-retried it, silently discarding real failure
+                // verdicts (job #198). The evidence-free infra-loss case #167
+                // actually targets — a container that died before it could judge
+                // (an OOM/timeout signal kill, or a backend `wait` that never
+                // resolved) — surfaces as an ABNORMAL exit: a signal code (>= 128)
+                // or the negative wait sentinel. Only such a verdict-less exit with
+                // no output is retried via the infra-loss machinery (no
+                // `eval_retries` burned, no rework, no cycle consumed); on
+                // exhaustion escalate `evaluator_no_output` so a human sees "the
+                // evaluator can't produce evidence" rather than "the code failed
+                // review". A normal program exit is 0..=127; anything outside that
+                // range (a signal kill >= 128, or the negative sentinel) is the
+                // verdict-less case.
+                let verdict_less = !(0..128).contains(&exit_code);
+                if verdict_less && output.trim().is_empty() {
                     task.result = Some(TaskResult::Command {
                         pass: false,
                         exit_code,
@@ -1163,9 +1178,11 @@ impl Core {
         self.stage_complete(owner, project, seq).await
     }
 
-    /// #167: an evaluator exited without producing evidence — a Command exiting
-    /// non-zero with an empty captured stream, or an Agent ending without a
-    /// `submit_eval` verdict. This is infrastructure loss, not a product verdict:
+    /// #167 (narrowed #198): an evaluator exited without ever delivering a
+    /// verdict — a Command whose container died before judging (an abnormal
+    /// signal/sentinel exit) with an empty captured stream, or an Agent ending
+    /// without a `submit_eval` verdict. This is infrastructure loss, not a
+    /// product verdict:
     /// relaunch the SAME attempt WITHOUT spending an `eval_retries` budget (the
     /// §3.6/#83 infra-loss semantics — no rework, no cycle consumed), bounded by
     /// [`INFRA_RELAUNCH_CAP`] over the evaluator's lineage. On exhaustion escalate
