@@ -269,6 +269,13 @@ impl ArtifactStore {
             // The object-store API reports a missing object as an error, not None.
             Err(_) => return Ok(None),
         };
+        // A DELETEd object is a tombstone: `get` succeeds but the reader has no
+        // chunks and `read_to_end` awaits forever (reproduced 2026-07-23 —
+        // GET-after-DELETE hung http_bridge_end_to_end and a prod CI task).
+        // Deleted ⇒ absent.
+        if object.info.deleted {
+            return Ok(None);
+        }
         let (content_type, _) = parse_attachment_desc(object.info.description.as_deref());
         let mut sealed = Vec::new();
         object
@@ -329,8 +336,12 @@ impl ArtifactStore {
         name: &str,
     ) -> crate::Result<bool> {
         let key = keys::job_attachment_key(owner, project, job_seq, name);
-        if self.obj.info(key.as_str()).await.is_err() {
-            return Ok(false);
+        // `info` on a DELETEd object still succeeds (tombstone) — treat it as
+        // already-gone, same as missing, so double-delete reports false.
+        match self.obj.info(key.as_str()).await {
+            Err(_) => return Ok(false),
+            Ok(info) if info.deleted => return Ok(false),
+            Ok(_) => {}
         }
         self.obj
             .delete(key.as_str())
