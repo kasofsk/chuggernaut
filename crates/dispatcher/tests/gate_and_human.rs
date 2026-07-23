@@ -634,10 +634,18 @@ async fn gate_compile_failure_takes_fast_path_and_relands() {
             .unwrap()
             .is_some()
     );
-    let log = rig.repo.manager.log("acme", "api", None, 1).await.unwrap();
+    // The note lives in the squash commit BODY; `RepoManager::log` reads only
+    // the subject (`--format=%s`), so read the full message straight from git.
+    let body = tokio::process::Command::new("git")
+        .args(["log", "-1", "--format=%B", "main"])
+        .current_dir(rig.repo.bare_path())
+        .output()
+        .await
+        .unwrap();
+    let body = String::from_utf8_lossy(&body.stdout).to_string();
     assert!(
-        format!("{log:?}").contains("gate-fix round"),
-        "squash body must note the gate-fix round: {log:?}"
+        body.contains("gate-fix round"),
+        "squash body must note the gate-fix round: {body:?}"
     );
 }
 
