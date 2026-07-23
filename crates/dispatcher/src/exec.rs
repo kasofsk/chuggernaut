@@ -640,6 +640,22 @@ impl Core {
         let Some(task) = self.tasks.get(owner, project, seq, task_id).await? else {
             return Ok(());
         };
+        // A revoked (or otherwise terminated) job has no exec state; a late
+        // exit from one of its containers is noise, not a state transition.
+        // Every phase handler except Triage assumes exec state exists, so
+        // without this guard a stale exit panics the core loop. Triage is
+        // advisory and passes through: it never reads exec state.
+        if task.phase != TaskPhase::Triage
+            && !self
+                .active
+                .contains_key(&(owner.to_string(), project.to_string(), seq))
+        {
+            tracing::warn!(
+                "stale task exit for {owner}/{project}#{seq} task {task_id}: \
+                 no exec state (job revoked or completed); ignoring"
+            );
+            return Ok(());
+        }
         // Container gone at restart (§3.6): an infrastructure loss, not a real
         // exit. Handled before the per-phase verdict logic so a Work retry
         // budget is never spent and a command evaluator's vanished container is
