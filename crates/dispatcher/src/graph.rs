@@ -2,6 +2,13 @@
 //! `jobs.*` KV on startup; the KV record stays the source of truth — this is
 //! the dispatcher's working copy for wiring checks, dependency queries, and
 //! revoke cascades.
+//!
+//! - **Accepts:** the `jobs.*` KV on startup; dependency/wiring queries and
+//!   revoke cascades from `core`.
+//! - **Emits:** rdeps maintenance and dependency answers — no KV writes.
+//! - **Guarantees:** the KV record stays the source of truth; this is a derived
+//!   working copy, rebuilt on startup.
+//! - **Spec:** §1.4, §2.3.
 
 use std::collections::{HashMap, HashSet};
 use types::{Job, JobState};

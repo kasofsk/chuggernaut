@@ -6,6 +6,16 @@
 //! parks the candidate squash commit on `merge-gate/{seq}` and re-runs the
 //! required command evaluators against it before promoting — nothing reaches
 //! the default branch untested against the exact tree that lands.
+//!
+//! - **Accepts:** a job entering Evaluation; evaluator submissions; merge-gate
+//!   re-runs.
+//! - **Emits:** evaluator container launches, the `EvalResult` reduction,
+//!   squash-merge to the default branch or conflict re-entry, and merge-gate
+//!   parking on `merge-gate/{seq}`.
+//! - **Guarantees:** every merge flows through a per-project depth-1 queue;
+//!   nothing lands on the default branch untested against the exact tree.
+//! - **Spec:** §3.3; §3.2 step 12. Runs as `impl Core` — core stays the single
+//!   writer.
 
 use crate::core::{Core, CoreError, EvalSubmission, Msg, Result, TaskExit};
 use crate::exec::{ChannelRole, INFRA_RELAUNCH_CAP, eval_image, task_timeout};

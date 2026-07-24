@@ -8,6 +8,14 @@
 //! API-facing reply envelope: success is the resource JSON verbatim; failure
 //! is `{"error": {"status": u16, "message": string, "errors": [...]?}}` so
 //! the HTTP bridge can map straight to §6.5 responses.
+//!
+//! - **Accepts:** `req.*` NATS requests — container-facing (work/eval submit)
+//!   and api-facing (jobs, graph, tasks, vcs.diff, …).
+//! - **Emits:** `CoreHandle` calls and reply envelopes (resource JSON on
+//!   success; `{"error": {...}}` on failure).
+//! - **Guarantees:** the idempotent, bounded-retry contract (§4.2); mutates no
+//!   state outside the core call.
+//! - **Spec:** §6.1, §6.5.
 
 use crate::core::{
     ChannelPost, CoreError, CoreHandle, CreateJobRequest, EvalSubmission, UpdateJobRequest,

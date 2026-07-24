@@ -92,28 +92,41 @@ Depends on `container` (launches through the backend) and `store` (KO resolution
 
 The core. Internal module map:
 
+Each module opens with a contract-style `//!` header (accepts / emits /
+guarantees / spec §); `MODULES.md` at the repo root is the one-line registry.
+The map below mirrors the actual `crates/dispatcher/src/*.rs` tree.
+
 ```
 dispatcher/
-  core.rs        — the single-writer event loop (see below)
+  core.rs        — the single-writer event loop (see below); all mutable state lives here
   state.rs       — the §2.1 transition table: one function per transition, guards + effects
-  graph.rs       — in-memory DAG (petgraph), rdeps maintenance and startup rebuild
+  graph.rs       — in-memory DAG (petgraph), rdeps maintenance and startup rebuild (§1.4, §2.3)
   queue.rs       — in-memory FIFO of Ready job IDs (§3.1 step 5)
-  release.rs     — three-pass validation (§2.2), graph validate/release (§2.3)
-  exec.rs        — the §3.2 work-execution sequence
-  eval.rs        — evaluator fan-out and reduce (§3.3), per-evaluator image resolution,
-                   merge gate (candidate ref, gate task fan-out, depth-1 queue)
-  escalation.rs  — escalation task creation, resolution actions incl. pre-Work rules (§1.2)
-  launch.rs      — launch-time validation, secret/var injection, credential issuance, container config
+  release.rs     — release validation: graph wiring + static config checks (§2.2, §2.3)
+  exec.rs        — the §3.2 work-execution sequence (Ready→Work, retry, rework/conflict re-entry)
+  eval.rs        — evaluator fan-out and reduce (§3.3), post-eval finalization and the
+                   depth-1 merge gate (§3.2 step 12)
+  escalation.rs  — escalation task construction (§1.2, §3.4)
+  launch_queue.rs— capacity-aware launch queue: park on NoCapacity, drain on slot-freed (§3.5)
   scan.rs        — task-timeout and one-shot job-deadline scans (§3.5)
+  reconcile.rs   — restart reconciliation of mid-execution jobs (§3.6)
   cd.rs          — config-snapshot freshness: republish live fleet/deploy-drift
                    state from the scan tick when serialized bytes change
-  factory.rs     — factory reload from default-branch HEAD, durable ingest consumers,
-                   batching, triage job creation, auto-release policy (§13)
-  reconcile.rs   — restart reconciliation (§3.6)
-  handlers/      — one module per req.* subject family (jobs, graph, vcs, vars, secrets,
-                   knowledge, channel, tasks, work/eval submit, usage, ssh)
+  fleet.rs       — live fleet occupancy publishing, rebuilt from live containers (§3.1, §3.6)
+  harvest.rs     — pull artifacts out of an exited container, then reclaim its overlay (§3.2)
+  channel.rs     — agent → operator channel posts: writes `channels` KV + job-events (§4.2)
+  triage.rs      — operator-dispatched advisory triage runs; never drives a transition (§1.2)
+  origin.rs      — linked-origin projects: the link flow and the origin-release PR surface (§5.3)
+  github.rs      — minimal GitHub REST client (create/read PRs) behind a trait for the origin surface (§5.3)
+  seed.rs        — platform starter template embedded in the binary (§12.2)
+  run.rs         — production startup: wire store, repos, fleet, provider; fail fast (§3.6, §12.4)
+  handlers.rs    — NATS req.* subject handlers, one spawn fn per subject family (§6.1, §6.5)
   config.rs      — dispatcher config (AGENT_PROVIDER_DEFAULT etc., §12.4)
 ```
+
+`handlers.rs` is still a single file; splitting it into a `handlers/`
+directory (one module per subject family) is scheduled refactor work, not
+current state.
 
 **Single-writer core:** `core.rs` owns all mutable state (job records, task log tail, DAG, work queue) inside one tokio task. Everything else — NATS request handlers, container monitors, scan timers — sends messages over an `mpsc` channel and never mutates state directly. Container monitoring is concurrent (one lightweight task per running container, each just awaiting `backend.wait()` and posting the exit back to the core loop). This makes the "state transitions are processed one at a time" guarantee (§3.1) structural rather than disciplinary: there is no lock to misuse because there is no shared mutable state.
 

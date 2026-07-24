@@ -14,6 +14,14 @@
 //! Single-writer intact: the queue lives in the actor, the slot-freed signal
 //! rides the existing container-exit fan-in, and every queue mutation happens
 //! on the actor thread.
+//!
+//! - **Accepts:** container launch requests that hit `NoCapacity`; the
+//!   slot-freed signal from container exits; scan-tick drains.
+//! - **Emits:** parked `Pending` tasks (no retry budget consumed), re-attempted
+//!   launches, and escalation when a launch outwaits `MAX_QUEUE_WAIT`.
+//! - **Guarantees:** every queue mutation on the actor thread;
+//!   unreachable-node and other launch errors keep fail-the-task semantics.
+//! - **Spec:** §3.5.
 
 use crate::core::{Core, Msg, Result, TaskExit};
 use crate::exec::{ChannelRole, eval_image, task_timeout};

@@ -11,6 +11,14 @@
 //! happens inside the per-task `tokio::spawn`, off the actor thread. Nothing
 //! here writes job or task state — it returns what it found and lets the actor
 //! record it, preserving the single-writer rule.
+//!
+//! - **Accepts:** an exited container's handles (logs, session transcript,
+//!   `eval-result.json`).
+//! - **Emits:** the harvested artifacts back to the actor; overlay-layer
+//!   disposal (`dispose`) once collection is done.
+//! - **Guarantees:** runs off the actor thread on cloned handles; writes no
+//!   job/task state (single-writer preserved).
+//! - **Spec:** §3.2 (container removal after harvest); §3.6 (crash sweep).
 
 use crate::core::CoreError;
 use agent::AgentOutput;

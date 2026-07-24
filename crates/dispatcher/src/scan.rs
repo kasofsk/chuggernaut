@@ -1,6 +1,14 @@
 //! Task-timeout and one-shot job-deadline scans (spec §3.5). Driven by the
 //! ticker in `core::spawn` (and `CoreHandle::trigger_scan` in tests); both
 //! scans run inside the single-writer loop like any other message.
+//!
+//! - **Accepts:** the periodic scan tick (or `CoreHandle::trigger_scan` in
+//!   tests).
+//! - **Emits:** task-timeout escalations and one-shot job-deadline
+//!   transitions; also drives the launch-queue drain and config republish.
+//! - **Guarantees:** every scan runs inside the single-writer loop; every wait
+//!   is bounded.
+//! - **Spec:** §3.5.
 
 use crate::core::{Core, Result, TaskExit};
 use crate::exec::task_timeout;

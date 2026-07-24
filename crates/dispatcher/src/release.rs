@@ -1,6 +1,13 @@
 //! Release validation (spec §2.2): graph wiring rules plus static
 //! configuration checks. Used at release time (against current HEAD) and at
 //! the Blocked→Ready re-validation (against the freshly pinned `base_ref`).
+//!
+//! - **Accepts:** a graph to release and the config tree at a given ref.
+//! - **Emits:** a validation verdict — wiring violations and static-config
+//!   errors, or a clean pass.
+//! - **Guarantees:** pure checks, no state writes; the same rules run at
+//!   release and at Blocked→Ready re-validation.
+//! - **Spec:** §2.2, §2.3.
 
 use crate::graph::JobGraph;
 use serde::Serialize;

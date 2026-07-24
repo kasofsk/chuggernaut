@@ -1,5 +1,11 @@
 //! Escalation task construction (spec §1.2, §3.4). Resolution actions land
 //! with the execution slice; this module owns the task shape.
+//!
+//! - **Accepts:** a job needing escalation and its reason.
+//! - **Emits:** the escalation `Task` shape.
+//! - **Guarantees:** owns task construction only — performs no state
+//!   transition (resolution actions live with `exec`).
+//! - **Spec:** §1.2, §3.4.
 
 use chrono::Utc;
 use types::{Task, TaskKind, TaskPhase, TaskState};

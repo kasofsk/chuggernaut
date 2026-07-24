@@ -14,6 +14,14 @@
 //!
 //! The KV entry is still maintained, because §6.2's `GET .../status` is defined
 //! in terms of it.
+//!
+//! - **Accepts:** `ChannelUpdate` / `AgentReply` posts from the channel MCP
+//!   server (via `handlers`).
+//! - **Emits:** the `channels` KV entry (a status cache, 7-day TTL) and a
+//!   `job-events` publish per post.
+//! - **Guarantees:** the dispatcher is the sole writer of `channels` KV; every
+//!   post is durably evented (90d) and reaches SSE.
+//! - **Spec:** §4.2; §6.2 `GET .../status`.
 
 use crate::core::{ChannelPost, Core, Result};
 use store::{buckets, keys};

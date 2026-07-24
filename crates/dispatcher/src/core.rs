@@ -3,6 +3,14 @@
 //! container monitors, scan timers — talks to it via the [`Msg`] channel and
 //! never mutates state directly. Container monitoring is concurrent; state
 //! transitions are sequential.
+//!
+//! - **Accepts:** `Msg` values over the mpsc channel — handler calls, container
+//!   exits, and scan ticks.
+//! - **Emits:** every job/task state write, graph/queue mutation, and container
+//!   launch; drives the other slices as `impl Core` blocks.
+//! - **Guarantees:** exactly one writer of platform state; transitions
+//!   processed one at a time; no shared mutable state, so no lock to misuse.
+//! - **Spec:** §3.1.
 
 use crate::graph::JobGraph;
 use crate::origin::OriginStatusResponse;

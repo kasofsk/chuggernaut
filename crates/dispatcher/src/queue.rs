@@ -1,6 +1,12 @@
 //! In-memory FIFO of Ready jobs (spec §3.1 step 5). Lives inside the core
 //! task; rebuilt on restart by the reconciliation scan, so it is never
 //! persisted.
+//!
+//! - **Accepts:** Ready job IDs enqueued by `core`; dequeue on launch.
+//! - **Emits:** the next Ready job ID in FIFO order.
+//! - **Guarantees:** holds only Ready jobs; lives in the actor, never
+//!   persisted; rebuilt from KV on restart.
+//! - **Spec:** §3.1 step 5.
 
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;

@@ -11,6 +11,14 @@
 //! state and the self-repo tip, serialize it, and write it back only when the
 //! bytes changed. That is a KV put every 30s at most — usually skipped, because
 //! nothing moved.
+//!
+//! - **Accepts:** the periodic scan tick (`Core::refresh_config_snapshot`);
+//!   live fleet state and the self-repo git tip.
+//! - **Emits:** a `DispatcherConfigSnapshot` KV put to the `platform` bucket,
+//!   written only when the serialized bytes change.
+//! - **Guarantees:** at most one KV write per scan tick (~30s); no write when
+//!   nothing moved.
+//! - **Spec:** CD plan C.
 
 use crate::core::Core;
 use container::NodeStatus;

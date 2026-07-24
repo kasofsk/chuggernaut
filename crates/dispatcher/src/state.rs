@@ -1,5 +1,12 @@
 //! The §2.1 transition table. No transition exists outside this function —
 //! every state write in `core` goes through [`assert_transition`] first.
+//!
+//! - **Accepts:** a current `JobState` and the event driving the change.
+//! - **Emits:** the permitted next state, or a rejected assertion for an
+//!   illegal edge.
+//! - **Guarantees:** pure and synchronous (no `.await`); terminal states are
+//!   absorbing; the sole authority on legal transitions.
+//! - **Spec:** §2.1.
 
 use thiserror::Error;
 use types::JobState;

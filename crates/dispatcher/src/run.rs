@@ -1,6 +1,14 @@
 //! Production startup: wire the store, repos, Docker fleet, and provider into
 //! a spawned core (`chuggernaut dispatcher`). Fails fast per §3.6/§12.4 — bad
 //! config, old git, or an unreachable fleet node aborts startup.
+//!
+//! - **Accepts:** validated `config`, the store connection, repo paths, the
+//!   Docker fleet, and the agent provider.
+//! - **Emits:** a spawned `Core` plus the initial `DispatcherConfigSnapshot`
+//!   (see `cd`).
+//! - **Guarantees:** fails fast — bad config, old git, or an unreachable fleet
+//!   node aborts startup before the message loop runs.
+//! - **Spec:** §3.6, §12.4.
 
 use crate::config::DispatcherConfig;
 use crate::core::{Core, CoreError, CoreHandle, Result, spawn};

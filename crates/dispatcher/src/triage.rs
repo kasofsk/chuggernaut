@@ -10,6 +10,14 @@
 //! the dispatcher already holds (brief, escalation reason, every task's result,
 //! and captured stdout logs); there is no channel MCP, so the assessment is
 //! read back from the CLI's own JSON result on stdout ([`agent::claude::parse_result`]).
+//!
+//! - **Accepts:** an operator triage request for an Escalated or Stalled job;
+//!   the job state the dispatcher already holds.
+//! - **Emits:** a platform-image agent run and a `TaskPhase::Triage` task
+//!   recording the written assessment + recommendation.
+//! - **Guarantees:** purely advisory — never drives a job transition (no
+//!   `state.rs` change); available only while Escalated/Stalled; repeatable.
+//! - **Spec:** §1.2.
 
 use crate::core::{Core, CoreError, Msg, Result, TaskExit};
 use crate::exec::{ChannelRole, job_brief_block, provider_name};

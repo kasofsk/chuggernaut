@@ -2,6 +2,13 @@
 //! read pull requests, nothing else. Behind a trait so integration tests
 //! script PR state instead of talking to GitHub. The PAT is resolved from
 //! project secrets per call (see `origin.rs`), never held by the client.
+//!
+//! - **Accepts:** PR create/read calls; a PAT resolved per call from project
+//!   secrets.
+//! - **Emits:** GitHub PR create/read REST requests (behind a trait so tests
+//!   script PR state).
+//! - **Guarantees:** creates/reads PRs only; never holds the PAT.
+//! - **Spec:** §5.3 (origin release; see `origin`).
 
 use async_trait::async_trait;
 use serde::Deserialize;

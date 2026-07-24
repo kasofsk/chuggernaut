@@ -2,6 +2,12 @@
 //! fresh project is seeded with at creation. Chuggernaut-level, versioned
 //! with the platform; everything project-specific stays editable in the
 //! project repo afterwards.
+//!
+//! - **Accepts:** nothing at runtime — the template is embedded in the binary.
+//! - **Emits:** the file set a fresh project is seeded with at creation.
+//! - **Guarantees:** chuggernaut-level and versioned with the platform; seeded
+//!   files stay editable in the project repo afterwards.
+//! - **Spec:** §12.2.
 
 /// The "Code" starter: a coding agent implements the job ticket, a second
 /// coding agent reviews it; `tasks/` shows the reusable-task convention

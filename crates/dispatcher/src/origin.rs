@@ -7,6 +7,14 @@
 //! need the age identity for the deploy key, and hold/reset/pump are actor
 //! state. Origin credentials live in project secrets under reserved names and
 //! are never injected into containers (see `RESERVED_SECRET_PREFIX`).
+//!
+//! - **Accepts:** `req.projects.link` and `req.origin.*` requests; project
+//!   secrets for the deploy key.
+//! - **Emits:** origin git ops (the local `integration` branch,
+//!   `chug/release-{n}` snapshots) and GitHub PRs via `github`.
+//! - **Guarantees:** runs inside the single-writer actor; origin credentials
+//!   are never injected into containers.
+//! - **Spec:** §5.3.
 
 use crate::core::{Core, CoreError, Result};
 use crate::release::ValidationError;

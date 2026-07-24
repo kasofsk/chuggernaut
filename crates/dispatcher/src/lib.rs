@@ -4,6 +4,10 @@
 //! task; handlers, container monitors, and scan timers communicate with it only
 //! via an mpsc channel. There is no lock to misuse because there is no shared
 //! mutable state.
+//!
+//! Every module here opens with a contract-style header (accepts / emits /
+//! guarantees / spec §); `MODULES.md` at the repo root is the one-line
+//! registry of these scoping-eligible modules.
 
 pub mod cd;
 pub mod channel;
@@ -12,13 +16,11 @@ pub mod core;
 pub mod escalation;
 pub mod eval;
 pub mod exec;
-pub mod factory;
 pub mod fleet;
 pub mod github;
 pub mod graph;
 pub mod handlers;
 pub(crate) mod harvest;
-pub mod launch;
 pub mod launch_queue;
 pub mod origin;
 pub mod queue;

@@ -2,6 +2,14 @@
 //! message loop starts. The task log in `tasks.*` KV is the source of truth;
 //! `Core::new` already rebuilt the rdeps index, graphs, and the Ready queue —
 //! this pass recovers jobs that were mid-execution when the process died.
+//!
+//! - **Accepts:** the persisted `tasks.*` KV, read at startup before the
+//!   message loop begins.
+//! - **Emits:** recovery transitions for jobs left mid-execution (re-queue,
+//!   re-attach, or fail per §3.6).
+//! - **Guarantees:** runs inside the actor task before any message is
+//!   processed; the task log stays the source of truth.
+//! - **Spec:** §3.6.
 
 use crate::core::{Core, Result, TaskExit};
 use crate::eval::{EvalRound, EvalSlot, SlotOutcome};

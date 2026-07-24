@@ -3,6 +3,14 @@
 //! rework/conflict re-entry paths. Evaluation
 //! lives in `eval.rs`; both are `impl Core` blocks — the core stays the single
 //! writer, these files are its execution verbs.
+//!
+//! - **Accepts:** a Ready job (Ready→Work); work submissions; retry, rework,
+//!   and conflict re-entry triggers.
+//! - **Emits:** work container launches, branch recover-or-reset on crash
+//!   recovery, and the transition into Evaluation.
+//! - **Guarantees:** runs as `impl Core` (single writer preserved); retry
+//!   budget bounded.
+//! - **Spec:** §3.2.
 
 use crate::core::{Core, CoreError, Msg, Result, TaskExit, WorkSubmission};
 use crate::escalation;

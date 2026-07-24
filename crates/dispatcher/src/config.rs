@@ -1,5 +1,10 @@
 //! Dispatcher configuration (spec §12.4). AGENT_PROVIDER_DEFAULT is required —
 //! the dispatcher refuses to start without it.
+//!
+//! - **Accepts:** the process environment at startup.
+//! - **Emits:** a validated `Config` value.
+//! - **Guarantees:** fails fast — refuses to start on missing/invalid config.
+//! - **Spec:** §12.4.
 
 use crate::core::{CoreConfig, CoreError, Result};
 use container::PlacementPolicy;

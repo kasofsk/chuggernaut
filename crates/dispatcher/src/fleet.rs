@@ -16,6 +16,15 @@
 //! `GET /api/v1/platform/fleet`; the existing per-task lifecycle events
 //! (`task-launched`, `task-queued`, task/job state) already ride the job-event
 //! stream and tell an SSE client when to refetch.
+//!
+//! - **Accepts:** task launch/exit events; the live container list from the
+//!   backend (`ContainerBackend::list_managed_running`).
+//! - **Emits:** a full `fleet.status` snapshot to the `platform` bucket,
+//!   written only when the serialized bytes change.
+//! - **Guarantees:** occupancy rebuilt from live containers, never stale
+//!   bookkeeping — correct straight after restart re-attachment; an idle fleet
+//!   republishes nothing.
+//! - **Spec:** §3.1, §3.6.
 
 use crate::core::Core;
 use std::collections::{BTreeMap, HashSet};
