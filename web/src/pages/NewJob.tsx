@@ -246,6 +246,8 @@ function CreateJob({
           <textarea rows={5} value={description} onChange={(e) => setDescription(e.target.value)} />
         </label>
 
+        <AttachmentComposer files={files} onChange={setFiles} />
+
         <div className="field">
           <span>Job type</span>
           <div className="type-select">
@@ -481,8 +483,6 @@ function CreateJob({
             placeholder={typeModel ? `${typeModel} (default)` : 'e.g. claude-opus-4-8, claude-fable-5'}
           />
         </label>
-
-        <AttachmentComposer files={files} onChange={setFiles} />
 
         <div className="departure">
           <div className="mode-seg" role="radiogroup" aria-label="Initial state">
