@@ -2868,7 +2868,7 @@ table.jobs tbody tr.row-draft td:first-child {
 
 /* ══════════════════════════════════════════════════════════════════════════
    SNAZZY REDESIGN (#161–#164, #171): cosmic identity, icon rail, page chrome,
-   overview sidebar, status footer, train header, ticket-stub New Job.
+   overview sidebar, status footer, train header, New Job.
    Both themes come from the tokens above — no hard-coded colours here.
    ═════════════════════════════════════════════════════════════════════════ */
 
@@ -3825,181 +3825,9 @@ tr[data-state='Batched'] {
   }
 }
 
-/* ── New Job as a departure: ticket stub, type cards, coupled cars (#171) ───── */
+/* ── New Job as a departure: type cards, coupled cars (#171) ───── */
 .newjob-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
-  gap: var(--sp-4);
-  align-items: start;
-}
-.ticket-col {
-  position: sticky;
-  top: var(--sp-4);
-}
-.ticket {
-  position: relative;
-  border-radius: var(--r-lg);
-  border: 1px solid var(--border);
-  background: linear-gradient(165deg, var(--card), color-mix(in srgb, var(--accent) 7%, var(--card)));
-  box-shadow: var(--shadow-card);
-  padding: var(--sp-4) var(--sp-5);
-  overflow: hidden;
-}
-.ticket-eyebrow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  font-size: var(--fs-xs);
-  color: var(--dim);
-  font-weight: 700;
-}
-.ticket-headline {
-  margin: var(--sp-2) 0 var(--sp-1);
-  font-size: var(--fs-lg);
-  font-weight: 800;
-  line-height: 1.2;
-  overflow-wrap: anywhere;
-}
-.ticket-headline.dim {
-  font-weight: 600;
-}
-.ticket-type-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.15rem 0.6rem;
-  border-radius: var(--r-full);
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--accent);
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-.ticket-route {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin: var(--sp-3) 0;
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  color: var(--dim);
-}
-.ticket-route b {
-  color: var(--text);
-}
-.ticket-perf {
-  border: none;
-  border-top: 1px dashed var(--border);
-  margin: var(--sp-3) 0;
-}
-.ticket-section-label {
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  font-size: var(--fs-xs);
-  color: var(--dim);
-  font-weight: 600;
-  margin-bottom: 0.3rem;
-}
-.ticket-conns,
-.ticket-stamps,
-.ticket-stickers {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  margin-bottom: var(--sp-2);
-}
-.ticket-conn {
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  padding: 0.1rem 0.45rem;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--border);
-  background: var(--inset);
-}
-.ticket-stamp {
-  font-size: var(--fs-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 0.15rem 0.45rem;
-  border-radius: var(--r-sm);
-  border: 1px dashed color-mix(in srgb, var(--green) 50%, transparent);
-  color: var(--green);
-  transform: rotate(-2deg);
-}
-.ticket-sticker {
-  font-size: var(--fs-xs);
-  padding: 0.1rem 0.45rem;
-  border-radius: var(--r-full);
-  border: 1px solid var(--border);
-  background: color-mix(in srgb, var(--purple) 10%, transparent);
-  color: var(--purple);
-}
-.ticket-error {
-  display: inline-block;
-  font-size: var(--fs-xs);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 0.15rem 0.5rem;
-  margin: 0.15rem 0.35rem 0.15rem 0;
-  border: 2px solid var(--orange);
-  color: var(--orange);
-  border-radius: var(--r-sm);
-  transform: rotate(-3deg);
-}
-.ticket-barcode {
-  margin-top: var(--sp-3);
-  height: 30px;
-  border-radius: 3px;
-  background-image: repeating-linear-gradient(
-    90deg,
-    var(--text) 0 2px,
-    transparent 2px 4px,
-    var(--text) 4px 5px,
-    transparent 5px 9px
-  );
-  opacity: 0.5;
-}
-/* Punch-on-create: a hole + spark burst, then the stub departs the frame. */
-.ticket-punched::after {
-  content: '';
-  position: absolute;
-  top: 18px;
-  right: 22px;
-  width: 16px;
-  height: 16px;
-  border-radius: var(--r-full);
-  background: var(--bg);
-  box-shadow: 0 0 0 2px var(--border) inset;
-  animation: ticket-punch 0.3s ease;
-}
-@keyframes ticket-punch {
-  from {
-    transform: scale(0);
-  }
-  to {
-    transform: scale(1);
-  }
-}
-.ticket-depart {
-  animation: ticket-depart 0.6s ease forwards;
-}
-@keyframes ticket-depart {
-  to {
-    transform: translateX(60px) rotate(2.5deg);
-    opacity: 0;
-  }
-}
-.ticket-siding {
-  animation: ticket-siding 0.6s ease forwards;
-}
-@keyframes ticket-siding {
-  to {
-    transform: translateX(-40px) translateY(10px) rotate(-2deg);
-    opacity: 0;
-  }
+  max-width: 720px;
 }
 
 /* Type cards */
@@ -4350,26 +4178,12 @@ tr[data-state='Batched'] {
   .switch-knob {
     transition: none;
   }
-  .ticket-punched::after,
-  .ticket-depart,
-  .ticket-siding {
-    animation: none;
-  }
-  .ticket-depart,
-  .ticket-siding {
-    opacity: 0;
-  }
 }
 
 /* ── Responsive: rail -> bottom bar, sidebars stack, header shrinks ─────────── */
 @media (max-width: 900px) {
-  .jobs-layout,
-  .newjob-layout {
+  .jobs-layout {
     grid-template-columns: minmax(0, 1fr);
-  }
-  .ticket-col {
-    position: static;
-    order: -1;
   }
 }
 @media (max-width: 640px) {

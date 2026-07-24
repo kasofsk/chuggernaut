@@ -10,16 +10,11 @@ import {
 } from '../api'
 import { ProjectHeader } from '../components/ProjectHeader'
 import { RichSelect } from '../components/RichSelect'
-import { TicketStub } from '../components/TicketStub'
 import { SkeletonLines } from '../components/Skeleton'
 import { AttachmentComposer, uploadFiles } from '../components/Attachments'
 
-const reducedMotion = () =>
-  typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
-
 /**
- * Create-job page (#171): a form beside a live train-ticket stub that
- * materialises the job as you compose it; deps render as coupled cars, and a
+ * Create-job page (#171): the compose form; deps render as coupled cars, and a
  * Draft/Frozen/Ready selector picks the initial state. `?type=` preselects a
  * job type (linked from the Library).
  */
@@ -125,8 +120,6 @@ function CreateJob({
   const typeModel = typeDetail?.job_type?.work?.model ?? null
   // Departure switch: 'release' schedules the run; 'draft' parks it on the siding.
   const [mode, setMode] = useState<'draft' | 'frozen' | 'ready'>('frozen')
-  // Create-time flourish for the ticket stub.
-  const [anim, setAnim] = useState<'none' | 'depart' | 'siding'>('none')
   const [error, setError] = useState<string | null>(null)
   const busy = useRef(false)
 
@@ -156,7 +149,6 @@ function CreateJob({
     .map((t) => t.trim())
     .filter(Boolean)
   const allTags = [...selectedTags, ...extraTags.filter((t) => !selectedTags.includes(t))]
-  const typeLabel = jobTypes.find((t) => t.name === type)?.display_name
 
   function build(draft: boolean) {
     if (busy.current) return
@@ -207,10 +199,7 @@ function CreateJob({
           }
           // Ready = create + immediate release; Frozen parks; Draft stays editable.
           if (mode === 'ready') await api.release(owner, project, job.id).catch(() => {})
-          const go = () => navigate(`/p/${owner}/${project}/jobs/${job.id}`)
-          if (reducedMotion()) return go()
-          setAnim(draft ? 'siding' : 'depart')
-          window.setTimeout(go, 600)
+          navigate(`/p/${owner}/${project}/jobs/${job.id}`)
         },
         (e) => {
           busy.current = false
@@ -512,22 +501,6 @@ function CreateJob({
         </div>
         {error && <div className="error">{error}</div>}
       </form>
-
-      <div className="ticket-col">
-        <TicketStub
-          anim={anim}
-          data={{
-            owner,
-            project,
-            title: title.trim(),
-            typeLabel,
-            deps,
-            evals: evalRows.map((r) => r.name.trim()).filter(Boolean),
-            tags: allTags,
-            destination: mode,
-          }}
-        />
-      </div>
     </div>
   )
 }
