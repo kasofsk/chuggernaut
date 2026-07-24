@@ -20,13 +20,16 @@ naming the rule.
 
 These are the invariants that must never be violated and that NORTH-STAR §4
 targets for machine enforcement, so that a worker cannot drift on them even
-without reading this file. **Status today:** the repo has no CI wired yet — no
-`.github/`, no `clippy.toml`/lints table, no ESLint config — so every item
-below is currently **reviewer-enforced by hand**, and each notes the check that
-will make it automatic. "Non-negotiable" is about the rule, not the machine: a
-violation blocks the change whether or not a linter caught it, and several of
-these guard state that today's code still violates (noted inline) — that debt
-is what the checks will pin down.
+without reading this file. **CI here is the evaluation gate, not a workflow
+file**: `jobs/_defaults.yaml` appends the `ci` command evaluator to every job
+type, and `tasks/ci.sh` runs fmt, clippy `-D warnings`, and the full workspace
+test suite on every merge (see CLAUDE.md "CI — the evaluation gates ARE the
+CI"). Each item below is tagged **live** (the gate already enforces it) or
+**pending** (needs config or a script the gate doesn't run yet; until then
+reviewer-enforced by hand). "Non-negotiable" is about the rule, not the
+machine: a violation blocks the change whether or not a linter caught it, and
+several of these guard state that today's code still violates (noted inline) —
+that debt is what the pending checks will pin down.
 
 - **Dependency-graph invariants.** *(pending: `cargo metadata` check; today
   reviewer-checked — the tree currently satisfies it.)* Only `store` depends
@@ -41,7 +44,7 @@ is what the checks will pin down.
   `store` lists `async-nats` among its dependencies, (b) `dispatcher` appears
   in `api`'s non-dev dependency edges, or (c) `tokio`/`async-nats` appear
   anywhere in `types`' subtree. No new tooling — jq or a tiny Rust/Python
-  script; it would run in the normal CI job before tests.
+  script; it would slot into `tasks/ci.sh` before the tests.
 
 - **Web import boundaries (ESLint).** *(pending: presupposes the `ui/`/`data/`
   split, which is NORTH-STAR §3 target work — `web/src/` is still flat, so
@@ -50,22 +53,24 @@ is what the checks will pin down.
   makes `ui/` presentational-by-construction and keeps fetching in one
   auditable layer (NORTH-STAR §3).
 
-- **Function length: 70 lines.** *(pending: `clippy.toml` with
-  `too-many-lines-threshold = 70` plus a deny of the allow-by-default
-  `clippy::too_many_lines` lint; today reviewer-checked, and much of `eval.rs`
-  exceeds it.)* *Why:* a function that fits on one screen can be reviewed as a
+- **Function length: 70 lines.** *(pending: the gate's clippy `-D warnings`
+  doesn't catch this — `clippy::too_many_lines` is allow-by-default and needs a
+  `clippy.toml` with `too-many-lines-threshold = 70` plus an explicit deny;
+  today reviewer-checked, and much of `eval.rs` exceeds it.)* *Why:* a function that fits on one screen can be reviewed as a
   unit; `eval.rs` reached ~2,900 lines precisely because no numeric limit
   existed.
 
-- **No `.unwrap()` / `.expect()` outside tests.** *(pending: deny
-  `clippy::unwrap_used`/`expect_used`; today reviewer-checked, and non-test
-  domain code still contains such calls to be cleaned up.)* *Why:* the large
+- **No `.unwrap()` / `.expect()` outside tests.** *(pending: like function
+  length, `clippy::unwrap_used`/`expect_used` are allow-by-default and need an
+  explicit deny; today reviewer-checked, and non-test domain code still
+  contains such calls to be cleaned up.)* *Why:* the large
   majority of catastrophic distributed-system failures trace to mishandled
   errors; in the dispatcher a panic stalls every job in the DAG.
 
-- **Formatting is `rustfmt` / `prettier` defaults.** *(pending: `cargo fmt
-  --check` / `prettier --check` in CI; run locally today.)* *Why:* zero
-  decisions, zero diffs about decisions.
+- **Formatting is `rustfmt` / `prettier` defaults.** *(live for Rust:
+  `tasks/ci.sh` runs `cargo fmt --all -- --check` on every merge; pending for
+  web: no `prettier --check` in the gate yet.)* *Why:* zero decisions, zero
+  diffs about decisions.
 
 ## Tier 2 — mechanical rules a reviewer checks by name
 

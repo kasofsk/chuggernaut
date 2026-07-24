@@ -36,6 +36,27 @@ Integration tests need **NATS** (and some need **Docker**). Run these dependenci
 guard macro that skips when Docker/NATS are unavailable. Prefer `nats-server` via Docker
 over a brew install.
 
+## CI — the evaluation gates ARE the CI
+
+There is no `.github/` workflow here, and that does **not** mean "no CI is
+wired." This project dogfoods itself: every change merges through a Chuggernaut
+job, and the job's **evaluation criteria are the CI**. "Enforced in CI" in this
+repo means "enforced by an evaluator" — never conclude the repo is ungated from
+the absence of a workflow file.
+
+- `jobs/_defaults.yaml` appends the `ci` **command evaluator** to *every* job
+  type. It runs `tasks/ci.sh` (stage 1) against the job branch before any merge:
+  `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D
+  warnings`, and `cargo test --workspace --no-fail-fast` with tier-2 tests
+  executing against a real `nats-server`. It is diff-aware — doc/web/config-only
+  diffs gate in seconds without a cargo build — and it version-skew-gates
+  `jobs/*.yaml` config changes against the deployed dispatcher (spec §14).
+- Per-type **stage-0 agent reviewers** run first (`tasks/review-*.md`), so the
+  slow cargo gate is spent only on changes the reviewer accepts; `docs`/`design`
+  jobs additionally gate on `tasks/doc-lint.sh` at stage 1.
+- The wiring lives in `jobs/*.yaml` (job types) and `prompts/` (work/review
+  prompts); the gates themselves are `tasks/*.sh` and `tasks/review-*.md`.
+
 ## Conventions that bite if you miss them
 
 - **The dispatcher is the single writer** of job records. State management is single-threaded
