@@ -2,6 +2,8 @@
 
 Companion to `spec.md` (normative behavior) and `design.md` (rationale). This document maps the spec onto a Rust workspace: which crates exist, what each owns, and how the dispatcher is decomposed internally.
 
+**See also** — for where this map is *heading*: `NORTH-STAR.md` (target factoring), `structure-assessment.md` (current-state audit against that target), `contracts.md` (extracting the dispatcher's internal interfaces), and `ts-rewrite-plan.md` (the TypeScript dispatcher rewrite).
+
 ## Workspace location
 
 The Cargo workspace lives at the repo root (`Cargo.toml`, `crates/*`).
