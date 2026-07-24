@@ -54,6 +54,14 @@ pub struct DeployLeg {
     /// A short failure reason, present only on [`LegStatus::Failed`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// A bounded tail of the underlying failure output (e.g. the worker
+    /// `worker-refresh.sh` stderr tail), present only on [`LegStatus::Failed`]
+    /// when the leg could capture it. `error` stays the one-line summary;
+    /// `detail` carries the real text so the structured result and the
+    /// escalation prompt show what actually broke (deploy #212). Bounded by the
+    /// emitter (`update.sh` caps it) so a huge build log cannot bloat the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// The structured result the dispatcher builds from a command work task's
@@ -101,18 +109,28 @@ mod tests {
                     status: LegStatus::Ok,
                     secs: Some(41),
                     error: None,
+                    detail: None,
+                },
+                DeployLeg {
+                    name: "worker-refresh:air".into(),
+                    status: LegStatus::Failed,
+                    secs: Some(31),
+                    error: Some("refresh not confirmed".into()),
+                    detail: Some("docker: no space left on device".into()),
                 },
                 DeployLeg {
                     name: "restart-verify".into(),
                     status: LegStatus::Failed,
                     secs: Some(12),
                     error: Some("health check timed out".into()),
+                    detail: None,
                 },
                 DeployLeg {
                     name: "sha-advance".into(),
                     status: LegStatus::Skipped,
                     secs: None,
                     error: None,
+                    detail: None,
                 },
             ],
         };
@@ -121,6 +139,8 @@ mod tests {
         // A skipped leg carries neither secs nor error on the wire.
         assert!(json.contains(r#""status":"skipped"#));
         assert!(!json.contains(r#""name":"sha-advance","status":"skipped","secs"#));
+        // A failed leg carries its detail tail alongside the one-line error.
+        assert!(json.contains(r#""detail":"docker: no space left on device""#));
     }
 
     /// A legs-only report (the generic harvest's output) round-trips, and the
@@ -133,6 +153,7 @@ mod tests {
                 status: LegStatus::Ok,
                 secs: Some(7),
                 error: None,
+                detail: None,
             }],
             ..Default::default()
         };
@@ -143,12 +164,29 @@ mod tests {
         assert!(!back.rollback);
     }
 
-    /// A leg record written before `error`/`secs` existed still decodes.
+    /// A leg record written before `error`/`secs`/`detail` existed still decodes
+    /// — `detail` defaults to `None`, so an old deploy record stays readable.
     #[test]
     fn minimal_leg_deserializes() {
         let leg: DeployLeg = serde_json::from_str(r#"{"name":"init","status":"ok"}"#).unwrap();
         assert_eq!(leg.status, LegStatus::Ok);
         assert_eq!(leg.secs, None);
         assert_eq!(leg.error, None);
+        assert_eq!(leg.detail, None);
+    }
+
+    /// A failed leg carrying both a one-line `error` and a longer `detail` tail
+    /// round-trips (the deploy #212 shape: summary + real failure text).
+    #[test]
+    fn failed_leg_with_detail_round_trips() {
+        let leg = DeployLeg {
+            name: "worker-refresh:air".into(),
+            status: LegStatus::Failed,
+            secs: Some(31),
+            error: Some("refresh not confirmed".into()),
+            detail: Some("build: docker: no space left on device (~11G free)".into()),
+        };
+        let json = serde_json::to_string(&leg).unwrap();
+        assert_eq!(serde_json::from_str::<DeployLeg>(&json).unwrap(), leg);
     }
 }

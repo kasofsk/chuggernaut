@@ -42,6 +42,13 @@ const MAX_INFLIGHT: usize = 16;
 /// in flight when quiescing began.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How much of `worker-refresh.sh`'s combined stdout+stderr the daemon keeps as
+/// the failure tail (deploy #212): the last N lines, then the last M bytes of
+/// those. Bounds both the RPC failure report and the durable job record so a
+/// huge build log cannot bloat the ping reply (NATS 1MB) or the deploy leg.
+const REFRESH_TAIL_LINES: usize = 50;
+const REFRESH_TAIL_BYTES: usize = 4096;
+
 /// Guards the daemon self-refresh swap window (spec §3.1 drain guarantee).
 /// Refreshing must never interrupt in-flight job containers, and the daemon
 /// must not replace itself *between accepting a launch and the container
@@ -710,8 +717,10 @@ async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshReque
 /// state rather than only this node's log. The error tail is trimmed for the
 /// operator; the swapped-in daemon (on success) never reaches here.
 fn record_refresh_failure(state: &WorkerState, stage: &str, error: &str) {
-    let n = error.chars().count();
-    let error_tail: String = error.chars().skip(n.saturating_sub(400)).collect();
+    // `error` already carries the script's captured tail on a build/swap
+    // failure; bound it the same way the daemon streams so the ping reply and
+    // the durable outcome stay small.
+    let error_tail = bounded_tail(error, REFRESH_TAIL_LINES, REFRESH_TAIL_BYTES);
     let mut slot = state.refresh_outcome.lock().unwrap();
     if let Some(outcome) = slot.as_mut() {
         outcome.finished_at = Some(chrono::Utc::now());
@@ -738,17 +747,92 @@ async fn drain(gate: &RefreshGate, timeout: Duration) -> bool {
 /// Run the node-local refresh script; non-zero exit is an error. The script
 /// reads its own ssh-front / git coordinates from the daemon's environment
 /// (spec §3.1) — the daemon passes only the phase, SHA, and tag.
+///
+/// The script's combined stdout+stderr is streamed line-by-line to the daemon's
+/// own stdout as it runs (each line stamped by the daemon's tracing subscriber),
+/// so `docker logs chug-worker` works as a live/post-mortem view instead of one
+/// buffered lump. The tail of that output is kept and, on non-zero exit, folded
+/// into the error string so the refresh failure report carries the real cause
+/// (deploy #212) rather than only the exit status.
 async fn run_script(script: &Path, args: &[&str]) -> Result<(), String> {
-    let status = tokio::process::Command::new(script)
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let phase = args.first().copied().unwrap_or("");
+    let mut child = tokio::process::Command::new(script)
         .args(args)
-        .status()
-        .await
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("spawning {}: {e}", script.display()))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{} {:?} exited {status}", script.display(), args))
+
+    // Feed both streams' lines into one channel; a single consumer prints and
+    // buffers them so stdout/stderr interleave in arrival order.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let tx_err = tx.clone();
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let _ = tx.send(line);
+        }
+    });
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let _ = tx_err.send(line);
+        }
+    });
+
+    // Keep only the last REFRESH_TAIL_LINES lines so a long build log stays
+    // memory-bounded; each line is streamed out immediately as it arrives.
+    let mut tail: std::collections::VecDeque<String> =
+        std::collections::VecDeque::with_capacity(REFRESH_TAIL_LINES);
+    while let Some(line) = rx.recv().await {
+        tracing::info!(phase = %phase, "worker-refresh: {line}");
+        if tail.len() == REFRESH_TAIL_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(line);
     }
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("waiting on {}: {e}", script.display()))?;
+    if status.success() {
+        return Ok(());
+    }
+    let head = format!("{} {:?} exited {status}", script.display(), args);
+    let tail = bounded_tail(
+        &tail.iter().cloned().collect::<Vec<_>>().join("\n"),
+        REFRESH_TAIL_LINES,
+        REFRESH_TAIL_BYTES,
+    );
+    if tail.is_empty() {
+        Err(head)
+    } else {
+        Err(format!("{head}\n{tail}"))
+    }
+}
+
+/// Bound a captured script tail: keep at most the last `max_lines` lines, then
+/// trim the joined text to its last `max_bytes` on a UTF-8 boundary (keeping the
+/// most recent bytes). Pure so the truncation is unit-tested without a
+/// subprocess. Bounds the RPC failure report and the durable job record.
+fn bounded_tail(text: &str, max_lines: usize, max_bytes: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    let joined = lines[start..].join("\n");
+    if joined.len() <= max_bytes {
+        return joined;
+    }
+    let mut cut = joined.len() - max_bytes;
+    while cut < joined.len() && !joined.is_char_boundary(cut) {
+        cut += 1;
+    }
+    joined[cut..].to_string()
 }
 
 #[cfg(test)]
@@ -851,5 +935,80 @@ mod tests {
         assert!(!env.contains_key("RUSTC_WRAPPER"));
         assert!(!env.contains_key("SCCACHE_DIR"));
         assert_eq!(env.len(), 1);
+    }
+
+    /// `bounded_tail` keeps the LAST `max_lines` lines and then trims to the last
+    /// `max_bytes` — so a huge build log collapses to a small, recent tail
+    /// (deploy #212). Both caps and the char-boundary guard are exercised.
+    #[test]
+    fn bounded_tail_caps_lines_then_bytes() {
+        // Line cap: 200 lines in, keep the last 50.
+        let big = (0..200)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tail = bounded_tail(&big, 50, 4096);
+        assert!(
+            tail.starts_with("line 150"),
+            "kept the wrong window: {tail:?}"
+        );
+        assert!(tail.ends_with("line 199"));
+        assert_eq!(tail.lines().count(), 50);
+
+        // Byte cap: a single very long line is trimmed to its most-recent bytes.
+        let long = "x".repeat(10_000);
+        let tail = bounded_tail(&long, 50, 100);
+        assert_eq!(tail.len(), 100);
+        assert!(long.ends_with(&tail));
+
+        // Char-boundary safety: cutting mid-multibyte never panics and yields
+        // valid UTF-8 no longer than the cap.
+        let unicode = "😀".repeat(100); // 4 bytes each
+        let tail = bounded_tail(&unicode, 50, 10);
+        assert!(tail.len() <= 10);
+        assert!(tail.chars().all(|c| c == '😀'));
+
+        // Short input is returned whole.
+        assert_eq!(bounded_tail("boom", 50, 4096), "boom");
+        assert_eq!(bounded_tail("", 50, 4096), "");
+    }
+
+    /// A failing refresh script's combined stdout+stderr is captured and folded
+    /// into the error, so the failure report carries the real cause (deploy
+    /// #212), not just the exit status. Runs a tiny local script — no Docker,
+    /// no NATS.
+    #[tokio::test]
+    async fn run_script_folds_output_tail_into_error() {
+        let dir = std::env::temp_dir().join(format!("chug-refresh-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fail.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho building images\necho 'docker: no space left on device' >&2\nexit 1\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = run_script(&script, &["build", "abc", "prod"])
+            .await
+            .expect_err("non-zero exit is an error");
+        assert!(err.contains("exited"), "keeps the exit summary: {err:?}");
+        assert!(
+            err.contains("docker: no space left on device"),
+            "captures the script's stderr tail: {err:?}"
+        );
+        assert!(
+            err.contains("building images"),
+            "captures stdout too: {err:?}"
+        );
+
+        // A script that succeeds is Ok with no error text.
+        let ok = dir.join("ok.sh");
+        std::fs::write(&ok, "#!/bin/sh\necho fine\nexit 0\n").unwrap();
+        std::fs::set_permissions(&ok, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(run_script(&ok, &["swap", "prod"]).await.is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

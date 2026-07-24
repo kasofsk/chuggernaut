@@ -39,6 +39,11 @@ export DOCKER_NODES="nuc|worker|4, air|dispatcher|0"
 export NATS_URL=nats://localhost:4222
 export KEYS_DIR="$WORK/keys"
 export CHUG_IMAGE_TAG=prod
+# refresh_workers drops each emitted leg from the pending list (chug_leg_drop),
+# which reads CHUG_LEGS_PENDING. The deploy body seeds this before it ever calls
+# refresh_workers; that init lives BELOW the CHUG_UPDATE_LIB gate, so the lib
+# harness must seed it too or `set -u` aborts on the first drop.
+export CHUG_LEGS_PENDING="worker-refresh:nuc"
 
 # A stub `chuggernaut` that CONFIRMS the swap — prints the "refresh OK:" line the
 # real CLI prints only on a confirmed refresh. Exits 0 (as the real CLI always
@@ -62,7 +67,22 @@ echo "WARNING: worker refresh node=nuc not confirmed within 90s (build may still
 exit 0
 EOF
 
-chmod +x "$BIN/chug-confirm" "$BIN/chug-unconfirmed"
+# A stub mirroring the CLI's FAILED-at-build path (deploy #212): it prints the
+# WARNING, the human-readable tail block, AND the machine-readable
+# `worker-refresh-detail:` line update.sh harvests into the leg. Still exit 0.
+cat > "$BIN/chug-failed" <<EOF
+#!/bin/sh
+echo "\$@" >> "$LOG"
+echo "refresh requested: node=nuc from=old -> sha=$TARGET_SHA tag=prod"
+echo "WARNING: worker refresh node=nuc FAILED at build (prod stays on the old images)"
+echo "--- worker-refresh.sh tail (node=nuc, stage=build) ---"
+echo "  docker: no space left on device"
+echo "--- end worker-refresh.sh tail ---"
+echo "worker-refresh-detail: build: docker: no space left on device (~11G free)"
+exit 0
+EOF
+
+chmod +x "$BIN/chug-confirm" "$BIN/chug-unconfirmed" "$BIN/chug-failed"
 
 pass=0
 fail=0
@@ -110,6 +130,28 @@ else
   else
     echo "FAIL - unconfirmed refresh should explain the failure"
     cat "$WORK/out2"
+    fail=$((fail + 1))
+  fi
+fi
+
+# ── Case 4: a FAILED refresh with a captured tail ⇒ leg carries the detail ────
+: > "$LOG"
+if CHUG_BIN="$BIN/chug-failed" refresh_workers >"$WORK/out4" 2>&1; then
+  echo "FAIL - a failed refresh must FAIL the step (refresh_workers returned 0)"
+  cat "$WORK/out4"
+  fail=$((fail + 1))
+else
+  # The emitted worker-refresh leg must be `failed` AND carry the harvested
+  # detail tail (deploy #212), not just the generic "refresh not confirmed".
+  _leg="$(grep '@chug:leg' "$WORK/out4" | grep 'worker-refresh:nuc' | grep '"status":"failed"')"
+  if printf '%s' "$_leg" | grep -q '"detail":"build: docker: no space left on device' \
+    && printf '%s' "$_leg" | grep -q '"error":"refresh not confirmed"'; then
+    echo "ok   - failed refresh leg carries the captured detail tail"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - failed refresh leg should carry a detail field with the tail"
+    printf 'leg was: %s\n' "$_leg"
+    cat "$WORK/out4"
     fail=$((fail + 1))
   fi
 fi

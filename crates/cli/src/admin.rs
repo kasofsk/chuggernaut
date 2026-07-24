@@ -302,6 +302,18 @@ pub async fn run(args: AdminArgs) -> Result<()> {
     }
 }
 
+/// Prefix of the single-line detail the CLI prints on a FAILED refresh, for
+/// `update.sh` to harvest into the deploy leg's `detail` field (deploy #212).
+const REFRESH_DETAIL_MARKER: &str = "worker-refresh-detail:";
+
+/// Flatten a captured tail to one line (collapse whitespace/newlines) and cap it
+/// so the marker line stays a single, bounded log line. `update.sh` bounds it
+/// again before it reaches the job record.
+fn one_line(s: &str) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat.chars().take(500).collect()
+}
+
 /// Request a worker self-refresh and report the outcome (spec §3.1). Soft by
 /// design: it prints `refresh OK` / a `WARNING:` line and always returns `Ok`,
 /// so a lagging or unreachable node never fails the deploy — the drift is
@@ -370,8 +382,24 @@ async fn run_worker_refresh(
                 }
                 RefreshConfirmation::Failed { stage, error_tail } => {
                     println!(
-                        "WARNING: worker refresh node={node} FAILED at {stage}: {error_tail} \
+                        "WARNING: worker refresh node={node} FAILED at {stage} \
                          (prod stays on the old images; check the fleet snapshot)"
+                    );
+                    // Stream the daemon-captured tail into the deploy task log so
+                    // the real cause (deploy #212: docker disk pressure) is
+                    // visible without ssh'ing the node.
+                    if !error_tail.trim().is_empty() {
+                        println!("--- worker-refresh.sh tail (node={node}, stage={stage}) ---");
+                        for line in error_tail.lines() {
+                            println!("  {line}");
+                        }
+                        println!("--- end worker-refresh.sh tail ---");
+                    }
+                    // A single-line, machine-readable detail line update.sh
+                    // harvests into the failed leg's bounded `detail` field.
+                    println!(
+                        "{REFRESH_DETAIL_MARKER} {}",
+                        one_line(&format!("{stage}: {error_tail}"))
                     );
                     return Ok(());
                 }
@@ -824,4 +852,26 @@ async fn run_project(store: &NatsStore, cmd: ProjectCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `one_line` collapses a multi-line tail into a single bounded log line, so
+    /// the `worker-refresh-detail:` marker `update.sh` harvests is always one
+    /// line and cannot grow unbounded (deploy #212).
+    #[test]
+    fn one_line_flattens_and_bounds() {
+        let tail = "build: docker: no space left on device\n  writing layer\n  ~11G free";
+        let out = one_line(tail);
+        assert!(!out.contains('\n'));
+        assert_eq!(
+            out,
+            "build: docker: no space left on device writing layer ~11G free"
+        );
+
+        let huge = "x ".repeat(1000);
+        assert!(one_line(&huge).chars().count() <= 500);
+    }
 }

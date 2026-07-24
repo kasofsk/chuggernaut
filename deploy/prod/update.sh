@@ -43,10 +43,11 @@ chug_json_str() {
 }
 
 chug_emit_leg() {
-  # chug_emit_leg NAME STATUS [SECS] [ERROR]
+  # chug_emit_leg NAME STATUS [SECS] [ERROR] [DETAIL]
   _l="{\"name\":\"$1\",\"status\":\"$2\""
   [ -n "${3:-}" ] && _l="$_l,\"secs\":$3"
   [ -n "${4:-}" ] && _l="$_l,\"error\":\"$(chug_json_str "$4")\""
+  [ -n "${5:-}" ] && _l="$_l,\"detail\":\"$(chug_json_str "$5")\""
   echo "@chug:leg $_l}"
 }
 
@@ -100,7 +101,12 @@ refresh_workers() {
       chug_leg_drop "worker-refresh:$wn"
       echo "update: worker '$wn' confirmed on $TARGET_SHA"
     else
-      chug_emit_leg "worker-refresh:$wn" failed "$(( $(date +%s) - _wr_start ))" "refresh not confirmed"
+      # Harvest the daemon-captured failure tail the CLI prints on a FAILED
+      # refresh (deploy #212), so the leg's `detail` carries the real cause
+      # (e.g. docker disk pressure), not just "refresh not confirmed".
+      _wr_detail="$(printf '%s\n' "$out" | sed -n 's/^worker-refresh-detail: //p' | head -1)"
+      chug_emit_leg "worker-refresh:$wn" failed "$(( $(date +%s) - _wr_start ))" \
+        "refresh not confirmed" "$_wr_detail"
       chug_leg_drop "worker-refresh:$wn"
       echo "update: worker '$wn' refresh NOT confirmed on $TARGET_SHA — FAILING deploy (not a warning)" >&2
       return 1
