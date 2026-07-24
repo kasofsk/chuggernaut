@@ -1,8 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { ApiError, api, type FleetNode, type PlatformConfig, type SlotOccupant } from '../api'
+import {
+  ApiError,
+  api,
+  type FleetNode,
+  type PlatformConfig,
+  type RefreshOutcome,
+  type SlotOccupant,
+} from '../api'
 import { useFleet } from '../useFleet'
-import { fmtDuration, nodeStale, phaseToState, shortSha } from '../format'
+import { fmtDuration, nodeStale, phaseToState, shortSha, versionHasSha } from '../format'
 import { StateBadge } from '../components/StateBadge'
 import { Skeleton } from '../components/Skeleton'
 
@@ -129,6 +136,7 @@ export function ClusterPage() {
           </div>
         </section>
       )}
+      {!forbidden && !loading && <DriftBanner d={cfg?.dispatcher} />}
       {!forbidden && !loading && (
         <section className="card cluster-card">
           <div className="cluster-graph">
@@ -151,7 +159,7 @@ export function ClusterPage() {
           {staleCount > 0 && deployedSha && (
             <div className="cluster-note dim">
               ⚠ {staleCount} node{staleCount === 1 ? '' : 's'} behind the deployed platform (
-              <code>{shortSha(deployedSha)}</code>) — marked. <Link to="/deploys">Deploys ↗</Link>
+              <code>{shortSha(deployedSha)}</code>) — marked.
             </div>
           )}
           {commonVersion && (
@@ -161,8 +169,133 @@ export function ClusterPage() {
           )}
         </section>
       )}
+      {!forbidden && !loading && (
+        <section className="card">
+          <h2>Fleet freshness</h2>
+          <p className="dim deploy-sub">
+            Each worker&apos;s daemon build vs the deployed platform SHA
+            {deployedSha ? (
+              <>
+                {' '}
+                (<code>{shortSha(deployedSha)}</code>)
+              </>
+            ) : null}
+            . A node behind the deployed platform is stale until its self-refresh lands.
+          </p>
+          {workers.length === 0 && <div className="dim">no worker nodes</div>}
+          {workers.length > 0 && (
+            <ul className="freshness-list">
+              {workers.map((n) => (
+                <FreshnessRow key={n.name} node={n} deployedSha={deployedSha} />
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
     </div>
   )
+}
+
+// prod-vs-main drift: deployed SHA, main tip, commits-behind, and the auto-deploy
+// posture. Green when in sync, amber when prod trails main, neutral when the
+// dispatcher hasn't reported the CD fields (a local/dev build, or an older
+// snapshot). Platform-scoped, so it lives on Cluster alongside the fleet graph.
+function DriftBanner({
+  d,
+}: {
+  d: PlatformConfig['dispatcher'] | null | undefined
+}) {
+  const deployed = d?.dispatcher_sha ?? null
+  const tip = d?.main_tip_sha ?? null
+  const behind = d?.commits_behind ?? null
+  const auto = d?.auto_deploy
+  const known = behind != null
+  const current = behind === 0
+  const tone = !known ? 'neutral' : current ? 'ok' : 'behind'
+
+  return (
+    <section className={`card drift-banner drift-${tone}`}>
+      <div className="drift-head">
+        <span className="drift-dot" aria-hidden="true" />
+        <span className="drift-headline">
+          {!known
+            ? 'Deploy drift unavailable'
+            : current
+              ? 'Prod is up to date with main'
+              : `Prod is ${behind} commit${behind === 1 ? '' : 's'} behind main`}
+        </span>
+        {auto != null && (
+          <span
+            className={`badge ${auto ? 'badge-blue' : 'badge-gray'} drift-auto`}
+            title={auto ? 'deploys land automatically' : 'deploys are manual'}
+          >
+            auto-deploy {auto ? 'on' : 'off'}
+          </span>
+        )}
+      </div>
+      <div className="drift-shas">
+        <span>
+          deployed{' '}
+          {deployed ? <code>{shortSha(deployed)}</code> : <span className="dim">unknown</span>}
+        </span>
+        <span aria-hidden="true" className="dim">
+          →
+        </span>
+        <span>
+          main tip{' '}
+          {tip ? <code>{shortSha(tip)}</code> : <span className="dim">unknown</span>}
+        </span>
+      </div>
+    </section>
+  )
+}
+
+// One worker's freshness: fresh (green) when its build carries the deployed SHA,
+// stale (red) when it demonstrably does not, unknown (grey) when either side is
+// unreported. Any refresh outcome (a failed or in-flight self-refresh) rides
+// alongside so a wedged refresh is visible, not just a stale version.
+function FreshnessRow({
+  node,
+  deployedSha,
+}: {
+  node: FleetNode
+  deployedSha: string | null
+}) {
+  const stale = nodeStale(node.version, deployedSha)
+  const fresh = versionHasSha(node.version, deployedSha)
+  const chip = stale
+    ? { cls: 'badge-red', text: 'stale' }
+    : fresh
+      ? { cls: 'badge-green', text: 'current' }
+      : { cls: 'badge-gray', text: 'unknown' }
+  return (
+    <li className="freshness-row">
+      <span className="freshness-name">{node.name}</span>
+      <span className={`badge ${chip.cls}`}>{chip.text}</span>
+      <code className="freshness-ver dim">{node.version ?? '—'}</code>
+      <RefreshChip outcome={node.refresh_outcome} />
+      {!node.available && <span className="badge badge-orange">out of service</span>}
+    </li>
+  )
+}
+
+// The node's last self-refresh outcome, when it carries signal: a failed refresh
+// (red, naming the stage) or one still in flight. A clean `ok` is left implicit —
+// the version chip already shows the node landed the build.
+function RefreshChip({ outcome }: { outcome?: RefreshOutcome | null }) {
+  if (!outcome) return null
+  const r = outcome.result
+  if (r.result === 'failed') {
+    return (
+      <span className="badge badge-red" title={r.error_tail}>
+        refresh failed · {r.stage}
+      </span>
+    )
+  }
+  if (r.result === 'in_progress') {
+    return <span className="badge badge-blue">refreshing…</span>
+  }
+  return null
 }
 
 function Edge() {

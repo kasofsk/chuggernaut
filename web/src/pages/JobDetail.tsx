@@ -4,7 +4,6 @@ import {
   ApiError,
   api,
   type CommandResult,
-  type DeployReport,
   type DiffResponse,
   type EvalResult,
   type HumanResult,
@@ -28,6 +27,7 @@ import { DraftEditor } from '../components/DraftEditor'
 import { CoverWidget } from '../components/CoverWidget'
 import { JobAttachments } from '../components/Attachments'
 import { Skeleton, SkeletonLines } from '../components/Skeleton'
+import { DeployLegCard, deployReportOf } from '../components/DeployLegCard'
 
 export function JobDetail() {
   const { owner = '', project = '', seq = '' } = useParams()
@@ -908,7 +908,7 @@ function EvalReport({ r }: { r: EvalResult }) {
 // collapsed details that scrolls inside its own box — never widens the page.
 function CommandReport({ r }: { r: CommandResult }) {
   const parsed = parseStructured(r.structured)
-  const deploy = deployReportOf(parsed)
+  const deploy = deployReportOf(r.structured)
   return (
     <div className="report-body">
       <div className="report-verdict">
@@ -925,63 +925,6 @@ function CommandReport({ r }: { r: CommandResult }) {
         </details>
       ) : (
         <div className="dim">(no output)</div>
-      )}
-    </div>
-  )
-}
-
-// A command work task on a deploy job carries a structured DeployReport (#187):
-// an object with a `legs` array (the envelope fields are optional). Detect that
-// shape so a deploy renders as a checklist card rather than a raw JSON block.
-function deployReportOf(parsed: ParsedStructured): DeployReport | null {
-  if (parsed?.kind !== 'object') return null
-  return Array.isArray(parsed.value.legs) ? (parsed.value as unknown as DeployReport) : null
-}
-
-// The structured deploy legs as a checklist card (#187): the from→to SHA header
-// with a rollback/health badge, then one row per leg — green ✓ ok, red ✕ failed
-// (with the short reason), grey · skipped. A deploy is a checklist, not a
-// conversation, so it reads as one.
-function DeployLegCard({ report }: { report: DeployReport }) {
-  const legs = report.legs ?? []
-  const glyph = (s: string) => (s === 'ok' ? '✓' : s === 'failed' ? '✕' : '·')
-  return (
-    <div className="deploy-card">
-      <div className="deploy-shas">
-        {report.from_sha && <code>{report.from_sha.slice(0, 12)}</code>}
-        <span aria-hidden="true" className="dim">
-          →
-        </span>
-        {report.to_sha ? <code>{report.to_sha.slice(0, 12)}</code> : <span className="dim">?</span>}
-        {report.rollback && (
-          <span
-            className="badge badge-red"
-            title="restart-verify's health check failed — prod was restored to the previous binary"
-          >
-            rolled back
-          </span>
-        )}
-        {report.health && (
-          <span className={`badge ${report.health === 'ok' ? 'badge-green' : 'badge-orange'}`}>
-            health: {report.health}
-          </span>
-        )}
-      </div>
-      {legs.length > 0 && (
-        <ul className="deploy-legs">
-          {legs.map((leg, i) => (
-            <li key={i} className={`deploy-leg deploy-leg-${leg.status}`}>
-              <span className="deploy-leg-icon" aria-hidden="true">
-                {glyph(leg.status)}
-              </span>
-              <span className="deploy-leg-name">{leg.name}</span>
-              {leg.error && <span className="deploy-leg-err">{leg.error}</span>}
-              {typeof leg.secs === 'number' && (
-                <span className="deploy-leg-secs dim">{leg.secs}s</span>
-              )}
-            </li>
-          ))}
-        </ul>
       )}
     </div>
   )

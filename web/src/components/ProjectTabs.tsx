@@ -11,6 +11,7 @@ export function ProjectTabs({ owner, project }: { owner: string; project: string
       <NavLink to={`/p/${owner}/${project}/prompts`}>Prompts</NavLink>
       <NavLink to={`/p/${owner}/${project}/files`}>Files</NavLink>
       <NavLink to={`/p/${owner}/${project}/stats`}>Stats</NavLink>
+      <NavLink to={`/p/${owner}/${project}/deploys`}>Deploys</NavLink>
       <NavLink to={`/p/${owner}/${project}/settings`}>Settings</NavLink>
     </nav>
   )

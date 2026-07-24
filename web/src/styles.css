@@ -2803,6 +2803,51 @@ table.jobs tbody tr.row-draft td:first-child {
   flex: none;
 }
 
+/* Per-project deploy history: one card per deploy job, a tappable head row
+   (seq · title · state · when) over the job's leg checklist. The head wraps on
+   narrow screens rather than pushing the card sideways. */
+.deploy-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.deploy-entry {
+  margin: 0;
+}
+.deploy-entry-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  text-decoration: none;
+  color: inherit;
+}
+.deploy-entry-head:hover .deploy-entry-title {
+  text-decoration: underline;
+}
+.deploy-entry-seq {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  flex: none;
+}
+.deploy-entry-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.deploy-entry-when {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.deploy-entry-noreport {
+  font-size: var(--fs-sm);
+  margin-top: var(--sp-2);
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
    SNAZZY REDESIGN (#161–#164, #171): cosmic identity, icon rail, page chrome,
    overview sidebar, status footer, train header, ticket-stub New Job.

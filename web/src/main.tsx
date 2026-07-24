@@ -43,8 +43,11 @@ createRoot(document.getElementById('root')!).render(
         <Route path="/share" element={<SharePage />} />
         <Route path="/settings" element={<PlatformSettingsPage />} />
         <Route path="/cluster" element={<ClusterPage />} />
-        <Route path="/deploys" element={<DeploysPage />} />
+        {/* Deploys are per-project now; the old platform drift/freshness view
+            folded into Cluster. Redirect stale bookmarks there. */}
+        <Route path="/deploys" element={<Navigate to="/cluster" replace />} />
         <Route path="/p/:owner/:project" element={<ProjectPage />} />
+        <Route path="/p/:owner/:project/deploys" element={<DeploysPage />} />
         <Route path="/p/:owner/:project/job-types" element={<LibraryPage />} />
         <Route path="/p/:owner/:project/job-types/:name" element={<JobTypePage />} />
         {/* legacy alias */}
