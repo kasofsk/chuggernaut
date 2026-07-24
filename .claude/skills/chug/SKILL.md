@@ -147,6 +147,11 @@ task) or `GET .../tasks/pending`.
   done | tail -n 40
   ```
 - Revoke kills running containers — confirm with the user first.
+- **Never predict server-assigned ids** for follow-up calls — thread them
+  from the create response (`ID=$(create … | jq -r .id)`), never hardcode a
+  guessed next number. A guessed id once raced a concurrent create and
+  released a different job. For consequential mutations (release, revoke),
+  re-verify the target's title/state if any time passed since the last read.
 - **Shipping this repo (`kasofsk/chuggernaut`)**: it's platform-owned — deploy
   is a **`deploy` job**, not an origin release. Create + release a `deploy` job
   to push the current `main` to prod (it ssh's the Mini and runs `update.sh`).

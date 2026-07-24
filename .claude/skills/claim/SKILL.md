@@ -67,9 +67,20 @@ must contain, in this order:
   its own failures separately).
 - Return format: summary of changes per file, verification commands + exact
   outcomes, commit hash.
+- **Verbatim in every prompt:** "Do NOT use run_in_background for anything.
+  Run every command in the foreground to completion. Your final message must
+  be the complete report; ending your turn while anything is pending means
+  the work is lost." Subagents have repeatedly backgrounded `cargo test` and
+  ended their turn "waiting" — nobody wakes a subagent, so the work dies
+  silently.
 
 While it runs, continue whatever else the session is doing; the completion
 notification arrives on its own. Do not touch the worktree meanwhile.
+
+When the subagent finishes, check whether its last message is a **report or a
+wait-statement**. If it ended waiting on something, SendMessage-resume it
+with: "no notifier exists — foreground and finish." Before pushing, verify
+its commit actually exists in the worktree yourself.
 
 ## 4. Review, push, VERIFY, then resolve — in that order
 
