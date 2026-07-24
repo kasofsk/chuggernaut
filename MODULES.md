@@ -28,6 +28,8 @@ created; today it covers the dispatcher.
 | `exec` | Work-execution sequence: Ready→Work, container launch, crash recover-or-reset, rework/conflict re-entry. | §3.2 |
 | `eval` | Evaluator fan-out/reduce and post-eval finalization: squash-merge, conflict re-entry, the depth-1 merge gate. | §3.3, §3.2 |
 | `escalation` | Escalation task construction; owns the task shape only — performs no transition. | §1.2, §3.4 |
+| `effects` | The effect vocabulary: an `Effect` enum naming each port action as `serde` data, with a variant→port-method table. Plain data, no I/O. | contracts.md §2 |
+| `interpret` | The effect interpreter: `Core::interpret` executes one `Effect` through the port it names; the sole `&mut Core` coupling deciders keep. | contracts.md §2 |
 | `launch_queue` | Capacity-aware launch queue: park on `NoCapacity`, drain on slot-freed, escalate past `MAX_QUEUE_WAIT`. | §3.5 |
 | `scan` | Task-timeout and one-shot job-deadline scans; run inside the single-writer loop; also drains the launch queue. | §3.5 |
 | `reconcile` | Restart reconciliation of jobs left mid-execution; runs in the actor before the message loop. | §3.6 |

@@ -2064,7 +2064,7 @@ impl Core {
         out
     }
 
-    async fn launch_gate_fix(
+    pub(crate) async fn launch_gate_fix(
         &mut self,
         owner: &str,
         project: &str,
