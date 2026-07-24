@@ -1,0 +1,21 @@
+steps:
+- event: release a
+  transitions:
+  - job: 1
+    from: Frozen
+    to: Ready
+  effects:
+  - PublishEvent job-released
+- event: revoke a (cascades b, c)
+  transitions:
+  - job: 1
+    from: Ready
+    to: Revoked
+  - job: 2
+    from: Frozen
+    to: Revoked
+  - job: 3
+    from: Frozen
+    to: Revoked
+  effects:
+  - PublishEvent job-revoked

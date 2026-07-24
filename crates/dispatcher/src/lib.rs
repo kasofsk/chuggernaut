@@ -33,4 +33,5 @@ pub mod run;
 pub mod scan;
 pub mod seed;
 pub mod state;
+pub mod trace;
 pub mod triage;

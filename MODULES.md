@@ -30,6 +30,7 @@ created; today it covers the dispatcher.
 | `escalation` | Escalation task construction; owns the task shape only — performs no transition. | §1.2, §3.4 |
 | `effects` | The effect vocabulary: an `Effect` enum naming each port action as `serde` data, with a variant→port-method table. Plain data, no I/O. | contracts.md §2 |
 | `interpret` | The effect interpreter: `Core::interpret` executes one `Effect` through the port it names; the sole `&mut Core` coupling deciders keep. | contracts.md §2 |
+| `trace` | Test-only golden-trace recorder: an inert-in-prod `TraceSink` a test attaches via `Core::attach_trace` to capture every `set_state` transition and `publish`/escalation effect as YAML fixtures (`tests/traces/`, regen `UPDATE_TRACES=1`); pins decisions during Track C. | refactor-plan B3 |
 | `launch_queue` | Capacity-aware launch queue: park on `NoCapacity`, drain on slot-freed, escalate past `MAX_QUEUE_WAIT`. | §3.5 |
 | `scan` | Task-timeout and one-shot job-deadline scans; run inside the single-writer loop; also drains the launch queue. | §3.5 |
 | `reconcile` | Restart reconciliation of jobs left mid-execution; runs in the actor before the message loop. | §3.6 |

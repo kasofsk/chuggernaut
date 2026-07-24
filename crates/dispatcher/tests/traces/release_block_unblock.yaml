@@ -1,0 +1,28 @@
+steps:
+- event: create build
+  effects:
+  - PublishEvent job-created
+- event: create deploy(dep build)
+  effects:
+  - PublishEvent job-created
+- event: release build
+  transitions:
+  - job: 1
+    from: Frozen
+    to: Ready
+  effects:
+  - PublishEvent job-released
+- event: release deploy
+  transitions:
+  - job: 2
+    from: Frozen
+    to: Blocked
+  effects:
+  - PublishEvent job-released
+- event: on_job_done build
+  transitions:
+  - job: 2
+    from: Blocked
+    to: Ready
+  effects:
+  - PublishEvent job-unblocked

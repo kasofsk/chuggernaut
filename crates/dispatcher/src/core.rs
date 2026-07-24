@@ -888,6 +888,11 @@ pub struct Core {
     /// seed that also re-announces (e.g. to change its slot count) is not removed
     /// from scheduling just because it stops announcing.
     pub(crate) seed_node_names: HashSet<String>,
+    /// Golden-trace recorder (refactor-plan B3, [`crate::trace`]). `None` in
+    /// production — a test attaches a [`crate::trace::TraceSink`] via
+    /// [`Core::attach_trace`] to capture every transition and effect. Inert
+    /// otherwise: a single `Option` check per `set_state`/`publish`.
+    pub(crate) trace: Option<crate::trace::TraceSink>,
 }
 
 const SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -995,6 +1000,7 @@ impl Core {
             last_fleet_status: None,
             announced_workers: HashMap::new(),
             seed_node_names: HashSet::new(),
+            trace: None,
         };
 
         // Restore merge-queue holds for Open origin releases before reconcile
@@ -2568,6 +2574,9 @@ impl Core {
             .unwrap_or(1);
         let task = escalation::escalation_task(task_id, seq, &job.project, cycle, detail.clone());
         self.tasks.put(&task).await?;
+        if let Some(trace) = &self.trace {
+            trace.effect("PutTask Human(escalation)");
+        }
         // Record WHY on the job itself (§1.2), so operators see the reason in the
         // header instead of digging through dispatcher logs (#69).
         job.escalation = Some(types::Escalation {
@@ -2607,6 +2616,9 @@ impl Core {
         // Pre-work: cycle 1, no exec state.
         let task = escalation::escalation_task(task_id, seq, &job.project, 1, detail.clone());
         self.tasks.put(&task).await?;
+        if let Some(trace) = &self.trace {
+            trace.effect("PutTask Human(escalation)");
+        }
         job.escalation = Some(types::Escalation {
             reason: reason.to_string(),
             detail,
@@ -2666,9 +2678,20 @@ impl Core {
         crate::exec::batch_brief_block(job, &members)
     }
 
+    /// Attach a golden-trace recorder (refactor-plan B3, [`crate::trace`]). A
+    /// test-only hook: production never calls this, so the sink stays `None` and
+    /// tracing is inert. Attach before [`spawn`] so the moved `Core` keeps a
+    /// clone of the shared sink.
+    pub fn attach_trace(&mut self, sink: crate::trace::TraceSink) {
+        self.trace = Some(sink);
+    }
+
     /// The single state-write path: §2.1 guard, then KV, then memory.
     pub(crate) async fn set_state(&mut self, job: &mut Job, to: JobState) -> Result<()> {
         assert_transition(job.state, to)?;
+        if let Some(trace) = &self.trace {
+            trace.transition(job.id, job.state, to);
+        }
         job.state = to;
         // Stamp the completion moment once, at the terminal transition (Done or
         // Revoked). This is the single funnel every job-state write flows
@@ -2748,6 +2771,9 @@ impl Core {
         self.store
             .publish_event(&subject, &serde_json::to_vec(&payload)?)
             .await?;
+        if let Some(trace) = &self.trace {
+            trace.effect(format!("PublishEvent {event_type}"));
+        }
         Ok(())
     }
 }

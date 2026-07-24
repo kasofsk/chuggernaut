@@ -1,0 +1,396 @@
+//! Golden decision traces (refactor-plan B3): the lifecycle and human-escalation
+//! scenarios from `lifecycle.rs` / `gate_and_human.rs`, re-driven with a
+//! [`TraceSink`] attached so every §2.1 transition and every effect is captured
+//! and compared against a committed `tests/traces/*.yaml` fixture. These pin the
+//! dispatcher's decisions during Track C decider extraction — a carved-out
+//! decider must reproduce the same `(transitions, effects)` the fixture records.
+//!
+//! Most scenarios drive `Core` **synchronously** (no spawned actor), so the
+//! ordering of transitions and effects is fixed by the sequential `.await`s the
+//! test makes — a golden trace there cannot flake on scheduler timing. The one
+//! actor-driven scenario (`trace_work_eval_merge_no_gate`) instead synchronizes
+//! its snapshot on the trace's **terminal effect** (see `wait_trace_effect`),
+//! which is emitted strictly after every other write of the step — so it too
+//! captures a quiesced, deterministic trace.
+//!
+//! Regenerate after an intended behavior change:
+//!
+//! ```sh
+//! UPDATE_TRACES=1 cargo test -p dispatcher --test golden_traces
+//! ```
+
+mod common;
+
+use common::assert_trace;
+use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
+use dispatcher::trace::TraceSink;
+use std::sync::Arc;
+use store::NatsStore;
+use test_utils::repo::{TempRepo, clone_branch_from};
+use test_utils::{FakeBackend, FakeProvider};
+use types::JobState;
+
+const BUILD_YAML: &str = r#"
+name: build
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/build.md
+  secrets: [DEPLOY_KEY]
+  provider: claude
+  review:
+    prompt: prompts/review.md
+    iterations: 3
+"#;
+
+const DEPLOY_YAML: &str = r#"
+name: deploy
+image: img:latest
+work:
+  type: command
+  run: ./deploy.sh
+"#;
+
+const DEFAULTS_YAML: &str = r#"
+eval:
+  - name: ci
+    type: command
+    run: ./scripts/ci.sh
+"#;
+
+// Agent work + a single command evaluator (the `ci` gate from `_defaults.yaml`;
+// this type adds none of its own, so the eval fan-out is a single task with no
+// legitimately-nondeterministic completion order). Main never moves, so the job
+// evaluates and squash-merges with no rebase and no merge gate (gate_and_human.rs
+// `no_movement_evaluates_and_merges_without_rebase_or_gate`).
+const IMPL_CMD_YAML: &str = r#"
+name: impl-cmd
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+"#;
+
+async fn new_core(store: &NatsStore, repos_root: std::path::PathBuf) -> Core {
+    Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        Arc::new(FakeBackend::new()),
+        Arc::new(FakeProvider::new()),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: "nats://test".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+}
+
+async fn seed_repo(repo: &TempRepo) {
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/build.yaml", BUILD_YAML.as_bytes(), "add build")
+        .await;
+    clone
+        .commit_file("jobs/deploy.yaml", DEPLOY_YAML.as_bytes(), "add deploy")
+        .await;
+    clone
+        .commit_file("jobs/_defaults.yaml", DEFAULTS_YAML.as_bytes(), "defaults")
+        .await;
+    clone
+        .commit_file(
+            "jobs/impl-cmd.yaml",
+            IMPL_CMD_YAML.as_bytes(),
+            "add impl-cmd",
+        )
+        .await;
+    clone
+        .commit_file("prompts/build.md", b"build it", "prompt")
+        .await;
+    clone
+        .commit_file("prompts/review.md", b"review it", "prompt")
+        .await;
+    clone
+        .commit_file("prompts/impl.md", b"implement it", "prompt")
+        .await;
+    clone.push("main").await;
+}
+
+fn core_repos_root(repo: &TempRepo) -> std::path::PathBuf {
+    repo.bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+/// Setup: shared NATS, a seeded bare repo, the declared secret, and a fresh
+/// `Core` with a trace sink attached. Returns `None` when NATS is unavailable
+/// (the tier-2 self-skip), so the fixture is only asserted where it can run.
+async fn setup() -> Option<(NatsStore, TempRepo, Core, TraceSink)> {
+    let server = test_utils::nats::NatsTestServer::shared().await?;
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    seed_repo(&repo).await;
+    store
+        .raw_bucket(store::buckets::SECRETS)
+        .await
+        .unwrap()
+        .put_json("acme.api.DEPLOY_KEY", &"encrypted-blob")
+        .await
+        .unwrap();
+    let mut core = new_core(&store, core_repos_root(&repo)).await;
+    let sink = TraceSink::new();
+    core.attach_trace(sink.clone());
+    Some((store, repo, core, sink))
+}
+
+fn req(r#type: &str, deps: &[u64]) -> CreateJobRequest {
+    CreateJobRequest {
+        owner: "acme".into(),
+        project: "api".into(),
+        r#type: r#type.into(),
+        title: String::new(),
+        description: String::new(),
+        cover_html: None,
+        deps: deps.to_vec(),
+        knowledge_tags: vec![],
+        eval: vec![],
+        timeout: None,
+        model: None,
+        factory: None,
+        members: vec![],
+        draft: false,
+    }
+}
+
+/// `lifecycle.rs::release_blocking_unblocking_and_events`, distilled to its
+/// decision trace: create build + a dependent deploy, release both (deploy
+/// Blocks behind build), then complete build so the dependent re-validates and
+/// unblocks to Ready.
+#[tokio::test]
+async fn trace_release_block_unblock() {
+    let Some((store, _repo, mut core, sink)) = setup().await else {
+        return;
+    };
+
+    sink.begin("create build");
+    let build = core.create_job(req("build", &[])).await.unwrap();
+    sink.begin("create deploy(dep build)");
+    let deploy = core.create_job(req("deploy", &[build.id])).await.unwrap();
+
+    sink.begin("release build");
+    assert_eq!(
+        core.release_job("acme", "api", build.id).await.unwrap(),
+        JobState::Ready
+    );
+    sink.begin("release deploy");
+    assert_eq!(
+        core.release_job("acme", "api", deploy.id).await.unwrap(),
+        JobState::Blocked
+    );
+
+    // Build completes (its execution slice lands elsewhere): mark Done in KV,
+    // then reload a fresh core (the restart path) so it observes the completion
+    // and drives the dependent's unblock. The same sink follows the new core;
+    // reload rebuilds state without `set_state`, so nothing records before the
+    // `begin` below.
+    let jobs = store.jobs().await.unwrap();
+    let mut done = jobs.get("acme", "api", build.id).await.unwrap().unwrap();
+    done.state = JobState::Done;
+    jobs.put(&done).await.unwrap();
+
+    let mut core = new_core(&store, core_repos_root(&_repo)).await;
+    core.attach_trace(sink.clone());
+    sink.begin("on_job_done build");
+    core.on_job_done("acme", "api", build.id).await.unwrap();
+
+    assert_trace(&sink, "release_block_unblock");
+}
+
+/// `lifecycle.rs::unblock_revalidation_failure_stalls_with_human_task`: the
+/// human-escalation decision. The dependent's job type breaks on main between
+/// release and unblock, so completing the upstream re-validates the dependent,
+/// fails, and Stalls it behind a Human escalation task (§1.2 pre-Work).
+#[tokio::test]
+async fn trace_stall_on_revalidation_failure() {
+    let Some((store, repo, mut core, sink)) = setup().await else {
+        return;
+    };
+
+    let build = core.create_job(req("build", &[])).await.unwrap();
+    let deploy = core.create_job(req("deploy", &[build.id])).await.unwrap();
+    sink.begin("release build");
+    core.release_job("acme", "api", build.id).await.unwrap();
+    sink.begin("release deploy");
+    core.release_job("acme", "api", deploy.id).await.unwrap();
+
+    // Break the deploy job type on main after release.
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/deploy.yaml", b"not: [valid", "break deploy type")
+        .await;
+    clone.push("main").await;
+
+    let jobs = store.jobs().await.unwrap();
+    let mut done = jobs.get("acme", "api", build.id).await.unwrap().unwrap();
+    done.state = JobState::Done;
+    jobs.put(&done).await.unwrap();
+
+    // Reload the core (restart path) so it observes build Done, then unblock.
+    let mut core = new_core(&store, core_repos_root(&repo)).await;
+    core.attach_trace(sink.clone());
+    sink.begin("on_job_done build (deploy re-validation fails)");
+    core.on_job_done("acme", "api", build.id).await.unwrap();
+    assert_eq!(
+        jobs.get("acme", "api", deploy.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        JobState::Stalled
+    );
+
+    assert_trace(&sink, "stall_on_revalidation_failure");
+}
+
+/// `lifecycle.rs::revoke_cascades_through_pending_dependents`: revoking a Ready
+/// job cascades Revoked through its whole pending dependent chain in one step.
+#[tokio::test]
+async fn trace_revoke_cascade() {
+    let Some((_store, _repo, mut core, sink)) = setup().await else {
+        return;
+    };
+
+    let a = core.create_job(req("build", &[])).await.unwrap();
+    let b = core.create_job(req("deploy", &[a.id])).await.unwrap();
+    let c = core.create_job(req("deploy", &[b.id])).await.unwrap();
+    sink.begin("release a");
+    core.release_job("acme", "api", a.id).await.unwrap();
+
+    sink.begin("revoke a (cascades b, c)");
+    let cascaded = core.revoke_job("acme", "api", a.id).await.unwrap();
+    assert_eq!(cascaded, vec![b.id, c.id]);
+
+    assert_trace(&sink, "revoke_cascade");
+}
+
+/// A spawned rig for the actor-driven merge scenario: work + eval run through
+/// the single-writer loop against fakes, so the trace still records only the
+/// deterministic decision chain (transitions + `job-events`) — fleet/status
+/// churn goes through other ports and is not captured.
+struct SpawnRig {
+    store: NatsStore,
+    handle: CoreHandle,
+    _repo: TempRepo,
+    sink: TraceSink,
+}
+
+async fn spawn_setup() -> Option<SpawnRig> {
+    let server = test_utils::nats::NatsTestServer::shared().await?;
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    seed_repo(&repo).await;
+
+    let backend = Arc::new(FakeBackend::new());
+    let provider = Arc::new(FakeProvider::new());
+    // Work hook: commit a file to the job branch; main never moves.
+    let bare = repo.bare_path();
+    provider.on_run(move |cfg| {
+        let bare = bare.clone();
+        async move {
+            let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+            let clone = clone_branch_from(&bare, &branch).await;
+            clone
+                .commit_file("src/a.rs", b"job change", "implement")
+                .await;
+            clone.push(&branch).await;
+        }
+    });
+    // The command evaluator reads its verdict from this file.
+    backend.put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
+
+    let mut core = new_core_with(&store, core_repos_root(&repo), backend.clone(), provider).await;
+    let sink = TraceSink::new();
+    core.attach_trace(sink.clone());
+    let handle = spawn(core);
+    Some(SpawnRig {
+        store,
+        handle,
+        _repo: repo,
+        sink,
+    })
+}
+
+async fn new_core_with(
+    store: &NatsStore,
+    repos_root: std::path::PathBuf,
+    backend: Arc<FakeBackend>,
+    provider: Arc<FakeProvider>,
+) -> Core {
+    Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        backend,
+        provider,
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: "nats://test".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+}
+
+/// `gate_and_human.rs::no_movement_evaluates_and_merges_without_rebase_or_gate`:
+/// the full Ready→Work→Evaluation→WrapUp→Done merge chain with no concurrent
+/// movement, driven through the spawned actor. Captured as one step — the
+/// causal chain is a single deterministic sequence — and asserted once the job
+/// reaches Done. Only transitions and `job-events` are recorded (fleet/status
+/// publishes go through uninstrumented ports), so no scheduler churn leaks in.
+#[tokio::test]
+async fn trace_work_eval_merge_no_gate() {
+    let Some(rig) = spawn_setup().await else {
+        return;
+    };
+
+    rig.sink.begin("create+release → work → eval → merge");
+    let job = rig.handle.create_job(req("impl-cmd", &[])).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
+    // `complete_done` writes the Done KV revision (which `job_state` above
+    // observes) *before* it publishes the trailing `job-done` event, so the Done
+    // state alone does not mean the actor has finished recording the step. Wait
+    // for that terminal effect — the last write of the merge chain, with no
+    // dependents to fan out — so the snapshot is taken only once the actor has
+    // quiesced. Synchronizing on the trace itself (not the KV state) is what
+    // keeps this actor-driven scenario from flaking on scheduler timing.
+    wait_trace_effect(&rig.sink, "PublishEvent job-done").await;
+
+    assert_trace(&rig.sink, "work_eval_merge_no_gate");
+}
+
+/// Block until the captured trace's final step records `effect`. Used to
+/// snapshot the actor-driven scenario only after its terminal effect lands — the
+/// Done KV write precedes the last `job-done` publish, so waiting on job state
+/// would race the trailing effect into or out of the snapshot. Polls the sink
+/// (in-memory, no KV watch can see it) under a hard timeout.
+async fn wait_trace_effect(sink: &TraceSink, effect: &str) {
+    test_utils::wait::poll_default(format!("trace effect {effect:?}"), || {
+        sink.snapshot()
+            .steps
+            .last()
+            .filter(|step| step.effects.iter().any(|e| e == effect))
+            .map(|_| ())
+    })
+    .await;
+}

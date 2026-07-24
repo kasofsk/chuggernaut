@@ -1,0 +1,23 @@
+steps:
+- event: release build
+  transitions:
+  - job: 1
+    from: Frozen
+    to: Ready
+  effects:
+  - PublishEvent job-released
+- event: release deploy
+  transitions:
+  - job: 2
+    from: Frozen
+    to: Blocked
+  effects:
+  - PublishEvent job-released
+- event: on_job_done build (deploy re-validation fails)
+  transitions:
+  - job: 2
+    from: Blocked
+    to: Stalled
+  effects:
+  - PutTask Human(escalation)
+  - PublishEvent job-stalled

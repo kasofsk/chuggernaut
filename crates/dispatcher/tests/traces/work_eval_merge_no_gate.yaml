@@ -1,0 +1,29 @@
+steps:
+- event: create+release → work → eval → merge
+  transitions:
+  - job: 1
+    from: Frozen
+    to: Ready
+  - job: 1
+    from: Ready
+    to: Work
+  - job: 1
+    from: Work
+    to: Evaluation
+  - job: 1
+    from: Evaluation
+    to: WrapUp
+  - job: 1
+    from: WrapUp
+    to: Done
+  effects:
+  - PublishEvent job-created
+  - PublishEvent job-released
+  - PublishEvent job-started
+  - PublishEvent task-created
+  - PublishEvent task-completed
+  - PublishEvent job-evaluation-started
+  - PublishEvent task-created
+  - PublishEvent task-completed
+  - PublishEvent job-wrapup-started
+  - PublishEvent job-done
