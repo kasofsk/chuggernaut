@@ -77,6 +77,13 @@ impl ReadyQueue {
         self.queue.len()
     }
 
+    /// Read-only iteration over the queued jobs, in FIFO order. Used by the
+    /// invariant checker (spec §3.1); the queue is otherwise mutated only
+    /// through `enqueue`/`dequeue`/`remove`.
+    pub fn iter(&self) -> impl Iterator<Item = &QueuedJob> {
+        self.queue.iter()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }

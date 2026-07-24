@@ -88,6 +88,26 @@ single-writer design — all state lives in one place. It converts tribal
 knowledge into a regression net, and it is the artifact that survives a
 language change untouched: invariants are statements about *data*, not code.
 
+**Status: landed (B1).** `dispatcher::invariants::check_invariants(&CoreState)
+-> Vec<Violation>` is now the source of truth for this list — a pure, total
+function harvesting the data invariants below. `Core::state()` hands out the
+read-only `CoreState` view it takes; the `lifecycle` integration tests run it
+after every message (`assert_invariants`). Add a new invariant *there*, not to
+a comment. The invariants enforced (each named, with its spec §):
+
+- `ready_queue_only_ready` (§3.1) — the ready queue holds only jobs that exist
+  and are `Ready`.
+- `rdeps_inverts_deps` (§1.4/§2.3) — the reverse-dependency index is the exact
+  inverse of the forward `deps` edges, both directions.
+- `active_is_executing` (§3.2/§3.3) — an execution slice exists only for a job
+  that is executing (Work/Evaluation/WrapUp/Escalated); "one attempt in flight
+  per job" is structural (the `active` map is keyed by seq).
+- `merge_queue_is_wrapup` (§3.3) — every queued/gating landing job is `WrapUp`,
+  and a gating seq has left the queue; "merge gate depth-1 per project" is
+  structural (the `gating` map is keyed by slug).
+- `terminal_is_absorbing` (§2.1) — no terminal (Done/Revoked) job is still
+  referenced by the ready queue, active set, merge queue, or gating map.
+
 ## Mining intent from the existing code
 
 - **The await sites → the Effect enum.** Mechanical classification; days, not

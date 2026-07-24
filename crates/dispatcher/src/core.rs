@@ -2629,6 +2629,20 @@ impl Core {
         self.graphs.get(&format!("{owner}/{project}"))
     }
 
+    /// Read-only view of the in-memory scheduling state, for the invariant
+    /// checker (contracts.md §3). Borrowing, so it is free to build; tests run
+    /// [`check_invariants`](crate::invariants::check_invariants) on it after
+    /// every message to catch state corruption at the point it is introduced.
+    pub fn state(&self) -> crate::invariants::CoreState<'_> {
+        crate::invariants::CoreState {
+            graphs: &self.graphs,
+            queue: &self.queue,
+            active: &self.active,
+            merge_queue: &self.merge_queue,
+            gating: &self.gating,
+        }
+    }
+
     pub(crate) fn must_get(&self, owner: &str, project: &str, seq: u64) -> Result<&Job> {
         self.graphs
             .get(&format!("{owner}/{project}"))

@@ -21,6 +21,7 @@ pub mod github;
 pub mod graph;
 pub mod handlers;
 pub(crate) mod harvest;
+pub mod invariants;
 pub mod launch_queue;
 pub mod origin;
 pub mod queue;
