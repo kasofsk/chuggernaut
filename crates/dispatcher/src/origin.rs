@@ -240,7 +240,11 @@ impl Core {
         }
         // A gate in flight would land a commit on integration *after* the
         // snapshot below, and the post-merge reset would silently discard it.
-        if self.gating.contains_key(&slug) {
+        if self
+            .merge_gates
+            .get(&slug)
+            .is_some_and(|g| g.gating.is_some())
+        {
             return Err(CoreError::Conflict(
                 "merge gate in flight — retry shortly".into(),
             ));

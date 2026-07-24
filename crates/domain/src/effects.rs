@@ -45,12 +45,17 @@
 //! | `DeferLaunch` | `Core::defer_launch` |
 //! | `SquashMerge` | `repos.squash_merge` |
 //! | `DeleteBranch` | `repos.delete_branch` |
+//! | `CreateSquashCandidate` | `repos.create_squash_candidate` |
+//! | `AdvanceDefault` | `repos.advance_default` |
+//! | `RebaseOntoWithConflict` | `repos.rebase_onto_with_conflict` |
+//! | `LaunchGateStage` | `Core::launch_gate_stage` → `provider.run` |
+//! | `EnterWork` | `Core::enter_work` |
 //! | `IssueCredentials` | `SshCa::issue_job_credential` |
 //! | `Escalate` | `Core::escalate` |
 //! | `Stall` | `Core::stall` |
 
 use serde::{Deserialize, Serialize};
-use types::{EvalResult, Job, JobState, ProjectRecord, Task};
+use types::{EvalResult, Evaluator, Job, JobState, ProjectRecord, ReworkReason, Task};
 
 /// Whether a §7.4 per-job credential may push. A self-contained mirror of the
 /// `auth` crate's `CertAccess` so the vocabulary stays `serde`-serializable and
@@ -237,6 +242,43 @@ pub enum Effect {
         project: String,
         branch: String,
     },
+    /// Build the `merge-gate/{seq}` squash candidate against the moved HEAD
+    /// (§3.3 Merge Gate entry). Maps to `repos.create_squash_candidate`;
+    /// produces a merge outcome the merge-gate decider consumes as its next
+    /// event (refactor-plan C2).
+    ///
+    /// Example call site: `eval.rs::try_finalize` when HEAD moved during eval.
+    CreateSquashCandidate {
+        owner: String,
+        project: String,
+        seq: u64,
+        base_ref: String,
+        job_type: String,
+        summary: Option<String>,
+    },
+    /// Compare-and-swap the default branch to `commit`, expecting
+    /// `expected_old_head` (§3.3 promote). Maps to `repos.advance_default`.
+    /// A CAS failure is a *decision input* ("HEAD moved again — refinalize"),
+    /// never an escalation.
+    ///
+    /// Example call site: `eval.rs::gate_reduce` promoting a passed candidate.
+    AdvanceDefault {
+        owner: String,
+        project: String,
+        commit: String,
+        expected_old_head: String,
+    },
+    /// Rebase `job/{seq}` onto `new_base`, reporting conflicts as data rather
+    /// than failure. Maps to `repos.rebase_onto_with_conflict`; the outcome
+    /// feeds the conflict re-entry decision.
+    ///
+    /// Example call site: `eval.rs::gate_reduce` rework on the new base.
+    RebaseOntoWithConflict {
+        owner: String,
+        project: String,
+        seq: u64,
+        new_base: String,
+    },
 
     // --- Credentials (auth SSH CA, §7.4) ---
     /// Mint a per-job SSH certificate scoped to `access` for `ttl_secs`. Maps
@@ -249,6 +291,37 @@ pub enum Effect {
         seq: u64,
         access: CredentialAccess,
         ttl_secs: u64,
+    },
+
+    // --- Merge-gate launches (§3.3) ---
+    /// Launch one stage of merge-gate evaluators against the candidate branch.
+    /// Maps to `Core::launch_gate_stage` → `provider.run` per evaluator; the
+    /// launched slots re-enter the merge-gate decider as its gate round.
+    ///
+    /// Example call site: `eval.rs::try_finalize` opening the gate.
+    LaunchGateStage {
+        owner: String,
+        project: String,
+        seq: u64,
+        gate_branch: String,
+        cycle: u32,
+        evaluators: Vec<Evaluator>,
+    },
+
+    // --- Work re-entry composite (§3.2) ---
+    /// Re-enter the Work phase for a rework cycle (gate failure, conflict,
+    /// gate-fix). Maps to `Core::enter_work` — a composite in the same spirit
+    /// as [`Effect::Escalate`].
+    ///
+    /// Example call site: `eval.rs::gate_reduce` full rework on a new base.
+    EnterWork {
+        owner: String,
+        project: String,
+        seq: u64,
+        cycle: u32,
+        eval_context: Vec<EvalResult>,
+        merge_conflict: Option<String>,
+        rework_reason: Option<ReworkReason>,
     },
 
     // --- Escalation composites (§1.2) ---
@@ -304,6 +377,11 @@ impl Effect {
             Effect::DeferLaunch { .. } => "Core::defer_launch",
             Effect::SquashMerge { .. } => "repos.squash_merge",
             Effect::DeleteBranch { .. } => "repos.delete_branch",
+            Effect::CreateSquashCandidate { .. } => "repos.create_squash_candidate",
+            Effect::AdvanceDefault { .. } => "repos.advance_default",
+            Effect::RebaseOntoWithConflict { .. } => "repos.rebase_onto_with_conflict",
+            Effect::LaunchGateStage { .. } => "Core::launch_gate_stage",
+            Effect::EnterWork { .. } => "Core::enter_work",
             Effect::IssueCredentials { .. } => "SshCa::issue_job_credential",
             Effect::Escalate { .. } => "Core::escalate",
             Effect::Stall { .. } => "Core::stall",
@@ -518,6 +596,62 @@ mod tests {
                 branch: "merge-gate/3".into(),
             },
             "repos.delete_branch",
+        );
+        assert_roundtrip(
+            Effect::CreateSquashCandidate {
+                owner: "acme".into(),
+                project: "api".into(),
+                seq: 3,
+                base_ref: "abc123".into(),
+                job_type: "build".into(),
+                summary: None,
+            },
+            "repos.create_squash_candidate",
+        );
+        assert_roundtrip(
+            Effect::AdvanceDefault {
+                owner: "acme".into(),
+                project: "api".into(),
+                commit: "def456".into(),
+                expected_old_head: "abc123".into(),
+            },
+            "repos.advance_default",
+        );
+        assert_roundtrip(
+            Effect::RebaseOntoWithConflict {
+                owner: "acme".into(),
+                project: "api".into(),
+                seq: 3,
+                new_base: "def456".into(),
+            },
+            "repos.rebase_onto_with_conflict",
+        );
+    }
+
+    #[test]
+    fn merge_gate_group() {
+        assert_roundtrip(
+            Effect::LaunchGateStage {
+                owner: "acme".into(),
+                project: "api".into(),
+                seq: 3,
+                gate_branch: "merge-gate/3".into(),
+                cycle: 1,
+                evaluators: vec![],
+            },
+            "Core::launch_gate_stage",
+        );
+        assert_roundtrip(
+            Effect::EnterWork {
+                owner: "acme".into(),
+                project: "api".into(),
+                seq: 3,
+                cycle: 2,
+                eval_context: vec![],
+                merge_conflict: None,
+                rework_reason: Some(types::ReworkReason::GateCiFailure),
+            },
+            "Core::enter_work",
         );
     }
 

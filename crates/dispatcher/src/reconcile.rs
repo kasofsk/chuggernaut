@@ -526,7 +526,9 @@ impl Core {
         // `done`, later stages `pending` (no tasks yet). A single-stage job
         // collapses to one group — identical to the pre-staging rebuild.
         let stages: Vec<Vec<types::Evaluator>> =
-            crate::eval::group_stages(evaluators).into_iter().collect();
+            crate::decide::merge_gate::group_stages(evaluators)
+                .into_iter()
+                .collect();
         let latest = |ev: &types::Evaluator| -> Option<Task> {
             all.iter()
                 .filter(|t| {

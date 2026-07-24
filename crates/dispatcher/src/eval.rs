@@ -18,20 +18,18 @@
 //!   writer.
 
 use crate::core::{Core, CoreError, EvalSubmission, Msg, Result, TaskExit};
+use crate::decide::merge_gate::{self, group_stages};
+use crate::effects::Effect;
 use crate::exec::{ChannelRole, INFRA_RELAUNCH_CAP, eval_image, task_timeout};
+use crate::interpret::Outcome;
 use agent::AgentRunConfig;
 use chrono::Utc;
 use std::collections::VecDeque;
 use types::{
-    EvalResult, Evaluator, EvaluatorType, JobState, ReworkReason, Task, TaskKind, TaskPhase,
+    EvalResult, Evaluator, EvaluatorType, Job, JobState, ReworkReason, Task, TaskKind, TaskPhase,
     TaskResult, TaskState, WorkType, WrapUpMode,
 };
-use vcs::{ConflictRebaseOutcome, MergeOutcome, RebaseOutcome};
-
-/// Gate-fix fast-path rounds allowed per landing (spec §3.3, job #154). Beyond
-/// this, a repeated gate compile failure falls back to the full rework loop —
-/// the failure wasn't the mechanical one-shot the fast path assumes.
-pub(crate) const GATE_FIX_BUDGET: u32 = 2;
+use vcs::{ConflictRebaseOutcome, RebaseOutcome};
 
 /// Machine code for an evaluator that exited without ever delivering a verdict
 /// (#167, narrowed #198): a Command whose container died before it could judge —
@@ -56,19 +54,6 @@ const GATE_FIX_FRAMING: &str = "\n\n---\n## Gate-Fix (compile only, job #154)\n\
     reproduce the exact errors, fix them in place, then commit. This goes \
     straight back to the merge gate — gate CI is the final authority — so no \
     re-review runs; keep the change small and obviously-correct.\n";
-
-/// How a merge-gate failure was classified (spec §3.3, job #154), determined
-/// deterministically from *which gate stage* failed — never by parsing output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GateFailureClass {
-    /// The first (build/compile) stage failed while a distinct later stage was
-    /// still queued: the branch no longer compiles. Eligible for the scoped
-    /// gate-fix fast path.
-    Compile,
-    /// A later stage failed (the build passed), or the gate is a single opaque
-    /// stage that can't be classified. Always takes the full rework loop.
-    Test,
-}
 
 /// One cycle's evaluation, run as an ascending sequence of stages (spec §3.3
 /// staged evaluation). Only the current stage has live tasks: `slots` is the
@@ -96,21 +81,6 @@ impl EvalRound {
     }
 }
 
-/// Partition evaluators into stages in ascending `stage` order, preserving the
-/// declared order within a stage (stable sort). One distinct stage → one group,
-/// which is exactly today's single fan-out.
-pub(crate) fn group_stages(mut evaluators: Vec<Evaluator>) -> VecDeque<Vec<Evaluator>> {
-    evaluators.sort_by_key(|e| e.stage);
-    let mut stages: VecDeque<Vec<Evaluator>> = VecDeque::new();
-    for e in evaluators {
-        match stages.back_mut() {
-            Some(last) if last[0].stage == e.stage => last.push(e),
-            _ => stages.push_back(vec![e]),
-        }
-    }
-    stages
-}
-
 /// Whether a completed stage lets the next stage start: every *required*
 /// evaluator resolved to a product `pass: true`. A required product fail, an
 /// abort (which implies `pass: false`), or an infra failure closes the round —
@@ -123,6 +93,7 @@ pub(crate) fn stage_passed(slots: &[EvalSlot]) -> bool {
     })
 }
 
+#[derive(Debug)]
 pub struct EvalSlot {
     pub evaluator: Evaluator,
     pub task_id: u64,
@@ -130,7 +101,7 @@ pub struct EvalSlot {
     pub outcome: Option<SlotOutcome>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum SlotOutcome {
     Product {
         pass: bool,
@@ -155,11 +126,18 @@ pub struct GateState {
     pub round: EvalRound,
 }
 
-enum FinalizeStep {
-    /// Job reached Done or re-entered Work — the queue can advance.
-    Completed,
-    /// Gate tasks are running; the queue holds until they resolve.
-    Gating,
+/// The owned read-set behind a [`merge_gate::LandingView`] borrow — one
+/// landing decision's inputs, assembled by `gather_landing_view`.
+struct LandingViewData {
+    job: Job,
+    head: String,
+    force_gate: bool,
+    summary: Option<String>,
+    cycle: u32,
+    gate_fix_used: u32,
+    gate_evaluators: Vec<Evaluator>,
+    gate_commit: Option<String>,
+    gate_old_head: Option<String>,
 }
 
 impl Core {
@@ -323,7 +301,7 @@ impl Core {
     /// gate runs its required command evaluators grouped by `stage`, ascending
     /// and one stage at a time, so a failure's class falls out of *which* stage
     /// failed (build vs test) rather than output parsing.
-    async fn launch_gate_stage(
+    pub(crate) async fn launch_gate_stage(
         &mut self,
         owner: &str,
         project: &str,
@@ -1484,80 +1462,80 @@ impl Core {
         self.finalize_pass(owner, project, seq).await
     }
 
+    /// A passed evaluation joins the landing queue (§3.3): the C2 shim —
+    /// decide, apply transitions, run effects, pump.
     async fn finalize_pass(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
-        // `finalize: none` (design-lifecycle.md): nothing to land — the work's
-        // effect is external, the branch is scratch. Eval-pass IS the wrap-up;
-        // complete_done is the platform bookkeeping every job gets.
-        let wrap_up = self
+        let job = self.must_get(owner, project, seq)?.clone();
+        let slug = format!("{owner}/{project}");
+        // `finalize: none` is a view input (design-lifecycle.md): the work's
+        // effect is external and the branch is scratch.
+        let wrap_up_none = self
             .active
             .get(&(owner.to_string(), project.to_string(), seq))
-            .map(|e| e.job_type.wrap_up.r#type)
-            .unwrap_or_default();
-        if wrap_up == WrapUpMode::None {
-            // Nothing to land: eval-pass IS the wrap-up (Evaluation→Done).
+            .map(|e| e.job_type.wrap_up.r#type == WrapUpMode::None)
+            .unwrap_or(false);
+        let state = self.merge_gates.remove(&slug).unwrap_or_default();
+        let (state, transitions, effects, step) =
+            merge_gate::decide_enqueue(state, &job, wrap_up_none);
+        self.store_gate_state(&slug, state);
+        if step == merge_gate::EnqueueStep::CompleteDirectly {
+            // Eval-pass IS the wrap-up; complete_done is the platform
+            // bookkeeping every job gets.
             return self.complete_done(owner, project, seq).await;
         }
-        // Eval passed; the job is now landing. Enter WrapUp (§2.1, §3.3) — the
-        // merge queue, gate, and squash run in this state, not Evaluation.
-        // refinalize (reconcile) re-enters while already WrapUp; skip the write.
-        let mut job = self.must_get(owner, project, seq)?.clone();
-        if job.state == JobState::Evaluation {
-            self.set_state(&mut job, JobState::WrapUp).await?;
-            self.publish(
-                owner,
-                project,
-                seq,
-                "job-wrapup-started",
-                serde_json::json!({}),
-            )
-            .await?;
+        for mut t in transitions {
+            self.set_state(&mut t.job, t.to).await?;
         }
-        let slug = format!("{owner}/{project}");
-        let q = self.merge_queue.entry(slug).or_default();
-        if !q.contains(&seq) {
-            q.push_back(seq);
+        for effect in effects {
+            self.interpret(effect).await?;
         }
         self.pump_merges(owner, project).await
     }
 
-    /// Advance the merge queue until it empties or a gate starts. Wrap-up is
-    /// designed to be infallible; when a finalization step fails anyway (git
-    /// plumbing, repo IO — not a Conflict, which has its own rework path), the
-    /// job escalates and the queue moves on instead of wedging
-    /// (design-lifecycle.md: unexpected wrap-up failure → triage).
+    /// Swap a slug's decider-owned [`merge_gate::MergeGateState`] back in,
+    /// dropping the entry when idle so an inactive project holds no state.
+    fn store_gate_state(&mut self, slug: &str, state: merge_gate::MergeGateState) {
+        if state.is_empty() {
+            self.merge_gates.remove(slug);
+        } else {
+            self.merge_gates.insert(slug.to_string(), state);
+        }
+    }
+
+    /// Advance the merge queue until it empties or a gate starts — the C2
+    /// fold driver over the pure serializer
+    /// ([`merge_gate::MergeGateState::next_candidate`]). Wrap-up is designed
+    /// to be infallible; when a landing step fails anyway (git plumbing, repo
+    /// IO — not a Conflict, which has its own rework path), the job escalates
+    /// and the queue moves on instead of wedging (design-lifecycle.md).
     pub(crate) async fn pump_merges(&mut self, owner: &str, project: &str) -> Result<()> {
-        // Draining (spec §3.6): no gate starts, no landing. The merge queue is
-        // in-memory and re-derived on restart, which resumes the gate then.
-        if self.draining {
-            return Ok(());
-        }
         let slug = format!("{owner}/{project}");
-        // An Open origin release holds the queue: nothing lands on integration
-        // until the release PR resolves (jobs still eval and enqueue). The
-        // post-merge reset is lossless because of exactly this hold.
-        if self.release_holds.contains(&slug) {
-            return Ok(());
-        }
-        while !self.gating.contains_key(&slug) {
-            let Some(&seq) = self.merge_queue.get(&slug).and_then(|q| q.front()) else {
+        loop {
+            // Draining (spec §3.6): no gate starts, no landing. An Open
+            // origin release holds the queue the same way (the post-merge
+            // integration reset is lossless because of exactly this hold).
+            let held = self.release_holds.contains(&slug);
+            let draining = self.draining;
+            let mut state = self.merge_gates.remove(&slug).unwrap_or_default();
+            let next = state.next_candidate(held, draining);
+            self.store_gate_state(&slug, state);
+            let Some(seq) = next else {
                 return Ok(());
             };
-            self.merge_queue.get_mut(&slug).unwrap().pop_front();
-            match self.try_finalize(owner, project, seq).await {
-                Ok(FinalizeStep::Completed) => continue,
-                Ok(FinalizeStep::Gating) => {
-                    self.gating.insert(slug, seq);
-                    return Ok(());
-                }
+            match self
+                .run_landing(owner, project, seq, merge_gate::LandingEvent::Start, None)
+                .await
+            {
+                Ok(merge_gate::LandingStep::Gating) => return Ok(()),
+                Ok(_) => continue,
                 Err(e) => {
-                    tracing::error!("finalizing {owner}/{project}#{seq}: {e}");
+                    tracing::error!("finalize for {owner}/{project}#{seq}: {e}");
                     self.escalate_finalize_failure(owner, project, seq, &e)
                         .await;
                     continue;
                 }
             }
         }
-        Ok(())
     }
 
     /// Best-effort escalation for an unexpected finalization error. Never
@@ -1587,31 +1565,25 @@ impl Core {
         }
     }
 
-    /// One finalization attempt against the then-current default HEAD.
-    async fn try_finalize(&mut self, owner: &str, project: &str, seq: u64) -> Result<FinalizeStep> {
+    /// Assemble the read-only inputs for one landing decision (contracts.md
+    /// §2: reads feed the view, they are not effects). Re-gathered before
+    /// EVERY `decide` call — the continuation contract's freshness rule, so a
+    /// decision never runs on a view the world moved under. `parked` carries
+    /// the gate round's (candidate commit, old head) on a verdict entry.
+    async fn gather_landing_view(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        parked: Option<&(String, String)>,
+    ) -> Result<LandingViewData> {
         let key = (owner.to_string(), project.to_string(), seq);
         let job = self.must_get(owner, project, seq)?.clone();
-        if job.state != JobState::WrapUp {
-            return Ok(FinalizeStep::Completed); // revoked while queued
-        }
-        let base_ref = job.base_ref.clone().expect("base_ref set");
-        // Was this landing's current cycle a gate-fix round (job #154)? If so the
-        // fix was never reviewed, so the gate MUST re-run against the fixed
-        // candidate — even when HEAD hasn't moved again (the usual fast-path
-        // squash condition) — because gate CI is the only validation it gets.
-        // Read from the persisted task log so it holds across a restart.
-        let cycle_now = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
-        let force_gate = self
-            .tasks
-            .list_for_job(owner, project, seq)
-            .await?
-            .iter()
-            .any(|t| {
-                t.phase == TaskPhase::Work
-                    && t.cycle == cycle_now
-                    && t.evaluator.is_none()
-                    && t.rework_reason == Some(ReworkReason::GateCompileFix)
-            });
+        let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
+        // Was this landing's current cycle a gate-fix round (job #154)? Read
+        // from the persisted task log so it holds across a restart.
+        let tasks = self.tasks.list_for_job(owner, project, seq).await?;
+        let force_gate = merge_gate::force_gate(&tasks, cycle);
         let mut summary = self
             .active
             .get(&key)
@@ -1629,7 +1601,6 @@ impl Core {
                 _ => note.to_string(),
             });
         }
-
         // A batch lands as one squash that completes every member, so open the
         // commit body with the member list — otherwise git history records only
         // `job/{batchseq}: {type}` with no trace of which tickets it closed
@@ -1650,131 +1621,163 @@ impl Core {
                 _ => header,
             });
         }
-
         let default_branch = self.repos.default_branch(owner, project).await?;
         let head = self
             .repos
             .resolve_ref(owner, project, &default_branch)
             .await?;
+        let gate_evaluators = self
+            .active
+            .get(&key)
+            .map(|e| merge_gate::gate_evaluators(&e.job_type.eval))
+            .unwrap_or_default();
+        let gate_fix_used = self.active.get(&key).map(|e| e.gate_fix_used).unwrap_or(0);
+        let (gate_commit, gate_old_head) = match parked {
+            Some((c, h)) => (Some(c.clone()), Some(h.clone())),
+            None => (None, None),
+        };
+        Ok(LandingViewData {
+            job,
+            head,
+            force_gate,
+            summary,
+            cycle,
+            gate_fix_used,
+            gate_evaluators,
+            gate_commit,
+            gate_old_head,
+        })
+    }
 
-        if head == base_ref && !force_gate {
-            // Fast path: evaluators already ran against exactly what lands.
-            return match self
-                .repos
-                .squash_merge(
-                    owner,
-                    project,
-                    seq,
-                    &base_ref,
-                    &job.r#type,
-                    summary.as_deref(),
-                )
-                .await?
-            {
-                MergeOutcome::Merged { .. } | MergeOutcome::NoOp => {
-                    self.finish_landing(owner, project, seq).await?;
-                    Ok(FinalizeStep::Completed)
-                }
-                // head == base_ref makes a conflict impossible by construction;
-                // treat one as the conflict path anyway rather than crash.
-                MergeOutcome::Conflict { files } => {
-                    self.conflict_rework(owner, project, seq, &base_ref, &head, files)
-                        .await?;
-                    Ok(FinalizeStep::Completed)
-                }
-                MergeOutcome::UnresolvedMarkers { files } => {
-                    self.escalate_unresolved_markers(owner, project, seq, files)
-                        .await?;
-                    Ok(FinalizeStep::Completed)
-                }
-            };
-        }
-
-        // HEAD moved: build the candidate and open the gate (§3.3 Merge Gate).
-        match self
-            .repos
-            .create_squash_candidate(
-                owner,
-                project,
-                seq,
-                &base_ref,
-                &job.r#type,
-                summary.as_deref(),
-            )
-            .await?
-        {
-            MergeOutcome::NoOp => {
-                self.finish_landing(owner, project, seq).await?;
-                Ok(FinalizeStep::Completed)
-            }
-            MergeOutcome::Conflict { files } => {
-                self.conflict_rework(owner, project, seq, &base_ref, &head, files)
-                    .await?;
-                Ok(FinalizeStep::Completed)
-            }
-            MergeOutcome::UnresolvedMarkers { files } => {
-                self.escalate_unresolved_markers(owner, project, seq, files)
-                    .await?;
-                Ok(FinalizeStep::Completed)
-            }
-            MergeOutcome::Merged { commit } => {
-                let gate_evaluators: Vec<Evaluator> = self
-                    .active
-                    .get(&key)
-                    .map(|e| {
-                        e.job_type
-                            .eval
-                            .iter()
-                            .filter(|ev| {
-                                ev.r#type == EvaluatorType::Command && ev.required.unwrap_or(true)
-                            })
-                            .cloned()
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                if gate_evaluators.is_empty() {
-                    // Nothing to re-run; the candidate promotes directly.
-                    self.repos
-                        .advance_default(owner, project, &commit, &head)
-                        .await?;
-                    let _ = self
-                        .repos
-                        .delete_branch(owner, project, &format!("merge-gate/{seq}"))
-                        .await;
-                    self.finish_landing(owner, project, seq).await?;
-                    return Ok(FinalizeStep::Completed);
-                }
-
-                let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
-                self.publish(
-                    owner,
-                    project,
-                    seq,
-                    "job-merge-gate-started",
-                    serde_json::json!({ "cycle": cycle }),
-                )
+    /// The C2 continuation fold for ONE landing (contracts.md §2): gather a
+    /// fresh view, call the pure decider, swap its state value, apply
+    /// transitions through `set_state`, run effects through `interpret` — and
+    /// when an effect carries a result, feed it back as the next event until
+    /// the decider settles. This loop IS the shape every later phase decider's
+    /// shim copies.
+    async fn run_landing(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        mut event: merge_gate::LandingEvent,
+        parked: Option<(String, String)>,
+    ) -> Result<merge_gate::LandingStep> {
+        use merge_gate::{LandingEvent, LandingStep, MergeOutcome as Mo};
+        let key = (owner.to_string(), project.to_string(), seq);
+        let slug = format!("{owner}/{project}");
+        // Fold-local carry between rounds: the conflict files feeding the
+        // context composition, and the candidate commit a gate round parks
+        // (both arrive one round before the decision that consumes them).
+        let mut conflict_files: Vec<String> = Vec::new();
+        let mut candidate_commit: Option<String> = None;
+        loop {
+            let view_data = self
+                .gather_landing_view(owner, project, seq, parked.as_ref())
                 .await?;
-                // Run the gate staged (job #154): ascending `stage`, one stage at
-                // a time, so a failure's class (compile vs test) falls out of
-                // which stage failed. A single-stage gate is the unchanged
-                // fan-out — and is treated as unclassifiable at reduce.
-                let gate_branch = format!("merge-gate/{seq}");
-                let mut pending = group_stages(gate_evaluators);
-                let first = pending.pop_front().expect("non-empty gate evaluators");
-                let slots = self
-                    .launch_gate_stage(owner, project, seq, &gate_branch, cycle, first)
-                    .await?;
-                self.active.get_mut(&key).expect("exec state").gate = Some(GateState {
-                    commit,
-                    old_head: head,
-                    round: EvalRound {
-                        slots,
-                        pending,
-                        done: Vec::new(),
-                    },
-                });
-                Ok(FinalizeStep::Gating)
+            let state = self.merge_gates.remove(&slug).unwrap_or_default();
+            let view = merge_gate::LandingView {
+                job: &view_data.job,
+                head: view_data.head.clone(),
+                force_gate: view_data.force_gate,
+                summary: view_data.summary.clone(),
+                cycle: view_data.cycle,
+                gate_fix_used: view_data.gate_fix_used,
+                gate_evaluators: view_data.gate_evaluators.clone(),
+                gate_commit: view_data.gate_commit.clone(),
+                gate_old_head: view_data.gate_old_head.clone(),
+            };
+            let (state, transitions, effects, step) = merge_gate::decide(state, &view, event);
+            self.store_gate_state(&slug, state);
+            for mut t in transitions {
+                self.set_state(&mut t.job, t.to).await?;
+            }
+            // An escalation out of the landing releases the exec slice BEFORE
+            // its Escalate effect runs (parity with the pre-C2 order: the
+            // escalation task's cycle must not read the dropped exec state).
+            if step == LandingStep::CompletedDropExec {
+                self.active.remove(&key);
+            }
+            let mut next: Option<LandingEvent> = None;
+            for effect in effects {
+                let fast_path = matches!(effect, Effect::SquashMerge { .. });
+                let rebase_target = match &effect {
+                    Effect::RebaseOntoWithConflict { new_base, .. } => Some(new_base.clone()),
+                    _ => None,
+                };
+                match self.interpret(effect).await? {
+                    Outcome::Done => {}
+                    Outcome::Merge(outcome) => {
+                        let mirrored = match outcome {
+                            vcs::MergeOutcome::Merged { commit } => {
+                                candidate_commit = Some(commit.clone());
+                                Mo::Merged { commit }
+                            }
+                            vcs::MergeOutcome::NoOp => Mo::NoOp,
+                            vcs::MergeOutcome::Conflict { files } => {
+                                conflict_files = files.clone();
+                                Mo::Conflict { files }
+                            }
+                            vcs::MergeOutcome::UnresolvedMarkers { files } => {
+                                Mo::UnresolvedMarkers { files }
+                            }
+                        };
+                        next = Some(if fast_path {
+                            LandingEvent::Squashed { outcome: mirrored }
+                        } else {
+                            LandingEvent::CandidateBuilt { outcome: mirrored }
+                        });
+                    }
+                    Outcome::CasRefused => next = Some(LandingEvent::PromoteRefused),
+                    Outcome::Rebase(outcome) => {
+                        // Compose the rework brief: the conflict context read
+                        // plus the rebase outcome folded in (§3.2 step 12).
+                        let new_base = rebase_target.expect("rebase outcome from a rebase effect");
+                        let old_base = view_data.job.base_ref.clone().expect("base_ref set");
+                        let mut context = self
+                            .repos
+                            .conflict_context(owner, project, &old_base, &new_base, &conflict_files)
+                            .await?;
+                        augment_conflict_context(&mut context, &outcome);
+                        conflict_files = Vec::new();
+                        next = Some(LandingEvent::Rebased {
+                            conflict_context: context,
+                        });
+                    }
+                    Outcome::GateSlots(slots) => {
+                        // Park the gate round: the candidate commit from this
+                        // round, the head it was built against, and the stages
+                        // beyond the launched first (same pure grouping the
+                        // decider used).
+                        let mut pending =
+                            merge_gate::group_stages(view_data.gate_evaluators.clone());
+                        pending.pop_front();
+                        let commit = candidate_commit
+                            .clone()
+                            .expect("gate opens from a built candidate");
+                        self.active.get_mut(&key).expect("exec state").gate = Some(GateState {
+                            commit,
+                            old_head: view_data.head.clone(),
+                            round: EvalRound {
+                                slots,
+                                pending,
+                                done: Vec::new(),
+                            },
+                        });
+                    }
+                }
+            }
+            match step {
+                LandingStep::AwaitOutcome => {
+                    event = next.expect("AwaitOutcome step without a result-carrying effect");
+                }
+                LandingStep::FinishLanding => {
+                    self.finish_landing(owner, project, seq).await?;
+                    return Ok(LandingStep::Completed);
+                }
+                LandingStep::Completed | LandingStep::CompletedDropExec | LandingStep::Gating => {
+                    return Ok(step);
+                }
             }
         }
     }
@@ -1861,6 +1864,9 @@ impl Core {
                 let next = g.round.pending.pop_front().expect("pending checked");
                 (passed, next)
             };
+            if let Some(trace) = &self.trace {
+                trace.effect("LaunchGateStage");
+            }
             let slots = self
                 .launch_gate_stage(owner, project, seq, &gate_branch, cycle, next)
                 .await?;
@@ -1873,7 +1879,13 @@ impl Core {
         // (promote, rework re-entry) escalates rather than wedging the queue.
         if let Err(e) = self.gate_reduce(owner, project, seq).await {
             tracing::error!("gate reduce for {owner}/{project}#{seq}: {e}");
-            self.gating.remove(&format!("{owner}/{project}"));
+            let slug = format!("{owner}/{project}");
+            if let Some(state) = self.merge_gates.get_mut(&slug) {
+                state.remove(seq);
+                if state.is_empty() {
+                    self.merge_gates.remove(&slug);
+                }
+            }
             self.escalate_finalize_failure(owner, project, seq, &e)
                 .await;
             return self.pump_merges(owner, project).await;
@@ -1881,9 +1893,11 @@ impl Core {
         Ok(())
     }
 
+    /// The gate's verdict (§3.3): fold the round's slots into the failure
+    /// set, derive the deterministic classification inputs, and re-enter the
+    /// landing fold with [`merge_gate::LandingEvent::GateVerdict`].
     async fn gate_reduce(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
-        let slug = format!("{owner}/{project}");
         let gate = self
             .active
             .get_mut(&key)
@@ -1920,113 +1934,35 @@ impl Core {
                 _ => None,
             })
             .collect();
-
-        // Classify the failure deterministically from *which stage* failed (job
-        // #154): the first stage failing while a distinct later stage was queued
-        // is a build/compile failure; anything else (a later stage, or a single
-        // opaque stage that can't be told apart) takes the full rework loop.
-        let class = if gate.round.done.is_empty() && !gate.round.pending.is_empty() {
-            GateFailureClass::Compile
-        } else {
-            GateFailureClass::Test
-        };
-        let gate_fix_used = self.active.get(&key).map(|e| e.gate_fix_used).unwrap_or(0);
-
-        self.gating.remove(&slug);
-        let gate_branch = format!("merge-gate/{seq}");
-
-        if !failures.is_empty()
-            && class == GateFailureClass::Compile
-            && gate_fix_used < GATE_FIX_BUDGET
-        {
-            // Gate-fix fast path (job #154): a compile-only failure on an
-            // already-approved branch gets a scoped fix task that returns
-            // straight to the gate — no re-review, no eval CI. Pull the failed
-            // build stage's captured compiler output so the brief shows the
-            // exact errors (its output was stored on the task by on_gate_exited).
-            let compiler_output = self
-                .gate_stage_output(owner, project, seq, &failed_ids)
-                .await;
-            self.launch_gate_fix(
-                owner,
-                project,
-                seq,
-                gate.old_head.clone(),
-                failures,
-                compiler_output,
-            )
-            .await?;
-            return self.pump_merges(owner, project).await;
-        }
-
-        if failures.is_empty() {
-            // Promote: the candidate commit IS the merge (§3.3). A failed CAS
-            // means HEAD moved under the parked candidate (an origin-release
-            // reset, or restart-race leftovers) — re-enqueue for finalization
-            // against the new HEAD instead of escalating.
-            if let Err(e) = self
-                .repos
-                .advance_default(owner, project, &gate.commit, &gate.old_head)
+        // The classification input (job #154): the first stage failing while a
+        // distinct later stage was queued is the compile class. The decider
+        // owns the classification itself.
+        let first_stage_failed = gate.round.done.is_empty() && !gate.round.pending.is_empty();
+        // The failed build stage's captured compiler output — the gate-fix
+        // brief's evidence; only a first-stage failure can need it.
+        let compiler_output = if !failures.is_empty() && first_stage_failed {
+            self.gate_stage_output(owner, project, seq, &failed_ids)
                 .await
-            {
-                tracing::warn!(
-                    "gate promote for {owner}/{project}#{seq}: HEAD moved under candidate ({e}); refinalizing"
-                );
-                let _ = self.repos.delete_branch(owner, project, &gate_branch).await;
-                self.refinalize(owner, project, seq).await?;
-                return Ok(());
-            }
-            let _ = self.repos.delete_branch(owner, project, &gate_branch).await;
-            self.finish_landing(owner, project, seq).await?;
         } else {
-            // Integration failure: rework on the new base, budget NOT consumed
-            // — same treatment as a merge conflict (§3.3).
-            let _ = self.repos.delete_branch(owner, project, &gate_branch).await;
-            let job = self.must_get(owner, project, seq)?.clone();
-            let old_base = job.base_ref.clone().expect("base_ref set");
-            let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
-            // Rebase job/{seq} onto the new base (the head the candidate was gated
-            // against), committing the 3-way-merged tree as a WIP commit so the
-            // agent fixes in place; enter_work preserves it (spec §3.2 step 12,
-            // §3.3). A gate failure usually merges cleanly (it is an eval failure,
-            // not a text conflict), but the augmented context handles either arm.
-            let outcome = self
-                .repos
-                .rebase_onto_with_conflict(owner, project, seq, &gate.old_head)
-                .await?;
-            let mut context = self
-                .repos
-                .conflict_context(owner, project, &old_base, &gate.old_head, &[])
-                .await?;
-            augment_conflict_context(&mut context, &outcome);
-            let mut job = job;
-            job.base_ref = Some(gate.old_head.clone());
-            self.jobs.put(&job).await?;
-            self.graphs
-                .entry(job.project.clone())
-                .or_default()
-                .insert(job.clone());
-            self.publish(
+            String::new()
+        };
+        let step = self
+            .run_landing(
                 owner,
                 project,
                 seq,
-                "job-rework-started",
-                serde_json::json!({
-                    "cycle": cycle + 1, "reason": "merge_gate_failure", "eval_context": failures,
-                }),
+                merge_gate::LandingEvent::GateVerdict {
+                    failures,
+                    first_stage_failed,
+                    compiler_output,
+                },
+                Some((gate.commit.clone(), gate.old_head.clone())),
             )
             .await?;
-            self.enter_work(
-                owner,
-                project,
-                seq,
-                cycle + 1,
-                failures,
-                Some(context),
-                Some(ReworkReason::GateCiFailure),
-            )
-            .await?;
-        }
+        debug_assert!(
+            step != merge_gate::LandingStep::Gating,
+            "a verdict never opens a gate directly"
+        );
         self.pump_merges(owner, project).await
     }
 
@@ -2418,90 +2354,6 @@ impl Core {
             self.on_job_done(owner, project, m).await?;
         }
         Ok(())
-    }
-
-    /// §3.2 step 12 guard: a squash carried conflict markers left by a WIP
-    /// rebase the agent never resolved. A no-evaluator job would land them on
-    /// the default branch, so escalate to a human instead of merging.
-    async fn escalate_unresolved_markers(
-        &mut self,
-        owner: &str,
-        project: &str,
-        seq: u64,
-        files: Vec<String>,
-    ) -> Result<()> {
-        let key = (owner.to_string(), project.to_string(), seq);
-        self.active.remove(&key);
-        self.escalate(
-            owner,
-            project,
-            seq,
-            "unresolved_conflict_markers",
-            format!(
-                "Job {seq}: the branch still carries unresolved conflict markers in {} \
-                 after a rebase-with-markers rework — merging would land \
-                 `<<<<<<< / ======= / >>>>>>>` on the default branch. Resolve the markers \
-                 on job/{seq} and commit before finalizing.",
-                files.join(", ")
-            ),
-            None,
-        )
-        .await
-    }
-
-    /// §3.2 step 12 conflict path: rebase-as-rework, budget NOT consumed.
-    async fn conflict_rework(
-        &mut self,
-        owner: &str,
-        project: &str,
-        seq: u64,
-        old_base: &str,
-        head: &str,
-        files: Vec<String>,
-    ) -> Result<()> {
-        let key = (owner.to_string(), project.to_string(), seq);
-        let mut job = self.must_get(owner, project, seq)?.clone();
-        let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
-        // Rebase job/{seq} onto the new base, committing the 3-way-merged tree
-        // (conflict markers in the conflicting hunks only) as a WIP commit — the
-        // merge is now ON the branch, and the agent resolves it in place rather
-        // than redoing the work (spec §3.2 step 12). enter_work below preserves
-        // this branch (Change A).
-        let outcome = self
-            .repos
-            .rebase_onto_with_conflict(owner, project, seq, head)
-            .await?;
-        let mut context = self
-            .repos
-            .conflict_context(owner, project, old_base, head, &files)
-            .await?;
-        augment_conflict_context(&mut context, &outcome);
-        job.base_ref = Some(head.to_string());
-        self.jobs.put(&job).await?;
-        self.graphs
-            .entry(job.project.clone())
-            .or_default()
-            .insert(job.clone());
-        self.publish(
-            owner,
-            project,
-            seq,
-            "job-rework-started",
-            serde_json::json!({
-                "cycle": cycle + 1, "reason": "merge_conflict", "eval_context": [],
-            }),
-        )
-        .await?;
-        self.enter_work(
-            owner,
-            project,
-            seq,
-            cycle + 1,
-            Vec::new(),
-            Some(context),
-            Some(ReworkReason::MergeConflict),
-        )
-        .await
     }
 }
 

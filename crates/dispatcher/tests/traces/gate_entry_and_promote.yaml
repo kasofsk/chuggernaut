@@ -1,5 +1,5 @@
 steps:
-- event: create+release → work → eval → merge
+- event: create+release → eval (main moves) → gate → promote
   transitions:
   - job: 1
     from: Frozen
@@ -26,5 +26,11 @@ steps:
   - PublishEvent task-created
   - PublishEvent task-completed
   - PublishEvent job-wrapup-started
-  - SquashMerge
+  - CreateSquashCandidate
+  - PublishEvent job-merge-gate-started
+  - LaunchGateStage
+  - PublishEvent task-created
+  - PublishEvent task-completed
+  - AdvanceDefault
+  - DeleteBranch merge-gate/1
   - PublishEvent job-done

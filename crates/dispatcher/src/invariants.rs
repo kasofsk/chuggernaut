@@ -15,13 +15,14 @@
 //! tests to convert tribal knowledge into a regression net. Because all state
 //! lives in one place (single-writer design), the check is cheap.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use types::JobState;
 
 use crate::exec::ExecState;
 use crate::graph::JobGraph;
 use crate::queue::ReadyQueue;
+use chuggernaut_domain::decide::merge_gate::MergeGateState;
 
 /// A single broken invariant. [`invariant`](Violation::invariant) is a stable,
 /// greppable identifier; [`detail`](Violation::detail) names the offending
@@ -55,13 +56,14 @@ pub struct CoreState<'a> {
     pub queue: &'a ReadyQueue,
     /// Execution slice per in-flight job, keyed `(owner, project, seq)`.
     pub active: &'a HashMap<(String, String, u64), ExecState>,
-    /// Per-project merge queue: seqs landing, in FIFO order (spec §3.3).
-    pub merge_queue: &'a HashMap<String, VecDeque<u64>>,
-    /// Project slug → the one seq whose merge gate is currently running.
-    pub gating: &'a HashMap<String, u64>,
+    /// Per-project landing pipeline (spec §3.3): the FIFO queue + the
+    /// depth-1 gate slot, as the decider-owned value (refactor-plan C2 —
+    /// depth-1 is enforced by `gating: Option<u64>`'s type, so this checker
+    /// keeps only the value-level clauses).
+    pub merge_gates: &'a HashMap<String, MergeGateState>,
 }
 
-/// Slug is what `graphs`/`merge_queue`/`gating` are keyed by (`owner/project`).
+/// Slug is what `graphs`/`merge_gates` are keyed by (`owner/project`).
 fn slug_of(owner: &str, project: &str) -> String {
     format!("{owner}/{project}")
 }
@@ -175,8 +177,8 @@ fn check_active_is_executing(state: &CoreState, out: &mut Vec<Violation>) {
 /// `WrapUp`, and the gating seq has already left the queue (it is popped before
 /// the gate starts, so it must not appear in both).
 fn check_merge_queue_is_wrapup(state: &CoreState, out: &mut Vec<Violation>) {
-    for (slug, queued) in state.merge_queue {
-        for &seq in queued {
+    for (slug, gate) in state.merge_gates {
+        for &seq in &gate.queue {
             if state.job_state(slug, seq) != Some(JobState::WrapUp) {
                 out.push(Violation::new(
                     "merge_queue_is_wrapup",
@@ -184,23 +186,19 @@ fn check_merge_queue_is_wrapup(state: &CoreState, out: &mut Vec<Violation>) {
                 ));
             }
         }
-    }
-    for (slug, &seq) in state.gating {
-        if state.job_state(slug, seq) != Some(JobState::WrapUp) {
-            out.push(Violation::new(
-                "merge_queue_is_wrapup",
-                format!("{slug}#{seq} is gating but not WrapUp"),
-            ));
-        }
-        if state
-            .merge_queue
-            .get(slug)
-            .is_some_and(|q| q.contains(&seq))
-        {
-            out.push(Violation::new(
-                "merge_queue_is_wrapup",
-                format!("{slug}#{seq} is gating yet still sits in the merge queue"),
-            ));
+        if let Some(seq) = gate.gating {
+            if state.job_state(slug, seq) != Some(JobState::WrapUp) {
+                out.push(Violation::new(
+                    "merge_queue_is_wrapup",
+                    format!("{slug}#{seq} is gating but not WrapUp"),
+                ));
+            }
+            if gate.queue.contains(&seq) {
+                out.push(Violation::new(
+                    "merge_queue_is_wrapup",
+                    format!("{slug}#{seq} is gating yet still sits in the merge queue"),
+                ));
+            }
         }
     }
 }
@@ -225,13 +223,13 @@ fn check_terminal_is_absorbing(state: &CoreState, out: &mut Vec<Violation>) {
     for (owner, project, seq) in state.active.keys() {
         flag(&slug_of(owner, project), *seq, "active set");
     }
-    for (slug, queued) in state.merge_queue {
-        for &seq in queued {
+    for (slug, gate) in state.merge_gates {
+        for &seq in &gate.queue {
             flag(slug, seq, "merge queue");
         }
-    }
-    for (slug, &seq) in state.gating {
-        flag(slug, seq, "gating map");
+        if let Some(seq) = gate.gating {
+            flag(slug, seq, "gating slot");
+        }
     }
 }
 
@@ -287,8 +285,7 @@ mod tests {
         graphs: HashMap<String, JobGraph>,
         queue: ReadyQueue,
         active: HashMap<(String, String, u64), ExecState>,
-        merge_queue: HashMap<String, VecDeque<u64>>,
-        gating: HashMap<String, u64>,
+        merge_gates: HashMap<String, MergeGateState>,
     }
 
     impl Fixture {
@@ -297,8 +294,7 @@ mod tests {
                 graphs: graph_of(jobs),
                 queue: ReadyQueue::default(),
                 active: no_active(),
-                merge_queue: HashMap::new(),
-                gating: HashMap::new(),
+                merge_gates: HashMap::new(),
             }
         }
 
@@ -307,8 +303,7 @@ mod tests {
                 graphs: &self.graphs,
                 queue: &self.queue,
                 active: &self.active,
-                merge_queue: &self.merge_queue,
-                gating: &self.gating,
+                merge_gates: &self.merge_gates,
             })
         }
     }
@@ -388,7 +383,7 @@ mod tests {
     #[test]
     fn gating_non_wrapup_job_is_flagged() {
         let mut f = Fixture::new(vec![job("acme/api", 1, &[], JobState::Evaluation)]);
-        f.gating.insert("acme/api".into(), 1);
+        f.merge_gates.entry("acme/api".into()).or_default().gating = Some(1);
         let v = f.check();
         assert!(
             v.iter().any(|x| x.invariant == "merge_queue_is_wrapup"),
@@ -399,7 +394,8 @@ mod tests {
     #[test]
     fn merge_queue_non_wrapup_job_is_flagged() {
         let mut f = Fixture::new(vec![job("acme/api", 1, &[], JobState::Ready)]);
-        f.merge_queue.insert("acme/api".into(), VecDeque::from([1]));
+        f.merge_gates.entry("acme/api".into()).or_default().queue =
+            std::collections::VecDeque::from([1]);
         let v = f.check();
         assert!(
             v.iter().any(|x| x.invariant == "merge_queue_is_wrapup"),
@@ -410,8 +406,9 @@ mod tests {
     #[test]
     fn gating_seq_still_in_queue_is_flagged() {
         let mut f = Fixture::new(vec![job("acme/api", 1, &[], JobState::WrapUp)]);
-        f.gating.insert("acme/api".into(), 1);
-        f.merge_queue.insert("acme/api".into(), VecDeque::from([1]));
+        f.merge_gates.entry("acme/api".into()).or_default().gating = Some(1);
+        f.merge_gates.entry("acme/api".into()).or_default().queue =
+            std::collections::VecDeque::from([1]);
         let v = f.check();
         assert!(
             v.iter()

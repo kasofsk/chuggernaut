@@ -110,6 +110,8 @@ domain/ (chuggernaut-domain — pure: no tokio/async-nats/store/vcs/auth)
   effects.rs     — the Effect vocabulary: each port action as serde data (contracts.md §2)
   decide/        — the decider layer: pure `(view, event) -> (transitions, effects)`
     escalation.rs— the C1 template decider: the escalate/stall family (§1.2, §3.4)
+    merge_gate.rs— the C2 landing decider: depth-1 queue + gate as a decider-owned
+                   value, continuation events for effect results (§3.3)
 ```
 
 ```

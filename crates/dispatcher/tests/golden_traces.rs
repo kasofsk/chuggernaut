@@ -71,6 +71,26 @@ work:
   prompt: prompts/impl.md
 "#;
 
+// Agent work + a STAGED command gate (job #154, mirrors gate_and_human.rs
+// `GATEFIX`): build at stage 0, tests at stage 1, so a stage-0 gate failure
+// classifies as compile and takes the gate-fix fast path.
+const GATEFIX_YAML: &str = r#"
+name: gatefix
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+eval:
+  - name: build
+    type: command
+    run: ./build.sh
+    stage: 0
+  - name: test
+    type: command
+    run: ./test.sh
+    stage: 1
+"#;
+
 async fn new_core(store: &NatsStore, repos_root: std::path::PathBuf) -> Core {
     Core::new(
         store.clone(),
@@ -88,6 +108,15 @@ async fn new_core(store: &NatsStore, repos_root: std::path::PathBuf) -> Core {
 }
 
 async fn seed_repo(repo: &TempRepo) {
+    seed_repo_with(repo, true).await
+}
+
+/// `with_defaults: false` seeds no `jobs/_defaults.yaml` — the gate-fix
+/// scenario needs the staged `gatefix` type's evaluators EXACTLY as declared
+/// (the appended `ci` default would share stage 0 with `build`, breaking both
+/// the exit-script accounting and the fixture's single-container-per-stage
+/// determinism).
+async fn seed_repo_with(repo: &TempRepo, with_defaults: bool) {
     let clone = repo.clone_branch("main").await;
     clone
         .commit_file("jobs/build.yaml", BUILD_YAML.as_bytes(), "add build")
@@ -95,15 +124,20 @@ async fn seed_repo(repo: &TempRepo) {
     clone
         .commit_file("jobs/deploy.yaml", DEPLOY_YAML.as_bytes(), "add deploy")
         .await;
-    clone
-        .commit_file("jobs/_defaults.yaml", DEFAULTS_YAML.as_bytes(), "defaults")
-        .await;
+    if with_defaults {
+        clone
+            .commit_file("jobs/_defaults.yaml", DEFAULTS_YAML.as_bytes(), "defaults")
+            .await;
+    }
     clone
         .commit_file(
             "jobs/impl-cmd.yaml",
             IMPL_CMD_YAML.as_bytes(),
             "add impl-cmd",
         )
+        .await;
+    clone
+        .commit_file("jobs/gatefix.yaml", GATEFIX_YAML.as_bytes(), "add gatefix")
         .await;
     clone
         .commit_file("prompts/build.md", b"build it", "prompt")
@@ -291,30 +325,107 @@ struct SpawnRig {
     sink: TraceSink,
 }
 
+/// Gate-scenario knobs for the actor-driven rig. `Default` reproduces the
+/// original no-gate setup: one work hook committing `src/a.rs`, main never
+/// moves, every container exits 0.
+#[derive(Default)]
+struct SpawnOpts {
+    /// Container exit codes, consumed in backend launch order — the gate
+    /// verdicts. Empty means every container exits 0.
+    script_exits: Vec<i32>,
+    /// Land `docs/other.md` on main while the FIRST eval container runs (the
+    /// one-shot `on_launch` hook), so the wrap-up merge gate fires (§3.3).
+    move_main_during_eval: bool,
+    /// Work hooks queued in cycle order. Empty means one plain `Commit`.
+    work_hooks: Vec<WorkHook>,
+    /// Captured container logs — the compiler output a gate-fix brief carries.
+    logs: Option<&'static [u8]>,
+    /// Seed `jobs/_defaults.yaml` (the appended `ci` evaluator). Off for the
+    /// staged gate-fix scenario — see [`seed_repo_with`].
+    no_defaults: bool,
+}
+
+/// One queued `FakeProvider::on_run` hook (hooks are FnOnce, consumed per
+/// work/fix cycle in order).
+enum WorkHook {
+    /// Commit `src/a.rs` on the job branch; main untouched.
+    Commit,
+    /// Commit `src/a.rs` on the branch AND land a conflicting `src/a.rs` on
+    /// main — the rebase at Evaluation entry cannot replay cleanly.
+    CommitAndConflictMain,
+    /// Rework/fix cycle: re-commit `src/a.rs` v2 on the freshly pinned base.
+    Recommit,
+}
+
 async fn spawn_setup() -> Option<SpawnRig> {
+    spawn_setup_with(SpawnOpts::default()).await
+}
+
+async fn spawn_setup_with(opts: SpawnOpts) -> Option<SpawnRig> {
     let server = test_utils::nats::NatsTestServer::shared().await?;
     let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
         .await
         .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
-    seed_repo(&repo).await;
+    seed_repo_with(&repo, !opts.no_defaults).await;
 
     let backend = Arc::new(FakeBackend::new());
     let provider = Arc::new(FakeProvider::new());
-    // Work hook: commit a file to the job branch; main never moves.
-    let bare = repo.bare_path();
-    provider.on_run(move |cfg| {
-        let bare = bare.clone();
-        async move {
-            let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
-            let clone = clone_branch_from(&bare, &branch).await;
-            clone
-                .commit_file("src/a.rs", b"job change", "implement")
-                .await;
-            clone.push(&branch).await;
+    if !opts.script_exits.is_empty() {
+        backend.script_exits(opts.script_exits);
+    }
+    if let Some(logs) = opts.logs {
+        backend.put_logs(logs.to_vec());
+    }
+    let hooks = if opts.work_hooks.is_empty() {
+        vec![WorkHook::Commit]
+    } else {
+        opts.work_hooks
+    };
+    for hook in hooks {
+        let bare = repo.bare_path();
+        match hook {
+            WorkHook::Commit => provider.on_run(move |cfg| async move {
+                let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+                let clone = clone_branch_from(&bare, &branch).await;
+                clone
+                    .commit_file("src/a.rs", b"job change", "implement")
+                    .await;
+                clone.push(&branch).await;
+            }),
+            WorkHook::CommitAndConflictMain => provider.on_run(move |cfg| async move {
+                let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+                let clone = clone_branch_from(&bare, &branch).await;
+                clone
+                    .commit_file("src/a.rs", b"job change", "implement")
+                    .await;
+                clone.push(&branch).await;
+
+                let main = clone_branch_from(&bare, "main").await;
+                main.commit_file("src/a.rs", b"conflicting land", "other job")
+                    .await;
+                main.push("main").await;
+            }),
+            WorkHook::Recommit => provider.on_run(move |cfg| async move {
+                let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+                let clone = clone_branch_from(&bare, &branch).await;
+                clone
+                    .commit_file("src/a.rs", b"job change v2", "implement again")
+                    .await;
+                clone.push(&branch).await;
+            }),
         }
-    });
+    }
+    if opts.move_main_during_eval {
+        let bare = repo.bare_path();
+        backend.on_launch(move |_cfg| async move {
+            let main = clone_branch_from(&bare, "main").await;
+            main.commit_file("docs/other.md", b"landed during eval", "other job")
+                .await;
+            main.push("main").await;
+        });
+    }
     // The command evaluator reads its verdict from this file.
     backend.put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
 
@@ -377,6 +488,110 @@ async fn trace_work_eval_merge_no_gate() {
     wait_trace_effect(&rig.sink, "PublishEvent job-done").await;
 
     assert_trace(&rig.sink, "work_eval_merge_no_gate");
+}
+
+/// `gate_and_human.rs::main_moves_during_eval_fires_merge_gate`: main moves
+/// while the eval container runs, so landing builds a squash candidate, runs
+/// the gate against it, and promotes via the `advance_default` CAS (§3.3).
+/// Pins the canonical gate-entry decision chain for the C2 extraction.
+#[tokio::test]
+async fn trace_gate_entry_and_promote() {
+    let Some(rig) = spawn_setup_with(SpawnOpts {
+        move_main_during_eval: true,
+        ..Default::default()
+    })
+    .await
+    else {
+        return;
+    };
+
+    rig.sink
+        .begin("create+release → eval (main moves) → gate → promote");
+    let job = rig.handle.create_job(req("impl-cmd", &[])).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
+    wait_trace_effect(&rig.sink, "PublishEvent job-done").await;
+
+    assert_trace(&rig.sink, "gate_entry_and_promote");
+}
+
+/// `gate_and_human.rs::merge_gate_failure_reworks_on_new_base_without_budget`:
+/// the gate fails (CI class), the job reworks on the new base — rebase, base
+/// pin, `EnterWork` — and lands on cycle 2 via the fast path (base caught up).
+#[tokio::test]
+async fn trace_gate_failure_full_rework() {
+    let Some(rig) = spawn_setup_with(SpawnOpts {
+        script_exits: vec![0, 1, 0],
+        move_main_during_eval: true,
+        work_hooks: vec![WorkHook::Commit, WorkHook::Recommit],
+        ..Default::default()
+    })
+    .await
+    else {
+        return;
+    };
+
+    rig.sink
+        .begin("gate fails → rework on new base → cycle-2 fast path");
+    let job = rig.handle.create_job(req("impl-cmd", &[])).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
+    wait_trace_effect(&rig.sink, "PublishEvent job-done").await;
+
+    assert_trace(&rig.sink, "gate_failure_full_rework");
+}
+
+/// `gate_and_human.rs::gate_compile_failure_takes_fast_path_and_relands` (job
+/// #154): a stage-0 (build) gate failure classifies as compile and takes the
+/// gate-fix fast path — scoped fix task, no cycle-2 eval, straight re-gate,
+/// land. Pins the classification + budget decision for C2.
+#[tokio::test]
+async fn trace_gate_fix_fast_path() {
+    let Some(rig) = spawn_setup_with(SpawnOpts {
+        script_exits: vec![0, 0, 1, 0, 0],
+        move_main_during_eval: true,
+        work_hooks: vec![WorkHook::Commit, WorkHook::Recommit],
+        logs: Some(b"error[E0433]: failed to resolve: use of undeclared crate `foo`"),
+        no_defaults: true,
+    })
+    .await
+    else {
+        return;
+    };
+
+    rig.sink
+        .begin("gate build fails → gate-fix → re-gate → promote");
+    let job = rig.handle.create_job(req("gatefix", &[])).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
+    wait_trace_effect(&rig.sink, "PublishEvent job-done").await;
+
+    assert_trace(&rig.sink, "gate_fix_fast_path");
+}
+
+/// `gate_and_human.rs::rebase_conflict_falls_through_to_wrapup_conflict_path`:
+/// a conflicting land during work → the pre-eval rebase aborts, eval runs on
+/// the old base, and the wrap-up squash conflicts — driving the conflict
+/// re-entry (`RebaseOntoWithConflict` + base pin + `EnterWork`), never a gate.
+#[tokio::test]
+async fn trace_conflict_reentry() {
+    let Some(rig) = spawn_setup_with(SpawnOpts {
+        work_hooks: vec![WorkHook::CommitAndConflictMain, WorkHook::Recommit],
+        ..Default::default()
+    })
+    .await
+    else {
+        return;
+    };
+
+    rig.sink
+        .begin("conflicting land → wrap-up conflict rework → cycle-2 land");
+    let job = rig.handle.create_job(req("impl-cmd", &[])).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
+    wait_trace_effect(&rig.sink, "PublishEvent job-done").await;
+
+    assert_trace(&rig.sink, "conflict_reentry");
 }
 
 /// Block until the captured trace's final step records `effect`. Used to

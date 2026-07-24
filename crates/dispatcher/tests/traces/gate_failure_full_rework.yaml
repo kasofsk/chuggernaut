@@ -1,0 +1,54 @@
+steps:
+- event: gate fails → rework on new base → cycle-2 fast path
+  transitions:
+  - job: 1
+    from: Frozen
+    to: Ready
+  - job: 1
+    from: Ready
+    to: Work
+  - job: 1
+    from: Work
+    to: Evaluation
+  - job: 1
+    from: Evaluation
+    to: WrapUp
+  - job: 1
+    from: WrapUp
+    to: Work
+  - job: 1
+    from: Work
+    to: Evaluation
+  - job: 1
+    from: Evaluation
+    to: WrapUp
+  - job: 1
+    from: WrapUp
+    to: Done
+  effects:
+  - PublishEvent job-created
+  - PublishEvent job-released
+  - PublishEvent job-started
+  - PublishEvent task-created
+  - PublishEvent task-completed
+  - PublishEvent job-evaluation-started
+  - PublishEvent task-created
+  - PublishEvent task-completed
+  - PublishEvent job-wrapup-started
+  - CreateSquashCandidate
+  - PublishEvent job-merge-gate-started
+  - LaunchGateStage
+  - PublishEvent task-created
+  - PublishEvent task-completed
+  - DeleteBranch merge-gate/1
+  - RebaseOntoWithConflict
+  - PublishEvent job-rework-started
+  - EnterWork
+  - PublishEvent task-created
+  - PublishEvent task-completed
+  - PublishEvent job-evaluation-started
+  - PublishEvent task-created
+  - PublishEvent task-completed
+  - PublishEvent job-wrapup-started
+  - SquashMerge
+  - PublishEvent job-done

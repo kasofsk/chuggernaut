@@ -97,6 +97,15 @@ Two refinements the template settled:
 - Reads (`next_task_id`, the clock, the active cycle) are **not** effects:
   the shim gathers them into the decider's read-only view.
 
+**C2 (merge_gate) extended the template with the continuation contract:** an
+effect whose result the decision needs (`SquashMerge` → outcome,
+`AdvanceDefault` CAS) is emitted and the decider TERMINATES; the interpreter
+returns the result as an `Outcome`, and the shim re-enters `decide` with it as
+the next event against a freshly gathered view — a decision never runs on a
+view the world moved under. Phase-owned scheduling state became a
+decider-owned value (`MergeGateState`, swapped wholesale by the shim), which
+promoted the depth-1 invariant into the type system (`gating: Option<u64>`).
+
 ### 3. Invariants — what must always hold
 
 Harvest every "must"/"always"/"never" comment and defensive pattern into one

@@ -33,6 +33,7 @@
 use types::{Job, JobState};
 
 pub mod escalation;
+pub mod merge_gate;
 
 /// One §2.1 state change a decider decided: the job record to persist (with
 /// any decision fields already stamped on it) and the target state. The shim

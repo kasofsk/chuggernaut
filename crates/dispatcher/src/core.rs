@@ -844,11 +844,11 @@ pub struct Core {
     pub(crate) secrets: Option<store::secrets::AgeSecretStore>,
     /// Transcript/log blob store; None disables capture (see `harvest`).
     pub(crate) artifacts: Option<Arc<store::ArtifactStore>>,
-    /// Per-project merge queue (spec §3.3 Merge Gate: depth-1 serialization).
-    /// All post-eval finalization flows through it, keyed by project slug.
-    pub(crate) merge_queue: HashMap<String, std::collections::VecDeque<u64>>,
-    /// Project slug → seq whose merge gate is currently running.
-    pub(crate) gating: HashMap<String, u64>,
+    /// Per-project landing pipeline (spec §3.3 Merge Gate: the FIFO queue +
+    /// the depth-1 gate slot), keyed by project slug. The VALUE is owned by
+    /// the merge-gate decider (refactor-plan C2) — the shim swaps it
+    /// wholesale per decision; entries are dropped when idle.
+    pub(crate) merge_gates: HashMap<String, chuggernaut_domain::decide::merge_gate::MergeGateState>,
     /// Platform project records (linked-origin state).
     pub(crate) projects: ProjectStore,
     /// PR surface for origin releases; a fake in integration tests.
@@ -988,8 +988,7 @@ impl Core {
             queue: ReadyQueue::default(),
             launch_queue: std::collections::VecDeque::new(),
             active: HashMap::new(),
-            merge_queue: HashMap::new(),
-            gating: HashMap::new(),
+            merge_gates: HashMap::new(),
             projects,
             pr_api: Arc::new(crate::github::GithubClient::new()),
             release_holds: HashSet::new(),
@@ -2133,11 +2132,11 @@ impl Core {
                 project: project.into(),
                 seq: target,
             });
-            if let Some(q) = self.merge_queue.get_mut(&slug) {
-                q.retain(|&s| s != target);
-            }
-            if self.gating.get(&slug) == Some(&target) {
-                self.gating.remove(&slug);
+            if let Some(state) = self.merge_gates.get_mut(&slug) {
+                state.remove(target);
+                if state.is_empty() {
+                    self.merge_gates.remove(&slug);
+                }
             }
         }
         // Revoking a batch releases its members rather than dropping them
@@ -2676,8 +2675,7 @@ impl Core {
             graphs: &self.graphs,
             queue: &self.queue,
             active: &self.active,
-            merge_queue: &self.merge_queue,
-            gating: &self.gating,
+            merge_gates: &self.merge_gates,
         }
     }
 

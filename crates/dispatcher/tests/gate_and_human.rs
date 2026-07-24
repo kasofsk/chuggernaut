@@ -1214,3 +1214,57 @@ async fn event_types(store: &NatsStore) -> Vec<String> {
         })
         .collect()
 }
+
+/// Two jobs landing concurrently serialize through the per-project merge
+/// queue (§3.3 depth-1), and NEITHER update is lost — the property the queue
+/// exists to protect. The interleave itself (who enqueues while who gates) is
+/// scheduler-timing and is pinned deterministically at tier 1 by the C2
+/// merge-gate decider's queue-behind-gate branch tests; this test pins the
+/// end-to-end outcome under real concurrency: both jobs Done, all three
+/// commits (two jobs + the concurrent land) present on final main.
+#[tokio::test]
+async fn two_concurrent_landings_serialize_and_neither_is_lost() {
+    let Some(rig) = rig().await else { return };
+    rig.backend
+        .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
+    // One work hook per job; whichever job draws which hook, both files land.
+    commit_branch(&rig, "src/a.rs");
+    commit_branch(&rig, "src/b.rs");
+    // Land an unrelated commit on main during the first eval container, so at
+    // least one landing finds HEAD moved and takes the gate.
+    move_main_during_eval(&rig);
+
+    let a = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    let b = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", a.id).await.unwrap();
+    rig.handle.release_job("acme", "api", b.id).await.unwrap();
+    wait_for_state(&rig.store, a.id, JobState::Done).await;
+    wait_for_state(&rig.store, b.id, JobState::Done).await;
+
+    // No lost update: both job changes AND the concurrent land are on main.
+    let m = &rig.repo.manager;
+    for path in ["src/a.rs", "src/b.rs", "docs/other.md"] {
+        assert!(
+            m.read_file_at("acme", "api", "main", path)
+                .await
+                .unwrap()
+                .is_some(),
+            "{path} must be on final main — a landing was lost"
+        );
+    }
+    // At least one landing found HEAD moved and went through the gate.
+    let events = event_types(&rig.store).await;
+    assert!(
+        events.contains(&"job-merge-gate-started".to_string()),
+        "expected at least one gated landing: {events:?}"
+    );
+    // Both candidate refs are cleaned up whatever paths were taken.
+    for seq in [a.id, b.id] {
+        assert!(
+            m.resolve_ref("acme", "api", &format!("merge-gate/{seq}"))
+                .await
+                .is_err(),
+            "merge-gate/{seq} must not survive landing"
+        );
+    }
+}

@@ -32,15 +32,34 @@ fn cert_access(access: CredentialAccess) -> auth::ssh::CertAccess {
     }
 }
 
+/// What performing an effect produced, for the effects whose results are
+/// decision inputs (contracts.md §2, the continuation contract): the shim
+/// maps an `Outcome` onto the decider's next event against a fresh view.
+/// Dispatcher-owned — it carries `vcs` port types the pure crate must not see.
+#[derive(Debug)]
+pub enum Outcome {
+    /// The effect produced nothing a decider branches on.
+    Done,
+    /// A `SquashMerge`/`CreateSquashCandidate` build outcome.
+    Merge(vcs::MergeOutcome),
+    /// An `AdvanceDefault` CAS refusal — HEAD moved under the candidate. A
+    /// decision input ("refinalize"), never bubbled as a failure (§3.3).
+    CasRefused,
+    /// A `RebaseOntoWithConflict` outcome (conflict files as data).
+    Rebase(vcs::ConflictRebaseOutcome),
+    /// The `LaunchGateStage` slots — the gate round the shim parks.
+    GateSlots(Vec<crate::eval::EvalSlot>),
+}
+
 impl Core {
     /// Execute one [`Effect`] through the port it maps to. See
     /// [`crate::effects`] for the variant → port-method table.
     ///
-    /// Skeleton, per refactor-plan B2: it performs the effect but does not yet
-    /// consume any *value* an effect produces (a `SquashMerge` outcome, a minted
-    /// credential) — the deciders that branch on those results are extracted in
-    /// Track C, which is where those return paths get wired.
-    pub async fn interpret(&mut self, effect: Effect) -> Result<()> {
+    /// Returns the effect's [`Outcome`]; most arms produce [`Outcome::Done`].
+    /// Result-carrying arms hand their port's answer back so the calling shim
+    /// can re-enter its decider with it as the next event — the effect stays
+    /// fire-and-forget from the decider's side.
+    pub async fn interpret(&mut self, effect: Effect) -> Result<Outcome> {
         match effect {
             // --- Job records & graph ---
             Effect::SetJobState { job, to } => {
@@ -48,7 +67,15 @@ impl Core {
                 self.set_state(&mut job, to).await?;
             }
             Effect::PutJob { job } => {
+                // Dual-write like `set_state`: KV is the truth, the in-memory
+                // graph is the working copy every scheduling read consults —
+                // a record write that skips it leaves stale decisions behind
+                // (the C2 conflict-rework base pin found this).
                 self.jobs.put(&job).await?;
+                self.graphs
+                    .entry(job.project.clone())
+                    .or_default()
+                    .insert((*job).clone());
             }
             Effect::AppendRdep {
                 owner,
@@ -151,6 +178,9 @@ impl Core {
                 failures,
                 compiler_output,
             } => {
+                if let Some(trace) = &self.trace {
+                    trace.effect("LaunchGateFix");
+                }
                 self.launch_gate_fix(&owner, &project, seq, new_base, failures, compiler_output)
                     .await?;
             }
@@ -175,10 +205,10 @@ impl Core {
                 job_type,
                 summary,
             } => {
-                // The `MergeOutcome` (Merged/Conflict/…) drives the finalize
-                // decider, which is not extracted yet (Track C); the skeleton
-                // performs the merge and drops the outcome.
-                let _ = self
+                if let Some(trace) = &self.trace {
+                    trace.effect("SquashMerge");
+                }
+                let outcome = self
                     .repos
                     .squash_merge(
                         &owner,
@@ -189,15 +219,118 @@ impl Core {
                         summary.as_deref(),
                     )
                     .await?;
+                return Ok(Outcome::Merge(outcome));
             }
             Effect::DeleteBranch {
                 owner,
                 project,
                 branch,
             } => {
-                self.repos.delete_branch(&owner, &project, &branch).await?;
+                if let Some(trace) = &self.trace {
+                    trace.effect(format!("DeleteBranch {branch}"));
+                }
+                // Branch deletion is best-effort cleanup everywhere it is
+                // decided (a missing scratch ref must not wedge a landing).
+                let _ = self.repos.delete_branch(&owner, &project, &branch).await;
             }
-
+            Effect::CreateSquashCandidate {
+                owner,
+                project,
+                seq,
+                base_ref,
+                job_type,
+                summary,
+            } => {
+                if let Some(trace) = &self.trace {
+                    trace.effect("CreateSquashCandidate");
+                }
+                let outcome = self
+                    .repos
+                    .create_squash_candidate(
+                        &owner,
+                        &project,
+                        seq,
+                        &base_ref,
+                        &job_type,
+                        summary.as_deref(),
+                    )
+                    .await?;
+                return Ok(Outcome::Merge(outcome));
+            }
+            Effect::AdvanceDefault {
+                owner,
+                project,
+                commit,
+                expected_old_head,
+            } => {
+                if let Some(trace) = &self.trace {
+                    trace.effect("AdvanceDefault");
+                }
+                if let Err(e) = self
+                    .repos
+                    .advance_default(&owner, &project, &commit, &expected_old_head)
+                    .await
+                {
+                    tracing::warn!(
+                        "gate promote for {owner}/{project}: HEAD moved under candidate ({e}); refinalizing"
+                    );
+                    return Ok(Outcome::CasRefused);
+                }
+            }
+            Effect::RebaseOntoWithConflict {
+                owner,
+                project,
+                seq,
+                new_base,
+            } => {
+                if let Some(trace) = &self.trace {
+                    trace.effect("RebaseOntoWithConflict");
+                }
+                let outcome = self
+                    .repos
+                    .rebase_onto_with_conflict(&owner, &project, seq, &new_base)
+                    .await?;
+                return Ok(Outcome::Rebase(outcome));
+            }
+            Effect::LaunchGateStage {
+                owner,
+                project,
+                seq,
+                gate_branch,
+                cycle,
+                evaluators,
+            } => {
+                if let Some(trace) = &self.trace {
+                    trace.effect("LaunchGateStage");
+                }
+                let slots = self
+                    .launch_gate_stage(&owner, &project, seq, &gate_branch, cycle, evaluators)
+                    .await?;
+                return Ok(Outcome::GateSlots(slots));
+            }
+            Effect::EnterWork {
+                owner,
+                project,
+                seq,
+                cycle,
+                eval_context,
+                merge_conflict,
+                rework_reason,
+            } => {
+                if let Some(trace) = &self.trace {
+                    trace.effect("EnterWork");
+                }
+                self.enter_work(
+                    &owner,
+                    &project,
+                    seq,
+                    cycle,
+                    eval_context,
+                    merge_conflict,
+                    rework_reason,
+                )
+                .await?;
+            }
             // --- Credentials (§7.4) ---
             Effect::IssueCredentials {
                 owner,
@@ -243,7 +376,7 @@ impl Core {
                     .await?;
             }
         }
-        Ok(())
+        Ok(Outcome::Done)
     }
 }
 
