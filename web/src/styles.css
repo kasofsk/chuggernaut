@@ -1671,8 +1671,11 @@ table.jobs tbody tr.row-draft td:first-child {
 }
 
 @media (max-width: 640px) {
+  /* Reclaim edge space on phones: drop the side padding so the central card
+     goes full-bleed (its own padding still insets the content). Keep a small
+     top/bottom inset off the viewport edge and bottom nav rail. */
   .page {
-    padding: 0.6rem;
+    padding: 0.6rem 0;
   }
   .card {
     padding: var(--sp-4);
