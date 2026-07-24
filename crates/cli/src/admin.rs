@@ -366,55 +366,139 @@ async fn run_worker_refresh(
     if wait_secs == 0 {
         return Ok(());
     }
+    worker_refresh_wait(&rpc, node, sha, wait_secs).await
+}
+
+/// Wait for a requested refresh to land, RELAYING the node's live progress to
+/// stdout as it goes (ticket #253). Every line printed here rides the deploy's
+/// ssh session straight into the deploy job's task output, so an operator
+/// watching the job sees which image leg is building and for how long — the
+/// silent multi-minute window is what this loop exists to remove.
+///
+/// Confirmation semantics are unchanged (#186/#187): only a `refresh OK:` line
+/// means the swap landed, and the CLI always returns `Ok` — the deploy decides.
+async fn worker_refresh_wait(
+    rpc: &store::worker::WorkerRpc,
+    node: &str,
+    sha: &str,
+    wait_secs: u64,
+) -> Result<()> {
     // Confirm against the SAME reported field the fleet snapshot shows (ticket
     // #187): a swapped-in daemon carries the target SHA in its version, and the
     // surviving daemon of a FAILED refresh reports a `Failed` outcome — so a
     // broken refresh is surfaced immediately with its stage/error instead of
     // waiting out the whole timeout.
-    use types::worker::{RefreshConfirmation, RefreshOutcome};
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+    use types::worker::{
+        REFRESH_HEARTBEAT_SECS, RefreshConfirmation, RefreshOutcome, RefreshProgress,
+        RefreshRelayState,
+    };
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(wait_secs);
+    let mut relay = RefreshRelayState::default();
+    // Kept across polls so a timeout can still report the last thing we saw even
+    // when the final ping itself failed.
+    let mut last: Option<RefreshProgress> = None;
     loop {
         if let Ok(ping) = rpc.ping().await {
+            // Only OUR refresh's progress is relayed or remembered: a node
+            // converging on some other SHA must not be reported as this
+            // deploy's, least of all in the timeout report below.
+            if let Some(progress) = ping.refresh_progress.filter(|p| p.to_sha == sha) {
+                let elapsed = started.elapsed().as_secs();
+                if let Some(line) = progress.relay(sha, &mut relay, elapsed, REFRESH_HEARTBEAT_SECS)
+                {
+                    println!("refresh progress: node={node} {line}");
+                }
+                last = Some(progress);
+            }
             match RefreshOutcome::confirm(sha, &ping.version, ping.refresh_outcome.as_ref()) {
                 RefreshConfirmation::Confirmed => {
-                    println!("refresh OK: node={node} version={}", ping.version);
+                    println!(
+                        "refresh OK: node={node} version={} ({}s)",
+                        ping.version,
+                        started.elapsed().as_secs()
+                    );
                     return Ok(());
                 }
                 RefreshConfirmation::Failed { stage, error_tail } => {
-                    println!(
-                        "WARNING: worker refresh node={node} FAILED at {stage} \
-                         (prod stays on the old images; check the fleet snapshot)"
-                    );
-                    // Stream the daemon-captured tail into the deploy task log so
-                    // the real cause (deploy #212: docker disk pressure) is
-                    // visible without ssh'ing the node.
-                    if !error_tail.trim().is_empty() {
-                        println!("--- worker-refresh.sh tail (node={node}, stage={stage}) ---");
-                        for line in error_tail.lines() {
-                            println!("  {line}");
-                        }
-                        println!("--- end worker-refresh.sh tail ---");
-                    }
-                    // A single-line, machine-readable detail line update.sh
-                    // harvests into the failed leg's bounded `detail` field.
-                    println!(
-                        "{REFRESH_DETAIL_MARKER} {}",
-                        one_line(&format!("{stage}: {error_tail}"))
-                    );
+                    worker_refresh_report_failed(node, &stage, &error_tail);
                     return Ok(());
                 }
                 RefreshConfirmation::Pending => {}
             }
         }
         if std::time::Instant::now() >= deadline {
-            println!(
-                "WARNING: worker refresh node={node} not confirmed within {wait_secs}s \
-                 (build may still be running; check the fleet snapshot for its version)"
-            );
+            worker_refresh_report_timeout(node, wait_secs, last.as_ref());
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
+}
+
+/// Report a refresh the node itself declared FAILED: the daemon-captured tail
+/// plus the machine-readable detail line `update.sh` harvests into the leg.
+fn worker_refresh_report_failed(node: &str, stage: &str, error_tail: &str) {
+    println!(
+        "WARNING: worker refresh node={node} FAILED at {stage} \
+         (prod stays on the old images; check the fleet snapshot)"
+    );
+    // Stream the daemon-captured tail into the deploy task log so the real cause
+    // (deploy #212: docker disk pressure) is visible without ssh'ing the node.
+    if !error_tail.trim().is_empty() {
+        println!("--- worker-refresh.sh tail (node={node}, stage={stage}) ---");
+        for line in error_tail.lines() {
+            println!("  {line}");
+        }
+        println!("--- end worker-refresh.sh tail ---");
+    }
+    // A single-line, machine-readable detail line update.sh harvests into the
+    // failed leg's bounded `detail` field.
+    println!(
+        "{REFRESH_DETAIL_MARKER} {}",
+        one_line(&format!("{stage}: {error_tail}"))
+    );
+}
+
+/// Report a refresh that never confirmed within the wait window. The node
+/// declared no verdict (it is probably still building), so the LAST PROGRESS we
+/// relayed is the whole diagnosis — print it here too, and fold it into the
+/// `worker-refresh-detail:` line, so the failing deploy leg carries "stuck at
+/// build-image 3/3 agent-rust" instead of a bare "not confirmed" that sends the
+/// operator ssh'ing the node (ticket #253).
+fn worker_refresh_report_timeout(
+    node: &str,
+    wait_secs: u64,
+    last: Option<&types::worker::RefreshProgress>,
+) {
+    println!(
+        "WARNING: worker refresh node={node} not confirmed within {wait_secs}s \
+         (build may still be running; check the fleet snapshot for its version)"
+    );
+    let Some(progress) = last else {
+        // No progress at all: the daemon never reported a phase — itself signal
+        // (an old daemon, or one that never started the script).
+        println!(
+            "{REFRESH_DETAIL_MARKER} not confirmed within {wait_secs}s (no progress reported)"
+        );
+        return;
+    };
+    println!(
+        "--- last progress (node={node}, phase={}) ---",
+        progress.phase
+    );
+    for line in &progress.recent {
+        println!("  {line}");
+    }
+    println!("--- end last progress ---");
+    println!(
+        "{REFRESH_DETAIL_MARKER} {}",
+        one_line(&format!(
+            "not confirmed within {wait_secs}s; stuck at phase={} ({}s in phase); last: {}",
+            progress.phase,
+            progress.phase_secs,
+            progress.recent.last().map(String::as_str).unwrap_or("-")
+        ))
+    );
 }
 
 /// Mint a worker daemon's `.creds` from the platform account seed. Non-expiring

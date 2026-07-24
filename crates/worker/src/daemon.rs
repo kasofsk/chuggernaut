@@ -25,8 +25,9 @@ use store::worker::{encode_reply, op_from_subject};
 use store::{NatsStore, StoreError};
 use types::worker::{
     ContainerRef, CopyFileOk, CopyFileRequest, FileSource, InspectOk, LaunchOk, LogsOk, LogsTailOk,
-    LogsTailRequest, PingOk, RefreshOk, RefreshOutcome, RefreshRequest, RefreshResult, WireStatus,
-    WorkerError, WorkerLaunchRequest, WorkerReply, b64_decode, b64_encode,
+    LogsTailRequest, PingOk, RefreshOk, RefreshOutcome, RefreshProgress, RefreshRequest,
+    RefreshResult, WireStatus, WorkerError, WorkerLaunchRequest, WorkerReply, b64_decode,
+    b64_encode,
 };
 
 /// Logs are tailed to fit the reply under NATS's 1MB max_payload after
@@ -48,6 +49,19 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// huge build log cannot bloat the ping reply (NATS 1MB) or the deploy leg.
 const REFRESH_TAIL_LINES: usize = 50;
 const REFRESH_TAIL_BYTES: usize = 4096;
+
+/// The line prefix `worker-refresh.sh` stamps on a phase transition (ticket
+/// #253). The script names its own phases — the daemon only reads them — so the
+/// deploy log's per-phase story stays in one place, next to the work it
+/// describes.
+const REFRESH_PHASE_MARKER: &str = "worker-refresh: phase ";
+
+/// How many recent script lines the daemon carries in `ping.refresh_progress`
+/// (ticket #253). Far smaller than the failure tail: this rides EVERY ping of an
+/// in-flight refresh (one every few seconds while the deploy waits), so it is
+/// sized to answer "what was it last doing" and nothing more.
+const REFRESH_PROGRESS_LINES: usize = 5;
+const REFRESH_PROGRESS_LINE_BYTES: usize = 300;
 
 /// Guards the daemon self-refresh swap window (spec §3.1 drain guarantee).
 /// Refreshing must never interrupt in-flight job containers, and the daemon
@@ -154,6 +168,81 @@ struct WorkerState {
     /// `tracing::error`. A successful refresh swaps this daemon away, so what a
     /// surviving daemon reports is the failure story.
     refresh_outcome: std::sync::Mutex<Option<RefreshOutcome>>,
+    /// Live progress of the refresh currently running (ticket #253), reported in
+    /// `ping` so the deploy's wait loop relays per-phase progress instead of
+    /// sitting silent for the whole build window. `None` between refreshes.
+    refresh_progress: std::sync::Mutex<Option<RefreshProgressState>>,
+}
+
+/// The daemon-side half of [`RefreshProgress`]: same story, but holding the
+/// phase start as a local `Instant` so the reported "seconds in phase" is
+/// measured against this node's own monotonic clock and carries no cross-host
+/// skew. Converted to the wire type at ping time.
+struct RefreshProgressState {
+    to_sha: String,
+    phase: String,
+    phase_since: Instant,
+    /// Last [`REFRESH_PROGRESS_LINES`] script lines, oldest first.
+    recent: std::collections::VecDeque<String>,
+}
+
+impl RefreshProgressState {
+    fn new(to_sha: &str, phase: &str) -> Self {
+        Self {
+            to_sha: to_sha.to_string(),
+            phase: phase.to_string(),
+            phase_since: Instant::now(),
+            recent: std::collections::VecDeque::with_capacity(REFRESH_PROGRESS_LINES),
+        }
+    }
+
+    fn wire(&self) -> RefreshProgress {
+        RefreshProgress {
+            to_sha: self.to_sha.clone(),
+            phase: self.phase.clone(),
+            phase_secs: self.phase_since.elapsed().as_secs(),
+            recent: self.recent.iter().cloned().collect(),
+        }
+    }
+}
+
+/// The phase name in a `worker-refresh: phase <name>` marker line, if this line
+/// is one. Pure over its input so the marker contract between the script and the
+/// daemon is unit-tested without a subprocess.
+fn refresh_phase_marker(line: &str) -> Option<&str> {
+    let phase = line.trim().strip_prefix(REFRESH_PHASE_MARKER)?.trim();
+    (!phase.is_empty()).then_some(phase)
+}
+
+/// Fold one line of script output into the live progress: it always joins the
+/// bounded recent-lines window, and a phase marker additionally advances the
+/// phase (restarting the in-phase clock). No-op when no refresh is in flight.
+fn refresh_progress_note(slot: &std::sync::Mutex<Option<RefreshProgressState>>, line: &str) {
+    let mut guard = slot.lock().unwrap();
+    let Some(progress) = guard.as_mut() else {
+        return;
+    };
+    if let Some(phase) = refresh_phase_marker(line) {
+        progress.phase = phase.to_string();
+        progress.phase_since = Instant::now();
+    }
+    if progress.recent.len() == REFRESH_PROGRESS_LINES {
+        progress.recent.pop_front();
+    }
+    progress
+        .recent
+        .push_back(line.chars().take(REFRESH_PROGRESS_LINE_BYTES).collect());
+}
+
+/// Advance the phase from the DAEMON's own side of the refresh (the drain and
+/// swap stages it runs between script invocations), so the deploy log never
+/// shows a stale build phase while the daemon is quiescing.
+fn refresh_progress_phase(slot: &std::sync::Mutex<Option<RefreshProgressState>>, phase: &str) {
+    let mut guard = slot.lock().unwrap();
+    if let Some(progress) = guard.as_mut() {
+        progress.phase = phase.to_string();
+        progress.phase_since = Instant::now();
+    }
 }
 
 /// Why a refresh cannot even be *attempted*: the node has no git credential to
@@ -238,6 +327,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         refresh_git_key: config.refresh_git_key.clone(),
         refresh: RefreshGate::default(),
         refresh_outcome: std::sync::Mutex::new(None),
+        refresh_progress: std::sync::Mutex::new(None),
     });
     if state.refresh_script.is_none() {
         tracing::warn!(
@@ -606,6 +696,12 @@ async fn ping(state: &WorkerState) -> WorkerReply<PingOk> {
                 version: state.version.clone(),
                 artifacts: state.artifact_hashes.clone(),
                 refresh_outcome: state.refresh_outcome.lock().unwrap().clone(),
+                refresh_progress: state
+                    .refresh_progress
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(RefreshProgressState::wire),
             })
         }
         .await,
@@ -664,6 +760,12 @@ async fn refresh(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<Refres
                 from_sha: from_version.clone(),
                 to_sha: req.sha.clone(),
             });
+            // Open the live progress record for this refresh (ticket #253) at
+            // accept time, so the deploy's very first poll already reads a phase
+            // rather than an empty wait. Replaces any previous refresh's record:
+            // progress is live state, not history.
+            *state.refresh_progress.lock().unwrap() =
+                Some(RefreshProgressState::new(&req.sha, "accepted"));
             let st = state.clone();
             tokio::spawn(async move { run_refresh(st, script, req).await });
             Ok(RefreshOk {
@@ -683,7 +785,8 @@ async fn refresh(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<Refres
 /// outage.
 async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshRequest) {
     tracing::info!(node = %state.node, sha = %req.sha, tag = %req.tag, "worker refresh: building images");
-    if let Err(e) = run_script(&script, &["build", &req.sha, &req.tag]).await {
+    let progress = &state.refresh_progress;
+    if let Err(e) = run_script(&script, &["build", &req.sha, &req.tag], Some(progress)).await {
         tracing::error!(node = %state.node, "worker refresh: build failed, aborting: {e}");
         record_refresh_failure(&state, "build", &e);
         state.refresh.abort();
@@ -692,6 +795,7 @@ async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshReque
 
     // Drain guarantee: refuse new launches, then wait for accepted-but-not-yet-
     // created launches to finish before swapping (spec §3.1).
+    refresh_progress_phase(progress, "drain");
     state.refresh.quiesce();
     if !drain(&state.refresh, DRAIN_TIMEOUT).await {
         let e = format!("in-flight launches did not drain in {DRAIN_TIMEOUT:?}");
@@ -702,7 +806,8 @@ async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshReque
     }
 
     tracing::info!(node = %state.node, "worker refresh: swapping daemon (job containers survive)");
-    if let Err(e) = run_script(&script, &["swap", &req.tag]).await {
+    refresh_progress_phase(progress, "daemon-swap");
+    if let Err(e) = run_script(&script, &["swap", &req.tag], Some(progress)).await {
         // The swap spawns a detached replacement, so on success this process is
         // simply removed and never returns here. Reaching this arm means the
         // swap itself failed to launch — reopen so the node keeps serving.
@@ -754,7 +859,15 @@ async fn drain(gate: &RefreshGate, timeout: Duration) -> bool {
 /// buffered lump. The tail of that output is kept and, on non-zero exit, folded
 /// into the error string so the refresh failure report carries the real cause
 /// (deploy #212) rather than only the exit status.
-async fn run_script(script: &Path, args: &[&str]) -> Result<(), String> {
+///
+/// Every line is ALSO folded into `progress` (ticket #253) as it arrives, so a
+/// concurrent `ping` reports what the script is doing right now and the deploy's
+/// wait loop can relay it. `None` disables that (nothing to report into).
+async fn run_script(
+    script: &Path,
+    args: &[&str],
+    progress: Option<&std::sync::Mutex<Option<RefreshProgressState>>>,
+) -> Result<(), String> {
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -791,6 +904,9 @@ async fn run_script(script: &Path, args: &[&str]) -> Result<(), String> {
         std::collections::VecDeque::with_capacity(REFRESH_TAIL_LINES);
     while let Some(line) = rx.recv().await {
         tracing::info!(phase = %phase, "worker-refresh: {line}");
+        if let Some(slot) = progress {
+            refresh_progress_note(slot, &line);
+        }
         if tail.len() == REFRESH_TAIL_LINES {
             tail.pop_front();
         }
@@ -990,7 +1106,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let err = run_script(&script, &["build", "abc", "prod"])
+        let err = run_script(&script, &["build", "abc", "prod"], None)
             .await
             .expect_err("non-zero exit is an error");
         assert!(err.contains("exited"), "keeps the exit summary: {err:?}");
@@ -1007,8 +1123,79 @@ mod tests {
         let ok = dir.join("ok.sh");
         std::fs::write(&ok, "#!/bin/sh\necho fine\nexit 0\n").unwrap();
         std::fs::set_permissions(&ok, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(run_script(&ok, &["swap", "prod"]).await.is_ok());
+        assert!(run_script(&ok, &["swap", "prod"], None).await.is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The script→daemon phase-marker contract (ticket #253): only a
+    /// `worker-refresh: phase <name>` line names a phase, and it is the phase
+    /// name alone — everything else is ordinary output.
+    #[test]
+    fn refresh_phase_marker_reads_only_marker_lines() {
+        assert_eq!(
+            refresh_phase_marker("worker-refresh: phase build-image 3/3 agent-rust"),
+            Some("build-image 3/3 agent-rust")
+        );
+        // The daemon reads the script's stdout through a line reader, so a
+        // trailing \r (or leading indent) must not hide a phase.
+        assert_eq!(
+            refresh_phase_marker("  worker-refresh: phase swap-daemon\r"),
+            Some("swap-daemon")
+        );
+        // Near-misses are not phases: an ordinary log line, and a marker with no
+        // name at all.
+        assert_eq!(
+            refresh_phase_marker("worker-refresh: pruned after a successful refresh"),
+            None
+        );
+        assert_eq!(refresh_phase_marker("worker-refresh: phase   "), None);
+        assert_eq!(
+            refresh_phase_marker("docker: no space left on device"),
+            None
+        );
+    }
+
+    /// A refresh's live progress tracks the script line by line: phase markers
+    /// advance the phase, every line joins a BOUNDED recent window, and with no
+    /// refresh in flight the whole thing is a no-op (ticket #253).
+    #[test]
+    fn refresh_progress_tracks_phases_and_bounds_recent_lines() {
+        let slot = std::sync::Mutex::new(None);
+
+        // No refresh in flight ⇒ nothing recorded, nothing reported.
+        refresh_progress_note(&slot, "worker-refresh: phase build-image 1/3 worker");
+        assert!(slot.lock().unwrap().is_none());
+
+        *slot.lock().unwrap() = Some(RefreshProgressState::new("target", "accepted"));
+        refresh_progress_note(&slot, "worker-refresh: disk pre-flight: 41.2GB free on /");
+        refresh_progress_note(&slot, "worker-refresh: phase build-image 1/3 worker");
+        let wire = slot.lock().unwrap().as_ref().unwrap().wire();
+        assert_eq!(wire.to_sha, "target");
+        assert_eq!(wire.phase, "build-image 1/3 worker");
+        assert_eq!(wire.recent.len(), 2, "both lines kept: {:?}", wire.recent);
+
+        // The recent window is bounded — a long build cannot grow the ping.
+        for i in 0..50 {
+            refresh_progress_note(&slot, &format!("build line {i}"));
+        }
+        let wire = slot.lock().unwrap().as_ref().unwrap().wire();
+        assert_eq!(wire.recent.len(), REFRESH_PROGRESS_LINES);
+        assert_eq!(
+            wire.recent.last().map(String::as_str),
+            Some("build line 49")
+        );
+        // A phase set by the daemon's own stages (drain/swap) shows too.
+        refresh_progress_phase(&slot, "drain");
+        assert_eq!(slot.lock().unwrap().as_ref().unwrap().wire().phase, "drain");
+
+        // Individual lines are capped, so one pathological build line cannot
+        // blow the ping reply either.
+        refresh_progress_note(&slot, &"x".repeat(10_000));
+        let wire = slot.lock().unwrap().as_ref().unwrap().wire();
+        assert_eq!(
+            wire.recent.last().map(String::len),
+            Some(REFRESH_PROGRESS_LINE_BYTES)
+        );
     }
 }

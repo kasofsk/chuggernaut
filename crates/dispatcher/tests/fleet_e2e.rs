@@ -195,6 +195,7 @@ async fn stale_list_running_worker(store: &NatsStore, node: &str) -> tokio::task
                         version: "0.0.0+stale".into(),
                         artifacts: HashMap::new(),
                         refresh_outcome: None,
+                        refresh_progress: None,
                     },
                 })
                 .unwrap()

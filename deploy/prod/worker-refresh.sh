@@ -22,6 +22,22 @@ set -eu
 
 PHASE="${1:?usage: worker-refresh.sh build <sha> <tag> | swap <tag>}"
 
+# ── progress markers (ticket #253) ───────────────────────────────────────────
+# A refresh rebuilds three images and the agent-rust leg alone can run 10+
+# minutes; before these markers the whole window was silent from the deploy
+# job's side and the only diagnosis was ssh + `docker logs chug-worker`. Each
+# marker names WHERE the refresh is; the daemon reads them off this script's
+# stdout (`REFRESH_PHASE_MARKER` in crates/worker/src/daemon.rs), reports the
+# current one in `ping`, and the deploy's wait loop relays it — so the deploy
+# job's task output carries per-phase progress with elapsed time.
+#
+# The marker prefix is a CONTRACT with the daemon: keep the two in step, and
+# emit a marker before every step that can take minutes. Bare `echo` per line
+# keeps the stream line-at-a-time — never batch progress behind a build.
+refresh_phase() {
+  echo "worker-refresh: phase $1"
+}
+
 # ── docker disk hygiene (deploy #248) ────────────────────────────────────────
 # A refresh needs headroom for a WHOLE new image generation ON TOP of the one
 # the node is still running, plus the BuildKit cache it grows while building.
@@ -178,6 +194,7 @@ build)
   # has moved off the requested SHA we refuse rather than build the wrong tree:
   # the daemon aborts, the old images stay, and the deploy surfaces a WARNING
   # with the drift (spec §3.1) instead of silently shipping the wrong SHA.
+  refresh_phase "fetch-context"
   git -C "$TMP" init -q
   git -C "$TMP" fetch -q --depth 1 "$GIT_URL" HEAD
   GOT="$(git -C "$TMP" rev-parse FETCH_HEAD)"
@@ -212,6 +229,7 @@ build)
   git -C "$TMP" archive --format=tar FETCH_HEAD > "$TMP/worker.tar"
   [ -s "$TMP/worker.tar" ] || { echo "worker-refresh: empty worker context — aborting (live images untouched)" >&2; exit 1; }
   BUILD_STARTED=1
+  refresh_phase "build-image 1/3 worker"
   docker build -q -t "chuggernaut/worker:$NEW" \
       -f deploy/prod/Dockerfile.worker --build-arg "CHUG_GIT_SHA=$SHA" \
       --label "chug.git.sha=$SHA" - < "$TMP/worker.tar"
@@ -219,9 +237,13 @@ build)
   # Agent images the job types run in.
   git -C "$TMP" archive --format=tar FETCH_HEAD:deploy/dev > "$TMP/agent.tar"
   [ -s "$TMP/agent.tar" ] || { echo "worker-refresh: empty agent context — aborting (live images untouched)" >&2; exit 1; }
+  refresh_phase "build-image 2/3 agent"
   docker build -q -t "chuggernaut/agent:$NEW" -f Dockerfile.agent - < "$TMP/agent.tar"
   git -C "$TMP" archive --format=tar FETCH_HEAD > "$TMP/agent-rust.tar"
   [ -s "$TMP/agent-rust.tar" ] || { echo "worker-refresh: empty agent-rust context — aborting (live images untouched)" >&2; exit 1; }
+  # The long pole: this image bakes the #123 warm-target seed, so a cold cache
+  # here is the 10+ minute leg the deploy log used to show nothing during.
+  refresh_phase "build-image 3/3 agent-rust"
   docker build -q -t "chuggernaut/agent-rust:$NEW" \
       -f deploy/prod/Dockerfile.agent-rust - < "$TMP/agent-rust.tar"
 
@@ -230,6 +252,7 @@ build)
   # is missing or wrong (stale layer, silent buildx failure) must never become
   # the live image — refuse the swap; the trap drops the temp tags and the live
   # images stay exactly as they were.
+  refresh_phase "verify-label"
   GOT_LABEL="$(docker inspect --format '{{index .Config.Labels "chug.git.sha"}}' "chuggernaut/worker:$NEW" 2>/dev/null | tr -d '[:space:]' || true)"
   if [ "$GOT_LABEL" != "$SHA" ]; then
     echo "worker-refresh: built worker image label '$GOT_LABEL' != requested $SHA — refusing retag-swap (live images untouched)" >&2
@@ -239,6 +262,7 @@ build)
   # All three built to completion — retag-swap onto the live tag. `docker tag`
   # is local and instant, so the live images flip to the new build only now,
   # and only after we know every image is buildable.
+  refresh_phase "retag-swap"
   docker tag "chuggernaut/worker:$NEW"     "chuggernaut/worker:$TAG"
   docker tag "chuggernaut/agent:$NEW"      "chuggernaut/agent:$TAG"
   docker tag "chuggernaut/agent-rust:$NEW" "chuggernaut/agent-rust:$TAG"
@@ -247,6 +271,7 @@ build)
   # ENOSPC incident): the retag-swap just stranded the previous generation as
   # dangling — prune those (NEVER -a: live tags must survive, #183) and cap
   # the BuildKit cache at 15G, keeping the hot #115 cache-mounts warm.
+  refresh_phase "prune"
   refresh_disk_prune "a successful refresh"
 
   echo "worker-refresh: built chuggernaut/{worker,agent,agent-rust}:$TAG ($SHA)"
@@ -319,6 +344,7 @@ swap)
     $CACHE_ARGS $DISK_ARGS chuggernaut/worker:$TAG"
 
   # sleep briefly so this RPC's reply flushes before the old daemon is removed.
+  refresh_phase "swap-container"
   docker run -d --rm \
     -v /var/run/docker.sock:/var/run/docker.sock \
     "$SWAP_IMAGE" \

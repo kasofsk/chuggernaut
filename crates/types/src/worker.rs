@@ -262,6 +262,90 @@ pub struct RefreshOutcome {
     pub to_sha: String,
 }
 
+/// Live progress of an in-flight self-refresh (ticket #253). The daemon fills
+/// this from `worker-refresh.sh`'s own phase markers as the script runs and
+/// reports it in `ping`, so the deploy's wait loop can RELAY per-phase progress
+/// into the deploy job's task output instead of sitting silent for the whole
+/// build window. It is live state, not a verdict — [`RefreshOutcome`] stays the
+/// durable record of how a refresh ended.
+///
+/// Everything here is bounded: `phase` is one short marker line and `recent`
+/// keeps only the last few output lines, so a 15-minute build cannot grow the
+/// ping reply (NATS 1MB) as it runs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RefreshProgress {
+    /// Target SHA this progress belongs to. The wait loop checks it before
+    /// relaying: an unrelated refresh still converging on the node must never be
+    /// reported as progress on *our* deploy's request.
+    pub to_sha: String,
+    /// Current phase marker, e.g. `build-image 3/3 agent-rust`.
+    pub phase: String,
+    /// Seconds the node has been in this phase. Measured on the NODE (against
+    /// its own monotonic clock) so it carries no cross-host clock skew.
+    pub phase_secs: u64,
+    /// The most recent script output lines, oldest first — what a leg that never
+    /// confirms leaves behind for the operator (ticket #253). Bounded by the
+    /// daemon; `#[serde(default)]` keeps a pre-field daemon's ping decodable.
+    #[serde(default)]
+    pub recent: Vec<String>,
+}
+
+/// How often the wait loop repeats an unchanged phase (ticket #253). A long
+/// build must never go silent: without a heartbeat, "still compiling" and "hung"
+/// look identical from the deploy log.
+pub const REFRESH_HEARTBEAT_SECS: u64 = 30;
+
+/// What the wait loop has already relayed, so the next poll can tell a phase
+/// CHANGE from a heartbeat from silence. Owned by the caller and threaded
+/// through [`RefreshProgress::relay`]; `Default` is "nothing relayed yet".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RefreshRelayState {
+    /// The phase the last relayed line named; `None` before the first line.
+    pub phase: Option<String>,
+    /// Refresh-elapsed seconds at which that line was relayed.
+    pub at_secs: u64,
+}
+
+impl RefreshProgress {
+    /// Decide the ONE line (if any) the wait loop should print for this poll,
+    /// and record it in `state`. A new phase always relays; an unchanged phase
+    /// relays again once `heartbeat_secs` have passed since the last line, so a
+    /// slow leg keeps ticking with its elapsed time. Progress belonging to a
+    /// different target SHA is ignored.
+    ///
+    /// `elapsed_secs` is the CALLER's elapsed time since it requested the
+    /// refresh (its own monotonic clock) — the deploy log's "how long has this
+    /// leg been running" — while `phase_secs` comes from the node.
+    ///
+    /// Pure over its inputs so the relay cadence is unit-tested without NATS, a
+    /// daemon, or a fifteen-minute wait.
+    pub fn relay(
+        &self,
+        target_sha: &str,
+        state: &mut RefreshRelayState,
+        elapsed_secs: u64,
+        heartbeat_secs: u64,
+    ) -> Option<String> {
+        if self.to_sha != target_sha {
+            return None;
+        }
+        let changed = state.phase.as_deref() != Some(self.phase.as_str());
+        if !changed && elapsed_secs.saturating_sub(state.at_secs) < heartbeat_secs {
+            return None;
+        }
+        state.phase = Some(self.phase.clone());
+        state.at_secs = elapsed_secs;
+        Some(if changed {
+            format!("phase={}, {elapsed_secs}s elapsed", self.phase)
+        } else {
+            format!(
+                "still phase={} ({}s in phase), {elapsed_secs}s elapsed",
+                self.phase, self.phase_secs
+            )
+        })
+    }
+}
+
 /// What `admin worker-refresh --wait-secs` should conclude from a node's latest
 /// `ping` while waiting for a refresh to land (ticket #187). Pure over its
 /// inputs so the wait loop's decision is unit-tested without NATS or a daemon.
@@ -323,6 +407,11 @@ pub struct PingOk {
     /// ping decodable (old daemons omit it → `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_outcome: Option<RefreshOutcome>,
+    /// Live progress of the refresh currently running on the node (ticket
+    /// #253), for the deploy's wait loop to relay. `None` when no refresh is in
+    /// flight, and on a pre-field daemon (`#[serde(default)]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_progress: Option<RefreshProgress>,
 }
 
 #[cfg(test)]
@@ -417,14 +506,79 @@ mod tests {
                 from_sha: "old000".into(),
                 to_sha: "new111".into(),
             }),
+            refresh_progress: Some(RefreshProgress {
+                to_sha: "new111".into(),
+                phase: "build-image 3/3 agent-rust".into(),
+                phase_secs: 240,
+                recent: vec!["worker-refresh: phase build-image 3/3 agent-rust".into()],
+            }),
         };
         let json = serde_json::to_string(&ping).unwrap();
         assert_eq!(serde_json::from_str::<PingOk>(&json).unwrap(), ping);
 
-        // Old daemon: no refresh_outcome key at all.
+        // Old daemon: no refresh_outcome / refresh_progress keys at all.
         let old = r#"{"running":0,"version":"0.1.0","artifacts":{}}"#;
         let back: PingOk = serde_json::from_str(old).unwrap();
         assert_eq!(back.refresh_outcome, None);
+        assert_eq!(back.refresh_progress, None);
+    }
+
+    /// The relay cadence (ticket #253): a phase CHANGE always prints, an
+    /// unchanged phase prints again only once the heartbeat is due, and progress
+    /// for a different target SHA is never relayed. This is what turns the
+    /// silent 15-minute refresh window into a ticking deploy log.
+    #[test]
+    fn refresh_progress_relays_phase_changes_and_heartbeats() {
+        let mut state = RefreshRelayState::default();
+        let p = RefreshProgress {
+            to_sha: "target".into(),
+            phase: "build-image 1/3 worker".into(),
+            phase_secs: 5,
+            recent: vec![],
+        };
+
+        // First sighting of a phase always relays, with the caller's elapsed.
+        assert_eq!(
+            p.relay("target", &mut state, 12, REFRESH_HEARTBEAT_SECS)
+                .as_deref(),
+            Some("phase=build-image 1/3 worker, 12s elapsed")
+        );
+        // Same phase, heartbeat not yet due ⇒ silent (no log spam every poll).
+        assert_eq!(
+            p.relay("target", &mut state, 20, REFRESH_HEARTBEAT_SECS),
+            None
+        );
+        assert_eq!(
+            p.relay("target", &mut state, 41, REFRESH_HEARTBEAT_SECS),
+            None
+        );
+        // Heartbeat due ⇒ a "still" line carrying both clocks. A wait with zero
+        // progress lines is then itself signal.
+        assert_eq!(
+            p.relay("target", &mut state, 42, REFRESH_HEARTBEAT_SECS)
+                .as_deref(),
+            Some("still phase=build-image 1/3 worker (5s in phase), 42s elapsed")
+        );
+
+        // A new phase relays immediately, without waiting out the heartbeat.
+        let next = RefreshProgress {
+            phase: "build-image 2/3 agent".into(),
+            ..p.clone()
+        };
+        assert_eq!(
+            next.relay("target", &mut state, 43, REFRESH_HEARTBEAT_SECS)
+                .as_deref(),
+            Some("phase=build-image 2/3 agent, 43s elapsed")
+        );
+
+        // Progress for some OTHER refresh is never relayed, and leaves the relay
+        // state untouched so our own next line is still correct.
+        let mut fresh = RefreshRelayState::default();
+        assert_eq!(
+            p.relay("other", &mut fresh, 12, REFRESH_HEARTBEAT_SECS),
+            None
+        );
+        assert_eq!(fresh, RefreshRelayState::default());
     }
 
     /// The `--wait-secs` confirmation decision (ticket #187): a version carrying

@@ -80,6 +80,9 @@ refresh_workers() {
   # fail every honest deploy mid-build; default to 15min, overridable per
   # deploy (WORKER_REFRESH_WAIT_SECS) for fleets with hotter caches.
   wait_secs="${WORKER_REFRESH_WAIT_SECS:-900}"
+  # Scratch file the CLI's transcript is tee'd into (ticket #253, below). One
+  # file for the whole function, truncated per node; removed on both exits.
+  _wr_log="$(mktemp)"
   # Main-shell iteration (no pipeline): chug_leg_drop mutates
   # CHUG_LEGS_PENDING, and a `| while` subshell would discard those drops —
   # the EXIT trap would then re-mark already-emitted worker-refresh legs as
@@ -90,28 +93,45 @@ refresh_workers() {
     [ "$wep" = "worker" ] || continue
     echo "update: requesting self-refresh of worker '$wn' -> $TARGET_SHA (waiting up to ${wait_secs}s for confirmation)"
     _wr_start="$(date +%s)"
-    out="$("$bin" admin worker-refresh \
+    : > "$_wr_log"
+    # RELAY, don't buffer (ticket #253). This used to be `out="$(... )"` — a
+    # command substitution that swallowed the ENTIRE refresh and reprinted it
+    # only after the wait window closed, so a 10-minute image rebuild showed
+    # the deploy job's task output precisely nothing while it ran. `tee` passes
+    # every line through to stdout the instant the CLI emits it (the CLI relays
+    # the node's per-phase progress and 30s elapsed-time heartbeats), and keeps
+    # a copy for the confirm/detail greps below.
+    #
+    # The grep MUST read that copy rather than the pipeline: the checks below
+    # call chug_leg_drop, which mutates CHUG_LEGS_PENDING and would be lost in a
+    # pipeline subshell (#207 review). The CLI always exits 0 (#186), so the
+    # pipeline's status is ignored exactly as before — only a `refresh OK:` line
+    # confirms.
+    "$bin" admin worker-refresh \
       --nats-url "${NATS_URL:-nats://localhost:4222}" \
       --keys-dir "$KEYS_DIR" \
       --node "$wn" --sha "$TARGET_SHA" --tag "${CHUG_IMAGE_TAG:-prod}" \
-      --wait-secs "$wait_secs" 2>&1)" || true
-    printf '%s\n' "$out"   # stream the CLI's story into the deploy task log
-    if printf '%s\n' "$out" | grep -q 'refresh OK:'; then
+      --wait-secs "$wait_secs" 2>&1 | tee "$_wr_log" || true
+    if grep -q 'refresh OK:' "$_wr_log"; then
       chug_emit_leg "worker-refresh:$wn" ok "$(( $(date +%s) - _wr_start ))"
       chug_leg_drop "worker-refresh:$wn"
       echo "update: worker '$wn' confirmed on $TARGET_SHA"
     else
       # Harvest the daemon-captured failure tail the CLI prints on a FAILED
-      # refresh (deploy #212), so the leg's `detail` carries the real cause
-      # (e.g. docker disk pressure), not just "refresh not confirmed".
-      _wr_detail="$(printf '%s\n' "$out" | sed -n 's/^worker-refresh-detail: //p' | head -1)"
+      # refresh (deploy #212) — or, when the leg simply never confirmed, the
+      # last progress it relayed (#253) — so the leg's `detail` carries the real
+      # cause (docker disk pressure, or "stuck at build-image 3/3 agent-rust"),
+      # not just "refresh not confirmed".
+      _wr_detail="$(sed -n 's/^worker-refresh-detail: //p' "$_wr_log" | head -1)"
       chug_emit_leg "worker-refresh:$wn" failed "$(( $(date +%s) - _wr_start ))" \
         "refresh not confirmed" "$_wr_detail"
       chug_leg_drop "worker-refresh:$wn"
       echo "update: worker '$wn' refresh NOT confirmed on $TARGET_SHA — FAILING deploy (not a warning)" >&2
+      rm -f "$_wr_log"
       return 1
     fi
   done
+  rm -f "$_wr_log"
   return 0
 }
 

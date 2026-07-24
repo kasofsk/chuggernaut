@@ -137,6 +137,17 @@ if grep -F "docker build" "$LOG" | grep -qE 'chuggernaut/(worker|agent|agent-rus
 fi
 echo "ok: build verifies SHA, builds temp tags, then atomically retag-swaps to :prod"
 
+# Progress markers (ticket #253): the daemon reads these off stdout and reports
+# the current one in `ping`, which is what puts per-phase progress in the deploy
+# job's task output. Each long step must be ANNOUNCED BEFORE it runs — a marker
+# printed after its build would relay the phase only once it was already over.
+for _phase in "fetch-context" "build-image 1/3 worker" "build-image 2/3 agent" \
+  "build-image 3/3 agent-rust" "verify-label" "retag-swap"; do
+  grep -qF "worker-refresh: phase $_phase" "$OUT" \
+    || fail "build must emit the '$_phase' progress marker"
+done
+echo "ok: build announces each phase before it runs (deploy-log progress markers)"
+
 # ── Case 1a: the success path reports the disk numbers and prunes as before ───
 # The pre-flight measurement is echoed (free + needed) so an operator reads the
 # disk story off the deploy leg, and the post-refresh prune pair is unchanged:
@@ -290,6 +301,11 @@ if grep -qE "prune (-a|.* -a)" "$LOG"; then
 fi
 # ...and the reclaim is in the output the daemon relays into the failed leg.
 grep_out "reclaimed 8.5GB (23.8GB -> 32.4GB free on /)"
+# A phase is ANNOUNCED BEFORE its step runs (ticket #253) — this build DIED in
+# agent-rust, so seeing its marker proves the marker preceded the work. A marker
+# printed after the step would relay the phase only once it was already over,
+# which is exactly the silence this ticket removes.
+grep_out "worker-refresh: phase build-image 3/3 agent-rust"
 unset FREE_KB_AFTER_PRUNE
 echo "ok: a failed build prunes what it stranded and reports the reclaim"
 

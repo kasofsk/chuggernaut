@@ -82,7 +82,54 @@ echo "worker-refresh-detail: build: docker: no space left on device (~11G free)"
 exit 0
 EOF
 
-chmod +x "$BIN/chug-confirm" "$BIN/chug-unconfirmed" "$BIN/chug-failed"
+# A stub PUBLISHER of live progress (ticket #253): it prints the per-phase
+# progress lines the real CLI relays off the node's `ping`, and — crucially —
+# BLOCKS mid-refresh until it can see its own first progress line in
+# refresh_workers' stdout. That is the streaming assertion: with the pre-#253
+# command substitution the transcript could not appear until the CLI exited, so
+# the line would never show up and the marker below would stay unwritten. The
+# wait is bounded (10 × 1s) so a regression FAILS the case instead of hanging
+# the suite.
+export RELAY_OUT="$WORK/out5"
+export STREAM_MARK="$WORK/streamed"
+cat > "$BIN/chug-progress" <<EOF
+#!/bin/sh
+echo "\$@" >> "$LOG"
+echo "refresh requested: node=nuc from=old -> sha=$TARGET_SHA tag=prod"
+echo "refresh progress: node=nuc phase=build-image 1/3 worker, 3s elapsed"
+i=0
+while [ "\$i" -lt 10 ]; do
+  if grep -q 'phase=build-image 1/3 worker' "$RELAY_OUT" 2>/dev/null; then
+    echo streamed > "$STREAM_MARK"
+    break
+  fi
+  i=\$((i + 1))
+  sleep 1
+done
+echo "refresh progress: node=nuc still phase=build-image 3/3 agent-rust (240s in phase), 300s elapsed"
+echo "refresh OK: node=nuc version=chuggernaut+$TARGET_SHA (312s)"
+exit 0
+EOF
+
+# A stub mirroring the CLI's TIMEOUT path (#253): the node never confirmed, so
+# the CLI prints the last progress it relayed plus a detail line naming the
+# phase it is stuck in. Still exit 0 — the absence of "refresh OK:" is what
+# fails the leg.
+cat > "$BIN/chug-timeout" <<EOF
+#!/bin/sh
+echo "\$@" >> "$LOG"
+echo "refresh requested: node=nuc from=old -> sha=$TARGET_SHA tag=prod"
+echo "refresh progress: node=nuc phase=build-image 3/3 agent-rust, 60s elapsed"
+echo "WARNING: worker refresh node=nuc not confirmed within 900s (build may still be running)"
+echo "--- last progress (node=nuc, phase=build-image 3/3 agent-rust) ---"
+echo "  worker-refresh: phase build-image 3/3 agent-rust"
+echo "--- end last progress ---"
+echo "worker-refresh-detail: not confirmed within 900s; stuck at phase=build-image 3/3 agent-rust (840s in phase); last: worker-refresh: phase build-image 3/3 agent-rust"
+exit 0
+EOF
+
+chmod +x "$BIN/chug-confirm" "$BIN/chug-unconfirmed" "$BIN/chug-failed" \
+  "$BIN/chug-progress" "$BIN/chug-timeout"
 
 pass=0
 fail=0
@@ -170,6 +217,57 @@ if DOCKER_NODES="" CHUG_BIN="$BIN/chug-confirm" refresh_workers >/dev/null 2>&1;
 else
   echo "FAIL - empty DOCKER_NODES must return 0 (clean no-op)"
   fail=$((fail + 1))
+fi
+
+# ── Case 5: live progress is RELAYED as it is produced, not buffered ─────────
+: > "$LOG"
+rm -f "$STREAM_MARK"
+if CHUG_BIN="$BIN/chug-progress" refresh_workers >"$RELAY_OUT" 2>&1; then
+  if [ "$(cat "$STREAM_MARK" 2>/dev/null)" = "streamed" ]; then
+    echo "ok   - progress reaches the deploy log WHILE the refresh runs (not buffered to the end)"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - refresh_workers must stream the CLI's output live (the publisher never saw its own line relayed)"
+    cat "$RELAY_OUT"
+    fail=$((fail + 1))
+  fi
+  # Every relayed line lands in the deploy task's output, in order, and the
+  # heartbeat carries its elapsed time.
+  if grep -qF "phase=build-image 1/3 worker, 3s elapsed" "$RELAY_OUT" \
+    && grep -qF "still phase=build-image 3/3 agent-rust (240s in phase), 300s elapsed" "$RELAY_OUT"; then
+    echo "ok   - per-phase progress and elapsed-time heartbeats appear in the task output"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - relayed progress lines missing from the deploy task output"
+    cat "$RELAY_OUT"
+    fail=$((fail + 1))
+  fi
+else
+  echo "FAIL - a confirmed refresh with progress must still return 0"
+  cat "$RELAY_OUT"
+  fail=$((fail + 1))
+fi
+
+# ── Case 6: a leg that never confirms keeps its last progress ────────────────
+: > "$LOG"
+if CHUG_BIN="$BIN/chug-timeout" refresh_workers >"$WORK/out6" 2>&1; then
+  echo "FAIL - a refresh that never confirms must FAIL the step (unchanged semantics)"
+  cat "$WORK/out6"
+  fail=$((fail + 1))
+else
+  _leg="$(grep '@chug:leg' "$WORK/out6" | grep 'worker-refresh:nuc' | grep '"status":"failed"')"
+  # Diagnosis starts from the job page: the failing leg names the phase it was
+  # stuck in, and the last progress block is in the task output itself.
+  if printf '%s' "$_leg" | grep -q '"detail":"not confirmed within 900s; stuck at phase=build-image 3/3 agent-rust' \
+    && grep -qF -- "--- last progress (node=nuc, phase=build-image 3/3 agent-rust) ---" "$WORK/out6"; then
+    echo "ok   - a never-confirmed leg carries its last progress (phase + lines) into the failure"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - timed-out leg should carry the stuck phase in its detail and the last progress in the log"
+    printf 'leg was: %s\n' "$_leg"
+    cat "$WORK/out6"
+    fail=$((fail + 1))
+  fi
 fi
 
 echo

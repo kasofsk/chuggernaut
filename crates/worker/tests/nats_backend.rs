@@ -186,6 +186,7 @@ async fn mock_worker(store: &store::NatsStore, node: &str) -> tokio::task::JoinH
                         version: env!("CARGO_PKG_VERSION").to_string(),
                         artifacts: std::collections::HashMap::new(),
                         refresh_outcome: None,
+                        refresh_progress: None,
                     },
                 };
                 req.respond(serde_json::to_vec(&reply).unwrap()).await;
@@ -218,6 +219,7 @@ async fn counting_worker(store: &store::NatsStore, node: &str) -> tokio::task::J
                         version: env!("CARGO_PKG_VERSION").to_string(),
                         artifacts: std::collections::HashMap::new(),
                         refresh_outcome: None,
+                        refresh_progress: None,
                     },
                 };
                 req.respond(serde_json::to_vec(&reply).unwrap()).await;

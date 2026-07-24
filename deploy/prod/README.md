@@ -505,6 +505,21 @@ Notes:
   (`docker ps --filter label=chuggernaut.managed`).
 - The daemon's version is reported in its ping; the dispatcher logs a warning
   when it drifts from the dispatcher's own (stale node artifacts).
+- **Watch a refresh from the deploy job, not the node.** `worker-refresh.sh`
+  announces each phase (`worker-refresh: phase build-image 3/3 agent-rust`)
+  before it runs it; the daemon reports the current phase in its ping and the
+  deploy's confirm loop relays it into the deploy job's task output, with a 30s
+  elapsed-time heartbeat while a phase runs long. So a live deploy reads:
+
+  ```
+  refresh progress: node=nuc phase=build-image 3/3 agent-rust, 154s elapsed
+  refresh progress: node=nuc still phase=build-image 3/3 agent-rust (204s in phase), 214s elapsed
+  ```
+
+  A leg that never confirms prints its last phase and output lines and folds
+  them into the failing leg's `detail` — so `ssh` + `docker logs chug-worker` is
+  the second resort now, not the first. If the progress lines are *absent*
+  during a real refresh, the node is running a daemon older than this feature.
 
 ### Fast image builds (BuildKit dependency caching, #115)
 
