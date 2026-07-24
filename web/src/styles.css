@@ -2524,7 +2524,8 @@ table.jobs tbody tr.row-draft td:first-child {
   transition: opacity 0.3s ease, border-color 0.3s ease;
 }
 .cl-node-api,
-.cl-node-dispatcher {
+.cl-node-dispatcher,
+.cl-node-web {
   min-width: 190px;
   text-align: center;
 }
@@ -2541,7 +2542,8 @@ table.jobs tbody tr.row-draft td:first-child {
   gap: var(--sp-2);
 }
 .cl-node-api .cl-node-head,
-.cl-node-dispatcher .cl-node-head {
+.cl-node-dispatcher .cl-node-head,
+.cl-node-web .cl-node-head {
   justify-content: center;
 }
 .cl-node-name {

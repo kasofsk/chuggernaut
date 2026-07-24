@@ -176,6 +176,14 @@ if [ -z "${CHUG_UPDATE_REEXEC:-}" ]; then
   CHUG_UPDATE_REEXEC=1 exec "$CHUG_REPO/deploy/prod/update.sh" "$TARGET_SHA"
 fi
 
+# Bake the deployed SHA into everything built natively below: the dispatcher +
+# api binaries read it via option_env!("CHUG_GIT_SHA") (cd.rs::deployed_sha, the
+# api health probe), and the web bundle via its vite `define` (web/vite.config.ts,
+# read from process.env.CHUG_GIT_SHA). This is what lets the cluster view show a
+# short hash for each deployable. Absent locally, each degrades to a dash.
+# (Worker images bake it themselves via a build-arg — build-worker.sh.)
+export CHUG_GIT_SHA="$TARGET_SHA"
+
 # --- structured deploy legs (ticket #187) ------------------------------------
 # Each step below is a "leg". We time it and emit one machine-readable
 # `@chug:leg {json}` line to stdout; a single `@chug:report {json}` envelope

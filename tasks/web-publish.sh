@@ -44,7 +44,10 @@ SSH="ssh -i $KEY_FILE -p $MINI_PORT -o IdentitiesOnly=yes -o StrictHostKeyChecki
 echo "web-publish: building web/dist at $SHA"
 cd web
 npm ci --no-audit --no-fund
-npm run build
+# Bake this commit into the bundle (vite `define` reads CHUG_GIT_SHA) so the
+# published web SHA survives the self-publish flow (#63) and the cluster view
+# shows which commit the live UI is on — the same SHA a full deploy bakes.
+CHUG_GIT_SHA="$SHA" npm run build
 cd ..
 
 echo "web-publish: staging dist tarball"

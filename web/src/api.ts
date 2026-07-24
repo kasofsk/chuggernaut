@@ -580,6 +580,10 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 export interface HealthStatus {
   dispatcher: string
   version?: string
+  /** The api process's own build SHA (`CHUG_GIT_SHA`), independent of the
+   *  dispatcher `version` — the cluster view shows it so an api restarted onto a
+   *  different commit than the dispatcher reads as skew. Absent on local/dev. */
+  api_sha?: string | null
   error?: string
 }
 

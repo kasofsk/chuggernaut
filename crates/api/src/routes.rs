@@ -161,6 +161,11 @@ fn map_reply(reply: &[u8], success: StatusCode) -> ApiResult<Response> {
 ///
 /// Deliberately unauthenticated: the body leaks only liveness and the build
 /// version, never any project data (spec §6.x).
+///
+/// The reply also carries this *api* process's own build SHA (`api_sha`),
+/// baked at build time and independent of the dispatcher's `version`: the api
+/// and dispatcher restart at different moments, so surfacing both lets the
+/// cluster view flag the real skew when one lands on a different commit.
 pub async fn health(State(state): State<SharedState>) -> Response {
     match state
         .store
@@ -170,7 +175,8 @@ pub async fn health(State(state): State<SharedState>) -> Response {
         Ok(reply) => match serde_json::from_slice::<serde_json::Value>(&reply.payload) {
             // Only a genuine {"dispatcher":"ok",..} reply is healthy; anything
             // else (e.g. the actor's 503 envelope) maps to 503, never 200.
-            Ok(body) if body.get("dispatcher").and_then(|d| d.as_str()) == Some("ok") => {
+            Ok(mut body) if body.get("dispatcher").and_then(|d| d.as_str()) == Some("ok") => {
+                inject_api_sha(&mut body);
                 (StatusCode::OK, Json(body)).into_response()
             }
             Ok(body) => (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response(),
@@ -188,6 +194,29 @@ pub async fn health(State(state): State<SharedState>) -> Response {
             Json(serde_json::json!({ "dispatcher": "error", "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+/// This api binary's own build SHA (`CHUG_GIT_SHA`, baked at build time — same
+/// `option_env!` pattern as the dispatcher's `cd::deployed_sha`). `None` for a
+/// local/dev build without it baked in, which the cluster view renders as a dash.
+fn api_sha() -> Option<&'static str> {
+    option_env!("CHUG_GIT_SHA")
+}
+
+/// Add this api process's `api_sha` to a healthy dispatcher reply so the cluster
+/// view can show the api's deployed hash independently of the dispatcher's. A
+/// no-op when the reply isn't a JSON object or no SHA was baked in.
+fn inject_api_sha(body: &mut serde_json::Value) {
+    inject_sha(body, api_sha());
+}
+
+/// The pure core of [`inject_api_sha`], split out so the injection is testable
+/// without the build-time `option_env!` read (which is `None` under `cargo
+/// test`). Inserts `api_sha` only when a SHA is present and `body` is an object.
+fn inject_sha(body: &mut serde_json::Value, sha: Option<&str>) {
+    if let (Some(obj), Some(sha)) = (body.as_object_mut(), sha) {
+        obj.insert("api_sha".into(), serde_json::Value::String(sha.to_string()));
     }
 }
 
@@ -1343,4 +1372,29 @@ pub async fn artifact_get(
         bytes,
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inject_sha;
+
+    /// A baked SHA is added as `api_sha` alongside the dispatcher's own fields,
+    /// leaving them untouched — so the cluster view reads the api's build
+    /// independently of the dispatcher `version`.
+    #[test]
+    fn inject_sha_adds_api_sha_when_present() {
+        let mut body = serde_json::json!({ "dispatcher": "ok", "version": "0.1.0" });
+        inject_sha(&mut body, Some("abc123"));
+        assert_eq!(body.get("api_sha").and_then(|v| v.as_str()), Some("abc123"));
+        assert_eq!(body.get("version").and_then(|v| v.as_str()), Some("0.1.0"));
+    }
+
+    /// A local/dev build with no SHA baked in leaves the reply untouched (no
+    /// `api_sha` key), which the cluster view renders as a dash — never an error.
+    #[test]
+    fn inject_sha_noop_without_sha() {
+        let mut body = serde_json::json!({ "dispatcher": "ok" });
+        inject_sha(&mut body, None);
+        assert!(body.get("api_sha").is_none());
+    }
 }

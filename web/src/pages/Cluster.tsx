@@ -4,6 +4,7 @@ import {
   ApiError,
   api,
   type FleetNode,
+  type HealthStatus,
   type PlatformConfig,
   type RefreshOutcome,
   type SlotOccupant,
@@ -31,6 +32,7 @@ export function ClusterPage() {
   const { fleet, unavailable, loaded } = useFleet({ pollMs: POLL_MS })
   const [cfg, setCfg] = useState<PlatformConfig | null>(null)
   const [cfgLoaded, setCfgLoaded] = useState(false)
+  const [health, setHealth] = useState<HealthStatus | null>(null)
   const [forbidden, setForbidden] = useState(false)
 
   useEffect(() => {
@@ -46,6 +48,13 @@ export function ClusterPage() {
       },
     )
   }, [navigate])
+
+  // The api node's own build SHA, read from the (unauthenticated) health probe
+  // so it is independent of the dispatcher's version. A 503 leaves it null and
+  // the node degrades to its role label — never an error on the graph.
+  useEffect(() => {
+    api.health().then(setHealth, () => setHealth(null))
+  }, [])
 
   // Initial load only: skeleton until both the occupancy snapshot and the
   // config roster have answered once. Poll refreshes never re-skeleton.
@@ -92,6 +101,20 @@ export function ClusterPage() {
   // with its peers — a uniformly-stale fleet (every node behind the deployed
   // platform) is invisible to peer comparison alone, which the audit flags.
   const deployedSha = cfg?.dispatcher?.dispatcher_sha ?? null
+  // The three platform deployables' baked build SHAs, each surfaced separately
+  // so the graph shows what commit every component actually runs: the dispatcher
+  // from its config snapshot, the api from its health probe, the web bundle from
+  // its own build-time define. Absent (local/dev, or an unreached health probe)
+  // renders as the role label rather than an error.
+  const apiSha = health?.api_sha ?? null
+  const webSha = __CHUG_WEB_SHA__ || null
+  const commitsBehind = cfg?.dispatcher?.commits_behind ?? null
+  // A component is skewed when its baked SHA disagrees with the deployed
+  // dispatcher SHA (the baseline) — an api/web that restarted or republished
+  // onto a different commit. Unknown either side ⇒ not flagged (never a false
+  // alarm), consistent with the fleet-freshness rule.
+  const shaSkew = (sha: string | null) =>
+    !!sha && !!deployedSha && shortSha(sha) !== shortSha(deployedSha)
   const isDrift = (n: FleetNode) =>
     nodeStale(n.version, deployedSha) ||
     (commonVersion != null && n.version != null && n.version !== commonVersion)
@@ -141,11 +164,40 @@ export function ClusterPage() {
         <section className="card cluster-card">
           <div className="cluster-graph">
             <div className="cl-tier">
-              <Node role="api" name="api" online sub="gateway" />
+              <Node
+                role="api"
+                name="api"
+                online
+                sub="gateway"
+                sha={apiSha}
+                drift={shaSkew(apiSha)}
+                title="build skew — the api is on a different commit than the dispatcher"
+              />
+              <Node
+                role="web"
+                name="web"
+                online
+                sub="ui"
+                sha={webSha}
+                drift={shaSkew(webSha)}
+                title="build skew — the published web bundle is on a different commit than the dispatcher"
+              />
             </div>
             <Edge />
             <div className="cl-tier cl-tier-dispatcher">
-              <Node role="dispatcher" name="dispatcher" online={dispatcherOnline} sub="orchestrator" />
+              <Node
+                role="dispatcher"
+                name="dispatcher"
+                online={dispatcherOnline}
+                sub="orchestrator"
+                sha={deployedSha}
+                drift={(commitsBehind ?? 0) > 0}
+                title={
+                  commitsBehind
+                    ? `${commitsBehind} commit${commitsBehind === 1 ? '' : 's'} behind main`
+                    : undefined
+                }
+              />
               {queue > 0 && <PendingTray count={queue} />}
             </div>
             <Edge />
@@ -302,20 +354,26 @@ function Edge() {
   return <div className="cl-edge" aria-hidden="true" />
 }
 
+// A platform tier node (api, dispatcher, web). Shows the deployable's short
+// build SHA when known; a skewed/behind component is marked amber with a
+// tooltip, reusing the drift-banner's presentation language (#188) rather than
+// duplicating its page.
 function Node({
   role,
   name,
   online,
   sub,
-  version,
+  sha,
   drift,
+  title,
 }: {
   role: string
   name: string
   online: boolean
   sub?: string
-  version?: string | null
+  sha?: string | null
   drift?: boolean
+  title?: string
 }) {
   return (
     <div className={`cl-node cl-node-${role}${online ? '' : ' cl-dim'}${drift ? ' cl-drift' : ''}`}>
@@ -324,7 +382,7 @@ function Node({
         <span className="cl-node-name">{name}</span>
       </div>
       <div className="cl-node-sub dim">
-        {version ? <code title={drift ? 'version drift' : undefined}>{version}</code> : sub}
+        {sha ? <code title={drift ? title : undefined}>{shortSha(sha)}</code> : sub}
       </div>
     </div>
   )
