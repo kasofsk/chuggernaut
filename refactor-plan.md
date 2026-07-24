@@ -7,6 +7,11 @@ existing code incrementally toward the north star. The rewrite plan's durable
 ideas — golden decision traces, effects-as-data, contract-first change rule —
 survive here as Track B; only the language migration is dropped.
 
+Design **#208** (the Python dispatcher) was the other language-migration
+proposal; it is **closed/superseded** by this decision. No dispatcher rewrite
+in any language is on the table — the surviving `ts-rewrite-plan.md` is kept
+only as a source of the Track-B ideas above.
+
 Ground truth this plan is based on (2026-07-24): `state.rs` is the only pure
 dispatcher module (zero awaits); `eval.rs`/`exec.rs`/`core.rs`/`handlers.rs`
 carry ~640 await sites between them; no `Effect` enum, invariant checker, or
@@ -160,9 +165,19 @@ boundary rule to `error` for its migrated paths.
 ## What we are explicitly not doing
 
 - No language rewrite, no `ts/` workspace, no shadow mode or cutover.
-- No dispatcher crate split — modules with `pub(crate)` discipline, not new
-  crates (NORTH-STAR: crates are compile/deploy boundaries; the dispatcher is
-  one deployable with one writer).
+- **No _speculative_ crate splits.** Decomposing the dispatcher into small
+  crates *is* now in scope (reversing this plan's earlier "no crate split"
+  stance), but only as a consequence of the de-braiding, never ahead of it: a
+  boundary graduates from a `pub(crate)` module to its own crate once (a) it
+  aligns with a north-star seam — the pure domain first, later the platform-ops
+  and forge-ingest contexts — and (b) its interface no longer needs `&mut
+  Core`. The payoff is faster incremental compiles and purity enforced *by
+  construction* — a `domain` crate with no `tokio`/`async-nats` dependency
+  cannot drift into I/O, which a module lint can only catch after the fact. The
+  single-writer loop and the single deployable are unchanged; these crates are
+  compile/visibility boundaries only, never new writers or processes. Carving a
+  crate before its decider extraction has dropped the `&mut Core` dependency
+  stays out of scope.
 - No multi-writer anything; every refactor preserves the single-writer loop.
 - No big-bang: `eval.rs`/`exec.rs` are dismantled one decider at a time
   behind traces, never rewritten wholesale.

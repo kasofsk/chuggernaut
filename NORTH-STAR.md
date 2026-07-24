@@ -1,8 +1,11 @@
 # Chuggernaut — structural north star
 
 Companion to `crates.md` (the map as it exists), `structure-assessment.md`
-(the audit that motivated this), and `contracts.md` (how the dispatcher's
-interfaces get extracted and formalized on the way here). This is the **target** factoring: where the
+(the audit that motivated this), `contracts.md` (how the dispatcher's
+interfaces get extracted and formalized on the way here), `refactor-plan.md`
+(the sequenced, ticketed path that executes this factoring incrementally in
+Rust), and `STYLE.md` (the tiered blessed practices every touch is held to).
+This is the **target** factoring: where the
 boundaries should sit if migration cost were no object. We are not migrating
 all at once — this document guides incremental refactoring as changes land, so
 that every touch moves the codebase toward one shape instead of many.
@@ -13,9 +16,11 @@ module. That requires boundaries that are (a) explicit, (b) enforced, and
 
 The headline: the macro-architecture is already close to right for this type
 of project — single-writer state machine, ports for containers/agents, one
-NATS integration point, services communicating only over messages. The crate
-topology stays roughly as-is. What changes is **where the boundaries sit
-inside the two big blobs** (dispatcher, web) and **how boundaries are enforced**
+NATS integration point, services communicating only over messages. The
+top-level crate count grows only as boundaries inside the two big blobs harden
+enough to earn a crate (see §1); the macro-topology is otherwise as-is. What
+changes is **where the boundaries sit inside the two big blobs** (dispatcher,
+web) and **how boundaries are enforced**
 (docs and discipline today; types and CI in the north star).
 
 ## 1. Backend: grow the pure core, shrink the interpreter
@@ -63,11 +68,18 @@ Why this is the right target for *this* project specifically:
   `domain::decide::merge_gate`" is a real, small, reviewable surface. "Jobs
   scoped to `eval.rs`" is not.
 
-Deliberately **not** in the north star: splitting the dispatcher into many
-crates. Crates are compile/deploy/visibility boundaries, and the dispatcher is
-one deployable with one writer. Modules with `pub(crate)` discipline give all
-the scoping value without the compile-time and orphan-rule tax. Keep the crate
-count roughly where it is.
+On crate decomposition: a dispatcher boundary graduates from a `pub(crate)`
+module to its **own crate** once (a) it aligns with a seam above — the pure
+domain first, later the platform-ops and forge-ingest contexts — and (b) its
+interface no longer needs `&mut Core`. Two things earn the split: faster
+incremental compiles, and purity enforced *by construction* — a `domain` crate
+that depends on neither `tokio` nor `async-nats` **cannot** drift into I/O,
+where a module lint can only catch the drift after the fact. Never split
+speculatively: the crate follows the de-braiding, it does not lead it — carving
+one before decider extraction has removed a boundary's `&mut Core` dependency
+buys the tax without the guarantee. The single-writer loop and the single
+deployable are unchanged; these crates are compile/visibility boundaries only,
+never new writers or processes.
 
 Two smaller backend targets:
 

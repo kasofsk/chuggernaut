@@ -1,5 +1,16 @@
 # TypeScript dispatcher rewrite — plan
 
+> **Superseded by [`refactor-plan.md`](refactor-plan.md).** The decision is to
+> stay in Rust and refactor the existing dispatcher incrementally toward the
+> north star — not to rewrite it in another language. Design #208 (the Python
+> dispatcher, the language-migration alternative this plan argued against) is
+> closed in the same move. This page is **retained for the ideas that outlive
+> the reversal** — golden decision traces, effects-as-data, the wire-level
+> conformance suite, and the contract-first change rule — which
+> `refactor-plan.md` carries forward as its Track B. Read it for those; do not
+> action the language migration, the `ts/` workspace, or the shadow/cutover
+> phases below.
+
 Companion to `NORTH-STAR.md` (target factoring), `contracts.md` (interface
 extraction), and `structure-assessment.md` (current-state audit). This is the
 execution plan for rewriting the **dispatcher** in TypeScript, guided by those
