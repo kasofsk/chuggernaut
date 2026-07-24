@@ -4134,6 +4134,17 @@ tr[data-state='Batched'] {
   align-items: center;
   gap: var(--sp-3);
   flex-wrap: wrap;
+  /* Sticky footer: the mode selector + Create button stay pinned to the
+     bottom of the viewport so the form scrolls behind them and you never
+     have to scroll down to submit. Negative side margins + card backdrop
+     let it span the card's full width and hide content passing underneath. */
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  margin: 0 calc(-1 * var(--sp-5)) calc(-1 * var(--sp-4));
+  padding: var(--sp-3) var(--sp-5) var(--sp-4);
+  background: var(--card);
+  border-top: 1px solid var(--border);
 }
 .switch {
   position: relative;
@@ -4208,6 +4219,13 @@ tr[data-state='Batched'] {
   .capacity-widget,
   .theme-picker {
     bottom: 62px;
+  }
+  /* Sticky Create footer sits above the fixed bottom nav rail (52px) and
+     matches the mobile card's tighter padding. */
+  .departure {
+    bottom: 52px;
+    margin: 0 calc(-1 * var(--sp-4)) calc(-1 * var(--sp-4));
+    padding: var(--sp-3) var(--sp-4) var(--sp-4);
   }
   .rail-logo {
     margin-bottom: 0;
