@@ -645,6 +645,11 @@ export const api = {
   /** Finalize an edited Draft back to Frozen (#166): validation runs, then it parks re-batchable; 409 outside Draft. */
   finalize: (owner: string, project: string, seq: number) =>
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/finalize`),
+  /** Edit a Draft batch's member list while composing it (§2.1 draft batches):
+   *  `{ add?, remove? }` couple/uncouple candidate jobs; returns the updated
+   *  batch. 409 unless the job is a Draft batch; 422 on an ineligible add. */
+  members: (owner: string, project: string, seq: number, body: { add?: number[]; remove?: number[] }) =>
+    req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/members`, body),
   revoke: (owner: string, project: string, seq: number) =>
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/revoke`),
   /** Claim the next work attempt for a human (spec §1.2 claims); 409 while an attempt is in flight. */

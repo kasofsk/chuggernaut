@@ -4105,6 +4105,217 @@ tr[data-state='Batched'] {
   color: var(--dim);
 }
 
+/* ── Consist editor (Draft-batch members as a train, §2.1) ──────────────────
+   The batch as a little train: locomotive + one coupled car per member. The
+   track scrolls in its own container so a long consist never scrolls the page
+   sideways. All motion is transform/opacity-only (see reduced-motion below). */
+.consist-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.consist-lede {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+.consist-track {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 0.35rem 0.1rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--inset);
+}
+.consist-loco {
+  font-size: 1.4rem;
+  line-height: 1;
+  padding: 0 0.2rem;
+  flex: none;
+}
+.consist-empty {
+  padding: 0 0.4rem;
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+.consist-car-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.consist-coupler {
+  color: var(--dim);
+}
+.consist-car {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.4rem 0.25rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--btn-bg);
+  box-shadow: var(--shadow-card);
+}
+.consist-car-seq {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--accent);
+  text-decoration: none;
+}
+.consist-car-seq:hover {
+  text-decoration: underline;
+}
+.consist-car-title {
+  max-width: 11rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+}
+.consist-uncouple {
+  display: grid;
+  place-items: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-full);
+  background: var(--inset);
+  color: var(--dim);
+  cursor: pointer;
+  line-height: 1;
+}
+.consist-uncouple:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.consist-uncouple:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* Soft clunk: the just-coupled car settles in with a one-shot bump. */
+.consist-bump {
+  animation: consist-bump 0.4s ease;
+}
+@keyframes consist-bump {
+  0% {
+    transform: translateX(7px);
+  }
+  55% {
+    transform: translateX(-2px);
+  }
+  100% {
+    transform: none;
+  }
+}
+/* Uncouple: the car drifts off to the siding before it's removed. */
+.consist-drift {
+  animation: consist-drift 0.38s ease forwards;
+}
+@keyframes consist-drift {
+  to {
+    transform: translateX(-26px) translateY(14px) rotate(-5deg);
+    opacity: 0;
+  }
+}
+/* Finalize/release with <2 cars: the locomotive refuses and shakes. */
+.consist-shake {
+  animation: consist-shake 0.5s ease;
+}
+@keyframes consist-shake {
+  10%,
+  90% {
+    transform: translateX(-1px);
+  }
+  20%,
+  80% {
+    transform: translateX(2px);
+  }
+  30%,
+  50%,
+  70% {
+    transform: translateX(-4px);
+  }
+  40%,
+  60% {
+    transform: translateX(4px);
+  }
+}
+.consist-cand-off {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Live manifest: the computed dep/eval union, stamped like paperwork and
+   re-stamped whenever an edit changes it. */
+.manifest-card {
+  border: 1px dashed color-mix(in srgb, var(--border) 70%, var(--dim));
+  border-radius: var(--r-md);
+  padding: var(--sp-3);
+  background: color-mix(in srgb, var(--accent) 3%, var(--card));
+}
+.manifest-head {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 0.4rem;
+}
+.manifest-body {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.2rem var(--sp-3);
+  margin: 0;
+}
+.manifest-body dt {
+  color: var(--dim);
+}
+.manifest-body dd {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: baseline;
+}
+.manifest-eval {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  padding: 0.05rem 0.35rem;
+  border-radius: var(--r-sm);
+  background: var(--inset);
+}
+.manifest-restamp {
+  animation: manifest-restamp 0.5s ease;
+}
+@keyframes manifest-restamp {
+  0% {
+    transform: scale(1.03);
+    opacity: 0.5;
+  }
+  100% {
+    transform: none;
+    opacity: 1;
+  }
+}
+.consist-actions {
+  flex-wrap: wrap;
+  align-items: center;
+}
+@media (prefers-reduced-motion: reduce) {
+  .consist-bump,
+  .consist-drift,
+  .consist-shake,
+  .manifest-restamp {
+    animation: none;
+  }
+  .consist-drift {
+    opacity: 0;
+  }
+}
+
 /* Departure switch */
 .departure {
   display: flex;

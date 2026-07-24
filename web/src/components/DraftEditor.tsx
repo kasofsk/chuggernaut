@@ -33,6 +33,7 @@ export function DraftEditor({
   owner,
   project,
   job,
+  isBatch = false,
   onRelease,
   onFinalize,
   onRevoke,
@@ -41,6 +42,10 @@ export function DraftEditor({
   owner: string
   project: string
   job: Job
+  /** true for a Draft batch: the plain deps picker and the finalize/release/
+   *  revoke actions are hidden here — the ConsistEditor renders the members
+   *  consist and owns those actions (§2.1 draft batches). */
+  isBatch?: boolean
   onRelease: () => void
   onFinalize: () => void
   onRevoke: () => void
@@ -325,6 +330,7 @@ export function DraftEditor({
         </div>
       </div>
 
+      {!isBatch && (
       <div className={fieldClass('deps')}>
         <span>Depends on <span className="dim">(jobs that must finish first)</span>{wiz('deps')}</span>
         {deps.length > 0 && (
@@ -364,6 +370,7 @@ export function DraftEditor({
           </div>
         )}
       </div>
+      )}
 
       <div className={fieldClass('knowledge_tags')}>
         <span>
@@ -430,6 +437,13 @@ export function DraftEditor({
           (spec §1.6). The job already exists, so uploads PUT straight to it. */}
       <JobAttachments owner={owner} project={project} seq={job.id} />
 
+      {isBatch ? (
+        // A Draft batch's finalize/release/revoke live in the ConsistEditor below,
+        // beside the cars they act on — only the autosave hint stays here.
+        <div className="create-actions">
+          <span className="dim draft-save-hint">edits save automatically · membership below</span>
+        </div>
+      ) : (
       <div className="create-actions">
         <button
           type="button"
@@ -451,6 +465,7 @@ export function DraftEditor({
         </button>
         <span className="dim draft-save-hint">edits save automatically</span>
       </div>
+      )}
     </section>
   )
 }

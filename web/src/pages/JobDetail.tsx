@@ -24,6 +24,7 @@ import { TaskLogPane } from '../components/TaskLogs'
 import { EvaluatorTable } from '../components/EvaluatorTable'
 import { Markdown } from '../components/Markdown'
 import { DraftEditor } from '../components/DraftEditor'
+import { ConsistEditor } from '../components/ConsistEditor'
 import { CoverWidget } from '../components/CoverWidget'
 import { JobAttachments } from '../components/Attachments'
 import { Skeleton, SkeletonLines } from '../components/Skeleton'
@@ -187,6 +188,10 @@ export function JobDetail() {
   // A Draft renders the live edit form in place of the read-only info card; its
   // task/criteria/diff sections are empty (nothing has run) so they're hidden.
   const isDraft = job.state === 'Draft'
+  // A Draft *batch* (§2.1 draft batches): its members are edited as a consist
+  // (train of cars) rather than the plain deps picker. A non-empty members list
+  // is the batch marker.
+  const isDraftBatch = isDraft && (job.members ?? []).length > 0
 
   // Tasks banded with an escalation resolution: the resolving Human task and the
   // failed attempts in the same cycle above it. They share an amber left edge in
@@ -224,15 +229,29 @@ export function JobDetail() {
       {error && <div className="error banner">{error}</div>}
 
       {isDraft ? (
-        <DraftEditor
-          owner={owner}
-          project={project}
-          job={job}
-          onRelease={() => api.release(owner, project, job.id).then(refresh, setActionError(setError))}
-          onFinalize={() => api.finalize(owner, project, job.id).then(refresh, setActionError(setError))}
-          onRevoke={() => api.revoke(owner, project, job.id).then(refresh, setActionError(setError))}
-          onLeftDraft={refresh}
-        />
+        <>
+          <DraftEditor
+            owner={owner}
+            project={project}
+            job={job}
+            isBatch={isDraftBatch}
+            onRelease={() => api.release(owner, project, job.id).then(refresh, setActionError(setError))}
+            onFinalize={() => api.finalize(owner, project, job.id).then(refresh, setActionError(setError))}
+            onRevoke={() => api.revoke(owner, project, job.id).then(refresh, setActionError(setError))}
+            onLeftDraft={refresh}
+          />
+          {isDraftBatch && (
+            <ConsistEditor
+              owner={owner}
+              project={project}
+              job={job}
+              onRelease={() => api.release(owner, project, job.id).then(refresh, setActionError(setError))}
+              onFinalize={() => api.finalize(owner, project, job.id).then(refresh, setActionError(setError))}
+              onRevoke={() => api.revoke(owner, project, job.id).then(refresh, setActionError(setError))}
+              onEdited={refresh}
+            />
+          )}
+        </>
       ) : (
       <section className="card">
         <h2>
