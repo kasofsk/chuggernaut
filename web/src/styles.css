@@ -2343,7 +2343,7 @@ table.jobs tbody tr.row-draft td:first-child {
   border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
   color: #fff;
   font-weight: 600;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   padding: 0.5rem 0.95rem;
   border-radius: var(--r-full);
   box-shadow: 0 6px 20px -6px var(--glow);
