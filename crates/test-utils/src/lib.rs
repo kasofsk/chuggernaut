@@ -4,12 +4,26 @@
 pub mod backend_suite;
 pub mod nats;
 pub mod repo;
+pub mod wait;
+
+/// A unique, NATS-safe namespace prefix for one test (#206). Every stream, KV
+/// bucket, object store, and subject a test touches carries this prefix (via
+/// [`store::NatsStore::connect_namespaced`]), so many tests share one server
+/// without colliding. Shape `t{8 hex}-`: a single subject token (no `.`) that is
+/// also a legal KV bucket-name fragment (`[A-Za-z0-9_-]`).
+pub fn unique_prefix() -> String {
+    // 16 hex chars (~64 bits): under the communal one-server gate every
+    // per-test prefix across all binaries shares one NATS, and 32 bits of
+    // uniqueness invites birthday collisions at scale (#207 review).
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    format!("t{}-", &id[..16])
+}
 
 use agent::{AgentError, AgentOutput, AgentProvider, AgentRunConfig};
 use async_trait::async_trait;
 use container::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus, LogTail,
-    RunningContainer,
+    NodeStatus, RunningContainer,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,6 +93,10 @@ struct FakeBackendState {
     /// stand-in for a non-fleet backend (single-node Docker) that cannot route to
     /// announced nodes, so the dispatcher must drop stray announces.
     no_dynamic_workers: bool,
+    /// What `fleet_status` reports — the live per-node health/version/refresh a
+    /// real backend fills from worker pings (spec §3.1, ticket #187). Empty by
+    /// default (the fake tracks capacity via `register_worker`, not health).
+    fleet_status: Vec<NodeStatus>,
 }
 
 impl Default for FakeBackend {
@@ -249,6 +267,14 @@ impl FakeBackend {
     pub fn disable_dynamic_workers(&self) {
         self.state.lock().unwrap().no_dynamic_workers = true;
     }
+
+    /// Set what `fleet_status` reports — the live per-node health/version/refresh
+    /// a real backend fills from worker pings (spec §3.1, ticket #187). Lets a
+    /// test prove a ping-reported refresh outcome flows into the published
+    /// `FleetStatus`.
+    pub fn set_fleet_status(&self, statuses: impl IntoIterator<Item = NodeStatus>) {
+        self.state.lock().unwrap().fleet_status = statuses.into_iter().collect();
+    }
 }
 
 #[async_trait]
@@ -399,6 +425,10 @@ impl ContainerBackend for FakeBackend {
     /// model a non-fleet backend.
     fn supports_dynamic_workers(&self) -> bool {
         !self.state.lock().unwrap().no_dynamic_workers
+    }
+
+    fn fleet_status(&self) -> Vec<NodeStatus> {
+        self.state.lock().unwrap().fleet_status.clone()
     }
 
     /// Model heartbeat loss (spec §3.1): record the deregistration and, as the

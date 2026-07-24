@@ -791,6 +791,7 @@ impl Core {
                                 launch_error: None,
                                 log_tail: None,
                                 infra_loss: false,
+                                structured: None,
                             },
                         })
                         .await;
@@ -825,6 +826,7 @@ impl Core {
                                 launch_error: None,
                                 log_tail: None,
                                 infra_loss: false,
+                                structured: None,
                             },
                         })
                         .await;

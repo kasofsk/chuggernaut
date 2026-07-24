@@ -45,7 +45,9 @@ fn running_task(id: u64, container_id: Option<&str>) -> Task {
 }
 
 async fn setup(server_url: &str) -> (NatsStore, Arc<FakeBackend>) {
-    let store = NatsStore::connect(server_url).await.unwrap();
+    let store = NatsStore::connect_namespaced(server_url, &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     // A real (empty) repo just so Core::new has somewhere to load from; the
     // output handler itself only touches the tasks KV and the backend.
@@ -94,7 +96,7 @@ async fn output(store: &NatsStore, task_id: u64, since: u64) -> serde_json::Valu
 
 #[tokio::test]
 async fn output_tails_running_serves_fallback_and_404s() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
     let (store, backend) = setup(server.url()).await;
@@ -136,7 +138,7 @@ async fn output_tails_running_serves_fallback_and_404s() {
 
 #[tokio::test]
 async fn wedged_node_errors_without_blocking_other_requests() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
     let (store, backend) = setup(server.url()).await;

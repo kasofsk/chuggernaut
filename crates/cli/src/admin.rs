@@ -354,16 +354,29 @@ async fn run_worker_refresh(
     if wait_secs == 0 {
         return Ok(());
     }
-    // A refreshed daemon reports the new SHA on ping; the version string is
-    // `{pkg}+{sha}`, so a `+{short_sha}` substring confirms the swap landed.
-    let needle = format!("+{}", &sha[..sha.len().min(12)]);
+    // Confirm against the SAME reported field the fleet snapshot shows (ticket
+    // #187): a swapped-in daemon carries the target SHA in its version, and the
+    // surviving daemon of a FAILED refresh reports a `Failed` outcome — so a
+    // broken refresh is surfaced immediately with its stage/error instead of
+    // waiting out the whole timeout.
+    use types::worker::{RefreshConfirmation, RefreshOutcome};
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
     loop {
-        if let Ok(ping) = rpc.ping().await
-            && ping.version.contains(&needle)
-        {
-            println!("refresh OK: node={node} version={}", ping.version);
-            return Ok(());
+        if let Ok(ping) = rpc.ping().await {
+            match RefreshOutcome::confirm(sha, &ping.version, ping.refresh_outcome.as_ref()) {
+                RefreshConfirmation::Confirmed => {
+                    println!("refresh OK: node={node} version={}", ping.version);
+                    return Ok(());
+                }
+                RefreshConfirmation::Failed { stage, error_tail } => {
+                    println!(
+                        "WARNING: worker refresh node={node} FAILED at {stage}: {error_tail} \
+                         (prod stays on the old images; check the fleet snapshot)"
+                    );
+                    return Ok(());
+                }
+                RefreshConfirmation::Pending => {}
+            }
         }
         if std::time::Instant::now() >= deadline {
             println!(

@@ -81,7 +81,7 @@ eval:
 "#;
 
 struct Rig {
-    _server: test_utils::nats::NatsTestServer,
+    _server: &'static test_utils::nats::NatsTestServer,
     store: NatsStore,
     repo: TempRepo,
     provider: Arc<FakeProvider>,
@@ -89,8 +89,10 @@ struct Rig {
 }
 
 async fn rig() -> Option<Rig> {
-    let server = test_utils::nats::NatsTestServer::spawn()?;
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let server = test_utils::nats::NatsTestServer::shared().await?;
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -172,16 +174,8 @@ fn commit_on_run(provider: &FakeProvider, bare: std::path::PathBuf) {
 }
 
 async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> Job {
-    let jobs = store.jobs().await.unwrap();
-    for _ in 0..400 {
-        if let Some(job) = jobs.get("acme", "api", seq).await.unwrap()
-            && job.state == want
-        {
-            return job;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("timed out waiting for {want:?}");
+    // Watch-based wait (#206 principle 3): value-inspecting, hard timeout.
+    test_utils::wait::job_state(store, "acme", "api", seq, want).await
 }
 
 /// A dispatcher died mid-Work: the job record says Work, the task log has a
@@ -190,10 +184,12 @@ async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> Job {
 #[tokio::test]
 async fn restart_recovers_orphaned_running_work_task() {
     // Fresh infra WITHOUT spawning a core yet — the crash state comes first.
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -322,10 +318,12 @@ async fn restart_recovers_orphaned_running_work_task() {
 /// the delta — proving nothing depended on the crashed dispatcher's memory.
 #[tokio::test]
 async fn restart_rebuilds_re_review_context_from_persisted_records() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -499,16 +497,13 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
     .unwrap();
     let _handle = spawn(core);
 
-    // Wait for the reconciled dispatcher to launch the cycle-2 reviewer.
-    let mut prompt = None;
-    for _ in 0..400 {
-        if let Some(run) = provider.runs().first() {
-            prompt = Some(run.prompt.clone());
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let prompt = prompt.expect("cycle-2 reviewer must launch after restart");
+    // Wait for the reconciled dispatcher to launch the cycle-2 reviewer. This
+    // observes in-memory FakeProvider state, so it uses the tightened poll
+    // (#206 principle 3).
+    let prompt = test_utils::wait::poll_default("cycle-2 reviewer to launch after restart", || {
+        provider.runs().first().map(|r| r.prompt.clone())
+    })
+    .await;
 
     // The re-review block was rebuilt entirely from the persisted task log.
     assert!(
@@ -540,10 +535,12 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
 /// a container id WAS recorded, so the container demonstrably existed.
 #[tokio::test]
 async fn restart_infra_loss_relaunches_work_without_burning_budget() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -679,10 +676,12 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
 /// directly (three restarts compressed into one crash state).
 #[tokio::test]
 async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -818,10 +817,12 @@ async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
 /// code is authoritative and the retry advances to attempt 2.
 #[tokio::test]
 async fn restart_real_nonzero_exit_still_burns_budget() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -953,10 +954,12 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
 /// no new attempt, no retry consumed.
 #[tokio::test]
 async fn restart_requeues_queued_pending_work_task() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -1166,10 +1169,12 @@ async fn seed_queued_command_work(
 /// oldest-first (job/3, job/2, job/1), matching the original enqueue order.
 #[tokio::test]
 async fn restart_relaunches_queued_tasks_in_persisted_fifo_order() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -1213,13 +1218,12 @@ async fn restart_relaunches_queued_tasks_in_persisted_fifo_order() {
     let _handle = spawn(core);
 
     // Drain launches the queue front-to-back, so the first three launches are the
-    // three work commands in FIFO order.
-    for _ in 0..400 {
-        if backend.launches().len() >= 3 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    // three work commands in FIFO order. In-memory backend state → tightened
+    // poll (#206 principle 3).
+    test_utils::wait::poll_default("3 launches to drain from the queue", || {
+        (backend.launches().len() >= 3).then_some(())
+    })
+    .await;
     let branches: Vec<String> = backend
         .launches()
         .iter()
@@ -1241,10 +1245,12 @@ async fn restart_relaunches_queued_tasks_in_persisted_fifo_order() {
 /// (wait ~0) would leave it Pending.
 #[tokio::test]
 async fn restart_preserves_queue_wait_clock_for_timeout() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -1311,10 +1317,12 @@ async fn restart_preserves_queue_wait_clock_for_timeout() {
 /// evaluator passes, and the job lands.
 #[tokio::test]
 async fn restart_requeues_queued_pending_agent_eval() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -1520,10 +1528,12 @@ async fn restart_requeues_queued_pending_agent_eval() {
 /// happy path, the sweep covers containers orphaned by a crash before that ran.
 #[tokio::test]
 async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -1640,15 +1650,13 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
     .unwrap();
     let _handle = spawn(core);
 
-    // Reconciliation runs once at startup; wait for the sweep to settle.
-    let mut removed = Vec::new();
-    for _ in 0..400 {
-        removed = backend.removed();
-        if removed.len() >= 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    // Reconciliation runs once at startup; wait for the sweep to settle
+    // (in-memory backend state → tightened poll, #206 principle 3).
+    let mut removed = test_utils::wait::poll_default("2 containers reclaimed by the sweep", || {
+        let removed = backend.removed();
+        (removed.len() >= 2).then_some(removed)
+    })
+    .await;
     removed.sort();
     assert_eq!(
         removed,
@@ -1667,12 +1675,14 @@ async fn fleet_sweep_core(
     backend: Arc<FakeBackend>,
 ) -> Option<(
     NatsStore,
-    test_utils::nats::NatsTestServer,
+    &'static test_utils::nats::NatsTestServer,
     CoreHandle,
     TempRepo,
 )> {
-    let server = test_utils::nats::NatsTestServer::spawn()?;
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let server = test_utils::nats::NatsTestServer::shared().await?;
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -1782,15 +1792,12 @@ fn work_task(id: u64, state: TaskState, container_id: Option<&str>) -> Task {
 }
 
 async fn wait_killed(backend: &FakeBackend, want: usize) -> Vec<String> {
-    let mut killed = Vec::new();
-    for _ in 0..400 {
-        killed = backend.killed();
-        if killed.len() >= want {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    killed
+    // In-memory backend call log → tightened poll (#206 principle 3).
+    test_utils::wait::poll_default(format!("{want} killed container(s)"), || {
+        let killed = backend.killed();
+        (killed.len() >= want).then_some(killed)
+    })
+    .await
 }
 
 /// §3.6 fleet sweep: a container still running after a crash-restart but owned
@@ -1937,10 +1944,12 @@ async fn startup_fleet_sweep_tolerates_backend_error() {
 /// (§2.1 WrapUp; §3.6 step 3). No gate was in flight, so the fast path squashes.
 #[tokio::test]
 async fn restart_lands_job_orphaned_in_wrapup() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -2071,10 +2080,12 @@ work:
 wrap_up:
   run: ./tasks/web-publish.sh
 "#;
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -2411,10 +2422,12 @@ async fn job_deadline_escalates_once_for_stalled_human_work() {
 /// from the task log on restart.
 #[tokio::test]
 async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -2573,10 +2586,12 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
 /// Running) with zero reconcile-failure and zero synthetic -1.
 #[tokio::test]
 async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -2619,23 +2634,19 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
     handle.release_job("acme", "api", job.id).await.unwrap();
     wait_for_state(&store, job.id, JobState::Work).await;
 
-    // Wait until the work task is Running with its container id stamped.
-    let tasks = store.tasks().await.unwrap();
-    let mut work = None;
-    for _ in 0..400 {
-        let log = tasks.list_for_job("acme", "api", job.id).await.unwrap();
-        if let Some(t) = log
-            .into_iter()
-            .find(|t| t.phase == TaskPhase::Work && t.state == TaskState::Running)
-            && t.container_id.is_some()
-        {
-            work = Some(t);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    let work = work.expect("running work task with a container id");
+    // Wait until the work task is Running with its container id stamped
+    // (#206 principle 3: watch the job's task keys, inspecting each revision).
+    let work = test_utils::wait::task_where(
+        &store,
+        "acme",
+        "api",
+        job.id,
+        "running work task with a container id",
+        |t| t.phase == TaskPhase::Work && t.state == TaskState::Running && t.container_id.is_some(),
+    )
+    .await;
     let real_cid = work.container_id.clone().unwrap();
+    let tasks = store.tasks().await.unwrap();
 
     // Simulate the in-flight race: its `TaskContainerStarted` had not landed, so
     // the record carries no id — yet the fleet still reports the container
@@ -2747,7 +2758,18 @@ async fn cut_short_drain_leaves_records_no_worse() {
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
-    wait_for_state(&rig.store, job.id, JobState::Work).await;
+    // Wait for the in-flight work task itself to be Running — the job-state Work
+    // write can land a beat before the task record, and this test inspects the
+    // task, so gate on the task, not just the job state.
+    test_utils::wait::task_where(
+        &rig.store,
+        "acme",
+        "api",
+        job.id,
+        "running work task",
+        |t| t.phase == TaskPhase::Work && t.state == TaskState::Running,
+    )
+    .await;
 
     // Cut the drain short almost immediately.
     let _ = tokio::time::timeout(Duration::from_millis(1), rig.handle.drain()).await;

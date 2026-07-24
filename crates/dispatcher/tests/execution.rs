@@ -180,7 +180,7 @@ eval:
 "#;
 
 struct Rig {
-    _server: test_utils::nats::NatsTestServer,
+    _server: &'static test_utils::nats::NatsTestServer,
     store: NatsStore,
     repo: TempRepo,
     backend: Arc<FakeBackend>,
@@ -202,8 +202,10 @@ async fn rig_full(
     artifacts_identity: Option<String>,
     launch_queue_max_wait: Option<Duration>,
 ) -> Option<Rig> {
-    let server = test_utils::nats::NatsTestServer::spawn()?;
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let server = test_utils::nats::NatsTestServer::shared().await?;
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -308,11 +310,18 @@ fn commit_work(rig: &Rig) {
 }
 
 async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::Job {
-    let jobs = store.jobs().await.unwrap();
-    for _ in 0..400 {
-        if let Some(job) = jobs.get("acme", "api", seq).await.unwrap() {
+    // Watch-based (#206 principle 3): value-inspecting wait, hard timeout, named
+    // failure. The terminal-state guard is preserved so a job that lands in an
+    // unexpected terminal state still fails loudly rather than timing out.
+    test_utils::wait::job_where(
+        store,
+        "acme",
+        "api",
+        seq,
+        format!("job {seq} to reach {want:?}"),
+        move |job| {
             if job.state == want {
-                return job;
+                return true;
             }
             assert!(
                 !matches!(
@@ -322,10 +331,10 @@ async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::J
                 "job reached terminal-ish {:?} while waiting for {want:?}",
                 job.state
             );
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("timed out waiting for {want:?}");
+            false
+        },
+    )
+    .await
 }
 
 #[tokio::test]
@@ -1165,20 +1174,18 @@ async fn wait_for_task(
     seq: u64,
     pred: impl Fn(&types::Task) -> bool,
 ) -> types::Task {
-    let tasks = store.tasks().await.unwrap();
-    for _ in 0..400 {
-        if let Some(t) = tasks
-            .list_for_job("acme", "api", seq)
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|t| pred(t))
-        {
-            return t;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("timed out waiting for task");
+    // Watch the job's task keys, testing each delivered revision so a transient
+    // state (a task flipping through Pending between relaunch attempts) is
+    // caught, not raced past (#206 principle 3).
+    test_utils::wait::task_where(
+        store,
+        "acme",
+        "api",
+        seq,
+        format!("a task of job {seq} matching predicate"),
+        pred,
+    )
+    .await
 }
 
 /// A command evaluator that can't be placed (fleet full → `NoCapacity`) is
@@ -1343,12 +1350,159 @@ async fn command_work_queues_on_no_capacity_then_launches_when_freed() {
     );
 }
 
+/// A command WORK task whose stdout carries `@chug:leg`/`@chug:report` lines
+/// (ticket #187) has them harvested into the work task's structured result: the
+/// valid legs survive in order, a malformed leg line is dropped without failing
+/// the harvest, ordinary output is ignored, and the envelope merges.
+/// The FAILED sibling of the harvest test (#207 review finding): a command
+/// work run that dies mid-deploy must still carry its harvested leg report —
+/// which leg failed and which never ran is exactly what the record is for.
+/// Previously the harvest landed only on the exit-0 path and a failed deploy
+/// dropped it.
+#[tokio::test]
+async fn failed_command_work_still_carries_harvested_leg_report() {
+    let Some(rig) = rig().await else { return };
+    let logs = concat!(
+        "@chug:leg {\"name\":\"build-dispatcher\",\"status\":\"ok\",\"secs\":41}\n",
+        "@chug:leg {\"name\":\"build-images\",\"status\":\"failed\",\"secs\":7,\"error\":\"ENOSPC\"}\n",
+        "@chug:leg {\"name\":\"restart-verify\",\"status\":\"skipped\"}\n",
+        "@chug:report {\"from_sha\":\"prev999\",\"to_sha\":\"abc123\",\"rollback\":false}\n",
+    );
+    rig.backend.put_logs(logs.as_bytes().to_vec());
+    rig.backend.script_exits([1]); // the deploy failed
+
+    let job = rig.handle.create_job(req("cmd-work")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    // cmd-work has work_retries: 1 — the retry (exit 0 scripted default, but
+    // logs unchanged) is irrelevant here; assert on the FIRST, failed task.
+    let failed = wait_for_task(&rig.store, job.id, |t| {
+        t.phase == TaskPhase::Work && t.state == TaskState::Failed
+    })
+    .await;
+    let Some(types::TaskResult::Command {
+        pass: false,
+        exit_code: 1,
+        structured: Some(value),
+        ..
+    }) = &failed.result
+    else {
+        panic!(
+            "failed run must keep its harvested report, got {:?}",
+            failed.result
+        );
+    };
+    let report: types::DeployReport = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(report.legs.len(), 3);
+    assert_eq!(report.legs[1].status, types::LegStatus::Failed);
+    assert_eq!(report.legs[2].status, types::LegStatus::Skipped);
+    assert_eq!(report.to_sha.as_deref(), Some("abc123"));
+}
+
+#[tokio::test]
+async fn command_work_harvests_deploy_legs_into_structured_result() {
+    let Some(rig) = rig().await else { return };
+    // Interleave ordinary output, valid legs, a malformed leg (must be ignored),
+    // and the deploy envelope — exactly what update.sh's stdout looks like.
+    let logs = concat!(
+        "update: deploying abc123\n",
+        "@chug:leg {\"name\":\"build-dispatcher\",\"status\":\"ok\",\"secs\":41}\n",
+        "some other output the harvest must ignore\n",
+        "@chug:leg {\"name\":\"build-images\",\"status\":\"ok\",\"secs\":7}\n",
+        "@chug:leg {not valid json at all}\n",
+        "@chug:leg {\"name\":\"restart-verify\",\"status\":\"failed\",\"secs\":3,\"error\":\"health timed out\"}\n",
+        "@chug:leg {\"name\":\"sha-advance\",\"status\":\"skipped\"}\n",
+        "@chug:report {\"from_sha\":\"prev999\",\"to_sha\":\"abc123\",\"rollback\":true,\"health\":\"degraded\"}\n",
+        "update: done\n",
+    );
+    rig.backend.put_logs(logs.as_bytes().to_vec());
+
+    let job = rig.handle.create_job(req("cmd-work")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let works: Vec<_> = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.phase == TaskPhase::Work)
+        .collect();
+    assert_eq!(works.len(), 1);
+    let Some(types::TaskResult::Work {
+        structured: Some(value),
+        ..
+    }) = &works[0].result
+    else {
+        panic!(
+            "expected a structured deploy report, got {:?}",
+            works[0].result
+        );
+    };
+    let report: types::DeployReport = serde_json::from_value(value.clone()).unwrap();
+
+    // The malformed line dropped; the four valid legs survive in emission order.
+    assert_eq!(report.legs.len(), 4, "malformed leg dropped: {report:?}");
+    assert_eq!(report.legs[0].name, "build-dispatcher");
+    assert_eq!(report.legs[0].status, types::LegStatus::Ok);
+    assert_eq!(report.legs[0].secs, Some(41));
+    assert_eq!(report.legs[1].name, "build-images");
+    assert_eq!(report.legs[2].name, "restart-verify");
+    assert_eq!(report.legs[2].status, types::LegStatus::Failed);
+    assert_eq!(report.legs[2].error.as_deref(), Some("health timed out"));
+    assert_eq!(report.legs[3].name, "sha-advance");
+    assert_eq!(report.legs[3].status, types::LegStatus::Skipped);
+    assert_eq!(report.legs[3].secs, None);
+    // The @chug:report envelope merged in.
+    assert_eq!(report.from_sha.as_deref(), Some("prev999"));
+    assert_eq!(report.to_sha.as_deref(), Some("abc123"));
+    assert!(report.rollback);
+    assert_eq!(report.health.as_deref(), Some("degraded"));
+}
+
+/// A command WORK task that emits no `@chug:` markers (an ordinary build/deploy
+/// with plain output) gets no structured result — the harvest leaves an
+/// ordinary command task untouched (ticket #187).
+#[tokio::test]
+async fn command_work_without_legs_has_no_structured_result() {
+    let Some(rig) = rig().await else { return };
+    rig.backend
+        .put_logs(b"just some ordinary build output\nno markers here\n".to_vec());
+
+    let job = rig.handle.create_job(req("cmd-work")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let work = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.phase == TaskPhase::Work)
+        .unwrap();
+    match work.result {
+        Some(types::TaskResult::Work { structured, .. }) => {
+            assert!(structured.is_none(), "no markers → no structured report");
+        }
+        other => panic!("expected a Work result, got {other:?}"),
+    }
+}
+
 /// A launch wedged in the queue past the maximum wait escalates with the clear
 /// `no_free_slots_timeout` reason — the backstop for a genuinely stuck fleet
 /// (§3.5). The rig shrinks the max wait so the scan fires it immediately.
 #[tokio::test]
 async fn queued_launch_escalates_after_max_wait() {
-    let Some(rig) = rig_full(None, Some(Duration::from_millis(1))).await else {
+    // 300ms, not 1ms: overdue entries also expire at resume time (#202), and
+    // the Pending observation below needs the entry to survive being seen.
+    let Some(rig) = rig_full(None, Some(Duration::from_millis(300))).await else {
         return;
     };
     // Fleet stays full for the whole test — the launch never gets a slot.
@@ -1363,7 +1517,7 @@ async fn queued_launch_escalates_after_max_wait() {
         t.phase == TaskPhase::Work && t.state == TaskState::Pending
     })
     .await;
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
     rig.handle.trigger_scan().await.unwrap();
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
@@ -1482,7 +1636,10 @@ async fn queued_eval_drains_before_queued_work() {
 /// retries (#140). Same backstop the work path uses; this pins the eval arm.
 #[tokio::test]
 async fn queued_eval_escalates_after_max_wait_not_retry_exhaustion() {
-    let Some(rig) = rig_full(None, Some(Duration::from_millis(1))).await else {
+    // Wide enough to observe the stably-queued Pending state: overdue entries
+    // now also expire at resume time (#202), so a 1ms max-wait escalates
+    // before the first poll can see the queue.
+    let Some(rig) = rig_full(None, Some(Duration::from_millis(300))).await else {
         return;
     };
     // Fleet stays full forever: the eval command launch never gets a slot.
@@ -1500,7 +1657,7 @@ async fn queued_eval_escalates_after_max_wait_not_retry_exhaustion() {
     })
     .await;
     assert_eq!(eval.attempt, 1, "queueing burns no eval_retries");
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
     rig.handle.trigger_scan().await.unwrap();
     let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
     assert_eq!(
@@ -1623,14 +1780,9 @@ async fn agent_eval_queues_on_no_capacity_then_launches_when_freed() {
 /// retries (#140). Pins the agent arm of the queue-timeout backstop, the exact
 /// failure mode #125/#130 hit before the fix.
 #[tokio::test]
-#[ignore = "deterministic red since job/150: bogus age identity fails rig setup, and fixing \
-            the identity unmasks a real #140 launch-queue bug (drain_launch_queue re-runs \
-            after every actor message and instantly re-resumes a starved agent eval, so the \
-            max-wait scan never sees it queued and escalates nothing). Quarantined \
-            2026-07-23 to unjam CI; the launch-queue fix + un-quarantine are tracked in a \
-            follow-up ticket"]
 async fn agent_eval_escalates_after_max_wait_not_retry_exhaustion() {
-    let Some(rig) = rig_full(Some("acme/api".into()), Some(Duration::from_millis(1))).await else {
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let Some(rig) = rig_full(Some(identity), Some(Duration::from_millis(100))).await else {
         return;
     };
     // The agent eval container is refused forever; command work still launches.
@@ -1644,20 +1796,31 @@ async fn agent_eval_escalates_after_max_wait_not_retry_exhaustion() {
     let job = rig.handle.create_job(req("cmd-agent-eval")).await.unwrap();
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
 
-    // The agent eval queues (Pending, attempt 1 — no eval_retries burned), then
-    // the backstop scan escalates it on the queue timeout.
-    let eval = wait_for_task(&rig.store, job.id, |t| {
-        t.phase == TaskPhase::Evaluation && t.state == TaskState::Pending
-    })
-    .await;
-    assert_eq!(eval.attempt, 1, "queueing burns no eval_retries");
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    // A starved agent eval ping-pongs between the queue and an optimistic
+    // relaunch, so its Pending state is only ever transient — the assertions
+    // target the outcomes: the backstop escalates with the queue-timeout
+    // reason (never eval_infra_failure), and the whole wait burned zero
+    // eval_retries (the failed record still says attempt 1).
+    tokio::time::sleep(Duration::from_millis(200)).await;
     rig.handle.trigger_scan().await.unwrap();
     let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
     assert_eq!(
         escalated.escalation.unwrap().reason,
         "no_free_slots_timeout",
         "starved agent eval escalates on the queue timeout, not eval_infra_failure",
+    );
+    let eval = wait_for_task(&rig.store, job.id, |t| {
+        t.phase == TaskPhase::Evaluation && t.state == TaskState::Failed
+    })
+    .await;
+    assert_eq!(eval.attempt, 1, "queue starvation burns no eval_retries");
+    let output = match eval.result {
+        Some(types::TaskResult::Command { ref output, .. }) => output.clone(),
+        ref other => panic!("expected the queue-timeout Command result, got {other:?}"),
+    };
+    assert!(
+        output.contains("launch queue"),
+        "failure records the queue wait: {output}"
     );
 }
 
@@ -1940,10 +2103,12 @@ work:
 /// its config entry, and declared secrets arrive age-decrypted in the env.
 #[tokio::test]
 async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -3250,21 +3415,17 @@ async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
 
     rig.handle.triage_job("acme", "api", job.id).await.unwrap();
 
-    // Poll for the Triage task to land with a recorded assessment.
-    let tasks = rig.store.tasks().await.unwrap();
-    let mut triage = None;
-    for _ in 0..400 {
-        let log = tasks.list_for_job("acme", "api", job.id).await.unwrap();
-        if let Some(t) = log
-            .iter()
-            .find(|t| t.phase == TaskPhase::Triage && t.result.is_some())
-        {
-            triage = Some(t.clone());
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let triage = triage.expect("triage task recorded a result");
+    // Wait for the Triage task to land with a recorded assessment (#206
+    // principle 3): watch the job's task keys, inspecting each revision.
+    let triage = test_utils::wait::task_where(
+        &rig.store,
+        "acme",
+        "api",
+        job.id,
+        format!("triage task for job {} with a result", job.id),
+        |t| t.phase == TaskPhase::Triage && t.result.is_some(),
+    )
+    .await;
     assert_eq!(triage.state, TaskState::Done);
     match triage.result.as_ref().unwrap() {
         types::TaskResult::Triage { assessment, .. } => {
@@ -3315,15 +3476,15 @@ async fn triage_rejected_on_non_intervention_state() {
 /// The record is written at launch with its resolved kind, so it is readable
 /// even after the job advances past Work.
 async fn wait_for_work_task(store: &NatsStore, seq: u64) -> types::Task {
-    let tasks = store.tasks().await.unwrap();
-    for _ in 0..400 {
-        let log = tasks.list_for_job("acme", "api", seq).await.unwrap();
-        if let Some(t) = log.into_iter().find(|t| t.phase == TaskPhase::Work) {
-            return t;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("timed out waiting for a work task for #{seq}");
+    test_utils::wait::task_where(
+        store,
+        "acme",
+        "api",
+        seq,
+        format!("a Work-phase task for job {seq}"),
+        |t| t.phase == TaskPhase::Work,
+    )
+    .await
 }
 
 // §12.4 model resolution: a per-job `Job.model` override lands on the Work
@@ -3378,20 +3539,19 @@ async fn work_container_id_recorded_while_running_and_kept_after_exit() {
     rig.provider.on_run(move |cfg| async move {
         // The "container" is alive until this hook returns: the id must already
         // be on the Running task record by now.
-        let tasks = store.tasks().await.unwrap();
-        let mut recorded = None;
-        for _ in 0..400 {
-            if let Some(t) = tasks.get("acme", "api", 1, 1).await.unwrap()
-                && t.state == TaskState::Running
-                && t.container_id.is_some()
-            {
-                recorded = t.container_id.clone();
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        // Resolves only once the Running work task carries a container id, so
+        // reaching past it is itself the assertion (#206 principle 3).
+        let work = test_utils::wait::task_where(
+            &store,
+            "acme",
+            "api",
+            1,
+            "work task 1/1 to record a container_id while Running",
+            |t| t.id == 1 && t.state == TaskState::Running && t.container_id.is_some(),
+        )
+        .await;
         assert!(
-            recorded.is_some(),
+            work.container_id.is_some(),
             "container_id must be set while the work task is Running"
         );
         // Commit so the job lands real content.
@@ -3868,17 +4028,17 @@ async fn rework_context_carries_command_eval_output_tail() {
     let job = rig.handle.create_job(req("impl-cmd-rework")).await.unwrap();
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
 
-    // Wait for the rework work cycle to launch (a second provider run).
-    let mut rework_prompt = None;
-    for _ in 0..400 {
-        let runs = rig.provider.runs();
-        if runs.len() >= 2 {
-            rework_prompt = Some(runs[1].prompt.clone());
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let prompt = rework_prompt.expect("a rework work cycle must launch after the ci failure");
+    // Wait for the rework work cycle to launch (a second provider run). This
+    // observes in-memory FakeProvider state — no KV to watch — so it uses the
+    // tightened poll (10ms + hard timeout + named message) (#206 principle 3).
+    let prompt = test_utils::wait::poll_default(
+        "a rework work cycle (2nd provider run) after the ci failure",
+        || {
+            let runs = rig.provider.runs();
+            (runs.len() >= 2).then(|| runs[1].prompt.clone())
+        },
+    )
+    .await;
     assert!(
         prompt.contains("FAILING_CI: assertion failed at src/lib.rs:99"),
         "the ci output tail must reach the rework prompt: {prompt}"

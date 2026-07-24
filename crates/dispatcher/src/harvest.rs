@@ -185,6 +185,45 @@ impl Harvester {
     }
 }
 
+/// Parse the structured deploy report a command work task emits on stdout
+/// (ticket #187). `update.sh` prints one `@chug:leg {json}` line per deploy leg
+/// plus a single `@chug:report {json}` envelope; this harvests them from the
+/// captured container logs — the same bytes [`Harvester::collect_logs`] stores —
+/// into a [`types::DeployReport`] for the task's structured result. Generic to
+/// command work: any job type could emit legs, but a deploy is the consumer that
+/// matters.
+///
+/// Forgiving like every other harvest: a malformed marker line is skipped rather
+/// than failing the whole report, and non-marker output is ignored untouched.
+/// Returns `None` when no marker line was present, so an ordinary command task's
+/// result is left exactly as it was.
+pub(crate) fn parse_deploy_report(logs: &str) -> Option<types::DeployReport> {
+    use types::deploy::{LEG_MARKER, REPORT_MARKER};
+    let mut report = types::DeployReport::default();
+    let mut found = false;
+    for line in logs.lines() {
+        let line = line.trim();
+        // Order matters only in that neither marker is a prefix of the other.
+        if let Some(rest) = line.strip_prefix(LEG_MARKER) {
+            if let Ok(leg) = serde_json::from_str::<types::DeployLeg>(rest.trim()) {
+                report.legs.push(leg);
+                found = true;
+            }
+        } else if let Some(rest) = line.strip_prefix(REPORT_MARKER) {
+            // The single deploy envelope: from/to SHAs, rollback, health. Parsed
+            // into a DeployReport (its `legs` default empty) so we reuse one type.
+            if let Ok(env) = serde_json::from_str::<types::DeployReport>(rest.trim()) {
+                report.from_sha = env.from_sha.or(report.from_sha.take());
+                report.to_sha = env.to_sha.or(report.to_sha.take());
+                report.rollback = env.rollback;
+                report.health = env.health.or(report.health.take());
+                found = true;
+            }
+        }
+    }
+    found.then_some(report)
+}
+
 /// Build the artifact store from the dispatcher's `age_artifacts` identity.
 /// `None` disables capture rather than failing startup — a platform without the
 /// key still runs jobs, it just keeps no transcripts.

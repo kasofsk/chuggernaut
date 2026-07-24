@@ -47,6 +47,7 @@ pub(crate) fn build_base_snapshot(
                     // is belt-and-suspenders).
                     available: status.map(|s| s.available).unwrap_or(true),
                     version: status.and_then(|s| s.version.clone()),
+                    refresh_outcome: status.and_then(|s| s.refresh_outcome.clone()),
                 }
             })
             .collect(),
@@ -92,6 +93,7 @@ pub(crate) fn merge_live_fleet(
         if let Some(status) = fleet.iter().find(|s| s.name == node.name) {
             node.available = status.available;
             node.version = status.version.clone();
+            node.refresh_outcome = status.refresh_outcome.clone();
         }
         // The live announcement wins on slots for a seeded worker.
         if let Some(r) = roster.iter().find(|r| r.name == node.name) {
@@ -250,6 +252,7 @@ mod tests {
             name: "nuc".into(),
             available: false,
             version: Some("0.1.0+abc".into()),
+            refresh_outcome: None,
         }];
         let snap = build_base_snapshot(&config(), &fleet, Some("abc".into()), true);
         assert_eq!(snap.nodes.len(), 1);
@@ -269,6 +272,7 @@ mod tests {
             name: "nuc".into(),
             available: true,
             version: Some("0.1.0+abc".into()),
+            refresh_outcome: None,
         }];
         let base = build_base_snapshot(&config(), &fleet, Some("abc".into()), true);
         let published = serde_json::to_vec(&base).unwrap();
@@ -296,6 +300,7 @@ mod tests {
             slots,
             available: true,
             version: Some("0.1.0".into()),
+            refresh_outcome: None,
         }
     }
 
@@ -311,6 +316,7 @@ mod tests {
             name: "air".into(),
             available: true,
             version: Some("0.2.0+air".into()),
+            refresh_outcome: None,
         }];
         // Roster reflects the re-announce at 5 slots (announce wins).
         let roster = vec![WorkerNode {

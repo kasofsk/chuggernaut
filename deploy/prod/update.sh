@@ -18,6 +18,102 @@ set -eu
 # identically from any caller: runner, ssh, or an interactive shell.
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+# refresh_workers — request a self-refresh of every worker node in DOCKER_NODES
+# and WAIT for confirmation (spec §3.1). Extracted as a function so it is unit
+# testable (update-refresh.test.sh) with a stubbed chuggernaut binary.
+#
+# The `admin worker-refresh` CLI always exits 0 — every outcome (not accepted,
+# SKIPPED for no git credential, already-in-progress, and even "not confirmed
+# within the wait window") returns Ok and prints its story to stdout; ONLY a
+# confirmed swap prints "refresh OK:" (admin.rs). So we cannot trust the exit
+# code: we pass --wait-secs 90 to actually RUN the confirm loop and treat the
+# absence of a "refresh OK:" line as a FAILED deploy step. No more
+# `|| echo WARNING` masking a refresh that never landed (#186).
+#
+# Returns 0 iff every worker node confirmed onto $TARGET_SHA; non-zero otherwise.
+# Reads TARGET_SHA, DOCKER_NODES, NATS_URL, KEYS_DIR, CHUG_IMAGE_TAG from the env;
+# the chuggernaut binary is $CHUG_BIN (default target/release/chuggernaut).
+# --- structured-leg helpers (ticket #187) ------------------------------------
+# Pure emit helpers, defined above the CHUG_UPDATE_LIB gate so the test harness
+# (and refresh_workers, which emits per-node legs) can use them when sourced.
+# The leg STATE and the exit trap live in the execution section further down.
+chug_json_str() {
+  # Minimal, JSON-safe scalar: drop backslashes/quotes, flatten whitespace, cap.
+  printf '%s' "$1" | tr '\n\r\t' '   ' | tr -d '\\"' | cut -c1-200
+}
+
+chug_emit_leg() {
+  # chug_emit_leg NAME STATUS [SECS] [ERROR]
+  _l="{\"name\":\"$1\",\"status\":\"$2\""
+  [ -n "${3:-}" ] && _l="$_l,\"secs\":$3"
+  [ -n "${4:-}" ] && _l="$_l,\"error\":\"$(chug_json_str "$4")\""
+  echo "@chug:leg $_l}"
+}
+
+chug_leg_drop() {
+  _new=""
+  for _p in $CHUG_LEGS_PENDING; do
+    [ "$_p" = "$1" ] || _new="$_new $_p"
+  done
+  CHUG_LEGS_PENDING="$_new"
+}
+
+leg_begin() {
+  CHUG_LEG_NAME="$1"
+  CHUG_LEG_START="$(date +%s)"
+}
+
+leg_ok() {
+  [ -n "$CHUG_LEG_NAME" ] || return 0
+  chug_emit_leg "$CHUG_LEG_NAME" ok "$(( $(date +%s) - CHUG_LEG_START ))"
+  chug_leg_drop "$CHUG_LEG_NAME"
+  CHUG_LEG_NAME=""
+}
+
+
+refresh_workers() {
+  [ -n "${DOCKER_NODES:-}" ] || return 0
+  bin="${CHUG_BIN:-target/release/chuggernaut}"
+  # A real refresh REBUILDS the node's three images before the daemon swap —
+  # minutes even warm (the nuc took ~7 on 2026-07-23), not seconds. 90s would
+  # fail every honest deploy mid-build; default to 15min, overridable per
+  # deploy (WORKER_REFRESH_WAIT_SECS) for fleets with hotter caches.
+  wait_secs="${WORKER_REFRESH_WAIT_SECS:-900}"
+  # Main-shell iteration (no pipeline): chug_leg_drop mutates
+  # CHUG_LEGS_PENDING, and a `| while` subshell would discard those drops —
+  # the EXIT trap would then re-mark already-emitted worker-refresh legs as
+  # skipped (#207 review).
+  for _entry in $(printf '%s' "$DOCKER_NODES" | tr ',' ' '); do
+    wn="$(printf '%s' "$_entry" | cut -d'|' -f1 | tr -d '[:space:]')"
+    wep="$(printf '%s' "$_entry" | cut -d'|' -f2 | tr -d '[:space:]')"
+    [ "$wep" = "worker" ] || continue
+    echo "update: requesting self-refresh of worker '$wn' -> $TARGET_SHA (waiting up to ${wait_secs}s for confirmation)"
+    _wr_start="$(date +%s)"
+    out="$("$bin" admin worker-refresh \
+      --nats-url "${NATS_URL:-nats://localhost:4222}" \
+      --keys-dir "$KEYS_DIR" \
+      --node "$wn" --sha "$TARGET_SHA" --tag "${CHUG_IMAGE_TAG:-prod}" \
+      --wait-secs "$wait_secs" 2>&1)" || true
+    printf '%s\n' "$out"   # stream the CLI's story into the deploy task log
+    if printf '%s\n' "$out" | grep -q 'refresh OK:'; then
+      chug_emit_leg "worker-refresh:$wn" ok "$(( $(date +%s) - _wr_start ))"
+      chug_leg_drop "worker-refresh:$wn"
+      echo "update: worker '$wn' confirmed on $TARGET_SHA"
+    else
+      chug_emit_leg "worker-refresh:$wn" failed "$(( $(date +%s) - _wr_start ))" "refresh not confirmed"
+      chug_leg_drop "worker-refresh:$wn"
+      echo "update: worker '$wn' refresh NOT confirmed on $TARGET_SHA — FAILING deploy (not a warning)" >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+
+# When sourced by the test harness (CHUG_UPDATE_LIB set), stop here: the helper
+# functions above are all the test wants — none of the deploy side effects below.
+[ -n "${CHUG_UPDATE_LIB:-}" ] && return 0
+
 CHUG_REPO="${CHUG_REPO:-$HOME/chuggernaut}"   # the deployed checkout
 TARGET_REF="${1:-origin/main}"
 
@@ -74,20 +170,79 @@ if [ -z "${CHUG_UPDATE_REEXEC:-}" ]; then
   CHUG_UPDATE_REEXEC=1 exec "$CHUG_REPO/deploy/prod/update.sh" "$TARGET_SHA"
 fi
 
+# --- structured deploy legs (ticket #187) ------------------------------------
+# Each step below is a "leg". We time it and emit one machine-readable
+# `@chug:leg {json}` line to stdout; a single `@chug:report {json}` envelope
+# follows at exit. tasks/deploy.sh streams stdout back unchanged, and the
+# dispatcher harvests these lines into the deploy task's structured result — so a
+# deploy's outcome is a typed record, not one opaque log. Purely additive: the
+# wrapped commands are unchanged, and this is confined to a few helper calls.
+CHUG_LEG_NAME=""
+CHUG_LEG_START=0
+# Legs still to run, in order, so a failure can mark the remainder skipped. The
+# per-node worker-refresh legs are emitted inline (their count is dynamic).
+CHUG_LEGS_PENDING="build-dispatcher build-images web-publish init ssh-front restart-verify sha-advance"
+CHUG_ROLLBACK=false
+CHUG_HEALTH=""
+CHUG_FROM_SHA=""
+[ -f "$MARK" ] && CHUG_FROM_SHA="$(cat "$MARK")"
+
+# On any early exit (a `set -e` abort), the in-progress leg failed and the rest
+# never ran — emit that story so a failed deploy is a structured record, not a
+# truncated log. Always closes with the `@chug:report` envelope.
+chug_on_exit() {
+  _rc=$?
+  if [ "$_rc" != 0 ]; then
+    # The in-flight leg (if any) failed…
+    if [ -n "$CHUG_LEG_NAME" ]; then
+      chug_emit_leg "$CHUG_LEG_NAME" failed "$(( $(date +%s) - CHUG_LEG_START ))" "step exited $_rc"
+      chug_leg_drop "$CHUG_LEG_NAME"
+      CHUG_LEG_NAME=""
+    fi
+    # …and everything still pending never ran. Unconditional on failure:
+    # refresh_workers fails BETWEEN legs (it emits its own per-node legs, no
+    # leg_begin in flight), and the old CHUG_LEG_NAME guard skipped this loop
+    # entirely, silently omitting the unreached legs (#207 review, cycle 2).
+    for _p in $CHUG_LEGS_PENDING; do chug_emit_leg "$_p" skipped; done
+    CHUG_LEGS_PENDING=""
+  fi
+  _rep="{\"rollback\":$CHUG_ROLLBACK"
+  [ -n "$CHUG_FROM_SHA" ] && _rep="$_rep,\"from_sha\":\"$CHUG_FROM_SHA\""
+  [ -n "${TARGET_SHA:-}" ] && _rep="$_rep,\"to_sha\":\"$TARGET_SHA\""
+  [ -n "$CHUG_HEALTH" ] && _rep="$_rep,\"health\":\"$CHUG_HEALTH\""
+  echo "@chug:report $_rep}"
+}
+trap chug_on_exit EXIT
+
 # 1. Native build of the host binaries (dispatcher + api — the api is the same
 #    `chuggernaut` binary, now run natively under launchd instead of in a
 #    container, so this build is the only place its code is compiled).
+leg_begin build-dispatcher
 cargo build --release
+leg_ok
 
 # 2. SSH-front image + linux channel binary (build.sh). No api/agent images
 #    build here anymore: the api runs natively (step 6b) and job containers run
 #    only on worker nodes, which build their own agent images (step 3).
+leg_begin build-images
 CHUG_IMAGE_TAG="${CHUG_IMAGE_TAG:-prod}" deploy/prod/build.sh
+leg_ok
 
 # Load prod config for the steps below.
 set -a
 . deploy/prod/chuggernaut.env
 set +a
+
+# Now that DOCKER_NODES is known, register the dynamic per-node refresh legs
+# in the pending list: if an earlier leg dies, the exit trap reports these as
+# skipped instead of silently omitting them (#207 review). refresh_workers
+# drops each as it emits.
+for _entry in $(printf '%s' "${DOCKER_NODES:-}" | tr ',' ' '); do
+  _wn="$(printf '%s' "$_entry" | cut -d'|' -f1 | tr -d '[:space:]')"
+  _wep="$(printf '%s' "$_entry" | cut -d'|' -f2 | tr -d '[:space:]')"
+  [ "$_wep" = "worker" ] || continue
+  CHUG_LEGS_PENDING="$CHUG_LEGS_PENDING worker-refresh:$_wn"
+done
 
 # 2b. Build the web SPA on the host and seed the served UI dir. The native api
 #     serves UI_DIST from UI_ROOT (run-api.sh); web-publish jobs rsync new
@@ -98,8 +253,10 @@ set +a
 UI_ROOT="${UI_ROOT:-$HOME/chuggernaut-data/ui}"
 export UI_ROOT
 mkdir -p "$UI_ROOT"
+leg_begin web-publish
 ( cd web && npm ci && npm run build )
 rsync -a --delete web/dist/ "$UI_ROOT/"
+leg_ok
 
 # 3. Worker nodes: refresh to the deployed SHA (rebuild the three node images +
 #    swap the daemon — job containers survive, spec §3.1).
@@ -112,33 +269,26 @@ rsync -a --delete web/dist/ "$UI_ROOT/"
 #    a node that fails is a WARNING with its drift surfaced (its ping version
 #    also feeds the fleet snapshot), never a deploy failure.
 CHUG_IMAGE_TAG="${CHUG_IMAGE_TAG:-prod}" deploy/prod/build-worker.sh
-if [ -z "${WORKER_SSH:-}" ] && [ -n "${DOCKER_NODES:-}" ]; then
-  echo "$DOCKER_NODES" | tr ',' '\n' | while IFS='|' read -r wn wep _wslots; do
-    wn="$(echo "$wn" | tr -d '[:space:]')"
-    wep="$(echo "$wep" | tr -d '[:space:]')"
-    [ "$wep" = "worker" ] || continue
-    echo "update: requesting self-refresh of worker '$wn' -> $TARGET_SHA"
-    # The command's stdout streams into the deploy task log, so its outcome is
-    # ALWAYS visible: `refresh requested` / `refresh already in progress` / or,
-    # critically, `node <name>: refresh SKIPPED — no git credential` when the
-    # node lacks WORKER_REFRESH_GIT_URL / its key (spec §3.1). That loud skip is
-    # what stops a credential-less node from making a deploy look like a success
-    # that refreshed nothing (#114); the fleet snapshot's per-node version (#109)
-    # is the cross-check. A non-zero exit (unreachable NATS etc.) is the fallback.
-    target/release/chuggernaut admin worker-refresh \
-      --nats-url "${NATS_URL:-nats://localhost:4222}" \
-      --keys-dir "$KEYS_DIR" \
-      --node "$wn" --sha "$TARGET_SHA" --tag "${CHUG_IMAGE_TAG:-prod}" \
-      || echo "update: WARNING worker '$wn' refresh request errored (non-fatal)"
-  done
+# NO-SSH self-refresh path: request + CONFIRM a refresh of each worker node. A
+# node that does not confirm on $TARGET_SHA fails the deploy (refresh_workers
+# returns non-zero, aborting under `set -e`) — the deploy no longer claims
+# success while a worker silently stayed on the old SHA (#186). Each node also
+# emits a `worker-refresh:{node}` leg (#187) from inside refresh_workers. The
+# fleet snapshot's per-node version (#109) remains the independent cross-check.
+if [ -z "${WORKER_SSH:-}" ]; then
+  CHUG_BIN="target/release/chuggernaut" refresh_workers
 fi
 
 # 4. Idempotent init — creates only missing keys (e.g. a newly-added age key).
+leg_begin init
 target/release/chuggernaut init --keys-dir "$KEYS_DIR" --repos-root "$REPOS_ROOT"
+leg_ok
 
 # 5. Rebuild + restart the ssh front (the only container whose code ships here;
 #    nats runs unchanged, brought up by boot.sh).
+leg_begin ssh-front
 GIT_UID="$(id -u)" docker compose -f deploy/prod/compose.yaml up -d --build ssh
+leg_ok
 
 # 6. Restart the host services (dispatcher + api — one binary, two launchd
 #    services; restart is safe, §3.6 reconciles in-memory state from KV) onto
@@ -151,14 +301,30 @@ GIT_UID="$(id -u)" docker compose -f deploy/prod/compose.yaml up -d --build ssh
 #    exit here fails the deploy job — but prod is already back on the old binary.
 PREV_SHA="unknown"
 [ -f "$MARK" ] && PREV_SHA="$(cat "$MARK")"
+# restart-verify runs inside `if`, so a failure does NOT `set -e`-abort here —
+# emit the restart-verify/sha-advance legs explicitly in each branch (ticket
+# #187) rather than relying on the EXIT trap.
+_rv_start="$(date +%s)"
 if deploy/prod/restart-verify.sh "$TARGET_SHA" "$PREV_SHA"; then
+  chug_emit_leg "restart-verify" ok "$(( $(date +%s) - _rv_start ))"
+  chug_leg_drop "restart-verify"
+  CHUG_HEALTH="ok"
   # Only record success once the dispatcher has genuinely come up on the new SHA.
+  _sa_start="$(date +%s)"
   echo "$TARGET_SHA" > "$MARK"
+  chug_emit_leg "sha-advance" ok "$(( $(date +%s) - _sa_start ))"
+  chug_leg_drop "sha-advance"
   echo "update: deployed $TARGET_SHA OK"
 else
   rc=$?
   # restart-verify.sh already printed the story (rolled back, or shouting for
   # help). Leave .deployed-sha untouched: prod is NOT on $TARGET_SHA.
+  chug_emit_leg "restart-verify" failed "$(( $(date +%s) - _rv_start ))" "health check failed (exit $rc), rolled back"
+  chug_leg_drop "restart-verify"
+  chug_emit_leg "sha-advance" skipped
+  chug_leg_drop "sha-advance"
+  CHUG_ROLLBACK=true
+  CHUG_HEALTH="failed"
   echo "update: deploy of $TARGET_SHA FAILED health check (exit $rc)" >&2
   exit "$rc"
 fi

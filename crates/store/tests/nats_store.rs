@@ -84,7 +84,9 @@ fn step(n: u32, kind: StepKind) -> StepRecord {
 #[tokio::test]
 async fn topology_and_typed_stores_round_trip() {
     let server = require_nats!();
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     // Idempotent: second call must not fail.
     store.ensure_topology().await.unwrap();
@@ -133,7 +135,9 @@ async fn topology_and_typed_stores_round_trip() {
 #[tokio::test]
 async fn artifacts_round_trip_a_blob_larger_than_max_payload() {
     let server = require_nats!();
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
     let (identity, public) = store::secrets::generate_age_keypair();
@@ -238,7 +242,9 @@ async fn artifacts_round_trip_a_blob_larger_than_max_payload() {
 #[tokio::test]
 async fn job_attachments_round_trip_list_and_delete() {
     let server = require_nats!();
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
     let (identity, public) = store::secrets::generate_age_keypair();
@@ -345,10 +351,74 @@ async fn job_attachments_round_trip_list_and_delete() {
     assert_eq!(names, vec!["mobile-bug.png".to_string()]);
 }
 
+/// #196 regression stress: the 2026-07-23 CI hang was a racy tombstone state
+/// in async-nats' object store (GET after DELETE parked `read_to_end` forever;
+/// the list stream was the other suspect). Hammer the full
+/// put/get/list/delete/get-after-delete/double-delete cycle so any recurrence
+/// of an unbounded await surfaces here — and surfaces as a loud `StoreError`
+/// via the store-level op bound rather than a parked runtime.
+#[tokio::test]
+async fn job_attachments_stress_cycle() {
+    let server = require_nats!();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let arts = store
+        .artifacts(store::ArtifactCrypto::with_identity(&identity).unwrap())
+        .await
+        .unwrap();
+
+    for i in 0..20u32 {
+        let name = format!("shot-{i}.png");
+        let body = format!("bytes-{i}").into_bytes();
+        arts.put_attachment("acme", "api", 7, &name, "image/png", &body)
+            .await
+            .unwrap();
+        let (_, got) = arts
+            .get_attachment("acme", "api", 7, &name)
+            .await
+            .unwrap()
+            .expect("just put");
+        assert_eq!(got, body);
+        let listed = arts.list_attachments("acme", "api", 7).await.unwrap();
+        assert!(listed.iter().any(|a| a.name == name), "iter {i}: listed");
+        assert!(
+            arts.delete_attachment("acme", "api", 7, &name)
+                .await
+                .unwrap()
+        );
+        // The exact prod hang: GET after DELETE must read as absent, not park.
+        assert!(
+            arts.get_attachment("acme", "api", 7, &name)
+                .await
+                .unwrap()
+                .is_none(),
+            "iter {i}: get-after-delete absent"
+        );
+        assert!(
+            !arts
+                .delete_attachment("acme", "api", 7, &name)
+                .await
+                .unwrap(),
+            "iter {i}: double-delete false"
+        );
+        let after = arts.list_attachments("acme", "api", 7).await.unwrap();
+        assert!(
+            after.iter().all(|a| a.name != name),
+            "iter {i}: gone from listing"
+        );
+    }
+}
+
 #[tokio::test]
 async fn step_log_upserts_by_step_number() {
     let server = require_nats!();
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let steps = store.steps().await.unwrap();
 
@@ -380,25 +450,27 @@ async fn step_log_upserts_by_step_number() {
 #[tokio::test]
 async fn request_with_retry_survives_late_responder() {
     let server = require_nats!();
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    // Both ends share one namespace so the prefixed subject lines up (#206).
+    let prefix = test_utils::unique_prefix();
+    let store = NatsStore::connect_namespaced(server.url(), &prefix)
+        .await
+        .unwrap();
 
     // Responder comes up only after the first attempt has failed — the §4.2
-    // bounded-retry contract is that the submit eventually lands.
-    let responder_store = NatsStore::connect(server.url()).await.unwrap();
+    // bounded-retry contract is that the submit eventually lands. It subscribes
+    // through the namespaced store so the harness prefix is applied on both
+    // ends (a raw `client().subscribe` would miss it).
+    let responder_store = NatsStore::connect_namespaced(server.url(), &prefix)
+        .await
+        .unwrap();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let mut sub = responder_store
-            .client()
-            .subscribe("req.work.submit.acme.api.1")
+            .subscribe_requests("req.work.submit.acme.api.1")
             .await
             .unwrap();
-        use futures::StreamExt;
-        if let Some(msg) = sub.next().await {
-            responder_store
-                .client()
-                .publish(msg.reply.unwrap(), "ack".into())
-                .await
-                .unwrap();
+        if let Some(req) = sub.next().await {
+            req.respond("ack").await;
         }
     });
 
@@ -412,4 +484,53 @@ async fn request_with_retry_survives_late_responder() {
         .await
         .unwrap();
     assert_eq!(&reply.payload[..], b"ack");
+}
+
+/// #206 isolation guard: two namespaced stores on the *same* server share no KV
+/// state (writes under one prefix are invisible under another), and a namespaced
+/// store never creates the production (un-prefixed) buckets — so the shared
+/// per-process server keeps tests apart, and prod names are reserved for prod.
+#[tokio::test]
+async fn namespaces_isolate_and_reserve_prod_names() {
+    let server = require_nats!();
+
+    let a = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    let b = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    a.ensure_topology().await.unwrap();
+    b.ensure_topology().await.unwrap();
+
+    a.jobs().await.unwrap().put(&job(1)).await.unwrap();
+    // b, a different namespace, must not see a's write.
+    assert!(
+        b.jobs()
+            .await
+            .unwrap()
+            .get("acme", "api", 1)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // a sees its own.
+    assert!(
+        a.jobs()
+            .await
+            .unwrap()
+            .get("acme", "api", 1)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // A namespaced store must not have created the bare, production-named `jobs`
+    // bucket: a plain (empty-prefix) handle finds no such bucket until real
+    // `ensure_topology` runs for prod. This reserves prod names for prod.
+    let prod = NatsStore::connect(server.url()).await.unwrap();
+    assert!(
+        prod.jobs().await.is_err(),
+        "namespaced tests must not create the production `jobs` bucket"
+    );
 }

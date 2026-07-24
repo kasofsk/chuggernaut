@@ -19,14 +19,22 @@ UI_ROOT="\$HOME/chuggernaut-data/ui"   # expanded remotely
 
 SHA="$(git rev-parse HEAD)"
 
+# Single cleanup for every temp file this script stages (the tarball below and,
+# when we materialize one, the deploy key). POSIX sh allows only one EXIT trap,
+# so both paths funnel through these vars — a second `trap` would clobber the
+# first and leak whichever file the other path staged.
+TARBALL=""
+KEY_TMP=""
+trap 'rm -f "$TARBALL" "$KEY_TMP" 2>/dev/null || true' EXIT INT TERM
+
 # Resolve the deploy key to a file for `ssh -i` (same contract as deploy.sh).
 if [ -n "${MINI_DEPLOY_KEY_FILE:-}" ]; then
   KEY_FILE="$MINI_DEPLOY_KEY_FILE"
 elif [ -n "${MINI_DEPLOY_KEY:-}" ]; then
   KEY_FILE="$(mktemp)"
+  KEY_TMP="$KEY_FILE"
   chmod 600 "$KEY_FILE"
   printf '%s\n' "$MINI_DEPLOY_KEY" > "$KEY_FILE"
-  trap 'rm -f "$KEY_FILE"' EXIT INT TERM
 else
   echo "web-publish: MINI_DEPLOY_KEY (or MINI_DEPLOY_KEY_FILE) not set — cannot ssh" >&2
   exit 1
@@ -39,14 +47,35 @@ npm ci --no-audit --no-fund
 npm run build
 cd ..
 
+echo "web-publish: staging dist tarball"
+# Stage the archive to a FILE first, never straight into the ssh pipe. A POSIX
+# pipeline reports only the LAST command's exit status, so `tar | ssh "rsync
+# --delete"` can mask a tar that dies mid-stream while the remote rsync succeeds
+# — with --delete that WIPES the served UI under a "done" message (#186). By
+# staging locally and POSITIVELY asserting the archive is non-empty AND carries
+# index.html before it can reach the remote --delete, an empty/partial tar can
+# never propagate: the wipe is structurally impossible, not merely unlikely.
+TARBALL="$(mktemp)"
+tar -C web/dist -cf "$TARBALL" .
+if [ ! -s "$TARBALL" ]; then
+  echo "web-publish: staged tarball is EMPTY — refusing to ship (a --delete sync of an empty tree would WIPE the served UI)" >&2
+  exit 1
+fi
+if ! tar -tf "$TARBALL" | grep -Eq '(^|/)index\.html$'; then
+  echo "web-publish: staged tarball has no index.html — refusing to ship (would leave the UI broken/wiped)" >&2
+  exit 1
+fi
+
 echo "web-publish: shipping dist to $MINI_HOST:$UI_ROOT"
-# Stage remotely, then swap contents in place (macOS has rsync natively).
-tar -C web/dist -cf - . | $SSH "$MINI_HOST" "
+# Stream the VERIFIED tarball from the file; swap contents in place remotely
+# (macOS has rsync natively). stdin comes from a file, so there is no upstream
+# pipeline whose failure could be masked.
+$SSH "$MINI_HOST" "
   set -eu
   rm -rf $UI_ROOT.new && mkdir -p $UI_ROOT.new $UI_ROOT
   tar -xf - -C $UI_ROOT.new
   rsync -a --delete $UI_ROOT.new/ $UI_ROOT/
   rm -rf $UI_ROOT.new
-"
+" < "$TARBALL"
 
 echo "web-publish: done — $SHA is live (refresh the page)"

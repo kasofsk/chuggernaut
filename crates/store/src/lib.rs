@@ -13,7 +13,8 @@ pub use artifacts::{
     ArtifactCrypto, ArtifactKind, ArtifactStore, Attachment, DEFAULT_ATTACHMENT_CONTENT_TYPE,
 };
 pub use stores::{
-    Bucket, CounterStore, JobStore, ProjectStore, RdepsStore, StepStore, TaskStore, split_project,
+    Bucket, CounterStore, JobStore, KvWatch, ProjectStore, RdepsStore, StepStore, TaskStore,
+    split_project,
 };
 
 use async_nats::jetstream;
@@ -38,24 +39,92 @@ fn nats_err(e: impl std::fmt::Display) -> StoreError {
     StoreError::Nats(e.to_string())
 }
 
+/// Prepend a namespace prefix to a NATS bucket/stream/object/subject name
+/// (#206). Free function so the byte-identical-for-empty-prefix invariant is
+/// unit-testable without a live connection: with the empty (production) prefix
+/// the name is returned unchanged, so prod's wire format never migrates.
+fn namespaced(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}{name}")
+    }
+}
+
 const DAY: Duration = Duration::from_secs(86_400);
 
 /// Connected NATS handle wrapping a client + JetStream context.
+///
+/// ## Namespacing (#206)
+///
+/// Every bucket, stream, object store, and subject name this handle touches is
+/// transparently prefixed with [`NatsStore::prefix`]. Production connects with
+/// the **empty** prefix, so the wire format is byte-identical to the un-prefixed
+/// names — prod data never migrates. Tests connect with a unique per-test prefix
+/// (via [`NatsStore::connect_namespaced`]) so many tests share one NATS server
+/// without stepping on each other's KV, streams, or request/reply subjects.
+///
+/// The prefix is applied at exactly one place per NATS primitive — the methods
+/// below — so no caller (and no other crate) ever needs to know it exists. This
+/// keeps `store` the only crate that talks to NATS *and* the only crate that
+/// knows names can be namespaced.
 #[derive(Clone)]
 pub struct NatsStore {
     client: async_nats::Client,
     js: jetstream::Context,
+    /// Prepended to every bucket/stream/object/subject name. Empty in prod.
+    prefix: String,
 }
 
 impl NatsStore {
     pub async fn connect(url: &str) -> Result<Self> {
-        let client = async_nats::connect(url).await.map_err(nats_err)?;
-        let js = jetstream::new(client.clone());
-        Ok(Self { client, js })
+        Self::connect_namespaced(url, "").await
+    }
+
+    /// Connect with a per-handle namespace `prefix` prepended to every
+    /// bucket/stream/object/subject name (#206). An empty prefix is identical to
+    /// [`NatsStore::connect`] — the prod wire format. A non-empty prefix must be
+    /// a single NATS-safe token fragment (`[A-Za-z0-9_-]`, no `.`) so it stays
+    /// legal in both KV bucket names and subject tokens; test callers use
+    /// [`crate::unique_prefix`]-style values such as `"t9f3a2c1-"`.
+    pub async fn connect_namespaced(url: &str, prefix: &str) -> Result<Self> {
+        // A namespaced (test) connection tolerates a momentarily-busy shared
+        // server: under a `cargo test --workspace` fan-out the handshake can drop
+        // ("expected INFO, got nothing"), so retry a few times before giving up.
+        // Production (empty prefix) connects once, unchanged.
+        let client = if prefix.is_empty() {
+            async_nats::connect(url).await.map_err(nats_err)?
+        } else {
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+                match async_nats::connect(url).await {
+                    Ok(c) => break c,
+                    Err(e) if attempt < 10 => {
+                        tokio::time::sleep(Duration::from_millis(100 * attempt)).await;
+                        let _ = e;
+                    }
+                    Err(e) => return Err(nats_err(e)),
+                }
+            }
+        };
+        let mut js = jetstream::new(client.clone());
+        // A non-empty prefix is a test sharing one server with many other
+        // namespaces (#206). Under a `cargo test --workspace` fan-out the server
+        // is momentarily busy, so lift the JetStream request timeout well above
+        // the 5s default — a slow bucket-create should wait, not spuriously fail.
+        if !prefix.is_empty() {
+            js.set_timeout(Duration::from_secs(30));
+        }
+        Ok(Self {
+            client,
+            js,
+            prefix: prefix.to_string(),
+        })
     }
 
     /// Connect with `.creds`-format credentials (per-job scoped user JWT +
-    /// nkey seed, spec §7.4).
+    /// nkey seed, spec §7.4). Always the empty prefix (production).
     pub async fn connect_with_creds(url: &str, creds: &str) -> Result<Self> {
         let client = async_nats::ConnectOptions::with_credentials(creds)
             .map_err(nats_err)?
@@ -63,7 +132,11 @@ impl NatsStore {
             .await
             .map_err(nats_err)?;
         let js = jetstream::new(client.clone());
-        Ok(Self { client, js })
+        Ok(Self {
+            client,
+            js,
+            prefix: String::new(),
+        })
     }
 
     pub fn client(&self) -> &async_nats::Client {
@@ -74,10 +147,59 @@ impl NatsStore {
         &self.js
     }
 
+    /// This handle's namespace prefix (empty in production).
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// Prepend the namespace prefix to a bucket/stream/object/subject name.
+    /// With the empty (prod) prefix this returns the input unchanged, so the
+    /// wire format is byte-identical to today.
+    #[inline]
+    fn ns(&self, name: &str) -> String {
+        namespaced(&self.prefix, name)
+    }
+
     /// Create all fixed KV buckets and streams (spec §1.5). Idempotent; called
     /// by `chuggernaut init` and the test harness. Replicas: 1 (dev) — the
     /// production replica count is a deployment concern layered on later.
+    ///
+    /// A namespaced (test) handle retries the whole sequence on a JetStream
+    /// timeout: under a `cargo test --workspace` fan-out, hundreds of namespaces
+    /// call this at once against one shared server, and the JetStream meta-layer
+    /// (which serializes stream/consumer creation) backs up. Retrying — the
+    /// creates are idempotent — disperses that thundering herd instead of failing
+    /// a test's setup. Production (empty prefix) runs once, unchanged.
     pub async fn ensure_topology(&self) -> Result<()> {
+        if self.prefix.is_empty() {
+            return self.ensure_topology_inner().await;
+        }
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self.ensure_topology_inner().await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < 8 => {
+                    tokio::time::sleep(Duration::from_millis(150 * attempt)).await;
+                    let _ = e;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn ensure_topology_inner(&self) -> Result<()> {
+        // Production (empty prefix) uses File storage — durable, and byte-for-
+        // byte unchanged from before (#206). A namespaced handle is a test on a
+        // shared server, where many namespaces are created concurrently: Memory
+        // storage keeps every JetStream request off the disk, so a
+        // `cargo test --workspace` fan-out of NATS containers does not saturate
+        // the host's fsync path and time bucket creation out.
+        let storage = if self.prefix.is_empty() {
+            jetstream::stream::StorageType::File
+        } else {
+            jetstream::stream::StorageType::Memory
+        };
         for &bucket in buckets::ALL_BUCKETS {
             let max_age = match bucket {
                 buckets::CHANNELS => 7 * DAY,
@@ -85,9 +207,9 @@ impl NatsStore {
             };
             self.js
                 .create_key_value(jetstream::kv::Config {
-                    bucket: bucket.to_string(),
+                    bucket: self.ns(bucket),
                     max_age,
-                    storage: jetstream::stream::StorageType::File,
+                    storage,
                     ..Default::default()
                 })
                 .await
@@ -102,10 +224,10 @@ impl NatsStore {
         for &(name, subject, max_age) in streams {
             self.js
                 .get_or_create_stream(jetstream::stream::Config {
-                    name: name.to_string(),
-                    subjects: vec![subject.to_string()],
+                    name: self.ns(name),
+                    subjects: vec![self.ns(subject)],
                     max_age,
-                    storage: jetstream::stream::StorageType::File,
+                    storage,
                     deny_delete: true,
                     ..Default::default()
                 })
@@ -119,9 +241,9 @@ impl NatsStore {
         // are observability data an operator may need to purge.
         self.js
             .create_object_store(jetstream::object_store::Config {
-                bucket: buckets::OBJECT_ARTIFACTS.to_string(),
+                bucket: self.ns(buckets::OBJECT_ARTIFACTS),
                 max_age: 90 * DAY,
-                storage: jetstream::stream::StorageType::File,
+                storage,
                 ..Default::default()
             })
             .await
@@ -130,7 +252,11 @@ impl NatsStore {
     }
 
     async fn bucket(&self, name: &str) -> Result<Bucket> {
-        let kv = self.js.get_key_value(name).await.map_err(nats_err)?;
+        let kv = self
+            .js
+            .get_key_value(self.ns(name))
+            .await
+            .map_err(nats_err)?;
         Ok(Bucket::new(kv))
     }
 
@@ -164,7 +290,7 @@ impl NatsStore {
     pub async fn artifacts(&self, crypto: ArtifactCrypto) -> Result<ArtifactStore> {
         let obj = self
             .js
-            .get_object_store(buckets::OBJECT_ARTIFACTS)
+            .get_object_store(self.ns(buckets::OBJECT_ARTIFACTS))
             .await
             .map_err(nats_err)?;
         Ok(ArtifactStore::new(obj, crypto))
@@ -179,7 +305,11 @@ impl NatsStore {
     /// consumer — event-trail assertions in tests, webhook replay later.
     pub async fn read_stream(&self, stream: &str, max: usize) -> Result<Vec<Vec<u8>>> {
         use futures::StreamExt;
-        let stream = self.js.get_stream(stream).await.map_err(nats_err)?;
+        let stream = self
+            .js
+            .get_stream(self.ns(stream))
+            .await
+            .map_err(nats_err)?;
         let consumer = stream
             .create_consumer(jetstream::consumer::pull::Config::default())
             .await
@@ -208,10 +338,14 @@ impl NatsStore {
         max: usize,
     ) -> Result<Vec<(u64, Vec<u8>)>> {
         use futures::StreamExt;
-        let stream = self.js.get_stream(stream).await.map_err(nats_err)?;
+        let stream = self
+            .js
+            .get_stream(self.ns(stream))
+            .await
+            .map_err(nats_err)?;
         let consumer = stream
             .create_consumer(jetstream::consumer::pull::Config {
-                filter_subject: subject.to_string(),
+                filter_subject: self.ns(subject),
                 deliver_policy: if after_seq == 0 {
                     jetstream::consumer::DeliverPolicy::All
                 } else {
@@ -250,10 +384,14 @@ impl NatsStore {
         after_seq: u64,
     ) -> Result<StreamSubscription> {
         use futures::StreamExt;
-        let stream = self.js.get_stream(stream).await.map_err(nats_err)?;
+        let stream = self
+            .js
+            .get_stream(self.ns(stream))
+            .await
+            .map_err(nats_err)?;
         let consumer = stream
             .create_consumer(jetstream::consumer::pull::Config {
-                filter_subject: subject.to_string(),
+                filter_subject: self.ns(subject),
                 deliver_policy: if after_seq == 0 {
                     jetstream::consumer::DeliverPolicy::All
                 } else {
@@ -276,7 +414,7 @@ impl NatsStore {
     pub async fn subscribe_requests(&self, subject: &str) -> Result<RequestSubscription> {
         let sub = self
             .client
-            .subscribe(subject.to_string())
+            .subscribe(self.ns(subject))
             .await
             .map_err(nats_err)?;
         Ok(RequestSubscription {
@@ -294,10 +432,11 @@ impl NatsStore {
         payload: &[u8],
         timeout: Duration,
     ) -> Result<async_nats::Message> {
+        let subject = self.ns(subject);
         match tokio::time::timeout(
             timeout,
             self.client
-                .request(subject.to_string(), payload.to_vec().into()),
+                .request(subject.clone(), payload.to_vec().into()),
         )
         .await
         {
@@ -314,9 +453,23 @@ impl NatsStore {
     /// A dropped message is covered by the next heartbeat, so this does not flush.
     pub async fn publish(&self, subject: &str, payload: &[u8]) -> Result<()> {
         self.client
-            .publish(subject.to_string(), payload.to_vec().into())
+            .publish(self.ns(subject), payload.to_vec().into())
             .await
             .map_err(nats_err)
+    }
+
+    /// Publish to a JetStream stream and await the server ack (the `job-events`
+    /// trail, spec §6.3). Unlike [`NatsStore::publish`] this is durable: the
+    /// double-await confirms the message reached the stream. The subject is
+    /// namespaced like everything else, so the per-test stream captures it.
+    pub async fn publish_event(&self, subject: &str, payload: &[u8]) -> Result<()> {
+        self.js
+            .publish(self.ns(subject), payload.to_vec().into())
+            .await
+            .map_err(nats_err)?
+            .await
+            .map_err(nats_err)?;
+        Ok(())
     }
 
     /// Request-reply with bounded retry (spec §4.2 reliability): retries until
@@ -328,11 +481,12 @@ impl NatsStore {
         attempts: u32,
         backoff: Duration,
     ) -> Result<async_nats::Message> {
+        let subject = self.ns(subject);
         let mut last_err = None;
         for attempt in 1..=attempts {
             match self
                 .client
-                .request(subject.to_string(), payload.to_vec().into())
+                .request(subject.clone(), payload.to_vec().into())
                 .await
             {
                 Ok(msg) => return Ok(msg),
@@ -412,5 +566,34 @@ impl InboundRequest {
                 .publish(reply_to.clone(), body.into().into())
                 .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    use super::namespaced;
+
+    /// #206: the empty (production) prefix must be byte-identical to the raw
+    /// name — prod data never migrates. A non-empty prefix is a plain prepend,
+    /// valid in both KV bucket names and subject tokens.
+    #[test]
+    fn empty_prefix_is_byte_identical() {
+        for name in [
+            "jobs",
+            "job-events",
+            "req.work.submit.acme.api.1",
+            "artifacts",
+        ] {
+            assert_eq!(namespaced("", name), name);
+        }
+    }
+
+    #[test]
+    fn non_empty_prefix_prepends() {
+        assert_eq!(namespaced("t9f3a2c1-", "jobs"), "t9f3a2c1-jobs");
+        assert_eq!(
+            namespaced("t9f3a2c1-", "req.work.submit.acme.api.1"),
+            "t9f3a2c1-req.work.submit.acme.api.1"
+        );
     }
 }

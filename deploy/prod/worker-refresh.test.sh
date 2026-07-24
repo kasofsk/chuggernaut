@@ -46,8 +46,12 @@ cat > "$BIN/docker" <<EOF
 cat >/dev/null 2>&1 || true
 echo "docker \$*" >> "$LOG"
 case "\$*" in
-  inspect*data/keys*)   echo "/home/worksalot/chuggernaut-worker/keys" ;;
-  inspect*docker.sock*) echo "/var/run/docker.sock" ;;
+  inspect*data/keys*)     echo "/home/worksalot/chuggernaut-worker/keys" ;;
+  inspect*docker.sock*)   echo "/var/run/docker.sock" ;;
+  # Image-label read-back for the retag-swap guard: echo \$FAKE_LABEL (default
+  # abc123, the requested SHA in the success cases) so the assert passes unless a
+  # case forces a mismatch (the stale-image-label case).
+  inspect*chug.git.sha*)  echo "\${FAKE_LABEL:-abc123}" ;;
 esac
 # Build-failure injection: FAIL_BUILD names an image (e.g. agent-rust) whose
 # \`docker build -t chuggernaut/<img>:...\` should fail, to exercise the atomic
@@ -92,6 +96,9 @@ grep_log "git rev-parse FETCH_HEAD"   # verifies HEAD resolves to the requested 
 grep_log "docker build -q -t chuggernaut/worker:prod-refresh"
 grep_log "docker build -q -t chuggernaut/agent:prod-refresh"
 grep_log "docker build -q -t chuggernaut/agent-rust:prod-refresh"
+# The requested SHA is baked as an image LABEL and read back before the swap.
+grep_log "label chug.git.sha=abc123"
+grep_log "docker inspect --format"
 # ...then retag-swap onto the live tag only after all three succeed.
 grep_log "docker tag chuggernaut/worker:prod-refresh chuggernaut/worker:prod"
 grep_log "docker tag chuggernaut/agent:prod-refresh chuggernaut/agent:prod"
@@ -116,6 +123,25 @@ if grep -qF "docker build" "$LOG"; then
   fail "build must not build any image when the SHA verify fails (no wrong-tree image)"
 fi
 echo "ok: build refuses when remote HEAD != requested SHA (drift stays, no wrong build)"
+
+# ── Case 1c: built image label != requested SHA ⇒ REFUSE the retag-swap ───────
+# The three images build to their temp tags, but the worker image's baked
+# chug.git.sha label does not match the requested SHA (a stale layer / silently
+# failed build). The retag-swap onto the live :prod tag must be refused so a
+# node keeps its working images rather than going live on the wrong build.
+: > "$LOG"
+if PATH="$BIN:$PATH" \
+     WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+     WORKER_GIT_KEY="$KEY" \
+     FAKE_FETCH_HEAD=abc123 \
+     FAKE_LABEL=staleSHA000 \
+     sh "$SUT" build abc123 prod 2>/dev/null; then
+  fail "build should fail when the built image label != requested SHA"
+fi
+if grep -qF "docker tag" "$LOG"; then
+  fail "a mismatched image label must not reach the retag-swap (live :prod images stay intact)"
+fi
+echo "ok: build refuses the retag-swap when the image label != requested SHA"
 
 # ── Case 2: build without a git URL is rejected before any docker mutation ────
 # The refresh must validate its config FIRST: no git URL ⇒ no build, no retag —

@@ -25,10 +25,12 @@ eval:
 
 #[tokio::test]
 async fn submits_flow_over_nats_to_the_core() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -137,14 +139,16 @@ async fn submits_flow_over_nats_to_the_core() {
         .unwrap();
     handle.release_job("acme", "api", job.id).await.unwrap();
 
-    let jobs = store.jobs().await.unwrap();
-    for _ in 0..400 {
-        if jobs.get("acme", "api", 1).await.unwrap().unwrap().state == JobState::Done {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let done = jobs.get("acme", "api", 1).await.unwrap().unwrap();
+    // Watch job 1 until it lands Done (#206 principle 3).
+    test_utils::wait::job_state(&store, "acme", "api", 1, JobState::Done).await;
+    let done = store
+        .jobs()
+        .await
+        .unwrap()
+        .get("acme", "api", 1)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(done.state, JobState::Done);
     // The Done transition stamps completed_at so the jobs list can show the
     // completion moment and derive a duration (completed_at − created_at).
@@ -177,10 +181,12 @@ async fn submits_flow_over_nats_to_the_core() {
 /// and, being presentational, never leaks into the squash body.
 #[tokio::test]
 async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -302,15 +308,18 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
         .unwrap();
     handle.release_job("acme", "api", job.id).await.unwrap();
 
-    let jobs = store.jobs().await.unwrap();
-    for _ in 0..400 {
-        if jobs.get("acme", "api", 1).await.unwrap().unwrap().state == JobState::Done {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    // Watch job 1 until it lands Done (#206 principle 3).
+    test_utils::wait::job_state(&store, "acme", "api", 1, JobState::Done).await;
     assert_eq!(
-        jobs.get("acme", "api", 1).await.unwrap().unwrap().state,
+        store
+            .jobs()
+            .await
+            .unwrap()
+            .get("acme", "api", 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
         JobState::Done
     );
 
@@ -385,10 +394,12 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
 /// that *is* the history.
 #[tokio::test]
 async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -478,30 +489,32 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
         })
         .await
         .unwrap();
+    // Subscribe to the event stream BEFORE releasing so no post is missed —
+    // a message wait uses a consumer created before the triggering action
+    // (#206 principle 3), then drains it under a hard timeout.
+    let mut events_sub = store
+        .subscribe_stream("job-events", "job.events.acme.api.1.>", 0)
+        .await
+        .unwrap();
     handle.release_job("acme", "api", job.id).await.unwrap();
 
     // Both updates and the reply survive as events — the whole point.
-    let mut updates = Vec::new();
-    let mut replies = Vec::new();
-    for _ in 0..50 {
-        let events = store
-            .read_subject_after("job-events", "job.events.acme.api.1.>", 0, 256)
-            .await
-            .unwrap();
-        updates = events
-            .iter()
-            .filter_map(|(_seq, bytes)| serde_json::from_slice::<serde_json::Value>(bytes).ok())
-            .filter(|v| v["event_type"] == "channel-update")
-            .collect();
-        replies = events
-            .iter()
-            .filter_map(|(_seq, bytes)| serde_json::from_slice::<serde_json::Value>(bytes).ok())
-            .filter(|v| v["event_type"] == "channel-reply")
-            .collect();
-        if updates.len() >= 2 && !replies.is_empty() {
-            break;
+    let mut updates: Vec<serde_json::Value> = Vec::new();
+    let mut replies: Vec<serde_json::Value> = Vec::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    while updates.len() < 2 || replies.is_empty() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let next = tokio::time::timeout(remaining, events_sub.next()).await;
+        let Ok(Some((_seq, _subject, bytes))) = next else {
+            panic!("timed out collecting channel events: updates={updates:?} replies={replies:?}");
+        };
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            match v["event_type"].as_str() {
+                Some("channel-update") => updates.push(v),
+                Some("channel-reply") => replies.push(v),
+                _ => {}
+            }
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(updates.len(), 2, "both updates must survive: {updates:?}");
     assert_eq!(updates[0]["message"], "cloning");

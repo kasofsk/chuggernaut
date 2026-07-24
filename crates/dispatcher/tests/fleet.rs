@@ -8,7 +8,6 @@
 use chrono::Utc;
 use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
 use std::sync::Arc;
-use std::time::Duration;
 use store::NatsStore;
 use test_utils::repo::TempRepo;
 use test_utils::{FakeBackend, FakeProvider};
@@ -39,6 +38,7 @@ fn roster() -> Vec<WorkerNode> {
             slots: 4,
             available: true,
             version: Some("0.1.0+air".into()),
+            refresh_outcome: None,
         },
         WorkerNode {
             name: "nuc".into(),
@@ -46,6 +46,7 @@ fn roster() -> Vec<WorkerNode> {
             slots: 2,
             available: true,
             version: None,
+            refresh_outcome: None,
         },
     ]
 }
@@ -162,19 +163,24 @@ async fn spawn_core(
 
 /// Poll `fleet.status` until `pred` holds (or time out), returning the snapshot.
 async fn wait_for_fleet(store: &NatsStore, pred: impl Fn(&FleetStatus) -> bool) -> FleetStatus {
+    // Watch the platform KV `fleet.status` key, inspecting each republished
+    // snapshot until `pred` holds (#206 principle 3).
     let bucket = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
-    for _ in 0..400 {
-        if let Some(fleet) = bucket
+    let watch = bucket.watch("fleet.status").await.unwrap();
+    let initial = || async {
+        bucket
             .get_json::<FleetStatus>("fleet.status")
             .await
             .unwrap()
-            && pred(&fleet)
-        {
-            return fleet;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("timed out waiting for fleet.status");
+    };
+    test_utils::wait::kv_wait::<FleetStatus, _, _, _, _>(
+        watch,
+        test_utils::wait::DEFAULT_TIMEOUT,
+        "fleet.status matching predicate",
+        initial,
+        |fleet| pred(fleet).then(|| fleet.clone()),
+    )
+    .await
 }
 
 fn node<'a>(fleet: &'a FleetStatus, name: &str) -> &'a types::FleetNode {
@@ -190,10 +196,12 @@ fn node<'a>(fleet: &'a FleetStatus, name: &str) -> &'a types::FleetNode {
 /// containers the backend reports, so republishing reflects both.
 #[tokio::test]
 async fn occupancy_reflects_launch_and_exit() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
     // An Escalated job (recovery leaves it and its tasks alone) with a Running
@@ -218,7 +226,7 @@ async fn occupancy_reflects_launch_and_exit() {
     let backend = Arc::new(FakeBackend::new());
     backend.seed_managed_running([running("air/c1", 51, 1)]);
     let (handle, _repo) = spawn_core(
-        &server,
+        server,
         &store,
         &[("jobs/flaky.yaml", FLAKY)],
         backend.clone(),
@@ -260,10 +268,12 @@ async fn occupancy_reflects_launch_and_exit() {
 /// job whose container is still alive re-attaches (§3.6) and shows as occupied.
 #[tokio::test]
 async fn restart_reattach_rebuilds_occupancy_from_live_containers() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
     let repo = TempRepo::create("acme", "api").await;
@@ -344,10 +354,12 @@ async fn restart_reattach_rebuilds_occupancy_from_live_containers() {
 /// queued, and the depth shows up with no slot occupied.
 #[tokio::test]
 async fn queue_depth_included() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
     // The fleet is at capacity: every launch is refused with NoCapacity, so the
@@ -355,7 +367,7 @@ async fn queue_depth_included() {
     let backend = Arc::new(FakeBackend::new());
     backend.fail_launch_no_capacity_if(|_| Some("no free slots".into()));
     let (handle, _repo) = spawn_core(
-        &server,
+        server,
         &store,
         &[("jobs/cmd-work.yaml", CMD_WORK)],
         backend.clone(),

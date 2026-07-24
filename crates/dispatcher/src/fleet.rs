@@ -18,7 +18,7 @@
 //! stream and tell an SSE client when to refetch.
 
 use crate::core::Core;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use types::{FleetNode, FleetStatus, JobState, SlotOccupant, TaskPhase};
 
 /// The fleet KV key in the `platform` bucket, beside `dispatcher.config`.
@@ -65,6 +65,33 @@ fn node_of(container_id: &str) -> &str {
         .split_once('/')
         .map(|(n, _)| n)
         .unwrap_or(container_id)
+}
+
+/// Assemble one node's occupancy entry (spec §3.1). Pure over its inputs so the
+/// availability rule is unit-tested without a backend. `occupancy_listed` is the
+/// crux: a node whose containers could not be enumerated this snapshot is shown
+/// **out of service**, never as a false-idle `occupied: 0, available: true` —
+/// the silent all-zero that hid the job/181 outage. It ANDs with the health
+/// `base_available`, so a listed node keeps its true (possibly idle) health and
+/// only an unlistable one is forced down.
+fn fleet_node(
+    name: String,
+    slots: Option<u32>,
+    running: Vec<SlotOccupant>,
+    base_available: bool,
+    version: Option<String>,
+    refresh_outcome: Option<types::worker::RefreshOutcome>,
+    occupancy_listed: bool,
+) -> FleetNode {
+    FleetNode {
+        slots,
+        occupied: running.len() as u32,
+        available: base_available && occupancy_listed,
+        version,
+        refresh_outcome,
+        name,
+        running,
+    }
 }
 
 impl Core {
@@ -122,6 +149,15 @@ impl Core {
             slots.sort_by_key(|o| (o.project.clone(), o.job_seq, o.task_id));
         }
 
+        // Nodes whose containers could not be listed this pass (spec §3.1): a
+        // worker that answers ping but whose `list_running` failed. Their slots
+        // are unknown, so they must show out-of-service, not falsely idle.
+        let unlisted: HashSet<String> = self
+            .backend
+            .occupancy_unavailable_nodes()
+            .into_iter()
+            .collect();
+
         // Node set = configured roster ∪ live-health nodes ∪ nodes seen busy.
         let live = self.backend.fleet_status();
         let mut names: BTreeMap<String, ()> = BTreeMap::new();
@@ -141,19 +177,30 @@ impl Core {
                 let roster = self.fleet_roster.iter().find(|n| n.name == name);
                 let status = live.iter().find(|s| s.name == name);
                 let running = by_node.remove(&name).unwrap_or_default();
-                FleetNode {
-                    slots: roster.map(|n| n.slots),
-                    occupied: running.len() as u32,
-                    available: status
-                        .map(|s| s.available)
-                        .or_else(|| roster.map(|n| n.available))
-                        .unwrap_or(true),
-                    version: status
-                        .and_then(|s| s.version.clone())
-                        .or_else(|| roster.and_then(|n| n.version.clone())),
+                let slots = roster.map(|n| n.slots);
+                let base_available = status
+                    .map(|s| s.available)
+                    .or_else(|| roster.map(|n| n.available))
+                    .unwrap_or(true);
+                let version = status
+                    .and_then(|s| s.version.clone())
+                    .or_else(|| roster.and_then(|n| n.version.clone()));
+                // The live ping-reported outcome (ticket #187) wins; fall back
+                // to the roster's last-known so a failed refresh stays visible
+                // across the occasional probe miss.
+                let refresh_outcome = status
+                    .and_then(|s| s.refresh_outcome.clone())
+                    .or_else(|| roster.and_then(|n| n.refresh_outcome.clone()));
+                let listed = !unlisted.contains(&name);
+                fleet_node(
                     name,
+                    slots,
                     running,
-                }
+                    base_available,
+                    version,
+                    refresh_outcome,
+                    listed,
+                )
             })
             .collect();
 
@@ -193,5 +240,37 @@ impl Core {
             occupant.started_at = task.started_at;
         }
         occupant
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fleet_node;
+
+    /// The occupancy availability rule (spec §3.1), the pure core of
+    /// `compute_fleet_status`'s node assembly. A node whose containers could not
+    /// be listed is shown out-of-service — never a false-idle `occupied: 0,
+    /// available: true`, the silent all-zero that hid the job/181 prod outage
+    /// (two containers live on a node the snapshot reported empty). A listed node
+    /// keeps its true health, idle or busy.
+    #[test]
+    fn unlisted_node_shows_out_of_service_not_idle() {
+        // Healthy (ping-reachable) but its `list_running` failed → occupancy is
+        // unknown, so it must NOT read as an available idle node.
+        let unlisted = fleet_node("air".into(), Some(4), vec![], true, None, None, false);
+        assert_eq!(unlisted.occupied, 0);
+        assert!(
+            !unlisted.available,
+            "an unlistable node must show out of service, not false-idle"
+        );
+
+        // A genuinely idle node whose listing succeeded stays available.
+        let idle = fleet_node("nuc".into(), Some(4), vec![], true, None, None, true);
+        assert!(idle.available);
+        assert_eq!(idle.occupied, 0);
+
+        // An already-down node stays down whether or not it was listed.
+        let down = fleet_node("old".into(), Some(4), vec![], false, None, None, true);
+        assert!(!down.available);
     }
 }

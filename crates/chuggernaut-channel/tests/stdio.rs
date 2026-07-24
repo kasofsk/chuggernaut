@@ -9,7 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::test]
 async fn binary_speaks_mcp_and_submits_over_nats() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
         return;
     };
     let store = NatsStore::connect(server.url()).await.unwrap();

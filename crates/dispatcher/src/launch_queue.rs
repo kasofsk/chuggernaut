@@ -258,6 +258,15 @@ impl Core {
             let Some(q) = self.launch_queue.pop_front() else {
                 break;
             };
+            // Backstop at resume time too (#202): an overdue entry escalates
+            // instead of burning another optimistic relaunch — the scan alone
+            // misses agent evals that are mid-relaunch whenever it fires.
+            let now = Utc::now();
+            let max_wait = self.config.launch_queue_max_wait.unwrap_or(MAX_QUEUE_WAIT);
+            if (now - q.queued_at).to_std().unwrap_or_default() > max_wait {
+                self.expire_queued_launch(&q, now, max_wait).await?;
+                continue;
+            }
             match self.resume_launch(&q).await? {
                 ResumeOutcome::Settled | ResumeOutcome::Discarded => continue,
                 // The agent launch is async and has claimed the freed slot; its
@@ -478,7 +487,17 @@ impl Core {
         let harvest = self.harvester();
         tokio::spawn(async move {
             let exit_code = backend.wait(&id).await.unwrap_or(-1);
-            harvest.collect_logs(&o, &p, seq, task_id, &id).await;
+            // Harvest the logs, and from them any structured deploy report the
+            // command emitted on stdout (ticket #187) — `@chug:leg` lines and
+            // the `@chug:report` envelope — so a deploy's outcome rides the exit
+            // into the task's structured result instead of an opaque log.
+            let structured = harvest
+                .collect_logs(&o, &p, seq, task_id, &id)
+                .await
+                .and_then(|bytes| {
+                    crate::harvest::parse_deploy_report(&String::from_utf8_lossy(&bytes))
+                })
+                .and_then(|report| serde_json::to_value(report).ok());
             harvest.dispose(seq, task_id, &id).await;
             let _ = tx
                 .send(Msg::TaskExited {
@@ -486,7 +505,10 @@ impl Core {
                     project: p,
                     seq,
                     task_id,
-                    exit: TaskExit::code(exit_code),
+                    exit: TaskExit {
+                        structured,
+                        ..TaskExit::code(exit_code)
+                    },
                 })
                 .await;
         });
@@ -538,6 +560,7 @@ impl Core {
                         launch_error: None,
                         log_tail,
                         infra_loss: false,
+                        structured: None,
                     },
                 })
                 .await;
@@ -562,70 +585,87 @@ impl Core {
             .collect();
         for q in expired {
             self.launch_queue.retain(|e| e != &q);
-            let Some(mut task) = self
-                .tasks
-                .get(&q.owner, &q.project, q.seq, q.task_id)
-                .await?
-            else {
-                continue;
-            };
-            if task.state != TaskState::Pending {
-                continue; // resumed or resolved between filter and here
-            }
-            // Only escalate a job still in an execution state; otherwise it was
-            // superseded and the stale entry just drops.
-            let Ok(job) = self.must_get(&q.owner, &q.project, q.seq) else {
-                continue;
-            };
-            if !matches!(
-                job.state,
-                JobState::Work | JobState::Evaluation | JobState::WrapUp
-            ) {
-                continue;
-            }
-            let waited = (now - q.queued_at).to_std().unwrap_or_default();
-            task.state = TaskState::Failed;
-            task.completed_at = Some(now);
-            // No longer queued — drop the markers so nothing reads it as waiting.
-            task.pending_reason = None;
-            task.queued_at = None;
-            task.result = Some(TaskResult::Command {
-                pass: false,
-                exit_code: -1,
-                output: format!(
-                    "no free fleet slot became available after waiting {waited:?} in the launch queue"
-                ),
-                structured: None,
-            });
-            self.tasks.put(&task).await?;
-            self.publish(
-                &q.owner,
-                &q.project,
-                q.seq,
-                "task-failed",
-                serde_json::json!({
-                    "task_id": q.task_id, "phase": format!("{:?}", task.phase),
-                    "reason": QUEUE_TIMEOUT_REASON,
-                }),
-            )
-            .await?;
-            self.active
-                .remove(&(q.owner.clone(), q.project.clone(), q.seq));
-            self.escalate(
-                &q.owner,
-                &q.project,
-                q.seq,
-                QUEUE_TIMEOUT_REASON,
-                format!(
-                    "Job {}: a container launch waited over {max_wait:?} for a free fleet slot \
-                     and none became available. The fleet is at capacity or wedged — free \
-                     capacity (finish or revoke other jobs) or revoke this one.",
-                    q.seq
-                ),
-                Some(q.task_id),
-            )
-            .await?;
+            self.expire_queued_launch(&q, now, max_wait).await?;
         }
+        Ok(())
+    }
+
+    /// Fail + escalate one launch that outwaited the queue backstop (§3.5).
+    /// Shared by the periodic scan and the resume path: a starved *agent* eval
+    /// ping-pongs between the queue and an optimistic re-spawn (the spawn
+    /// re-defers on `NoCapacity`), so at scan time it is often mid-flight and
+    /// invisible to the queue walk — the #140/#202 starvation. Checking at
+    /// resume time closes the gap: however the entry is observed, an overdue
+    /// wait escalates instead of burning another doomed relaunch.
+    async fn expire_queued_launch(
+        &mut self,
+        q: &QueuedLaunch,
+        now: chrono::DateTime<Utc>,
+        max_wait: std::time::Duration,
+    ) -> Result<()> {
+        let Some(mut task) = self
+            .tasks
+            .get(&q.owner, &q.project, q.seq, q.task_id)
+            .await?
+        else {
+            return Ok(());
+        };
+        if task.state != TaskState::Pending {
+            return Ok(()); // resumed or resolved in the meantime
+        }
+        // Only escalate a job still in an execution state; otherwise it was
+        // superseded and the stale entry just drops.
+        let Ok(job) = self.must_get(&q.owner, &q.project, q.seq) else {
+            return Ok(());
+        };
+        if !matches!(
+            job.state,
+            JobState::Work | JobState::Evaluation | JobState::WrapUp
+        ) {
+            return Ok(());
+        }
+        let waited = (now - q.queued_at).to_std().unwrap_or_default();
+        task.state = TaskState::Failed;
+        task.completed_at = Some(now);
+        // No longer queued — drop the markers so nothing reads it as waiting.
+        task.pending_reason = None;
+        task.queued_at = None;
+        task.result = Some(TaskResult::Command {
+            pass: false,
+            exit_code: -1,
+            output: format!(
+                "no free fleet slot became available after waiting {waited:?} in the launch queue"
+            ),
+            structured: None,
+        });
+        self.tasks.put(&task).await?;
+        self.publish(
+            &q.owner,
+            &q.project,
+            q.seq,
+            "task-failed",
+            serde_json::json!({
+                "task_id": q.task_id, "phase": format!("{:?}", task.phase),
+                "reason": QUEUE_TIMEOUT_REASON,
+            }),
+        )
+        .await?;
+        self.active
+            .remove(&(q.owner.clone(), q.project.clone(), q.seq));
+        self.escalate(
+            &q.owner,
+            &q.project,
+            q.seq,
+            QUEUE_TIMEOUT_REASON,
+            format!(
+                "Job {}: a container launch waited over {max_wait:?} for a free fleet slot \
+                 and none became available. The fleet is at capacity or wedged — free \
+                 capacity (finish or revoke other jobs) or revoke this one.",
+                q.seq
+            ),
+            Some(q.task_id),
+        )
+        .await?;
         Ok(())
     }
 }

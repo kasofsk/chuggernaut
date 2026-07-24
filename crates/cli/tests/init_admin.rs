@@ -5,7 +5,6 @@
 use cli::admin::{self, AdminArgs, AdminCmd, ProjectCmd, RoleCmd, UserCmd};
 use cli::init::{self, InitArgs};
 use store::NatsStore;
-use test_utils::require_nats;
 use types::User;
 
 fn init_args(server_url: &str, dir: &std::path::Path) -> InitArgs {
@@ -20,7 +19,9 @@ fn init_args(server_url: &str, dir: &std::path::Path) -> InitArgs {
 
 #[tokio::test]
 async fn init_bootstraps_and_is_idempotent() {
-    let server = require_nats!();
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
 
     init::run(init_args(server.url(), dir.path()))
@@ -110,7 +111,9 @@ async fn init_bootstraps_and_is_idempotent() {
 
 #[tokio::test]
 async fn admin_project_and_user_commands() {
-    let server = require_nats!();
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
     let repos_root = dir.path().join("repos");
 
@@ -188,7 +191,9 @@ async fn admin_project_and_user_commands() {
 
 #[tokio::test]
 async fn admin_user_role_commands() {
-    let server = require_nats!();
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
 
     let store = NatsStore::connect(server.url()).await.unwrap();

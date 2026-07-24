@@ -88,9 +88,16 @@ async fn seed_repo(repo: &TempRepo) {
     clone.push("main").await;
 }
 
-async fn setup() -> Option<(test_utils::nats::NatsTestServer, NatsStore, TempRepo, Core)> {
-    let server = test_utils::nats::NatsTestServer::spawn()?;
-    let store = NatsStore::connect(server.url()).await.unwrap();
+async fn setup() -> Option<(
+    &'static test_utils::nats::NatsTestServer,
+    NatsStore,
+    TempRepo,
+    Core,
+)> {
+    let server = test_utils::nats::NatsTestServer::shared().await?;
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     seed_repo(&repo).await;
@@ -374,15 +381,19 @@ async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
         .await
         .unwrap();
 
-    let mut cleared = false;
-    for _ in 0..400 {
-        let s = jobs
-            .get("acme", "api", deploy.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .state;
-        if !matches!(s, JobState::Stalled) {
+    // Watch the deploy job until it leaves Stalled; the forward-progress guard
+    // fires inside the check (#206 principle 3).
+    test_utils::wait::job_where(
+        &store,
+        "acme",
+        "api",
+        deploy.id,
+        format!("job {} to clear the stall after Retry", deploy.id),
+        |j| {
+            let s = j.state;
+            if matches!(s, JobState::Stalled) {
+                return false;
+            }
             assert!(
                 matches!(
                     s,
@@ -394,15 +405,10 @@ async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
                 ),
                 "Retry should move the job forward, got {s:?}"
             );
-            cleared = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    assert!(
-        cleared,
-        "Retry after the fix must clear the stall toward Ready"
-    );
+            true
+        },
+    )
+    .await;
 }
 
 /// spec §14.2 launch park: a job whose pinned config requires a newer dispatcher
@@ -444,16 +450,15 @@ async fn version_skewed_config_parks_stalled_not_escalated_at_launch() {
     let core2 = new_core(&store, core_repos_root(&repo)).await;
     let _handle = dispatcher::core::spawn(core2);
 
-    let mut parked = None;
-    for _ in 0..400 {
-        let rec = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
-        if rec.state != JobState::Ready {
-            parked = Some(rec);
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    let rec = parked.expect("the skewed job must leave Ready");
+    let rec = test_utils::wait::job_where(
+        &store,
+        "acme",
+        "api",
+        job.id,
+        format!("skewed job {} to leave Ready (park pre-Work)", job.id),
+        |rec| rec.state != JobState::Ready,
+    )
+    .await;
 
     // Parked pre-Work (Stalled), never Escalated — no per-launch storm.
     assert_eq!(

@@ -73,10 +73,12 @@ async fn get(router: &axum::Router, path: &str, bearer: &str) -> (StatusCode, se
 
 #[tokio::test]
 async fn config_endpoints() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
     // Seed KV directly. Secret VALUES here are arbitrary — the api lists names
@@ -126,6 +128,7 @@ async fn config_endpoints() {
                     slots: 4,
                     available: true,
                     version: None,
+                    refresh_outcome: None,
                 }],
                 agent_provider_default: "claude".into(),
                 agent_model_default: Some("claude-sonnet-5".into()),
@@ -242,10 +245,12 @@ async fn config_endpoints() {
 /// published anything.
 #[tokio::test]
 async fn platform_fleet_endpoint() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
     // JWT signer + router (no Core — this route is a pure KV read).
@@ -292,6 +297,7 @@ async fn platform_fleet_endpoint() {
                     occupied: 1,
                     available: true,
                     version: Some("0.1.0+air".into()),
+                    refresh_outcome: None,
                     running: vec![SlotOccupant {
                         project: "acme/api".into(),
                         job_seq: 42,

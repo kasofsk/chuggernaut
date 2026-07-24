@@ -538,6 +538,7 @@ impl Core {
                                 launch_error: None,
                                 log_tail: None,
                                 infra_loss: false,
+                                structured: None,
                             },
                         })
                         .await;
@@ -714,6 +715,7 @@ impl Core {
             exit_code,
             usage,
             launch_error,
+            structured,
             ..
         } = exit;
         let key = (owner.to_string(), project.to_string(), seq);
@@ -728,7 +730,13 @@ impl Core {
                     .and_then(|e| e.work_submission.clone());
                 task.result = Some(TaskResult::Work {
                     summary: sub.as_ref().and_then(|s| s.summary.clone()),
-                    structured: sub.as_ref().and_then(|s| s.structured.clone()),
+                    // A command work task carries no submission; its structured
+                    // result is the deploy report harvested from stdout (ticket
+                    // #187). An agent's own `structured` wins when present.
+                    structured: sub
+                        .as_ref()
+                        .and_then(|s| s.structured.clone())
+                        .or(structured),
                     cover_html: sub.as_ref().and_then(|s| s.cover_html.clone()),
                     token_usage: sub.and_then(|s| s.token_usage),
                 });
@@ -804,7 +812,19 @@ impl Core {
                 pass: false,
                 exit_code,
                 output: reason.clone(),
-                structured: None,
+                structured,
+            });
+        } else if structured.is_some() {
+            // A FAILED run's harvested report (#187 @chug:leg lines) is the
+            // whole point of structured legs — a deploy that died mid-leg must
+            // record which leg failed and which never ran, not drop the report
+            // because the exit was non-zero (found by #207's review: the
+            // harvest previously landed only on the exit-0 path).
+            task.result = Some(TaskResult::Command {
+                pass: false,
+                exit_code,
+                output: String::new(),
+                structured,
             });
         }
         self.tasks.put(&task).await?;

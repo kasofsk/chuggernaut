@@ -166,6 +166,29 @@ impl ArtifactCrypto {
     }
 }
 
+/// #196 belt-and-braces: no object-store await may park its caller forever.
+/// async-nats 0.38's object store has watch-backed list streams and chunk
+/// readers whose termination has raced in prod (the http_bridge / CI hang,
+/// 2026-07-23). The construction-level fixes (tombstone guards) close the
+/// known cases; this bound turns any unknown one into a loud `StoreError`
+/// instead of an eternally-hung CI task.
+const OBJ_OP_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Await `fut` under [`OBJ_OP_BOUND`], mapping both the op's own error and a
+/// timeout into a `StoreError` tagged `what`.
+async fn bound<T, E: std::fmt::Display>(
+    what: &str,
+    fut: impl std::future::Future<Output = Result<T, E>>,
+) -> crate::Result<T> {
+    match tokio::time::timeout(OBJ_OP_BOUND, fut).await {
+        Ok(r) => r.map_err(|e| StoreError::Nats(format!("{what}: {e}"))),
+        Err(_) => Err(StoreError::Nats(format!(
+            "{what}: exceeded {}s object-store bound",
+            OBJ_OP_BOUND.as_secs()
+        ))),
+    }
+}
+
 pub struct ArtifactStore {
     obj: ObjectStore,
     crypto: ArtifactCrypto,
@@ -187,10 +210,11 @@ impl ArtifactStore {
     ) -> crate::Result<()> {
         let sealed = self.crypto.seal(plaintext)?;
         let name = keys::artifact_key(owner, project, job_seq, task_id, kind.as_str());
-        self.obj
-            .put(name.as_str(), &mut sealed.as_slice())
-            .await
-            .map_err(|e| StoreError::Nats(format!("artifact put: {e}")))?;
+        bound(
+            "artifact put",
+            self.obj.put(name.as_str(), &mut sealed.as_slice()),
+        )
+        .await?;
         Ok(())
     }
 
@@ -205,16 +229,23 @@ impl ArtifactStore {
         kind: ArtifactKind,
     ) -> crate::Result<Option<Vec<u8>>> {
         let name = keys::artifact_key(owner, project, job_seq, task_id, kind.as_str());
-        let mut object = match self.obj.get(name.as_str()).await {
-            Ok(o) => o,
+        let mut object = match tokio::time::timeout(OBJ_OP_BOUND, self.obj.get(name.as_str())).await
+        {
             // The object-store API reports a missing object as an error, not None.
-            Err(_) => return Ok(None),
+            Ok(Err(_)) => return Ok(None),
+            Ok(Ok(o)) => o,
+            Err(_) => {
+                return Err(StoreError::Nats("artifact get: exceeded bound".into()));
+            }
         };
+        // Same tombstone hazard as `get_attachment` (#196): a DELETEd object's
+        // reader has no chunks and `read_to_end` awaits forever. Nothing deletes
+        // transcripts today, but the guard costs nothing and the hang is fatal.
+        if object.info.deleted {
+            return Ok(None);
+        }
         let mut sealed = Vec::new();
-        object
-            .read_to_end(&mut sealed)
-            .await
-            .map_err(|e| StoreError::Nats(format!("artifact read: {e}")))?;
+        bound("artifact read", object.read_to_end(&mut sealed)).await?;
         self.crypto.open(&sealed).map(Some)
     }
 
@@ -248,10 +279,7 @@ impl ArtifactStore {
             description: Some(attachment_desc(content_type, plaintext.len() as u64)),
             chunk_size: None,
         };
-        self.obj
-            .put(meta, &mut sealed.as_slice())
-            .await
-            .map_err(|e| StoreError::Nats(format!("attachment put: {e}")))?;
+        bound("attachment put", self.obj.put(meta, &mut sealed.as_slice())).await?;
         Ok(())
     }
 
@@ -264,10 +292,14 @@ impl ArtifactStore {
         name: &str,
     ) -> crate::Result<Option<(Attachment, Vec<u8>)>> {
         let key = keys::job_attachment_key(owner, project, job_seq, name);
-        let mut object = match self.obj.get(key.as_str()).await {
-            Ok(o) => o,
+        let mut object = match tokio::time::timeout(OBJ_OP_BOUND, self.obj.get(key.as_str())).await
+        {
             // The object-store API reports a missing object as an error, not None.
-            Err(_) => return Ok(None),
+            Ok(Err(_)) => return Ok(None),
+            Ok(Ok(o)) => o,
+            Err(_) => {
+                return Err(StoreError::Nats("attachment get: exceeded bound".into()));
+            }
         };
         // A DELETEd object is a tombstone: `get` succeeds but the reader has no
         // chunks and `read_to_end` awaits forever (reproduced 2026-07-23 —
@@ -278,10 +310,7 @@ impl ArtifactStore {
         }
         let (content_type, _) = parse_attachment_desc(object.info.description.as_deref());
         let mut sealed = Vec::new();
-        object
-            .read_to_end(&mut sealed)
-            .await
-            .map_err(|e| StoreError::Nats(format!("attachment read: {e}")))?;
+        bound("attachment read", object.read_to_end(&mut sealed)).await?;
         let plaintext = self.crypto.open(&sealed)?;
         let meta = Attachment {
             name: name.to_string(),
@@ -301,15 +330,8 @@ impl ArtifactStore {
     ) -> crate::Result<Vec<Attachment>> {
         use futures::TryStreamExt as _;
         let prefix = keys::job_attachment_prefix(owner, project, job_seq);
-        let list = self
-            .obj
-            .list()
-            .await
-            .map_err(|e| StoreError::Nats(format!("attachment list: {e}")))?;
-        let infos: Vec<_> = list
-            .try_collect()
-            .await
-            .map_err(|e| StoreError::Nats(format!("attachment list: {e}")))?;
+        let list = bound("attachment list", self.obj.list()).await?;
+        let infos: Vec<_> = bound("attachment list collect", list.try_collect()).await?;
         let mut out: Vec<Attachment> = infos
             .iter()
             .filter(|i| !i.deleted)
@@ -338,15 +360,15 @@ impl ArtifactStore {
         let key = keys::job_attachment_key(owner, project, job_seq, name);
         // `info` on a DELETEd object still succeeds (tombstone) — treat it as
         // already-gone, same as missing, so double-delete reports false.
-        match self.obj.info(key.as_str()).await {
-            Err(_) => return Ok(false),
-            Ok(info) if info.deleted => return Ok(false),
-            Ok(_) => {}
+        match tokio::time::timeout(OBJ_OP_BOUND, self.obj.info(key.as_str())).await {
+            Ok(Err(_)) => return Ok(false),
+            Ok(Ok(info)) if info.deleted => return Ok(false),
+            Ok(Ok(_)) => {}
+            Err(_) => {
+                return Err(StoreError::Nats("attachment info: exceeded bound".into()));
+            }
         }
-        self.obj
-            .delete(key.as_str())
-            .await
-            .map_err(|e| StoreError::Nats(format!("attachment delete: {e}")))?;
+        bound("attachment delete", self.obj.delete(key.as_str())).await?;
         Ok(true)
     }
 
@@ -360,17 +382,14 @@ impl ArtifactStore {
     ) -> crate::Result<Vec<ArtifactKind>> {
         use futures::TryStreamExt as _;
         let prefix = keys::artifact_task_prefix(owner, project, job_seq, task_id);
-        let list = self
-            .obj
-            .list()
-            .await
-            .map_err(|e| StoreError::Nats(format!("artifact list: {e}")))?;
-        let infos: Vec<_> = list
-            .try_collect()
-            .await
-            .map_err(|e| StoreError::Nats(format!("artifact list: {e}")))?;
+        let list = bound("artifact list", self.obj.list()).await?;
+        let infos: Vec<_> = bound("artifact list collect", list.try_collect()).await?;
         Ok(infos
             .iter()
+            // Tombstones read as absent, same as get()/list_attachments (#196):
+            // nothing deletes task artifacts today, but a deleted one must
+            // never resurface as a live kind (#207 review, cycle 2).
+            .filter(|i| !i.deleted)
             .filter_map(|i| i.name.strip_prefix(&prefix))
             .filter_map(ArtifactKind::parse)
             .collect())

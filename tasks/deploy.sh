@@ -43,6 +43,10 @@ else
 fi
 
 echo "deploy: shipping $SHA to $MINI_HOST"
+# update.sh's stdout — including its `@chug:leg`/`@chug:report` lines (ticket
+# #187) — streams straight back through this ssh session into the deploy task's
+# log unchanged, where the dispatcher harvests it into the task's structured
+# result. Do not filter or reformat it.
 ssh -i "$KEY_FILE" -p "$MINI_PORT" \
   -o IdentitiesOnly=yes \
   -o StrictHostKeyChecking=accept-new \

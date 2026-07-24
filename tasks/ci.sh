@@ -12,6 +12,22 @@
 set -eu
 export CARGO_TERM_COLOR=always
 
+# --- sccache liveness guard ---------------------------------------------------
+# The agent image may carry an sccache binary for the WRONG arch (observed
+# 2026-07-24: x86_64 sccache under qemu on an arm64 worker), and the emulated
+# server can deadlock on start — cargo then parks forever waiting on its
+# compiler wrapper, wedging the whole CI task with zero CPU. Probe the server
+# once with a hard timeout; if it cannot answer, compile WITHOUT the wrapper
+# (slower, never wedged). Loud either way.
+if [ -n "${RUSTC_WRAPPER:-}" ] && command -v sccache >/dev/null 2>&1; then
+	if timeout 15 sccache --start-server >/dev/null 2>&1 || timeout 5 sccache --show-stats >/dev/null 2>&1; then
+		echo "ci: sccache server answering — wrapper enabled"
+	else
+		echo "ci: WARNING sccache server did not answer within 15s (emulated/broken binary?) — disabling RUSTC_WRAPPER for this run"
+		unset RUSTC_WRAPPER
+	fi
+fi
+
 # --- sccache stats -----------------------------------------------------------
 # Agent/CI containers compile through sccache (WORKER_CACHE_DIR, #55/#122). Each
 # container starts a fresh sccache server, so its stats are inherently per-task
@@ -109,12 +125,77 @@ announce_tier2() {
 	fi
 }
 
+# One communal NATS server for the whole gate (#206). Every test binary's
+# namespaced `shared()` connects here via CHUG_TEST_NATS_URL instead of each
+# spinning its own Docker container — per-binary brokers (plus lingering
+# reaper lag, plus the tier-3 real-container suites) saturated a laptop
+# Docker daemon and flaked the gate with setup timeouts. Per-test namespaces
+# make the sharing safe; the private-server suites (prod-named or config-mode)
+# deliberately ignore the env and keep their own containers. Best-effort: if
+# Docker cannot start it, tests fall back to per-binary containers (or skip,
+# exactly as without it).
+GATE_NATS_NAME=""
+start_gate_nats() {
+	[ -n "${CHUG_TEST_NATS_URL:-}" ] && return 0 # caller provided one
+	command -v docker >/dev/null 2>&1 || return 0
+	docker info >/dev/null 2>&1 || return 0
+	GATE_NATS_NAME="chug-gate-nats-$$"
+	docker run -d --rm --name "$GATE_NATS_NAME" -p 127.0.0.1:0:4222 \
+		nats:2.10-alpine -js >/dev/null 2>&1 || { GATE_NATS_NAME=""; return 0; }
+	# Sibling-aware addressing: when this gate itself runs INSIDE a container
+	# (the CI evaluator — /.dockerenv present), the docker socket is the
+	# HOST's, so the host-port mapping points at the host's localhost, which
+	# a sibling cannot reach. Use the NATS container's bridge IP instead
+	# (both siblings sit on the default bridge). On a bare host, the mapped
+	# localhost port is the reachable address. The test harness liveness-
+	# probes whichever URL we export and falls back loudly if it is wrong.
+	if [ -f /.dockerenv ]; then
+		addr="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GATE_NATS_NAME" 2>/dev/null)"
+		port=""
+		[ -n "$addr" ] && port="4222" && gate_url="nats://$addr:4222"
+	else
+		port="$(docker port "$GATE_NATS_NAME" 4222/tcp 2>/dev/null | head -1 | sed 's/.*://')"
+		gate_url="nats://127.0.0.1:$port"
+	fi
+	if [ -z "$port" ]; then
+		docker rm -f "$GATE_NATS_NAME" >/dev/null 2>&1
+		GATE_NATS_NAME=""
+		return 0
+	fi
+	# Wait for readiness so the first binary never races the server boot.
+	i=0
+	while [ "$i" -lt 50 ]; do
+		if docker logs "$GATE_NATS_NAME" 2>&1 | grep -q "Server is ready"; then
+			CHUG_TEST_NATS_URL="$gate_url"
+			export CHUG_TEST_NATS_URL
+			echo "ci: communal gate NATS at $CHUG_TEST_NATS_URL ($GATE_NATS_NAME)"
+			return 0
+		fi
+		i=$((i + 1))
+		sleep 0.2
+	done
+	docker rm -f "$GATE_NATS_NAME" >/dev/null 2>&1
+	GATE_NATS_NAME=""
+	return 0
+}
+
+stop_gate_nats() {
+	[ -n "$GATE_NATS_NAME" ] && docker rm -f "$GATE_NATS_NAME" >/dev/null 2>&1
+	GATE_NATS_NAME=""
+}
+
 run_full_ci() {
 	cargo_ran=1
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets -- -D warnings
 
 	announce_tier2
+
+	start_gate_nats
+	# POSIX sh has ONE EXIT trap — line ~61 already owns it for the sccache
+	# stats, so re-arm with both (a bare `trap stop_gate_nats EXIT` here would
+	# silently clobber the stats printer; the #186 web-publish lesson).
+	trap 'stop_gate_nats; print_sccache_stats' EXIT
 
 	# Stream the test output live (tee) while capturing cargo's real exit code
 	# through the pipe (POSIX sh has no `pipefail`).

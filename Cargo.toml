@@ -69,3 +69,4 @@ uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 futures = "0.3"
 tower = { version = "0.5", features = ["util"] }
+testcontainers = "=0.26.3"

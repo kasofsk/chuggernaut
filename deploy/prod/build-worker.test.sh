@@ -35,11 +35,21 @@ EOF
 
 # Fake ssh: consume any piped stdin (git archive) and log the full argv, so the
 # assertions can inspect the remote command strings — including the multi-line
-# daemon `docker run`.
+# daemon `docker run`. It also answers the two verification probes the script now
+# runs over ssh:
+#   * the image-label inspect (`...chug.git.sha...`) echoes $FAKE_LABEL, default
+#     the SHA fake-git reports, so the label assert passes unless a case forces a
+#     mismatch (the stale-image-label case);
+#   * the daemon health probe (`...State.Running...`) echoes HEALTHY unless
+#     $FAIL_PROBE is set, so a case can drive the probe to time out.
 cat > "$BIN/ssh" <<EOF
 #!/bin/sh
 cat >/dev/null 2>&1 || true
 echo "ssh \$*" >> "$LOG"
+case "\$*" in
+  *chug.git.sha*)  echo "\${FAKE_LABEL:-deadbeefcafe}" ;;
+  *State.Running*) [ -n "\${FAIL_PROBE:-}" ] || echo HEALTHY ;;
+esac
 exit 0
 EOF
 
@@ -85,6 +95,12 @@ if grep -qF "WORKER_CACHE_DIR" "$LOG"; then
 fi
 echo "ok: no WORKER_CACHE_DIR passed when unset"
 
+# Also assert the label + health verification happened on the success path.
+grep_log "chug.git.sha=deadbeefcafe"                 # SHA baked as an image LABEL
+grep_log "docker inspect --format"                   # label read back for the assert
+grep -F "ssh" "$LOG" | grep -qF "State.Running"      # daemon health probe ran
+echo "ok: success path bakes + verifies the image label and probes daemon health"
+
 # ── Case 3: no worker node ⇒ clean no-op ──────────────────────────────────────
 : > "$LOG"
 PATH="$BIN:$PATH" sh "$SUT"
@@ -92,5 +108,44 @@ if [ -s "$LOG" ]; then
   fail "build-worker.sh must no-op (no ssh) when WORKER_SSH is unset"
 fi
 echo "ok: no-op when WORKER_SSH unset"
+
+# ── Case 4: stale image label ⇒ REFUSE the daemon restart ─────────────────────
+# If the built worker image's chug.git.sha label does not match the requested
+# SHA (a stale layer / silently failed build), the script must refuse to (re)start
+# the daemon onto it and exit non-zero — the live daemon stays put.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  FAKE_LABEL=staleSHA000 \
+  sh "$SUT" >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "stale image label must fail the build (got rc=0)"
+if grep -qF "docker run -d --restart=always --name chug-worker" "$LOG"; then
+  fail "stale image label must REFUSE the daemon restart (docker run must not have happened)"
+fi
+echo "ok: stale image label refuses the daemon restart (non-zero, daemon untouched)"
+
+# ── Case 5: daemon never reports healthy ⇒ probe times out, loud failure ──────
+# The label matches (build ok) but the daemon does not come up (FAIL_PROBE): the
+# health probe must time out and exit non-zero — never a silent 'deployed'.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  FAIL_PROBE=1 \
+  PROBE_TIMEOUT_SECS=0 PROBE_INTERVAL_SECS=0 \
+  sh "$SUT" >"$WORK/probe.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an unhealthy daemon must fail the deploy (got rc=0)"
+grep -qF "did NOT report healthy" "$WORK/probe.out" || fail "probe timeout must be loud"
+grep -qF "deployed" "$WORK/probe.out" && fail "must not print a 'deployed' message when the probe times out"
+echo "ok: unhealthy daemon times out loudly (non-zero, no 'deployed' claim)"
 
 echo "ALL PASS"

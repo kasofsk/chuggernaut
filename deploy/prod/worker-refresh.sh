@@ -85,18 +85,41 @@ build)
   export DOCKER_BUILDKIT=1
 
 
-  # Worker daemon image (repo-root context; bakes chuggernaut + channel binary
-  # at this SHA — native on the node).
-  git -C "$TMP" archive --format=tar FETCH_HEAD \
-    | docker build -q -t "chuggernaut/worker:$NEW" \
-        -f deploy/prod/Dockerfile.worker --build-arg "CHUG_GIT_SHA=$SHA" -
+  # Stage each build context to a FILE, then feed `docker build` from it — never
+  # `git archive | docker build`. A POSIX pipeline reports only the LAST
+  # command's status, so a `git archive` that dies mid-stream would be masked by
+  # a build that "succeeds" on a truncated context. With a staged file, `set -e`
+  # aborts on the archive step itself and the build reads a complete context.
+  #
+  # --label chug.git.sha=<sha> stamps the requested SHA INTO the worker image so
+  # we can positively PROVE, before the retag-swap, that the image about to go
+  # live was built from the commit we asked for — an exit code alone is not
+  # trustworthy (the buildx-missing class of failure).
+  git -C "$TMP" archive --format=tar FETCH_HEAD > "$TMP/worker.tar"
+  [ -s "$TMP/worker.tar" ] || { echo "worker-refresh: empty worker context — aborting (live images untouched)" >&2; exit 1; }
+  docker build -q -t "chuggernaut/worker:$NEW" \
+      -f deploy/prod/Dockerfile.worker --build-arg "CHUG_GIT_SHA=$SHA" \
+      --label "chug.git.sha=$SHA" - < "$TMP/worker.tar"
 
   # Agent images the job types run in.
-  git -C "$TMP" archive --format=tar FETCH_HEAD:deploy/dev \
-    | docker build -q -t "chuggernaut/agent:$NEW" -f Dockerfile.agent -
-  git -C "$TMP" archive --format=tar FETCH_HEAD \
-    | docker build -q -t "chuggernaut/agent-rust:$NEW" \
-        -f deploy/prod/Dockerfile.agent-rust -
+  git -C "$TMP" archive --format=tar FETCH_HEAD:deploy/dev > "$TMP/agent.tar"
+  [ -s "$TMP/agent.tar" ] || { echo "worker-refresh: empty agent context — aborting (live images untouched)" >&2; exit 1; }
+  docker build -q -t "chuggernaut/agent:$NEW" -f Dockerfile.agent - < "$TMP/agent.tar"
+  git -C "$TMP" archive --format=tar FETCH_HEAD > "$TMP/agent-rust.tar"
+  [ -s "$TMP/agent-rust.tar" ] || { echo "worker-refresh: empty agent-rust context — aborting (live images untouched)" >&2; exit 1; }
+  docker build -q -t "chuggernaut/agent-rust:$NEW" \
+      -f deploy/prod/Dockerfile.agent-rust - < "$TMP/agent-rust.tar"
+
+  # Positively assert the freshly built worker image carries the requested SHA
+  # label BEFORE the retag-swap flips the live tag onto it. A build whose label
+  # is missing or wrong (stale layer, silent buildx failure) must never become
+  # the live image — refuse the swap; the trap drops the temp tags and the live
+  # images stay exactly as they were.
+  GOT_LABEL="$(docker inspect --format '{{index .Config.Labels "chug.git.sha"}}' "chuggernaut/worker:$NEW" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [ "$GOT_LABEL" != "$SHA" ]; then
+    echo "worker-refresh: built worker image label '$GOT_LABEL' != requested $SHA — refusing retag-swap (live images untouched)" >&2
+    exit 1
+  fi
 
   # All three built to completion — retag-swap onto the live tag. `docker tag`
   # is local and instant, so the live images flip to the new build only now,

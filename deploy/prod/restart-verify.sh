@@ -48,6 +48,19 @@ UID_NUM="$(id -u)"
 HEALTH_TIMEOUT_SECS="${HEALTH_TIMEOUT_SECS:-60}"
 HEALTH_INTERVAL_SECS="${HEALTH_INTERVAL_SECS:-3}"
 
+# Preflight: is the docker engine up? The dispatcher liveness probe runs inside
+# `docker run ... nats-box`, so a DOWN engine makes every probe fail and would
+# roll back a perfectly good binary — mistaking docker-down for dispatcher-down
+# (the failure this ticket fixes). docker-down gets its own exit code and does
+# NOT roll back. Overridable via DOCKER_PREFLIGHT_CMD for the shell test.
+docker_up() {
+  if [ -n "${DOCKER_PREFLIGHT_CMD:-}" ]; then
+    sh -c "$DOCKER_PREFLIGHT_CMD" >/dev/null 2>&1
+    return $?
+  fi
+  docker info >/dev/null 2>&1
+}
+
 # The dispatcher and api are the SAME binary, run as two launchd services.
 restart_services() {
   launchctl kickstart -k "gui/$UID_NUM/com.chuggernaut.dispatcher"
@@ -91,6 +104,18 @@ await_health() {
     sleep "$HEALTH_INTERVAL_SECS"
   done
 }
+
+# Preflight the docker engine BEFORE touching services. Only the real nats-box
+# probe needs docker, so skip this when the caller injects HEALTHCHECK_CMD (the
+# shell test's fake probe inspects a file, not NATS). A down engine is exit 4 —
+# a DISTINCT code that update.sh must not confuse with a health-check failure —
+# and we do NOT roll back: the running binary is fine, docker is what's down.
+if [ -z "${HEALTHCHECK_CMD:-}" ] && ! docker_up; then
+  echo "health: docker engine is DOWN (docker info failed) — the NATS liveness probe" \
+       "cannot run. This is NOT a dispatcher failure; NOT restarting and NOT rolling" \
+       "back. Bring docker/colima up and re-run the deploy." >&2
+  exit 4
+fi
 
 echo "health: restarting dispatcher + api onto $TARGET_SHA"
 restart_services

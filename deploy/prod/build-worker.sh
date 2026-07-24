@@ -26,17 +26,50 @@ SHA="$(git rev-parse HEAD)"
 # plugin is required — the engine's built-in BuildKit is enough for cache mounts.
 BK="DOCKER_BUILDKIT=1"
 
+# Health-probe budget (overridable for the shell test). Defaults give ~60s.
+PROBE_TIMEOUT_SECS="${PROBE_TIMEOUT_SECS:-60}"
+PROBE_INTERVAL_SECS="${PROBE_INTERVAL_SECS:-3}"
+
+# Stage every build context to a FILE, then feed `docker build` from it — never
+# `git archive | ssh docker build`. A POSIX pipeline reports only the LAST
+# command's status, so a `git archive` that dies mid-stream is masked by a
+# `docker build` that "succeeds" on a truncated context (the 2026-07-23 incident:
+# a buildx-missing failure printed ERROR yet the pipeline exit stayed 0 and the
+# deploy sailed on, leaving a stale daemon). With a staged file, `set -e` aborts
+# on the archive step itself, and the build reads a complete, verified context.
+CTX="$(mktemp)"
+trap 'rm -f "$CTX"' EXIT INT TERM
+
 # Worker daemon image (repo-root context; bakes chuggernaut + channel binary).
-git archive --format=tar HEAD \
-  | ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/worker:$TAG \
-      -f deploy/prod/Dockerfile.worker --build-arg CHUG_GIT_SHA=$SHA -"
+# --label chug.git.sha=<sha> stamps the requested SHA INTO the image so we can
+# positively prove, below, that the image the daemon will run was built from the
+# commit we asked for — an exit code alone is not trustworthy here.
+git archive --format=tar HEAD > "$CTX"
+[ -s "$CTX" ] || { echo "build-worker: empty build context for worker image — aborting" >&2; exit 1; }
+ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/worker:$TAG \
+    -f deploy/prod/Dockerfile.worker --build-arg CHUG_GIT_SHA=$SHA \
+    --label chug.git.sha=$SHA -" < "$CTX"
+
+# Positively assert the built image carries the requested SHA label BEFORE we
+# restart the daemon onto it. A stale/failed build (label missing or mismatched)
+# must never reach `docker run` — refuse loudly and leave the live daemon as-is.
+GOT_LABEL="$(ssh "$WORKER_SSH" \
+  "docker inspect --format '{{index .Config.Labels \"chug.git.sha\"}}' chuggernaut/worker:$TAG" \
+  2>/dev/null | tr -d '[:space:]' || true)"
+if [ "$GOT_LABEL" != "$SHA" ]; then
+  echo "build-worker: worker image label '$GOT_LABEL' != requested SHA '$SHA' — REFUSING daemon restart (stale or failed build; live daemon untouched)" >&2
+  exit 1
+fi
+echo "build-worker: verified chuggernaut/worker:$TAG carries chug.git.sha=$SHA"
 
 # Agent images the job types run in, native on the node.
-git archive --format=tar HEAD:deploy/dev \
-  | ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/agent:$TAG -f Dockerfile.agent -"
-git archive --format=tar HEAD \
-  | ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/agent-rust:$TAG \
-      -f deploy/prod/Dockerfile.agent-rust -"
+git archive --format=tar HEAD:deploy/dev > "$CTX"
+[ -s "$CTX" ] || { echo "build-worker: empty build context for agent image — aborting" >&2; exit 1; }
+ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/agent:$TAG -f Dockerfile.agent -" < "$CTX"
+git archive --format=tar HEAD > "$CTX"
+[ -s "$CTX" ] || { echo "build-worker: empty build context for agent-rust image — aborting" >&2; exit 1; }
+ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/agent-rust:$TAG \
+    -f deploy/prod/Dockerfile.agent-rust -" < "$CTX"
 
 # (Re)start the worker daemon on the new image. Safe mid-job: containers
 # survive, the dispatcher's poll-based wait re-attaches (spec §3.1).
@@ -70,6 +103,30 @@ docker run -d --restart=always --name chug-worker \
   chuggernaut/worker:$TAG >/dev/null"
 ssh "$WORKER_SSH" "$REMOTE"
 
+# Positively PROVE the daemon actually came up before we claim "deployed". An
+# exit code from `docker run` only says the container was created, not that it
+# stayed up. A direct NATS ping from this laptop path is impractical (the
+# dispatcher's NATS is not generally reachable here), so the probe demands the
+# daemon's OWN proof of NATS liveness: the "worker up" log line, which the
+# daemon emits only AFTER its NATS connection and worker-RPC subscription
+# succeed (daemon.rs) — the ping RPC is serving once that line exists. This is
+# strictly stronger than container-running + any-log-line (#207 review: a
+# crash-looping daemon can log plenty without ever reaching NATS). A timeout
+# is a LOUD failure with a non-zero exit — never a silent "deployed".
+PROBE_REMOTE='r=$(docker inspect -f "{{.State.Running}}" chug-worker 2>/dev/null || echo false); [ "$r" = true ] && docker logs --tail 50 chug-worker 2>&1 | grep -q "worker up" && echo HEALTHY'
+probe_deadline=$(( $(date +%s) + PROBE_TIMEOUT_SECS ))
+probe_attempt=0
+until ssh "$WORKER_SSH" "$PROBE_REMOTE" 2>/dev/null | grep -q HEALTHY; do
+  probe_attempt=$((probe_attempt + 1))
+  if [ "$(date +%s)" -ge "$probe_deadline" ]; then
+    echo "build-worker: chug-worker did NOT report healthy within ${PROBE_TIMEOUT_SECS}s on $WORKER_SSH (State.Running + a "worker up" NATS-subscribed log line) — FAILED; the daemon is not confirmed up" >&2
+    exit 1
+  fi
+  echo "build-worker: waiting for chug-worker to report healthy (attempt $probe_attempt) — retrying in ${PROBE_INTERVAL_SECS}s"
+  sleep "$PROBE_INTERVAL_SECS"
+done
+echo "build-worker: verified chug-worker is running and NATS-subscribed (worker up) on $WORKER_SSH"
+
 # Bound the node's docker disk (the 2026-07-23 air incident: 27G of BuildKit
 # cache + dangling image generations filled the colima partition and an image
 # build died ENOSPC mid-deploy). Each rebuild strands the previous image
@@ -78,4 +135,4 @@ ssh "$WORKER_SSH" "$REMOTE"
 # hot cargo/sccache cache-mounts (#115) while shedding stale layers.
 ssh "$WORKER_SSH" "docker image prune -f >/dev/null; docker builder prune -f --keep-storage 15GB >/dev/null 2>&1 || true"
 
-echo "build-worker: chuggernaut/{worker,agent,agent-rust}:$TAG deployed on $WORKER_SSH ($SHA)"
+echo "build-worker: chuggernaut/{worker,agent,agent-rust}:$TAG deployed + VERIFIED on $WORKER_SSH ($SHA) — image label matches and chug-worker is up"

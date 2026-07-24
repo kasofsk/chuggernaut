@@ -63,6 +63,66 @@ impl Bucket {
         }
         Ok(out)
     }
+
+    /// Watch one key (or a `*`/`>`-wildcard key filter) for changes. Powers the
+    /// watch-based test waits (#206).
+    ///
+    /// Uses `watch()` (`DeliverPolicy::New`): the stream stays open and delivers
+    /// **every future** revision's value for the matching key(s) — a `Put` as
+    /// `Some(value)`, a `Delete`/`Purge` as `None`. Delivering each revision
+    /// (not just a bare "changed" pulse) is what lets a wait catch a *transient*
+    /// state — e.g. a task that flips through `Pending` between relaunch
+    /// attempts — that a re-read of the latest value would race past.
+    ///
+    /// New does **not** replay the current value, so a caller waiting on an
+    /// already-present state must pair this with an initial read taken *after*
+    /// the watch is created (so no put is lost in the gap). `watch_with_history`
+    /// is deliberately avoided: it terminates immediately when no key matches at
+    /// creation, which is exactly the wait-for-a-future-key case.
+    pub async fn watch(&self, key: &str) -> Result<KvWatch> {
+        use async_nats::jetstream::kv::Operation;
+        use futures::StreamExt as _;
+        let watch = self.kv.watch(key).await.map_err(nats_err)?;
+        // A transport error ends the stream, so a bounded wait falls through to
+        // its own named timeout instead of looping on errors.
+        let inner = watch
+            .take_while(|e| futures::future::ready(e.is_ok()))
+            .map(|e| {
+                let entry = e.expect("take_while kept only Ok items");
+                match entry.operation {
+                    Operation::Put => Some(entry.value.to_vec()),
+                    Operation::Delete | Operation::Purge => None,
+                }
+            })
+            .boxed();
+        Ok(KvWatch { inner })
+    }
+}
+
+/// A live watch over one KV key (or wildcard key filter). Test waits block on
+/// this instead of sleep-polling (#206). Each item is one KV revision's value
+/// (`Some(bytes)` for a put, `None` for a delete/purge).
+pub struct KvWatch {
+    inner: futures::stream::BoxStream<'static, Option<Vec<u8>>>,
+}
+
+impl KvWatch {
+    /// Resolve when a watched key next changes; `false` once the underlying
+    /// watch has ended (transport dropped), so the caller should stop waiting.
+    /// Use this for a *re-read* wait, where the change is only a trigger to
+    /// re-query some other surface (e.g. an HTTP endpoint).
+    pub async fn changed(&mut self) -> bool {
+        use futures::StreamExt as _;
+        self.inner.next().await.is_some()
+    }
+
+    /// The next revision's value: outer `None` = the watch ended;
+    /// `Some(None)` = a delete/purge; `Some(Some(bytes))` = a put's value.
+    /// Use this to inspect *each* revision so a transient state is not missed.
+    pub async fn next_value(&mut self) -> Option<Option<Vec<u8>>> {
+        use futures::StreamExt as _;
+        self.inner.next().await
+    }
 }
 
 #[derive(Clone)]
@@ -89,6 +149,13 @@ impl JobStore {
     /// Every job across all projects — the startup reconciliation scan (§3.6).
     pub async fn list_all(&self) -> Result<Vec<Job>> {
         self.0.list_prefix("").await
+    }
+
+    /// Watch one job's record for changes — the watch-based `wait_for_state`
+    /// backing (#206). Create it before the first [`JobStore::get`] to avoid a
+    /// lost wakeup.
+    pub async fn watch(&self, owner: &str, project: &str, seq: u64) -> Result<KvWatch> {
+        self.0.watch(&keys::job_key(owner, project, seq)).await
     }
 }
 
@@ -135,6 +202,14 @@ impl TaskStore {
         let mut tasks: Vec<Task> = self.0.list_prefix(&format!("{owner}.{project}.")).await?;
         tasks.sort_by_key(|t| (t.job_seq, t.id));
         Ok(tasks)
+    }
+
+    /// Watch every task under one job (any task id) for changes — the
+    /// watch-based `wait_for_task` backing (#206).
+    pub async fn watch_job(&self, owner: &str, project: &str, job_seq: u64) -> Result<KvWatch> {
+        self.0
+            .watch(&format!("{owner}.{project}.{job_seq}.*"))
+            .await
     }
 }
 

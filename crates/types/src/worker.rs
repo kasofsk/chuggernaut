@@ -9,6 +9,7 @@
 //! Everything must fit NATS's default 1MB max_payload — the store layer
 //! enforces a size guard before sending.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -223,6 +224,90 @@ pub struct WorkerAnnounce {
     pub version: String,
 }
 
+/// How a worker's most recent self-refresh ended (spec §3.1, ticket #187). The
+/// daemon records this when a refresh completes and reports it in `ping` so a
+/// FAILED refresh becomes durable, queryable platform state (the fleet snapshot)
+/// instead of a node-local `tracing::error` that only the node's own logs hold.
+/// A successful refresh swaps the daemon away, so in practice this surfaces
+/// failures — the swapped-in daemon reports the new `version` instead.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum RefreshResult {
+    /// Accepted and still building/swapping — no terminal verdict yet.
+    InProgress,
+    /// The refresh built and swapped cleanly.
+    Ok,
+    /// The refresh failed before the swap; the old daemon keeps running.
+    Failed {
+        /// Which stage failed: `build`, `drain`, or `swap`.
+        stage: String,
+        /// A short tail of the failure detail for the operator.
+        error_tail: String,
+    },
+}
+
+/// The last refresh outcome a worker daemon reports (spec §3.1, ticket #187).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RefreshOutcome {
+    /// When the daemon accepted the refresh request.
+    pub accepted_at: DateTime<Utc>,
+    /// When it reached a terminal verdict; `None` while `InProgress`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+    /// The verdict.
+    pub result: RefreshResult,
+    /// Version the node was refreshing away from.
+    pub from_sha: String,
+    /// Target SHA of the refresh.
+    pub to_sha: String,
+}
+
+/// What `admin worker-refresh --wait-secs` should conclude from a node's latest
+/// `ping` while waiting for a refresh to land (ticket #187). Pure over its
+/// inputs so the wait loop's decision is unit-tested without NATS or a daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshConfirmation {
+    /// The refresh landed: the node reports the target SHA (the swapped-in
+    /// daemon's `version` carries it), or its outcome says `Ok`.
+    Confirmed,
+    /// The node reports a failed refresh for this target — surface the stage and
+    /// error rather than waiting out the timeout.
+    Failed { stage: String, error_tail: String },
+    /// No verdict yet — keep waiting.
+    Pending,
+}
+
+impl RefreshOutcome {
+    /// Decide whether a refresh to `target_sha` is confirmed, given the node's
+    /// reported `version` string and its latest refresh `outcome`. A version
+    /// carrying the target SHA (the swapped-in daemon) confirms; otherwise a
+    /// terminal outcome for this same target reports Ok/Failed; anything else is
+    /// still pending. Reads "the same reported field" the fleet snapshot shows.
+    pub fn confirm(
+        target_sha: &str,
+        version: &str,
+        outcome: Option<&RefreshOutcome>,
+    ) -> RefreshConfirmation {
+        // The swapped-in daemon reports `{pkg}+{sha}` — a `+{short_sha}` needle
+        // proves the swap landed even before any outcome field would.
+        let needle = format!("+{}", &target_sha[..target_sha.len().min(12)]);
+        if version.contains(&needle) {
+            return RefreshConfirmation::Confirmed;
+        }
+        match outcome {
+            Some(o) if o.to_sha == target_sha => match &o.result {
+                RefreshResult::Ok => RefreshConfirmation::Confirmed,
+                RefreshResult::Failed { stage, error_tail } => RefreshConfirmation::Failed {
+                    stage: stage.clone(),
+                    error_tail: error_tail.clone(),
+                },
+                RefreshResult::InProgress => RefreshConfirmation::Pending,
+            },
+            _ => RefreshConfirmation::Pending,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PingOk {
     /// Running `chuggernaut.managed` containers on the node (slot accounting).
@@ -233,6 +318,11 @@ pub struct PingOk {
     /// Local artifact name → sha256 hex, for operator forensics (arches
     /// differ across the fleet, so hashes are informational, not compared).
     pub artifacts: HashMap<String, String>,
+    /// The node's last self-refresh outcome (ticket #187), so a failed refresh
+    /// is durable platform state. `#[serde(default)]` keeps a pre-field daemon's
+    /// ping decodable (old daemons omit it → `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_outcome: Option<RefreshOutcome>,
 }
 
 #[cfg(test)]
@@ -307,5 +397,90 @@ mod tests {
         let s = WireStatus::Exited { exit_code: 137 };
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<WireStatus>(&json).unwrap(), s);
+    }
+
+    /// A ping carrying a refresh outcome round-trips, and a ping from an older
+    /// daemon — no `refresh_outcome` field — still decodes (back-compat).
+    #[test]
+    fn ping_refresh_outcome_round_trip_and_back_compat() {
+        let ping = PingOk {
+            running: 2,
+            version: "0.1.0+abc123".into(),
+            artifacts: HashMap::from([("channel".into(), "deadbeef".into())]),
+            refresh_outcome: Some(RefreshOutcome {
+                accepted_at: chrono::Utc::now(),
+                finished_at: Some(chrono::Utc::now()),
+                result: RefreshResult::Failed {
+                    stage: "build".into(),
+                    error_tail: "cargo build exited 101".into(),
+                },
+                from_sha: "old000".into(),
+                to_sha: "new111".into(),
+            }),
+        };
+        let json = serde_json::to_string(&ping).unwrap();
+        assert_eq!(serde_json::from_str::<PingOk>(&json).unwrap(), ping);
+
+        // Old daemon: no refresh_outcome key at all.
+        let old = r#"{"running":0,"version":"0.1.0","artifacts":{}}"#;
+        let back: PingOk = serde_json::from_str(old).unwrap();
+        assert_eq!(back.refresh_outcome, None);
+    }
+
+    /// The `--wait-secs` confirmation decision (ticket #187): a version carrying
+    /// the target SHA confirms; a matching failed outcome reports stage/error; a
+    /// matching ok outcome confirms; an in-progress or mismatched outcome is
+    /// pending.
+    #[test]
+    fn refresh_confirmation_decision() {
+        // The swapped-in daemon reports the target SHA in its version → confirmed.
+        assert_eq!(
+            RefreshOutcome::confirm("abc123def456", "0.1.0+abc123def456", None),
+            RefreshConfirmation::Confirmed
+        );
+
+        // A failed outcome for this target reports stage/error rather than waiting.
+        let failed = RefreshOutcome {
+            accepted_at: chrono::Utc::now(),
+            finished_at: Some(chrono::Utc::now()),
+            result: RefreshResult::Failed {
+                stage: "swap".into(),
+                error_tail: "boom".into(),
+            },
+            from_sha: "old".into(),
+            to_sha: "target".into(),
+        };
+        assert_eq!(
+            RefreshOutcome::confirm("target", "0.1.0", Some(&failed)),
+            RefreshConfirmation::Failed {
+                stage: "swap".into(),
+                error_tail: "boom".into()
+            }
+        );
+
+        // An ok outcome for this target confirms.
+        let ok = RefreshOutcome {
+            result: RefreshResult::Ok,
+            ..failed.clone()
+        };
+        assert_eq!(
+            RefreshOutcome::confirm("target", "0.1.0", Some(&ok)),
+            RefreshConfirmation::Confirmed
+        );
+
+        // Still building, or an outcome for a different target → pending.
+        let in_progress = RefreshOutcome {
+            result: RefreshResult::InProgress,
+            finished_at: None,
+            ..failed.clone()
+        };
+        assert_eq!(
+            RefreshOutcome::confirm("target", "0.1.0", Some(&in_progress)),
+            RefreshConfirmation::Pending
+        );
+        assert_eq!(
+            RefreshOutcome::confirm("other", "0.1.0", Some(&failed)),
+            RefreshConfirmation::Pending
+        );
     }
 }

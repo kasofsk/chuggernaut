@@ -613,6 +613,7 @@ impl ContainerBackend for DockerBackend {
                 name,
                 available,
                 version: None,
+                refresh_outcome: None,
             })
             .collect()
     }

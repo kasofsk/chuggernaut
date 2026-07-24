@@ -188,6 +188,13 @@ pub struct TaskExit {
     /// `eval_retries` budget (capped, then escalates `infra_loss`). Never set on
     /// the in-container exit paths — a real exit keeps burning budget.
     pub infra_loss: bool,
+    /// A structured report harvested from a command work task's stdout (ticket
+    /// #187): the `@chug:leg`/`@chug:report` lines a deploy emits, parsed into a
+    /// [`types::DeployReport`] and serialized. Only set by the command
+    /// work/wrap-up log monitor; `None` for agent runs (which report through
+    /// `submit_result`) and for command work that emitted no leg lines. Consumed
+    /// by [`Core::on_work_exited`] into the task's structured result.
+    pub structured: Option<serde_json::Value>,
 }
 
 impl TaskExit {
@@ -1039,6 +1046,7 @@ impl Core {
                 slots,
                 available: true,
                 version: Some(version),
+                refresh_outcome: None,
             }),
         }
     }
@@ -2401,12 +2409,8 @@ impl Core {
         }
         let subject = subjects::job_event(owner, project, seq, event_type);
         self.store
-            .jetstream()
-            .publish(subject, serde_json::to_vec(&payload)?.into())
-            .await
-            .map_err(|e| store::StoreError::Nats(e.to_string()))?
-            .await
-            .map_err(|e| store::StoreError::Nats(e.to_string()))?;
+            .publish_event(&subject, &serde_json::to_vec(&payload)?)
+            .await?;
         Ok(())
     }
 }

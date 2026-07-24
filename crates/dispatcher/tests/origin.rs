@@ -66,7 +66,7 @@ impl PullRequestApi for FakePr {
 }
 
 struct Rig {
-    _server: test_utils::nats::NatsTestServer,
+    _server: &'static test_utils::nats::NatsTestServer,
     store: NatsStore,
     origin: FakeOrigin,
     repos_root: tempfile::TempDir,
@@ -119,8 +119,10 @@ impl Rig {
 }
 
 async fn rig() -> Option<Rig> {
-    let server = test_utils::nats::NatsTestServer::spawn()?;
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let server = test_utils::nats::NatsTestServer::shared().await?;
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let origin = FakeOrigin::create().await;
     origin
@@ -495,14 +497,20 @@ async fn held_job_lands_after_merged_release_sync() {
     // The job passes evaluation and enters WrapUp but cannot land: it parks in
     // the merge queue behind the release hold and integration does not move.
     let jobs = rig.store.jobs().await.unwrap();
-    for _ in 0..400 {
-        let j = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
-        assert_ne!(j.state, JobState::Done, "must not land while held");
-        if j.state == JobState::WrapUp {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    // Watch until WrapUp; the Done guard fires inside the check so a wrong
+    // landing panics loudly (#206 principle 3).
+    test_utils::wait::job_where(
+        &rig.store,
+        "acme",
+        "api",
+        job.id,
+        format!("job {} to reach WrapUp (held in merge queue)", job.id),
+        |j| {
+            assert_ne!(j.state, JobState::Done, "must not land while held");
+            j.state == JobState::WrapUp
+        },
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(300)).await; // let any wrong landing surface
     let j = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
     assert_eq!(j.state, JobState::WrapUp, "held in the merge queue");
@@ -522,13 +530,7 @@ async fn held_job_lands_after_merged_release_sync() {
     rig.pr.script("closed", true);
     handle.origin_sync("acme", "api").await.unwrap();
 
-    for _ in 0..400 {
-        let j = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
-        if j.state == JobState::Done {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
     let j = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
     assert_eq!(j.state, JobState::Done, "held job landed after sync");
     // The job's work is on integration, on top of the reset base.

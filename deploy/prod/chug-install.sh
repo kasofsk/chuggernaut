@@ -19,7 +19,8 @@
 #   chug-install.sh worker-join               provision a worker node's creds + images
 #
 # Global flags (before the subcommand): --dry-run prints what WOULD run and
-# changes nothing. Destructive/outward steps honor it.
+# changes nothing. Destructive/outward steps honor it. --force downgrades an
+# otherwise-fatal config-validation failure (preflight) to a warning.
 #
 # Config comes from deploy/prod/chuggernaut.env (same file the services source).
 set -eu
@@ -28,6 +29,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"      # deploy/prod
 REPO="$(cd "$HERE/../.." && pwd)"          # workspace root
 ENV_FILE="${CHUG_ENV_FILE:-$HERE/chuggernaut.env}"
 DRY_RUN=0
+FORCE=0
 
 log()  { printf '\033[1;36mchug-install:\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mchug-install: warning:\033[0m %s\n' "$*" >&2; }
@@ -92,10 +94,19 @@ cmd_preflight() {
 	BIN="$REPO/target/release/chuggernaut"
 	if [ -x "$BIN" ] && [ -d "$REPO/jobs" ]; then
 		log "preflight: validating jobs/*.yaml (chuggernaut validate)"
+		# A validation failure is FATAL: shipping config that fails the same rules
+		# CI enforces would deploy a broken job type. `--force` downgrades it to a
+		# warning for the operator who knowingly wants to proceed anyway.
 		for f in "$REPO"/jobs/*.yaml; do
 			[ "$(basename "$f")" = "_defaults.yaml" ] && continue
 			[ -f "$f" ] || continue
-			"$BIN" validate "$f" >/dev/null 2>&1 || warn "validation issues in $f — run: $BIN validate $f"
+			if ! "$BIN" validate "$f" >/dev/null 2>&1; then
+				if [ "$FORCE" -eq 1 ]; then
+					warn "validation FAILED for $f — proceeding anyway (--force); run: $BIN validate $f"
+				else
+					die "validation FAILED for $f — run: $BIN validate $f (or pass --force to override)"
+				fi
+			fi
 		done
 	else
 		log "preflight: chuggernaut binary not built — skipping offline config validation (CI covers it)"
@@ -248,6 +259,7 @@ main() {
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--dry-run) DRY_RUN=1; shift ;;
+		--force) FORCE=1; shift ;;
 		--env) ENV_FILE="${2:?}"; shift 2 ;;
 		-h|--help|help|"") usage; exit 0 ;;
 		*) break ;;

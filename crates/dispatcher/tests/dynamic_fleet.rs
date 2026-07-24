@@ -7,13 +7,14 @@
 //! containers. The `FakeBackend` models capacity: `register_worker` supplies it
 //! (clears the NoCapacity refusal), `mark_worker_unschedulable` removes it.
 
+use chrono::Utc;
 use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
 use std::sync::Arc;
 use std::time::Duration;
 use store::NatsStore;
 use test_utils::repo::TempRepo;
 use test_utils::{FakeBackend, FakeProvider};
-use types::{FleetStatus, WorkerNode};
+use types::{FleetStatus, Job, JobState, Task, TaskKind, TaskPhase, TaskState, WorkerNode};
 
 const CMD_WORK: &str = r#"
 name: cmd-work
@@ -23,6 +24,68 @@ work:
   run: ./build.sh
 "#;
 
+/// Job/task records backing a seeded live container, so the §3.6 startup sweep
+/// classifies it as a re-attachable live task instead of reaping it as an
+/// orphan (the race that made the heartbeat test flaky).
+fn seeded_job(id: u64) -> Job {
+    Job {
+        id,
+        project: "acme/api".into(),
+        r#type: "cmd-work".into(),
+        title: String::new(),
+        description: String::new(),
+        cover_html: None,
+        deps: vec![],
+        members: vec![],
+        batch_id: None,
+        state: JobState::Work,
+        branch: format!("job/{id}"),
+        base_ref: None,
+        knowledge_tags: vec![],
+        eval: vec![],
+        timeout: None,
+        model: None,
+        claim_next: false,
+        escalation: None,
+        factory: None,
+        created_at: Utc::now(),
+        ready_at: Some(Utc::now()),
+        completed_at: None,
+    }
+}
+
+fn seeded_work_task(id: u64, job_seq: u64, container_id: &str) -> Task {
+    Task {
+        id,
+        job_seq,
+        project: "acme/api".into(),
+        phase: TaskPhase::Work,
+        cycle: 1,
+        kind: TaskKind::Agent {
+            provider: "claude".into(),
+            model: None,
+            prompt: "prompts/impl.md".into(),
+        },
+        state: TaskState::Running,
+        attempt: 1,
+        evaluator: None,
+        stage: 0,
+        performed_by: None,
+        label: None,
+        container_id: Some(container_id.into()),
+        rework_reason: None,
+        infra_loss: false,
+        session_id: None,
+        reviewed_tip: None,
+        result: None,
+        created_at: Utc::now(),
+        started_at: Some(Utc::now()),
+        completed_at: None,
+        pending_reason: None,
+        queued_at: None,
+    }
+}
+
 fn worker_node(name: &str, slots: u32, version: Option<&str>) -> WorkerNode {
     WorkerNode {
         name: name.into(),
@@ -30,6 +93,7 @@ fn worker_node(name: &str, slots: u32, version: Option<&str>) -> WorkerNode {
         slots,
         available: true,
         version: version.map(Into::into),
+        refresh_outcome: None,
     }
 }
 
@@ -107,30 +171,30 @@ async fn release_cmd_work(handle: &CoreHandle) -> u64 {
 }
 
 async fn wait_for_fleet(store: &NatsStore, pred: impl Fn(&FleetStatus) -> bool) -> FleetStatus {
+    // Watch the platform KV `fleet.status` key, inspecting each republished
+    // snapshot until `pred` holds (#206 principle 3).
     let bucket = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
-    for _ in 0..400 {
-        if let Some(fleet) = bucket
+    let watch = bucket.watch("fleet.status").await.unwrap();
+    let initial = || async {
+        bucket
             .get_json::<FleetStatus>("fleet.status")
             .await
             .unwrap()
-            && pred(&fleet)
-        {
-            return fleet;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("timed out waiting for fleet.status");
+    };
+    test_utils::wait::kv_wait::<FleetStatus, _, _, _, _>(
+        watch,
+        test_utils::wait::DEFAULT_TIMEOUT,
+        "fleet.status matching predicate",
+        initial,
+        |fleet| pred(fleet).then(|| fleet.clone()),
+    )
+    .await
 }
 
-/// Poll a backend predicate (e.g. a launch appearing) until it holds.
+/// Wait for a backend predicate (e.g. a launch appearing) — in-memory state, so
+/// a tightened poll (#206 principle 3).
 async fn wait_until(pred: impl Fn() -> bool) {
-    for _ in 0..400 {
-        if pred() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("timed out waiting for backend condition");
+    test_utils::wait::poll_default("backend condition", || pred().then_some(())).await;
 }
 
 fn node<'a>(fleet: &'a FleetStatus, name: &str) -> &'a types::FleetNode {
@@ -146,17 +210,19 @@ fn node<'a>(fleet: &'a FleetStatus, name: &str) -> &'a types::FleetNode {
 /// restart — the core of dynamic registration.
 #[tokio::test]
 async fn announce_adds_capacity_and_drains_launch_queue() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
     // A one-node fleet that is at capacity: every launch is refused.
     let backend = Arc::new(FakeBackend::new());
     backend.fail_launch_no_capacity_if(|_| Some("full".into()));
     let (handle, _repo) = spawn_core(
-        &server,
+        server,
         &store,
         vec![worker_node("air", 1, Some("0.1.0+air"))],
         None,
@@ -193,22 +259,42 @@ async fn announce_adds_capacity_and_drains_launch_queue() {
 /// touches a container already running there: the running slot stays tracked in
 /// occupancy, and a fresh launch queues for other capacity instead.
 #[tokio::test]
-#[ignore = "flaky: 1ms-heartbeat race vs startup sweep/announce timing — quarantined 2026-07-23 to unjam CI; deflake + un-quarantine tracked as #201"]
 async fn heartbeat_loss_stops_placement_but_preserves_running() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
-    // A container is already running on `nuc` (seeded into the live set).
+    // A container is already running on `nuc` (seeded into the live set), WITH
+    // its backing job + Running task records and a live `inspect` — the §3.6
+    // startup sweep then re-attaches it. Without the records the sweep raced
+    // the test: it legitimately reaped the container as an orphan, tripping
+    // the "never killed" assertion (the old quarantined flake).
     let backend = Arc::new(FakeBackend::new());
     backend.seed_managed_running([running("nuc/live", 7, 1)]);
+    backend.seed_running(["nuc/live".to_string()]);
+    store
+        .jobs()
+        .await
+        .unwrap()
+        .put(&seeded_job(7))
+        .await
+        .unwrap();
+    store
+        .tasks()
+        .await
+        .unwrap()
+        .put(&seeded_work_task(1, 7, "nuc/live"))
+        .await
+        .unwrap();
 
     // Zero-seed fleet with a tiny heartbeat timeout so the very next scan after
     // an announce treats it as lapsed.
     let (handle, _repo) = spawn_core(
-        &server,
+        server,
         &store,
         vec![],
         Some(Duration::from_millis(1)),
@@ -250,16 +336,18 @@ async fn heartbeat_loss_stops_placement_but_preserves_running() {
 /// live fleet, and a brand-new name joins.
 #[tokio::test]
 async fn static_and_dynamic_merge_precedence() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
     let backend = Arc::new(FakeBackend::new());
     // Seed `air` at 4 slots (a DOCKER_NODES worker entry).
     let (handle, _repo) = spawn_core(
-        &server,
+        server,
         &store,
         vec![worker_node("air", 4, Some("0.1.0+air"))],
         None,
@@ -298,16 +386,18 @@ async fn static_and_dynamic_merge_precedence() {
 /// drains — capacity appears entirely at runtime.
 #[tokio::test]
 async fn zero_seed_boot_then_announce() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
     // No capacity at all: launches are refused until a node announces.
     let backend = Arc::new(FakeBackend::new());
     backend.fail_launch_no_capacity_if(|_| Some("no nodes yet".into()));
-    let (handle, _repo) = spawn_core(&server, &store, vec![], None, backend.clone()).await;
+    let (handle, _repo) = spawn_core(server, &store, vec![], None, backend.clone()).await;
 
     // A launch on the empty fleet queues rather than failing.
     release_cmd_work(&handle).await;
@@ -331,16 +421,18 @@ async fn zero_seed_boot_then_announce() {
 /// snapshot never grows a node the backend could never place work on.
 #[tokio::test]
 async fn non_fleet_backend_drops_stray_announce() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
     // A backend that does not support dynamic workers (a Docker deployment).
     let backend = Arc::new(FakeBackend::new());
     backend.disable_dynamic_workers();
-    let (handle, _repo) = spawn_core(&server, &store, vec![], None, backend.clone()).await;
+    let (handle, _repo) = spawn_core(server, &store, vec![], None, backend.clone()).await;
 
     // Its boot fleet publishes with no nodes.
     wait_for_fleet(&store, |f| f.nodes.is_empty()).await;
@@ -362,6 +454,76 @@ async fn non_fleet_backend_drops_stray_announce() {
     assert!(
         backend.registered().is_empty(),
         "announce should not reach a non-fleet backend"
+    );
+}
+
+/// A worker's ping-reported refresh outcome (ticket #187) flows through the
+/// backend's live `fleet_status` into the published `FleetStatus`, so a failed
+/// self-refresh becomes durable, queryable platform state rather than a
+/// node-local log line. A node with no reported outcome stays `None` (absent-
+/// field back-compat: an old ping omits the field → no outcome).
+#[tokio::test]
+async fn ping_refresh_outcome_lands_in_fleet_status() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let backend = Arc::new(FakeBackend::new());
+    // The live fleet_status a real backend fills from worker pings: `air`
+    // reported a FAILED refresh, `nuc` reported none (an older daemon).
+    backend.set_fleet_status([
+        container::NodeStatus {
+            name: "air".into(),
+            available: true,
+            version: Some("0.1.0+old".into()),
+            refresh_outcome: Some(types::worker::RefreshOutcome {
+                accepted_at: chrono::Utc::now(),
+                finished_at: Some(chrono::Utc::now()),
+                result: types::worker::RefreshResult::Failed {
+                    stage: "build".into(),
+                    error_tail: "cargo build exited 101".into(),
+                },
+                from_sha: "old".into(),
+                to_sha: "target".into(),
+            }),
+        },
+        container::NodeStatus {
+            name: "nuc".into(),
+            available: true,
+            version: Some("0.1.0+old".into()),
+            refresh_outcome: None,
+        },
+    ]);
+    let (handle, _repo) = spawn_core(server, &store, vec![], None, backend.clone()).await;
+
+    // Any non-ping message republishes fleet.status; the scan tick does it.
+    handle.trigger_scan().await.unwrap();
+
+    let fleet = wait_for_fleet(&store, |f| {
+        f.nodes
+            .iter()
+            .any(|n| n.name == "air" && n.refresh_outcome.is_some())
+    })
+    .await;
+
+    let air = node(&fleet, "air");
+    match air.refresh_outcome.as_ref().map(|o| &o.result) {
+        Some(types::worker::RefreshResult::Failed { stage, error_tail }) => {
+            assert_eq!(stage, "build");
+            assert!(error_tail.contains("101"), "error tail: {error_tail}");
+        }
+        other => panic!("expected a failed refresh outcome for air, got {other:?}"),
+    }
+    assert_eq!(air.refresh_outcome.as_ref().unwrap().to_sha, "target");
+
+    // A node whose ping carried no outcome (absent-field back-compat) stays None.
+    assert!(
+        node(&fleet, "nuc").refresh_outcome.is_none(),
+        "a node with no reported refresh outcome must read None"
     );
 }
 

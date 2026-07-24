@@ -1,219 +1,245 @@
-//! Ephemeral NATS server for tier-2 tests (testing.md).
+//! NATS server for tier-2 tests (testing.md), managed by the
+//! [`testcontainers`] crate (#206).
 //!
-//! Two mechanisms, tried in order so tier-2 runs wherever *any* of them is
-//! available:
+//! ## One instance per test process (principle 2)
 //!
-//! 1. **Local `nats-server` binary** on `PATH` — a JetStream-enabled process
-//!    on an OS-assigned port, killed on drop. This is what the CI `agent-rust`
-//!    image bakes in (a ~15 MB static binary), so the merge-gate actually
-//!    executes this tier instead of silently skipping it.
-//! 2. **`nats:2-alpine` in Docker** on an ephemeral host port, removed on
-//!    drop — the local dev fallback when the binary is absent but Docker is up.
+//! [`NatsTestServer::shared`] starts a single JetStream-enabled `nats` container
+//! the first time any test in a binary asks for it and hands every later caller
+//! the same running instance. The container handle is owned by a process-wide
+//! `OnceCell`, so it lives for the whole test binary (testcontainers stops a
+//! container on `Drop`, and a `static` is never dropped — the testcontainers
+//! reaper cleans it up after the process exits). Combined with per-test
+//! namespacing ([`store::NatsStore::connect_namespaced`]) this lets the whole
+//! tier-2 suite share one server.
 //!
-//! Neither available → [`NatsTestServer::spawn`] returns `None` so callers can
-//! skip (see the `require_nats!` macro).
+//! [`NatsTestServer::spawn`] is the per-test-isolation escape hatch: a private
+//! container just for the caller (torn down on drop), for tests that genuinely
+//! need their own server.
+//!
+//! ## Skip semantics
+//!
+//! When Docker is unavailable the container cannot start, so `spawn`/`shared`
+//! return `None` and callers skip — exactly as the previous hand-rolled harness
+//! did (see the `require_nats!` macro). Setting the [`URL_ENV`] environment
+//! variable points tests at an already-running NATS instead (CI with a baked
+//! server, or a shared dev NATS); no container — and no Docker — is then needed.
 
-use std::io::Read;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use testcontainers::{
+    ContainerAsync, GenericImage, ImageExt,
+    core::{IntoContainerPort, WaitFor},
+    runners::AsyncRunner,
+};
+use tokio::sync::OnceCell;
 
-const IMAGE: &str = "nats:2-alpine";
-// Generous enough to tolerate a heavily-loaded CI box (a full `cargo test
-// --workspace` spawns many of these in parallel while the machine still
-// compiles).
-const READY_TIMEOUT: Duration = Duration::from_secs(60);
+/// The `nats` image + tag started for tier-2. JetStream is enabled via the
+/// `-js` flag (plain server) or a mounted config (the operator-mode variant).
+const IMAGE_NAME: &str = "nats";
+const IMAGE_TAG: &str = "2.10-alpine";
+/// The server's own readiness log line (printed on stderr).
+const READY_LOG: &str = "Server is ready";
+/// Env override: reuse an already-running NATS at this URL instead of starting
+/// a container. When set, Docker is not required. Also the escape valve for a
+/// resource-constrained host: point every binary at one externally-managed NATS
+/// (e.g. `docker run -d -p 4222:4222 nats:2.10-alpine -js`) so a whole-workspace
+/// run stands up a single server instead of one container per binary.
+pub const URL_ENV: &str = "CHUG_TEST_NATS_URL";
 
-/// The running server's control mechanism; [`Drop`] tears it down.
-enum Backend {
-    /// A local `nats-server` child process.
-    Local(Child),
-    /// A Docker container id.
-    Docker(String),
+/// Docker label stamped on every harness-started NATS container, so the
+/// stale-container sweep only ever touches our own.
+const LEAK_LABEL: &str = "chug.test.nats";
+
+/// Best-effort reap of harness containers older than 30 minutes (see the
+/// comment at the sweep call site). Shells out to `docker` — the harness
+/// already requires Docker, and a subprocess keeps this synchronous-simple.
+fn sweep_stale_containers() {
+    let Ok(out) = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "--filter",
+            concat!("label=", "chug.test.nats"),
+            "--format",
+            "{{.ID}}\t{{.RunningFor}}",
+        ])
+        .output()
+    else {
+        return;
+    };
+    let stale: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let (id, age) = l.split_once('\t')?;
+            // "About an hour ago", "2 hours ago", "35 minutes ago", "days"…
+            let stale = age.contains("hour")
+                || age.contains("day")
+                || age
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .is_some_and(|n| n >= 30 && age.contains("minute"));
+            stale.then(|| id.to_string())
+        })
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    eprintln!(
+        "test-utils: reaping {} stale NATS test container(s) (no ryuk in testcontainers-rs)",
+        stale.len()
+    );
+    let _ = std::process::Command::new("docker")
+        .arg("rm")
+        .arg("-f")
+        .args(&stale)
+        .output();
 }
 
+/// A NATS server available to a tier-2 test: either a testcontainers-managed
+/// container (torn down on drop) or an externally-provided URL ([`URL_ENV`]).
 pub struct NatsTestServer {
-    backend: Backend,
     url: String,
-    /// Local-mode JetStream store, removed with the server.
-    _store_dir: Option<tempfile::TempDir>,
-    /// Keeps a mounted/loaded config file alive for the server's lifetime.
-    _config_dir: Option<tempfile::TempDir>,
+    /// Owns the container so it is stopped on drop. `None` when reusing an
+    /// external URL, or for the process-shared instance held in a `static`.
+    _container: Option<ContainerAsync<GenericImage>>,
 }
+
+/// Process-wide shared server (principle 2). `Option` so a Docker-less run
+/// resolves to `None` once and every caller skips.
+static SHARED: OnceCell<Option<NatsTestServer>> = OnceCell::const_new();
 
 impl NatsTestServer {
-    /// Spawn a JetStream-enabled NATS server. Returns `None` when no mechanism
-    /// (local binary or Docker) is available so callers can skip. Panics on
-    /// unexpected failures — a half-working environment should be loud.
-    pub fn spawn() -> Option<Self> {
-        Self::spawn_inner(None)
+    /// The single per-process server (principle 2). The first caller in a test
+    /// binary starts the container; later callers get the running instance.
+    /// `None` when NATS is unavailable (Docker down and no [`URL_ENV`]).
+    pub async fn shared() -> Option<&'static NatsTestServer> {
+        SHARED
+            .get_or_init(|| async { NatsTestServer::start(None, true).await })
+            .await
+            .as_ref()
     }
 
-    /// Spawn with an extra config body — the operator/resolver stanza used by
-    /// the §7.4 auth tests. The harness owns the listen port and JetStream
-    /// store, so the body must NOT set `port:` or `jetstream {}`.
-    pub fn spawn_with_config(config: &str) -> Option<Self> {
-        Self::spawn_inner(Some(config))
+    /// A private, isolated server just for the caller (the escape hatch for
+    /// tests that need their own instance — e.g. the worker daemon and cli-init
+    /// tests, which connect with the empty prefix and cannot be namespaced onto
+    /// the shared server). Torn down when the returned value drops. `None` when
+    /// unavailable.
+    pub async fn spawn() -> Option<Self> {
+        Self::start(None, false).await
     }
 
-    fn spawn_inner(config: Option<&str>) -> Option<Self> {
-        if local_nats_available() {
-            return Some(Self::spawn_local(config));
-        }
-        if docker_available() {
-            return Some(Self::spawn_docker(config));
-        }
-        eprintln!("skipping: no NATS available (no `nats-server` binary, Docker daemon down)");
-        None
+    /// Spawn a private server with an extra config body — the operator/resolver
+    /// stanza used by the §7.4 auth tests. The harness owns JetStream (a
+    /// `store_dir` is prepended), so the body must NOT set `jetstream {}`; the
+    /// listen port is the image default (4222), mapped to an ephemeral host
+    /// port by testcontainers.
+    pub async fn spawn_with_config(config: &str) -> Option<Self> {
+        Self::start(Some(config), false).await
     }
 
-    // -- Local `nats-server` process -------------------------------------
-
-    fn spawn_local(config: Option<&str>) -> Self {
-        let store_dir = tempfile::tempdir().expect("tempdir (jetstream store)");
-        let log_dir = tempfile::tempdir().expect("tempdir (nats log)");
-        let log_path = log_dir.path().join("nats.log");
-        let log = std::fs::File::create(&log_path).expect("create nats log");
-        let log_err = log.try_clone().expect("clone nats log handle");
-
-        // `-p -1` lets the server pick a free port atomically and write the
-        // chosen address to `<ports_dir>/nats-server_<pid>.ports` — no
-        // bind-then-release race between many parallel test servers.
-        let mut cmd = Command::new("nats-server");
-        cmd.args(["-a", "127.0.0.1", "-p", "-1"])
-            .args(["--ports_file_dir", &log_dir.path().display().to_string()]);
-        let config_dir = match config {
-            Some(body) => {
-                let dir = tempfile::tempdir().expect("tempdir (nats.conf)");
-                let conf = dir.path().join("nats.conf");
-                std::fs::write(&conf, full_config(body, store_dir.path()))
-                    .expect("write nats.conf");
-                cmd.args(["-c".into(), conf.display().to_string()]);
-                Some(dir)
+    async fn start(config: Option<&str>, shared: bool) -> Option<Self> {
+        // External-URL override — NAMESPACED (shared) callers only. The full
+        // gate (tasks/ci.sh) starts ONE communal server and points every
+        // binary's `shared()` at it; per-test namespaces make that safe. The
+        // private `spawn()`/`spawn_with_config()` suites are exactly the ones
+        // that use PRODUCTION names or bespoke server config (cli init, the
+        // worker daemon, channel stdio, auth config-mode) — routing them to a
+        // communal server would leak prod-named state across binaries, so
+        // they always get their own container regardless of the env.
+        if shared
+            && config.is_none()
+            && let Ok(url) = std::env::var(URL_ENV)
+            && !url.is_empty()
+        {
+            // Trust but verify: a dead communal server would otherwise turn
+            // every tier-2 suite into connection-refused panics (learned the
+            // hard way, 2026-07-23). Unreachable ⇒ warn loudly and fall back
+            // to a self-managed container.
+            if let Some(hostport) = url.strip_prefix("nats://")
+                && tokio::net::TcpStream::connect(hostport).await.is_ok()
+            {
+                return Some(Self {
+                    url,
+                    _container: None,
+                });
             }
-            None => {
-                cmd.args(["-js", "-sd", &store_dir.path().display().to_string()]);
-                None
-            }
-        };
-        let mut child = cmd
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(log_err))
-            .spawn()
-            .expect("spawn nats-server");
-
-        let url = await_local_ready(&mut child, &log_path, log_dir.path());
-        Self {
-            backend: Backend::Local(child),
-            url,
-            _store_dir: Some(store_dir),
-            _config_dir: config_dir,
-        }
-    }
-
-    // -- Docker `nats:2-alpine` container --------------------------------
-
-    fn spawn_docker(config: Option<&str>) -> Self {
-        let config_dir = config.map(|body| {
-            let dir = tempfile::tempdir().expect("tempdir");
-            std::fs::write(
-                dir.path().join("nats.conf"),
-                full_config(body, std::path::Path::new("/tmp/js")),
-            )
-            .expect("write nats.conf");
-            dir
-        });
-
-        // 127.0.0.1:0 → Docker assigns an ephemeral host port. The config
-        // variant skips --rm so a config error's logs survive the crash
-        // (Drop still removes the container).
-        let mut args: Vec<String> = ["run", "-d", "-p", "127.0.0.1:0:4222"]
-            .map(String::from)
-            .to_vec();
-        if config_dir.is_none() {
-            args.insert(2, "--rm".into());
-        }
-        match &config_dir {
-            Some(dir) => {
-                args.push("-v".into());
-                args.push(format!("{}:/etc/nats-test", dir.path().display()));
-                args.push(IMAGE.into());
-                args.extend(["-c".into(), "/etc/nats-test/nats.conf".into()]);
-            }
-            None => args.extend([IMAGE.into(), "-js".into()]),
-        }
-        let run = Command::new("docker")
-            .args(&args)
-            .output()
-            .expect("docker run");
-        assert!(
-            run.status.success(),
-            "docker run failed: {}",
-            String::from_utf8_lossy(&run.stderr)
-        );
-        let container_id = String::from_utf8_lossy(&run.stdout).trim().to_string();
-
-        let port_out = Command::new("docker")
-            .args(["port", &container_id, "4222/tcp"])
-            .output()
-            .expect("docker port");
-        let mapping = String::from_utf8_lossy(&port_out.stdout);
-        let port = mapping
-            .lines()
-            .next()
-            .and_then(|l| l.rsplit(':').next())
-            .unwrap_or_else(|| {
-                // Config errors kill the container instantly; surface its logs
-                // (the --rm may not have collected it yet).
-                let logs = Command::new("docker")
-                    .args(["logs", &container_id])
-                    .output()
-                    .map(|o| {
-                        format!(
-                            "{}{}",
-                            String::from_utf8_lossy(&o.stdout),
-                            String::from_utf8_lossy(&o.stderr)
-                        )
-                    })
-                    .unwrap_or_default();
-                let _ = Command::new("docker")
-                    .args(["rm", "-f", &container_id])
-                    .output();
-                panic!("no port mapping for {container_id}; container logs:\n{logs}");
-            })
-            .trim()
-            .to_string();
-
-        let server = Self {
-            backend: Backend::Docker(container_id),
-            url: format!("nats://127.0.0.1:{port}"),
-            _store_dir: None,
-            _config_dir: config_dir,
-        };
-        server.await_docker_ready();
-        server
-    }
-
-    fn await_docker_ready(&self) {
-        let Backend::Docker(container_id) = &self.backend else {
-            unreachable!("await_docker_ready on a non-Docker backend");
-        };
-        // The docker-proxy accepts TCP as soon as the port maps, well before
-        // nats-server inside is up — so readiness is the server's own log line.
-        let deadline = Instant::now() + READY_TIMEOUT;
-        loop {
-            let logs = Command::new("docker")
-                .args(["logs", container_id])
-                .output()
-                .expect("docker logs");
-            if String::from_utf8_lossy(&logs.stderr).contains("Server is ready") {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "NATS container {container_id} not ready within {READY_TIMEOUT:?}"
+            eprintln!(
+                "test-utils: {URL_ENV}={url} is UNREACHABLE — falling back to a per-process container"
             );
-            std::thread::sleep(Duration::from_millis(100));
         }
+
+        // Otherwise: one NATS container per test binary/process (principle 2):
+        // the first `shared()`/`spawn()` in a binary creates it.
+        // Self-healing leak sweep. testcontainers-rs has NO ryuk reaper —
+        // cleanup is purely Drop-based — and `shared()`'s container lives in
+        // a `static`, which never drops: every test-binary run would leak one
+        // immortal NATS container (103 accumulated during #206's development
+        // and strangled the Docker daemon). Label ours and reap stale ones
+        // (>30 min — no honest test run lasts that long) before starting a
+        // new one. Best-effort by design: a failed sweep never blocks a test.
+        sweep_stale_containers();
+        let build = || {
+            let image = GenericImage::new(IMAGE_NAME, IMAGE_TAG)
+                .with_exposed_port(4222.tcp())
+                .with_wait_for(WaitFor::message_on_stderr(READY_LOG))
+                .with_labels([(LEAK_LABEL, "1")]);
+            match config {
+                None => image.with_cmd(["-js"]),
+                Some(body) => image
+                    .with_copy_to("/etc/nats-test/nats.conf", full_config(body).into_bytes())
+                    .with_cmd(["-c", "/etc/nats-test/nats.conf"]),
+            }
+        };
+
+        let mut attempt = 0;
+        let container = loop {
+            attempt += 1;
+            match build().start().await {
+                Ok(c) => break c,
+                // A concurrent-startup Docker hiccup: back off and retry a few
+                // times before deciding NATS is unavailable.
+                Err(e) if attempt < 5 => {
+                    tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
+                    let _ = e;
+                }
+                Err(e) => {
+                    // The common cause is "Docker not available" — skip, as the
+                    // old harness did. Any other infra failure skips, but loudly.
+                    eprintln!(
+                        "skipping: NATS testcontainer could not start (is Docker running?): {e}"
+                    );
+                    return None;
+                }
+            }
+        };
+
+        let host = match container.get_host().await {
+            Ok(h) => h.to_string(),
+            Err(e) => {
+                eprintln!("skipping: NATS container host unavailable: {e}");
+                return None;
+            }
+        };
+        let port = match container.get_host_port_ipv4(4222.tcp()).await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("skipping: NATS container port unmapped: {e}");
+                return None;
+            }
+        };
+        let url = format!("nats://{host}:{port}");
+
+        // The "Server is ready" log can precede the client port actually
+        // accepting under load; a short connect probe closes that gap so the
+        // first NatsStore::connect never races the listener.
+        if !await_accept(&url).await {
+            eprintln!("skipping: NATS at {url} never accepted a connection");
+            return None;
+        }
+
+        Some(Self {
+            url,
+            _container: Some(container),
+        })
     }
 
     pub fn url(&self) -> &str {
@@ -221,121 +247,47 @@ impl NatsTestServer {
     }
 }
 
-impl Drop for NatsTestServer {
-    fn drop(&mut self) {
-        match &mut self.backend {
-            Backend::Local(child) => {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            Backend::Docker(container_id) => {
-                let _ = Command::new("docker")
-                    .args(["rm", "-f", container_id])
-                    .output();
-            }
-        }
-    }
-}
-
-/// Wait for a local `nats-server` to report ready, returning its client URL
-/// (read from the ports file the server writes once it is listening). Fails
-/// fast — and loud — if the process exits early instead of blocking the whole
-/// timeout on an empty log.
-fn await_local_ready(
-    child: &mut Child,
-    log_path: &std::path::Path,
-    ports_dir: &std::path::Path,
-) -> String {
-    let ports_file = ports_dir.join(format!("nats-server_{}.ports", child.id()));
-    let deadline = Instant::now() + READY_TIMEOUT;
+/// Probe the client port until a real NATS connection succeeds (bounded).
+/// Goes through `store` so test-utils keeps no direct `async-nats` dependency.
+async fn await_accept(url: &str) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
-        if let Ok(Some(status)) = child.try_wait() {
-            panic!(
-                "nats-server exited early ({status}); log:\n{}",
-                read_to_string_lossy(log_path)
-            );
+        if store::NatsStore::connect(url).await.is_ok() {
+            return true;
         }
-        let log = read_to_string_lossy(log_path);
-        if log.contains("Server is ready")
-            && let Some(url) = read_ports_url(&ports_file)
-        {
-            return url;
+        if tokio::time::Instant::now() >= deadline {
+            return false;
         }
-        assert!(
-            Instant::now() < deadline,
-            "local nats-server not ready within {READY_TIMEOUT:?}; log:\n{log}"
-        );
-        std::thread::sleep(Duration::from_millis(50));
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-}
-
-fn read_to_string_lossy(path: &std::path::Path) -> String {
-    let mut buf = String::new();
-    if let Ok(mut f) = std::fs::File::open(path) {
-        let _ = f.read_to_string(&mut buf);
-    }
-    buf
-}
-
-/// Extract the client URL from a `nats-server` ports file, whose body is
-/// `{"nats":["nats://127.0.0.1:PORT"], ...}`. Returns `None` until the file
-/// exists and holds a `nats://` URL.
-fn read_ports_url(ports_file: &std::path::Path) -> Option<String> {
-    let body = std::fs::read_to_string(ports_file).ok()?;
-    let start = body.find("nats://")?;
-    let rest = &body[start..];
-    let end = rest.find('"').unwrap_or(rest.len());
-    Some(rest[..end].to_string())
-}
-
-/// True when a `nats-server` binary is on `PATH`.
-fn local_nats_available() -> bool {
-    Command::new("nats-server")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// True when the Docker daemon answers.
-fn docker_available() -> bool {
-    Command::new("docker")
-        .args(["info", "--format", "{{.ServerVersion}}"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 /// Wrap a caller-supplied config body (auth/resolver stanza only) with the
 /// harness-owned JetStream store so the body stays free of infra details. The
-/// listen port is owned by the harness too: `-p -1` for a local process, and
-/// the default 4222 inside Docker (mapped out to an ephemeral host port).
-fn full_config(body: &str, store_dir: &std::path::Path) -> String {
-    format!(
-        "jetstream {{ store_dir: \"{}\" }}\n{body}",
-        store_dir.display()
-    )
+/// store dir is inside the container's own filesystem.
+fn full_config(body: &str) -> String {
+    format!("jetstream {{ store_dir: \"/tmp/js\" }}\n{body}")
 }
 
-/// Skip guard: binds a [`NatsTestServer`] or returns early (test skipped).
+/// Skip guard: binds a shared [`NatsTestServer`] or returns early (test
+/// skipped). Uses the process-shared instance (#206), so a whole test binary
+/// starts at most one container.
 #[macro_export]
 macro_rules! require_nats {
     () => {
-        match $crate::nats::NatsTestServer::spawn() {
+        match $crate::nats::NatsTestServer::shared().await {
             Some(server) => server,
             None => return,
         }
     };
 }
 
-/// Skip guard for a server booted with an extra config body (operator-mode
-/// auth tests).
+/// Skip guard for a **private** server booted with an extra config body
+/// (operator-mode auth tests). Not shareable — the config is test-specific.
 #[macro_export]
 macro_rules! require_nats_config {
     ($config:expr) => {
-        match $crate::nats::NatsTestServer::spawn_with_config($config) {
+        match $crate::nats::NatsTestServer::spawn_with_config($config).await {
             Some(server) => server,
             None => return,
         }

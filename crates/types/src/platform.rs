@@ -30,6 +30,13 @@ pub struct WorkerNode {
     /// and spot deploy drift after a worker self-refresh.
     #[serde(default)]
     pub version: Option<String>,
+    /// The node's last self-refresh outcome (ticket #187), last reported by a
+    /// worker's ping. `None` for docker-endpoint nodes and workers that have
+    /// not refreshed. A failed refresh is durable platform state here rather
+    /// than a node-local `tracing::error`. Defaults to `None` for snapshots
+    /// written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_outcome: Option<crate::worker::RefreshOutcome>,
 }
 
 fn default_available() -> bool {
@@ -48,6 +55,7 @@ mod tests {
                 slots: 4,
                 available: true,
                 version: Some("0.1.0+abc123".into()),
+                refresh_outcome: None,
             }],
             agent_provider_default: "claude".into(),
             agent_model_default: None,
@@ -102,6 +110,8 @@ mod tests {
         // Pre-existing optional fields default.
         assert!(snap.nodes[0].available);
         assert_eq!(snap.nodes[0].version, None);
+        // A snapshot predating the refresh-outcome field (ticket #187) defaults it.
+        assert_eq!(snap.nodes[0].refresh_outcome, None);
         // New CD fields default to None.
         assert_eq!(snap.dispatcher_sha, None);
         assert_eq!(snap.main_tip_sha, None);
@@ -235,6 +245,12 @@ pub struct FleetNode {
     pub available: bool,
     /// Build version last reported by a worker node's ping, if any.
     pub version: Option<String>,
+    /// The node's last self-refresh outcome (ticket #187), last reported by a
+    /// worker's ping — so a failed refresh is visible in the live fleet, not
+    /// just the node's logs. `None` when the node has not refreshed (or is a
+    /// docker-endpoint node).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_outcome: Option<crate::worker::RefreshOutcome>,
     /// The occupied slots on this node.
     pub running: Vec<SlotOccupant>,
 }
@@ -275,6 +291,16 @@ mod fleet_tests {
                     occupied: 1,
                     available: true,
                     version: Some("0.1.0+abc".into()),
+                    refresh_outcome: Some(crate::worker::RefreshOutcome {
+                        accepted_at: Utc::now(),
+                        finished_at: Some(Utc::now()),
+                        result: crate::worker::RefreshResult::Failed {
+                            stage: "build".into(),
+                            error_tail: "cargo build exited 101".into(),
+                        },
+                        from_sha: "old".into(),
+                        to_sha: "new".into(),
+                    }),
                     running: vec![SlotOccupant {
                         project: "acme/api".into(),
                         job_seq: 42,
@@ -291,6 +317,7 @@ mod fleet_tests {
                     occupied: 0,
                     available: false,
                     version: None,
+                    refresh_outcome: None,
                     running: vec![],
                 },
             ],

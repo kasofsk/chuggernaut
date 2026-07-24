@@ -24,7 +24,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use store::NatsStore;
 use store::worker::{WorkerRpc, WorkerRpcError};
 use types::worker::{
-    FileSource, WireFile, WireStatus, WorkerError, WorkerLaunchRequest, b64_decode, b64_encode,
+    FileSource, RefreshOutcome, WireFile, WireStatus, WorkerError, WorkerLaunchRequest, b64_decode,
+    b64_encode,
 };
 
 /// Poll interval for `wait` on worker-node containers — no long-held NATS
@@ -61,12 +62,47 @@ enum NodeHandle {
         /// the platform config snapshot so the UI can show fleet versions and
         /// spot drift. `None` until the node first answers.
         last_version: Mutex<Option<String>>,
+        /// Last self-refresh outcome reported by a successful ping (ticket #187),
+        /// surfaced in the fleet/config snapshot so a failed refresh is durable
+        /// platform state. `None` until the node reports one.
+        last_refresh: Mutex<Option<RefreshOutcome>>,
     },
 }
 
 struct FleetNode {
     name: String,
     handle: NodeHandle,
+    /// In-flight launches this dispatcher has *placed* on the node but whose
+    /// containers the node's live count (ping / docker list) does not yet
+    /// report. Added to the node's running count during placement so two
+    /// launches dispatched back-to-back — agent launches run on their own
+    /// spawned tasks, so their `place()` calls race — don't both read the same
+    /// stale `running: 0` and tie onto the same node under `Busyness` (spec
+    /// §3.1). Incremented while the placement lock is held, decremented once the
+    /// launch RPC returns (the container then exists and the node counts it).
+    reserved: AtomicU32,
+    /// Set when the node's most recent occupancy listing (`list_running` RPC)
+    /// failed, cleared on the next success. A worker can answer `ping`/`launch`
+    /// (so it stays schedulable and reachable) while an older daemon rejects the
+    /// `list_running` op it never learned — leaving occupancy unable to see the
+    /// node's containers. Surfaced via [`FleetBackend::occupancy_unavailable_nodes`]
+    /// so the fleet snapshot shows the node out-of-service rather than falsely
+    /// idle (spec §3.1; the job/181 prod outage).
+    list_failed: AtomicBool,
+}
+
+/// A placed-but-not-yet-launched slot on a fleet node. Held across the launch
+/// RPC; its drop releases the reservation once the container exists (or the
+/// launch failed), so the node's live count takes over the accounting with no
+/// double-count and no leak on error.
+struct Reservation {
+    node: Arc<FleetNode>,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.node.reserved.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 pub struct FleetBackend {
@@ -84,6 +120,12 @@ pub struct FleetBackend {
     /// Platform placement policy (spec §3.1), applied across the whole fleet.
     /// Set from `PLACEMENT_POLICY`; defaults to [`PlacementPolicy::Busyness`].
     policy: PlacementPolicy,
+    /// Serializes the read-loads → choose → reserve step of [`Self::place`] so
+    /// concurrent launches can't both observe the pre-reservation counts and
+    /// pick the same node. Placements are infrequent and the body is short, so
+    /// serializing them is free at our scale and makes the reservation
+    /// authoritative rather than merely narrowing the race window.
+    place_lock: tokio::sync::Mutex<()>,
 }
 
 /// The precedence decision for one announce against the current roster (spec
@@ -118,6 +160,7 @@ fn worker_handle(store: NatsStore, name: &str, slots: u32) -> NodeHandle {
         schedulable: AtomicBool::new(true),
         version_warned: AtomicBool::new(false),
         last_version: Mutex::new(None),
+        last_refresh: Mutex::new(None),
     }
 }
 
@@ -165,6 +208,8 @@ impl FleetBackend {
             nodes.push(Arc::new(FleetNode {
                 name: c.name,
                 handle,
+                reserved: AtomicU32::new(0),
+                list_failed: AtomicBool::new(false),
             }));
         }
         // An empty node set is legal: a dynamic fleet may boot with zero seeds
@@ -175,6 +220,7 @@ impl FleetBackend {
             nodes: RwLock::new(nodes),
             store,
             policy,
+            place_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -248,6 +294,7 @@ impl FleetBackend {
             schedulable,
             version_warned,
             last_version,
+            last_refresh,
         } = &node.handle
         else {
             return None;
@@ -274,6 +321,14 @@ impl FleetBackend {
                         version_warned.store(false, Ordering::Relaxed);
                         *v = Some(ping.version.clone());
                     }
+                }
+                // Record the last refresh outcome (ticket #187) so a failed
+                // refresh surfaces in the fleet snapshot rather than staying a
+                // node-local log line. Only overwrite when the node reports one;
+                // a swapped-in daemon reports `None`, and we keep the last known
+                // outcome until it does.
+                if let Some(outcome) = &ping.refresh_outcome {
+                    *last_refresh.lock().unwrap() = Some(outcome.clone());
                 }
                 let own = env!("CARGO_PKG_VERSION");
                 if !ping.version.starts_with(own) && !version_warned.swap(true, Ordering::Relaxed) {
@@ -304,7 +359,16 @@ impl FleetBackend {
     /// service → `NoCapacity` "no free slots on node {name}", queued and retried
     /// by the dispatcher; unknown → a hard `Launch` naming the known nodes). The
     /// decision itself is [`choose_placement`].
-    async fn place(&self, pin: Option<&str>) -> Result<Arc<FleetNode>, BackendError> {
+    async fn place(
+        &self,
+        pin: Option<&str>,
+    ) -> Result<(Arc<FleetNode>, Reservation), BackendError> {
+        // Hold the placement lock across read-loads → choose → reserve: two
+        // launches placed back-to-back (agent launches each run on their own
+        // spawned task) otherwise both read the pre-reservation counts and tie
+        // onto the same node. Serialized, the second sees the first's
+        // reservation and busyness sends it to the idle node (spec §3.1).
+        let _guard = self.place_lock.lock().await;
         let nodes = self.snapshot();
         let mut candidates = Vec::with_capacity(nodes.len());
         for (i, node) in nodes.iter().enumerate() {
@@ -316,22 +380,37 @@ impl FleetBackend {
             });
         }
         let index = choose_placement(self.policy, &candidates, pin)?;
-        Ok(nodes[index].clone())
+        let node = nodes[index].clone();
+        // Reserve before releasing the lock so the next placement counts this
+        // launch even though its container does not exist yet.
+        node.reserved.fetch_add(1, Ordering::SeqCst);
+        Ok((node.clone(), Reservation { node }))
     }
 
     /// Live load on a fleet node: `Ok(Some)` when live, `Ok(None)` for an
     /// out-of-service worker (skipped by placement), `Err` for an unreachable
     /// docker-endpoint node (strict, spec §3.1).
     async fn node_load(&self, node: &FleetNode) -> Result<Option<NodeLoad>, BackendError> {
-        match &node.handle {
-            NodeHandle::Docker { backend } => Ok(backend
+        let base = match &node.handle {
+            NodeHandle::Docker { backend } => backend
                 .load_by_node()
                 .await?
                 .into_iter()
                 .map(|(_, running, free)| NodeLoad { running, free })
-                .next()),
-            NodeHandle::Worker { .. } => Ok(self.probe_worker(node).await),
-        }
+                .next(),
+            NodeHandle::Worker { .. } => self.probe_worker(node).await,
+        };
+        // Fold in launches already placed on this node whose containers the
+        // live count can't see yet (spec §3.1): they occupy the slot for
+        // placement purposes, so busyness and the free-slot check both treat a
+        // reserved slot as busy.
+        Ok(base.map(|l| {
+            let reserved = node.reserved.load(Ordering::SeqCst) as i64;
+            NodeLoad {
+                running: l.running + reserved,
+                free: l.free - reserved,
+            }
+        }))
     }
 
     /// Per-node health for the platform snapshot (spec §3.1): `(name, in_service)`
@@ -373,6 +452,22 @@ impl FleetBackend {
                     NodeHandle::Docker { .. } => None,
                 };
                 (n.name.clone(), version)
+            })
+            .collect()
+    }
+
+    /// Per-node last self-refresh outcome for the platform snapshot (ticket
+    /// #187): `(name, outcome)` as of the last successful ping. `None` for
+    /// docker-endpoint nodes and workers that have not reported a refresh.
+    pub fn node_refreshes(&self) -> Vec<(String, Option<RefreshOutcome>)> {
+        self.snapshot()
+            .iter()
+            .map(|n| {
+                let outcome = match &n.handle {
+                    NodeHandle::Worker { last_refresh, .. } => last_refresh.lock().unwrap().clone(),
+                    NodeHandle::Docker { .. } => None,
+                };
+                (n.name.clone(), outcome)
             })
             .collect()
     }
@@ -435,7 +530,11 @@ fn to_wire(config: &ContainerLaunchConfig) -> WorkerLaunchRequest {
 #[async_trait]
 impl ContainerBackend for FleetBackend {
     async fn launch(&self, config: ContainerLaunchConfig) -> Result<ContainerId, BackendError> {
-        let node = self.place(config.node.as_deref()).await?;
+        // `_reservation` is held until this method returns — i.e. across the
+        // launch RPC. Once the RPC completes the container exists and the node's
+        // live count reports it, so releasing the reservation then hands the
+        // accounting back to the live count with no gap and no double-count.
+        let (node, _reservation) = self.place(config.node.as_deref()).await?;
         match &node.handle {
             NodeHandle::Docker { backend } => backend.launch(config).await,
             NodeHandle::Worker { rpc, .. } => {
@@ -582,16 +681,23 @@ impl ContainerBackend for FleetBackend {
             match &node.handle {
                 NodeHandle::Docker { backend } => out.extend(backend.list_managed_running().await?),
                 NodeHandle::Worker { rpc, .. } => match rpc.list_running().await {
-                    Ok(ok) => out.extend(ok.containers.into_iter().map(|c| RunningContainer {
-                        id: c.id,
-                        project: c.project,
-                        job: c.job,
-                        task: c.task,
-                    })),
+                    Ok(ok) => {
+                        node.list_failed.store(false, Ordering::Relaxed);
+                        out.extend(ok.containers.into_iter().map(|c| RunningContainer {
+                            id: c.id,
+                            project: c.project,
+                            job: c.job,
+                            task: c.task,
+                        }));
+                    }
                     // An unreachable worker must not fail the whole sweep — its
-                    // orphans get reaped on a later pass.
+                    // orphans get reaped on a later pass. Record the failure so
+                    // the occupancy snapshot can show the node out-of-service
+                    // rather than falsely idle (spec §3.1; job/181): the node may
+                    // still answer ping/launch, so nothing else marks it down.
                     Err(e) => {
-                        tracing::warn!(node = %node.name, "list_running skipped: {e}");
+                        node.list_failed.store(true, Ordering::Relaxed);
+                        tracing::warn!(node = %node.name, "fleet occupancy: list_running failed — node shown out of service: {e}");
                     }
                 },
             }
@@ -601,6 +707,7 @@ impl ContainerBackend for FleetBackend {
 
     fn fleet_status(&self) -> Vec<NodeStatus> {
         let versions = self.node_versions();
+        let refreshes = self.node_refreshes();
         self.availability()
             .into_iter()
             .map(|(name, available)| {
@@ -608,10 +715,15 @@ impl ContainerBackend for FleetBackend {
                     .iter()
                     .find(|(n, _)| n == &name)
                     .and_then(|(_, v)| v.clone());
+                let refresh_outcome = refreshes
+                    .iter()
+                    .find(|(n, _)| n == &name)
+                    .and_then(|(_, o)| o.clone());
                 NodeStatus {
                     name,
                     available,
                     version,
+                    refresh_outcome,
                 }
             })
             .collect()
@@ -677,6 +789,8 @@ impl ContainerBackend for FleetBackend {
                 nodes.push(Arc::new(FleetNode {
                     name: name.to_string(),
                     handle,
+                    reserved: AtomicU32::new(0),
+                    list_failed: AtomicBool::new(false),
                 }));
                 true
             }
@@ -702,6 +816,22 @@ impl ContainerBackend for FleetBackend {
         {
             schedulable.store(false, Ordering::Relaxed);
         }
+    }
+
+    /// Worker nodes whose last `list_running` failed (spec §3.1 occupancy). A
+    /// node that answers `ping` but rejects `list_running` (a stale daemon that
+    /// predates the op) stays schedulable, yet its containers are invisible to
+    /// occupancy; naming it here lets the snapshot show it out-of-service instead
+    /// of a false-idle `occupied: 0` — the silent all-zero of job/181.
+    fn occupancy_unavailable_nodes(&self) -> Vec<String> {
+        self.snapshot()
+            .iter()
+            .filter(|n| {
+                matches!(n.handle, NodeHandle::Worker { .. })
+                    && n.list_failed.load(Ordering::Relaxed)
+            })
+            .map(|n| n.name.clone())
+            .collect()
     }
 }
 

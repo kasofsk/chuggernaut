@@ -102,7 +102,7 @@ work:
 "#;
 
 struct Rig {
-    _server: test_utils::nats::NatsTestServer,
+    _server: &'static test_utils::nats::NatsTestServer,
     store: NatsStore,
     repo: TempRepo,
     backend: Arc<FakeBackend>,
@@ -111,8 +111,10 @@ struct Rig {
 }
 
 async fn rig() -> Option<Rig> {
-    let server = test_utils::nats::NatsTestServer::spawn()?;
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let server = test_utils::nats::NatsTestServer::shared().await?;
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -190,16 +192,8 @@ fn req(r#type: &str) -> CreateJobRequest {
 }
 
 async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::Job {
-    let jobs = store.jobs().await.unwrap();
-    for _ in 0..400 {
-        if let Some(job) = jobs.get("acme", "api", seq).await.unwrap()
-            && job.state == want
-        {
-            return job;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("timed out waiting for {want:?}");
+    // Watch-based wait (#206 principle 3): value-inspecting, hard timeout.
+    test_utils::wait::job_state(store, "acme", "api", seq, want).await
 }
 
 /// Work hook: commit `file` to the job branch, nothing else. `main` stays put,

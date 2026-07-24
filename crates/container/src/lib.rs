@@ -257,6 +257,20 @@ pub trait ContainerBackend: Send + Sync {
     /// routable — they keep running and the poll-based `wait` re-attaches (spec
     /// §3.1 semantics unchanged). A later announce re-admits it. Default no-op.
     fn mark_worker_unschedulable(&self, _name: &str) {}
+
+    /// Nodes whose most recent [`Self::list_managed_running`] call could not
+    /// enumerate their containers (spec §3.1 occupancy). Unlike the §3.6 reap —
+    /// which tolerates a node it can't list by skipping it — the *occupancy*
+    /// snapshot must not present such a node as idle: `occupied: 0, available:
+    /// true` is indistinguishable from a genuinely empty node and silently hid a
+    /// prod outage (job/181) where a worker daemon reported no managed containers
+    /// while two were live. Returning the node here lets the dispatcher show it
+    /// out-of-service instead. Default empty: backends whose listing is
+    /// all-or-nothing (single-node Docker, the test fake) surface a total failure
+    /// through `list_managed_running`'s `Err` and never partially blank a node.
+    fn occupancy_unavailable_nodes(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// One fleet node's live health and build version for the platform config
@@ -267,6 +281,11 @@ pub struct NodeStatus {
     pub name: String,
     pub available: bool,
     pub version: Option<String>,
+    /// The node's last self-refresh outcome (ticket #187), last reported by its
+    /// ping. `None` for docker-endpoint nodes and workers that have not
+    /// refreshed. Carried through to the platform snapshot so a failed refresh
+    /// is durable, queryable fleet state.
+    pub refresh_outcome: Option<types::worker::RefreshOutcome>,
 }
 
 /// A running managed container tagged with the task it serves (spec §3.6 fleet

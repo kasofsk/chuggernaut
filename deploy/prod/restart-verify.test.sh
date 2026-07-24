@@ -92,6 +92,34 @@ rm -f "$BIN.prev"
 run_sut sha-new sha-old
 check "bad build + no prior binary shouts (exit 3)" 3 "$RC" "$OUT" "ROLLBACK IMPOSSIBLE"
 
+# 5. docker engine DOWN -> distinct exit 4, its own message, and NO rollback.
+# This case takes the REAL docker-probe path (no HEALTHCHECK_CMD), so the new
+# `docker info` preflight fires. A fake docker whose `info` fails simulates a
+# down engine: the script must exit 4 (distinct from the 1/2/3 health failures)
+# WITHOUT rolling back — docker-down is not dispatcher-down. The GOOD .prev must
+# be left untouched (no `cp` rollback), proving a good binary is not clobbered.
+cat > "$WORK/bin/docker" <<'EOF'
+#!/bin/sh
+[ "$1" = info ] && exit 1
+exit 0
+EOF
+chmod +x "$WORK/bin/docker"
+printf GOOD > "$BIN"
+printf GOOD > "$BIN.prev"
+OUT="$WORK/out"
+set +e
+PATH="$WORK/bin:$PATH" \
+CHUG_HEALTH_NO_ENV=1 \
+CHUG_REPO="$REPO" \
+NATS_NETWORK=fake-net \
+KEYS_DIR="$WORK" \
+HEALTH_TIMEOUT_SECS=0 \
+HEALTH_INTERVAL_SECS=0 \
+  "$SUT" sha-new sha-old >"$OUT" 2>&1
+RC=$?
+set -e
+check "docker down -> exit 4, no rollback" 4 "$RC" "$OUT" "NOT rolling back"
+
 echo
 echo "passed $pass, failed $fail"
 [ "$fail" -eq 0 ]

@@ -207,6 +207,43 @@ pub async fn inspect_kill_and_not_found(be: &dyn ContainerBackend, node: &str) {
     assert!(be.wait(&ghost).await.is_err());
 }
 
+/// Live occupancy accounting (spec §3.1): a running container appears in
+/// `list_managed_running` tagged with the `(project, job, task)` it was
+/// launched for, and drops out once it exits. This is the input both the fleet
+/// occupancy snapshot (#138) and busyness placement (#153) read, so every
+/// backend — including the NATS-proxied worker fleet — must report it faithfully
+/// (the DockerBackend's own list is unit-covered, but the proxy path was not).
+pub async fn running_count_reflects_launch_and_exit(be: &dyn ContainerBackend, node: &str) {
+    let mut config = cfg("sleep 30");
+    config.env.insert("JOB_PROJECT".into(), "acme/api".into());
+    config.env.insert("JOB_ID".into(), "51".into());
+    config.env.insert("CHUG_TASK_ID".into(), "7".into());
+    let id = be.launch(config).await.unwrap();
+
+    // Visible to the accounting while running, carrying its launch identity —
+    // asserted on the specific id so a concurrent test's container never flakes
+    // this (the node's list is fleet-wide).
+    let running = be.list_managed_running().await.unwrap();
+    let mine = running
+        .iter()
+        .find(|c| c.id == id)
+        .unwrap_or_else(|| panic!("launched container {id} missing from {running:?}"));
+    assert_eq!(mine.project.as_deref(), Some("acme/api"));
+    assert_eq!(mine.job, Some(51));
+    assert_eq!(mine.task, Some(7));
+    assert!(id.starts_with(node), "id {id} should carry node {node}");
+
+    // The freed slot: once killed and reaped it no longer occupies the node.
+    be.kill(&id).await.unwrap();
+    assert_ne!(be.wait(&id).await.unwrap(), 0);
+    be.remove(&id).await.unwrap();
+    let after = be.list_managed_running().await.unwrap();
+    assert!(
+        !after.iter().any(|c| c.id == id),
+        "exited+removed container {id} still counted as occupied: {after:?}"
+    );
+}
+
 /// Run the whole contract.
 pub async fn run_all(be: &dyn ContainerBackend, node: &str) {
     logs_capture_both_streams_after_exit(be, node).await;
@@ -214,4 +251,5 @@ pub async fn run_all(be: &dyn ContainerBackend, node: &str) {
     exit_codes_round_trip(be).await;
     env_file_injection_and_copy_out(be).await;
     inspect_kill_and_not_found(be, node).await;
+    running_count_reflects_launch_and_exit(be, node).await;
 }

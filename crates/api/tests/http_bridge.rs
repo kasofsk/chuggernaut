@@ -99,10 +99,12 @@ fn gen_jwt_keys(dir: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
 
 #[tokio::test]
 async fn http_bridge_end_to_end() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
     let repo = TempRepo::create("acme", "api").await;
@@ -543,23 +545,31 @@ async fn http_bridge_end_to_end() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(released["state"], "Ready");
 
-    let mut work_task = None;
-    for _ in 0..100 {
-        let (_, pending, _) = call(
-            &router,
-            "GET",
-            "/api/v1/projects/acme/api/tasks/pending",
-            Some(&cookie),
-            None,
-        )
-        .await;
-        if let Some(t) = pending.as_array().and_then(|a| a.first()) {
-            work_task = Some(t.clone());
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let work_task = work_task.expect("human work task in inbox");
+    // Watch the job's task keys, re-issuing the HTTP read on each change until
+    // the inbox shows the pending work task (#206 principle 3).
+    let signal = store
+        .tasks()
+        .await
+        .unwrap()
+        .watch_job("acme", "api", 1)
+        .await
+        .unwrap();
+    let work_task = test_utils::wait::on_kv_default(
+        signal,
+        "a pending work task in the inbox (via HTTP)",
+        || async {
+            let (_, pending, _) = call(
+                &router,
+                "GET",
+                "/api/v1/projects/acme/api/tasks/pending",
+                Some(&cookie),
+                None,
+            )
+            .await;
+            pending.as_array().and_then(|a| a.first()).cloned()
+        },
+    )
+    .await;
     assert_eq!(work_task["phase"], "Work");
     let task_id = work_task["id"].as_u64().unwrap();
 
@@ -615,26 +625,32 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let mut eval_task = None;
-    for _ in 0..100 {
-        let (_, pending, _) = call(
-            &router,
-            "GET",
-            "/api/v1/projects/acme/api/tasks/pending",
-            Some(&cookie),
-            None,
-        )
-        .await;
-        if let Some(t) = pending
-            .as_array()
-            .and_then(|a| a.iter().find(|t| t["phase"] == "Evaluation"))
-        {
-            eval_task = Some(t.clone());
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let eval_task = eval_task.expect("human eval task in inbox");
+    let signal = store
+        .tasks()
+        .await
+        .unwrap()
+        .watch_job("acme", "api", 1)
+        .await
+        .unwrap();
+    let eval_task = test_utils::wait::on_kv_default(
+        signal,
+        "a pending Evaluation task in the inbox (via HTTP)",
+        || async {
+            let (_, pending, _) = call(
+                &router,
+                "GET",
+                "/api/v1/projects/acme/api/tasks/pending",
+                Some(&cookie),
+                None,
+            )
+            .await;
+            pending
+                .as_array()
+                .and_then(|a| a.iter().find(|t| t["phase"] == "Evaluation"))
+                .cloned()
+        },
+    )
+    .await;
     assert_eq!(eval_task["evaluator"], "approval");
     let (status, _, _) = call(
         &router,
@@ -649,23 +665,31 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let mut done = false;
-    for _ in 0..100 {
-        let (_, job, _) = call(
-            &router,
-            "GET",
-            "/api/v1/projects/acme/api/jobs/1",
-            Some(&cookie),
-            None,
-        )
-        .await;
-        if job["state"] == "Done" {
-            done = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(done, "job 1 should reach Done through the HTTP surface");
+    // Watch the job record, re-reading via HTTP until it reports Done (#206
+    // principle 3); reaching past the wait is itself the assertion.
+    let signal = store
+        .jobs()
+        .await
+        .unwrap()
+        .watch("acme", "api", 1)
+        .await
+        .unwrap();
+    test_utils::wait::on_kv_default(
+        signal,
+        "job 1 to reach Done through the HTTP surface",
+        || async {
+            let (_, job, _) = call(
+                &router,
+                "GET",
+                "/api/v1/projects/acme/api/jobs/1",
+                Some(&cookie),
+                None,
+            )
+            .await;
+            (job["state"] == "Done").then_some(())
+        },
+    )
+    .await;
 
     // Per-job task log has both cycles' tasks.
     let (status, tasks, _) = call(
@@ -776,6 +800,66 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
+    // Job attachments moved to their own test (`job_attachments_over_http`,
+    // #196): the section made this mega-test hang nondeterministically while
+    // the async-nats tombstone bug was live, and a hang in a smaller test
+    // localizes itself.
+}
+
+/// Job attachments over HTTP (§1.6), split from the mega-test (#196) so a
+/// store-level hang localizes here instead of poisoning the whole bridge run.
+/// Router-only rig: attachments need auth + artifact storage, no dispatcher.
+#[tokio::test]
+async fn job_attachments_over_http() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let users = store.raw_bucket(store::buckets::USERS).await.unwrap();
+    let user = User {
+        id: "op".into(),
+        email: "op@example.com".into(),
+        password_hash: auth::hash_password("hunter2").unwrap(),
+        project_roles: [("acme/api".to_string(), ProjectRole::Member)].into(),
+        platform_admin: false,
+        created_at: chrono::Utc::now(),
+    };
+    users
+        .put_json(&store::keys::user_key(&user.email), &user)
+        .await
+        .unwrap();
+
+    let keys_dir = tempfile::tempdir().unwrap();
+    let (private, public) = gen_jwt_keys(keys_dir.path());
+    let (artifacts_identity, _) = store::secrets::generate_age_keypair();
+    let artifacts = store
+        .artifacts(store::ArtifactCrypto::with_identity(&artifacts_identity).unwrap())
+        .await
+        .unwrap();
+    let state: SharedState = Arc::new(ApiState {
+        store: store.clone(),
+        signer: auth::jwt::JwtSigner::from_pem(&private).unwrap(),
+        verifier: auth::jwt::JwtVerifier::from_pem(&public).unwrap(),
+        session_ttl: chrono::Duration::hours(1),
+        artifacts: Some(artifacts),
+    });
+    let router = api::router(state, None);
+
+    let (status, _, cookie) = call(
+        &router,
+        "POST",
+        "/auth/login",
+        None,
+        Some(serde_json::json!({"email": "op@example.com", "password": "hunter2"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let cookie = cookie.expect("session cookie");
+
     // ── Job attachments: an operator uploads a screenshot on the job ───────
     //
     // Raw bytes off the object store (a screenshot exceeds 1MB max_payload),
@@ -874,10 +958,12 @@ async fn http_bridge_end_to_end() {
 /// it answers `503` — never a masquerading `200`. Unauthenticated by design.
 #[tokio::test]
 async fn health_endpoint() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
     let keys_dir = tempfile::tempdir().unwrap();
@@ -988,10 +1074,12 @@ fn keygen(path: &std::path::Path, comment: &str) -> String {
 /// command embeds the caller's roles as read from their user record.
 #[tokio::test]
 async fn ssh_cert_minting() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
     // A CA keypair for the dispatcher's user-cert handler, and JWT keys + user.
@@ -1133,10 +1221,12 @@ async fn ssh_cert_minting() {
 /// back to the harvested `stdout.log` artifact once the task has finished.
 #[tokio::test]
 async fn task_output_endpoint() {
-    let Some(server) = test_utils::nats::NatsTestServer::spawn() else {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let store = NatsStore::connect(server.url()).await.unwrap();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
     store.ensure_topology().await.unwrap();
 
     let repos_root = tempfile::tempdir().unwrap();

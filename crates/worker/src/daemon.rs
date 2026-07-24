@@ -25,8 +25,8 @@ use store::worker::{encode_reply, op_from_subject};
 use store::{NatsStore, StoreError};
 use types::worker::{
     ContainerRef, CopyFileOk, CopyFileRequest, FileSource, InspectOk, LaunchOk, LogsOk, LogsTailOk,
-    LogsTailRequest, PingOk, RefreshOk, RefreshRequest, WireStatus, WorkerError,
-    WorkerLaunchRequest, WorkerReply, b64_decode, b64_encode,
+    LogsTailRequest, PingOk, RefreshOk, RefreshOutcome, RefreshRequest, RefreshResult, WireStatus,
+    WorkerError, WorkerLaunchRequest, WorkerReply, b64_decode, b64_encode,
 };
 
 /// Logs are tailed to fit the reply under NATS's 1MB max_payload after
@@ -142,6 +142,11 @@ struct WorkerState {
     refresh_git_key: PathBuf,
     /// Drain guarantee for the self-refresh swap window.
     refresh: RefreshGate,
+    /// The node's last self-refresh outcome (ticket #187), reported in `ping` so
+    /// a failed refresh is durable platform state instead of a node-local
+    /// `tracing::error`. A successful refresh swaps this daemon away, so what a
+    /// surviving daemon reports is the failure story.
+    refresh_outcome: std::sync::Mutex<Option<RefreshOutcome>>,
 }
 
 /// Why a refresh cannot even be *attempted*: the node has no git credential to
@@ -225,6 +230,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         refresh_git_url: config.refresh_git_url.clone(),
         refresh_git_key: config.refresh_git_key.clone(),
         refresh: RefreshGate::default(),
+        refresh_outcome: std::sync::Mutex::new(None),
     });
     if state.refresh_script.is_none() {
         tracing::warn!(
@@ -592,6 +598,7 @@ async fn ping(state: &WorkerState) -> WorkerReply<PingOk> {
                 running,
                 version: state.version.clone(),
                 artifacts: state.artifact_hashes.clone(),
+                refresh_outcome: state.refresh_outcome.lock().unwrap().clone(),
             })
         }
         .await,
@@ -640,6 +647,16 @@ async fn refresh(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<Refres
                     from_version,
                 });
             }
+            // Record the accepted refresh as in-progress (ticket #187): a later
+            // ping carries this, and `run_refresh` overwrites it with the
+            // terminal verdict on failure (a success swaps the daemon away).
+            *state.refresh_outcome.lock().unwrap() = Some(RefreshOutcome {
+                accepted_at: chrono::Utc::now(),
+                finished_at: None,
+                result: RefreshResult::InProgress,
+                from_sha: from_version.clone(),
+                to_sha: req.sha.clone(),
+            });
             let st = state.clone();
             tokio::spawn(async move { run_refresh(st, script, req).await });
             Ok(RefreshOk {
@@ -661,6 +678,7 @@ async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshReque
     tracing::info!(node = %state.node, sha = %req.sha, tag = %req.tag, "worker refresh: building images");
     if let Err(e) = run_script(&script, &["build", &req.sha, &req.tag]).await {
         tracing::error!(node = %state.node, "worker refresh: build failed, aborting: {e}");
+        record_refresh_failure(&state, "build", &e);
         state.refresh.abort();
         return;
     }
@@ -669,10 +687,9 @@ async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshReque
     // created launches to finish before swapping (spec §3.1).
     state.refresh.quiesce();
     if !drain(&state.refresh, DRAIN_TIMEOUT).await {
-        tracing::error!(
-            node = %state.node,
-            "worker refresh: in-flight launches did not drain in {DRAIN_TIMEOUT:?}; aborting swap"
-        );
+        let e = format!("in-flight launches did not drain in {DRAIN_TIMEOUT:?}");
+        tracing::error!(node = %state.node, "worker refresh: {e}; aborting swap");
+        record_refresh_failure(&state, "drain", &e);
         state.refresh.abort();
         return;
     }
@@ -683,7 +700,25 @@ async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshReque
         // simply removed and never returns here. Reaching this arm means the
         // swap itself failed to launch — reopen so the node keeps serving.
         tracing::error!(node = %state.node, "worker refresh: swap failed: {e}");
+        record_refresh_failure(&state, "swap", &e);
         state.refresh.abort();
+    }
+}
+
+/// Stamp the in-flight refresh outcome (ticket #187) as failed at `stage`, so
+/// the next `ping` reports it and the failure becomes durable, queryable fleet
+/// state rather than only this node's log. The error tail is trimmed for the
+/// operator; the swapped-in daemon (on success) never reaches here.
+fn record_refresh_failure(state: &WorkerState, stage: &str, error: &str) {
+    let n = error.chars().count();
+    let error_tail: String = error.chars().skip(n.saturating_sub(400)).collect();
+    let mut slot = state.refresh_outcome.lock().unwrap();
+    if let Some(outcome) = slot.as_mut() {
+        outcome.finished_at = Some(chrono::Utc::now());
+        outcome.result = RefreshResult::Failed {
+            stage: stage.to_string(),
+            error_tail,
+        };
     }
 }
 

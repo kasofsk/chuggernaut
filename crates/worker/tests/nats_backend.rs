@@ -7,7 +7,6 @@ use container::PlacementPolicy;
 use container::docker::DockerNodeConfig;
 use test_utils::backend_suite as suite;
 use test_utils::nats::NatsTestServer;
-use test_utils::require_nats;
 use worker::{FleetBackend, WorkerConfig};
 
 /// In-process daemon (node "w1", local Docker) + fleet backend over it, or
@@ -64,14 +63,13 @@ async fn setup(
     .unwrap();
 
     // Wait for the daemon's subscription to be live: a ghost inspect answered
-    // with an op-level result (Ok(None)) proves the round trip.
-    for _ in 0..100 {
-        if fleet.inspect(&"w1/deadbeef".to_string()).await.is_ok() {
-            return Some((fleet, daemon));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("worker daemon never became reachable");
+    // with an op-level result (Ok(None)) proves the round trip. RPC liveness is
+    // not KV-watchable, so a tightened async poll (#206 principle 3).
+    test_utils::wait::poll_async_default("worker daemon w1 to become reachable", || async {
+        fleet.inspect(&"w1/deadbeef".to_string()).await.ok()
+    })
+    .await;
+    Some((fleet, daemon))
 }
 
 fn local_docker_endpoint() -> String {
@@ -98,7 +96,9 @@ fn local_docker_endpoint() -> String {
 
 #[tokio::test]
 async fn contract_suite_through_the_proxy() {
-    let server = require_nats!();
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
     let Some((fleet, daemon)) = setup(&server, b"#!/bin/sh\nexit 0\n").await else {
         return;
     };
@@ -108,7 +108,9 @@ async fn contract_suite_through_the_proxy() {
 
 #[tokio::test]
 async fn local_artifact_substitution_and_unknown_artifact() {
-    let server = require_nats!();
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
     let Some((fleet, daemon)) = setup(&server, b"#!/bin/sh\necho artifact-ran\n").await else {
         return;
     };
@@ -146,7 +148,9 @@ async fn local_artifact_substitution_and_unknown_artifact() {
 
 #[tokio::test]
 async fn remove_and_exited_sweep_through_the_proxy() {
-    let server = require_nats!();
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
     let Some((fleet, daemon)) = setup(&server, b"#!/bin/sh\nexit 0\n").await else {
         return;
     };
@@ -181,6 +185,7 @@ async fn mock_worker(store: &store::NatsStore, node: &str) -> tokio::task::JoinH
                         running: 0,
                         version: env!("CARGO_PKG_VERSION").to_string(),
                         artifacts: std::collections::HashMap::new(),
+                        refresh_outcome: None,
                     },
                 };
                 req.respond(serde_json::to_vec(&reply).unwrap()).await;
@@ -189,12 +194,103 @@ async fn mock_worker(store: &store::NatsStore, node: &str) -> tokio::task::JoinH
     })
 }
 
+/// A stand-in worker that models a real node's live count: it answers `launch`
+/// (bumping an internal counter and returning a synthetic id) and reports that
+/// counter as `ping.running`. No Docker — but the ping accounting placement
+/// reads is exactly what a real daemon returns, so this exercises the real
+/// cross-node busyness decision without a docker socket.
+async fn counting_worker(store: &store::NatsStore, node: &str) -> tokio::task::JoinHandle<()> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let mut sub = store
+        .subscribe_requests(&store::subjects::worker_all(node))
+        .await
+        .expect("subscribe counting worker");
+    store.client().flush().await.expect("flush sub");
+    let node = node.to_string();
+    tokio::spawn(async move {
+        let running = Arc::new(AtomicU32::new(0));
+        while let Some(req) = sub.next().await {
+            if req.subject.ends_with(".ping") {
+                let reply = types::worker::WorkerReply::Ok {
+                    value: types::worker::PingOk {
+                        running: running.load(Ordering::SeqCst),
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        artifacts: std::collections::HashMap::new(),
+                        refresh_outcome: None,
+                    },
+                };
+                req.respond(serde_json::to_vec(&reply).unwrap()).await;
+            } else if req.subject.ends_with(".launch") {
+                let n = running.fetch_add(1, Ordering::SeqCst) + 1;
+                let reply = types::worker::WorkerReply::Ok {
+                    value: types::worker::LaunchOk {
+                        id: format!("{node}/c{n}"),
+                    },
+                };
+                req.respond(serde_json::to_vec(&reply).unwrap()).await;
+            }
+        }
+    })
+}
+
+/// Busyness placement over the *real* accounting (spec §3.1/#153): two launches
+/// dispatched concurrently — as the dispatcher does, each agent launch on its
+/// own spawned task — must land on different nodes. Before the in-flight
+/// reservation both `place()` calls read the same `running: 0` and busyness tied
+/// them onto the first node (prod 2026-07-22: back-to-back releases both went to
+/// `air` while `nuc` sat idle); the choose-under-lock reservation fixes it.
+/// The unit test over `choose_placement` passed throughout because it feeds a
+/// mocked `running: 1` that the un-reserved live count never actually produced
+/// in the race window.
+#[tokio::test]
+async fn busyness_places_concurrent_launches_on_distinct_nodes() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let air = counting_worker(&store, "air").await;
+    let nuc = counting_worker(&store, "nuc").await;
+    let fleet = FleetBackend::new(
+        vec![
+            DockerNodeConfig {
+                name: "air".into(),
+                endpoint: "worker".into(),
+                slots: 4,
+            },
+            DockerNodeConfig {
+                name: "nuc".into(),
+                endpoint: "worker".into(),
+                slots: 4,
+            },
+        ],
+        store,
+        PlacementPolicy::Busyness,
+    )
+    .unwrap();
+
+    let cfg = || suite::cfg("true");
+    let (a, b) = tokio::join!(fleet.launch(cfg()), fleet.launch(cfg()));
+    let a = a.unwrap();
+    let b = b.unwrap();
+    let na = a.split_once('/').unwrap().0;
+    let nb = b.split_once('/').unwrap().0;
+    air.abort();
+    nuc.abort();
+    assert_ne!(
+        na, nb,
+        "busyness sent both concurrent launches to {na}; the second should have gone to the idle node"
+    );
+}
+
 /// A responding worker gives the fleet live capacity, so startup succeeds and a
 /// second, unreachable worker is soft-failed — a pin onto it fails *placement*,
 /// not startup (spec §3.1/§3.6).
 #[tokio::test]
 async fn worker_capacity_starts_fleet_and_dead_worker_fails_placement() {
-    let server = require_nats!();
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
     let store = store::NatsStore::connect(server.url()).await.unwrap();
     let mock = mock_worker(&store, "up").await;
     let fleet = FleetBackend::new(
@@ -238,7 +334,9 @@ async fn worker_capacity_starts_fleet_and_dead_worker_fails_placement() {
 /// is a fleet property, evaluated once across transports.
 #[tokio::test]
 async fn zero_slot_docker_does_not_veto_live_worker_fleet() {
-    let server = require_nats!();
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
     let store = store::NatsStore::connect(server.url()).await.unwrap();
     let mock = mock_worker(&store, "air").await;
     let fleet = FleetBackend::new(
@@ -266,7 +364,9 @@ async fn zero_slot_docker_does_not_veto_live_worker_fleet() {
 /// ⇒ refuse to start (spec §3.6).
 #[tokio::test]
 async fn no_reachable_capacity_fails_startup() {
-    let server = require_nats!();
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
     let store = store::NatsStore::connect(server.url()).await.unwrap();
     let fleet = FleetBackend::new(
         vec![
@@ -371,14 +471,13 @@ async fn fleet_over(store: store::NatsStore, node: &str, slots: u32) -> FleetBac
 }
 
 /// Wait for a daemon's subscription to be live (a ghost inspect round-trips).
+/// RPC liveness is not KV-watchable, so a tightened async poll (#206 principle 3).
 async fn await_reachable(fleet: &FleetBackend, node: &str) {
-    for _ in 0..100 {
-        if fleet.inspect(&format!("{node}/deadbeef")).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("worker daemon never became reachable");
+    test_utils::wait::poll_async_default(
+        format!("worker daemon {node} to become reachable"),
+        || async { fleet.inspect(&format!("{node}/deadbeef")).await.ok() },
+    )
+    .await;
 }
 
 /// A task's `wait` stream survives a daemon restart and still delivers the exit
@@ -387,7 +486,9 @@ async fn await_reachable(fleet: &FleetBackend, node: &str) {
 /// dispatcher's poll-based `wait` re-attaches over the new daemon.
 #[tokio::test]
 async fn wait_survives_daemon_restart() {
-    let server = require_nats!();
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
     if !suite::docker_available() {
         eprintln!("skipping: Docker daemon unavailable");
         return;
@@ -426,7 +527,9 @@ async fn refresh_rpc_and_quiesce_window() {
     use store::worker::WorkerRpc;
     use types::worker::RefreshRequest;
 
-    let server = require_nats!();
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
     if !suite::docker_available() {
         eprintln!("skipping: Docker daemon unavailable");
         return;
@@ -482,23 +585,27 @@ async fn refresh_rpc_and_quiesce_window() {
         "concurrent refresh must report not-accepted"
     );
 
-    // Poll: once build+quiesce+swap have run, launches are refused.
-    let mut refused = false;
-    for _ in 0..30 {
-        match fleet.launch(suite::cfg("true")).await {
-            Ok(id) => {
-                // Not quiesced yet (or a real container slipped in) — clean up.
-                suite::rm(&id);
+    // Once build+quiesce+swap have run, launches are refused. RPC-observed
+    // state (not KV) → tightened async poll; reaching past it is the assertion
+    // (#206 principle 3).
+    test_utils::wait::poll_async(
+        std::time::Duration::from_secs(30),
+        "launches to be refused during the swap window",
+        || async {
+            match fleet.launch(suite::cfg("true")).await {
+                Ok(id) => {
+                    // Not quiesced yet (or a real container slipped in) — clean up.
+                    suite::rm(&id);
+                    None
+                }
+                Err(e) => {
+                    assert!(e.to_string().contains("refreshing"), "unexpected: {e}");
+                    Some(())
+                }
             }
-            Err(e) => {
-                assert!(e.to_string().contains("refreshing"), "unexpected: {e}");
-                refused = true;
-                break;
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    assert!(refused, "launches must be refused during the swap window");
+        },
+    )
+    .await;
     daemon.abort();
 }
 
@@ -511,7 +618,9 @@ async fn refresh_reports_skip_without_git_credential() {
     use store::worker::WorkerRpc;
     use types::worker::RefreshRequest;
 
-    let server = require_nats!();
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
     if !suite::docker_available() {
         eprintln!("skipping: Docker daemon unavailable");
         return;
@@ -580,7 +689,9 @@ async fn refresh_reports_skip_without_git_credential() {
 
 #[tokio::test]
 async fn payload_guard_rejects_bulk_inline_files() {
-    let server = require_nats!();
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
     let Some((fleet, daemon)) = setup(&server, b"x").await else {
         return;
     };
