@@ -333,6 +333,61 @@ config_schema_gate() {
 	[ "$_gate_failed" -eq 0 ] || exit 1
 }
 
+# --- MODULES.md registry-completeness gate (refactor-plan A3) -----------------
+# The module registry (MODULES.md) is what jobs get scoped against, so it must
+# not drift from the tree the way crates.md's dispatcher map did: every
+# top-level dispatcher module file (crates/dispatcher/src/*.rs, minus lib.rs)
+# has a row, and every row names a real module file. Pure shell so it runs
+# BEFORE the Rust early-exit — a docs-only diff skips cargo, and a rename or a
+# dropped row is exactly a docs-shaped edit, so a check living only in the Rust
+# tests would be silently bypassed by the changes most likely to break it (the
+# config_schema_gate precedent).
+modules_registry_gate() {
+	_src_dir="crates/dispatcher/src"
+	[ -d "$_src_dir" ] || return 0
+	if [ ! -f MODULES.md ]; then
+		echo "!!! ci: MODULES.md is missing — the module registry gate cannot run"
+		exit 1
+	fi
+
+	# Module files on disk: basename without .rs, excluding the crate root.
+	_files="$(for f in "$_src_dir"/*.rs; do
+		b="$(basename "$f" .rs)"
+		[ "$b" = "lib" ] || echo "$b"
+	done | sort -u)"
+
+	# Registry rows: the first-column backticked name of each table row inside
+	# the dispatcher section (from its `## `-heading to the next `## `). Other
+	# sections (web feature modules, per the doc) are scoped out here.
+	_rows="$(awk '
+		/^## / { indisp = ($0 ~ /dispatcher/) }
+		indisp && /^\|[[:space:]]*`/ {
+			row = $0
+			sub(/^\|[[:space:]]*`/, "", row)
+			sub(/`.*/, "", row)
+			print row
+		}
+	' MODULES.md | sort -u)"
+
+	_gate_failed=0
+	for m in $_files; do
+		printf '%s\n' "$_rows" | grep -qx "$m" || {
+			echo "!!! ci: crates/dispatcher/src/$m.rs has no row in MODULES.md"
+			echo "!!!     (refactor-plan A3 registry drift — add a one-line contract row)"
+			_gate_failed=1
+		}
+	done
+	for m in $_rows; do
+		printf '%s\n' "$_files" | grep -qx "$m" || {
+			echo "!!! ci: MODULES.md lists module \`$m\` with no crates/dispatcher/src/$m.rs"
+			echo "!!!     (refactor-plan A3 registry drift — remove or fix the stale row)"
+			_gate_failed=1
+		}
+	done
+	[ "$_gate_failed" -eq 0 ] || exit 1
+	echo "ci: MODULES.md registry gate — dispatcher modules and rows are in sync"
+}
+
 # Diff-aware gate: only run the (slow) Rust build/test when the change
 # actually touches Rust-relevant paths. This lets docs/web/prompt/job-type
 # changes pass CI in seconds. Rust-relevant globs (see case list below):
@@ -367,6 +422,9 @@ if [ "$diff_ok" -eq 1 ]; then
 else
 	config_schema_gate all
 fi
+# Registry-completeness runs unconditionally and before the Rust early-exit:
+# a docs-only diff (which skips cargo) is exactly what breaks it.
+modules_registry_gate
 if [ "$diff_ok" -eq 1 ]; then
 	rust_changed=0
 	# Split the changed list on newlines so paths with spaces stay intact.

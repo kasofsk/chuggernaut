@@ -21,6 +21,7 @@ created; today it covers the dispatcher.
 | --- | --- | --- |
 | `core` | Single-writer event loop: owns all mutable state; every other slice is `impl Core` reached via the `Msg` channel. | §3.1 |
 | `state` | The transition table — the sole authority on legal state edges; pure, synchronous, terminal states absorbing. | §2.1 |
+| `invariants` | Executable invariant checker: pure/total read-only `CoreState` view → `Vec<Violation>`; negative-space assertions run after every message in tests. | §1.4, §2.1, §3.1, §3.2, §3.3 |
 | `graph` | In-memory per-project DAG (petgraph): rdeps maintenance, dependency queries, revoke cascades; a working copy, KV stays truth. | §1.4, §2.3 |
 | `queue` | In-memory FIFO of Ready job IDs; lives in the actor, never persisted, rebuilt on restart. | §3.1 |
 | `release` | Release validation: graph wiring rules + static config checks; pure, run at release and at Blocked→Ready re-validation. | §2.2, §2.3 |
