@@ -92,17 +92,33 @@ export interface JobTypeDetail {
   errors: string[]
 }
 
+/** The latest channel post on a live job (spec §4.2), carried on the jobs
+ *  *list* so the table can show a progress line without opening the event
+ *  stream's history. Absent on terminal jobs and jobs that never posted. */
+export interface JobChannel {
+  message: string
+  percent?: number | null
+  /** when the dispatcher accepted the post; absent on posts written before it
+   *  was stamped (the channels bucket ages those out after 7 days) */
+  at?: string
+}
+
+/**
+ * A job as the **list** endpoint serves it (`api.jobs`) — every field of the
+ * stored record except the two heavy prose ones. `description` and
+ * `cover_html` were 78% of the list payload and no list consumer reads them,
+ * so they live on {@link JobFull}, which `api.job` returns.
+ *
+ * This is the shape nearly the whole app works with, so it keeps the plain
+ * name. Reaching for `description` on a list row is a type error rather than
+ * an `undefined` at runtime — which is the point of the split.
+ */
 export interface Job {
   id: number
   project: string
   type: string
   /** ticket-style identity: what this run is for (may be empty) */
   title: string
-  description: string
-  /** optional rich cover page for the UI (spec §1.1, §4.3): presentational
-   *  only, never injected into any agent prompt. Rendered above the description
-   *  in a sandboxed iframe. Absent/undefined on records without a cover. */
-  cover_html?: string
   /** upstream job ids that must be Done before this job starts */
   deps: number[]
   /** member job ids this batch absorbs onto one branch; empty for an ordinary
@@ -135,8 +151,23 @@ export interface Job {
    *  dispatcher at the terminal transition; null while the job is still live or
    *  on records written before completion stamping existed */
   completed_at?: string | null
-  /** derived server-side from the task log; null when no human action is pending */
+  /** derived server-side from the task log; null when no human action is pending.
+   *  Only the single-job reply sets it — see {@link JobFull}. */
   awaiting_human?: AwaitingHuman | null
+  /** latest channel post, on live jobs only (see {@link JobChannel}) */
+  channel?: JobChannel | null
+}
+
+/**
+ * A job as the **single-job** endpoint serves it (`api.job`): the list shape
+ * plus the prose the detail page renders.
+ */
+export interface JobFull extends Job {
+  description: string
+  /** optional rich cover page for the UI (spec §1.1, §4.3): presentational
+   *  only, never injected into any agent prompt. Rendered above the description
+   *  in a sandboxed iframe. Absent/undefined on records without a cover. */
+  cover_html?: string
 }
 
 export type TaskKind =
@@ -636,12 +667,12 @@ export const api = {
   jobs: (owner: string, project: string) =>
     req<Job[]>('GET', `/api/v1/projects/${owner}/${project}/jobs`),
   job: (owner: string, project: string, seq: number) =>
-    req<Job>('GET', `/api/v1/projects/${owner}/${project}/jobs/${seq}`),
+    req<JobFull>('GET', `/api/v1/projects/${owner}/${project}/jobs/${seq}`),
   createJob: (owner: string, project: string, body: { type: string; title?: string; description?: string; deps?: number[]; knowledge_tags?: string[]; eval?: Evaluator[]; timeout?: string; model?: string; draft?: boolean }) =>
-    req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs`, body),
+    req<JobFull>('POST', `/api/v1/projects/${owner}/${project}/jobs`, body),
   /** Full-field replace of an editable Draft job; 409 once it has left Draft. */
   patchJob: (owner: string, project: string, seq: number, body: JobPatch) =>
-    req<Job>('PATCH', `/api/v1/projects/${owner}/${project}/jobs/${seq}`, body),
+    req<JobFull>('PATCH', `/api/v1/projects/${owner}/${project}/jobs/${seq}`, body),
   criteria: (owner: string, project: string, seq: number) =>
     req<JobCriteria>('GET', `/api/v1/projects/${owner}/${project}/jobs/${seq}/criteria`),
   release: (owner: string, project: string, seq: number) =>

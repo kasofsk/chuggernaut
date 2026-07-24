@@ -4,13 +4,34 @@
 //! of these buckets (spec §3.1).
 
 use crate::{Result, StoreError, keys};
-use futures::TryStreamExt;
+use futures::StreamExt as _;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use types::{Job, ProjectRecord, StepRecord, Task};
 
 fn nats_err(e: impl std::fmt::Display) -> StoreError {
     StoreError::Nats(e.to_string())
+}
+
+/// How long one message of a prefix scan may take before the scan fails loudly.
+/// The consumer is already bounded by its `num_pending`; this bounds the *wait*,
+/// so a wedged connection surfaces as an error instead of a hung dispatcher.
+const SCAN_MESSAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The `KV-Operation` header async-nats stamps on a delete/purge. It keeps its
+/// own parser private, so the name is repeated here.
+const KV_OPERATION_HEADER: &str = "KV-Operation";
+
+/// Is this revision a delete/purge marker rather than a stored value?
+fn is_tombstone(message: &async_nats::jetstream::Message) -> bool {
+    message
+        .headers
+        .as_ref()
+        .and_then(|h| h.get(KV_OPERATION_HEADER))
+        .is_some_and(|op| {
+            let op = op.as_str();
+            op == "DEL" || op == "PURGE"
+        })
 }
 
 /// Shared plumbing over one KV bucket.
@@ -43,22 +64,113 @@ impl Bucket {
 
     /// All keys in the bucket starting with `prefix`.
     pub async fn keys_with_prefix(&self, prefix: &str) -> Result<Vec<String>> {
-        let keys: Vec<String> = self
-            .kv
-            .keys()
-            .await
-            .map_err(nats_err)?
-            .try_collect()
-            .await
-            .map_err(nats_err)?;
-        Ok(keys.into_iter().filter(|k| k.starts_with(prefix)).collect())
+        Ok(self
+            .scan_prefix(prefix, true)
+            .await?
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect())
     }
 
     pub async fn list_prefix<T: DeserializeOwned>(&self, prefix: &str) -> Result<Vec<T>> {
+        Ok(self
+            .list_prefix_keyed(prefix)
+            .await?
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect())
+    }
+
+    /// [`Bucket::list_prefix`] with each value's key alongside it, for callers
+    /// that need to join the result against something else (the jobs list
+    /// joining each job to its latest channel post) rather than just iterate.
+    pub async fn list_prefix_keyed<T: DeserializeOwned>(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, T)>> {
+        self.scan_prefix(prefix, false)
+            .await?
+            .into_iter()
+            .map(|(key, value)| Ok((key, serde_json::from_slice(&value)?)))
+            .collect()
+    }
+
+    /// One pass over every *current* value whose key starts with `prefix`.
+    ///
+    /// The obvious spelling — `kv.keys()` then a `get` per key — costs `1 + N`
+    /// round trips and scans the whole bucket across every project, because
+    /// `kv::Store::keys` filters on the bucket's own subject prefix, not the
+    /// caller's key prefix. On the dogfood project that was 254 sequential
+    /// round trips for one jobs list, and the pending-tasks reply paid it twice.
+    ///
+    /// This builds the same ordered, last-per-subject consumer async-nats' own
+    /// `keys()` uses, but narrows `filter_subject` to the caller's prefix and
+    /// (unless `headers_only`) keeps the values — so one round trip returns the
+    /// whole result set, proportional to the *matching* keys rather than the
+    /// bucket.
+    ///
+    /// Bounded by the consumer's `num_pending` at creation and a per-message
+    /// deadline: a snapshot, so a concurrent write simply is not reflected,
+    /// exactly as the previous key-then-get spelling behaved.
+    async fn scan_prefix(
+        &self,
+        prefix: &str,
+        headers_only: bool,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        use async_nats::jetstream::consumer::{DeliverPolicy, pull};
+
+        // Subject filters match whole tokens, but `prefix` is a string prefix
+        // and callers may end mid-token. Narrow to the token-aligned part and
+        // let the `starts_with` check below do the rest, so the filter is an
+        // optimization and never changes which keys are returned.
+        let aligned = match prefix.rfind('.') {
+            Some(i) => &prefix[..=i],
+            None => "",
+        };
+        let consumer = self
+            .kv
+            .stream
+            .clone()
+            .create_consumer(pull::Config {
+                description: Some("chuggernaut prefix scan".to_string()),
+                filter_subject: format!("{}{aligned}>", self.kv.prefix),
+                // Only the latest revision of each key is the current value.
+                deliver_policy: DeliverPolicy::LastPerSubject,
+                headers_only,
+                ..Default::default()
+            })
+            .await
+            .map_err(nats_err)?;
+
+        let expected = consumer.cached_info().num_pending;
+        let mut messages = consumer.messages().await.map_err(nats_err)?;
         let mut out = Vec::new();
-        for key in self.keys_with_prefix(prefix).await? {
-            if let Some(v) = self.get_json(&key).await? {
-                out.push(v);
+        for _ in 0..expected {
+            let message = match tokio::time::timeout(SCAN_MESSAGE_TIMEOUT, messages.next()).await {
+                Ok(Some(m)) => m.map_err(nats_err)?,
+                // The consumer ended early (transport dropped) — return what we
+                // have rather than hanging; callers re-read on the next request.
+                Ok(None) => break,
+                Err(_) => {
+                    return Err(StoreError::Nats(format!(
+                        "prefix scan of {} stalled after {:?} with {} of {expected} entries read",
+                        self.kv.name,
+                        SCAN_MESSAGE_TIMEOUT,
+                        out.len(),
+                    )));
+                }
+            };
+            // LastPerSubject delivers a delete/purge tombstone as the latest
+            // revision of a removed key. Its payload is empty, so keeping it
+            // would surface a deleted record as a deserialization failure.
+            if is_tombstone(&message) {
+                continue;
+            }
+            let Some(key) = message.subject.strip_prefix(self.kv.prefix.as_str()) else {
+                continue;
+            };
+            if key.starts_with(prefix) {
+                out.push((key.to_string(), message.payload.to_vec()));
             }
         }
         Ok(out)

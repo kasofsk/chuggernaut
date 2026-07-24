@@ -703,11 +703,17 @@ async fn http_bridge_end_to_end() {
     assert_eq!(status, StatusCode::OK);
     assert!(tasks.as_array().unwrap().len() >= 2);
 
-    // SSE replay (§6.4): connecting with no Last-Event-ID streams the trail
-    // from the start; the first frame carries an id and the job-created event.
+    // SSE replay (§6.4). The two feeds start differently on a *fresh* connect,
+    // and the difference is the whole point: a project feed spans every job the
+    // project ever ran, so replaying it costs the operator the entire history
+    // before the first live frame; one job's history is bounded and is itself
+    // the content the detail page renders.
+    use futures::StreamExt;
+
+    // A job feed with no Last-Event-ID still replays from the beginning.
     let req = Request::builder()
         .method("GET")
-        .uri("/api/v1/projects/acme/api/events")
+        .uri("/api/v1/projects/acme/api/jobs/1/events")
         .header(header::COOKIE, &cookie)
         .body(Body::empty())
         .unwrap();
@@ -717,7 +723,6 @@ async fn http_bridge_end_to_end() {
         res.headers().get(header::CONTENT_TYPE).unwrap(),
         "text/event-stream"
     );
-    use futures::StreamExt;
     let mut body = res.into_body().into_data_stream();
     let first = tokio::time::timeout(Duration::from_secs(5), body.next())
         .await
@@ -731,7 +736,50 @@ async fn http_bridge_end_to_end() {
     );
     assert!(
         frame.contains("job-created"),
-        "replay starts at the beginning: {frame}"
+        "a job feed replays from the beginning: {frame}"
+    );
+
+    // A project feed with no Last-Event-ID delivers live events only — the
+    // history it would otherwise replay is exactly what the jobs list now
+    // carries. Nothing arrives until something new is published.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/projects/acme/api/events")
+        .header(header::COOKIE, &cookie)
+        .body(Body::empty())
+        .unwrap();
+    let res = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let mut body = res.into_body().into_data_stream();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), body.next())
+            .await
+            .is_err(),
+        "a fresh project feed must not replay the trail"
+    );
+
+    // …but a *resuming* client still gets everything after its Last-Event-ID.
+    // Losing this would silently drop events across a reconnect, which is the
+    // failure the bounded start could plausibly introduce.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/projects/acme/api/events")
+        .header(header::COOKIE, &cookie)
+        .header("last-event-id", "0")
+        .body(Body::empty())
+        .unwrap();
+    let res = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let mut body = res.into_body().into_data_stream();
+    let first = tokio::time::timeout(Duration::from_secs(5), body.next())
+        .await
+        .expect("resumed feed replays within 5s")
+        .unwrap()
+        .unwrap();
+    let frame = String::from_utf8_lossy(&first);
+    assert!(
+        frame.contains("job-created"),
+        "resuming from 0 replays the trail: {frame}"
     );
 
     // ── Artifacts: the transcript reaches the operator, decrypted ──────────

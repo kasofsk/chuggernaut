@@ -3,6 +3,7 @@ import {
   ApiError,
   api,
   type Job,
+  type JobFull,
   type JobPatch,
   type JobTypeSummary,
 } from '../api'
@@ -41,7 +42,7 @@ export function DraftEditor({
 }: {
   owner: string
   project: string
-  job: Job
+  job: JobFull
   /** true for a Draft batch: the plain deps picker and the finalize/release/
    *  revoke actions are hidden here — the ConsistEditor renders the members
    *  consist and owns those actions (§2.1 draft batches). */

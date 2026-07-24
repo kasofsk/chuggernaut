@@ -381,7 +381,7 @@ impl NatsStore {
         &self,
         stream: &str,
         subject: &str,
-        after_seq: u64,
+        start: StreamStart,
     ) -> Result<StreamSubscription> {
         use futures::StreamExt;
         let stream = self
@@ -392,11 +392,13 @@ impl NatsStore {
         let consumer = stream
             .create_consumer(jetstream::consumer::pull::Config {
                 filter_subject: self.ns(subject),
-                deliver_policy: if after_seq == 0 {
-                    jetstream::consumer::DeliverPolicy::All
-                } else {
-                    jetstream::consumer::DeliverPolicy::ByStartSequence {
-                        start_sequence: after_seq + 1,
+                deliver_policy: match start {
+                    StreamStart::New => jetstream::consumer::DeliverPolicy::New,
+                    StreamStart::All => jetstream::consumer::DeliverPolicy::All,
+                    StreamStart::After(seq) => {
+                        jetstream::consumer::DeliverPolicy::ByStartSequence {
+                            start_sequence: seq + 1,
+                        }
                     }
                 },
                 ..Default::default()
@@ -500,6 +502,24 @@ impl NatsStore {
         }
         Err(last_err.unwrap_or_else(|| StoreError::Nats("no attempts made".into())))
     }
+}
+
+/// Where a [`NatsStore::subscribe_stream`] consumer starts reading.
+///
+/// The distinction is load-bearing for SSE (spec §6.4): a *resuming* client
+/// sends `Last-Event-ID` and must get everything after it or it silently loses
+/// events, while a *fresh* subscriber may not want the stream's whole retained
+/// history — on the dogfood project a cold project-scoped connect replayed
+/// ~3900 events (900 KB) before delivering anything live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamStart {
+    /// Only events published from now on.
+    New,
+    /// Everything the stream still retains.
+    All,
+    /// Everything after this stream sequence — a client resuming from its
+    /// `Last-Event-ID`.
+    After(u64),
 }
 
 /// A live JetStream subscription (see [`NatsStore::subscribe_stream`]).

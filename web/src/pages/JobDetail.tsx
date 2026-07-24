@@ -8,6 +8,7 @@ import {
   type EvalResult,
   type HumanResult,
   type Job,
+  type JobFull,
   type JobCriteria,
   type QueueSnapshot,
   type ReviewFinding,
@@ -35,7 +36,7 @@ export function JobDetail() {
   const { owner = '', project = '', seq = '' } = useParams()
   const jobSeq = Number(seq)
   const navigate = useNavigate()
-  const [job, setJob] = useState<Job | null>(null)
+  const [job, setJob] = useState<JobFull | null>(null)
   // When this job is a batch, the member jobs it absorbs — fetched from the
   // project list so the Members section can show their titles and live states.
   const [members, setMembers] = useState<Job[]>([])

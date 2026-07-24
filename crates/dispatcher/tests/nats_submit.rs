@@ -493,7 +493,11 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
     // a message wait uses a consumer created before the triggering action
     // (#206 principle 3), then drains it under a hard timeout.
     let mut events_sub = store
-        .subscribe_stream("job-events", "job.events.acme.api.1.>", 0)
+        .subscribe_stream(
+            "job-events",
+            "job.events.acme.api.1.>",
+            store::StreamStart::All,
+        )
         .await
         .unwrap();
     handle.release_job("acme", "api", job.id).await.unwrap();

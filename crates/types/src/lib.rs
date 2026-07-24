@@ -25,7 +25,7 @@ pub use channel::{
 pub use deploy::{DeployLeg, DeployReport, LegStatus};
 pub use duration::{DurationParseError, parse_duration};
 pub use ingest::IngestEvent;
-pub use job::{Escalation, Job, JobState};
+pub use job::{Escalation, JOB_SUMMARY_EXTRA_FIELDS, Job, JobState, JobSummary};
 pub use job_type::{
     ConfigWarning, Evaluator, EvaluatorType, JobType, Placement, ProjectDefaults, ReviewSpec,
     WorkSpec, WorkType, WrapUpMode, WrapUpSpec,

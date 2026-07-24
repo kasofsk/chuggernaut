@@ -138,6 +138,20 @@ export function ProjectPage() {
       .then(([js, ts]) => {
         setJobs(js)
         setPending(ts)
+        // Seed/refresh the progress lines from the list. A live SSE event is
+        // always newer than the snapshot it raced, so let the existing ts guard
+        // decide rather than clobbering: only fill in what we don't already
+        // hold at an equal-or-newer stamp.
+        setChannelMsgs((prev) => {
+          const next = new Map(prev)
+          for (const j of js) {
+            if (!j.channel?.at) continue
+            const cur = next.get(j.id)
+            if (cur && Date.parse(cur.ts) >= Date.parse(j.channel.at)) continue
+            next.set(j.id, { message: j.channel.message, ts: j.channel.at })
+          }
+          return next
+        })
         setError(null)
         setLoading(false)
       })
@@ -156,10 +170,11 @@ export function ProjectPage() {
   }, [owner, project, navigate])
 
   // Latest channel-update message per job, surfaced muted under the title for
-  // live jobs. Seeded for free from the SSE history replay (the per-project feed
-  // replays every channel-update on connect — no N+1 per-job fetch), then kept
-  // current from live events. Reset on project change so stale rows don't bleed
-  // across navigations.
+  // live jobs. Seeded from the jobs list itself (each live job carries its
+  // latest post), then kept current from live SSE events. It used to be seeded
+  // from the SSE history replay, which meant every page load downloaded the
+  // project's entire event history — ~900 KB to annotate a handful of rows.
+  // Reset on project change so stale rows don't bleed across navigations.
   const [channelMsgs, setChannelMsgs] = useState<Map<number, { message: string; ts: string }>>(
     new Map(),
   )

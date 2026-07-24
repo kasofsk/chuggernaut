@@ -1,5 +1,6 @@
 //! Job record and state machine states (spec §1.1, §2.1).
 
+use crate::channel::ChannelUpdate;
 use crate::job_type::Evaluator;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -111,6 +112,101 @@ pub struct Job {
     /// written before completion stamping existed deserialize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// The jobs-**list** projection (spec §6.1): every [`Job`] field except the two
+/// heavy prose ones, `description` and `cover_html`.
+///
+/// Those two dominate the payload — on the dogfood project they are 78% of a
+/// 578 KB list reply — and no list consumer reads either: the operator table
+/// renders title/type/state, and its search matches id/title/type only. They
+/// stay on the single-job reply, which is where the UI renders them.
+///
+/// Serialize-only by design: this is a wire shape, never a stored record, and
+/// nothing should be able to round-trip a summary back into a [`Job`] with an
+/// empty description. `job_summary_mirrors_job_fields` pins the field set, so
+/// a field added to [`Job`] fails the build until someone decides whether the
+/// list should carry it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct JobSummary<'a> {
+    pub id: u64,
+    pub project: &'a str,
+    pub r#type: &'a str,
+    pub title: &'a str,
+    pub deps: &'a [u64],
+    pub members: &'a [u64],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<u64>,
+    pub state: JobState,
+    pub branch: &'a str,
+    pub base_ref: Option<&'a str>,
+    pub knowledge_tags: &'a [String],
+    pub eval: &'a [Evaluator],
+    pub timeout: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub claim_next: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<&'a Escalation>,
+    pub factory: Option<&'a str>,
+    pub created_at: DateTime<Utc>,
+    pub ready_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+    /// The job's latest channel post, for the muted progress line the operator
+    /// table shows under a live job's title. Not a [`Job`] field — it lives in
+    /// the `channels` bucket — and the one deliberate *addition* the projection
+    /// makes over the record.
+    ///
+    /// Carrying it here is what lets a cold page load stop replaying the
+    /// project's entire event history just to learn what a handful of live jobs
+    /// are doing. Only populated for non-terminal jobs; None otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<&'a ChannelUpdate>,
+}
+
+/// Fields [`JobSummary`] adds that [`Job`] does not have, pinned by
+/// `job_summary_mirrors_job_fields` so the mirror check stays honest as the
+/// projection grows.
+pub const JOB_SUMMARY_EXTRA_FIELDS: &[&str] = &["channel"];
+
+impl<'a> From<&'a Job> for JobSummary<'a> {
+    fn from(job: &'a Job) -> Self {
+        Self {
+            id: job.id,
+            project: &job.project,
+            r#type: &job.r#type,
+            title: &job.title,
+            deps: &job.deps,
+            members: &job.members,
+            batch_id: job.batch_id,
+            state: job.state,
+            branch: &job.branch,
+            base_ref: job.base_ref.as_deref(),
+            knowledge_tags: &job.knowledge_tags,
+            eval: &job.eval,
+            timeout: job.timeout.as_deref(),
+            model: job.model.as_deref(),
+            claim_next: job.claim_next,
+            escalation: job.escalation.as_ref(),
+            factory: job.factory.as_deref(),
+            created_at: job.created_at,
+            ready_at: job.ready_at,
+            completed_at: job.completed_at,
+            // Lives in a different bucket; the list handler joins it in.
+            channel: None,
+        }
+    }
+}
+
+impl<'a> JobSummary<'a> {
+    /// Attach the job's latest channel post (see [`JobSummary::channel`]).
+    /// Terminal jobs keep None — nothing is making progress to report.
+    pub fn with_channel(mut self, update: Option<&'a ChannelUpdate>) -> Self {
+        if !self.state.is_terminal() {
+            self.channel = update;
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -467,5 +563,101 @@ mod tests {
         let back = serde_json::to_string(&job).unwrap();
         let again: Job = serde_json::from_str(&back).unwrap();
         assert_eq!(job, again);
+    }
+
+    /// A [`Job`] with every optional field populated, so nothing is dropped by a
+    /// `skip_serializing_if` and the key sets below compare the *declared*
+    /// fields rather than whichever happened to be `Some`.
+    fn job_with_every_field_set() -> Job {
+        Job {
+            id: 7,
+            project: "acme/api".into(),
+            r#type: "code".into(),
+            title: "title".into(),
+            description: "the ticket body".into(),
+            cover_html: Some("<p>cover</p>".into()),
+            deps: vec![1, 2],
+            members: vec![3],
+            batch_id: Some(4),
+            state: JobState::Work,
+            branch: "job/7".into(),
+            base_ref: Some("abc123".into()),
+            knowledge_tags: vec!["rust".into()],
+            eval: Vec::new(),
+            timeout: Some("30m".into()),
+            model: Some("claude-opus-5".into()),
+            claim_next: true,
+            escalation: Some(Escalation {
+                reason: "work_retries_exhausted".into(),
+                detail: "three attempts failed".into(),
+                failing_task: Some(2),
+                at: "2026-07-24T10:00:00Z".parse().unwrap(),
+            }),
+            factory: Some("triage".into()),
+            created_at: "2026-07-24T09:00:00Z".parse().unwrap(),
+            ready_at: Some("2026-07-24T09:30:00Z".parse().unwrap()),
+            completed_at: Some("2026-07-24T11:00:00Z".parse().unwrap()),
+        }
+    }
+
+    /// The list projection must stay a *complete* mirror of [`Job`] minus the
+    /// two prose fields. This is the guard that makes that true over time: add a
+    /// field to `Job` and this fails until someone decides whether the jobs list
+    /// should carry it. Without it the omission would be invisible — the field
+    /// would just quietly stop reaching the operator UI's table.
+    #[test]
+    fn job_summary_mirrors_job_fields() {
+        use std::collections::BTreeSet;
+
+        let job = job_with_every_field_set();
+        let keys = |v: &serde_json::Value| -> BTreeSet<String> {
+            v.as_object()
+                .expect("job shapes serialize as objects")
+                .keys()
+                .cloned()
+                .collect()
+        };
+
+        // The job is in Work and carries a post, so every optional field of the
+        // projection — including the added `channel` — is present too.
+        let update = ChannelUpdate {
+            message: "running the gate".into(),
+            percent: Some(40),
+            at: Some("2026-07-24T10:30:00Z".parse().unwrap()),
+            origin: Default::default(),
+        };
+        let full = keys(&serde_json::to_value(&job).unwrap());
+        let summary = keys(
+            &serde_json::to_value(JobSummary::from(&job).with_channel(Some(&update))).unwrap(),
+        );
+
+        let mut expected = full.clone();
+        assert!(expected.remove("description"), "Job must have description");
+        assert!(expected.remove("cover_html"), "Job must have cover_html");
+        for extra in JOB_SUMMARY_EXTRA_FIELDS {
+            expected.insert((*extra).to_string());
+        }
+        assert_eq!(
+            summary, expected,
+            "JobSummary must carry every Job field except description/cover_html \
+             (plus JOB_SUMMARY_EXTRA_FIELDS) — a new Job field needs a deliberate \
+             decision about whether the jobs list should carry it"
+        );
+    }
+
+    /// The projection exists to drop the payload's bulk; pin that it actually
+    /// does, so a future refactor can't reintroduce the prose fields by name.
+    #[test]
+    fn job_summary_omits_the_prose_fields() {
+        let job = job_with_every_field_set();
+        let json = serde_json::to_string(&JobSummary::from(&job)).unwrap();
+        assert!(
+            !json.contains("the ticket body"),
+            "description leaked: {json}"
+        );
+        assert!(!json.contains("<p>cover</p>"), "cover_html leaked: {json}");
+        // …while still carrying what the operator table renders.
+        assert!(json.contains("\"title\":\"title\""));
+        assert!(json.contains("\"state\":\"Work\""));
     }
 }

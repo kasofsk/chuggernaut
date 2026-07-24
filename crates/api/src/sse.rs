@@ -13,22 +13,24 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::Stream;
 use std::convert::Infallible;
 
-fn last_event_id(headers: &HeaderMap) -> u64 {
+/// The stream sequence a reconnecting `EventSource` resumes from, when it sent
+/// one. Absent on a fresh connect, which is what the two endpoints below
+/// interpret differently.
+fn last_event_id(headers: &HeaderMap) -> Option<u64> {
     headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok())
-        .unwrap_or(0)
 }
 
 async fn bridge(
     state: &SharedState,
     filter: String,
-    after_seq: u64,
+    start: store::StreamStart,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>> + use<>>, ApiError> {
     let sub = state
         .store
-        .subscribe_stream(store::buckets::STREAM_JOB_EVENTS, &filter, after_seq)
+        .subscribe_stream(store::buckets::STREAM_JOB_EVENTS, &filter, start)
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let stream = futures::stream::unfold(sub, |mut sub| async move {
@@ -55,7 +57,14 @@ pub async fn project_events(
     )
     .map_err(|_| ApiError::new(StatusCode::FORBIDDEN, "insufficient role"))?;
     let filter = format!("job.events.{owner}.{project}.>");
-    bridge(&state, filter, last_event_id(&headers)).await
+    // A fresh connect gets live events only. The project feed spans every job
+    // the project has ever run, so replaying it costs the operator a multi-
+    // megabyte download before the first live frame — and nothing needs it:
+    // the page's initial state comes from the jobs list (which now carries each
+    // live job's latest channel post), and this stream's job is to keep that
+    // state current. A reconnect still resumes exactly where it left off.
+    let start = last_event_id(&headers).map_or(store::StreamStart::New, store::StreamStart::After);
+    bridge(&state, filter, start).await
 }
 
 pub async fn job_events(
@@ -72,5 +81,8 @@ pub async fn job_events(
     )
     .map_err(|_| ApiError::new(StatusCode::FORBIDDEN, "insufficient role"))?;
     let filter = format!("job.events.{owner}.{project}.{seq}.>");
-    bridge(&state, filter, last_event_id(&headers)).await
+    // Unlike the project feed, one job's history is bounded and *is* the
+    // content: the detail page renders the event log itself. Replay it whole.
+    let start = last_event_id(&headers).map_or(store::StreamStart::All, store::StreamStart::After);
+    bridge(&state, filter, start).await
 }

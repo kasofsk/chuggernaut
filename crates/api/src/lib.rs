@@ -213,12 +213,35 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
 
     if let Some(dist) = ui_dist {
         let index = dist.join("index.html");
-        router = router.fallback_service(
-            tower_http::services::ServeDir::new(&dist)
-                .fallback(tower_http::services::ServeFile::new(index)),
-        );
+        // Vite content-hashes everything under /assets, so a given URL's bytes
+        // never change — cache it forever and skip even the revalidation RTT.
+        // Everything else (index.html, sw.js, the manifest, icons) keeps the
+        // default no-cache behavior: those URLs are stable across builds, so a
+        // long TTL would pin operators to a stale shell.
+        router = router
+            .nest_service(
+                "/assets",
+                axum::routing::get_service(tower_http::services::ServeDir::new(
+                    dist.join("assets"),
+                ))
+                .layer(
+                    tower_http::set_header::SetResponseHeaderLayer::overriding(
+                        axum::http::header::CACHE_CONTROL,
+                        axum::http::HeaderValue::from_static("public, max-age=31536000, immutable"),
+                    ),
+                ),
+            )
+            .fallback_service(
+                tower_http::services::ServeDir::new(&dist)
+                    .fallback(tower_http::services::ServeFile::new(index)),
+            );
     }
-    router
+    // Compress every response the client will take it on. The default predicate
+    // already skips SSE (`text/event-stream`), gRPC, images, and sub-32-byte
+    // bodies, so the live event stream still flushes per frame. Applied last so
+    // it wraps the static fallback too — the UI bundle is the single largest
+    // transfer the operator makes.
+    router.layer(tower_http::compression::CompressionLayer::new())
 }
 
 /// Bind and serve until the process is killed.

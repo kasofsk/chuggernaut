@@ -196,6 +196,9 @@ impl Server {
                         .get("percent")
                         .and_then(|p| p.as_u64())
                         .map(|p| p as u8),
+                    // Stamped by the dispatcher on accept, not here — the
+                    // container's clock is not the platform's.
+                    at: None,
                     origin: self.ctx.origin.clone(),
                 };
                 let subject = subjects::channel_update(&owner, &project, seq);
@@ -312,6 +315,7 @@ mod tests {
         let update = ChannelUpdate {
             message: "checking".into(),
             percent: Some(50),
+            at: None,
             origin: origin.clone(),
         };
         let v = serde_json::to_value(&update).unwrap();
@@ -335,6 +339,7 @@ mod tests {
         let update = ChannelUpdate {
             message: "hi".into(),
             percent: None,
+            at: None,
             origin: ChannelOrigin::default(),
         };
         let v = serde_json::to_value(&update).unwrap();

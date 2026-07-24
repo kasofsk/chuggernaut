@@ -51,7 +51,13 @@ impl Core {
         });
 
         match &post {
-            ChannelPost::Update(update) => entry.update = Some(update.clone()),
+            ChannelPost::Update(update) => {
+                // Stamp acceptance time here rather than trusting the
+                // container's clock; the jobs list ages the message against it.
+                let mut update = update.clone();
+                update.at = Some(chrono::Utc::now());
+                entry.update = Some(update);
+            }
             ChannelPost::Reply(reply) => entry.last_reply = Some(reply.clone()),
         }
         let (event_type, payload) = channel_event(&post);
@@ -112,6 +118,7 @@ mod tests {
         let (event_type, payload) = channel_event(&ChannelPost::Update(ChannelUpdate {
             message: "running tests".into(),
             percent: Some(60),
+            at: None,
             origin: ChannelOrigin {
                 task_id: Some(1),
                 phase: Some("Work".into()),
@@ -150,6 +157,7 @@ mod tests {
         let (event_type, payload) = channel_event(&ChannelPost::Update(ChannelUpdate {
             message: "cloning".into(),
             percent: Some(10),
+            at: None,
             origin: ChannelOrigin::default(),
         }));
         assert_eq!(event_type, "channel-update");

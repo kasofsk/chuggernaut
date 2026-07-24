@@ -15,6 +15,13 @@ pub struct ChannelEntry {
 pub struct ChannelUpdate {
     pub message: String,
     pub percent: Option<u8>,
+    /// When the dispatcher accepted the post. Stamped on write, not by the
+    /// container — a container's clock is not ours to trust, and this is what
+    /// the operator UI ages the message against ("2m ago") when it reads the
+    /// latest post off the jobs list instead of the event stream. None on posts
+    /// written before this field existed; the bucket's 7-day TTL ages those out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<DateTime<Utc>>,
     /// Which task produced this post (spec §4.2, §6.3). Stamped by the channel
     /// binary from its container env; absent on legacy posts.
     #[serde(flatten)]
