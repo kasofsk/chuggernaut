@@ -13,6 +13,9 @@ Don't re-derive these — read them:
 - `crates.md` — the crate/module map: what each crate owns and why. Read before adding a crate
   or moving responsibility between them.
 - `testing.md` — the three test tiers and where a given test belongs.
+- `STYLE.md` — the tiered blessed practices (machine-checkable invariants,
+  reviewer-checked rules, principles). Hold every change to it; reviewers reject
+  by rule name.
 - `NORTH-STAR.md` — the entry point for the structural-direction cluster: target
   factoring, and the reading order into `structure-assessment.md` (current-state
   audit), `contracts.md` (extracting the dispatcher's interfaces), and

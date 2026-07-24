@@ -125,6 +125,9 @@ correct; they need the same treatment as the backend invariants — enforcement.
 
 ## 4. Enforcement: invariants as CI, module map as registry
 
+The rule-level companion to this section is `STYLE.md` — the tiered blessed
+practices that workers and reviewers hold each change to.
+
 `crates.md` lists "invariants worth enforcing (e.g. via CI lint)" — in the
 north star they *are* enforced, because agent-driven development erodes
 disciplinary boundaries faster than human development does:
