@@ -2892,6 +2892,18 @@ table.jobs tbody tr.row-draft td:first-child {
   font-size: var(--fs-sm);
   margin-top: var(--sp-2);
 }
+/* Reveal the next page of deploy history. Centred, full-width-safe: the button
+   shrinks to its text and the row wraps, so it never widens the page on a
+   narrow screen. The bottom margin keeps it clear of the fixed theme picker
+   when the list is scrolled all the way down — it is the last thing on the
+   page, so nothing else would. */
+.deploy-more {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: var(--sp-3);
+  margin-bottom: 3.5rem;
+}
 
 /* ══════════════════════════════════════════════════════════════════════════
    SNAZZY REDESIGN (#161–#164, #171): cosmic identity, icon rail, page chrome,
@@ -4240,6 +4252,10 @@ tr[data-state='Batched'] {
   .capacity-widget,
   .theme-picker {
     bottom: 62px;
+  }
+  /* …and the last thing on the deploys page clear of the raised picker. */
+  .deploy-more {
+    margin-bottom: 6.5rem;
   }
   /* Sticky Create footer sits above the fixed bottom nav rail (52px) and
      matches the mobile card's tighter padding. */

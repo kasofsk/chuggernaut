@@ -32,6 +32,24 @@ import { ProjectHeader } from '../components/ProjectHeader'
 import { Skeleton, SkeletonLines } from '../components/Skeleton'
 import { DeployLegCard, deployReportOf } from '../components/DeployLegCard'
 
+// A fetch the page can do without: its failure resolves to null instead of
+// rejecting, so it can be awaited alongside the required ones without taking
+// the page down with it.
+function bestEffort<T>(p: Promise<T>): Promise<T | null> {
+  return p.then(
+    (v) => v,
+    () => null,
+  )
+}
+
+// How many of a batch's members get their detail fetched. Fetching each member
+// directly beats pulling the project's whole job list for the handful a batch
+// normally holds, but it costs a request per member on *every* refresh and the
+// spec puts no ceiling on `members` — so the fan-out is bounded, and a batch
+// past the bound renders its remaining members as bare ids with a note saying
+// so rather than issuing an unbounded burst per SSE event.
+const MEMBER_DETAIL_MAX = 24
+
 export function JobDetail() {
   const { owner = '', project = '', seq = '' } = useParams()
   const jobSeq = Number(seq)
@@ -73,34 +91,42 @@ export function JobDetail() {
     )
   }, [])
 
+  // Everything the page needs, in one round trip. Nothing here depends on
+  // another's result, so nothing may be chained: at operator latency (~240ms
+  // RTT over the tailnet) each serialized fetch is another quarter second on
+  // every load *and* every SSE-triggered refresh. `criteria` and `queue` stay
+  // best-effort — bestEffort() turns their failure into null so they can ride
+  // the same Promise.all without ever failing the page — which leaves
+  // job/tasks/diff as the only rejectors, so the 401 → /login bounce below is
+  // unchanged.
   const refresh = useCallback(() => {
     Promise.all([
       api.job(owner, project, jobSeq),
       api.tasks(owner, project, jobSeq),
       api.diff(owner, project, jobSeq),
+      bestEffort(api.criteria(owner, project, jobSeq)),
+      bestEffort(api.queue(owner, project)),
     ])
-      .then(([j, ts, d]) => {
+      .then(([j, ts, d, c, q]) => {
         setJob(j)
         setTasks(ts)
         setDiff(d)
+        setCriteria(c)
+        setQueue(q)
         setError(null)
-        // A batch: pull the member jobs from the project list (one fetch) so the
-        // Members section stays live with the same debounced refresh. Non-batches
-        // skip the call and clear any stale members.
-        const memberIds = j.members ?? []
-        if (memberIds.length > 0) {
-          api.jobs(owner, project).then(
-            (all) => setMembers(all.filter((m) => memberIds.includes(m.id))),
-            () => {},
-          )
-        } else {
+        // A batch: fetch its member jobs directly — one small request each, in
+        // parallel — rather than the project's entire job list to filter a
+        // handful of rows out of it. Best-effort: a member that fails to load
+        // just renders as its id. Non-batches clear any stale members.
+        const memberIds = (j.members ?? []).slice(0, MEMBER_DETAIL_MAX)
+        if (memberIds.length === 0) {
           setMembers([])
+          return
         }
+        Promise.all(memberIds.map((id) => bestEffort(api.job(owner, project, id)))).then((ms) =>
+          setMembers(ms.filter((m): m is JobFull => m !== null)),
+        )
       })
-      .then(() => api.criteria(owner, project, jobSeq).then(setCriteria, () => setCriteria(null)))
-      // Best-effort: a queue snapshot the badge uses for position, never a
-      // reason to fail the page (dispatcher may be briefly unreachable).
-      .then(() => api.queue(owner, project).then(setQueue, () => setQueue(null)))
       .catch((e) => {
         if (e instanceof ApiError && e.status === 401) navigate('/login')
         else setError(e instanceof Error ? e.message : 'load failed')
@@ -375,6 +401,12 @@ export function JobDetail() {
           <h2>
             Members <span className="dim">{(job.members ?? []).length}</span>
           </h2>
+          {(job.members ?? []).length > MEMBER_DETAIL_MAX && (
+            <p className="dim">
+              Titles and states are loaded for the first {MEMBER_DETAIL_MAX} members; open a member
+              to see the rest.
+            </p>
+          )}
           <ul className="batch-members">
             {(job.members ?? []).map((id) => {
               const m = members.find((x) => x.id === id)

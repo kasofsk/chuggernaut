@@ -132,6 +132,21 @@ export function ProjectPage() {
     (f: JobFilters) => setParams(filtersToParams(f), { replace: true }),
     [setParams],
   )
+  // The URL owns the filters (a filtered view is shareable, #162), but writing
+  // `q` there on every keystroke re-runs the filter/sort/batch-grouping pipeline
+  // over every job for each letter typed. So type into local state and push to
+  // the URL once typing settles. `qPending` also tracks what we last wrote, so
+  // the sync below can tell a URL change we caused from one we didn't
+  // (back/forward, a shared link) and only adopt the latter.
+  const [qDraft, setQDraft] = useState(filters.q)
+  const qPending = useRef(filters.q)
+  const commitQ = useDebouncedCallback(() => setFilters({ ...filters, q: qPending.current }), 200)
+  const urlQ = filters.q
+  useEffect(() => {
+    if (urlQ === qPending.current) return
+    qPending.current = urlQ
+    setQDraft(urlQ)
+  }, [urlQ])
 
   const refresh = useCallback(() => {
     Promise.all([api.jobs(owner, project), api.pendingTasks(owner, project)])
@@ -413,8 +428,12 @@ export function ProjectPage() {
                 <input
                   type="search"
                   placeholder="Search jobs…"
-                  value={filters.q}
-                  onChange={(e) => setFilters({ ...filters, q: e.target.value })}
+                  value={qDraft}
+                  onChange={(e) => {
+                    qPending.current = e.target.value
+                    setQDraft(e.target.value)
+                    commitQ()
+                  }}
                   aria-label="Search jobs"
                 />
               </div>

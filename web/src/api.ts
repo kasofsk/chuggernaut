@@ -151,9 +151,6 @@ export interface Job {
    *  dispatcher at the terminal transition; null while the job is still live or
    *  on records written before completion stamping existed */
   completed_at?: string | null
-  /** derived server-side from the task log; null when no human action is pending.
-   *  Only the single-job reply sets it — see {@link JobFull}. */
-  awaiting_human?: AwaitingHuman | null
   /** latest channel post, on live jobs only (see {@link JobChannel}) */
   channel?: JobChannel | null
 }
@@ -163,6 +160,12 @@ export interface Job {
  * plus the prose the detail page renders.
  */
 export interface JobFull extends Job {
+  /** derived server-side from the task log; null when no human action is
+   *  pending. Only the single-job reply carries it — the list projection
+   *  (`types::JobSummary`) has never had the field, so it lives here rather
+   *  than on {@link Job}: a list consumer reaching for it is a type error
+   *  instead of a filter that silently matches nothing. */
+  awaiting_human?: AwaitingHuman | null
   description: string
   /** optional rich cover page for the UI (spec §1.1, §4.3): presentational
    *  only, never injected into any agent prompt. Rendered above the description

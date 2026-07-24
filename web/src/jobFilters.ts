@@ -1,7 +1,15 @@
 import type { Job, JobState } from './api'
 
-/** Quick-filter keys (#162). Composable (AND) with search + state groups. */
-export type QuickKey = 'mine' | 'waiting' | 'failed' | 'attention' | 'recent'
+/**
+ * Quick-filter keys (#162). Composable (AND) with search + state groups.
+ *
+ * Every key must be decidable from a jobs-*list* row. `waiting` (a job with a
+ * pending human task) was not: it read `awaiting_human`, which only the
+ * single-job reply carries — see {@link JobFull} — so it silently matched
+ * nothing. It is gone rather than left dead; the states that put a job in front
+ * of a human (Escalated/Stalled) are what `attention` now means.
+ */
+export type QuickKey = 'mine' | 'failed' | 'attention' | 'recent'
 
 export interface JobFilters {
   /** free-text search over #id / title / type */
@@ -54,12 +62,10 @@ function quickPred(k: QuickKey, j: Job, claimed: Set<number>): boolean {
   switch (k) {
     case 'mine':
       return !!j.claim_next || claimed.has(j.id)
-    case 'waiting':
-      return j.awaiting_human != null
     case 'failed':
       return j.state === 'Revoked'
     case 'attention':
-      return j.state === 'Escalated' || j.state === 'Stalled' || j.awaiting_human != null
+      return j.state === 'Escalated' || j.state === 'Stalled'
     case 'recent':
       return within(j.created_at, DAY) || within(j.completed_at, DAY)
   }
@@ -149,7 +155,7 @@ export function filtersToParams(f: JobFilters): URLSearchParams {
   return p
 }
 
-const QUICK_KEYS: QuickKey[] = ['mine', 'waiting', 'failed', 'attention', 'recent']
+const QUICK_KEYS: QuickKey[] = ['mine', 'failed', 'attention', 'recent']
 export function filtersFromParams(p: URLSearchParams): JobFilters {
   return {
     q: p.get('q') ?? '',
