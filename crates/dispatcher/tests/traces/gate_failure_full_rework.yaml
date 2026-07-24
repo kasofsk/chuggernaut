@@ -51,4 +51,5 @@ steps:
   - PublishEvent task-completed
   - PublishEvent job-wrapup-started
   - SquashMerge
+  - DeleteBranch job/1
   - PublishEvent job-done

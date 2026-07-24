@@ -57,4 +57,5 @@ steps:
   - PublishEvent task-completed
   - AdvanceDefault
   - DeleteBranch merge-gate/1
+  - DeleteBranch job/1
   - PublishEvent job-done

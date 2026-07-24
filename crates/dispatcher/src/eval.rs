@@ -19,6 +19,7 @@
 
 use crate::core::{Core, CoreError, EvalSubmission, Msg, Result, TaskExit};
 use crate::decide::merge_gate::{self, group_stages};
+use crate::decide::wrapup;
 use crate::effects::Effect;
 use crate::exec::{ChannelRole, INFRA_RELAUNCH_CAP, eval_image, task_timeout};
 use crate::interpret::Outcome;
@@ -2105,14 +2106,70 @@ impl Core {
         project: &str,
         seq: u64,
     ) -> Result<()> {
+        self.run_wrapup(owner, project, seq, wrapup::WrapUpEvent::Landed)
+            .await
+    }
+
+    /// The C3 shim (contracts.md §2), the same four-step shape C1 set: gather
+    /// the reads into the view, call the pure decider, apply its transitions
+    /// through `set_state`, run its effects through `interpret` — plus the
+    /// dispatcher-side bookkeeping the returned [`wrapup::WrapUpStep`] names,
+    /// which touches shell state (the execution slice, the dependents fan-out)
+    /// the pure crate cannot see.
+    pub(crate) async fn run_wrapup(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        event: wrapup::WrapUpEvent,
+    ) -> Result<()> {
+        // 1. Reads feed the view — they are not effects.
         let key = (owner.to_string(), project.to_string(), seq);
-        let run = self
+        let job = self.must_get(owner, project, seq)?.clone();
+        let members = job
+            .members
+            .iter()
+            .map(|&m| self.must_get(owner, project, m).cloned())
+            .collect::<Result<Vec<Job>>>()?;
+        let publish_command = self
             .active
             .get(&key)
-            .and_then(|e| e.job_type.wrap_up.run.clone());
-        match run {
-            Some(_) => self.launch_wrapup_task(owner, project, seq, 1).await,
-            None => self.complete_done(owner, project, seq).await,
+            .is_some_and(|e| e.job_type.wrap_up.run.is_some());
+        let view = wrapup::WrapUpView {
+            job: &job,
+            publish_command,
+            members: &members,
+            now: Utc::now(),
+        };
+        // 2. The decision, made purely.
+        let (transitions, effects, step) = wrapup::decide(&view, event);
+        // 3. Commit the decision: transitions first (§2.1 record is the source
+        // of truth; the publish task and the announcements are its artifacts,
+        // re-derived by restart reconciliation if a crash loses them).
+        for mut t in transitions {
+            self.set_state(&mut t.job, t.to).await?;
+        }
+        // The exec slice is released BEFORE the effects run (parity with the
+        // pre-C3 order, and with C2's `CompletedDropExec`): neither the
+        // escalation task's cycle nor the terminal announcement may read a
+        // slice the decision just ended.
+        if step.drops_exec() {
+            self.active.remove(&key);
+        }
+        // 4. The artifacts of the decision.
+        for effect in effects {
+            self.interpret(effect).await?;
+        }
+        // 5. The bookkeeping the step names.
+        match step {
+            wrapup::WrapUpStep::AwaitPublish | wrapup::WrapUpStep::EscalatedDropExec => Ok(()),
+            wrapup::WrapUpStep::Complete => self.complete_done(owner, project, seq).await,
+            wrapup::WrapUpStep::Completed { unblock } => {
+                for done_seq in unblock {
+                    self.on_job_done(owner, project, done_seq).await?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -2235,7 +2292,7 @@ impl Core {
         owner: &str,
         project: &str,
         seq: u64,
-        mut task: Task,
+        task: Task,
         exit: TaskExit,
     ) -> Result<()> {
         let TaskExit {
@@ -2243,117 +2300,30 @@ impl Core {
             launch_error,
             ..
         } = exit;
-        let key = (owner.to_string(), project.to_string(), seq);
-        task.completed_at = Some(Utc::now());
-        if exit_code == 0 {
-            task.state = TaskState::Done;
-            task.result = Some(TaskResult::Command {
-                pass: true,
+        self.run_wrapup(
+            owner,
+            project,
+            seq,
+            wrapup::WrapUpEvent::PublishExited {
+                task: Box::new(task),
                 exit_code,
-                output: String::new(),
-                structured: None,
-            });
-            self.tasks.put(&task).await?;
-            self.publish(
-                owner,
-                project,
-                seq,
-                "task-completed",
-                serde_json::json!({ "task_id": task.id, "phase": "WrapUp" }),
-            )
-            .await?;
-            return self.complete_done(owner, project, seq).await;
-        }
-
-        task.state = TaskState::Failed;
-        task.result = Some(TaskResult::Command {
-            pass: false,
-            exit_code,
-            output: launch_error.clone().unwrap_or_default(),
-            structured: None,
-        });
-        self.tasks.put(&task).await?;
-        self.publish(
-            owner,
-            project,
-            seq,
-            "task-failed",
-            serde_json::json!({
-                "task_id": task.id, "phase": "WrapUp", "exit_code": exit_code,
-                "launch_error": launch_error,
-            }),
-        )
-        .await?;
-        self.active.remove(&key);
-        self.escalate(
-            owner,
-            project,
-            seq,
-            "wrap_up_failed",
-            format!(
-                "Job {seq}: the wrap-up publish command failed (exit {exit_code}). \
-                 The squash already landed on the default branch — the merge is final; \
-                 only the publish did not run. Re-run the publish (jobs/web-publish.yaml) \
-                 or resolve."
-            ),
-            Some(task.id),
+                launch_error,
+            },
         )
         .await
     }
 
-    /// Terminal success: branch cleanup, Done, dependents unblock.
+    /// Terminal success (spec §2.1): branch cleanup, Done — for a batch, every
+    /// member with it — and dependents unblocked. Boxed because the decider
+    /// re-enters here for the terminal step of a landing or a publish, closing
+    /// an async cycle through [`Core::run_wrapup`].
     pub(crate) async fn complete_done(
         &mut self,
         owner: &str,
         project: &str,
         seq: u64,
     ) -> Result<()> {
-        let key = (owner.to_string(), project.to_string(), seq);
-        let mut job = self.must_get(owner, project, seq)?.clone();
-        let _ = self.repos.delete_branch(owner, project, &job.branch).await;
-        self.set_state(&mut job, JobState::Done).await?;
-        self.active.remove(&key);
-        self.publish(owner, project, seq, "job-done", serde_json::json!({}))
-            .await?;
-        self.on_job_done(owner, project, seq).await?;
-        // A batch merge completes every member (spec §2.1 batches): fan its Done
-        // out so each member lands Done and unblocks its dependents exactly as if
-        // it had run on its own.
-        if job.is_batch() {
-            self.complete_batch_members(owner, project, seq, &job.members)
-                .await?;
-        }
-        Ok(())
-    }
-
-    /// Fan a batch's completion out to its members (spec §2.1 batches). Each
-    /// member goes Batched→Done (stamping `completed_at` via `set_state`) with a
-    /// `job-completed-via-batch` event; only then does each member's `on_job_done`
-    /// run, so a dependent that waits on several members unblocks once — after
-    /// the last of them is Done — rather than churning on the earlier ones.
-    async fn complete_batch_members(
-        &mut self,
-        owner: &str,
-        project: &str,
-        batch_seq: u64,
-        members: &[u64],
-    ) -> Result<()> {
-        for &m in members {
-            let mut member = self.must_get(owner, project, m)?.clone();
-            self.set_state(&mut member, JobState::Done).await?;
-            self.publish(
-                owner,
-                project,
-                m,
-                "job-completed-via-batch",
-                serde_json::json!({ "batch_id": batch_seq }),
-            )
-            .await?;
-        }
-        for &m in members {
-            self.on_job_done(owner, project, m).await?;
-        }
-        Ok(())
+        Box::pin(self.run_wrapup(owner, project, seq, wrapup::WrapUpEvent::Completing)).await
     }
 }
 

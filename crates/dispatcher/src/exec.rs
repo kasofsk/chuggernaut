@@ -13,6 +13,7 @@
 //! - **Spec:** §3.2.
 
 use crate::core::{Core, CoreError, Msg, Result, TaskExit, WorkSubmission};
+use crate::decide::wrapup;
 use crate::escalation;
 use crate::queue::QueuedJob;
 use crate::release;
@@ -1392,7 +1393,12 @@ impl Core {
                 // grant and the work attempt counter is untouched (#141).
                 self.enter_evaluation(owner, project, seq).await
             }
-            TaskPhase::WrapUp => self.retry_wrapup(owner, project, seq).await,
+            // Only the publish re-runs: the squash already landed, so the C3
+            // decider takes the job back to WrapUp and relaunches the command.
+            TaskPhase::WrapUp => {
+                self.run_wrapup(owner, project, seq, wrapup::WrapUpEvent::RetryRequested)
+                    .await
+            }
             TaskPhase::Work | TaskPhase::Triage | TaskPhase::Escalation => {
                 self.retry_work(owner, project, seq).await
             }
@@ -1433,15 +1439,6 @@ impl Core {
             Some("wrap_up_failed") => TaskPhase::WrapUp,
             _ => TaskPhase::Work,
         })
-    }
-
-    /// Re-run only the wrap-up publish after a `wrap_up_failed` escalation
-    /// (#141): the squash already landed, so the merge is final — set the job
-    /// back to WrapUp and relaunch the command at a fresh attempt.
-    async fn retry_wrapup(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
-        let mut job = self.must_get(owner, project, seq)?.clone();
-        self.set_state(&mut job, JobState::WrapUp).await?;
-        self.launch_wrapup_task(owner, project, seq, 1).await
     }
 
     /// Re-run Work after a work-phase escalation (#141, pre-existing behavior):

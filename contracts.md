@@ -106,6 +106,13 @@ view the world moved under. Phase-owned scheduling state became a
 decider-owned value (`MergeGateState`, swapped wholesale by the shim), which
 promoted the depth-1 invariant into the type system (`gating: Option<u64>`).
 
+**C3 (wrapup) settled the third piece: the step.** A decider returns, besides
+transitions and effects, a value naming the shell bookkeeping that follows
+(`WrapUpStep` — release the execution slice, unblock these seqs, re-enter with
+this event). Work the pure crate cannot express — because it reads dispatcher
+state that is not part of the decision — is *named* by the decider rather than
+left implicit in the shim, so the shim keeps no branching of its own.
+
 ### 3. Invariants — what must always hold
 
 Harvest every "must"/"always"/"never" comment and defensive pattern into one
