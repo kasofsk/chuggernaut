@@ -14,6 +14,8 @@ name: docs
 display_name: Docs
 description: Write or update a reference/wiki page under docs/; agent-reviewed, doc-lint gated.
 image: chuggernaut/agent-rust:prod
+knowledge:
+  - north-star-blessed-practices
 work:
   type: agent
   prompt: prompts/work/docs.md
