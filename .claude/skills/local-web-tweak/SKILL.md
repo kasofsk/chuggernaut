@@ -86,15 +86,15 @@ Project `kasofsk/chuggernaut`. On 401, re-mint per `.claude/skills/chug/SKILL.md
    `job/{N}` at `base_ref` (platform main). From the worktree:
 
    ```sh
-   git fetch chug
-   git rebase chug/job/{N}     # only if base_ref moved past the branch point
-   git push chug HEAD:job/{N}
+   git fetch origin
+   git rebase origin/job/{N}   # only if base_ref moved past the branch point
+   git push origin HEAD:job/{N}
    ```
 
    If the push is rejected non-fast-forward, fetch and look — never
    force-push over commits you haven't read.
 5. **Verify before resolving** (prevents the empty-branch review race, #54):
-   `git fetch chug && git log --oneline -1 chug/job/{N}` must show your
+   `git fetch origin && git log --oneline -1 origin/job/{N}` must show your
    commit. Only then resolve the parked task Pass — the summary becomes the
    squash-merge commit body, so write it like one:
 

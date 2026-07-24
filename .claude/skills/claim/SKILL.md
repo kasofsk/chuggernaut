@@ -40,8 +40,8 @@ Project: `kasofsk/chuggernaut`. On 401, re-mint per `.claude/skills/chug/SKILL.m
 ## 2. Worktree
 
 ```sh
-git fetch chug
-git worktree add /Users/david/chug-job-{N} -b job/{N} chug/job/{N}
+git fetch origin
+git worktree add /Users/david/chug-job-{N} -b job/{N} origin/job/{N}
 ```
 
 The branch exists once the job enters Work and starts at `base_ref`. If the
@@ -87,11 +87,11 @@ its commit actually exists in the worktree yourself.
 1. Review the diff yourself (`git -C /Users/david/chug-job-{N} diff
    {base_ref}..HEAD`) against the brief. Fix-ups: prefer sending the subagent
    a follow-up message over editing its work silently.
-2. Push: `git -C /Users/david/chug-job-{N} push chug job/{N}:job/{N}`.
-   If rejected non-fast-forward, `git fetch chug` and look — never force-push
+2. Push: `git -C /Users/david/chug-job-{N} push origin job/{N}:job/{N}`.
+   If rejected non-fast-forward, `git fetch origin` and look — never force-push
    over commits you have not read.
 3. **Verify the remote tip** before resolving:
-   `git fetch chug && git log --oneline -1 chug/job/{N}` must show the new
+   `git fetch origin && git log --oneline -1 origin/job/{N}` must show the new
    commit on top of `base_ref`. Resolving before the push lands gives the
    review evaluator an empty branch (the #54 race).
 4. Resolve the parked task Pass — the summary becomes the squash-commit body,

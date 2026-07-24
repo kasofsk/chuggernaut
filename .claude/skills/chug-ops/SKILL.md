@@ -44,6 +44,22 @@ will run and wait.
 - Git: the Mini checkout `~/chuggernaut` has origin = local bare repo — the
   **platform owns `main`; GitHub is a read-only mirror**. Direct pushes to
   GitHub main get overwritten.
+- **Operator checkout on a new machine**: `origin` must point at the
+  platform's SSH front, not GitHub. Add to `~/.ssh/config`:
+
+  ```
+  Host chug-mini
+    HostName gumbo-mini-0
+    Port 2222
+    User git
+    IdentityFile ~/.ssh/id_ed25519
+    CertificateFile ~/.ssh/id_ed25519-cert-chug.pub
+  ```
+
+  then `git remote set-url origin ssh://chug-mini/kasofsk/chuggernaut.git`
+  (equivalently `ssh://git@100.116.243.42:2222/...` over the tailnet). Push
+  access comes from the per-user SSH certificate issued by the platform.
+  Optionally keep the GitHub mirror as a `github` remote — never push to it.
 - UI static files live in `~/chuggernaut-data/ui`, swapped by web-publish
   jobs.
 - API tokens: see `.claude/skills/chug/SKILL.md` (mint on the Mini over ssh).

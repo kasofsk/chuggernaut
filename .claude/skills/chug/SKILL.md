@@ -24,8 +24,10 @@ The dogfood project — chuggernaut developing itself — is
 **`kasofsk/chuggernaut`**. It is a **classic, platform-owned** project: the
 platform's bare repo owns `main`, agents merge job branches straight into it,
 and GitHub is a **read-only mirror**. To ship a change, **create + release a
-`deploy` job** (see "Shipping this repo" below). Pull `main` via the SSH front
-(`ssh://git@100.116.243.42:2222/kasofsk/chuggernaut.git`) or the GitHub mirror.
+`deploy` job** (see "Shipping this repo" below). The operator checkout's
+`origin` is the platform's SSH front
+(`ssh://git@100.116.243.42:2222/kasofsk/chuggernaut.git`; setup in
+`.claude/skills/chug-ops/SKILL.md`); GitHub is a read-only mirror.
 
 If the user explicitly says **dev** (the local stack from `deploy/dev`):
 `BASE=http://localhost:8081`, token at `deploy/dev/data/keys/claude.token`.
@@ -102,7 +104,7 @@ container. Verbs to support conversationally:
   if it is still Frozen. When the job enters Work the attempt parks (visible
   as `awaiting_human: { kind: "work", claimed: true }` on the job).
 - **"start working"** — set up a worktree on the job branch:
-  `git fetch chug && git worktree add ../job-N -b job/N chug/job/N`
+  `git fetch origin && git worktree add ../job-N -b job/N origin/job/N`
   (the branch exists once the job enters Work; push access per the user's cert).
 - **"submit job N"** — after pushing the work to `job/N`, resolve the parked
   task Pass with a summary (it becomes the squash-merge commit body):
