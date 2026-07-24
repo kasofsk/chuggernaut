@@ -98,15 +98,23 @@ them with zero extra plumbing. They pin behavior during Track C.
 
 ## Track C — Decider extraction (grow the pure core)
 
-**C1. Module skeleton + template decider** *(code, medium — depends on B2, B3)*
-Create `dispatcher/src/domain/` and move the already-pure pieces in
-(`state.rs`, `graph.rs`, `queue.rs`, `release.rs`). Extract the first decider
-as the template: **escalation** (`escalation.rs` is 46 lines — the cheapest
-proving ground), signature
-`decide_escalation(view, event) -> (transitions, Vec<Effect>)`, executed via
-`interpret.rs`, pinned by B3's traces and B1's checker. Extend A3's
-zero-await test to cover `domain/`. This ticket sets the pattern every later
-one copies.
+**C1. Pure-domain crate + template decider** *(code, medium — depends on B2, B3)*
+*(Amended by the crate-decomposition decision — job #230: the pure domain is
+its **own crate**, `crates/domain` / `chuggernaut-domain`, not a
+`dispatcher/src/domain/` module directory, so purity holds by construction —
+a crate with no `tokio`/`async-nats` dependency cannot drift into I/O.)*
+Create `crates/domain` and move the already-pure pieces in: `state.rs`,
+`graph.rs`, `queue.rs`, the `Effect` vocabulary from B2, and `release.rs`'s
+pure half (the `vcs`-reading loaders stay dispatcher-side; the dispatcher
+re-exports so call sites keep one surface). Extract the first decider as the
+template: **escalation** — covering both the escalate/stall twins — signature
+`decide(view, event) -> (Vec<Transition>, Vec<Effect>)`, executed via the
+`Core::run_escalation` shim (`set_state` for transitions, `interpret.rs` for
+effects; transitions first — the crash window is closed by a reconcile heal,
+not write ordering), pinned by B3's traces and B1's checker. Extend A3's
+checks: zero-await across all of `crates/domain`, and the crate's resolve
+subtree must not reach `tokio`/`async-nats`. This ticket sets the pattern
+every later one copies. **Landed.**
 
 **C2–C6. One ticket per remaining phase** *(code, medium each — after C1)*
 In rough order of risk: `merge_gate` (carved from `eval.rs`), `wrapup`,
@@ -177,7 +185,10 @@ boundary rule to `error` for its migrated paths.
   single-writer loop and the single deployable are unchanged; these crates are
   compile/visibility boundaries only, never new writers or processes. Carving a
   crate before its decider extraction has dropped the `&mut Core` dependency
-  stays out of scope.
+  stays out of scope. (C1 carved the first one — `chuggernaut-domain` — *in
+  the same change* as the escalation decider extraction that dropped its
+  `&mut Core` dependency, satisfying both conditions at once; later
+  graduations still follow the rule, one boundary at a time.)
 - No multi-writer anything; every refactor preserves the single-writer loop.
 - No big-bang: `eval.rs`/`exec.rs` are dismantled one decider at a time
   behind traces, never rewritten wholesale.

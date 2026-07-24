@@ -22,3 +22,4 @@ deploy/prod/*.local
 # infra/ — orphaned terraform experiment with LIVE plaintext secrets
 # (terraform.tfvars, .tokens/*). Never commit.
 infra/
+.claude/worktrees/

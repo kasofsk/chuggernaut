@@ -18,7 +18,19 @@
 //! - **Spec:** §3.1–3.4; `contracts.md` §2.
 
 use crate::core::{Core, Result};
-use crate::effects::Effect;
+use crate::effects::{CredentialAccess, Effect};
+
+/// Map the vocabulary's serde mirror back onto the auth crate's type. Lives
+/// here (not as a `From` impl) because the domain crate must not depend on the
+/// async `auth` crate, and the orphan rule forbids a dispatcher-side `From`
+/// between the two foreign types — the interpreter is the boundary where pure
+/// effect data meets the port types, so the mapping is its to own.
+fn cert_access(access: CredentialAccess) -> auth::ssh::CertAccess {
+    match access {
+        CredentialAccess::ReadWrite => auth::ssh::CertAccess::ReadWrite,
+        CredentialAccess::ReadOnly => auth::ssh::CertAccess::ReadOnly,
+    }
+}
 
 impl Core {
     /// Execute one [`Effect`] through the port it maps to. See
@@ -62,6 +74,15 @@ impl Core {
             // --- Task & project records ---
             Effect::PutTask { task } => {
                 self.tasks.put(&task).await?;
+                // Golden-trace label parity: Human escalation task writes are
+                // the one PutTask production callers recorded before the
+                // decider migration (B3 fixtures pin the exact string).
+                if let Some(trace) = &self.trace
+                    && matches!(task.kind, types::TaskKind::Human { .. })
+                    && task.phase == types::TaskPhase::Escalation
+                {
+                    trace.effect("PutTask Human(escalation)");
+                }
             }
             Effect::PutProject {
                 owner,
@@ -190,7 +211,7 @@ impl Core {
                 if let Some(ca_key) = &self.config.ssh_ca {
                     let ca = auth::ssh::SshCa::new(ca_key);
                     let ttl = chrono::Duration::seconds(ttl_secs as i64);
-                    ca.issue_job_credential(&owner, &project, seq, access.into(), ttl)
+                    ca.issue_job_credential(&owner, &project, seq, cert_access(access), ttl)
                         .await
                         .map_err(|e| {
                             crate::core::CoreError::Config(format!("issuing job ssh cert: {e}"))
@@ -223,5 +244,25 @@ impl Core {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The vocabulary ↔ port-type mapping is the one piece of interpreter
+    //! logic that is pure, so it is unit-tested here; the port dispatch itself
+    //! is exercised end-to-end by the Tier-2 tests.
+    use super::*;
+
+    #[test]
+    fn cert_access_maps_the_serde_mirror_onto_auth() {
+        assert_eq!(
+            cert_access(CredentialAccess::ReadWrite),
+            auth::ssh::CertAccess::ReadWrite,
+        );
+        assert_eq!(
+            cert_access(CredentialAccess::ReadOnly),
+            auth::ssh::CertAccess::ReadOnly,
+        );
     }
 }

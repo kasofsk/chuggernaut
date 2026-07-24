@@ -44,7 +44,12 @@ impl Core {
                 JobState::Work => self.recover_work(&owner, &project, job.id).await?,
                 JobState::Evaluation => self.recover_evaluation(&owner, &project, job.id).await?,
                 JobState::WrapUp => self.recover_wrapup(&owner, &project, job.id).await?,
-                // Escalated/Stalled wait on the operator inbox; nothing to recover.
+                // Escalated/Stalled wait on the operator inbox; the only thing
+                // to recover is the inbox artifact itself (C1 heal below).
+                JobState::Escalated | JobState::Stalled => {
+                    self.heal_missing_escalation_task(&owner, &project, job)
+                        .await?
+                }
                 _ => {}
             }
         }
@@ -69,6 +74,83 @@ impl Core {
         // still before the message loop starts, so no concurrent launch can
         // race the reap (single-writer ordering).
         self.sweep_orphan_running_containers(&jobs).await;
+        Ok(())
+    }
+
+    /// C1 heal: an Escalated/Stalled job must always hold a Pending Human
+    /// escalation task — that task *is* the operator inbox entry its state
+    /// waits on. The decider shim commits the §2.1 transition before the
+    /// PutTask/PublishEvent effects (the record is the decision; artifacts
+    /// are downstream), so a crash between the two leaves the job parked with
+    /// an empty inbox — and the same shape appears when a crash eats a
+    /// resolution mid-flight. The job's stamped [`types::Escalation`] record
+    /// carries everything the artifacts need, so recovery re-derives them
+    /// here — the same `[PutTask, PublishEvent]` pair the decider emits,
+    /// through the same interpreter — instead of the writes being carefully
+    /// ordered and the window merely narrowed.
+    async fn heal_missing_escalation_task(
+        &mut self,
+        owner: &str,
+        project: &str,
+        job: &Job,
+    ) -> Result<()> {
+        let tasks = self.tasks.list_for_job(owner, project, job.id).await?;
+        if tasks
+            .iter()
+            .any(|t| t.phase == TaskPhase::Escalation && t.state == TaskState::Pending)
+        {
+            return Ok(()); // Inbox intact — the normal case.
+        }
+        let Some(esc) = &job.escalation else {
+            // No WHY to rebuild from (pre-#69 record); surface it rather than
+            // invent an empty escalation.
+            tracing::warn!(
+                "job {}#{} is {:?} with no pending escalation task and no \
+                 escalation record; cannot heal — resolve via triage",
+                job.project,
+                job.id,
+                job.state,
+            );
+            return Ok(());
+        };
+
+        // Sequential-within-job id (§1.2) and the cycle the failure happened
+        // in; the decision moment is the stamped one, so the healed task and
+        // the record still agree about when.
+        let task_id = tasks.len() as u64 + 1;
+        let cycle = tasks.iter().map(|t| t.cycle).max().unwrap_or(1);
+        let task = crate::escalation::escalation_task(
+            task_id,
+            job.id,
+            &job.project,
+            cycle,
+            esc.detail.clone(),
+            esc.at,
+        );
+        let event_type = match job.state {
+            JobState::Escalated => "job-escalated",
+            _ => "job-stalled",
+        };
+        tracing::info!(
+            "healing {}#{}: {:?} with no pending escalation task — re-creating \
+             task {task_id} from the stamped record ({})",
+            job.project,
+            job.id,
+            job.state,
+            esc.reason,
+        );
+        self.interpret(crate::effects::Effect::PutTask {
+            task: Box::new(task),
+        })
+        .await?;
+        self.interpret(crate::effects::Effect::PublishEvent {
+            owner: owner.to_string(),
+            project: project.to_string(),
+            seq: job.id,
+            event_type: event_type.to_string(),
+            extra: serde_json::json!({ "reason": esc.reason }),
+        })
+        .await?;
         Ok(())
     }
 

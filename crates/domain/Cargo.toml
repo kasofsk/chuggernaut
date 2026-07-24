@@ -1,0 +1,17 @@
+[package]
+name = "chuggernaut-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The pure functional core (NORTH-STAR §1). Purity is enforced *by
+# construction*: this crate depends on neither `tokio` nor `async-nats` (nor
+# `store`/`vcs`/`auth`), so it cannot perform I/O — a guarantee a module lint
+# could only catch after the fact. The dependency-boundary guard in
+# `test-utils/tests/boundary_guard.rs` machine-checks it.
+[dependencies]
+types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true

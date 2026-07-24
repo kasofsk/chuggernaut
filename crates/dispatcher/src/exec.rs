@@ -1538,6 +1538,7 @@ impl Core {
                     &job.project,
                     1,
                     format!("Job {seq} still fails re-validation at {head}:\n{detail}"),
+                    Utc::now(),
                 );
                 self.tasks.put(&task).await?;
                 Ok(())

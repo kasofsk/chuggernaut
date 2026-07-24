@@ -31,20 +31,17 @@ machine: a violation blocks the change whether or not a linter caught it, and
 several of these guard state that today's code still violates (noted inline) —
 that debt is what the pending checks will pin down.
 
-- **Dependency-graph invariants.** *(pending: `cargo metadata` check; today
-  reviewer-checked — the tree currently satisfies it.)* Only `store` depends
-  on `async-nats`; `api` never depends on `dispatcher` outside dev-deps;
-  `types` has no async runtime or I/O dependencies. *Why:* one NATS
-  integration point and a pure data crate are what keep every other boundary
-  in the workspace meaningful.
-
-  The check itself is a ~20-line script over `cargo metadata`: run
-  `cargo metadata --format-version 1`, walk `resolve.nodes` (the resolved
-  workspace graph), and fail the build if (a) any workspace crate other than
-  `store` lists `async-nats` among its dependencies, (b) `dispatcher` appears
-  in `api`'s non-dev dependency edges, or (c) `tokio`/`async-nats` appear
-  anywhere in `types`' subtree. No new tooling — jq or a tiny Rust/Python
-  script; it would slot into `tasks/ci.sh` before the tests.
+- **Dependency-graph invariants.** *(enforced:
+  `crates/test-utils/tests/boundary_guard.rs` over `cargo metadata`, riding
+  the workspace test run in `tasks/ci.sh` — refactor-plan A3.)* Only `store`
+  depends on `async-nats`; `api` never depends on `dispatcher` outside
+  dev-deps; `types` has no async runtime or I/O dependencies; and
+  `chuggernaut-domain` — the pure core (refactor-plan C1) — resolves neither
+  `tokio` nor `async-nats` (nor `store`/`vcs`/`auth`) anywhere in its
+  subtree, with a companion zero-`.await` sweep over its sources. *Why:* one
+  NATS integration point and pure data/domain crates are what keep every
+  other boundary in the workspace meaningful — and a crate that cannot reach
+  a runtime cannot drift into I/O.
 
 - **Web import boundaries (ESLint).** *(pending: presupposes the `ui/`/`data/`
   split, which is NORTH-STAR §3 target work — `web/src/` is still flat, so
@@ -83,9 +80,9 @@ verify it in seconds and must name it when rejecting.
    each decider stays pure and returns `Vec<Effect>` for one interpreter to
    execute — it never performs an effect. *Why:* pure decision logic is
    exhaustively testable at tier 1 of `testing.md`, and the decider/effects
-   seam is the whole point of the north-star factoring. (`Effect` and
-   `domain::decide` do not exist yet — this is the shape new decision code must
-   take, not a description of the tree today.)
+   seam is the whole point of the north-star factoring.
+   (`chuggernaut_domain::{effects, decide}` exist as of B2/C1;
+   `decide::escalation` is the worked template a new decider copies.)
 
 2. **Assert liberally in domain code — arguments, postconditions, and
    invariants.** Aim for TigerStyle's density (on average, two assertions per

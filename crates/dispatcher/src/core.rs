@@ -2565,36 +2565,22 @@ impl Core {
         detail: String,
         failing_task: Option<u64>,
     ) -> Result<()> {
-        let mut job = self.must_get(owner, project, seq)?.clone();
-        let task_id = self.next_task_id(owner, project, seq).await?;
         let cycle = self
             .active
             .get(&(owner.to_string(), project.to_string(), seq))
             .map(|e| e.cycle)
             .unwrap_or(1);
-        let task = escalation::escalation_task(task_id, seq, &job.project, cycle, detail.clone());
-        self.tasks.put(&task).await?;
-        if let Some(trace) = &self.trace {
-            trace.effect("PutTask Human(escalation)");
-        }
-        // Record WHY on the job itself (§1.2), so operators see the reason in the
-        // header instead of digging through dispatcher logs (#69).
-        job.escalation = Some(types::Escalation {
-            reason: reason.to_string(),
-            detail,
-            failing_task,
-            at: Utc::now(),
-        });
-        self.set_state(&mut job, JobState::Escalated).await?;
-        self.publish(
+        self.run_escalation(
             owner,
             project,
             seq,
-            "job-escalated",
-            serde_json::json!({ "reason": reason }),
+            escalation::EscalationKind::Escalate,
+            reason,
+            detail,
+            failing_task,
+            cycle,
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Create a Human escalation task and move the job to Stalled — the
@@ -2611,29 +2597,69 @@ impl Core {
         detail: String,
         failing_task: Option<u64>,
     ) -> Result<()> {
-        let mut job = self.must_get(owner, project, seq)?.clone();
-        let task_id = self.next_task_id(owner, project, seq).await?;
         // Pre-work: cycle 1, no exec state.
-        let task = escalation::escalation_task(task_id, seq, &job.project, 1, detail.clone());
-        self.tasks.put(&task).await?;
-        if let Some(trace) = &self.trace {
-            trace.effect("PutTask Human(escalation)");
-        }
-        job.escalation = Some(types::Escalation {
-            reason: reason.to_string(),
-            detail,
-            failing_task,
-            at: Utc::now(),
-        });
-        self.set_state(&mut job, JobState::Stalled).await?;
-        self.publish(
+        self.run_escalation(
             owner,
             project,
             seq,
-            "job-stalled",
-            serde_json::json!({ "reason": reason }),
+            escalation::EscalationKind::Stall,
+            reason,
+            detail,
+            failing_task,
+            1,
         )
-        .await?;
+        .await
+    }
+
+    /// The C1 template shim (contracts.md §2): gather the reads into the view,
+    /// call the pure decider, apply its transitions through the `set_state`
+    /// funnel, run its effects through the interpreter. Every later phase
+    /// decider's call site copies this four-step shape.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_escalation(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        kind: escalation::EscalationKind,
+        reason: &str,
+        detail: String,
+        failing_task: Option<u64>,
+        cycle: u32,
+    ) -> Result<()> {
+        // 1. Reads feed the view — they are not effects.
+        let job = self.must_get(owner, project, seq)?.clone();
+        let next_task_id = self.next_task_id(owner, project, seq).await?;
+        let view = escalation::EscalationView {
+            job: &job,
+            next_task_id,
+            cycle,
+            now: Utc::now(),
+        };
+        // 2. The decision, made purely.
+        let (transitions, effects) = escalation::decide(
+            &view,
+            escalation::EscalationEvent {
+                kind,
+                reason: reason.to_string(),
+                detail,
+                failing_task,
+            },
+        );
+        // 3. Commit the decision: transitions first (§2.1 record is the
+        // source of truth; a crash before the effects land is healed by
+        // restart reconciliation re-creating the task from the stamped WHY).
+        for mut t in transitions {
+            self.set_state(&mut t.job, t.to).await?;
+        }
+        // 4. The artifacts of the decision. Boxed: `interpret`'s composite
+        // arms (and the launch paths behind them) can re-enter `escalate`,
+        // and this call is the one new edge closing that async cycle — the
+        // indirection lives here so every arm stays plain. The runtime never
+        // actually recurses: this decider emits only PutTask/PublishEvent.
+        for effect in effects {
+            Box::pin(self.interpret(effect)).await?;
+        }
         Ok(())
     }
 

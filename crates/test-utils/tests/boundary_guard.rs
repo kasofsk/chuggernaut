@@ -7,10 +7,12 @@
 //!
 //! - only `store` depends on `async-nats` (it is the sole NATS crate);
 //! - `api` never depends on `dispatcher` outside dev-deps;
-//! - `types` stays sync — no `tokio`/`async-nats` anywhere in its subtree.
+//! - `types` stays sync — no `tokio`/`async-nats` anywhere in its subtree;
+//! - `chuggernaut-domain` stays sync the same way (refactor-plan C1): the
+//!   pure core cannot even *reach* a runtime, so purity holds by
+//!   construction.
 //!
-//! The source-level `.await` guard pins `state.rs` pure (extends to the whole
-//! domain crate once C1 lands).
+//! The source-level `.await` guard sweeps every file of the domain crate.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -195,25 +197,66 @@ fn types_subtree_is_sync() {
     );
 }
 
-/// STYLE.md Tier 1 / NORTH-STAR: the domain code is pure and synchronous.
-/// `state.rs` is the transition table — it must contain zero `.await`.
-/// (Extends to the whole `domain/` crate when refactor-plan C1 lands.)
+/// STYLE.md Tier 1 / NORTH-STAR §1: the domain crate's dependency subtree is
+/// as sync as `types`' — purity by construction (refactor-plan C1): code that
+/// cannot resolve `tokio` or `async-nats` cannot drift into I/O.
 #[test]
-fn state_rs_has_zero_await() {
-    let path = workspace_root().join("crates/dispatcher/src/state.rs");
-    let src = std::fs::read_to_string(&path).expect("read state.rs");
-    let offenders: Vec<usize> = src
-        .lines()
-        .enumerate()
-        // Skip comment lines — the module's `//!` header names `.await` to
-        // state the guarantee this test enforces.
-        .filter(|(_, line)| !line.trim_start().starts_with("//"))
-        .filter(|(_, line)| line.contains(".await"))
-        .map(|(i, _)| i + 1)
+fn domain_subtree_is_sync() {
+    let g = load_graph();
+    let names = g.subtree_names(&g.id_of("chuggernaut-domain"));
+    let mut offenders: Vec<&str> = ["tokio", "async-nats", "store", "vcs", "auth"]
+        .into_iter()
+        .filter(|forbidden| names.contains(*forbidden))
         .collect();
+    offenders.sort_unstable();
     assert!(
         offenders.is_empty(),
-        "crates/dispatcher/src/state.rs must be pure/synchronous (zero \
-         `.await`), but found `.await` on line(s): {offenders:?}"
+        "`chuggernaut-domain` must stay pure/sync (STYLE.md Tier 1, \
+         refactor-plan C1) but its dependency subtree pulls in: {offenders:?}"
+    );
+}
+
+/// STYLE.md Tier 1 / NORTH-STAR §1: the domain code is pure and synchronous —
+/// zero `.await` in any source file of `crates/domain` (refactor-plan C1;
+/// grew out of the pre-C1 `state.rs`-only guard).
+#[test]
+fn domain_crate_has_zero_await() {
+    fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read domain src dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    let root = workspace_root().join("crates/domain/src");
+    let mut files = Vec::new();
+    rust_files(&root, &mut files);
+    assert!(
+        !files.is_empty(),
+        "no .rs files under crates/domain/src — did the crate move?"
+    );
+
+    let mut offenders = Vec::new();
+    for path in files {
+        let src = std::fs::read_to_string(&path).expect("read domain source file");
+        for (i, line) in src.lines().enumerate() {
+            // Skip comment lines — doc headers may name `.await` to state the
+            // guarantee this test enforces.
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            if line.contains(".await") {
+                offenders.push(format!("{}:{}", path.display(), i + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "crates/domain must be pure/synchronous (zero `.await`), but found \
+         `.await` at: {offenders:?}"
     );
 }

@@ -13,25 +13,26 @@ pub mod cd;
 pub mod channel;
 pub mod config;
 pub mod core;
-pub mod effects;
-pub mod escalation;
 pub mod eval;
 pub mod exec;
 pub mod fleet;
 pub mod github;
-pub mod graph;
 pub mod handlers;
 pub(crate) mod harvest;
 pub mod interpret;
 pub mod invariants;
 pub mod launch_queue;
 pub mod origin;
-pub mod queue;
 pub mod reconcile;
 pub mod release;
 pub mod run;
 pub mod scan;
 pub mod seed;
-pub mod state;
 pub mod trace;
 pub mod triage;
+
+// The pure domain (refactor-plan C1) lives in `chuggernaut-domain`; re-exported
+// here so existing `crate::{state,graph,queue,effects,escalation}::*` call
+// sites stay stable. (`escalation` moved under the decider layer.)
+pub use chuggernaut_domain::decide::escalation;
+pub use chuggernaut_domain::{decide, effects, graph, queue, state};

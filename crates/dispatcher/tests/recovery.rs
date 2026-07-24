@@ -2963,3 +2963,86 @@ async fn cut_short_drain_leaves_records_no_worse() {
         "the in-flight work task is left exactly as it was"
     );
 }
+
+/// C1 heal: the escalation shim commits the Stalled/Escalated transition
+/// before the PutTask effect (the §2.1 record is the decision; artifacts are
+/// downstream), so a crash between the two leaves a parked job with an empty
+/// operator inbox — a shape `reconcile` previously had "nothing to recover"
+/// for. Restart reconciliation re-derives the Pending Human task from the WHY
+/// stamped on the job record.
+#[tokio::test]
+async fn restart_recreates_missing_escalation_task_from_stamped_record() {
+    let Some(rig) = rig().await else { return };
+
+    // The crash state: a job committed to Stalled with WHY stamped, but the
+    // Human task write never landed (no tasks exist at all).
+    let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    let jobs = rig.store.jobs().await.unwrap();
+    let mut stalled = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
+    stalled.state = JobState::Stalled;
+    stalled.escalation = Some(types::Escalation {
+        reason: "revalidation_failed".into(),
+        detail: "missing dep".into(),
+        failing_task: None,
+        at: Utc::now(),
+    });
+    jobs.put(&stalled).await.unwrap();
+
+    // Restart against the same store.
+    let repos_root = rig
+        .repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let core = Core::new(
+        rig.store.clone(),
+        vcs::RepoManager::new(repos_root),
+        Arc::new(FakeBackend::new()),
+        rig.provider.clone(),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: rig._server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _handle2 = spawn(core);
+
+    // The inbox artifact is re-derived: a Pending Human escalation task
+    // carrying the stamped detail as its prompt.
+    let tasks_store = rig.store.tasks().await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let healed = loop {
+        let tasks = tasks_store
+            .list_for_job("acme", "api", job.id)
+            .await
+            .unwrap();
+        if let Some(t) = tasks
+            .iter()
+            .find(|t| t.phase == TaskPhase::Escalation && t.state == TaskState::Pending)
+        {
+            break t.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "escalation task was not healed within 5s"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        matches!(&healed.kind, TaskKind::Human { prompt } if prompt == "missing dep"),
+        "healed task must carry the stamped detail, got {:?}",
+        healed.kind,
+    );
+    // The job itself is untouched: still Stalled, WHY intact.
+    let after = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
+    assert_eq!(after.state, JobState::Stalled);
+    assert_eq!(
+        after.escalation.as_ref().unwrap().reason,
+        "revalidation_failed"
+    );
+}

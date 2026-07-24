@@ -1,18 +1,17 @@
 //! The effect vocabulary (refactor-plan B2, `contracts.md` §2).
 //!
 //! An [`Effect`] is one thing the dispatcher does *about* a decision — a write
-//! to the world through a port, never a decision itself. Today the ~460
-//! `.await` sites in `eval`/`exec`/`core` reach the ports inline, tangled with
-//! the logic that decides to; this enum names each of those actions as a value
-//! so that decision code can eventually return `(transitions, Vec<Effect>)` and
-//! one interpreter ([`crate::interpret`]) performs them. This ticket lands the
-//! vocabulary only — no caller is migrated yet (that is Track C, one decider at
-//! a time), so production still calls the ports directly.
+//! to the world through a port, never a decision itself. The enum names each of
+//! those actions as a value so that deciders ([`crate::decide`]) return
+//! `(transitions, Vec<Effect>)` and one interpreter (the dispatcher's
+//! `interpret` module — deliberately *not* in this crate, since executing an
+//! effect is I/O) performs them. Most `.await` sites in `eval`/`exec`/`core`
+//! still reach the ports inline; Track C migrates them one decider at a time.
 //!
 //! - **Accepts:** nothing — `Effect` is a plain data type, constructed by
-//!   (future) deciders and by tests.
-//! - **Emits:** nothing itself; [`Core::interpret`](crate::core::Core::interpret)
-//!   (in [`crate::interpret`]) is what turns an `Effect` into a port call.
+//!   deciders and by tests.
+//! - **Emits:** nothing itself; `Core::interpret` (dispatcher `interpret`
+//!   module) is what turns an `Effect` into a port call.
 //! - **Guarantees:** every variant is `serde`-serializable (the vocabulary
 //!   emits JSON Schema later, `NORTH-STAR.md` §2) and carries exactly the data
 //!   its execution needs — no `&Core` handles, no live futures. Reads
@@ -53,10 +52,11 @@
 use serde::{Deserialize, Serialize};
 use types::{EvalResult, Job, JobState, ProjectRecord, Task};
 
-/// Whether a §7.4 per-job credential may push. A self-contained mirror of
-/// [`auth::ssh::CertAccess`] so the vocabulary stays `serde`-serializable and
-/// free of the `auth` crate's non-serde types; [`crate::interpret`] converts it
-/// back at execution time.
+/// Whether a §7.4 per-job credential may push. A self-contained mirror of the
+/// `auth` crate's `CertAccess` so the vocabulary stays `serde`-serializable and
+/// this crate stays free of the async `auth` dependency; the dispatcher's
+/// interpreter maps it back at execution time (and owns the mapping — the
+/// orphan rule keeps a `From` impl between two foreign types out of here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialAccess {
@@ -64,15 +64,6 @@ pub enum CredentialAccess {
     ReadWrite,
     /// Eval-phase certificate — read-only (§7.4).
     ReadOnly,
-}
-
-impl From<CredentialAccess> for auth::ssh::CertAccess {
-    fn from(access: CredentialAccess) -> Self {
-        match access {
-            CredentialAccess::ReadWrite => auth::ssh::CertAccess::ReadWrite,
-            CredentialAccess::ReadOnly => auth::ssh::CertAccess::ReadOnly,
-        }
-    }
 }
 
 /// One action the dispatcher performs through a port. See the module header for
@@ -85,12 +76,11 @@ impl From<CredentialAccess> for auth::ssh::CertAccess {
 pub enum Effect {
     // --- Job records & graph (JobStore / RdepsStore) ---
     /// Transition a job through the §2.1 funnel (`assert_transition`, then
-    /// `jobs.put`, then the in-memory graph). Maps to [`Core::set_state`].
+    /// `jobs.put`, then the in-memory graph). Maps to `Core::set_state`.
     ///
     /// Example call site: `core.rs::escalate` moving a job to
     /// [`JobState::Escalated`].
     ///
-    /// [`Core::set_state`]: crate::core::Core::set_state
     SetJobState { job: Box<Job>, to: JobState },
     /// Persist a job record without a state change (definition edits, cover
     /// stamps). Maps to `jobs.put`.
@@ -136,11 +126,10 @@ pub enum Effect {
 
     // --- Events & status snapshots ---
     /// Append a `job-events` trail entry (durable JetStream publish). Maps to
-    /// [`Core::publish`] → `store.publish_event`.
+    /// `Core::publish` → `store.publish_event`.
     ///
     /// Example call site: `core.rs::escalate` emitting `job-escalated`.
     ///
-    /// [`Core::publish`]: crate::core::Core::publish
     PublishEvent {
         owner: String,
         project: String,
@@ -176,12 +165,11 @@ pub enum Effect {
     RemoveContainer { container_id: String },
 
     // --- Task launches (AgentProvider + ContainerBackend, via exec/eval) ---
-    /// Launch (or resume) a Work-phase task. Maps to [`Core::launch_work_task`]
+    /// Launch (or resume) a Work-phase task. Maps to `Core::launch_work_task`
     /// → `provider.run`.
     ///
     /// Example call site: `exec.rs` Ready→Work entry.
     ///
-    /// [`Core::launch_work_task`]: crate::core::Core::launch_work_task
     LaunchWorkTask {
         owner: String,
         project: String,
@@ -190,12 +178,11 @@ pub enum Effect {
         attempt: u32,
         resume: bool,
     },
-    /// Launch a WrapUp-phase task. Maps to [`Core::launch_wrapup_task`] →
+    /// Launch a WrapUp-phase task. Maps to `Core::launch_wrapup_task` →
     /// `provider.run`.
     ///
     /// Example call site: `eval.rs` post-eval WrapUp entry.
     ///
-    /// [`Core::launch_wrapup_task`]: crate::core::Core::launch_wrapup_task
     LaunchWrapupTask {
         owner: String,
         project: String,
@@ -203,11 +190,10 @@ pub enum Effect {
         attempt: u32,
     },
     /// Launch a merge-gate fix task after a gate-level eval failure. Maps to
-    /// [`Core::launch_gate_fix`] → `provider.run`.
+    /// `Core::launch_gate_fix` → `provider.run`.
     ///
     /// Example call site: `eval.rs` merge-gate re-entry with the new base.
     ///
-    /// [`Core::launch_gate_fix`]: crate::core::Core::launch_gate_fix
     LaunchGateFix {
         owner: String,
         project: String,
@@ -217,11 +203,10 @@ pub enum Effect {
         compiler_output: String,
     },
     /// Park a launch that hit `NoCapacity` on the §3.5 launch queue. Maps to
-    /// [`Core::defer_launch`].
+    /// `Core::defer_launch`.
     ///
     /// Example call site: `exec.rs` launch path on a full fleet.
     ///
-    /// [`Core::defer_launch`]: crate::core::Core::defer_launch
     DeferLaunch {
         owner: String,
         project: String,
@@ -269,11 +254,10 @@ pub enum Effect {
     // --- Escalation composites (§1.2) ---
     /// Post-work escalation: create a Human task, move the job to
     /// [`JobState::Escalated`], publish `job-escalated`. Maps to
-    /// [`Core::escalate`].
+    /// `Core::escalate`.
     ///
     /// Example call site: `exec.rs::retry_or_escalate_work` on exhausted retries.
     ///
-    /// [`Core::escalate`]: crate::core::Core::escalate
     Escalate {
         owner: String,
         project: String,
@@ -283,11 +267,10 @@ pub enum Effect {
         failing_task: Option<u64>,
     },
     /// Pre-work escalation: create a Human task, move the job to
-    /// [`JobState::Stalled`], publish `job-stalled`. Maps to [`Core::stall`].
+    /// [`JobState::Stalled`], publish `job-stalled`. Maps to `Core::stall`.
     ///
     /// Example call site: `core.rs` Blocked→Ready re-validation failure.
     ///
-    /// [`Core::stall`]: crate::core::Core::stall
     Stall {
         owner: String,
         project: String,
@@ -550,11 +533,8 @@ mod tests {
             },
             "SshCa::issue_job_credential",
         );
-        // The serde mirror maps back onto the auth crate's type unchanged.
-        assert_eq!(
-            auth::ssh::CertAccess::from(CredentialAccess::ReadOnly),
-            auth::ssh::CertAccess::ReadOnly,
-        );
+        // The mapping back onto the auth crate's `CertAccess` lives with the
+        // dispatcher's interpreter (orphan rule + purity), tested there.
     }
 
     #[test]

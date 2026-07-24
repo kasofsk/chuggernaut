@@ -21,6 +21,7 @@ One fat binary plus three tiny ones:
 | Crate | Kind | Spec | Purpose |
 |---|---|---|---|
 | `types` | lib | §1 | Shared domain types, no I/O |
+| `chuggernaut-domain` | lib | §2.1–2.2, §3, contracts.md §2 | The pure core (`crates/domain`): state machine, DAG, queue, release validation, effect vocabulary, deciders — no async, no I/O, by construction |
 | `store` | lib | §1.4–1.5, §8, §9 | NATS KV/stream access; the only crate that talks to NATS |
 | `auth` | lib | §7 | JWT, SSH CA, per-job credentials, permission rules |
 | `container` | lib | §3.1 | `ContainerBackend` trait + Docker and k8s implementations |
@@ -96,20 +97,37 @@ Each module opens with a contract-style `//!` header (accepts / emits /
 guarantees / spec §); `MODULES.md` at the repo root is the one-line registry.
 The map below mirrors the actual `crates/dispatcher/src/*.rs` tree.
 
+The pure pieces live in `crates/domain` (`chuggernaut-domain`, refactor-plan
+C1) and are re-exported by the dispatcher so call sites keep one surface:
+
+```
+domain/ (chuggernaut-domain — pure: no tokio/async-nats/store/vcs/auth)
+  state.rs       — the §2.1 transition table (`assert_transition`)
+  graph.rs       — in-memory DAG, rdeps maintenance and dependency queries (§1.4, §2.3)
+  queue.rs       — in-memory FIFO of Ready job IDs (§3.1 step 5)
+  release.rs     — release validation, pure half: error vocabulary, wiring rules,
+                   additive-evaluator merge (§2.2, §2.3)
+  effects.rs     — the Effect vocabulary: each port action as serde data (contracts.md §2)
+  decide/        — the decider layer: pure `(view, event) -> (transitions, effects)`
+    escalation.rs— the C1 template decider: the escalate/stall family (§1.2, §3.4)
+```
+
 ```
 dispatcher/
   core.rs        — the single-writer event loop (see below); all mutable state lives here
-  state.rs       — the §2.1 transition table: one function per transition, guards + effects
-  graph.rs       — in-memory DAG (petgraph), rdeps maintenance and startup rebuild (§1.4, §2.3)
-  queue.rs       — in-memory FIFO of Ready job IDs (§3.1 step 5)
-  release.rs     — release validation: graph wiring + static config checks (§2.2, §2.3)
+  release.rs     — release validation, ref-reading half: jobs/*.yaml loading + prompt/KV
+                   checks through the vcs port (§2.2, §14); re-exports the pure half
   exec.rs        — the §3.2 work-execution sequence (Ready→Work, retry, rework/conflict re-entry)
   eval.rs        — evaluator fan-out and reduce (§3.3), post-eval finalization and the
                    depth-1 merge gate (§3.2 step 12)
-  escalation.rs  — escalation task construction (§1.2, §3.4)
+  interpret.rs   — the effect interpreter: `Core::interpret` runs one Effect through its
+                   port; the sole `&mut Core` coupling deciders keep (contracts.md §2)
+  invariants.rs  — executable invariant checker over the read-only CoreState view (B1)
+  trace.rs       — test-only golden-trace recorder pinning decisions (B3)
   launch_queue.rs— capacity-aware launch queue: park on NoCapacity, drain on slot-freed (§3.5)
   scan.rs        — task-timeout and one-shot job-deadline scans (§3.5)
-  reconcile.rs   — restart reconciliation of mid-execution jobs (§3.6)
+  reconcile.rs   — restart reconciliation of mid-execution jobs, incl. the escalation
+                   inbox heal (§3.6)
   cd.rs          — config-snapshot freshness: republish live fleet/deploy-drift
                    state from the scan tick when serialized bytes change
   fleet.rs       — live fleet occupancy publishing, rebuilt from live containers (§3.1, §3.6)
@@ -152,12 +170,13 @@ Thin: `webhooks` consumes `job-events` and POSTs to configured endpoints; `cli` 
 
 ```
 types ──────────────────────────────┐
+chuggernaut-domain ► types          │
 store ──► types                     │
 auth ───► types, store              │
 vcs ────► types                     │
 container ► types                   │
 agent ──► types, store, container   │
-dispatcher ► types, store, auth, vcs, container, agent
+dispatcher ► types, chuggernaut-domain, store, auth, vcs, container, agent
 api ────► types, store, auth
 webhooks ► types, store
 cli ────► types, store, auth, vcs
@@ -166,7 +185,7 @@ chuggernaut-channel / chuggernaut-ko / chuggernaut-harness (bins) ► types, sto
 test-utils ► types, store, container (fake backend), agent (fake provider), vcs (temp repos)
 ```
 
-Invariants worth enforcing (e.g. via CI lint): only `store` depends on `async-nats`; only `container` and `agent` know about containers; `api` never depends on `dispatcher` (they communicate exclusively over NATS); `types` has no async runtime dependency.
+Invariants worth enforcing (enforced in `test-utils/tests/boundary_guard.rs` over `cargo metadata`, refactor-plan A3): only `store` depends on `async-nats`; only `container` and `agent` know about containers; `api` never depends on `dispatcher` (they communicate exclusively over NATS); `types` has no async runtime dependency; `chuggernaut-domain` resolves neither `tokio` nor `async-nats` (nor `store`/`vcs`/`auth`) anywhere in its subtree, plus a zero-`.await` sweep over its sources.
 
 ## Not crates
 

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/types",
+    "crates/domain",
     "crates/store",
     "crates/auth",
     "crates/container",
@@ -27,6 +28,7 @@ license = "MIT"
 [workspace.dependencies]
 # internal
 types = { path = "crates/types" }
+chuggernaut-domain = { path = "crates/domain" }
 store = { path = "crates/store" }
 auth = { path = "crates/auth" }
 container = { path = "crates/container" }

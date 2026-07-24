@@ -384,8 +384,48 @@ modules_registry_gate() {
 			_gate_failed=1
 		}
 	done
+
+	# Same drift check for the pure domain crate (refactor-plan C1). Its tree
+	# nests (decide/escalation.rs), so module names are src-relative paths with
+	# `.rs` stripped and `<dir>/mod` collapsing to `<dir>`.
+	_dom_dir="crates/domain/src"
+	if [ -d "$_dom_dir" ]; then
+		_dom_files="$(find "$_dom_dir" -name '*.rs' | while IFS= read -r f; do
+			rel="${f#"$_dom_dir"/}"
+			rel="${rel%.rs}"
+			case "$rel" in
+			lib) ;;
+			*/mod) echo "${rel%/mod}" ;;
+			*) echo "$rel" ;;
+			esac
+		done | sort -u)"
+		_dom_rows="$(awk '
+			/^## / { indom = ($0 ~ /chuggernaut-domain/) }
+			indom && /^\|[[:space:]]*`/ {
+				row = $0
+				sub(/^\|[[:space:]]*`/, "", row)
+				sub(/`.*/, "", row)
+				print row
+			}
+		' MODULES.md | sort -u)"
+		for m in $_dom_files; do
+			printf '%s\n' "$_dom_rows" | grep -qx "$m" || {
+				echo "!!! ci: $_dom_dir/$m.rs has no row in MODULES.md"
+				echo "!!!     (refactor-plan A3 registry drift — add a one-line contract row)"
+				_gate_failed=1
+			}
+		done
+		for m in $_dom_rows; do
+			printf '%s\n' "$_dom_files" | grep -qx "$m" || {
+				echo "!!! ci: MODULES.md lists module \`$m\` with no $_dom_dir/$m.rs"
+				echo "!!!     (refactor-plan A3 registry drift — remove or fix the stale row)"
+				_gate_failed=1
+			}
+		done
+	fi
+
 	[ "$_gate_failed" -eq 0 ] || exit 1
-	echo "ci: MODULES.md registry gate — dispatcher modules and rows are in sync"
+	echo "ci: MODULES.md registry gate — dispatcher and domain modules are in sync"
 }
 
 # Diff-aware gate: only run the (slow) Rust build/test when the change

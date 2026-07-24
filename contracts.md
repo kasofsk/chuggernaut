@@ -79,6 +79,24 @@ triage) becomes a named module with a named contract. **That is the
 inter-module interface structure the dispatcher currently lacks: modules stop
 sharing `&mut Core` and start exchanging values.**
 
+**Status: landed (B2 + C1).** The vocabulary is
+`chuggernaut_domain::effects::Effect` (~20 variants) with the interpreter in
+`dispatcher::interpret` (`Core::interpret`) — the sole `&mut Core` coupling
+deciders keep. The first decider is `chuggernaut_domain::decide::escalation`,
+the C1 template every later phase copies (its shim: `Core::run_escalation`).
+Two refinements the template settled:
+
+- `transitions` is first-class — `Vec<Transition>` (the decision-stamped job
+  record + target state) — and the shim applies transitions through
+  `Core::set_state` **before** running the effects: the §2.1 record is the
+  committed decision, tasks/events are its downstream artifacts. A crash
+  between the two is healed by restart reconciliation re-deriving the
+  artifacts from the stamped record (`heal_missing_escalation_task`) —
+  recovery owns crash consistency, so deciders never encode write
+  choreography.
+- Reads (`next_task_id`, the clock, the active cycle) are **not** effects:
+  the shim gathers them into the decider's read-only view.
+
 ### 3. Invariants — what must always hold
 
 Harvest every "must"/"always"/"never" comment and defensive pattern into one
