@@ -60,6 +60,10 @@ export function JobDetail() {
   // We only disable the button on a confirmed null, so an unknown state keeps
   // the current behavior (the 422 mapping below still catches a live rejection).
   const [triageImage, setTriageImage] = useState<string | null | undefined>(undefined)
+  // True while the run (release) request is in flight. Disables the run button
+  // and shows a working label so a tap reads as acknowledged — and so a stray
+  // second tap can't land on the revoke button that wraps directly below it.
+  const [releasing, setReleasing] = useState(false)
 
   useEffect(() => {
     api.platformConfig().then(
@@ -306,10 +310,17 @@ export function JobDetail() {
         <div className="actions">
           {job.state === 'Frozen' && (
             <button
+              disabled={releasing}
               title="hand the job to the dispatcher: work → evaluation → wrap-up"
-              onClick={() => api.release(owner, project, job.id).then(refresh, setActionError(setError))}
+              onClick={() => {
+                setReleasing(true)
+                api
+                  .release(owner, project, job.id)
+                  .then(refresh, setActionError(setError))
+                  .finally(() => setReleasing(false))
+              }}
             >
-              ▶ run
+              {releasing ? '⏳ running…' : '▶ run'}
             </button>
           )}
           {!job.claim_next &&
@@ -345,7 +356,10 @@ export function JobDetail() {
           {job.state !== 'Done' && job.state !== 'Revoked' && (
             <button
               className="danger"
-              onClick={() => api.revoke(owner, project, job.id).then(refresh, setActionError(setError))}
+              onClick={() => {
+                if (!confirm(`Revoke job #${job.id}? This cancels the job and can't be undone.`)) return
+                api.revoke(owner, project, job.id).then(refresh, setActionError(setError))
+              }}
             >
               revoke
             </button>
