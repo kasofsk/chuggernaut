@@ -2328,6 +2328,30 @@ table.jobs tbody tr.row-draft td:first-child {
   bottom: 1rem;
   z-index: 50;
   --band: var(--green);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-2);
+}
+/* Launch button: the anchor of the floating cluster, sat at the bottom-right
+   corner where it is easiest to thumb-tap (#245). */
+.capacity-newjob {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  background: linear-gradient(120deg, var(--accent), var(--accent-2));
+  border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  color: #fff;
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  padding: 0.5rem 0.95rem;
+  border-radius: var(--r-full);
+  box-shadow: 0 6px 20px -6px var(--glow);
+}
+.capacity-newjob:hover {
+  filter: brightness(1.08);
+  border-color: var(--accent);
+  text-decoration: none;
 }
 .capacity-widget[data-band='high'] {
   --band: var(--blue);
@@ -2346,6 +2370,7 @@ table.jobs tbody tr.row-draft td:first-child {
   cursor: pointer;
 }
 .capacity-card {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--sp-1);
@@ -3321,12 +3346,6 @@ table.jobs tbody tr.row-draft td:first-child {
 }
 .state-filter {
   padding: 0.45rem 0.6rem;
-}
-.btn-newjob-link {
-  text-decoration: none;
-}
-.btn-newjob-link:hover {
-  text-decoration: none;
 }
 .btn-primary-glow {
   background: linear-gradient(120deg, var(--accent), var(--accent-2));

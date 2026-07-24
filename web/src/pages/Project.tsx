@@ -420,9 +420,6 @@ export function ProjectPage() {
                   </option>
                 ))}
               </select>
-              <Link to={`/p/${owner}/${project}/jobs/new`} className="btn-newjob-link">
-                <button className="btn-primary-glow">+ New job</button>
-              </Link>
             </div>
           </div>
           <div className="table-scroll">
@@ -624,7 +621,11 @@ export function ProjectPage() {
         </section>
       </div>
       <StatusFooter jobs={jobs} fleet={fleet.fleet} fleetUnavailable={fleet.unavailable} />
-      <CapacityWidget fleet={fleet.fleet} unavailable={fleet.unavailable} />
+      <CapacityWidget
+        fleet={fleet.fleet}
+        unavailable={fleet.unavailable}
+        newJobHref={`/p/${owner}/${project}/jobs/new`}
+      />
     </div>
   )
 }

@@ -14,31 +14,53 @@ function loadBand(busy: number, total: number, queue: number): 'ok' | 'high' | '
 }
 
 /**
- * A sticky, always-visible fleet capacity readout for the jobs page (#148): the
+ * A sticky, always-visible floating cluster for the jobs page (#148): the fleet
  * busy/total slot fraction fed by the live fleet occupancy feed (spec §3.1), with
  * a per-slot dot row and the launch-queue depth when non-empty. Hover/tap expands
  * a per-node breakdown linking each busy slot back to its job, and through to the
- * cluster view. Collapsible to a dot (remembered in localStorage); hidden
- * entirely when the feed is unavailable rather than showing zeros.
+ * cluster view. Collapsible to a dot (remembered in localStorage); the capacity
+ * readout hides when the feed is unavailable rather than showing zeros.
+ *
+ * The "new job" launch button (#245) lives here too so it floats at the bottom of
+ * the page where it is easy to thumb-tap; it always renders, even when the
+ * capacity readout is hidden, so job creation is never lost with the feed.
  */
-export function CapacityWidget({ fleet, unavailable }: { fleet: FleetStatus | null; unavailable: boolean }) {
+export function CapacityWidget({
+  fleet,
+  unavailable,
+  newJobHref,
+}: {
+  fleet: FleetStatus | null
+  unavailable: boolean
+  newJobHref: string
+}) {
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSE_KEY) === '1')
   const [expanded, setExpanded] = useState(false)
-
-  // Feed down, non-admin, or nothing published yet → show nothing (never zeros).
-  if (unavailable || !fleet) return null
-  const sized = fleet.nodes.filter((n) => n.slots != null)
-  const total = sized.reduce((n, x) => n + (x.slots ?? 0), 0)
-  if (total === 0) return null
-  const busy = fleet.nodes.reduce((n, x) => n + x.occupied, 0)
-  const queue = fleet.queue_depth
-  const band = loadBand(busy, total, queue)
 
   const setCollapse = (v: boolean) => {
     setCollapsed(v)
     localStorage.setItem(COLLAPSE_KEY, v ? '1' : '0')
     if (v) setExpanded(false)
   }
+
+  // The launch button is the anchor of the cluster and always renders. The
+  // capacity pill is grafted on above it only when the feed has real numbers.
+  const newJobButton = (
+    <Link to={newJobHref} className="capacity-newjob" title="start a new job">
+      + new job
+    </Link>
+  )
+
+  // Feed down, non-admin, or nothing published yet → readout hidden (never zeros),
+  // but the launch button still floats on its own.
+  const sized = fleet?.nodes.filter((n) => n.slots != null) ?? []
+  const total = sized.reduce((n, x) => n + (x.slots ?? 0), 0)
+  if (unavailable || !fleet || total === 0) {
+    return <div className="capacity-widget">{newJobButton}</div>
+  }
+  const busy = fleet.nodes.reduce((n, x) => n + x.occupied, 0)
+  const queue = fleet.queue_depth
+  const band = loadBand(busy, total, queue)
 
   if (collapsed) {
     return (
@@ -50,6 +72,7 @@ export function CapacityWidget({ fleet, unavailable }: { fleet: FleetStatus | nu
           aria-label={`fleet capacity ${busy} of ${total} busy`}
           onClick={() => setCollapse(false)}
         />
+        {newJobButton}
       </div>
     )
   }
@@ -60,13 +83,12 @@ export function CapacityWidget({ fleet, unavailable }: { fleet: FleetStatus | nu
   const filled = Math.round((busy / total) * dotCount)
 
   return (
-    <div
-      className="capacity-widget"
-      data-band={band}
-      onMouseEnter={() => setExpanded(true)}
-      onMouseLeave={() => setExpanded(false)}
-    >
-      <div className="capacity-card">
+    <div className="capacity-widget" data-band={band}>
+      <div
+        className="capacity-card"
+        onMouseEnter={() => setExpanded(true)}
+        onMouseLeave={() => setExpanded(false)}
+      >
         <button
           type="button"
           className="capacity-summary"
@@ -126,6 +148,7 @@ export function CapacityWidget({ fleet, unavailable }: { fleet: FleetStatus | nu
           </div>
         )}
       </div>
+      {newJobButton}
     </div>
   )
 }
