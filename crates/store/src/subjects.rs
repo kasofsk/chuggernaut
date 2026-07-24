@@ -124,6 +124,12 @@ pub fn jobs_finalize(owner: &str, project: &str, seq: u64) -> String {
     format!("req.jobs.finalize.{owner}.{project}.{seq}")
 }
 
+/// Add/remove the members of a Draft batch while composing it (spec §2.1
+/// draft batches). Draft-only.
+pub fn jobs_members(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.jobs.members.{owner}.{project}.{seq}")
+}
+
 /// Claim the job's next work attempt for a human (spec §1.2 claims).
 pub fn jobs_claim(owner: &str, project: &str, seq: u64) -> String {
     format!("req.jobs.claim.{owner}.{project}.{seq}")

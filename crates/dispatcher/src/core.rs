@@ -122,6 +122,15 @@ pub struct UpdateJobRequest {
     pub model: Option<String>,
 }
 
+/// The composition of a batch derived from its member list (spec §2.1): the
+/// union of the members' external deps and their additive evaluators. Computed
+/// by [`Core::plan_batch`] and committed onto the batch record at create
+/// (non-draft) or at finalize/release (draft).
+struct BatchComposition {
+    deps: Vec<u64>,
+    eval: Vec<types::Evaluator>,
+}
+
 /// `req.work.submit.*` payload (spec §4.2).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkSubmission {
@@ -274,6 +283,19 @@ pub enum Msg {
         project: String,
         seq: u64,
         reply: Reply<()>,
+    },
+    /// `req.jobs.members.*` (spec §2.1 batches, draft batches): add/remove the
+    /// members of a **Draft** batch while composing it. Draft-only (409 in any
+    /// other state); adds are re-validated per-candidate. Members are not
+    /// absorbed here — a draft holds a non-binding list, absorbed only at
+    /// finalize/release.
+    EditMembers {
+        owner: String,
+        project: String,
+        seq: u64,
+        add: Vec<u64>,
+        remove: Vec<u64>,
+        reply: Reply<Job>,
     },
     /// `req.jobs.claim.*` (spec §1.2 claims): a human claims the job's next
     /// work attempt. 409 while an attempt is in flight.
@@ -530,6 +552,28 @@ impl CoreHandle {
             owner,
             project,
             seq,
+            reply,
+        })
+        .await
+    }
+
+    /// Add/remove the members of a Draft batch while composing it (spec §2.1
+    /// batches, draft batches). Draft-only; adds re-validated per-candidate.
+    pub async fn edit_members(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        add: Vec<u64>,
+        remove: Vec<u64>,
+    ) -> Result<Job> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::EditMembers {
+            owner,
+            project,
+            seq,
+            add,
+            remove,
             reply,
         })
         .await
@@ -1228,6 +1272,16 @@ impl Core {
             } => {
                 let _ = reply.send(self.triage_job(&owner, &project, seq).await);
             }
+            Msg::EditMembers {
+                owner,
+                project,
+                seq,
+                add,
+                remove,
+                reply,
+            } => {
+                let _ = reply.send(self.edit_members(&owner, &project, seq, add, remove).await);
+            }
             Msg::ClaimJob {
                 owner,
                 project,
@@ -1526,26 +1580,181 @@ impl Core {
     /// members of the same type, unions their external deps and additive
     /// evaluators, and lands one branch whose single merge completes them all.
     ///
-    /// Validated at creation (unlike ordinary wiring, which defers to release):
-    /// ≥2 members, each existing, Frozen, same-type, not already batched, and
-    /// not itself a batch. Deps between members are satisfied jointly (dropped
-    /// from the batch's deps); the batch depends on the union of the members'
-    /// *external* deps. Evaluators union by name — an identical duplicate is
-    /// deduped, a same-name-different-definition clash is a creation error.
+    /// A plain `POST jobs {members}` (default `draft:false`) is **atomic**: the
+    /// members are validated (≥2, each existing, Frozen, same-type, not already
+    /// batched, not itself a batch), their external-dep and evaluator unions and
+    /// auto-description computed, and each member absorbed Frozen→Batched — all
+    /// at create. `draft:true` instead stages a **Draft batch**: the member list
+    /// is validated per-candidate but **not absorbed** (members stay Frozen and
+    /// claimable/batchable elsewhere); membership is edited via
+    /// [`Core::edit_members`] and absorption is deferred to finalize/release,
+    /// which recompute the unions against *current* state ([`Core::absorb_plan`]).
     async fn create_batch(&mut self, req: CreateJobRequest) -> Result<Job> {
         let (owner, project) = (req.owner.clone(), req.project.clone());
         let member_seqs = req.members.clone();
 
+        // A Draft batch composes incrementally, so it may hold below the
+        // committable floor of 2 while members are added/removed; a non-draft
+        // batch is an atomic act over ≥2 existing jobs. Either way the per-
+        // candidate rules are enforced now (absorption at create only for the
+        // non-draft path).
+        let min = if req.draft { 1 } else { 2 };
+        let comp = self.plan_batch(&owner, &project, &req.r#type, &member_seqs, min)?;
+
+        // A draft holds a non-binding member list: its dep/eval unions and
+        // auto-description are (re)computed only at finalize/release, so the
+        // record carries an empty composition until then. A non-draft batch
+        // commits the composition at create.
+        let (deps, eval, description) = if req.draft {
+            (Vec::new(), Vec::new(), req.description)
+        } else {
+            let description = if req.description.is_empty() {
+                Self::batch_auto_description(&req.r#type, &member_seqs)
+            } else {
+                req.description
+            };
+            (comp.deps, comp.eval, description)
+        };
+
+        let seq = self.counters.next(&owner, &project).await?;
+        let batch = Job {
+            id: seq,
+            project: format!("{owner}/{project}"),
+            r#type: req.r#type,
+            title: req.title,
+            description,
+            cover_html: req.cover_html,
+            deps,
+            members: member_seqs.clone(),
+            batch_id: None,
+            state: if req.draft {
+                JobState::Draft
+            } else {
+                JobState::Frozen
+            },
+            branch: format!("job/{seq}"),
+            base_ref: None,
+            knowledge_tags: req.knowledge_tags,
+            eval,
+            timeout: req.timeout,
+            model: req.model,
+            claim_next: false,
+            escalation: None,
+            factory: req.factory,
+            created_at: Utc::now(),
+            ready_at: None,
+            completed_at: None,
+        };
+        self.jobs.put(&batch).await?;
+        for &upstream in &batch.deps {
+            let _ = self.rdeps.append(&owner, &project, upstream, seq).await;
+        }
+        self.graphs
+            .entry(batch.project.clone())
+            .or_default()
+            .insert(batch.clone());
+        self.publish(&owner, &project, seq, "job-created", serde_json::json!({}))
+            .await?;
+
+        // A non-draft batch pulls each member Frozen→Batched now; a Draft batch
+        // absorbs nothing until it leaves Draft.
+        if !req.draft {
+            self.absorb_batch(&owner, &project, seq, &member_seqs)
+                .await?;
+        }
+        Ok(batch)
+    }
+
+    /// Validate one candidate against the batch membership rules (spec §2.1) at
+    /// *current* state: exists, Frozen, same type, not already batched, and not
+    /// itself a batch. Pushes a field error per violation and returns the record
+    /// (or `None` if the candidate does not exist). Shared by every path that
+    /// admits a member — atomic create, draft-member edits, and the
+    /// finalize/release re-validation.
+    fn validate_member(
+        &self,
+        owner: &str,
+        project: &str,
+        ty: &str,
+        m: u64,
+        errs: &mut Vec<ValidationError>,
+    ) -> Option<Job> {
+        let Some(job) = self
+            .graphs
+            .get(&format!("{owner}/{project}"))
+            .and_then(|g| g.get(m))
+            .cloned()
+        else {
+            errs.push(ValidationError::new(
+                Some(m),
+                "members",
+                format!("member #{m} does not exist"),
+            ));
+            return None;
+        };
+        if job.state != JobState::Frozen {
+            errs.push(ValidationError::new(
+                Some(m),
+                "members",
+                format!(
+                    "member #{m} is {:?}; only a Frozen job can be batched",
+                    job.state
+                ),
+            ));
+        }
+        if job.r#type != ty {
+            errs.push(ValidationError::new(
+                Some(m),
+                "members",
+                format!(
+                    "member #{m} is type '{}'; a batch absorbs one type ('{}')",
+                    job.r#type, ty
+                ),
+            ));
+        }
+        if job.batch_id.is_some() {
+            errs.push(ValidationError::new(
+                Some(m),
+                "members",
+                format!("member #{m} is already batched"),
+            ));
+        }
+        if job.is_batch() {
+            errs.push(ValidationError::new(
+                Some(m),
+                "members",
+                format!("member #{m} is itself a batch; batches do not nest"),
+            ));
+        }
+        Some(job)
+    }
+
+    /// Validate `member_seqs` against the batch rules at *current* state and, if
+    /// all pass, compute the batch's external-dep and evaluator unions (spec
+    /// §2.1). Pure (no mutation) — the caller absorbs. Member-on-member deps are
+    /// satisfied jointly so they drop out; the batch depends on the union of the
+    /// members' *external* deps. Evaluators union by name (identical duplicates
+    /// dedup; a same-name-different-definition clash is a validation error).
+    /// `min_members` is the committable floor (2) everywhere the batch must be
+    /// releasable; a Draft batch composing passes 1.
+    fn plan_batch(
+        &self,
+        owner: &str,
+        project: &str,
+        ty: &str,
+        member_seqs: &[u64],
+        min_members: usize,
+    ) -> Result<BatchComposition> {
         let mut errs: Vec<ValidationError> = Vec::new();
-        if member_seqs.len() < 2 {
+        if member_seqs.len() < min_members {
             errs.push(ValidationError::new(
                 None,
                 "members",
-                "a batch needs at least 2 members",
+                format!("a batch needs at least {min_members} members"),
             ));
         }
         let mut seen = HashSet::new();
-        for &m in &member_seqs {
+        for &m in member_seqs {
             if !seen.insert(m) {
                 errs.push(ValidationError::new(
                     None,
@@ -1556,62 +1765,13 @@ impl Core {
         }
         let member_set: HashSet<u64> = member_seqs.iter().copied().collect();
 
-        // Gather the member records, validating each against the batch rules.
         let mut members: Vec<Job> = Vec::new();
-        for &m in &member_seqs {
-            let Some(job) = self
-                .graphs
-                .get(&format!("{owner}/{project}"))
-                .and_then(|g| g.get(m))
-                .cloned()
-            else {
-                errs.push(ValidationError::new(
-                    Some(m),
-                    "members",
-                    format!("member #{m} does not exist"),
-                ));
-                continue;
-            };
-            if job.state != JobState::Frozen {
-                errs.push(ValidationError::new(
-                    Some(m),
-                    "members",
-                    format!(
-                        "member #{m} is {:?}; only a Frozen job can be batched",
-                        job.state
-                    ),
-                ));
+        for &m in member_seqs {
+            if let Some(job) = self.validate_member(owner, project, ty, m, &mut errs) {
+                members.push(job);
             }
-            if job.r#type != req.r#type {
-                errs.push(ValidationError::new(
-                    Some(m),
-                    "members",
-                    format!(
-                        "member #{m} is type '{}'; a batch absorbs one type ('{}')",
-                        job.r#type, req.r#type
-                    ),
-                ));
-            }
-            if job.batch_id.is_some() {
-                errs.push(ValidationError::new(
-                    Some(m),
-                    "members",
-                    format!("member #{m} is already batched"),
-                ));
-            }
-            if job.is_batch() {
-                errs.push(ValidationError::new(
-                    Some(m),
-                    "members",
-                    format!("member #{m} is itself a batch; batches do not nest"),
-                ));
-            }
-            members.push(job);
         }
 
-        // Union the members' external deps (member-on-member deps are satisfied
-        // jointly, so they drop out) and their additive evaluators (dedup by
-        // name; a same-name-different-definition clash is a creation error).
         let mut deps: Vec<u64> = Vec::new();
         let mut eval: Vec<types::Evaluator> = Vec::new();
         for job in &members {
@@ -1639,80 +1799,107 @@ impl Core {
         if !errs.is_empty() {
             return Err(errs.into());
         }
+        Ok(BatchComposition { deps, eval })
+    }
 
-        // Default description: an auto-index of the members it absorbs.
-        let description = if req.description.is_empty() {
-            format!(
-                "Batch of {} {} jobs: {}",
-                members.len(),
-                req.r#type,
-                member_seqs
-                    .iter()
-                    .map(|m| format!("#{m}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )
-        } else {
-            req.description
-        };
+    /// The auto-index description a batch defaults to (spec §2.1):
+    /// `Batch of N {type} jobs: #a #b …`.
+    fn batch_auto_description(ty: &str, member_seqs: &[u64]) -> String {
+        format!(
+            "Batch of {} {} jobs: {}",
+            member_seqs.len(),
+            ty,
+            member_seqs
+                .iter()
+                .map(|m| format!("#{m}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    }
 
-        let seq = self.counters.next(&owner, &project).await?;
-        let batch = Job {
-            id: seq,
-            project: format!("{owner}/{project}"),
-            r#type: req.r#type,
-            title: req.title,
-            description,
-            cover_html: req.cover_html,
-            deps,
-            members: member_seqs.clone(),
-            batch_id: None,
-            state: JobState::Frozen,
-            branch: format!("job/{seq}"),
-            base_ref: None,
-            knowledge_tags: req.knowledge_tags,
-            eval,
-            timeout: req.timeout,
-            model: req.model,
-            claim_next: false,
-            escalation: None,
-            factory: req.factory,
-            created_at: Utc::now(),
-            ready_at: None,
-            completed_at: None,
-        };
-        self.jobs.put(&batch).await?;
-        for &upstream in &batch.deps {
-            let _ = self.rdeps.append(&owner, &project, upstream, seq).await;
-        }
-        self.graphs
-            .entry(batch.project.clone())
-            .or_default()
-            .insert(batch.clone());
-        self.publish(&owner, &project, seq, "job-created", serde_json::json!({}))
-            .await?;
-
-        // Pull each member Frozen→Batched under this batch.
-        for &m in &member_seqs {
-            let mut member = self.must_get(&owner, &project, m)?.clone();
-            member.batch_id = Some(seq);
+    /// Absorb a batch's members: each Frozen→Batched with `batch_id` set,
+    /// emitting `job-batched` (spec §2.1). Shared by atomic create and the
+    /// finalize/release paths where a Draft batch commits its members.
+    async fn absorb_batch(
+        &mut self,
+        owner: &str,
+        project: &str,
+        batch_seq: u64,
+        member_seqs: &[u64],
+    ) -> Result<()> {
+        for &m in member_seqs {
+            let mut member = self.must_get(owner, project, m)?.clone();
+            member.batch_id = Some(batch_seq);
             self.set_state(&mut member, JobState::Batched).await?;
             self.publish(
-                &owner,
-                &project,
+                owner,
+                project,
                 m,
                 "job-batched",
-                serde_json::json!({ "batch_id": seq }),
+                serde_json::json!({ "batch_id": batch_seq }),
             )
             .await?;
         }
-        Ok(batch)
+        Ok(())
+    }
+
+    /// Return a batch's absorbed members to Frozen: each Batched→Frozen with
+    /// `batch_id` cleared, emitting `job-unbatched` (spec §2.1). A member that
+    /// is not Batched (a Draft batch that never absorbed) is left untouched.
+    /// Shared by revoke (batch dropped) and Frozen→Draft (batch reopened for
+    /// editing).
+    async fn release_batch_members(
+        &mut self,
+        owner: &str,
+        project: &str,
+        batch_seq: u64,
+        members: &[u64],
+    ) -> Result<()> {
+        for &m in members {
+            let mut member = self.must_get(owner, project, m)?.clone();
+            if member.state == JobState::Batched {
+                member.batch_id = None;
+                self.set_state(&mut member, JobState::Frozen).await?;
+                self.publish(
+                    owner,
+                    project,
+                    m,
+                    "job-unbatched",
+                    serde_json::json!({ "batch_id": batch_seq }),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Re-validate a Draft batch's members against *current* state and compute
+    /// the composition to commit when it leaves Draft (finalize or release,
+    /// spec §2.1). Mutates `job` in place with the recomputed dep/eval unions
+    /// and, if its description is still empty, the auto-index — exactly what an
+    /// atomic create would have written. A stale member (released/claimed/
+    /// batched meanwhile, or the list now below 2) yields a field error and
+    /// `job` is left untouched, so the caller keeps it Draft with nothing
+    /// absorbed. Returns the member list to absorb once the caller's own
+    /// validation passes.
+    fn absorb_plan(&self, job: &mut Job) -> Result<Vec<u64>> {
+        let (owner, project) = job
+            .project
+            .split_once('/')
+            .expect("project slug is owner/project");
+        let comp = self.plan_batch(owner, project, &job.r#type, &job.members, 2)?;
+        job.deps = comp.deps;
+        job.eval = comp.eval;
+        if job.description.is_empty() {
+            job.description = Self::batch_auto_description(&job.r#type, &job.members);
+        }
+        Ok(job.members.clone())
     }
 
     /// Handle `req.jobs.release.*` (spec §2.2 release-time pass + §2.1
     /// Frozen→Ready|Blocked). Returns the resulting state.
     pub async fn release_job(&mut self, owner: &str, project: &str, seq: u64) -> Result<JobState> {
-        let job = self.must_get(owner, project, seq)?.clone();
+        let mut job = self.must_get(owner, project, seq)?.clone();
         // Frozen and Draft both release; a Draft is finalized (its edited
         // definition locked in) in the same step (§2.1). Any other state rejects.
         if !matches!(job.state, JobState::Frozen | JobState::Draft) {
@@ -1723,6 +1910,24 @@ impl Core {
             .into());
         }
         let from_draft = job.state == JobState::Draft;
+
+        // A Draft batch commits its membership at release (spec §2.1): re-
+        // validate the members against current state and recompute the dep/eval
+        // unions + auto-description before the wiring/static pass runs on them.
+        // A stale member (or fewer than 2) fails here, leaving the batch Draft
+        // with nothing absorbed. Absorption itself is deferred to after the
+        // whole release validation succeeds. The recomputed record is inserted
+        // into the graph now so `wiring_errors`/`deps_done` see the union deps.
+        let batch_members = if from_draft && job.is_batch() {
+            let members = self.absorb_plan(&mut job)?;
+            self.graphs
+                .entry(job.project.clone())
+                .or_default()
+                .insert(job.clone());
+            members
+        } else {
+            Vec::new()
+        };
 
         let default_branch = self.repos.default_branch(owner, project).await?;
         let head = self
@@ -1771,6 +1976,16 @@ impl Core {
                 project: project.into(),
                 seq,
             });
+        }
+        // A Draft batch now absorbs its members (Frozen→Batched) — validation
+        // has passed, so the commit is atomic with the release (§2.1). Index the
+        // newly-committed union deps too (best-effort, §2.3).
+        if !batch_members.is_empty() {
+            for &upstream in &updated.deps {
+                let _ = self.rdeps.append(owner, project, upstream, seq).await;
+            }
+            self.absorb_batch(owner, project, seq, &batch_members)
+                .await?;
         }
         // Leaving Draft finalizes the edited definition: emit job-finalized so
         // the UI/SSE can distinguish it from a plain Frozen release (§2.1).
@@ -1915,22 +2130,11 @@ impl Core {
         // (spec §2.1 batches): each returns Batched→Frozen with its `batch_id`
         // cleared, so it is re-batchable and re-releasable on its own. Members
         // are not graph dependents of the batch, so the cascade above never
-        // touched them.
-        for &m in &job.members {
-            let mut member = self.must_get(owner, project, m)?.clone();
-            if member.state == JobState::Batched {
-                member.batch_id = None;
-                self.set_state(&mut member, JobState::Frozen).await?;
-                self.publish(
-                    owner,
-                    project,
-                    m,
-                    "job-unbatched",
-                    serde_json::json!({ "batch_id": seq }),
-                )
-                .await?;
-            }
-        }
+        // touched them. A Draft batch (never absorbed) leaves its would-be
+        // members untouched — `release_batch_members` skips non-Batched jobs.
+        let members = job.members.clone();
+        self.release_batch_members(owner, project, seq, &members)
+            .await?;
         // A revoked gate occupant frees the queue for the next candidate.
         self.pump_merges(owner, project).await?;
         self.publish(
@@ -2055,8 +2259,97 @@ impl Core {
     pub async fn draft_job(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let mut job = self.must_get(owner, project, seq)?.clone();
         self.set_state(&mut job, JobState::Draft).await?;
+        // Reopening a batch for editing un-absorbs its members (spec §2.1): each
+        // Batched→Frozen with `batch_id` cleared, so membership can be edited
+        // before finalize/release re-absorbs. Mirrors the revoke un-absorb.
+        if job.is_batch() {
+            let members = job.members.clone();
+            self.release_batch_members(owner, project, seq, &members)
+                .await?;
+        }
         self.publish(owner, project, seq, "job-drafted", serde_json::json!({}))
             .await
+    }
+
+    /// Handle `req.jobs.members.*` (spec §2.1 draft batches): add/remove the
+    /// members of a **Draft** batch while composing it. Draft-only — any other
+    /// state (or a non-batch job) is a 409 (`Conflict`), so a committed batch's
+    /// membership is never mutated in place. Adds are re-validated per-candidate
+    /// against current state (exists, Frozen, same type, unbatched, not a
+    /// batch); a member is **not** absorbed here (a draft holds a non-binding
+    /// list — absorption happens at finalize/release). Removes are trivial —
+    /// nothing was absorbed. The result keeps at least one member so the batch
+    /// retains its identity (`members` non-empty *is* the batch marker, §2.1);
+    /// revoke the draft to discard it entirely. Emits `job-updated {members}`.
+    pub async fn edit_members(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        add: Vec<u64>,
+        remove: Vec<u64>,
+    ) -> Result<Job> {
+        let mut job = self.must_get(owner, project, seq)?.clone();
+        if !job.is_batch() {
+            return Err(CoreError::Conflict(format!(
+                "job {seq} is not a batch; it has no members to edit"
+            )));
+        }
+        if job.state != JobState::Draft {
+            return Err(CoreError::Conflict(format!(
+                "job {seq} is {:?}; only a Draft batch's members can be edited",
+                job.state
+            )));
+        }
+
+        // Validate the adds against current state, rejecting duplicates and
+        // candidates already in the batch. A draft reserves nothing, so a
+        // removed member simply drops from the list.
+        let mut errs: Vec<ValidationError> = Vec::new();
+        let mut present: HashSet<u64> = job.members.iter().copied().collect();
+        for &a in &add {
+            if !present.insert(a) {
+                errs.push(ValidationError::new(
+                    Some(a),
+                    "members",
+                    format!("member #{a} is already in the batch"),
+                ));
+                continue;
+            }
+            self.validate_member(owner, project, &job.r#type, a, &mut errs);
+        }
+        if !errs.is_empty() {
+            return Err(errs.into());
+        }
+
+        let mut members = job.members.clone();
+        members.retain(|m| !remove.contains(m));
+        for &a in &add {
+            if !members.contains(&a) {
+                members.push(a);
+            }
+        }
+        if members.is_empty() {
+            return Err(CoreError::Conflict(format!(
+                "these removals would empty batch {seq}; a batch keeps at least one member (revoke it to discard)"
+            )));
+        }
+
+        job.members = members;
+        self.jobs.put(&job).await?;
+        self.graphs
+            .entry(job.project.clone())
+            .or_default()
+            .insert(job.clone());
+        self.publish(
+            owner,
+            project,
+            seq,
+            "job-updated",
+            serde_json::json!({ "fields": ["members"] }),
+        )
+        .await?;
+        Ok(job)
     }
 
     /// Handle `req.jobs.finalize.*` (#166): Draft → Frozen. Finalizes an edited
@@ -2067,7 +2360,7 @@ impl Core {
     /// release, matching a freshly-created Frozen job (§2.1); validation failure
     /// returns field errors (422) and the job stays Draft.
     pub async fn finalize_job(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
-        let job = self.must_get(owner, project, seq)?.clone();
+        let mut job = self.must_get(owner, project, seq)?.clone();
         if job.state != JobState::Draft {
             return Err(InvalidTransition {
                 from: job.state,
@@ -2076,10 +2369,23 @@ impl Core {
             .into());
         }
 
-        // Validate the edited definition against the current default HEAD: the
-        // job type's §1.1 field rules (via `load_job_type`) plus the additive
-        // evaluators' name-collision / field rules (`with_job_evaluators`). Any
-        // error returns before the state write, so the job stays Draft.
+        // A Draft batch commits its membership at finalize (spec §2.1): re-
+        // validate every member against current state and recompute the dep/
+        // eval unions + auto-description, exactly as an atomic create would.
+        // A stale member (or fewer than 2) fails here, leaving the batch Draft
+        // with nothing absorbed. Absorption is deferred to after the field-rule
+        // validation below passes.
+        let batch_members = if job.is_batch() {
+            self.absorb_plan(&mut job)?
+        } else {
+            Vec::new()
+        };
+
+        // Validate the (possibly recomputed) definition against the current
+        // default HEAD: the job type's §1.1 field rules (via `load_job_type`)
+        // plus the additive evaluators' name-collision / field rules
+        // (`with_job_evaluators`, over the unioned eval for a batch). Any error
+        // returns before the state write, so the job stays Draft.
         let default_branch = self.repos.default_branch(owner, project).await?;
         let head = self
             .repos
@@ -2090,8 +2396,17 @@ impl Core {
                 .await?;
         release::with_job_evaluators(job_type, &job)?;
 
-        let mut updated = job;
-        self.set_state(&mut updated, JobState::Frozen).await?;
+        self.set_state(&mut job, JobState::Frozen).await?;
+        // A batch now absorbs its members (Frozen→Batched) and indexes its
+        // newly-committed union deps (best-effort, §2.3).
+        if !batch_members.is_empty() {
+            let deps = job.deps.clone();
+            for upstream in deps {
+                let _ = self.rdeps.append(owner, project, upstream, seq).await;
+            }
+            self.absorb_batch(owner, project, seq, &batch_members)
+                .await?;
+        }
         self.publish(owner, project, seq, "job-finalized", serde_json::json!({}))
             .await
     }

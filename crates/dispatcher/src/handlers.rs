@@ -313,6 +313,17 @@ struct UpdateJobBody {
     model: Option<String>,
 }
 
+/// Wire body for `req.jobs.members` (spec §2.1 draft batches): the seqs to
+/// add to / remove from a Draft batch's member list. Both default empty so a
+/// caller can add-only or remove-only.
+#[derive(serde::Deserialize)]
+struct MembersBody {
+    #[serde(default)]
+    add: Vec<u64>,
+    #[serde(default)]
+    remove: Vec<u64>,
+}
+
 /// Wire body for `req.tasks.resolve`: the §6.2 `TaskResolution` plus the
 /// operator identity the api layer read from the JWT cookie.
 #[derive(serde::Deserialize)]
@@ -1029,6 +1040,19 @@ async fn spawn_read_handlers(
                 ("revoke", Some(seq)) => match jobs_handle.revoke_job(owner, project, seq).await {
                     Err(e) => error_reply(&e),
                     Ok(_) => fetch_job(&jobs_store, owner, project, seq).await,
+                },
+                // §2.1 draft batches: add/remove a Draft batch's members while
+                // composing it (409 in any other state). Reply is the updated job.
+                ("members", Some(seq)) => match serde_json::from_slice::<MembersBody>(&req.payload)
+                {
+                    Err(e) => bad_request(&e.to_string()),
+                    Ok(b) => match jobs_handle
+                        .edit_members(owner, project, seq, b.add, b.remove)
+                        .await
+                    {
+                        Err(e) => error_reply(&e),
+                        Ok(_) => fetch_job(&jobs_store, owner, project, seq).await,
+                    },
                 },
                 // §1.2 claims: park the next work attempt for a human /
                 // clear a pending claim. Reply is the updated job.

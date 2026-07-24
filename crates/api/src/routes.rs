@@ -918,6 +918,25 @@ pub async fn jobs_draft(
     .await
 }
 
+/// Add/remove the members of a Draft batch while composing it (§2.1 draft
+/// batches). Body `{ add?: [seq], remove?: [seq] }`. Member+; the dispatcher
+/// rejects (409) anything but a Draft batch and re-validates the adds (422).
+pub async fn jobs_members(
+    State(state): State<SharedState>,
+    Path((owner, project, seq)): Path<(String, String, u64)>,
+    Auth(identity): Auth,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<Response> {
+    member_on(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::jobs_members(&owner, &project, seq),
+        body,
+        StatusCode::OK,
+    )
+    .await
+}
+
 /// Claim the job's next work attempt for a human (§1.2 claims): the attempt
 /// parks as a Pending task with the declared kind instead of launching.
 /// Member+; the dispatcher enforces the in-flight guard (409).
