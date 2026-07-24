@@ -2724,6 +2724,171 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
     assert_eq!(backend2.killed(), Vec::<String>::new(), "nothing reaped");
 }
 
+/// §3.6 re-attach harvest (ticket #187, self-deploy report loss on deploy #209):
+/// a command WORK container the OLD dispatcher launched is still Running when the
+/// NEW dispatcher reconciles, so it re-attaches (§3.6) rather than relaunching —
+/// and at exit it must harvest the `@chug:leg`/`@chug:report` stream into the
+/// task's structured result *exactly* as the launch-path monitor does. Before the
+/// fix the re-attach monitor threaded `structured: None`, so a self-deploy — which
+/// always spans its own dispatcher restart — lost its report every time.
+#[tokio::test]
+async fn restart_reattach_harvests_command_work_deploy_report() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file("jobs/cmd-work.yaml", CMD_WORK.as_bytes(), "type")
+        .await;
+    clone.push("main").await;
+    let head = repo.head().await;
+    repo.create_job_branch(1, &head).await;
+
+    // The crash state: the OLD dispatcher had this command work task Running with
+    // a live container id when it was swapped out mid-task (a restart-verify).
+    let cid = "reattach/deploy-1";
+    store
+        .jobs()
+        .await
+        .unwrap()
+        .put(&Job {
+            id: 1,
+            project: "acme/api".into(),
+            r#type: "cmd-work".into(),
+            title: String::new(),
+            description: String::new(),
+            cover_html: None,
+            deps: vec![],
+            members: vec![],
+            batch_id: None,
+            state: JobState::Work,
+            branch: "job/1".into(),
+            base_ref: Some(head.clone()),
+            knowledge_tags: vec![],
+            eval: vec![],
+            timeout: None,
+            model: None,
+            claim_next: false,
+            escalation: None,
+            factory: None,
+            created_at: Utc::now(),
+            ready_at: Some(Utc::now()),
+            completed_at: None,
+        })
+        .await
+        .unwrap();
+    store
+        .tasks()
+        .await
+        .unwrap()
+        .put(&Task {
+            id: 1,
+            job_seq: 1,
+            project: "acme/api".into(),
+            phase: TaskPhase::Work,
+            cycle: 1,
+            kind: TaskKind::Command {
+                run: "./build.sh".into(),
+            },
+            state: TaskState::Running,
+            attempt: 1,
+            evaluator: None,
+            label: None,
+            stage: 0,
+            performed_by: None,
+            container_id: Some(cid.into()),
+            rework_reason: None,
+            infra_loss: false,
+            pending_reason: None,
+            queued_at: None,
+            session_id: None,
+            reviewed_tip: None,
+            result: None,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            completed_at: None,
+        })
+        .await
+        .unwrap();
+
+    // The container is still Running (inspect re-attaches), its complete deploy
+    // stream is on stdout, and it exits 0 once the re-attached monitor waits.
+    let backend = Arc::new(FakeBackend::new());
+    backend.seed_running([cid.to_string()]);
+    backend.put_logs(
+        concat!(
+            "update: deploying abc123\n",
+            "@chug:leg {\"name\":\"build-dispatcher\",\"status\":\"ok\",\"secs\":41}\n",
+            "@chug:leg {\"name\":\"restart-verify\",\"status\":\"ok\",\"secs\":12}\n",
+            "@chug:leg {\"name\":\"sha-advance\",\"status\":\"ok\",\"secs\":1}\n",
+            "@chug:report {\"from_sha\":\"prev999\",\"to_sha\":\"abc123\",\"rollback\":false,\"health\":\"ok\"}\n",
+        )
+        .as_bytes()
+        .to_vec(),
+    );
+    backend.finish_running(cid, 0);
+
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        backend.clone(),
+        Arc::new(FakeProvider::new()),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _handle = spawn(core);
+
+    // cmd-work has no evaluators, so a passing work task carries the job to Done.
+    wait_for_state(&store, 1, JobState::Done).await;
+    let works: Vec<Task> = store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", 1)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.phase == TaskPhase::Work)
+        .collect();
+    assert_eq!(works.len(), 1, "re-attached, not relaunched: {works:?}");
+    assert_eq!(works[0].state, TaskState::Done);
+    let Some(TaskResult::Work {
+        structured: Some(value),
+        ..
+    }) = &works[0].result
+    else {
+        panic!(
+            "re-attached command work must carry its harvested deploy report, got {:?}",
+            works[0].result
+        );
+    };
+    let report: types::DeployReport = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(report.legs.len(), 3, "all three legs harvested: {report:?}");
+    assert_eq!(report.legs[1].name, "restart-verify");
+    assert_eq!(report.to_sha.as_deref(), Some("abc123"));
+    assert_eq!(report.health.as_deref(), Some("ok"));
+    assert!(!report.rollback);
+    // The re-attached container was reclaimed once its report was out (§3.6).
+    assert_eq!(backend.removed(), vec![cid.to_string()]);
+}
+
 /// §3.6 graceful drain: even with a busy mailbox the drain completes well under
 /// its ~10s bound. Draining is non-blocking on the mailbox — it sweeps what is
 /// present and returns — so a backlog of in-flight requests cannot wedge exit.

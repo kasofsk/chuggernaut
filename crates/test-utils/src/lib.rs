@@ -63,6 +63,11 @@ struct FakeBackendState {
     /// a still-alive container a restarted dispatcher re-attaches to (§3.6).
     /// Consulted only when the id is not already in `exits`.
     running: std::collections::HashSet<ContainerId>,
+    /// Exit codes that resolve a *running* container's `wait` without changing
+    /// what `inspect` reports — a re-attached container (still `Running` at
+    /// reconcile time) that later exits, so a test drives the re-attach monitor
+    /// through to its harvest-at-exit (§3.6) without racing `inspect`.
+    finished: HashMap<ContainerId, i32>,
     /// Files retrievable via copy_file, keyed by (container path).
     files: HashMap<String, Vec<u8>>,
     /// Returned by `logs` (and sliced by `logs_tail`) for every container.
@@ -209,6 +214,19 @@ impl FakeBackend {
         self.state.lock().unwrap().running.extend(ids);
     }
 
+    /// Exit a container previously seeded via [`seed_running`]: its `wait`
+    /// resolves with `exit_code` while `inspect` kept reporting `Running` right
+    /// up to the exit. Lets a test drive the §3.6 re-attach monitor through to
+    /// its harvest-at-exit (the #187 deploy report) without racing the
+    /// reconcile-time `inspect`.
+    pub fn finish_running(&self, id: impl Into<ContainerId>, exit_code: i32) {
+        self.state
+            .lock()
+            .unwrap()
+            .finished
+            .insert(id.into(), exit_code);
+    }
+
     /// Seed the ids that `list_managed_exited` reports — the exited managed
     /// containers a startup sweep should consider.
     pub fn seed_managed_exited(&self, ids: impl IntoIterator<Item = ContainerId>) {
@@ -320,22 +338,28 @@ impl ContainerBackend for FakeBackend {
             Running,
             Gone,
         }
-        let outcome = {
-            let st = self.state.lock().unwrap();
-            if let Some(code) = st.exits.get(id).copied() {
-                Wait::Exited(code)
-            } else if st.running.contains(id) {
-                Wait::Running
-            } else {
-                Wait::Gone
+        loop {
+            let outcome = {
+                let st = self.state.lock().unwrap();
+                if let Some(code) = st.exits.get(id).copied() {
+                    Wait::Exited(code)
+                } else if let Some(code) = st.finished.get(id).copied() {
+                    // A re-attached running container that has now exited.
+                    Wait::Exited(code)
+                } else if st.running.contains(id) {
+                    Wait::Running
+                } else {
+                    Wait::Gone
+                }
+            };
+            match outcome {
+                Wait::Exited(code) => return Ok(code),
+                // A still-running container never exits on its own — a
+                // re-attached monitor parks here, keeping the task Running
+                // (spec §3.6), until a test calls `finish_running`.
+                Wait::Running => tokio::time::sleep(Duration::from_millis(5)).await,
+                Wait::Gone => return Err(BackendError::NotFound(id.clone())),
             }
-        };
-        match outcome {
-            Wait::Exited(code) => Ok(code),
-            // A still-running container never exits on its own — a re-attached
-            // monitor parks here, keeping the task Running (spec §3.6).
-            Wait::Running => std::future::pending().await,
-            Wait::Gone => Err(BackendError::NotFound(id.clone())),
         }
     }
 
@@ -390,6 +414,8 @@ impl ContainerBackend for FakeBackend {
         // Drop it from the launch bookkeeping so `inspect`/`wait` afterward
         // report it as gone, mirroring a real removed container. Idempotent.
         st.exits.remove(id);
+        st.running.remove(id);
+        st.finished.remove(id);
         st.managed_exited.retain(|c| c != id);
         st.removed.push(id.clone());
         Ok(())

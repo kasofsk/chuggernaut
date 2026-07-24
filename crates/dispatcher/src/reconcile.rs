@@ -3,7 +3,7 @@
 //! `Core::new` already rebuilt the rdeps index, graphs, and the Ready queue —
 //! this pass recovers jobs that were mid-execution when the process died.
 
-use crate::core::{Core, Msg, Result, TaskExit};
+use crate::core::{Core, Result, TaskExit};
 use crate::eval::{EvalRound, EvalSlot, SlotOutcome};
 use chrono::Utc;
 use types::{Job, JobState, Task, TaskKind, TaskPhase, TaskResult, TaskState};
@@ -590,47 +590,24 @@ impl Core {
         let exit = match &task.container_id {
             Some(cid) => match self.backend.inspect(cid).await {
                 Ok(Some(container::ContainerStatus::Running)) => {
-                    // Still running: re-attach a monitor and resume.
-                    let backend = self.backend.clone();
-                    let tx = self.self_tx.clone().expect("spawned core");
-                    let (o, p, cid) = (owner.to_string(), project.to_string(), cid.clone());
-                    let task_id = task.id;
-                    tokio::spawn(async move {
-                        let exit_code = backend.wait(&cid).await.unwrap_or(-1);
-                        let eval_json = backend
-                            .copy_file(&cid, "/workspace/eval-result.json")
-                            .await
-                            .ok()
-                            .flatten()
-                            .and_then(|b| serde_json::from_slice(&b).ok());
-                        // Re-attached after a restart: reclaim the overlay once
-                        // the verdict is out, same as the normal exit path.
-                        if let Err(e) = backend.remove(&cid).await {
-                            tracing::warn!(
-                                "job {seq} task {task_id}: removing container failed: {e}"
-                            );
+                    // Still running across the restart: re-attach the *same*
+                    // monitor the launch path uses for this phase, so exit
+                    // handling is byte-identical — not a bespoke inline monitor
+                    // that drops the structured result. A command work / wrap-up
+                    // task's `@chug:leg` deploy report (§3.6, #187) is then
+                    // harvested from its logs at exit exactly as on the launch
+                    // path (`spawn_logs_monitor`), instead of vanishing as
+                    // `structured: None`. A SELF-deploy always spans its own
+                    // dispatcher restart, so this re-attach is the only path its
+                    // report can survive on — the report the Deploys page (#188)
+                    // renders. Evaluators keep their eval-result.json monitor.
+                    let cid = cid.clone();
+                    match task.phase {
+                        TaskPhase::Work | TaskPhase::WrapUp => {
+                            self.spawn_logs_monitor(owner, project, seq, task.id, cid)
                         }
-                        let _ = tx
-                            .send(Msg::TaskExited {
-                                owner: o,
-                                project: p,
-                                seq,
-                                task_id,
-                                // Re-attaching after a restart: the agent
-                                // monitor that would have parsed usage is gone.
-                                exit: TaskExit {
-                                    exit_code,
-                                    eval_json,
-                                    usage: None,
-                                    assessment: None,
-                                    launch_error: None,
-                                    log_tail: None,
-                                    infra_loss: false,
-                                    structured: None,
-                                },
-                            })
-                            .await;
-                    });
+                        _ => self.spawn_eval_monitor(owner, project, seq, task.id, cid),
+                    }
                     return Ok(());
                 }
                 Ok(Some(container::ContainerStatus::Exited { exit_code })) => {
