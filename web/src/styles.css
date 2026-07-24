@@ -289,6 +289,25 @@ a:hover {
 .topbar a {
   font-size: var(--fs-md);
 }
+
+/* Job page heading: sits under the shared ProjectHeader/tabs chrome, so only
+   the job number + state badges — the breadcrumb lives in the header now. */
+.job-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin: 0 0 var(--sp-4);
+}
+.job-heading .job-num {
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  background: linear-gradient(90deg, var(--accent), var(--purple));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
 .who {
   margin-left: auto;
   color: var(--dim);
@@ -844,16 +863,6 @@ table.jobs tbody tr.row-draft td:first-child {
 }
 .batch-indent {
   margin-right: 0.35rem;
-}
-
-/* Recent-tail rows: the few most recently completed Done jobs the default view
-   lets through (jobFilters.recentDoneIds). Dimmed so the working set reads
-   first; full opacity when an explicit filter reveals finished jobs. */
-.row-recent-done {
-  opacity: 0.65;
-}
-.row-recent-done:hover {
-  opacity: 1;
 }
 
 /* Collapsible card header (e.g. the job page's Channel section): the whole
@@ -1674,6 +1683,12 @@ table.jobs tbody tr.row-draft td:first-child {
   }
   .topbar h1 {
     font-size: var(--fs-lg);
+  }
+  .job-heading .job-num {
+    font-size: var(--fs-lg);
+  }
+  .ov-layout {
+    grid-template-columns: minmax(0, 1fr); /* stack: states above the chart */
   }
   input,
   select,
@@ -3058,28 +3073,7 @@ table.jobs tbody tr.row-draft td:first-child {
   gap: var(--sp-4);
   align-items: start;
 }
-.jobs-side {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-4);
-}
-.side-card h2 {
-  margin-bottom: var(--sp-2);
-}
-.side-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.side-head svg {
-  color: var(--dim);
-}
-
 /* Jobs overview card */
-.ov-spark {
-  color: var(--accent);
-  margin: 0.1rem 0 0.5rem;
-}
 .ov-total {
   display: flex;
   align-items: baseline;
@@ -3288,11 +3282,6 @@ table.jobs tbody tr.row-draft td:first-child {
   text-transform: none;
   color: var(--text);
 }
-.jobs-sub {
-  margin: 0.15rem 0 0;
-  color: var(--dim);
-  font-size: var(--fs-sm);
-}
 .jobs-controls {
   display: flex;
   align-items: center;
@@ -3326,14 +3315,6 @@ table.jobs tbody tr.row-draft td:first-child {
 .search-field:focus-within {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
-}
-.kbd-hint {
-  font-size: var(--fs-xs);
-  color: var(--dim);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0 0.3rem;
-  white-space: nowrap;
 }
 .state-filter {
   padding: 0.45rem 0.6rem;
@@ -4465,11 +4446,98 @@ tr[data-state='Batched'] {
 }
 
 /* ── Stats page (overview moved off the jobs page) ─────────────────────────── */
-.stats-grid {
+.ov-layout {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 360px));
-  gap: var(--sp-4);
+  grid-template-columns: minmax(200px, 280px) minmax(0, 1fr);
+  gap: var(--sp-5);
   align-items: start;
+}
+
+/* Activity chart (components/ActivityChart.tsx): series colors ride the theme
+   tokens; everything textual wears text tokens, never a series color. */
+.activity-chart {
+  position: relative;
+}
+.ac-legend {
+  display: flex;
+  gap: var(--sp-4);
+  justify-content: flex-end;
+  margin-bottom: 0.2rem;
+}
+.ac-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--dim);
+  font-size: var(--fs-xs);
+}
+.ac-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.ac-dot.ac-created { background: var(--accent); }
+.ac-dot.ac-completed { background: var(--green); }
+.ac-bar.ac-created { fill: var(--accent); }
+.ac-bar.ac-completed { fill: var(--green); }
+.ac-grid {
+  stroke: var(--border-faint);
+  stroke-width: 1;
+}
+.ac-axis {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.ac-label {
+  fill: var(--dim);
+  font-size: 10px;
+}
+.ac-col-hi {
+  fill: var(--stripe);
+}
+.ac-hit {
+  fill: transparent;
+}
+.ac-tooltip {
+  position: absolute;
+  top: 0;
+  pointer-events: none;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 0.35rem 0.6rem;
+  font-size: var(--fs-xs);
+  color: var(--text);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 25%);
+  white-space: nowrap;
+  z-index: 2;
+}
+.ac-tt-day {
+  color: var(--dim);
+  margin-bottom: 0.15rem;
+}
+
+/* By-type table */
+table.type-stats {
+  width: 100%;
+  border-collapse: collapse;
+}
+table.type-stats th,
+table.type-stats td {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border-faint);
+  text-align: left;
+}
+table.type-stats th {
+  color: var(--dim);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+table.type-stats .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 .jobs-layout-full {
   grid-template-columns: minmax(0, 1fr);

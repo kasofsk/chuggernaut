@@ -27,6 +27,7 @@ import { DraftEditor } from '../components/DraftEditor'
 import { ConsistEditor } from '../components/ConsistEditor'
 import { CoverWidget } from '../components/CoverWidget'
 import { JobAttachments } from '../components/Attachments'
+import { ProjectHeader } from '../components/ProjectHeader'
 import { Skeleton, SkeletonLines } from '../components/Skeleton'
 import { DeployLegCard, deployReportOf } from '../components/DeployLegCard'
 
@@ -139,15 +140,10 @@ export function JobDetail() {
           <div className="error banner">{error}</div>
         ) : (
           <>
-            <header className="topbar">
-              <Link to="/">Chuggernaut</Link>
-              <Link to={`/p/${owner}/${project}`}>
-                {owner}/{project}
-              </Link>
-              <h1>
-                #{seq} <Skeleton width="4rem" height="1em" />
-              </h1>
-            </header>
+            <ProjectHeader owner={owner} project={project} />
+            <h1 className="job-heading">
+              <span className="job-num">#{seq}</span> <Skeleton width="4rem" height="1em" />
+            </h1>
             <section className="card">
               <Skeleton width="16rem" height="1.3em" />
               <SkeletonLines n={5} />
@@ -207,25 +203,20 @@ export function JobDetail() {
 
   return (
     <div className="page">
-      <header className="topbar">
-        <Link to="/">Chuggernaut</Link>
-        <Link to={`/p/${owner}/${project}`}>
-          {owner}/{project}
-        </Link>
-        <h1>
-          #{job.id} <StateBadge state={job.state} />
-          {job.awaiting_human &&
-            (job.awaiting_human.claimed ? (
-              <span className="badge badge-purple" title="a claimed attempt is in progress — a human is doing the work">
-                human working
-              </span>
-            ) : (
-              <span className="badge badge-orange" title="a human task is pending in the inbox below">
-                action needed
-              </span>
-            ))}
-        </h1>
-      </header>
+      <ProjectHeader owner={owner} project={project} />
+      <h1 className="job-heading">
+        <span className="job-num">#{job.id}</span> <StateBadge state={job.state} />
+        {job.awaiting_human &&
+          (job.awaiting_human.claimed ? (
+            <span className="badge badge-purple" title="a claimed attempt is in progress — a human is doing the work">
+              human working
+            </span>
+          ) : (
+            <span className="badge badge-orange" title="a human task is pending in the inbox below">
+              action needed
+            </span>
+          ))}
+      </h1>
       {error && <div className="error banner">{error}</div>}
 
       {isDraft ? (

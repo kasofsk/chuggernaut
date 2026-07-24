@@ -28,23 +28,6 @@ export const OVERVIEW_GROUPS: { key: string; label: string; color: string; state
 
 const isTerminal = (s: JobState) => s === 'Done' || s === 'Revoked'
 
-/**
- * The "recent tail": ids of the `n` most recently completed Done jobs. The
- * default view hides finished jobs but lets these through, so the bottom of
- * the list doubles as a what-just-landed digest (they sink below live jobs
- * under the default state sort). Revoked jobs stay hidden — they were
- * cancelled, not delivered.
- */
-export function recentDoneIds(jobs: Job[], n = 5): Set<number> {
-  return new Set(
-    jobs
-      .filter((j) => j.state === 'Done' && j.completed_at)
-      .sort((a, b) => Date.parse(b.completed_at!) - Date.parse(a.completed_at!))
-      .slice(0, n)
-      .map((j) => j.id),
-  )
-}
-
 export function textMatch(j: Job, q: string): boolean {
   const s = q.trim().toLowerCase()
   if (!s) return true
@@ -86,19 +69,13 @@ function quickPred(k: QuickKey, j: Job, claimed: Set<number>): boolean {
  * The composed jobs-table predicate. Search AND state-group AND every active
  * quick filter; the finished-hiding gate applies only when nothing explicit is
  * selected, so choosing "Completed" or "Failed" reveals its terminal jobs.
- * `recentTail` (see recentDoneIds) is exempt from that gate.
  */
-export function matchesFilters(
-  j: Job,
-  f: JobFilters,
-  claimed: Set<number>,
-  recentTail?: Set<number>,
-): boolean {
+export function matchesFilters(j: Job, f: JobFilters, claimed: Set<number>): boolean {
   if (!textMatch(j, f.q)) return false
   if (f.states.length && !f.states.includes(j.state)) return false
   if (!f.quick.every((k) => quickPred(k, j, claimed))) return false
   const explicit = f.states.length > 0 || f.quick.length > 0
-  if (!explicit && !f.showFinished && isTerminal(j.state) && !recentTail?.has(j.id)) return false
+  if (!explicit && !f.showFinished && isTerminal(j.state)) return false
   return true
 }
 
@@ -116,6 +93,34 @@ export function countStates(jobs: Job[], states: JobState[]): number {
  * how many jobs were created or completed on each day (oldest -> newest). Purely
  * derived from created_at/completed_at — no extra fetch, no chart lib.
  */
+/**
+ * Two-series daily activity for the stats chart: jobs created and jobs
+ * completed per day over the window, oldest → newest, plus each bucket's
+ * day-start timestamp for labels/tooltips. Same bucketing as activityBuckets
+ * but the series stay separate so the chart can show flow in vs flow out.
+ */
+export function activitySeries(
+  jobs: Job[],
+  days = 14,
+): { starts: number[]; created: number[]; completed: number[] } {
+  const now = new Date()
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() - (days - 1) * DAY
+  const created = new Array(days).fill(0)
+  const completed = new Array(days).fill(0)
+  const bump = (iso: string | null | undefined, series: number[]) => {
+    if (!iso) return
+    const t = Date.parse(iso)
+    if (!Number.isFinite(t)) return
+    const d = Math.floor((t - start) / DAY)
+    if (d >= 0 && d < days) series[d] += 1
+  }
+  for (const j of jobs) {
+    bump(j.created_at, created)
+    bump(j.completed_at, completed)
+  }
+  return { starts: Array.from({ length: days }, (_, i) => start + i * DAY), created, completed }
+}
+
 export function activityBuckets(jobs: Job[], days = 14): number[] {
   const now = new Date()
   const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() - (days - 1) * DAY

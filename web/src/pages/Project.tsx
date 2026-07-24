@@ -12,15 +12,15 @@ import { IconSearch } from '../components/icons'
 import { SkeletonTable } from '../components/Skeleton'
 import { useFleet } from '../useFleet'
 import {
-  filtersActive,
   filtersFromParams,
   filtersToParams,
   matchesFilters,
-  recentDoneIds,
   type JobFilters,
 } from '../jobFilters'
 
-// The states the "All states" dropdown offers, lifecycle-ordered.
+// The states the state-filter dropdown offers, lifecycle-ordered. The default
+// ("Active") is no filter at all — the finished-hiding gate in matchesFilters
+// is what makes the unfiltered view active-only.
 const FILTER_STATES: JobState[] = [
   'Draft', 'Frozen', 'Batched', 'Blocked', 'Ready', 'Work',
   'Evaluation', 'WrapUp', 'Escalated', 'Stalled', 'Done', 'Revoked',
@@ -288,16 +288,7 @@ export function ProjectPage() {
     filterKeyRef.current = filterKey
     pinnedRef.current = new Set()
   }
-  // The last few Done jobs ride along in the default view (dimmed, sinking to
-  // the bottom under the state sort) so recent completions stay glanceable. The
-  // exemption applies ONLY when no filter is active — any explicit filter
-  // (state, quick, search, show-finished) hides the tail again, so search
-  // behaves exactly as before. `tailRow` (the dimming) uses the same gate.
-  const recentTail = recentDoneIds(jobs)
-  const showTail = !filtersActive(filters)
-  const tailRow = (j: Job) => showTail && recentTail.has(j.id)
-  const passesFilter = (j: Job) =>
-    matchesFilters(j, filters, claimedInWork, showTail ? recentTail : undefined)
+  const passesFilter = (j: Job) => matchesFilters(j, filters, claimedInWork)
   const visible = jobs.filter((j) => passesFilter(j) || pinnedRef.current.has(j.id))
   pinnedRef.current = new Set(visible.map((j) => j.id))
 
@@ -400,7 +391,6 @@ export function ProjectPage() {
           <div className="jobs-toolbar">
             <div className="jobs-toolbar-title">
               <h2 className="jobs-h1">Jobs</h2>
-              <p className="jobs-sub">Monitor and manage background work across your repository.</p>
             </div>
             <div className="jobs-controls">
               <div className="search-field">
@@ -412,7 +402,6 @@ export function ProjectPage() {
                   onChange={(e) => setFilters({ ...filters, q: e.target.value })}
                   aria-label="Search jobs"
                 />
-                <span className="kbd-hint">⌘K</span>
               </div>
               <select
                 className="state-filter"
@@ -423,7 +412,7 @@ export function ProjectPage() {
                 }}
                 aria-label="Filter by state"
               >
-                <option value="">All states</option>
+                <option value="">Active</option>
                 {stateDropdownValue === '__multi' && <option value="__multi">Filtered…</option>}
                 {FILTER_STATES.map((s) => (
                   <option key={s} value={s}>
@@ -480,7 +469,6 @@ export function ProjectPage() {
                   i % 2 ? 'row-stripe' : '',
                   j.state === 'Draft' ? 'row-draft' : '',
                   member ? 'row-batch-member' : '',
-                  tailRow(j) ? 'row-recent-done' : '',
                 ]
                   .filter(Boolean)
                   .join(' ')}
