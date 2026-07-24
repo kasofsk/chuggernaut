@@ -70,5 +70,8 @@ flate2 = "1"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 futures = "0.3"
+# Signalling a process GROUP (worker self-refresh cancel, ticket #254) — std has
+# no equivalent. Already in the tree via tokio; no new supply chain.
+libc = "0.2"
 tower = { version = "0.5", features = ["util"] }
 testcontainers = "=0.26.3"

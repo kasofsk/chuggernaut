@@ -6,8 +6,8 @@ use crate::{NatsStore, StoreError, subjects};
 use std::time::Duration;
 use types::worker::{
     ContainerRef, CopyFileOk, CopyFileRequest, InspectOk, LaunchOk, ListExitedOk, ListRunningOk,
-    LogsOk, LogsTailOk, LogsTailRequest, PingOk, RefreshOk, RefreshRequest, WorkerError,
-    WorkerLaunchRequest, WorkerReply,
+    LogsOk, LogsTailOk, LogsTailRequest, PingOk, RefreshCancelOk, RefreshCancelRequest, RefreshOk,
+    RefreshRequest, WorkerError, WorkerLaunchRequest, WorkerReply,
 };
 
 /// Requests must fit NATS's default 1MB max_payload with headroom. Launch
@@ -159,6 +159,16 @@ impl WorkerRpc {
         req: &RefreshRequest,
     ) -> std::result::Result<RefreshOk, WorkerRpcError> {
         self.call("refresh", req, REFRESH_TIMEOUT).await
+    }
+
+    /// Cancel an in-flight self-refresh to `req.sha` (ticket #254). Like
+    /// `refresh` this only covers the round-trip: the daemon signals its build
+    /// and answers, it does not wait for the build to die.
+    pub async fn refresh_cancel(
+        &self,
+        req: &RefreshCancelRequest,
+    ) -> std::result::Result<RefreshCancelOk, WorkerRpcError> {
+        self.call("refresh_cancel", req, REFRESH_TIMEOUT).await
     }
 
     pub async fn remove(&self, id: &str) -> std::result::Result<(), WorkerRpcError> {

@@ -84,6 +84,14 @@ pub enum AdminCmd {
         /// can take minutes; the new version still flows to the fleet snapshot).
         #[arg(long, default_value = "0")]
         wait_secs: u64,
+        /// CANCEL the in-flight refresh to `--sha` on this node instead of
+        /// requesting one (ticket #254). The deploy fans refreshes out to every
+        /// node at once, so when one node fails it cancels the rest rather than
+        /// letting them build for another ten minutes against a deploy that is
+        /// already failing. A node that already swapped stays swapped — the
+        /// reply says so.
+        #[arg(long)]
+        cancel: bool,
     },
 }
 
@@ -295,7 +303,14 @@ pub async fn run(args: AdminArgs) -> Result<()> {
             sha,
             tag,
             wait_secs,
-        } => run_worker_refresh(&store, &node, &sha, &tag, wait_secs).await,
+            cancel,
+        } => {
+            if cancel {
+                run_worker_refresh_cancel(&store, &node, &sha).await
+            } else {
+                run_worker_refresh(&store, &node, &sha, &tag, wait_secs).await
+            }
+        }
         AdminCmd::WorkerCreds { .. } | AdminCmd::WorkerGitKey { .. } => {
             unreachable!("handled before connect")
         }
@@ -367,6 +382,34 @@ async fn run_worker_refresh(
         return Ok(());
     }
     worker_refresh_wait(&rpc, node, sha, wait_secs).await
+}
+
+/// Cancel an in-flight refresh (ticket #254). Soft like every other refresh
+/// path: it prints one machine-readable line and returns `Ok`, because the
+/// deploy is ALREADY failing when this runs — a cancel that cannot be delivered
+/// must not replace the real failure with its own.
+///
+/// The printed line is what `update.sh` folds into the cancelled node's leg
+/// detail, so both outcomes are stated plainly: the refresh was stopped, or the
+/// node had already swapped and stays on the new images ahead of a dispatcher
+/// that will not advance (spec §3.1 version-skew window).
+async fn run_worker_refresh_cancel(store: &NatsStore, node: &str, sha: &str) -> Result<()> {
+    use store::worker::WorkerRpc;
+    use types::worker::RefreshCancelRequest;
+
+    let rpc = WorkerRpc::new(store.clone(), node);
+    let req = RefreshCancelRequest {
+        sha: sha.to_string(),
+    };
+    match rpc.refresh_cancel(&req).await {
+        Ok(ok) if ok.cancelled => println!("refresh cancelled: node={node} sha={sha}"),
+        Ok(ok) => println!(
+            "refresh cancel declined: node={node} — {}",
+            one_line(&ok.note)
+        ),
+        Err(e) => println!("refresh cancel not delivered: node={node} — {e}"),
+    }
+    Ok(())
 }
 
 /// Wait for a requested refresh to land, RELAYING the node's live progress to

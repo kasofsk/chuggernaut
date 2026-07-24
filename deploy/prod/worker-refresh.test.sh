@@ -80,6 +80,14 @@ if [ -n "\${FAIL_BUILD:-}" ]; then
     build*chuggernaut/\$FAIL_BUILD:*) exit 1 ;;
   esac
 fi
+# Cancel injection (ticket #254): FAKE_TERM_ON_BUILD names an image whose build
+# SIGTERMs the script mid-flight — exactly what the daemon's \`refresh_cancel\`
+# does to this script's whole process group when the deploy cancels the node.
+if [ -n "\${FAKE_TERM_ON_BUILD:-}" ]; then
+  case "\$*" in
+    build*chuggernaut/\$FAKE_TERM_ON_BUILD:*) kill -TERM "\$PPID" ;;
+  esac
+fi
 exit 0
 EOF
 
@@ -197,6 +205,33 @@ PATH="$BIN:$PATH" \
 grep_out "df cannot read"
 grep_log "docker build -q -t chuggernaut/worker:prod-refresh"
 echo "ok: disk pre-flight fails open when df cannot report"
+
+# ── Case 1g: a CANCELLED build cleans up after itself (ticket #254) ──────────
+# The parallel deploy fan-out cancels the nodes still building as soon as one
+# node fails, by signalling this script's process group. POSIX sh does NOT run
+# an EXIT trap when it is killed by a signal, so without the TERM handler the
+# staged `-refresh` tags and the partial generation behind them would be
+# stranded — the disk-pressure loop #248 closed, re-opened by cancellation.
+: > "$LOG"
+set_free_kb 60000000
+if PATH="$BIN:$PATH" \
+     WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+     WORKER_GIT_KEY="$KEY" \
+     FAKE_FETCH_HEAD=abc123 \
+     FAKE_TERM_ON_BUILD=agent-rust \
+     sh "$SUT" build abc123 prod > "$OUT" 2>&1; then
+  fail "a cancelled build must exit non-zero (the deploy is failing)"
+fi
+grep_out "cancelled — dropping staged tags"
+grep_log "docker rmi -f chuggernaut/worker:prod-refresh"
+grep_log "docker image prune -f"
+grep_out "pruned after a failed build"
+# The live images belong to the generation the node is still running: a cancel
+# must leave them exactly as they were.
+if grep -qF "docker tag chuggernaut/worker:prod-refresh chuggernaut/worker:prod" "$LOG"; then
+  fail "a cancelled build must never retag-swap onto the live tag"
+fi
+echo "ok: a cancelled build drops its staged tags, prunes, and never swaps live"
 
 # ── Case 1b: build refuses when remote HEAD != requested SHA (no wrong build) ──
 : > "$LOG"

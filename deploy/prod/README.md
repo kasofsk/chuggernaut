@@ -520,6 +520,17 @@ Notes:
   them into the failing leg's `detail` — so `ssh` + `docker logs chug-worker` is
   the second resort now, not the first. If the progress lines are *absent*
   during a real refresh, the node is running a daemon older than this feature.
+- **The fleet refreshes in parallel, and one failure stops the rest.** Every
+  worker node is asked at once and confirmed concurrently, so this step costs
+  the slowest node's build, not the sum (#254). The progress lines of the nodes
+  therefore **interleave** — read the `node=` on each. When a node fails, the
+  deploy cancels the refreshes still building on the others
+  (`chuggernaut admin worker-refresh --cancel --node N --sha S`, which the
+  daemon honours by signalling the build's process group) and each cancelled
+  node gets a **failed** `worker-refresh:{node}` leg naming the node that
+  aborted the deploy. A node that had already started swapping stays swapped —
+  its leg says so, and the fleet snapshot's per-node version is the
+  cross-check. To cancel a hand-run refresh, the same command works standalone.
 
 ### Fast image builds (BuildKit dependency caching, #115)
 

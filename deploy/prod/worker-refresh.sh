@@ -178,6 +178,14 @@ build)
     fi
   }
   trap 'RC=$?; refresh_cleanup "$RC"; exit "$RC"' EXIT
+  # A cancelled deploy signals this script's whole process group (ticket #254:
+  # the daemon's `refresh_cancel`), so the build dies mid-flight. POSIX sh does
+  # NOT run the EXIT trap when it is killed by a signal — without this handler
+  # the staged `-refresh` tags and the partial generation behind them would be
+  # stranded on the node, which is exactly the disk-pressure loop #248 closed.
+  # Exiting from the handler runs the EXIT trap, so a cancel cleans up on the
+  # same path a failed build does. 143 = 128 + SIGTERM, the conventional code.
+  trap 'echo "worker-refresh: cancelled — dropping staged tags (live images untouched)" >&2; exit 143' TERM INT
   # Fetch the repo's advertised HEAD (its default branch tip) over the ssh
   # front, then verify it resolves to the requested SHA before building.
   #

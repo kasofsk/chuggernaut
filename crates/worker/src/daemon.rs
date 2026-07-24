@@ -25,9 +25,9 @@ use store::worker::{encode_reply, op_from_subject};
 use store::{NatsStore, StoreError};
 use types::worker::{
     ContainerRef, CopyFileOk, CopyFileRequest, FileSource, InspectOk, LaunchOk, LogsOk, LogsTailOk,
-    LogsTailRequest, PingOk, RefreshOk, RefreshOutcome, RefreshProgress, RefreshRequest,
-    RefreshResult, WireStatus, WorkerError, WorkerLaunchRequest, WorkerReply, b64_decode,
-    b64_encode,
+    LogsTailRequest, PingOk, REFRESH_STAGE_CANCELLED, RefreshCancelOk, RefreshCancelRequest,
+    RefreshOk, RefreshOutcome, RefreshProgress, RefreshRequest, RefreshResult, WireStatus,
+    WorkerError, WorkerLaunchRequest, WorkerReply, b64_decode, b64_encode,
 };
 
 /// Logs are tailed to fit the reply under NATS's 1MB max_payload after
@@ -63,6 +63,12 @@ const REFRESH_PHASE_MARKER: &str = "worker-refresh: phase ";
 const REFRESH_PROGRESS_LINES: usize = 5;
 const REFRESH_PROGRESS_LINE_BYTES: usize = 300;
 
+/// How long a cancelled build (ticket #254) gets to die on SIGTERM before the
+/// daemon escalates to SIGKILL. Generous enough for `worker-refresh.sh`'s EXIT
+/// trap to drop the staged tags and prune, short enough that the deploy's own
+/// cancel drain does not wait on it.
+const REFRESH_CANCEL_GRACE: Duration = Duration::from_secs(20);
+
 /// Guards the daemon self-refresh swap window (spec §3.1 drain guarantee).
 /// Refreshing must never interrupt in-flight job containers, and the daemon
 /// must not replace itself *between accepting a launch and the container
@@ -79,6 +85,15 @@ struct RefreshGate {
     inflight: AtomicUsize,
     /// One refresh at a time.
     refreshing: AtomicBool,
+    /// A cancel landed for the refresh in flight (ticket #254). Checked at every
+    /// step boundary of `run_refresh`, so a cancelled refresh stops at the next
+    /// one instead of only when its build process notices the signal.
+    cancelled: AtomicBool,
+    /// The swap window has opened: the daemon is being replaced and the node
+    /// WILL come up on the new images. Past this point a cancel is refused —
+    /// nothing can un-swap a node, and saying otherwise would put a lie in the
+    /// deploy leg.
+    swapping: AtomicBool,
 }
 
 /// Held for the accept→container-exists window of one launch; decrements the
@@ -120,9 +135,44 @@ impl RefreshGate {
         self.quiescing.store(true, Ordering::SeqCst);
     }
 
-    /// Abort a refresh that failed before the swap: reopen launches.
+    /// Mark the in-flight refresh cancelled (ticket #254). Returns whether the
+    /// cancel is authoritative — `false` means the swap window had already
+    /// opened, so the node is going onto the new images regardless.
+    ///
+    /// The store-then-read pairs with [`Self::begin_swap`]'s read-then-store: at
+    /// most one of the two can win, and this one only claims a win when it can
+    /// prove the swap had not started. The error is therefore always in the safe
+    /// direction — a cancel may under-report, never over-report.
+    fn cancel(&self) -> bool {
+        self.cancelled.store(true, Ordering::SeqCst);
+        !self.swapping.load(Ordering::SeqCst)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Open the swap window unless a cancel already landed; `false` ⇒ the
+    /// refresh was cancelled and must not swap.
+    fn begin_swap(&self) -> bool {
+        if self.cancelled.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.swapping.store(true, Ordering::SeqCst);
+        if self.cancelled.load(Ordering::SeqCst) {
+            self.swapping.store(false, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    /// Abort a refresh that failed before the swap: reopen launches. Clears the
+    /// cancel flags too — they belong to the refresh that just ended, and a
+    /// leftover `cancelled` would poison the node's NEXT refresh.
     fn abort(&self) {
         self.quiescing.store(false, Ordering::SeqCst);
+        self.cancelled.store(false, Ordering::SeqCst);
+        self.swapping.store(false, Ordering::SeqCst);
         self.refreshing.store(false, Ordering::SeqCst);
     }
 
@@ -172,6 +222,11 @@ struct WorkerState {
     /// `ping` so the deploy's wait loop relays per-phase progress instead of
     /// sitting silent for the whole build window. `None` between refreshes.
     refresh_progress: std::sync::Mutex<Option<RefreshProgressState>>,
+    /// Process GROUP of the refresh script currently running (ticket #254), so a
+    /// `refresh_cancel` can signal the whole build — the shell AND the `docker
+    /// build` it is blocked on — rather than orphaning the build under a dead
+    /// shell. `None` whenever no script child is running.
+    refresh_pgid: std::sync::Mutex<Option<i32>>,
 }
 
 /// The daemon-side half of [`RefreshProgress`]: same story, but holding the
@@ -328,6 +383,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         refresh: RefreshGate::default(),
         refresh_outcome: std::sync::Mutex::new(None),
         refresh_progress: std::sync::Mutex::new(None),
+        refresh_pgid: std::sync::Mutex::new(None),
     });
     if state.refresh_script.is_none() {
         tracing::warn!(
@@ -443,6 +499,7 @@ async fn handle(state: &Arc<WorkerState>, subject: &str, payload: &[u8]) -> Vec<
         Some("list_exited") => encode_reply(&list_exited(state).await),
         Some("list_running") => encode_reply(&list_running(state).await),
         Some("refresh") => encode_reply(&refresh(state, payload).await),
+        Some("refresh_cancel") => encode_reply(&refresh_cancel(state, payload).await),
         other => encode_reply::<()>(&WorkerReply::Err {
             error: WorkerError::Other {
                 message: format!("unknown op {other:?} on {subject}"),
@@ -786,7 +843,22 @@ async fn refresh(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<Refres
 async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshRequest) {
     tracing::info!(node = %state.node, sha = %req.sha, tag = %req.tag, "worker refresh: building images");
     let progress = &state.refresh_progress;
-    if let Err(e) = run_script(&script, &["build", &req.sha, &req.tag], Some(progress)).await {
+    let built = run_script(
+        &script,
+        &["build", &req.sha, &req.tag],
+        Some(progress),
+        Some(&state.refresh_pgid),
+    )
+    .await;
+    // Cancellation is checked BEFORE the build's own verdict: a cancel kills the
+    // build, so the build error it produces is a CONSEQUENCE of the cancel, not
+    // the cause. Attributing it to `build` would put "the node's build broke" in
+    // a deploy leg for a node the deploy itself stopped (ticket #254).
+    if state.refresh.is_cancelled() {
+        refresh_end_cancelled(&state, "build");
+        return;
+    }
+    if let Err(e) = built {
         tracing::error!(node = %state.node, "worker refresh: build failed, aborting: {e}");
         record_refresh_failure(&state, "build", &e);
         state.refresh.abort();
@@ -805,9 +877,16 @@ async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshReque
         return;
     }
 
+    // Last cancellable instant: past `begin_swap` the node is going onto the new
+    // images and a cancel is refused, so this is where a cancel that arrived
+    // during the build or the drain actually stops the refresh.
+    if !state.refresh.begin_swap() {
+        refresh_end_cancelled(&state, "drain");
+        return;
+    }
     tracing::info!(node = %state.node, "worker refresh: swapping daemon (job containers survive)");
     refresh_progress_phase(progress, "daemon-swap");
-    if let Err(e) = run_script(&script, &["swap", &req.tag], Some(progress)).await {
+    if let Err(e) = run_script(&script, &["swap", &req.tag], Some(progress), None).await {
         // The swap spawns a detached replacement, so on success this process is
         // simply removed and never returns here. Reaching this arm means the
         // swap itself failed to launch — reopen so the node keeps serving.
@@ -833,6 +912,113 @@ fn record_refresh_failure(state: &WorkerState, stage: &str, error: &str) {
             stage: stage.to_string(),
             error_tail,
         };
+    }
+}
+
+/// End a refresh the deploy cancelled (ticket #254): record the terminal
+/// verdict under the shared `cancelled` stage — so the deploy reads back "this
+/// node was stopped", never "this node's build broke" — and reopen launches. The
+/// node keeps its old images and its old daemon, exactly as on any other
+/// pre-swap failure.
+fn refresh_end_cancelled(state: &WorkerState, during: &str) {
+    tracing::warn!(node = %state.node, "worker refresh: cancelled during {during} (old images kept)");
+    record_refresh_failure(
+        state,
+        REFRESH_STAGE_CANCELLED,
+        &format!("cancelled by the deploy during {during}; node stays on its old images"),
+    );
+    state.refresh.abort();
+}
+
+/// `refresh_cancel` (spec §3.1, ticket #254): abort the in-flight refresh to
+/// `sha`. Soft by construction — a cancel races the build it aborts, so "no
+/// refresh in flight", "a different SHA", and "already swapping" are reported
+/// outcomes, not errors.
+async fn refresh_cancel(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<RefreshCancelOk> {
+    reply(
+        async {
+            let req: RefreshCancelRequest = parse(payload)?;
+            // Only OUR target may be cancelled: a node converging on some other
+            // SHA (a concurrent deploy, a hand-run refresh) is none of this
+            // deploy's business.
+            let target = state
+                .refresh_outcome
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|o| o.result == RefreshResult::InProgress)
+                .map(|o| o.to_sha.clone());
+            let note = match target {
+                None => "no refresh in flight".to_string(),
+                Some(sha) if sha != req.sha => {
+                    format!("node is refreshing to {sha}, not {}", req.sha)
+                }
+                Some(_) if !state.refresh.cancel() => {
+                    "refresh already past the swap — node stays on the new images".to_string()
+                }
+                Some(_) => {
+                    let pgid = *state.refresh_pgid.lock().unwrap();
+                    signal_refresh_build(state, pgid);
+                    return Ok(RefreshCancelOk {
+                        cancelled: true,
+                        note: String::new(),
+                    });
+                }
+            };
+            tracing::info!(node = %state.node, sha = %req.sha, "worker refresh cancel declined: {note}");
+            Ok(RefreshCancelOk {
+                cancelled: false,
+                note,
+            })
+        }
+        .await,
+    )
+}
+
+/// Stop the refresh script's build (ticket #254): SIGTERM the whole process
+/// GROUP, then SIGKILL what survives the grace window.
+///
+/// The group, not the child: the script blocks in `docker build`, so killing
+/// only the shell would leave a ten-minute build running against a deploy that
+/// is already failing — and skip the script's cleanup. TERM first because
+/// `worker-refresh.sh` traps it and exits through its EXIT trap, which is what
+/// drops the staged `-refresh` tags and prunes the partial generation (#248).
+/// The SIGKILL escalation is the bound: a build that ignores TERM still dies.
+///
+/// A missing pgid is normal — the cancel landed between scripts (during the
+/// drain); the `cancelled` flag alone stops the refresh at the next checkpoint.
+fn signal_refresh_build(state: &Arc<WorkerState>, pgid: Option<i32>) {
+    let Some(pgid) = pgid else {
+        tracing::info!(node = %state.node, "worker refresh cancel: no build process running");
+        return;
+    };
+    tracing::warn!(node = %state.node, pgid, "worker refresh cancel: signalling the build process group");
+    kill_process_group(pgid, libc::SIGTERM);
+    let st = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(REFRESH_CANCEL_GRACE).await;
+        if *st.refresh_pgid.lock().unwrap() == Some(pgid) {
+            tracing::warn!(node = %st.node, pgid, "worker refresh cancel: build ignored SIGTERM — SIGKILL");
+            kill_process_group(pgid, libc::SIGKILL);
+        }
+    });
+}
+
+/// Signal a process group. The daemon spawns refresh scripts into their own
+/// group (`process_group(0)` in [`run_script`]), so the negated pid can never
+/// reach the daemon's own group — the one thing that would turn a cancel into
+/// an outage.
+fn kill_process_group(pgid: i32, signal: i32) {
+    debug_assert!(pgid > 1, "pgid {pgid} must be a real process group");
+    // SAFETY: `kill` is async-signal-safe and takes no pointers; the only
+    // failure mode is ESRCH (the group already exited), which is a no-op.
+    let rc = unsafe { libc::kill(-pgid, signal) };
+    if rc != 0 {
+        tracing::info!(
+            pgid,
+            signal,
+            "worker refresh cancel: process group already gone"
+        );
     }
 }
 
@@ -863,21 +1049,66 @@ async fn drain(gate: &RefreshGate, timeout: Duration) -> bool {
 /// Every line is ALSO folded into `progress` (ticket #253) as it arrives, so a
 /// concurrent `ping` reports what the script is doing right now and the deploy's
 /// wait loop can relay it. `None` disables that (nothing to report into).
+///
+/// `pgid_slot` (ticket #254) publishes the child's process GROUP while it runs,
+/// so `refresh_cancel` can stop the whole build. The child is spawned into its
+/// OWN group for exactly that reason — the daemon must never be able to signal
+/// itself — and the slot is cleared before this returns, so a cancel arriving
+/// after the script exits signals nothing.
 async fn run_script(
     script: &Path,
     args: &[&str],
     progress: Option<&std::sync::Mutex<Option<RefreshProgressState>>>,
+    pgid_slot: Option<&std::sync::Mutex<Option<i32>>>,
 ) -> Result<(), String> {
     use std::process::Stdio;
-    use tokio::io::{AsyncBufReadExt, BufReader};
 
     let phase = args.first().copied().unwrap_or("");
     let mut child = tokio::process::Command::new(script)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|e| format!("spawning {}: {e}", script.display()))?;
+    // With `process_group(0)` the child leads its own group, so its pid IS the
+    // group id.
+    let pgid = child.id().map(|pid| pid as i32);
+    if let Some(slot) = pgid_slot {
+        *slot.lock().unwrap() = pgid;
+    }
+
+    let tail = run_script_stream(&mut child, phase, progress).await;
+    let status = child.wait().await;
+    if let Some(slot) = pgid_slot {
+        *slot.lock().unwrap() = None;
+    }
+    let status = status.map_err(|e| format!("waiting on {}: {e}", script.display()))?;
+    if status.success() {
+        return Ok(());
+    }
+    let head = format!("{} {:?} exited {status}", script.display(), args);
+    let tail = bounded_tail(
+        &tail.iter().cloned().collect::<Vec<_>>().join("\n"),
+        REFRESH_TAIL_LINES,
+        REFRESH_TAIL_BYTES,
+    );
+    if tail.is_empty() {
+        Err(head)
+    } else {
+        Err(format!("{head}\n{tail}"))
+    }
+}
+
+/// Pump the child's stdout+stderr until both close, streaming every line to the
+/// daemon's log and into `progress`, and return the bounded tail. Split out of
+/// [`run_script`] so each stays one readable unit.
+async fn run_script_stream(
+    child: &mut tokio::process::Child,
+    phase: &str,
+    progress: Option<&std::sync::Mutex<Option<RefreshProgressState>>>,
+) -> std::collections::VecDeque<String> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
 
     // Feed both streams' lines into one channel; a single consumer prints and
     // buffers them so stdout/stderr interleave in arrival order.
@@ -912,25 +1143,7 @@ async fn run_script(
         }
         tail.push_back(line);
     }
-
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| format!("waiting on {}: {e}", script.display()))?;
-    if status.success() {
-        return Ok(());
-    }
-    let head = format!("{} {:?} exited {status}", script.display(), args);
-    let tail = bounded_tail(
-        &tail.iter().cloned().collect::<Vec<_>>().join("\n"),
-        REFRESH_TAIL_LINES,
-        REFRESH_TAIL_BYTES,
-    );
-    if tail.is_empty() {
-        Err(head)
-    } else {
-        Err(format!("{head}\n{tail}"))
-    }
+    tail
 }
 
 /// Bound a captured script tail: keep at most the last `max_lines` lines, then
@@ -987,6 +1200,45 @@ mod tests {
         gate.abort();
         assert!(gate.try_launch().is_some(), "launches admitted after abort");
         assert!(gate.begin_refresh(), "refresh slot freed after abort");
+    }
+
+    /// A cancel that lands BEFORE the swap window stops the refresh: it is
+    /// authoritative, the swap is refused, and the abort leaves the node clean
+    /// for its next refresh (ticket #254 — the deploy fan-out cancels the nodes
+    /// still building the moment one node fails).
+    #[test]
+    fn refresh_gate_cancel_before_swap_stops_the_swap() {
+        let gate = RefreshGate::default();
+        assert!(gate.begin_refresh());
+
+        assert!(gate.cancel(), "a pre-swap cancel is authoritative");
+        assert!(gate.is_cancelled());
+        assert!(
+            !gate.begin_swap(),
+            "a cancelled refresh must never swap the daemon"
+        );
+
+        // The cancel belongs to the refresh that just ended — a leftover flag
+        // would poison the node's NEXT refresh into cancelling itself.
+        gate.abort();
+        assert!(!gate.is_cancelled(), "abort clears the cancel");
+        assert!(gate.begin_refresh(), "refresh slot freed after abort");
+        assert!(gate.begin_swap(), "the next refresh may swap normally");
+    }
+
+    /// Once the swap window is open the node IS going onto the new images:
+    /// the cancel is refused rather than reported as a stop that never happened.
+    /// That honesty is what lets the deploy leg say "this node stayed swapped".
+    #[test]
+    fn refresh_gate_cancel_after_swap_is_declined() {
+        let gate = RefreshGate::default();
+        assert!(gate.begin_refresh());
+        assert!(gate.begin_swap());
+
+        assert!(
+            !gate.cancel(),
+            "a cancel arriving after the swap window opened cannot un-swap the node"
+        );
     }
 
     /// Caching on ⇒ the launch env gains sccache wiring, with `SCCACHE_DIR`
@@ -1106,7 +1358,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let err = run_script(&script, &["build", "abc", "prod"], None)
+        let err = run_script(&script, &["build", "abc", "prod"], None, None)
             .await
             .expect_err("non-zero exit is an error");
         assert!(err.contains("exited"), "keeps the exit summary: {err:?}");
@@ -1123,7 +1375,7 @@ mod tests {
         let ok = dir.join("ok.sh");
         std::fs::write(&ok, "#!/bin/sh\necho fine\nexit 0\n").unwrap();
         std::fs::set_permissions(&ok, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(run_script(&ok, &["swap", "prod"], None).await.is_ok());
+        assert!(run_script(&ok, &["swap", "prod"], None, None).await.is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

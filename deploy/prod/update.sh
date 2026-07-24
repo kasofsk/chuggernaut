@@ -18,21 +18,6 @@ set -eu
 # identically from any caller: runner, ssh, or an interactive shell.
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-# refresh_workers — request a self-refresh of every worker node in DOCKER_NODES
-# and WAIT for confirmation (spec §3.1). Extracted as a function so it is unit
-# testable (update-refresh.test.sh) with a stubbed chuggernaut binary.
-#
-# The `admin worker-refresh` CLI always exits 0 — every outcome (not accepted,
-# SKIPPED for no git credential, already-in-progress, and even "not confirmed
-# within the wait window") returns Ok and prints its story to stdout; ONLY a
-# confirmed swap prints "refresh OK:" (admin.rs). So we cannot trust the exit
-# code: we pass --wait-secs 90 to actually RUN the confirm loop and treat the
-# absence of a "refresh OK:" line as a FAILED deploy step. No more
-# `|| echo WARNING` masking a refresh that never landed (#186).
-#
-# Returns 0 iff every worker node confirmed onto $TARGET_SHA; non-zero otherwise.
-# Reads TARGET_SHA, DOCKER_NODES, NATS_URL, KEYS_DIR, CHUG_IMAGE_TAG from the env;
-# the chuggernaut binary is $CHUG_BIN (default target/release/chuggernaut).
 # --- structured-leg helpers (ticket #187) ------------------------------------
 # Pure emit helpers, defined above the CHUG_UPDATE_LIB gate so the test harness
 # (and refresh_workers, which emits per-node legs) can use them when sourced.
@@ -72,67 +57,269 @@ leg_ok() {
 }
 
 
+# ── worker refresh fan-out (spec §3.1; tickets #186/#187/#253/#254) ───────────
+# Request a self-refresh of every worker node in DOCKER_NODES and WAIT for
+# confirmation. Split into functions so the whole flow is unit testable
+# (update-refresh.test.sh) against a stubbed chuggernaut binary.
+#
+# PARALLEL, not serial (ticket #254). Each node rebuilds its own three images
+# locally and swaps its own daemon — the builds share nothing — so walking the
+# fleet serially made deploy wall-clock the SUM of the node build times
+# (observed 2026-07-23: air ~11-15min + nuc ~7min ≈ 20+min) where it should be
+# the MAX. Every node's refresh is requested up front and the confirmations are
+# collected concurrently, each against its own per-node deadline.
+#
+# The `admin worker-refresh` CLI always exits 0 — every outcome (not accepted,
+# SKIPPED for no git credential, already-in-progress, and even "not confirmed
+# within the wait window") returns Ok and prints its story to stdout; ONLY a
+# confirmed swap prints "refresh OK:" (admin.rs). So we cannot trust the exit
+# code: we pass --wait-secs to actually RUN the confirm loop and treat the
+# absence of a "refresh OK:" line as a FAILED deploy step. No more
+# `|| echo WARNING` masking a refresh that never landed (#186).
+#
+# CANCEL ON FIRST FAILURE (#254). The moment one node fails there is nothing to
+# win by letting the others build for another ten minutes against a deploy that
+# is already failing: the remaining refreshes are cancelled (`admin
+# worker-refresh --cancel`, which the daemon honours by signalling the build's
+# process group). Deploy-level semantics are UNCHANGED — any unconfirmed or
+# cancelled node still fails the deploy, so there is no such thing as a
+# half-deploy here.
+#
+# VERSION SKEW, and why the swap is deliberately NOT two-phase. A failed deploy
+# can leave a node already swapped onto the new images while the dispatcher
+# stays on the old SHA. That window is neither new nor materially widened by the
+# fan-out: on EVERY successful deploy all worker nodes swap here at step 3 while
+# the dispatcher only restarts at step 6, so "workers ahead of the dispatcher"
+# is a state the platform is designed to run in for minutes at a time, exercised
+# by every deploy — the worker RPC is versioned for exactly that window (spec
+# §3.1). A two-phase build-all-then-swap-all shape was considered and rejected:
+# the live image tags flip at the END of a node's BUILD phase (worker-refresh.sh
+# does the retag-swap there), so gating only the daemon swap would gate the
+# smaller half of the window while forcing the staged `{tag}-refresh` images to
+# survive across two RPCs — which breaks the EXIT-trap cleanup that stops a
+# failed refresh from stranding a whole image generation (#248), and a deploy
+# dying between the phases would strand one on every node at once. Cancelling
+# early is the mitigation that actually narrows the window. A node that already
+# swapped before its cancel arrived stays swapped, and its leg says so.
+#
+# Reads TARGET_SHA, DOCKER_NODES, NATS_URL, KEYS_DIR, CHUG_IMAGE_TAG from the
+# env; the chuggernaut binary is $CHUG_BIN (default target/release/chuggernaut).
+# Returns 0 iff every worker node confirmed onto $TARGET_SHA.
 refresh_workers() {
   [ -n "${DOCKER_NODES:-}" ] || return 0
-  bin="${CHUG_BIN:-target/release/chuggernaut}"
+  CHUG_WR_BIN="${CHUG_BIN:-target/release/chuggernaut}"
   # A real refresh REBUILDS the node's three images before the daemon swap —
   # minutes even warm (the nuc took ~7 on 2026-07-23), not seconds. 90s would
   # fail every honest deploy mid-build; default to 15min, overridable per
-  # deploy (WORKER_REFRESH_WAIT_SECS) for fleets with hotter caches.
-  wait_secs="${WORKER_REFRESH_WAIT_SECS:-900}"
-  # Scratch file the CLI's transcript is tee'd into (ticket #253, below). One
-  # file for the whole function, truncated per node; removed on both exits.
-  _wr_log="$(mktemp)"
-  # Main-shell iteration (no pipeline): chug_leg_drop mutates
-  # CHUG_LEGS_PENDING, and a `| while` subshell would discard those drops —
-  # the EXIT trap would then re-mark already-emitted worker-refresh legs as
-  # skipped (#207 review).
-  for _entry in $(printf '%s' "$DOCKER_NODES" | tr ',' ' '); do
-    wn="$(printf '%s' "$_entry" | cut -d'|' -f1 | tr -d '[:space:]')"
-    wep="$(printf '%s' "$_entry" | cut -d'|' -f2 | tr -d '[:space:]')"
-    [ "$wep" = "worker" ] || continue
-    echo "update: requesting self-refresh of worker '$wn' -> $TARGET_SHA (waiting up to ${wait_secs}s for confirmation)"
-    _wr_start="$(date +%s)"
-    : > "$_wr_log"
-    # RELAY, don't buffer (ticket #253). This used to be `out="$(... )"` — a
-    # command substitution that swallowed the ENTIRE refresh and reprinted it
-    # only after the wait window closed, so a 10-minute image rebuild showed
-    # the deploy job's task output precisely nothing while it ran. `tee` passes
-    # every line through to stdout the instant the CLI emits it (the CLI relays
-    # the node's per-phase progress and 30s elapsed-time heartbeats), and keeps
-    # a copy for the confirm/detail greps below.
-    #
-    # The grep MUST read that copy rather than the pipeline: the checks below
-    # call chug_leg_drop, which mutates CHUG_LEGS_PENDING and would be lost in a
-    # pipeline subshell (#207 review). The CLI always exits 0 (#186), so the
-    # pipeline's status is ignored exactly as before — only a `refresh OK:` line
-    # confirms.
-    "$bin" admin worker-refresh \
+  # deploy (WORKER_REFRESH_WAIT_SECS) for fleets with hotter caches. It is a
+  # PER-NODE window, not a budget the fleet shares.
+  CHUG_WR_WAIT="${WORKER_REFRESH_WAIT_SECS:-900}"
+  _nodes="$(refresh_worker_nodes)"
+  [ -n "$_nodes" ] || return 0
+  CHUG_WR_DIR="$(mktemp -d)"
+  for _n in $_nodes; do
+    echo "update: requesting self-refresh of worker '$_n' -> $TARGET_SHA (waiting up to ${CHUG_WR_WAIT}s for confirmation)"
+    # Stamp the start in the MAIN shell, before the waiter exists, so each leg's
+    # secs is that node's own elapsed time rather than the fan-out's.
+    date +%s > "$CHUG_WR_DIR/$_n.start"
+    refresh_worker_one "$_n" &
+    echo "$!" > "$CHUG_WR_DIR/$_n.pid"
+  done
+  _rc=0
+  refresh_workers_collect "$_nodes" || _rc=1
+  rm -rf "$CHUG_WR_DIR"
+  return "$_rc"
+}
+
+# The `worker`-endpoint node names in DOCKER_NODES, one per line. One parser
+# feeds both the fan-out and the pending-leg registration in the deploy body, so
+# the two can never disagree about which nodes get a leg.
+refresh_worker_nodes() {
+  for _entry in $(printf '%s' "${DOCKER_NODES:-}" | tr ',' ' '); do
+    _wn="$(printf '%s' "$_entry" | cut -d'|' -f1 | tr -d '[:space:]')"
+    _wep="$(printf '%s' "$_entry" | cut -d'|' -f2 | tr -d '[:space:]')"
+    [ "$_wep" = "worker" ] || continue
+    echo "$_wn"
+  done
+  return 0
+}
+
+# One node's request + confirm wait. Runs as a BACKGROUND JOB, i.e. in a
+# subshell, so it does NO leg bookkeeping: chug_leg_drop mutates
+# CHUG_LEGS_PENDING and a subshell's mutations are lost, after which the EXIT
+# trap would re-mark already-emitted worker-refresh legs as skipped (#207
+# review). It writes its verdict to files under $CHUG_WR_DIR; the MAIN shell
+# reads them and emits the legs.
+#
+# RELAY, don't buffer (ticket #253): `tee` passes every line through to stdout
+# the instant the CLI emits it (the CLI relays the node's per-phase progress and
+# 30s elapsed-time heartbeats), and keeps a copy for the confirm/detail greps.
+# With the fan-out the nodes' lines interleave — every CLI line names its own
+# `node=`, and each node's greps read only its own copy. The CLI always exits 0
+# (#186), so the pipeline's status is ignored: only a `refresh OK:` line
+# confirms.
+refresh_worker_one() {
+  _n="$1"
+  # The CLI runs in the BACKGROUND of this subshell purely so its own pid is
+  # recorded: `$!` in the caller is this waiter subshell, and killing that leaves
+  # the CLI (and the `tee` reading it) running as orphans — see
+  # refresh_workers_cancel, which needs the pid of the process actually holding
+  # the deploy's stdout. `wait` puts the pipeline straight back.
+  {
+    "$CHUG_WR_BIN" admin worker-refresh \
       --nats-url "${NATS_URL:-nats://localhost:4222}" \
       --keys-dir "$KEYS_DIR" \
-      --node "$wn" --sha "$TARGET_SHA" --tag "${CHUG_IMAGE_TAG:-prod}" \
-      --wait-secs "$wait_secs" 2>&1 | tee "$_wr_log" || true
-    if grep -q 'refresh OK:' "$_wr_log"; then
-      chug_emit_leg "worker-refresh:$wn" ok "$(( $(date +%s) - _wr_start ))"
-      chug_leg_drop "worker-refresh:$wn"
-      echo "update: worker '$wn' confirmed on $TARGET_SHA"
-    else
-      # Harvest the daemon-captured failure tail the CLI prints on a FAILED
-      # refresh (deploy #212) — or, when the leg simply never confirmed, the
-      # last progress it relayed (#253) — so the leg's `detail` carries the real
-      # cause (docker disk pressure, or "stuck at build-image 3/3 agent-rust"),
-      # not just "refresh not confirmed".
-      _wr_detail="$(sed -n 's/^worker-refresh-detail: //p' "$_wr_log" | head -1)"
-      chug_emit_leg "worker-refresh:$wn" failed "$(( $(date +%s) - _wr_start ))" \
-        "refresh not confirmed" "$_wr_detail"
-      chug_leg_drop "worker-refresh:$wn"
-      echo "update: worker '$wn' refresh NOT confirmed on $TARGET_SHA — FAILING deploy (not a warning)" >&2
-      rm -f "$_wr_log"
-      return 1
+      --node "$_n" --sha "$TARGET_SHA" --tag "${CHUG_IMAGE_TAG:-prod}" \
+      --wait-secs "$CHUG_WR_WAIT" 2>&1 &
+    _cli=$!
+    echo "$_cli" > "$CHUG_WR_DIR/$_n.cli"
+    wait "$_cli"
+  } | tee "$CHUG_WR_DIR/$_n.log" || true
+  date +%s > "$CHUG_WR_DIR/$_n.end"
+  # `.done` is the marker the collector polls, so it is written LAST — after the
+  # transcript and the end stamp it stands for — and ATOMICALLY. A plain
+  # redirect creates the file BEFORE the verdict lands in it, and a poll inside
+  # that window reads an empty marker, which is not "ok": a node that confirmed
+  # would be booked as failed, which under the fan-out also cancels every other
+  # node still building. `mv` within the mktemp dir is a rename, so the
+  # collector sees the verdict or nothing.
+  if grep -q 'refresh OK:' "$CHUG_WR_DIR/$_n.log"; then
+    echo ok > "$CHUG_WR_DIR/$_n.done.tmp"
+  else
+    echo failed > "$CHUG_WR_DIR/$_n.done.tmp"
+  fi
+  mv "$CHUG_WR_DIR/$_n.done.tmp" "$CHUG_WR_DIR/$_n.done"
+}
+
+# Collect the fan-out's verdicts in the MAIN shell, emitting each node's leg the
+# moment it lands, and cancel whatever is still in flight as soon as one node
+# fails. Returns non-zero if any node did not confirm.
+#
+# Bounded (STYLE): the poll gives up at the per-node wait window plus a slack
+# that only has to cover a CLI which died without writing its verdict — the CLI
+# bounds itself with --wait-secs, so this never becomes the deploy's real clock.
+refresh_workers_collect() {
+  _pending="$1"
+  _why=""
+  _rc=0
+  _deadline=$(( $(date +%s) + CHUG_WR_WAIT + ${WORKER_REFRESH_COLLECT_SLACK_SECS:-120} ))
+  while [ -n "$_pending" ]; do
+    _still=""
+    for _n in $_pending; do
+      if [ -f "$CHUG_WR_DIR/$_n.done" ]; then
+        if ! refresh_worker_leg "$_n" ""; then
+          _rc=1
+          [ -n "$_why" ] || _why="worker '$_n' did not confirm"
+        fi
+      else
+        _still="$_still $_n"
+      fi
+    done
+    _pending="$_still"
+    [ -z "$_why" ] || break
+    [ -n "$_pending" ] || break
+    if [ "$(date +%s)" -ge "$_deadline" ]; then
+      _why="the refresh collector deadline elapsed with$_pending still in flight"
+      _rc=1
+      break
     fi
+    sleep 1
   done
-  rm -f "$_wr_log"
-  return 0
+  if [ -n "$_pending" ]; then
+    refresh_workers_cancel "$_pending" "$_why"
+    _rc=1
+  fi
+  return "$_rc"
+}
+
+# Cancel the refreshes still in flight, then emit their legs. MAIN SHELL (it
+# calls refresh_worker_leg, which mutates CHUG_LEGS_PENDING).
+refresh_workers_cancel() {
+  _rest="$1"
+  _cwhy="$2"
+  for _n in $_rest; do
+    echo "update: cancelling in-flight refresh of worker '$_n' — $_cwhy" >&2
+    "$CHUG_WR_BIN" admin worker-refresh --cancel \
+      --nats-url "${NATS_URL:-nats://localhost:4222}" \
+      --keys-dir "$KEYS_DIR" \
+      --node "$_n" --sha "$TARGET_SHA" 2>&1 | tee "$CHUG_WR_DIR/$_n.cancel" || true
+  done
+  # Bounded drain: a cancelled daemon reports its terminal outcome within a poll
+  # or two and the waiter returns on its own; the bound covers one that does not.
+  _cdeadline=$(( $(date +%s) + ${WORKER_REFRESH_CANCEL_WAIT_SECS:-60} ))
+  while [ "$(date +%s)" -lt "$_cdeadline" ]; do
+    _left=""
+    for _n in $_rest; do
+      [ -f "$CHUG_WR_DIR/$_n.done" ] || _left="$_left $_n"
+    done
+    [ -n "$_left" ] || break
+    sleep 1
+  done
+  for _n in $_rest; do
+    # A waiter that outlived the drain is bounded by its own --wait-secs, but
+    # the deploy is over — don't leave it polling a node for another ten
+    # minutes. Kill the CLI ITSELF, not just the background job: `$!` is the
+    # waiter SUBSHELL, and its children — the CLI and the `tee` relaying it —
+    # survive a kill of their parent, reparented and still holding this shell's
+    # stdout. That stdout is the deploy's ssh session (tasks/deploy.sh runs ssh
+    # without a tty), so sshd would hold the session open until the orphan's own
+    # --wait-secs elapsed: the exact wall-clock this fan-out exists to remove.
+    # Killing the CLI is what ends the wait; `tee` then reads EOF and goes.
+    # (No process-GROUP kill here: dash refuses job control without a tty, so
+    # `set -m` + `kill -- -$pid` would silently no-op under /bin/sh.)
+    # Best effort by design: the leg below is emitted either way.
+    if [ ! -f "$CHUG_WR_DIR/$_n.done" ]; then
+      for _f in cli pid; do
+        _p="$(cat "$CHUG_WR_DIR/$_n.$_f" 2>/dev/null || true)"
+        [ -z "$_p" ] || kill "$_p" 2>/dev/null || true
+      done
+    fi
+    refresh_worker_leg "$_n" "$_cwhy" || true
+  done
+}
+
+# Emit one node's `worker-refresh:{node}` leg from the files its waiter left
+# behind, and drop it from the pending list. MAIN SHELL ONLY: chug_leg_drop
+# mutates CHUG_LEGS_PENDING (#207 review). A non-empty $2 is why this node was
+# cancelled — it names the failure that aborted the fan-out. Returns non-zero
+# when the node did not confirm.
+refresh_worker_leg() {
+  _n="$1"
+  _cancel_why="$2"
+  _start="$(cat "$CHUG_WR_DIR/$_n.start" 2>/dev/null || date +%s)"
+  _end="$(cat "$CHUG_WR_DIR/$_n.end" 2>/dev/null || date +%s)"
+  _secs=$(( _end - _start ))
+  [ "$_secs" -ge 0 ] || _secs=0
+  if [ "$(cat "$CHUG_WR_DIR/$_n.done" 2>/dev/null || echo failed)" = "ok" ]; then
+    chug_emit_leg "worker-refresh:$_n" ok "$_secs"
+    chug_leg_drop "worker-refresh:$_n"
+    echo "update: worker '$_n' confirmed on $TARGET_SHA (${_secs}s)"
+    return 0
+  fi
+  # Harvest the daemon-captured failure tail the CLI prints on a FAILED refresh
+  # (deploy #212) — or, when the leg simply never confirmed, the last progress
+  # it relayed (#253) — so the leg's `detail` carries the real cause (docker
+  # disk pressure, or "stuck at build-image 3/3 agent-rust"), not just "refresh
+  # not confirmed".
+  _detail="$(sed -n 's/^worker-refresh-detail: //p' "$CHUG_WR_DIR/$_n.log" 2>/dev/null | head -1)"
+  # A cancelled node is still a FAILED leg: LegStatus is ok|failed|skipped and
+  # an unknown status makes the harvest DROP the leg (types::deploy), so the
+  # cancellation is carried by the error/detail text, not by a fourth status.
+  if [ -n "$_cancel_why" ]; then
+    # What the node said when the cancel reached it — including the case that
+    # matters for the skew story: "already past the swap", i.e. this node stays
+    # on the NEW images while the deploy fails (spec §3.1).
+    _said="$(grep -m1 '^refresh cancel' "$CHUG_WR_DIR/$_n.cancel" 2>/dev/null || true)"
+    chug_emit_leg "worker-refresh:$_n" failed "$_secs" "refresh cancelled" \
+      "cancelled because $_cancel_why${_said:+; $_said}${_detail:+; $_detail}"
+    chug_leg_drop "worker-refresh:$_n"
+    echo "update: worker '$_n' refresh CANCELLED ($_cancel_why) — FAILING deploy" >&2
+    return 1
+  fi
+  chug_emit_leg "worker-refresh:$_n" failed "$_secs" "refresh not confirmed" "$_detail"
+  chug_leg_drop "worker-refresh:$_n"
+  echo "update: worker '$_n' refresh NOT confirmed on $TARGET_SHA — FAILING deploy (not a warning)" >&2
+  return 1
 }
 
 
@@ -271,10 +458,7 @@ set +a
 # in the pending list: if an earlier leg dies, the exit trap reports these as
 # skipped instead of silently omitting them (#207 review). refresh_workers
 # drops each as it emits.
-for _entry in $(printf '%s' "${DOCKER_NODES:-}" | tr ',' ' '); do
-  _wn="$(printf '%s' "$_entry" | cut -d'|' -f1 | tr -d '[:space:]')"
-  _wep="$(printf '%s' "$_entry" | cut -d'|' -f2 | tr -d '[:space:]')"
-  [ "$_wep" = "worker" ] || continue
+for _wn in $(refresh_worker_nodes); do
   CHUG_LEGS_PENDING="$CHUG_LEGS_PENDING worker-refresh:$_wn"
 done
 
@@ -299,14 +483,15 @@ leg_ok
 #    used only when WORKER_SSH is set (a laptop that can reach the node); no-ops
 #    otherwise. (b) NO-SSH self-refresh: the dispatcher host cannot ssh a tagged
 #    worker (Tailscale blocks tagged->tagged), so we invert control and REQUEST
-#    refresh over the worker RPC. Each worker node in DOCKER_NODES gets a request;
-#    a node that fails is a WARNING with its drift surfaced (its ping version
-#    also feeds the fleet snapshot), never a deploy failure.
+#    refresh over the worker RPC. Every worker node in DOCKER_NODES is requested
+#    AT ONCE (#254) and confirmed concurrently, so this step costs the slowest
+#    node's build, not the sum of them.
 CHUG_IMAGE_TAG="${CHUG_IMAGE_TAG:-prod}" deploy/prod/build-worker.sh
 # NO-SSH self-refresh path: request + CONFIRM a refresh of each worker node. A
 # node that does not confirm on $TARGET_SHA fails the deploy (refresh_workers
 # returns non-zero, aborting under `set -e`) — the deploy no longer claims
-# success while a worker silently stayed on the old SHA (#186). Each node also
+# success while a worker silently stayed on the old SHA (#186) — and the first
+# such node cancels the refreshes still building on the others (#254). Each node
 # emits a `worker-refresh:{node}` leg (#187) from inside refresh_workers. The
 # fleet snapshot's per-node version (#109) remains the independent cross-check.
 if [ -z "${WORKER_SSH:-}" ]; then

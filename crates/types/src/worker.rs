@@ -206,6 +206,47 @@ pub struct RefreshOk {
     pub from_version: String,
 }
 
+/// Payload for `refresh_cancel` (spec §3.1, ticket #254): abort the in-flight
+/// refresh to `sha` on this node. The deploy fans refreshes out to every node at
+/// once, so the moment ONE node fails there is nothing left to win by letting
+/// the others burn ten more minutes of build against a deploy that is already
+/// failing — it cancels them instead.
+///
+/// The SHA is part of the request, not decoration: a node converging on some
+/// OTHER target (a concurrent deploy, a hand-run refresh) must never be aborted
+/// by this deploy's cleanup.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RefreshCancelRequest {
+    /// Target SHA of the refresh to cancel. A mismatch is a no-op.
+    pub sha: String,
+}
+
+/// Reply for `refresh_cancel`. Never an error for "nothing to cancel": a cancel
+/// races the very build it aborts, so "no refresh in flight" and "already past
+/// the swap" are ordinary outcomes the caller reports, not failures.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RefreshCancelOk {
+    /// True only when the refresh was still cancellable and has been aborted —
+    /// i.e. the node did NOT swap onto the new images. False leaves the node's
+    /// state to the deploy's other signals (`ping`, the fleet snapshot).
+    pub cancelled: bool,
+    /// Why not, when `cancelled` is false (no refresh in flight, a different
+    /// target SHA, or the swap window already opened). Short, bounded, and
+    /// meant for the deploy leg's `detail` — it is what records that a node
+    /// stayed swapped ahead of a failed deploy.
+    pub note: String,
+}
+
+/// Stage string a [`RefreshResult::Failed`] carries when the refresh ended
+/// because the deploy CANCELLED it (ticket #254) rather than because the build
+/// broke. A contract between the daemon (which stamps it) and the deploy, which
+/// reads the stage back off `ping` and reports "FAILED at cancelled" — so a
+/// cancelled node is never misread as a node whose build was broken. That
+/// reader is generic over stage strings, so the value itself is pinned by
+/// `worker`'s `refresh_cancel_aborts_only_its_own_sha` tier-2 test rather than
+/// by a comparison against this constant.
+pub const REFRESH_STAGE_CANCELLED: &str = "cancelled";
+
 /// A worker daemon's announce/heartbeat (spec §3.1 dynamic registration).
 /// Published periodically by `chuggernaut worker` on [`crate::worker`]'s announce
 /// subject; the dispatcher merges it into the live fleet without a restart. It is

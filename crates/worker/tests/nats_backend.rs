@@ -442,6 +442,12 @@ fn spawn_daemon(
 /// Write an executable no-op refresh script (build/swap both exit 0) so the
 /// daemon's refresh sequence runs without touching Docker or the real script.
 fn fake_refresh_script() -> std::path::PathBuf {
+    refresh_script_with("exit 0\n")
+}
+
+/// Write an executable refresh script with `body`, invoked by the daemon as
+/// `script <phase> [sha] [tag]` exactly as `worker-refresh.sh` is.
+fn refresh_script_with(body: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!(
         "chug-fake-refresh-{}-{:x}.sh",
         std::process::id(),
@@ -450,7 +456,7 @@ fn fake_refresh_script() -> std::path::PathBuf {
             .unwrap()
             .as_nanos()
     ));
-    std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -608,6 +614,124 @@ async fn refresh_rpc_and_quiesce_window() {
         },
     )
     .await;
+    daemon.abort();
+}
+
+/// `refresh_cancel` over the real RPC (spec §3.1, ticket #254) — the deploy's
+/// abort path when the fan-out has already lost a node. Two properties make it
+/// safe to fire at a fleet that is mid-build, and neither is checkable from the
+/// gate's flag algebra alone:
+///
+/// 1. It only touches the refresh it NAMES. A node converging on some other
+///    SHA — a concurrent deploy, a hand-run refresh — must not be aborted by
+///    this deploy's cleanup, so the SHA in the request is a guard, not
+///    decoration.
+/// 2. When it does fire, the refresh ends under the `cancelled` stage, which is
+///    what makes [`types::worker::REFRESH_STAGE_CANCELLED`] a contract rather
+///    than a name only the daemon uses: the deploy's CLI reads that stage back
+///    off `ping` and reports "FAILED at cancelled", so a node the deploy itself
+///    stopped is never diagnosed as a node whose build is broken.
+#[tokio::test]
+async fn refresh_cancel_aborts_only_its_own_sha() {
+    use store::worker::WorkerRpc;
+    use types::worker::{
+        REFRESH_STAGE_CANCELLED, RefreshCancelRequest, RefreshRequest, RefreshResult,
+    };
+
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    if !suite::docker_available() {
+        eprintln!("skipping: Docker daemon unavailable");
+        return;
+    }
+
+    // A build that BLOCKS, and announces its phase first so the test can tell
+    // the script is really running before it cancels (past that line the
+    // daemon has published the build's process group). The `sleep` is a CHILD
+    // of the script shell: only a process-GROUP signal takes it down — which is
+    // exactly what the cancel promises, and what step 2 below measures.
+    let script = refresh_script_with(concat!(
+        "if [ \"$1\" = build ]; then\n",
+        "  echo 'worker-refresh: phase build-image 1/3 worker'\n",
+        "  sleep 120\n",
+        "fi\n",
+        "exit 0\n",
+    ));
+    let daemon = spawn_daemon(&server, "w1", b"x", Some(script));
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let fleet = fleet_over(store.clone(), "w1", 8).await;
+    await_reachable(&fleet, "w1").await;
+    let rpc = WorkerRpc::new(store, "w1");
+
+    assert!(
+        rpc.refresh(&RefreshRequest {
+            sha: "cafef00d".into(),
+            tag: "prod".into(),
+        })
+        .await
+        .unwrap()
+        .accepted
+    );
+    // RPC-observed state, so a tightened async poll (#206 principle 3).
+    test_utils::wait::poll_async(
+        std::time::Duration::from_secs(30),
+        "the refresh build to start",
+        || async {
+            let progress = rpc.ping().await.ok()?.refresh_progress?;
+            (progress.phase == "build-image 1/3 worker").then_some(())
+        },
+    )
+    .await;
+
+    // 1. A cancel naming a DIFFERENT sha is declined, and — the part that
+    //    matters — changes nothing: the node keeps converging on its own target.
+    let other = rpc
+        .refresh_cancel(&RefreshCancelRequest {
+            sha: "deadbeef".into(),
+        })
+        .await
+        .unwrap();
+    assert!(!other.cancelled, "a cancel for another sha must not fire");
+    assert!(
+        other.note.contains("cafef00d") && other.note.contains("deadbeef"),
+        "the note must name both shas: {}",
+        other.note
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(
+        rpc.ping().await.unwrap().refresh_outcome.unwrap().result,
+        RefreshResult::InProgress,
+        "a declined cancel must leave the refresh converging"
+    );
+
+    // 2. A cancel naming OUR sha fires, and the refresh reaches its terminal
+    //    verdict under the `cancelled` stage. Reaching it QUICKLY is also the
+    //    proof that the whole process group died: the script's `sleep 120`
+    //    outlives a signal sent to the shell alone, so a kill that missed the
+    //    group would leave this poll to time out.
+    let ours = rpc
+        .refresh_cancel(&RefreshCancelRequest {
+            sha: "cafef00d".into(),
+        })
+        .await
+        .unwrap();
+    assert!(ours.cancelled, "unexpected decline: {}", ours.note);
+    let stage = test_utils::wait::poll_async(
+        std::time::Duration::from_secs(60),
+        "the cancelled refresh to reach its terminal verdict",
+        || async {
+            match rpc.ping().await.ok()?.refresh_outcome?.result {
+                RefreshResult::Failed { stage, .. } => Some(stage),
+                _ => None,
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        stage, REFRESH_STAGE_CANCELLED,
+        "a cancelled refresh must not be reported as a broken build"
+    );
     daemon.abort();
 }
 
