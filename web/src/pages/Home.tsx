@@ -56,6 +56,7 @@ export function Home() {
           {identity.platform_admin && (
             <>
               <Link to="/cluster">Cluster</Link>{' · '}
+              <Link to="/deploys">Deploys</Link>{' · '}
               <Link to="/settings">Settings</Link>{' · '}
             </>
           )}

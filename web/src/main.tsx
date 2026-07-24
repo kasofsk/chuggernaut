@@ -13,6 +13,7 @@ import { SettingsPage } from './pages/Settings'
 import { PlatformSettingsPage } from './pages/PlatformSettings'
 import { JobDetail } from './pages/JobDetail'
 import { ClusterPage } from './pages/Cluster'
+import { DeploysPage } from './pages/Deploys'
 import { StatsPage } from './pages/Stats'
 import { AppShell } from './components/AppShell'
 import { ThemePicker, applySavedTheme } from './theme'
@@ -39,6 +40,7 @@ createRoot(document.getElementById('root')!).render(
         <Route path="/" element={<Home />} />
         <Route path="/settings" element={<PlatformSettingsPage />} />
         <Route path="/cluster" element={<ClusterPage />} />
+        <Route path="/deploys" element={<DeploysPage />} />
         <Route path="/p/:owner/:project" element={<ProjectPage />} />
         <Route path="/p/:owner/:project/job-types" element={<LibraryPage />} />
         <Route path="/p/:owner/:project/job-types/:name" element={<JobTypePage />} />

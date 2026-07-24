@@ -364,6 +364,29 @@ export interface ProjectConfig {
   origin_credentials: { deploy_key: boolean; pat: boolean }
 }
 
+/** How a worker's most recent self-refresh ended (ticket #187). Internally
+ *  tagged on `result`, mirroring `types::worker::RefreshResult`. A successful
+ *  refresh swaps the daemon away (the node then reports the new `version`), so in
+ *  practice this surfaces failures and in-flight refreshes. */
+export type RefreshResult =
+  | { result: 'in_progress' }
+  | { result: 'ok' }
+  | { result: 'failed'; stage: string; error_tail: string }
+
+/** The last refresh outcome a worker daemon reports (ticket #187), carried on the
+ *  fleet + config snapshots so a failed refresh is durable, visible platform
+ *  state rather than a node-local log line. */
+export interface RefreshOutcome {
+  accepted_at: string
+  /** when it reached a terminal verdict; absent while `in_progress` */
+  finished_at?: string | null
+  result: RefreshResult
+  /** version the node was refreshing away from */
+  from_sha: string
+  /** target SHA of the refresh */
+  to_sha: string
+}
+
 export interface WorkerNode {
   name: string
   endpoint: string
@@ -373,6 +396,9 @@ export interface WorkerNode {
   /** Worker build version (chuggernaut + git SHA) from its last ping; null for
    *  docker-endpoint nodes or workers that have not answered yet. */
   version?: string | null
+  /** The node's last self-refresh outcome (ticket #187); null for docker-endpoint
+   *  nodes and workers that have not refreshed. */
+  refresh_outcome?: RefreshOutcome | null
 }
 
 /** The dispatcher's runtime config snapshot (fleet + defaults + paths). */
@@ -392,6 +418,19 @@ export interface DispatcherSnapshot {
   /** Active fleet placement policy (§3.1): `busyness` (fewest running) or
    *  `headroom` (most free slots). Absent on snapshots predating the field. */
   placement_policy?: string
+  /** The running dispatcher binary's own build SHA (`CHUG_GIT_SHA`), the SHA
+   *  currently live in prod. null for local/dev builds with no SHA baked in, or
+   *  on snapshots predating the CD drift fields (#109). */
+  dispatcher_sha?: string | null
+  /** Current `main` tip SHA of the platform's own source repo — the deploy target
+   *  the running dispatcher is measured against. null when unresolvable. */
+  main_tip_sha?: string | null
+  /** How many commits `dispatcher_sha` is behind `main_tip_sha` (0 = in sync);
+   *  null when drift can't be computed. */
+  commits_behind?: number | null
+  /** CD auto-deploy posture: true = deploys land automatically, false = manual;
+   *  null until the CD engine lands. */
+  auto_deploy?: boolean | null
 }
 
 /**
@@ -442,6 +481,9 @@ export interface FleetNode {
   available: boolean
   /** build version last reported by the node's ping, if any */
   version?: string | null
+  /** the node's last self-refresh outcome (ticket #187), so a failed refresh is
+   *  visible in the live fleet; null when the node has not refreshed */
+  refresh_outcome?: RefreshOutcome | null
   /** the occupied slots on this node */
   running: SlotOccupant[]
 }
@@ -461,6 +503,39 @@ export interface PlatformConfig {
   /** global/agents secret NAMES injected into every agent container */
   agent_secrets: string[]
   vapid_public: boolean
+}
+
+/** Status of one deploy leg (ticket #187, `types::deploy::LegStatus`). */
+export type LegStatus = 'ok' | 'failed' | 'skipped'
+
+/** One deploy leg's typed record (ticket #187). The legs are the fixed steps of
+ *  `update.sh` — `build-dispatcher`, `build-images`, `web-publish`,
+ *  `worker-refresh:{node}`, `init`, `ssh-front`, `restart-verify`, `sha-advance`. */
+export interface DeployLeg {
+  name: string
+  status: LegStatus
+  /** wall-clock seconds the leg took; absent for a skipped leg */
+  secs?: number | null
+  /** short failure reason; present only on a `failed` leg */
+  error?: string | null
+}
+
+/** Structured deploy report (ticket #187): the dispatcher harvests one
+ *  `@chug:leg` line per leg plus a `@chug:report` envelope from a deploy job's
+ *  command work task into this shape on `TaskResult.structured`. Every field is
+ *  optional-tolerant so a legs-only report (no envelope) still renders. */
+export interface DeployReport {
+  /** SHA the deploy started from (the previously-deployed SHA) */
+  from_sha?: string | null
+  /** SHA the deploy targeted */
+  to_sha?: string | null
+  /** true when restart-verify's health check failed and prod was restored to
+   *  `from_sha` (rolled back to the previous binary) */
+  rollback?: boolean
+  /** post-restart health verdict, if reported (e.g. `"ok"`) */
+  health?: string | null
+  /** the legs, in emission order */
+  legs?: DeployLeg[]
 }
 
 export class ApiError extends Error {

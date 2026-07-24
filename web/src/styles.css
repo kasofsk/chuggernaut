@@ -2434,6 +2434,169 @@ table.jobs tbody tr.row-draft td:first-child {
   padding: var(--sp-4);
 }
 
+/* ── Deploys page: drift banner, fleet freshness, deploy leg card ──────────── */
+
+/* Cross-page nav in a page topbar (Deploys ↔ Cluster ↔ Settings). Sits after
+   the gradient h1; wraps under it on narrow screens rather than overflowing. */
+.topbar-nav {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  font-size: var(--fs-md);
+}
+
+/* prod-vs-main drift banner: tone comes from the left border + status dot so it
+   reads at a glance — green in sync, amber behind, neutral when unreported. */
+.drift-banner {
+  border-left: 3px solid var(--border);
+}
+.drift-banner.drift-ok {
+  border-left-color: var(--green);
+}
+.drift-banner.drift-behind {
+  border-left-color: var(--orange);
+}
+.drift-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.drift-headline {
+  font-weight: 600;
+}
+.drift-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: var(--r-full);
+  background: var(--dim);
+  flex: none;
+}
+.drift-ok .drift-dot {
+  background: var(--green);
+}
+.drift-behind .drift-dot {
+  background: var(--orange);
+}
+.drift-auto {
+  margin-left: auto;
+}
+.drift-shas {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--dim);
+}
+.drift-shas code {
+  font-family: var(--font-mono);
+}
+
+.deploy-sub {
+  font-size: var(--fs-sm);
+  margin: 0 0 var(--sp-3);
+}
+.deploy-foot {
+  font-size: var(--fs-xs);
+  margin-top: var(--sp-3);
+}
+
+/* Per-node freshness rows: name · fresh/stale chip · version · refresh outcome.
+   Each row wraps its trailing chips rather than pushing the card sideways. */
+.freshness-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.freshness-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+.freshness-row:last-child {
+  border-bottom: none;
+}
+.freshness-name {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  min-width: 4rem;
+}
+.freshness-ver {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+/* Deploy leg checklist (rendered in a deploy job's detail): a from→to header
+   then one row per leg, colored by status. */
+.deploy-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--sp-3);
+  margin: var(--sp-2) 0;
+}
+.deploy-card .deploy-shas {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.deploy-card .deploy-shas code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+.deploy-legs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.deploy-leg {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+}
+.deploy-leg-icon {
+  flex: none;
+  width: 1rem;
+  text-align: center;
+  font-weight: 700;
+}
+.deploy-leg-ok .deploy-leg-icon {
+  color: var(--green);
+}
+.deploy-leg-failed .deploy-leg-icon {
+  color: var(--red);
+}
+.deploy-leg-skipped {
+  color: var(--dim);
+}
+.deploy-leg-name {
+  font-family: var(--font-mono);
+}
+.deploy-leg-err {
+  color: var(--red);
+  overflow-wrap: anywhere;
+}
+.deploy-leg-secs {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
    SNAZZY REDESIGN (#161–#164, #171): cosmic identity, icon rail, page chrome,
    overview sidebar, status footer, train header, ticket-stub New Job.

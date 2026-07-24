@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ApiError, api, type FleetNode, type PlatformConfig, type SlotOccupant } from '../api'
 import { useFleet } from '../useFleet'
-import { fmtDuration, phaseToState } from '../format'
+import { fmtDuration, nodeStale, phaseToState, shortSha } from '../format'
 import { StateBadge } from '../components/StateBadge'
 import { Skeleton } from '../components/Skeleton'
 
@@ -80,6 +80,16 @@ export function ClusterPage() {
     return counts.size > 1 ? best : null
   }, [workers])
 
+  // Deploy freshness: the deployed platform SHA the fleet is measured against.
+  // A node drifts if it's behind that SHA (stale vs main) OR simply disagrees
+  // with its peers — a uniformly-stale fleet (every node behind the deployed
+  // platform) is invisible to peer comparison alone, which the audit flags.
+  const deployedSha = cfg?.dispatcher?.dispatcher_sha ?? null
+  const isDrift = (n: FleetNode) =>
+    nodeStale(n.version, deployedSha) ||
+    (commonVersion != null && n.version != null && n.version !== commonVersion)
+  const staleCount = workers.filter((n) => nodeStale(n.version, deployedSha)).length
+
   const dispatcherOnline = cfg ? cfg.dispatcher != null : true
   const queue = fleet?.queue_depth ?? 0
 
@@ -134,15 +144,16 @@ export function ClusterPage() {
             <div className="cl-fan">
               {workers.length === 0 && <div className="dim cl-empty">no worker nodes</div>}
               {workers.map((n) => (
-                <WorkerNode
-                  key={n.name}
-                  node={n}
-                  now={now}
-                  drift={commonVersion != null && n.version != null && n.version !== commonVersion}
-                />
+                <WorkerNode key={n.name} node={n} now={now} drift={isDrift(n)} />
               ))}
             </div>
           </div>
+          {staleCount > 0 && deployedSha && (
+            <div className="cluster-note dim">
+              ⚠ {staleCount} node{staleCount === 1 ? '' : 's'} behind the deployed platform (
+              <code>{shortSha(deployedSha)}</code>) — marked. <Link to="/deploys">Deploys ↗</Link>
+            </div>
+          )}
           {commonVersion && (
             <div className="cluster-note dim">
               ⚠ version drift across workers — nodes off <code>{commonVersion}</code> are marked.
