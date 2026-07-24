@@ -26,6 +26,7 @@ import { EvaluatorTable } from '../components/EvaluatorTable'
 import { Markdown } from '../components/Markdown'
 import { DraftEditor } from '../components/DraftEditor'
 import { CoverWidget } from '../components/CoverWidget'
+import { JobAttachments } from '../components/Attachments'
 import { Skeleton, SkeletonLines } from '../components/Skeleton'
 
 export function JobDetail() {
@@ -367,6 +368,10 @@ export function JobDetail() {
       )}
 
       {!isDraft && criteria && <CriteriaCard owner={owner} project={project} criteria={criteria} />}
+
+      {/* Attachments (spec §1.6): screenshots and reference files. The Draft
+          editor renders its own copy, so only the read view shows it here. */}
+      {!isDraft && <JobAttachments owner={owner} project={project} seq={jobSeq} />}
 
       {pendingHuman.length > 0 && (
         <section className="card inbox">

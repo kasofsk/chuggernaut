@@ -12,6 +12,7 @@ import { PromptsPage } from './pages/Prompts'
 import { SettingsPage } from './pages/Settings'
 import { PlatformSettingsPage } from './pages/PlatformSettings'
 import { JobDetail } from './pages/JobDetail'
+import { SharePage } from './pages/Share'
 import { ClusterPage } from './pages/Cluster'
 import { DeploysPage } from './pages/Deploys'
 import { StatsPage } from './pages/Stats'
@@ -38,6 +39,8 @@ createRoot(document.getElementById('root')!).render(
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<Home />} />
+        {/* PWA share-target landing: the OS share sheet drops a screenshot here. */}
+        <Route path="/share" element={<SharePage />} />
         <Route path="/settings" element={<PlatformSettingsPage />} />
         <Route path="/cluster" element={<ClusterPage />} />
         <Route path="/deploys" element={<DeploysPage />} />

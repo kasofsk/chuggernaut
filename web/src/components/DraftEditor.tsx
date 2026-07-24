@@ -10,6 +10,7 @@ import { useDebouncedCallback } from '../useEvents'
 import { prefersReducedMotion, useTypewriter } from '../useTypewriter'
 import { Markdown } from './Markdown'
 import { RichSelect } from './RichSelect'
+import { JobAttachments } from './Attachments'
 
 // The editable fields, used as keys for focus/dirty/flash tracking. `eval` is
 // not edited here — it round-trips unchanged on the full-replace PATCH.
@@ -424,6 +425,10 @@ export function DraftEditor({
           />
         </label>
       </details>
+
+      {/* On a Draft the attachments are editable like the rest of the draft
+          (spec §1.6). The job already exists, so uploads PUT straight to it. */}
+      <JobAttachments owner={owner} project={project} seq={job.id} />
 
       <div className="create-actions">
         <button

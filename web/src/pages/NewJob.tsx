@@ -12,6 +12,7 @@ import { ProjectHeader } from '../components/ProjectHeader'
 import { RichSelect } from '../components/RichSelect'
 import { TicketStub } from '../components/TicketStub'
 import { SkeletonLines } from '../components/Skeleton'
+import { AttachmentComposer, uploadFiles } from '../components/Attachments'
 
 const reducedMotion = () =>
   typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -116,6 +117,9 @@ function CreateJob({
   const [selectedTags, setSelectedTags] = useState<string[]>([])
   const [tags, setTags] = useState('')
   const [timeout, setTimeout] = useState('')
+  // Files picked/pasted/shot while composing (spec §1.6): held locally and PUT
+  // to the job's attachments once it's created, before navigating to it.
+  const [files, setFiles] = useState<File[]>([])
   const typeTimeout = typeDetail?.job_type?.resources?.task_timeout ?? null
   const [model, setModel] = useState('')
   const typeModel = typeDetail?.job_type?.work?.model ?? null
@@ -193,6 +197,14 @@ function CreateJob({
       })
       .then(
         async (job) => {
+          // Attach composed files before release/navigation so they're present
+          // when work starts. Best-effort: a failed upload warns but doesn't
+          // block — it can be retried from the job page.
+          if (files.length) {
+            const failed = await uploadFiles(owner, project, job.id, files)
+            if (failed.length)
+              onError(`some attachments didn't upload (${failed.join(', ')}) — retry on the job page`)
+          }
           // Ready = create + immediate release; Frozen parks; Draft stays editable.
           if (mode === 'ready') await api.release(owner, project, job.id).catch(() => {})
           const go = () => navigate(`/p/${owner}/${project}/jobs/${job.id}`)
@@ -469,6 +481,8 @@ function CreateJob({
             placeholder={typeModel ? `${typeModel} (default)` : 'e.g. claude-opus-4-8, claude-fable-5'}
           />
         </label>
+
+        <AttachmentComposer files={files} onChange={setFiles} />
 
         <div className="departure">
           <div className="mode-seg" role="radiogroup" aria-label="Initial state">

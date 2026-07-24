@@ -538,6 +538,20 @@ export interface DeployReport {
   legs?: DeployLeg[]
 }
 
+/** One operator-uploaded job attachment (spec §1.6): a screenshot or reference
+ *  file. Presentational reference material — never injected into an agent
+ *  prompt. `content_type` is the stored MIME type echoed on download. */
+export interface Attachment {
+  name: string
+  content_type: string
+  size: number
+}
+
+/** Server-side cap on a single attachment (crates/api MAX_ATTACHMENT_BYTES):
+ *  16 MiB. Mirrored here so the UI can reject an over-cap file before the PUT
+ *  and word the error the same way the API does (413). */
+export const MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024
+
 export class ApiError extends Error {
   status: number
   body: unknown
@@ -685,4 +699,56 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, null)
     return res.text()
   },
+
+  // ── Job attachments (spec §1.6) ─────────────────────────────────────────
+  /** Files uploaded to a job, sorted by name. Empty when storage is unconfigured. */
+  attachments: (owner: string, project: string, seq: number) =>
+    req<{ attachments: Attachment[] }>(
+      'GET',
+      `/api/v1/projects/${owner}/${project}/jobs/${seq}/attachments`,
+    ).then((r) => r.attachments),
+  /** Download URL for one attachment; served as raw bytes under its stored
+   *  content type, so it bypasses req() (use it as an <img> src or href). */
+  attachmentUrl: (owner: string, project: string, seq: number, name: string) =>
+    `/api/v1/projects/${owner}/${project}/jobs/${seq}/attachments/${encodeURIComponent(name)}`,
+  deleteAttachment: (owner: string, project: string, seq: number, name: string) =>
+    req<unknown>('DELETE', api.attachmentUrl(owner, project, seq, name)),
+  /**
+   * Upload (or replace) an attachment. The raw file bytes are the request body
+   * and the blob's MIME type rides the Content-Type header. Uses XHR (not
+   * fetch) so `onProgress` can report upload fraction for the progress bar. A
+   * non-2xx status rejects with {@link ApiError} carrying the parsed body — a
+   * 413 is the over-cap case, surfaced verbatim.
+   */
+  putAttachment: (
+    owner: string,
+    project: string,
+    seq: number,
+    name: string,
+    file: Blob,
+    onProgress?: (fraction: number) => void,
+  ): Promise<Attachment> =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('PUT', api.attachmentUrl(owner, project, seq, name))
+      xhr.responseType = 'text'
+      if (file.type) xhr.setRequestHeader('Content-Type', file.type)
+      xhr.upload.onprogress = (e) => {
+        if (onProgress && e.lengthComputable) onProgress(e.loaded / e.total)
+      }
+      const parse = (): unknown => {
+        try {
+          return xhr.responseText ? JSON.parse(xhr.responseText) : null
+        } catch {
+          return null
+        }
+      }
+      xhr.onload = () => {
+        const body = parse()
+        if (xhr.status >= 200 && xhr.status < 300) resolve(body as Attachment)
+        else reject(new ApiError(xhr.status, body))
+      }
+      xhr.onerror = () => reject(new ApiError(0, null))
+      xhr.send(file)
+    }),
 }
