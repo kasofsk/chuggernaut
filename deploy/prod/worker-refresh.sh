@@ -17,9 +17,102 @@
 #   WORKER_NODE, NATS_URL, NATS_CREDS   passed through to the replacement daemon
 #   WORKER_CACHE_DIR        optional node-local build cache (re-applied on swap)
 #   WORKER_SWAP_IMAGE       docker-cli image for the detached swapper (default docker:cli)
+#   WORKER_REFRESH_DISK_FREE_GB_MIN / _DISK_PATH   disk pre-flight (see below)
 set -eu
 
 PHASE="${1:?usage: worker-refresh.sh build <sha> <tag> | swap <tag>}"
+
+# ── docker disk hygiene (deploy #248) ────────────────────────────────────────
+# A refresh needs headroom for a WHOLE new image generation ON TOP of the one
+# the node is still running, plus the BuildKit cache it grows while building.
+# When that headroom is missing the build dies ~10 minutes in AND strands the
+# partial generation, so — because the script used to prune only after a
+# SUCCESSFUL refresh — every failure made the next attempt more likely to fail
+# (deploy #248: images 37 -> 45.6GB, cache to 30.6GB, recovered by hand with an
+# ssh + prune + a colima disk resize). Both halves of that loop are closed
+# below: refuse up front when the space cannot be there, and prune on the
+# FAILED-build path too, not only the successful one.
+#
+# The threshold is a deliberately conservative CONSTANT, not a measurement:
+# ~14GB for a new agent-rust generation (it bakes the #123 warm-target seed) and
+# ~6GB of headroom for cache growth during the build. Revisit it if the seed
+# shrinks. Env-overridable so a node with a different disk shape can tune it:
+# build-worker.sh puts the knob in the daemon's environment at node creation and
+# the swap phase below carries it forward, so an override survives self-refreshes
+# instead of reverting to this default on the next one.
+DISK_FREE_GB_MIN="${WORKER_REFRESH_DISK_FREE_GB_MIN:-20}"
+# Where the space is measured. The build runs inside the worker container, whose
+# root filesystem is an overlay on the filesystem that backs /var/lib/docker —
+# statfs on it reports exactly the pool images and the BuildKit cache compete
+# for.
+DISK_PATH="${WORKER_REFRESH_DISK_PATH:-/}"
+# BuildKit cache cap for the prune pair. 15G keeps the hot #115 cache mounts
+# warm across SHA bumps.
+BUILDER_KEEP_STORAGE="15GB"
+
+# Free space on $DISK_PATH in 1K blocks; empty when df cannot report it.
+refresh_disk_free_kb() {
+  _df_row="$(df -Pk "$DISK_PATH" 2>/dev/null | tail -n 1)"
+  # Word-split the POSIX df row deliberately: fs blocks used AVAIL cap mount.
+  # shellcheck disable=SC2086
+  set -- $_df_row
+  [ $# -ge 4 ] || return 0
+  case "$4" in
+    '' | *[!0-9]*) return 0 ;;
+  esac
+  echo "$4"
+}
+
+# Render 1K blocks as GB with one decimal, for a human reading a deploy leg.
+# Integer arithmetic only: the worker image is debian-slim, so this depends on
+# nothing beyond the shell itself.
+refresh_disk_gb() {
+  _tenths=$(( $1 * 10 / 1048576 ))
+  echo "$(( _tenths / 10 )).$(( _tenths % 10 ))"
+}
+
+# Refuse a build that cannot possibly fit, in SECONDS and with the numbers that
+# explain it, instead of burning ten minutes of cargo into a doomed build that
+# then strands a half generation. Read-only (no docker call), so it belongs in
+# the validate-first block. Fails OPEN when df cannot report: an unreadable
+# filesystem shape must not block a refresh that would otherwise work.
+refresh_disk_preflight() {
+  _free_kb="$(refresh_disk_free_kb)"
+  if [ -z "$_free_kb" ]; then
+    echo "worker-refresh: disk pre-flight: df cannot read $DISK_PATH — proceeding unchecked"
+    return 0
+  fi
+  _free_gb="$(refresh_disk_gb "$_free_kb")"
+  echo "worker-refresh: disk pre-flight: ${_free_gb}GB free on $DISK_PATH, need ${DISK_FREE_GB_MIN}GB"
+  if [ "$(( _free_kb / 1048576 ))" -lt "$DISK_FREE_GB_MIN" ]; then
+    echo "worker-refresh: insufficient docker disk: need ~${DISK_FREE_GB_MIN}GB for a new image generation + cache growth, have ${_free_gb}GB free on $DISK_PATH — prune (docker image prune -f; docker builder prune -f --keep-storage $BUILDER_KEEP_STORAGE) or grow the VM disk; refusing build (live images untouched)" >&2
+    return 1
+  fi
+  return 0
+}
+
+# The sanctioned safe prune pair (#183) plus the reclaim it won, reported so an
+# operator reads the disk story off the deploy leg without ssh'ing the node.
+# NEVER `-a`: only DANGLING images (the generation a retag-swap orphaned, or the
+# temp tags a failed build left behind) and BuildKit cache above the keep
+# threshold. Layers in use by the running daemon and by job containers are
+# protected by docker itself — keep it that way. Cleanup never fails its caller:
+# on the failure path the real cause is already reported, on the success path
+# the new images are already live.
+refresh_disk_prune() {
+  _why="$1"
+  _before_kb="$(refresh_disk_free_kb)"
+  docker image prune -f >/dev/null 2>&1 || true
+  docker builder prune -f --keep-storage "$BUILDER_KEEP_STORAGE" >/dev/null 2>&1 || true
+  _after_kb="$(refresh_disk_free_kb)"
+  if [ -z "$_before_kb" ] || [ -z "$_after_kb" ]; then
+    echo "worker-refresh: pruned after $_why: dangling images + BuildKit cache above $BUILDER_KEEP_STORAGE"
+    return 0
+  fi
+  _reclaimed_kb=$(( _after_kb - _before_kb ))
+  [ "$_reclaimed_kb" -ge 0 ] || _reclaimed_kb=0
+  echo "worker-refresh: pruned after $_why: reclaimed $(refresh_disk_gb "$_reclaimed_kb")GB ($(refresh_disk_gb "$_before_kb")GB -> $(refresh_disk_gb "$_after_kb")GB free on $DISK_PATH)"
+}
 
 case "$PHASE" in
 build)
@@ -39,6 +132,11 @@ build)
   fi
   export GIT_SSH_COMMAND="ssh -i $KEY -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes"
 
+  # Disk pre-flight (deploy #248): read-only, so it lives in the validate-first
+  # block — a node without headroom fails here, before the fetch and before any
+  # docker call, with the free/needed numbers in the leg detail.
+  refresh_disk_preflight || exit 1
+
   # Build every image under a TEMP tag first; only once all three build to
   # completion do we retag-swap them onto the live $TAG (below). A build that
   # dies part-way therefore leaves each live tag exactly as it was — a node that
@@ -47,7 +145,23 @@ build)
   # untags the temp name and the live image survives.
   NEW="$TAG-refresh"
   TMP="$(mktemp -d)"
-  trap 'rm -rf "$TMP"; docker rmi -f "chuggernaut/worker:$NEW" "chuggernaut/agent:$NEW" "chuggernaut/agent-rust:$NEW" >/dev/null 2>&1 || true' EXIT
+  # Set once the first `docker build` is reached: only from there on can a
+  # failure have stranded a partial generation worth pruning.
+  BUILD_STARTED=0
+
+  # Drop the temp tags, then — on the FAILURE path (deploy #248) — prune what a
+  # dead build stranded, so a failed attempt leaves the docker filesystem no
+  # fuller than it started and cannot poison the retry. Order matters: the `rmi`
+  # is what turns the temp tags into the dangling images the prune reclaims.
+  refresh_cleanup() {
+    _rc="$1"
+    rm -rf "$TMP"
+    docker rmi -f "chuggernaut/worker:$NEW" "chuggernaut/agent:$NEW" "chuggernaut/agent-rust:$NEW" >/dev/null 2>&1 || true
+    if [ "$_rc" -ne 0 ] && [ "$BUILD_STARTED" -eq 1 ]; then
+      refresh_disk_prune "a failed build"
+    fi
+  }
+  trap 'RC=$?; refresh_cleanup "$RC"; exit "$RC"' EXIT
   # Fetch the repo's advertised HEAD (its default branch tip) over the ssh
   # front, then verify it resolves to the requested SHA before building.
   #
@@ -97,6 +211,7 @@ build)
   # trustworthy (the buildx-missing class of failure).
   git -C "$TMP" archive --format=tar FETCH_HEAD > "$TMP/worker.tar"
   [ -s "$TMP/worker.tar" ] || { echo "worker-refresh: empty worker context — aborting (live images untouched)" >&2; exit 1; }
+  BUILD_STARTED=1
   docker build -q -t "chuggernaut/worker:$NEW" \
       -f deploy/prod/Dockerfile.worker --build-arg "CHUG_GIT_SHA=$SHA" \
       --label "chug.git.sha=$SHA" - < "$TMP/worker.tar"
@@ -132,8 +247,7 @@ build)
   # ENOSPC incident): the retag-swap just stranded the previous generation as
   # dangling — prune those (NEVER -a: live tags must survive, #183) and cap
   # the BuildKit cache at 15G, keeping the hot #115 cache-mounts warm.
-  docker image prune -f >/dev/null
-  docker builder prune -f --keep-storage 15GB >/dev/null 2>&1 || true
+  refresh_disk_prune "a successful refresh"
 
   echo "worker-refresh: built chuggernaut/{worker,agent,agent-rust}:$TAG ($SHA)"
   ;;
@@ -159,6 +273,19 @@ swap)
   CACHE_ARGS=""
   if [ -n "${WORKER_CACHE_DIR:-}" ]; then
     CACHE_ARGS="-e WORKER_CACHE_DIR=$WORKER_CACHE_DIR"
+  fi
+
+  # Same reasoning for the disk pre-flight knobs (deploy #248). A node whose disk
+  # shape needs a threshold other than the built-in default sets them on the
+  # daemon; if the swap dropped them, the very next self-refresh would silently
+  # revert that node to the default — the #55/#82 failure mode again. Unset adds
+  # nothing, so a stock node keeps the documented constant.
+  DISK_ARGS=""
+  if [ -n "${WORKER_REFRESH_DISK_FREE_GB_MIN:-}" ]; then
+    DISK_ARGS="-e WORKER_REFRESH_DISK_FREE_GB_MIN=$WORKER_REFRESH_DISK_FREE_GB_MIN"
+  fi
+  if [ -n "${WORKER_REFRESH_DISK_PATH:-}" ]; then
+    DISK_ARGS="$DISK_ARGS -e WORKER_REFRESH_DISK_PATH=$WORKER_REFRESH_DISK_PATH"
   fi
 
   # Recover the REAL host bind sources from the running daemon rather than
@@ -189,7 +316,7 @@ swap)
     -e WORKER_NODE=$NODE -e NATS_URL=$NATS -e NATS_CREDS=$CREDS \
     -e WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-} \
     -e WORKER_GIT_KEY=${WORKER_GIT_KEY:-/data/keys/worker_git} \
-    $CACHE_ARGS chuggernaut/worker:$TAG"
+    $CACHE_ARGS $DISK_ARGS chuggernaut/worker:$TAG"
 
   # sleep briefly so this RPC's reply flushes before the old daemon is removed.
   docker run -d --rm \

@@ -91,6 +91,19 @@ CACHE_ENV=""
 if [ -n "${WORKER_CACHE_DIR:-}" ]; then
   CACHE_ENV="-e WORKER_CACHE_DIR=$WORKER_CACHE_DIR"
 fi
+# Disk pre-flight knobs (deploy #248, worker-refresh.sh): the refresh refuses a
+# build that cannot fit a new image generation, sized by a conservative constant.
+# A node with a different disk shape (a bigger colima volume, docker's data root
+# on its own filesystem) tunes it here, at creation — the refresh's swap phase
+# carries whatever is set forward, so the override survives self-refreshes.
+# Empty when unset ⇒ the documented default applies.
+DISK_ENV=""
+if [ -n "${WORKER_REFRESH_DISK_FREE_GB_MIN:-}" ]; then
+  DISK_ENV="-e WORKER_REFRESH_DISK_FREE_GB_MIN=$WORKER_REFRESH_DISK_FREE_GB_MIN"
+fi
+if [ -n "${WORKER_REFRESH_DISK_PATH:-}" ]; then
+  DISK_ENV="$DISK_ENV -e WORKER_REFRESH_DISK_PATH=$WORKER_REFRESH_DISK_PATH"
+fi
 REMOTE="docker rm -f chug-worker >/dev/null 2>&1 || true
 docker run -d --restart=always --name chug-worker \
   -v /var/run/docker.sock:/var/run/docker.sock \
@@ -100,6 +113,7 @@ docker run -d --restart=always --name chug-worker \
   -e NATS_CREDS=/data/keys/worker.creds \
   $REFRESH_ENV \
   $CACHE_ENV \
+  $DISK_ENV \
   chuggernaut/worker:$TAG >/dev/null"
 ssh "$WORKER_SSH" "$REMOTE"
 

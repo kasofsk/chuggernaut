@@ -93,13 +93,36 @@ grep_log "docker run -d --restart=always --name chug-worker"
 if grep -qF "WORKER_CACHE_DIR" "$LOG"; then
   fail "WORKER_CACHE_DIR must not be passed when unset (caching stays off)"
 fi
-echo "ok: no WORKER_CACHE_DIR passed when unset"
+# Likewise the disk pre-flight knobs: unset ⇒ nothing passed, so the refresh uses
+# the conservative default documented in worker-refresh.sh.
+if grep -qF "WORKER_REFRESH_DISK_" "$LOG"; then
+  fail "WORKER_REFRESH_DISK_* must not be passed when unset (documented default applies)"
+fi
+echo "ok: no WORKER_CACHE_DIR or WORKER_REFRESH_DISK_* passed when unset"
 
 # Also assert the label + health verification happened on the success path.
 grep_log "chug.git.sha=deadbeefcafe"                 # SHA baked as an image LABEL
 grep_log "docker inspect --format"                   # label read back for the assert
 grep -F "ssh" "$LOG" | grep -qF "State.Running"      # daemon health probe ran
 echo "ok: success path bakes + verifies the image label and probes daemon health"
+
+# ── Case 2b: disk pre-flight knobs reach the daemon's environment (deploy #248) ─
+# worker-refresh.sh's pre-flight threshold is documented as env-overridable, and
+# node creation is the only place an operator can set it — a knob the daemon
+# never receives is an inert knob. (worker-refresh.test.sh covers the other half:
+# the swap phase carrying it forward so a self-refresh does not drop it.)
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_REFRESH_DISK_FREE_GB_MIN=30 \
+  WORKER_REFRESH_DISK_PATH=/var/lib/docker \
+  sh "$SUT"
+
+grep_log "WORKER_REFRESH_DISK_FREE_GB_MIN=30"
+grep_log "WORKER_REFRESH_DISK_PATH=/var/lib/docker"
+echo "ok: daemon run carries the disk pre-flight knobs when set"
 
 # ── Case 3: no worker node ⇒ clean no-op ──────────────────────────────────────
 : > "$LOG"

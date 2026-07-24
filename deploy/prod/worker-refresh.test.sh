@@ -37,6 +37,21 @@ esac
 exit 0
 EOF
 
+# Fake df: report the free space held in $FREE_FILE (1K blocks), in the POSIX
+# `df -Pk` layout the disk pre-flight parses. A case moves the number to put the
+# node above or below the pre-flight threshold; the fake docker rewrites it on a
+# prune so a reclaim is observable.
+FREE_FILE="$WORK/free_kb"
+cat > "$BIN/df" <<EOF
+#!/bin/sh
+echo "df \$*" >> "$LOG"
+# FAKE_DF_BROKEN mimics a filesystem df cannot report on (an unknown mount, a
+# stripped image): the pre-flight must then fail OPEN, not block the refresh.
+[ -z "\${FAKE_DF_BROKEN:-}" ] || { echo "df: no such file or directory" >&2; exit 1; }
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/vda1 104857600 0 \$(cat "$FREE_FILE") 50% /"
+EOF
+
 # Fake docker: log the full argv (so we can assert on `build -t <image>` and the
 # detached swapper's inner command), consume any piped stdin. `inspect` answers
 # with the real host bind Source the swap phase recovers instead of re-deriving
@@ -52,6 +67,9 @@ case "\$*" in
   # abc123, the requested SHA in the success cases) so the assert passes unless a
   # case forces a mismatch (the stale-image-label case).
   inspect*chug.git.sha*)  echo "\${FAKE_LABEL:-abc123}" ;;
+  # A prune frees space: move the fake df reading to \$FREE_KB_AFTER_PRUNE so the
+  # script's reclaim report is computed from a real before/after difference.
+  *prune*) [ -z "\${FREE_KB_AFTER_PRUNE:-}" ] || echo "\$FREE_KB_AFTER_PRUNE" > "$FREE_FILE" ;;
 esac
 # Build-failure injection: FAIL_BUILD names an image (e.g. agent-rust) whose
 # \`docker build -t chuggernaut/<img>:...\` should fail, to exercise the atomic
@@ -65,7 +83,12 @@ fi
 exit 0
 EOF
 
-chmod +x "$BIN/git" "$BIN/docker"
+chmod +x "$BIN/git" "$BIN/docker" "$BIN/df"
+
+# Free space the fake df reports, in 1K blocks. Default ~57GB — comfortably over
+# the pre-flight threshold, so the pre-existing cases are unaffected.
+set_free_kb() { echo "$1" > "$FREE_FILE"; }
+set_free_kb 60000000
 
 # A real git key file: the build phase now validates its presence before any
 # docker mutation, so the success cases must point WORKER_GIT_KEY at a file that
@@ -75,6 +98,10 @@ KEY="$WORK/key"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 grep_log() { grep -qF "$1" "$LOG" || fail "expected in log: $1"; }
+# Combined stdout+stderr of the run under test — the daemon streams exactly this
+# into the deploy leg, so the disk story is asserted on it.
+OUT="$WORK/out.txt"
+grep_out() { grep -qF "$1" "$OUT" || fail "expected in output: $1"; }
 
 # ── Case 1: build fetches an advertised ref + builds temp tags + retag-swaps ──
 : > "$LOG"
@@ -82,7 +109,7 @@ PATH="$BIN:$PATH" \
   WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
   WORKER_GIT_KEY="$KEY" \
   FAKE_FETCH_HEAD=abc123 \
-  sh "$SUT" build abc123 prod
+  sh "$SUT" build abc123 prod > "$OUT" 2>&1
 
 grep_log "git fetch"
 # Fetch HEAD (a ref the ssh front advertises), NOT a raw SHA: the front only
@@ -110,13 +137,63 @@ if grep -F "docker build" "$LOG" | grep -qE 'chuggernaut/(worker|agent|agent-rus
 fi
 echo "ok: build verifies SHA, builds temp tags, then atomically retag-swaps to :prod"
 
+# ── Case 1a: the success path reports the disk numbers and prunes as before ───
+# The pre-flight measurement is echoed (free + needed) so an operator reads the
+# disk story off the deploy leg, and the post-refresh prune pair is unchanged:
+# dangling images + BuildKit cache above the keep threshold, NEVER `-a`.
+grep_out "disk pre-flight: 57.2GB free on /, need 20GB"
+grep_log "docker image prune -f"
+grep_log "docker builder prune -f --keep-storage 15GB"
+grep_out "pruned after a successful refresh"
+if grep -qE "prune (-a|.* -a)" "$LOG"; then
+  fail "prune must never use -a (it would delete the live :prod images)"
+fi
+echo "ok: success path reports free/needed and keeps the safe prune pair"
+
+# ── Case 1e: too little free space ⇒ fail FAST with the numbers, before work ──
+# The 2026-07-24 (deploy #248) loop: a build with no headroom for a new image
+# generation dies ten minutes in and strands the partial generation. Refuse up
+# front instead, and say what is needed vs what is free.
+: > "$LOG"
+set_free_kb 10000000   # ~9.5GB — under the 20GB threshold
+if PATH="$BIN:$PATH" \
+     WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+     WORKER_GIT_KEY="$KEY" \
+     FAKE_FETCH_HEAD=abc123 \
+     sh "$SUT" build abc123 prod > "$OUT" 2>&1; then
+  fail "build should fail when the docker filesystem lacks room for a generation"
+fi
+grep_out "need ~20GB"
+grep_out "have 9.5GB free on /"
+# Fail FAST: no fetch, no docker call at all — seconds, not a doomed build.
+if grep -qE "git fetch|docker (build|tag|image prune|builder prune)" "$LOG"; then
+  fail "the disk pre-flight must refuse before any fetch or docker call"
+fi
+echo "ok: insufficient space fails fast with the free/needed numbers"
+
+# ── Case 1f: a filesystem df cannot report on fails OPEN (never blocks) ──────
+# The pre-flight is a guard, not a gate: an unreadable disk shape must not stop
+# a refresh that would otherwise work — it says so and proceeds.
+: > "$LOG"
+set_free_kb 60000000
+PATH="$BIN:$PATH" \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  WORKER_GIT_KEY="$KEY" \
+  FAKE_FETCH_HEAD=abc123 \
+  FAKE_DF_BROKEN=1 \
+  sh "$SUT" build abc123 prod > "$OUT" 2>&1 \
+  || fail "a refresh must not be blocked by a filesystem df cannot report on"
+grep_out "df cannot read"
+grep_log "docker build -q -t chuggernaut/worker:prod-refresh"
+echo "ok: disk pre-flight fails open when df cannot report"
+
 # ── Case 1b: build refuses when remote HEAD != requested SHA (no wrong build) ──
 : > "$LOG"
 if PATH="$BIN:$PATH" \
      WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
      WORKER_GIT_KEY="$WORK/key" \
      FAKE_FETCH_HEAD=deadbeef \
-     sh "$SUT" build abc123 prod 2>/dev/null; then
+     sh "$SUT" build abc123 prod >/dev/null 2>&1; then
   fail "build should fail when remote HEAD does not match the requested SHA"
 fi
 if grep -qF "docker build" "$LOG"; then
@@ -135,7 +212,7 @@ if PATH="$BIN:$PATH" \
      WORKER_GIT_KEY="$KEY" \
      FAKE_FETCH_HEAD=abc123 \
      FAKE_LABEL=staleSHA000 \
-     sh "$SUT" build abc123 prod 2>/dev/null; then
+     sh "$SUT" build abc123 prod >/dev/null 2>&1; then
   fail "build should fail when the built image label != requested SHA"
 fi
 if grep -qF "docker tag" "$LOG"; then
@@ -148,7 +225,7 @@ echo "ok: build refuses the retag-swap when the image label != requested SHA"
 # the node's existing images are left exactly as they were (the incident: a
 # refresh that mutated before it validated stranded the node with no images).
 : > "$LOG"
-if PATH="$BIN:$PATH" sh "$SUT" build abc123 prod 2>/dev/null; then
+if PATH="$BIN:$PATH" sh "$SUT" build abc123 prod >/dev/null 2>&1; then
   fail "build should fail when WORKER_REFRESH_GIT_URL is unset"
 fi
 if grep -qE "docker (build|tag)" "$LOG"; then
@@ -161,7 +238,7 @@ echo "ok: build without WORKER_REFRESH_GIT_URL is rejected before any docker mut
 if PATH="$BIN:$PATH" \
      WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
      WORKER_GIT_KEY="$WORK/absent-key" \
-     sh "$SUT" build abc123 prod 2>/dev/null; then
+     sh "$SUT" build abc123 prod >/dev/null 2>&1; then
   fail "build should fail when the git key file is missing"
 fi
 if grep -qE "docker (build|tag)" "$LOG"; then
@@ -179,13 +256,42 @@ if PATH="$BIN:$PATH" \
      WORKER_GIT_KEY="$KEY" \
      FAKE_FETCH_HEAD=abc123 \
      FAIL_BUILD=agent-rust \
-     sh "$SUT" build abc123 prod 2>/dev/null; then
+     sh "$SUT" build abc123 prod >/dev/null 2>&1; then
   fail "build should fail when one image build fails"
 fi
 if grep -qF "docker tag" "$LOG"; then
   fail "a failed build must not reach the retag-swap (live :prod images stay intact)"
 fi
 echo "ok: a build that fails mid-way leaves the live :prod images untouched"
+
+# ── Case 2d: a FAILED build prunes what it stranded and reports the reclaim ────
+# Pruning only after a SUCCESSFUL refresh is what let each failure make the next
+# one more likely to fail (deploy #248): the dead build's generation stayed
+# stranded until someone ssh'd in. The failure path now runs the same safe prune
+# pair and reports the reclaim, so the retry starts no fuller than this one did.
+: > "$LOG"
+set_free_kb 25000000                    # ~23.8GB free: clears the pre-flight
+export FREE_KB_AFTER_PRUNE=34000000     # ~32.4GB after the prune pair
+if PATH="$BIN:$PATH" \
+     WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+     WORKER_GIT_KEY="$KEY" \
+     FAKE_FETCH_HEAD=abc123 \
+     FAIL_BUILD=agent-rust \
+     sh "$SUT" build abc123 prod > "$OUT" 2>&1; then
+  fail "build should fail when one image build fails"
+fi
+# The temp tags are dropped FIRST (that is what makes them dangling), then the
+# sanctioned pair reclaims them — dangling images only, never `-a`.
+grep_log "docker rmi -f chuggernaut/worker:prod-refresh"
+grep_log "docker image prune -f"
+grep_log "docker builder prune -f --keep-storage 15GB"
+if grep -qE "prune (-a|.* -a)" "$LOG"; then
+  fail "the failure-path prune must never use -a (live :prod images must survive)"
+fi
+# ...and the reclaim is in the output the daemon relays into the failed leg.
+grep_out "reclaimed 8.5GB (23.8GB -> 32.4GB free on /)"
+unset FREE_KB_AFTER_PRUNE
+echo "ok: a failed build prunes what it stranded and reports the reclaim"
 
 # ── Case 3: swap schedules a detached sibling that recreates chug-worker ──────
 : > "$LOG"
@@ -226,6 +332,31 @@ if grep -qF -- "-v /var/cache/chuggernaut/sccache:/var/cache/chuggernaut/sccache
   fail "swap must pass WORKER_CACHE_DIR as env only, not a daemon bind-mount"
 fi
 echo "ok: swap carries WORKER_CACHE_DIR forward as env (no daemon mount)"
+
+# ── Case 3c: swap carries the disk pre-flight knobs forward (deploy #248) ──────
+# Same class of silent-drop bug as WORKER_CACHE_DIR: a node tuned to a different
+# disk shape must keep that tuning across a self-refresh, or the very next
+# refresh reverts it to the built-in default and the operator's override is a
+# no-op. Unset ⇒ nothing passed, so a stock node keeps the documented constant.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  WORKER_REFRESH_DISK_FREE_GB_MIN=30 \
+  WORKER_REFRESH_DISK_PATH=/var/lib/docker \
+  sh "$SUT" swap prod
+
+grep_log "WORKER_REFRESH_DISK_FREE_GB_MIN=30"
+grep_log "WORKER_REFRESH_DISK_PATH=/var/lib/docker"
+
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  sh "$SUT" swap prod
+
+if grep -qF "WORKER_REFRESH_DISK_" "$LOG"; then
+  fail "swap must not pass a WORKER_REFRESH_DISK_ knob when unset (default applies)"
+fi
+echo "ok: swap carries the disk pre-flight knobs forward, and passes none when unset"
 
 # ── Case 4: unknown phase is a hard error ────────────────────────────────────
 if PATH="$BIN:$PATH" sh "$SUT" frobnicate 2>/dev/null; then

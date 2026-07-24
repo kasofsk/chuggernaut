@@ -102,10 +102,16 @@ will run and wait.
    the node and reading `docker logs chug-worker` — output is buffer-flushed
    in one lump and may lag or be empty.
 2. **Recurring cause on dev-air**: colima docker disk pressure (~80%+ full)
-   kills the `cargo build` inside the image build. The refresh script only
-   prunes after a *successful* refresh, so repeated failures accumulate
-   stranded build generations.
-3. Safe cleanup (**ask first — it deletes**):
+   kills the `cargo build` inside the image build. The script now owns this
+   itself (#250): a **disk pre-flight** refuses in seconds with
+   `insufficient docker disk: need ~20GB … have NGB free` (a leg failing that
+   fast means grow the VM disk / prune, not debug the build), and a failed
+   build runs the safe prune pair itself and reports the reclaim — a failure
+   no longer strands a generation for the next attempt. The 20GB threshold is
+   a conservative constant; a node with a different disk shape overrides it
+   with `WORKER_REFRESH_DISK_FREE_GB_MIN` (and `_DISK_PATH`) in the daemon's
+   env at node creation — a self-refresh carries the override forward.
+3. Safe cleanup by hand (**ask first — it deletes**), same pair the script runs:
    `docker image prune -f` (dangling only, **never `-a`**) and
    `docker builder prune -f --keep-storage 15GB`.
 4. Verify with a manual rebuild (validate-first, can't hurt live tags):
