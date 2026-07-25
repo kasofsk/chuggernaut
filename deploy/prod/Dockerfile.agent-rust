@@ -116,3 +116,16 @@ ENV IS_SANDBOX=1
 RUN git config --system user.name "Chuggernaut Agent" \
  && git config --system user.email "agent@chuggernaut.local" \
  && git config --system --add safe.directory '*'
+
+# Same ownership marker the dispatcher stamps on every container it launches
+# (MANAGED_LABEL, crates/container/src/docker.rs) — one key means "Chuggernaut
+# owns this Docker object", container or image; the two must not drift. Nothing
+# runs from this image between jobs, so a host-level `docker system prune --all`
+# (daily timer on gumbo-nuc-0) deletes it and the next job on that node fails to
+# launch with a 404 — the host spares it via `--filter
+# label!=chuggernaut.managed`.
+#
+# Kept LAST, below the warm-target seed: a LABEL is its own layer, so anything
+# above it would be invalidated by an edit here — and above the seed that costs
+# the 10+ minute workspace bake on every subsequent build.
+LABEL chuggernaut.managed="true"

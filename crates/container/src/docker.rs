@@ -23,7 +23,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Label stamped on every container we launch; placement counts by it.
+/// Label stamped on every container we launch; placement counts by it. The
+/// three built images carry the same key as a `LABEL` (`deploy/prod/
+/// Dockerfile.worker`, `deploy/dev/Dockerfile.agent`, `deploy/prod/
+/// Dockerfile.agent-rust`) so one marker means "Chuggernaut owns this Docker
+/// object" whatever kind it is, and a host `docker system prune --all` can
+/// spare them with `--filter label!=chuggernaut.managed`. Renaming it here
+/// without renaming it there strands the images — `deploy/managed-label.test.sh`
+/// reads this constant and fails on the drift.
 const MANAGED_LABEL: &str = "chuggernaut.managed";
 
 /// Identity labels stamped alongside [`MANAGED_LABEL`] so the §3.6 fleet sweep

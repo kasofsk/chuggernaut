@@ -18,3 +18,10 @@ ENV IS_SANDBOX=1
 RUN git config --system user.name "Chuggernaut Agent" \
  && git config --system user.email "agent@chuggernaut.local" \
  && git config --system --add safe.directory '*'
+
+# Same ownership marker the dispatcher stamps on every container it launches
+# (MANAGED_LABEL, crates/container/src/docker.rs) — the two must not drift.
+# Nothing runs from this image between jobs, so a host-level `docker system
+# prune --all` deletes it and the next job on that node fails to launch with a
+# 404; the host spares it via `--filter label!=chuggernaut.managed`.
+LABEL chuggernaut.managed="true"

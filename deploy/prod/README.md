@@ -556,6 +556,22 @@ the dependency layer so a SHA-only change never invalidates the deps.
   never collide. `agent-rust` still **bakes** its warm-target seed (#123) into
   the image — it compiles into the cache mount, then `cp -a`s the result into
   the baked `/opt/chug-prebuilt-target`.
+- **Prune protection.** All three images (`worker`, `agent`, `agent-rust`) carry
+  `LABEL chuggernaut.managed="true"` — the same `MANAGED_LABEL` the dispatcher
+  stamps on every container it launches. A host-level `docker system prune
+  --all` (gumbo-nuc-0 runs one on a daily timer) removes every image not backing
+  a *running* container, and the agent images back nothing between jobs, so an
+  unfiltered sweep deletes them and the next job on that node fails to launch
+  with `404: No such image`. The host spares them with `--filter
+  label!=chuggernaut.managed`; that filter is inert unless every image carries
+  the label, so the pairing is checked statically:
+
+  ```sh
+  deploy/managed-label.test.sh   # all three carry it, key read from docker.rs
+  ```
+
+  The label lives in the Dockerfiles (constant property of the image), unlike
+  `chug.git.sha`, which stays a CLI `--label` because it is per-build.
 - **MEASURE cold vs warm (manual, run on the node).** CI cannot build images, so
   the warm-cache win is a manual measurement — capture it once on dev-air:
 
