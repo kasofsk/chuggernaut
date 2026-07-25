@@ -1720,7 +1720,18 @@ table.jobs tbody tr.row-draft td:first-child {
      wraps. This is a display-level re-layout of the very same cells, so there
      is no second markup to keep in sync with the desktop table. The gutter is
      a negative margin rather than absolute positioning, so a five-digit job
-     number pushes the title along instead of overlapping it. */
+     number pushes the title along instead of overlapping it.
+     The item runs the full width of the screen: the card's 1rem side padding
+     is right for a card of prose, but here it spent 2rem of every item — a
+     twelfth of a 360px screen — insetting rows that already carry their own
+     padding, so titles and the metadata line wrapped earlier than they had
+     to. The card keeps its top/bottom padding, and the toolbar above re-adds
+     the side inset so its controls don't sit on the screen edge (its padding
+     is in the responsive-chrome block below). */
+  .jobs-main {
+    padding-left: 0;
+    padding-right: 0;
+  }
   .jobs-list thead {
     display: none;
   }
@@ -1737,7 +1748,10 @@ table.jobs tbody tr.row-draft td:first-child {
        here would push the title onto its own line for any wide job number. */
     column-gap: 0;
     row-gap: 0.2rem;
-    padding: 0.5rem 0.35rem 0.55rem 3.2rem;
+    /* Right padding matches the 0.5rem the job number keeps on the left, so
+       the item is inset evenly from both screen edges now that the card no
+       longer insets it. */
+    padding: 0.5rem 0.5rem 0.55rem 3.2rem;
     border-bottom: 1px solid var(--border-faint);
   }
   .jobs-list tbody td {
@@ -4415,8 +4429,11 @@ tr[data-state='Batched'] {
   .proj-title {
     font-size: 1.5rem;
   }
+  /* The toolbar carries the side inset its card gave up so the jobs list
+     below could go full-bleed (see .jobs-main in the jobs-list block above). */
   .jobs-toolbar {
     gap: var(--sp-2);
+    padding: 0 var(--sp-4);
   }
   .jobs-controls {
     width: 100%;
