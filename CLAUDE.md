@@ -51,6 +51,12 @@ the absence of a workflow file.
   executing against a real `nats-server`. It is diff-aware — doc/web/config-only
   diffs gate in seconds without a cargo build — and it version-skew-gates
   `jobs/*.yaml` config changes against the deployed dispatcher (spec §14).
+- `tasks/ci.sh` also runs three pure-shell gates **before** that diff-aware
+  early-exit, so a web-only or docs-only change is still gated: the `jobs/*.yaml`
+  version-skew check, the `MODULES.md` registry check, and
+  `tasks/check-duplication.sh` — copy-paste detection via a pinned
+  `jscpd@5.0.5` at `threshold: 0` (STYLE.md Tier 1; ~30ms for the whole repo, so
+  it is unconditional). Any clone fails the gate.
 - Per-type **stage-0 agent reviewers** run first (`tasks/review-*.md`), so the
   slow cargo gate is spent only on changes the reviewer accepts; `docs`/`design`
   jobs additionally gate on `tasks/doc-lint.sh` at stage 1.

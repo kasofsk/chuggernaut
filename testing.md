@@ -57,6 +57,26 @@ The v1 fixture format (`title`/`body`/`deps`/`priority`/`capabilities`) predates
 
 **Assertions** run against the public surfaces only — the HTTP API and git history (final graph state, one squash-merge per non-noop job with the §3.2 commit format, event stream contents) — never against KV internals, so e2e tests survive internal refactors.
 
+## Duplication: integration tests are out of scope
+
+The copy-paste gate (`tasks/check-duplication.sh`, STYLE.md Tier 1) runs at
+`threshold: 0` over the repo, but `.jscpd.json` excludes `**/tests/**` and
+`**/*.test.*` **deliberately**: integration-test setup blocks repeat by nature —
+spawn NATS, seed a project, drive the same first three states — and forcing them
+through shared helpers costs more in test readability than the duplication costs
+in drift. A test should read top to bottom as the scenario it is.
+
+Two consequences worth knowing:
+
+- In-file `#[cfg(test)] mod tests` blocks are **in** scope — a glob cannot see
+  inside a file. That is deliberate too: a tier-1 unit test module lives beside
+  the code it pins, and a repeated `decide(...)` scaffold there is better named
+  once as a local helper (`decide_ci_exit` in `domain::decide::eval`) than
+  copied. Keep such helpers in the same test module, next to the fixtures.
+- When a duplication genuinely belongs (a golden fixture, two tests that must
+  stay independently readable), bracket it with `jscpd:ignore-start` /
+  `jscpd:ignore-end` and a comment saying why. Never raise the threshold.
+
 ## Conventions
 
 - `test-utils` owns: the NATS harness (local `nats-server` process, else Docker container), temp-repo builder, fake backend/provider, fixture seeding, and `require_nats!`/`e2e!` guard macros that skip when NATS/Docker are unavailable

@@ -549,7 +549,6 @@ impl Core {
         let job = self.must_get(owner, project, seq)?.clone();
         let job_type = self.active.get(&key).expect("exec state").job_type.clone();
         let task_id = self.next_task_id(owner, project, seq).await?;
-        let phase_name = format!("{phase:?}");
 
         let (kind, pending_human) = match evaluator.r#type {
             EvaluatorType::Command => (
@@ -624,14 +623,11 @@ impl Core {
             started_at: (!pending_human).then(Utc::now),
             completed_at: None,
         };
-        self.tasks.put(&task).await?;
-        self.publish(
+        self.task_create(
             owner,
             project,
-            seq,
-            "task-created",
+            &task,
             serde_json::json!({
-                "task_id": task_id, "phase": phase_name, "cycle": cycle,
                 "attempt": attempt, "evaluator": evaluator.name, "stage": evaluator.stage,
             }),
         )
@@ -1942,15 +1938,11 @@ impl Core {
             started_at: Some(Utc::now()),
             completed_at: None,
         };
-        self.tasks.put(&task).await?;
-        self.publish(
+        self.task_create(
             owner,
             project,
-            seq,
-            "task-created",
-            serde_json::json!({
-                "task_id": task_id, "phase": "WrapUp", "cycle": cycle, "attempt": attempt,
-            }),
+            &task,
+            serde_json::json!({ "attempt": attempt }),
         )
         .await?;
 

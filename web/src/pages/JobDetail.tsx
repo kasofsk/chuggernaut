@@ -31,6 +31,7 @@ import { JobAttachments } from '../components/Attachments'
 import { ProjectHeader } from '../components/ProjectHeader'
 import { Skeleton, SkeletonLines } from '../components/Skeleton'
 import { DeployLegCard, deployReportOf } from '../components/DeployLegCard'
+import { fmtDuration } from '../format'
 
 // A fetch the page can do without: its failure resolves to null instead of
 // rejecting, so it can be awaited alongside the required ones without taking
@@ -1038,15 +1039,6 @@ function TokenChip({ usage }: { usage?: TokenUsage | null }) {
 function fmtTime(iso: string | null): string {
   if (!iso) return ''
   return new Date(iso).toLocaleTimeString([], { hour12: false })
-}
-
-// Humane duration: '42s', '3m 12s', '1h 04m'.
-function fmtDuration(ms: number): string {
-  const total = Math.max(0, Math.round(ms / 1000))
-  if (total < 60) return `${total}s`
-  const m = Math.floor(total / 60)
-  if (m < 60) return `${m}m ${String(total % 60).padStart(2, '0')}s`
-  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
 }
 
 // A task parked Pending by the capacity launch queue (spec §3.5) — waiting for

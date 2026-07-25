@@ -32,6 +32,29 @@ export function SkeletonLines({ n = 3 }: { n?: number }) {
   )
 }
 
+/** n placeholder cards, each a title bar over `lines` text lines — the shape a
+ *  page of stacked content cards (tags, prompts) loads into. */
+export function SkeletonCards({
+  n = 2,
+  titleWidth = '8rem',
+  lines = 4,
+}: {
+  n?: number
+  titleWidth?: string
+  lines?: number
+}) {
+  return (
+    <>
+      {Array.from({ length: n }, (_, i) => (
+        <section className="card" key={i}>
+          <Skeleton width={titleWidth} height="1.2em" />
+          <SkeletonLines n={lines} />
+        </section>
+      ))}
+    </>
+  )
+}
+
 /** n rows of cells sized by `widths`, mimicking a table's shape. */
 export function SkeletonTable({ rows = 5, widths }: { rows?: number; widths: string[] }) {
   return (

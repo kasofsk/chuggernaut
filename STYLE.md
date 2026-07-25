@@ -78,6 +78,20 @@ that debt is what the pending checks will pin down.
   files that fail it belong to refactor-plan E1.)* *Why:* zero decisions, zero
   diffs about decisions.
 
+- **No duplicated code: zero clones.** *(live: `tasks/check-duplication.sh`
+  runs `jscpd@5.0.5` — pinned exactly — over the whole repo from `tasks/ci.sh`,
+  unconditionally and before the Rust early-exit, at `threshold: 0`. Config:
+  `.jscpd.json`, 10 lines / 80 tokens; integration tests, vendored and
+  generated trees excluded — ticket A5.)* Any clone fails the gate; extract the
+  shared body into a helper named after its caller (Tier 2 rule 4) rather than
+  raise the bar. A deliberate exception is a `jscpd:ignore-start` /
+  `jscpd:ignore-end` bracket **with a comment saying why** — never a threshold
+  change. *Why:* duplicated logic drifts apart, and the copy that didn't get
+  the fix is where the next bug lives. Agent-written code duplicates far more
+  readily than human-written code — an agent that cannot find the existing
+  helper writes a second one — so a threshold set anywhere above zero would
+  ratchet the wrong way.
+
 ## Tier 2 — mechanical rules a reviewer checks by name
 
 Not (yet) machine-checked, but each is concrete enough that a reviewer can

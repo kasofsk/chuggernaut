@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api } from '../api'
-import { ProjectHeader } from '../components/ProjectHeader'
-import { Skeleton, SkeletonLines } from '../components/Skeleton'
+import { ProjectPage } from '../components/ProjectPage'
+import { SkeletonCards } from '../components/Skeleton'
 
 /**
  * Knowledge tags: every tags/{tag}.md at default-branch HEAD, with its
@@ -41,18 +41,8 @@ export function TagsPage() {
   }, [owner, project, navigate])
 
   return (
-    <div className="page">
-      <ProjectHeader owner={owner} project={project} />
-      {error && <div className="error banner">{error}</div>}
-
-      {!loaded &&
-        !error &&
-        [0, 1].map((i) => (
-          <section className="card" key={i}>
-            <Skeleton width="8rem" height="1.2em" />
-            <SkeletonLines n={4} />
-          </section>
-        ))}
+    <ProjectPage owner={owner} project={project} error={error}>
+      {!loaded && !error && <SkeletonCards titleWidth="8rem" lines={4} />}
       {loaded &&
         tags.map((t) => (
           <section className="card" key={t.name} id={t.name}>
@@ -77,6 +67,6 @@ export function TagsPage() {
           </div>
         </section>
       )}
-    </div>
+    </ProjectPage>
   )
 }

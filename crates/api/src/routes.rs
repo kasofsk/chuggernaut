@@ -450,6 +450,27 @@ pub async fn project_config_get(
     .into_response())
 }
 
+/// The `platform` bucket, for a caller that must be a platform admin first.
+/// Every platform-scoped read is cross-project, so they share one gate and one
+/// bucket handle; keeping the pair in one place is what stops the admin check
+/// from being forgotten on the next one.
+async fn platform_bucket_for_admin(
+    state: &SharedState,
+    identity: &Identity,
+) -> ApiResult<store::Bucket> {
+    if !identity.platform_admin {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "platform admin required",
+        ));
+    }
+    state
+        .store
+        .raw_bucket(store::buckets::PLATFORM)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))
+}
+
 /// Read-only platform config for the platform settings page: the dispatcher's
 /// published snapshot (fleet + defaults), the `global/agents` secret NAMES, and
 /// whether web-push (VAPID) is configured. Platform admins only.
@@ -457,17 +478,7 @@ pub async fn platform_config_get(
     State(state): State<SharedState>,
     Auth(identity): Auth,
 ) -> ApiResult<Response> {
-    if !identity.platform_admin {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "platform admin required",
-        ));
-    }
-    let platform = state
-        .store
-        .raw_bucket(store::buckets::PLATFORM)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let platform = platform_bucket_for_admin(&state, &identity).await?;
     let dispatcher: Option<types::DispatcherConfigSnapshot> = platform
         .get_json("dispatcher.config")
         .await
@@ -503,17 +514,7 @@ pub async fn platform_fleet_get(
     State(state): State<SharedState>,
     Auth(identity): Auth,
 ) -> ApiResult<Response> {
-    if !identity.platform_admin {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "platform admin required",
-        ));
-    }
-    let platform = state
-        .store
-        .raw_bucket(store::buckets::PLATFORM)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let platform = platform_bucket_for_admin(&state, &identity).await?;
     let fleet: types::FleetStatus = platform
         .get_json("fleet.status")
         .await

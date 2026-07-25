@@ -134,17 +134,8 @@ impl Core {
             started_at: Some(Utc::now()),
             completed_at: None,
         };
-        self.tasks.put(&task).await?;
-        self.publish(
-            owner,
-            project,
-            seq,
-            "task-created",
-            serde_json::json!({
-                "task_id": task_id, "phase": "Triage", "cycle": cycle,
-            }),
-        )
-        .await?;
+        self.task_create(owner, project, &task, serde_json::Value::Null)
+            .await?;
 
         // Minimal launch env: clone the default branch (always present — a
         // Stalled job may have no job branch) read-only for code context, plus

@@ -2734,6 +2734,44 @@ impl Core {
         }
         Ok(())
     }
+
+    /// Persist a freshly created task record and announce it (`task-created`).
+    ///
+    /// Every creation path — work, evaluator, merge gate, wrap-up, triage — is
+    /// this same pair, and the pair is not separable: a stored task with no event
+    /// is a task the operator UI never learns about, and an event with no record
+    /// is a phantom. The event's identity fields are DERIVED from the record (so
+    /// they cannot disagree with it) and the job it publishes under is the
+    /// record's own `job_seq`; `extra` carries only what one phase adds — the
+    /// retry attempt, an evaluator's name and stage, a human performer.
+    pub(crate) async fn task_create(
+        &self,
+        owner: &str,
+        project: &str,
+        task: &types::Task,
+        extra: serde_json::Value,
+    ) -> Result<()> {
+        debug_assert!(
+            task.result.is_none(),
+            "task {} is being created with a result already on it",
+            task.id
+        );
+        debug_assert!(
+            task.completed_at.is_none(),
+            "created task already completed"
+        );
+        self.tasks.put(task).await?;
+        let mut payload = serde_json::json!({
+            "task_id": task.id,
+            "phase": task.phase,
+            "cycle": task.cycle,
+        });
+        if let (Some(obj), Some(ext)) = (payload.as_object_mut(), extra.as_object()) {
+            obj.extend(ext.clone());
+        }
+        self.publish(owner, project, task.job_seq, "task-created", payload)
+            .await
+    }
 }
 
 fn split_slug(slug: &str) -> Result<(String, String)> {

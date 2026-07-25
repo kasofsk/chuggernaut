@@ -11,6 +11,7 @@ import { StatusFooter } from '../components/StatusFooter'
 import { IconSearch } from '../components/icons'
 import { SkeletonTable } from '../components/Skeleton'
 import { useFleet } from '../useFleet'
+import { fmtDuration } from '../format'
 import {
   filtersFromParams,
   filtersToParams,
@@ -40,16 +41,6 @@ function fmtStamp(iso: string): string {
     d.getDate() === now.getDate()
   const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
   return sameDay ? time : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`
-}
-
-// Humane duration, matching JobDetail's #57 task-duration format:
-// '42s', '3m 12s', '1h 04m'.
-function fmtDuration(ms: number): string {
-  const total = Math.max(0, Math.round(ms / 1000))
-  if (total < 60) return `${total}s`
-  const m = Math.floor(total / 60)
-  if (m < 60) return `${m}m ${String(total % 60).padStart(2, '0')}s`
-  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
 }
 
 // Tooltip for the completed cell: the full ISO instant plus the humanized

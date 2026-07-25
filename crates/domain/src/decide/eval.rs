@@ -1220,6 +1220,45 @@ mod tests {
             .collect()
     }
 
+    /// A one-slot `ci` round taking a raw container exit — the failing-command
+    /// shape the budget/rework/verdict tests share. A test then states only what
+    /// it actually varies (the view, and the exit code), not the event plumbing.
+    fn decide_ci_exit(
+        v: &EvalView<'_>,
+        exit_code: i32,
+    ) -> (Option<EvalRound>, Vec<Transition>, Vec<Effect>, EvalStep) {
+        decide(
+            Some(open_round(vec![open_slot("ci", 1)], vec![])),
+            v,
+            EvalEvent::SlotExited {
+                task: Box::new(command_task(1, "ci")),
+                exit: exit(exit_code),
+            },
+        )
+    }
+
+    /// A stage-0 `review` slot resolving with `ci` queued behind it as stage 1 —
+    /// the staged-progression shape (advance vs short-circuit turns only on
+    /// `pass`).
+    fn decide_stage0_resolved(
+        job: &Job,
+        pass: bool,
+    ) -> (Option<EvalRound>, Vec<Transition>, Vec<Effect>, EvalStep) {
+        decide(
+            Some(open_round(
+                vec![open_slot("review", 1)],
+                vec![vec![evaluator("ci", 1, None)]],
+            )),
+            &view(job, &[]),
+            EvalEvent::SlotResolved {
+                task_id: 1,
+                pass,
+                abort: false,
+                structured: None,
+            },
+        )
+    }
+
     // ── entry: the staged fan-out (§3.2 steps 9–10, §3.3) ───────────────────
 
     /// Entry moves the record, announces the round, and creates STAGE 0 ONLY —
@@ -1509,14 +1548,7 @@ mod tests {
         v.rework_budget = 1;
         v.reworks_used = 1;
         v.cycle = 2;
-        let (round, _, effects, step) = decide(
-            Some(open_round(vec![open_slot("ci", 1)], vec![])),
-            &v,
-            EvalEvent::SlotExited {
-                task: Box::new(command_task(1, "ci")),
-                exit: exit(1),
-            },
-        );
+        let (round, _, effects, step) = decide_ci_exit(&v, 1);
 
         assert_eq!(
             effect_names(&effects).last().map(String::as_str),
@@ -1542,14 +1574,7 @@ mod tests {
         let mut v = view(&job, &[]);
         v.rework_budget = 5;
         v.work_type = WorkType::Command;
-        let (_, _, effects, step) = decide(
-            Some(open_round(vec![open_slot("ci", 1)], vec![])),
-            &v,
-            EvalEvent::SlotExited {
-                task: Box::new(command_task(1, "ci")),
-                exit: exit(1),
-            },
-        );
+        let (_, _, effects, step) = decide_ci_exit(&v, 1);
 
         assert_eq!(
             effect_names(&effects).last().map(String::as_str),
@@ -1566,14 +1591,7 @@ mod tests {
         let job = sample_job(JobState::Evaluation);
         let mut v = view(&job, &[]);
         v.rework_budget = 1;
-        let (_, _, effects, step) = decide(
-            Some(open_round(vec![open_slot("ci", 1)], vec![])),
-            &v,
-            EvalEvent::SlotExited {
-                task: Box::new(command_task(1, "ci")),
-                exit: exit(1),
-            },
-        );
+        let (_, _, effects, step) = decide_ci_exit(&v, 1);
 
         assert_eq!(
             effect_names(&effects),
@@ -1592,14 +1610,7 @@ mod tests {
     #[test]
     fn verdict_less_exit_relaunches_without_spending_eval_retries() {
         let job = sample_job(JobState::Evaluation);
-        let (round, _, effects, step) = decide(
-            Some(open_round(vec![open_slot("ci", 1)], vec![])),
-            &view(&job, &[]),
-            EvalEvent::SlotExited {
-                task: Box::new(command_task(1, "ci")),
-                exit: exit(137),
-            },
-        );
+        let (round, _, effects, step) = decide_ci_exit(&view(&job, &[]), 137);
 
         assert_eq!(
             effect_names(&effects),
@@ -2004,19 +2015,7 @@ mod tests {
     #[test]
     fn a_passed_stage_advances_to_the_next() {
         let job = sample_job(JobState::Evaluation);
-        let (round, _, effects, step) = decide(
-            Some(open_round(
-                vec![open_slot("review", 1)],
-                vec![vec![evaluator("ci", 1, None)]],
-            )),
-            &view(&job, &[]),
-            EvalEvent::SlotResolved {
-                task_id: 1,
-                pass: true,
-                abort: false,
-                structured: None,
-            },
-        );
+        let (round, _, effects, step) = decide_stage0_resolved(&job, true);
 
         assert_eq!(
             effect_names(&effects),
@@ -2034,19 +2033,7 @@ mod tests {
     #[test]
     fn a_failed_stage_short_circuits_the_rest() {
         let job = sample_job(JobState::Evaluation);
-        let (round, _, effects, step) = decide(
-            Some(open_round(
-                vec![open_slot("review", 1)],
-                vec![vec![evaluator("ci", 1, None)]],
-            )),
-            &view(&job, &[]),
-            EvalEvent::SlotResolved {
-                task_id: 1,
-                pass: false,
-                abort: false,
-                structured: None,
-            },
-        );
+        let (round, _, effects, step) = decide_stage0_resolved(&job, false);
 
         assert_eq!(
             effect_names(&effects),

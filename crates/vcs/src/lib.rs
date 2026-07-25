@@ -64,6 +64,21 @@ enum SquashBuild {
     UnresolvedMarkers { files: Vec<String> },
 }
 
+/// The [`MergeOutcome`] a [`SquashBuild`] maps to on its own. Both squash
+/// callers ([`RepoManager::squash_merge`], [`RepoManager::create_squash_candidate`])
+/// report the three no-commit results identically and differ ONLY in what they
+/// do with a built commit — promote the default branch, or park it on
+/// `merge-gate/{seq}`. Callers destructure `Commit` themselves; reporting it
+/// merged here is the truthful mapping for a commit nobody moved a ref for.
+fn squash_build_outcome(build: SquashBuild) -> MergeOutcome {
+    match build {
+        SquashBuild::NoOp => MergeOutcome::NoOp,
+        SquashBuild::Conflict { files } => MergeOutcome::Conflict { files },
+        SquashBuild::UnresolvedMarkers { files } => MergeOutcome::UnresolvedMarkers { files },
+        SquashBuild::Commit { commit, .. } => MergeOutcome::Merged { commit },
+    }
+}
+
 /// Outcome of [`RepoManager::rebase_onto_with_conflict`] — the merge-tree
 /// rebase that REUSES the merged tree instead of discarding it (spec §3.2
 /// step 12 conflict / merge-gate rework). Unlike [`RebaseOutcome`], BOTH arms
@@ -1086,21 +1101,15 @@ impl RepoManager {
         job_type: &str,
         summary: Option<&str>,
     ) -> Result<MergeOutcome> {
-        match self
+        let build = self
             .build_squash_commit(owner, project, seq, base_ref, job_type, summary)
-            .await?
-        {
-            SquashBuild::NoOp => Ok(MergeOutcome::NoOp),
-            SquashBuild::Conflict { files } => Ok(MergeOutcome::Conflict { files }),
-            SquashBuild::UnresolvedMarkers { files } => {
-                Ok(MergeOutcome::UnresolvedMarkers { files })
-            }
-            SquashBuild::Commit { commit, old_head } => {
-                self.advance_default(owner, project, &commit, &old_head)
-                    .await?;
-                Ok(MergeOutcome::Merged { commit })
-            }
-        }
+            .await?;
+        let SquashBuild::Commit { commit, old_head } = build else {
+            return Ok(squash_build_outcome(build));
+        };
+        self.advance_default(owner, project, &commit, &old_head)
+            .await?;
+        Ok(MergeOutcome::Merged { commit })
     }
 
     /// Build the candidate squash commit and park it on `merge-gate/{seq}`
@@ -1116,21 +1125,15 @@ impl RepoManager {
         job_type: &str,
         summary: Option<&str>,
     ) -> Result<MergeOutcome> {
-        match self
+        let build = self
             .build_squash_commit(owner, project, seq, base_ref, job_type, summary)
-            .await?
-        {
-            SquashBuild::NoOp => Ok(MergeOutcome::NoOp),
-            SquashBuild::Conflict { files } => Ok(MergeOutcome::Conflict { files }),
-            SquashBuild::UnresolvedMarkers { files } => {
-                Ok(MergeOutcome::UnresolvedMarkers { files })
-            }
-            SquashBuild::Commit { commit, .. } => {
-                self.create_branch(owner, project, &format!("merge-gate/{seq}"), &commit)
-                    .await?;
-                Ok(MergeOutcome::Merged { commit })
-            }
-        }
+            .await?;
+        let SquashBuild::Commit { commit, .. } = build else {
+            return Ok(squash_build_outcome(build));
+        };
+        self.create_branch(owner, project, &format!("merge-gate/{seq}"), &commit)
+            .await?;
+        Ok(MergeOutcome::Merged { commit })
     }
 
     /// Advance the default branch to `commit`, CAS on `expected_old_head`. The

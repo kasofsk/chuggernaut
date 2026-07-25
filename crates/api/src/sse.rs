@@ -23,6 +23,23 @@ fn last_event_id(headers: &HeaderMap) -> Option<u64> {
         .and_then(|v| v.parse().ok())
 }
 
+/// Both feeds below are project-scoped reads over the same subject space, so
+/// they authorize identically and differ only in their subject filter — one
+/// check, so a new feed cannot accidentally ship without it.
+fn events_authorize_read(
+    identity: &types::Identity,
+    owner: &str,
+    project: &str,
+) -> Result<(), ApiError> {
+    auth::authorize(
+        identity,
+        &auth::Action::ReadProject {
+            project: format!("{owner}/{project}"),
+        },
+    )
+    .map_err(|_| ApiError::new(StatusCode::FORBIDDEN, "insufficient role"))
+}
+
 async fn bridge(
     state: &SharedState,
     filter: String,
@@ -49,13 +66,7 @@ pub async fn project_events(
     Auth(identity): Auth,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    auth::authorize(
-        &identity,
-        &auth::Action::ReadProject {
-            project: format!("{owner}/{project}"),
-        },
-    )
-    .map_err(|_| ApiError::new(StatusCode::FORBIDDEN, "insufficient role"))?;
+    events_authorize_read(&identity, &owner, &project)?;
     let filter = format!("job.events.{owner}.{project}.>");
     // A fresh connect gets live events only. The project feed spans every job
     // the project has ever run, so replaying it costs the operator a multi-
@@ -73,13 +84,7 @@ pub async fn job_events(
     Auth(identity): Auth,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    auth::authorize(
-        &identity,
-        &auth::Action::ReadProject {
-            project: format!("{owner}/{project}"),
-        },
-    )
-    .map_err(|_| ApiError::new(StatusCode::FORBIDDEN, "insufficient role"))?;
+    events_authorize_read(&identity, &owner, &project)?;
     let filter = format!("job.events.{owner}.{project}.{seq}.>");
     // Unlike the project feed, one job's history is bounded and *is* the
     // content: the detail page renders the event log itself. Replay it whole.

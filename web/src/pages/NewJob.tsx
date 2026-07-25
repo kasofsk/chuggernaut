@@ -12,6 +12,7 @@ import { ProjectHeader } from '../components/ProjectHeader'
 import { RichSelect } from '../components/RichSelect'
 import { SkeletonLines } from '../components/Skeleton'
 import { AttachmentComposer, uploadFiles } from '../components/Attachments'
+import { depCandidates } from '../jobFilters'
 
 /**
  * Create-job page (#171): the compose form; deps render as coupled cars, and a
@@ -127,19 +128,7 @@ function CreateJob({
     setSelectedTags((ts) => (ts.includes(tag) ? ts.filter((t) => t !== tag) : [...ts, tag]))
   }
 
-  const depMatches = jobs
-    .filter((j) => j.state !== 'Revoked' && !deps.includes(j.id))
-    .filter((j) => {
-      const q = depQuery.trim().toLowerCase()
-      if (!q) return true
-      return (
-        `#${j.id}`.includes(q) ||
-        String(j.id).startsWith(q.replace('#', '')) ||
-        j.title.toLowerCase().includes(q) ||
-        j.type.toLowerCase().includes(q)
-      )
-    })
-    .slice(0, 8)
+  const depMatches = depCandidates(jobs, deps, depQuery)
   function setEvalRow(i: number, patch: Partial<EvalRow>) {
     setEvalRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)))
   }

@@ -47,6 +47,24 @@ export function textMatch(j: Job, q: string): boolean {
   )
 }
 
+/** How many candidates a dependency picker's dropdown shows. */
+const DEP_MATCHES_MAX = 8
+
+/**
+ * Dependency-picker candidates: jobs that can still be depended on — not
+ * revoked, not already chosen, never the job itself — narrowed by the picker's
+ * query (the same matching as the jobs list) and capped at what the dropdown
+ * renders. One implementation, so the draft editor's picker and the create
+ * form's picker cannot drift apart. `selfId` is omitted when composing a job
+ * that does not exist yet.
+ */
+export function depCandidates(jobs: Job[], deps: number[], query: string, selfId?: number): Job[] {
+  return jobs
+    .filter((j) => j.id !== selfId && j.state !== 'Revoked' && !deps.includes(j.id))
+    .filter((j) => textMatch(j, query))
+    .slice(0, DEP_MATCHES_MAX)
+}
+
 const DAY = 86_400_000
 function within(iso: string | null | undefined, ms: number): boolean {
   if (!iso) return false

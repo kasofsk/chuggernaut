@@ -473,8 +473,6 @@ impl Core {
     /// Monitor for a command work / wrap-up container: wait, harvest logs,
     /// reclaim the overlay, report the exit. Shared by the initial launch paths
     /// and the queue resume so both behave identically.
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::expect_used)]
     pub(crate) fn spawn_logs_monitor(
         &self,
         owner: &str,
@@ -483,46 +481,34 @@ impl Core {
         task_id: u64,
         id: String,
     ) {
-        let backend = self.backend.clone();
-        let tx = self.self_tx.clone().expect("spawned core");
-        let (o, p) = (owner.to_string(), project.to_string());
-        let harvest = self.harvester();
-        tokio::spawn(async move {
-            let exit_code = backend.wait(&id).await.unwrap_or(-1);
-            // Harvest the logs, and from them any structured deploy report the
-            // command emitted on stdout (ticket #187) — `@chug:leg` lines and
-            // the `@chug:report` envelope — so a deploy's outcome rides the exit
-            // into the task's structured result instead of an opaque log.
-            let structured = harvest
-                .collect_logs(&o, &p, seq, task_id, &id)
-                .await
-                .and_then(|bytes| {
-                    crate::harvest::parse_deploy_report(&String::from_utf8_lossy(&bytes))
-                })
-                .and_then(|report| serde_json::to_value(report).ok());
-            harvest.dispose(seq, task_id, &id).await;
-            let _ = tx
-                .send(Msg::TaskExited {
-                    owner: o,
-                    project: p,
-                    seq,
-                    task_id,
-                    exit: TaskExit {
-                        structured,
-                        ..TaskExit::code(exit_code)
-                    },
-                })
-                .await;
-        });
+        self.spawn_exit_monitor(MonitorKind::Logs, owner, project, seq, task_id, id);
     }
 
     /// Monitor for a command evaluator / merge-gate container: like
     /// [`Core::spawn_logs_monitor`] plus extracting `/workspace/eval-result.json`
     /// as the structured verdict (§3.3).
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::expect_used)]
     pub(crate) fn spawn_eval_monitor(
         &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task_id: u64,
+        id: String,
+    ) {
+        self.spawn_exit_monitor(MonitorKind::Eval, owner, project, seq, task_id, id);
+    }
+
+    /// The one container-exit monitor both kinds are: wait for the exit, harvest
+    /// the artifacts that kind wants, reclaim the overlay, report the exit into
+    /// the actor's fan-in. Only the artifact harvesting differs — keeping the
+    /// wait/dispose/report skeleton in one place is what guarantees a
+    /// `MonitorKind` can never quietly skip the overlay reclaim or the report,
+    /// which would leak disk and wedge the task at `Running` forever.
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::expect_used)]
+    fn spawn_exit_monitor(
+        &self,
+        kind: MonitorKind,
         owner: &str,
         project: &str,
         seq: u64,
@@ -535,20 +521,27 @@ impl Core {
         let harvest = self.harvester();
         tokio::spawn(async move {
             let exit_code = backend.wait(&id).await.unwrap_or(-1);
-            let eval_json = backend
-                .copy_file(&id, "/workspace/eval-result.json")
-                .await
-                .ok()
-                .flatten()
-                .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-            // Keep a tail of the container output on the exit so a failing gate
-            // build stage's compiler errors can ride into the gate-fix brief
-            // (job #154) — collect_logs already fetches (and stores) the bytes.
-            let log_tail = harvest
-                .collect_logs(&o, &p, seq, task_id, &id)
-                .await
-                .map(|bytes| tail(&String::from_utf8_lossy(&bytes), GATE_LOG_TAIL_BYTES))
-                .filter(|s| !s.trim().is_empty());
+            let exit = match kind {
+                MonitorKind::Logs => TaskExit {
+                    structured: monitor_harvest_deploy_report(&harvest, &o, &p, seq, task_id, &id)
+                        .await,
+                    ..TaskExit::code(exit_code)
+                },
+                MonitorKind::Eval => {
+                    let eval_json = backend
+                        .copy_file(&id, "/workspace/eval-result.json")
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+                    TaskExit {
+                        eval_json,
+                        log_tail: monitor_harvest_log_tail(&harvest, &o, &p, seq, task_id, &id)
+                            .await,
+                        ..TaskExit::code(exit_code)
+                    }
+                }
+            };
             harvest.dispose(seq, task_id, &id).await;
             let _ = tx
                 .send(Msg::TaskExited {
@@ -556,16 +549,7 @@ impl Core {
                     project: p,
                     seq,
                     task_id,
-                    exit: TaskExit {
-                        exit_code,
-                        eval_json,
-                        usage: None,
-                        assessment: None,
-                        launch_error: None,
-                        log_tail,
-                        infra_loss: false,
-                        structured: None,
-                    },
+                    exit,
                 })
                 .await;
         });
@@ -672,4 +656,42 @@ impl Core {
         .await?;
         Ok(())
     }
+}
+
+/// Harvest a work/wrap-up container's logs and, from them, any structured deploy
+/// report the command emitted on stdout (ticket #187) — `@chug:leg` lines and the
+/// `@chug:report` envelope — so a deploy's outcome rides the exit into the task's
+/// structured result instead of an opaque log. `collect_logs` stores the bytes as
+/// the task's stdout artifact either way.
+async fn monitor_harvest_deploy_report(
+    harvest: &crate::harvest::Harvester,
+    owner: &str,
+    project: &str,
+    seq: u64,
+    task_id: u64,
+    id: &container::ContainerId,
+) -> Option<serde_json::Value> {
+    harvest
+        .collect_logs(owner, project, seq, task_id, id)
+        .await
+        .and_then(|bytes| crate::harvest::parse_deploy_report(&String::from_utf8_lossy(&bytes)))
+        .and_then(|report| serde_json::to_value(report).ok())
+}
+
+/// Harvest an evaluator / merge-gate container's logs and keep a tail of them on
+/// the exit, so a failing gate build stage's compiler errors can ride into the
+/// gate-fix brief (job #154). Empty output yields None rather than a blank tail.
+async fn monitor_harvest_log_tail(
+    harvest: &crate::harvest::Harvester,
+    owner: &str,
+    project: &str,
+    seq: u64,
+    task_id: u64,
+    id: &container::ContainerId,
+) -> Option<String> {
+    harvest
+        .collect_logs(owner, project, seq, task_id, id)
+        .await
+        .map(|bytes| tail(&String::from_utf8_lossy(&bytes), GATE_LOG_TAIL_BYTES))
+        .filter(|s| !s.trim().is_empty())
 }

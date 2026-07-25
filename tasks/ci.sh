@@ -428,6 +428,19 @@ modules_registry_gate() {
 	echo "ci: MODULES.md registry gate — dispatcher and domain modules are in sync"
 }
 
+# --- copy-paste detection gate (STYLE.md Tier 1, ticket A5) -------------------
+# Delegates to tasks/check-duplication.sh so CI and the pre-commit hook run the
+# SAME check with the same pinned jscpd and the same .jscpd.json — "clean
+# locally" and "clean in CI" cannot diverge. Pure shell + npx, so it runs before
+# the Rust early-exit for the diffs that skip cargo entirely.
+duplication_gate() {
+	[ -x tasks/check-duplication.sh ] || {
+		echo "!!! ci: tasks/check-duplication.sh is missing or not executable"
+		exit 1
+	}
+	tasks/check-duplication.sh
+}
+
 # Diff-aware gate: only run the (slow) Rust build/test when the change
 # actually touches Rust-relevant paths. This lets docs/web/prompt/job-type
 # changes pass CI in seconds. Rust-relevant globs (see case list below):
@@ -465,6 +478,12 @@ fi
 # Registry-completeness runs unconditionally and before the Rust early-exit:
 # a docs-only diff (which skips cargo) is exactly what breaks it.
 modules_registry_gate
+# Copy-paste detection (STYLE.md Tier 1). Also before the Rust early-exit, and
+# also unconditional: a web-only diff skips the cargo section, and duplicated TSX
+# is exactly what a web-only diff introduces. The whole-repo run is ~30ms, so it
+# needs no diff scoping. Its own exit code is the gate (1 = clones, 2 = the check
+# could not run — neither is a pass).
+duplication_gate
 if [ "$diff_ok" -eq 1 ]; then
 	rust_changed=0
 	# Split the changed list on newlines so paths with spaces stay intact.

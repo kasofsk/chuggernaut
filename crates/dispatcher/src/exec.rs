@@ -393,15 +393,12 @@ impl Core {
             started_at: (!pending_human).then(Utc::now),
             completed_at: None,
         };
-        self.tasks.put(&task).await?;
-        self.publish(
+        self.task_create(
             owner,
             project,
-            seq,
-            "task-created",
+            &task,
             serde_json::json!({
-                "task_id": task_id, "phase": "Work", "cycle": cycle, "attempt": attempt,
-                "performed_by": claimed.then_some("human"),
+                "attempt": attempt, "performed_by": claimed.then_some("human"),
             }),
         )
         .await?;

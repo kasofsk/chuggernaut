@@ -269,37 +269,39 @@ impl DockerBackend {
         Ok(total)
     }
 
-    async fn managed_running(&self, node: &Node) -> Result<u32, BackendError> {
+    /// Managed containers on one node in a single docker `status`, through the
+    /// `chuggernaut.managed` label filter every fleet query shares. One place
+    /// to state that filter: a query that forgot the label would count (or
+    /// reap) containers this platform does not own.
+    async fn managed_list_by_status(
+        &self,
+        node: &Node,
+        status: &str,
+        include_stopped: bool,
+    ) -> Result<Vec<bollard::models::ContainerSummary>, BackendError> {
         let opts = ListContainersOptionsBuilder::default()
+            // `all(true)` is required to see anything but running containers.
+            .all(include_stopped)
             .filters(&HashMap::from([
                 ("label".to_string(), vec![format!("{MANAGED_LABEL}=true")]),
-                ("status".to_string(), vec!["running".to_string()]),
+                ("status".to_string(), vec![status.to_string()]),
             ]))
             .build();
-        let list = node
-            .docker
+        node.docker
             .list_containers(Some(opts))
             .await
-            .map_err(|e| BackendError::Other(e.to_string()))?;
+            .map_err(|e| BackendError::Other(e.to_string()))
+    }
+
+    async fn managed_running(&self, node: &Node) -> Result<u32, BackendError> {
+        let list = self.managed_list_by_status(node, "running", false).await?;
         Ok(list.len() as u32)
     }
 
     /// Exited managed containers on one node, as `{node}/{docker_id}` ids —
     /// the same encoding as launch, so the sweep can match against task records.
     async fn managed_exited(&self, node: &Node) -> Result<Vec<ContainerId>, BackendError> {
-        let opts = ListContainersOptionsBuilder::default()
-            // `all(true)` is required to see anything but running containers.
-            .all(true)
-            .filters(&HashMap::from([
-                ("label".to_string(), vec![format!("{MANAGED_LABEL}=true")]),
-                ("status".to_string(), vec!["exited".to_string()]),
-            ]))
-            .build();
-        let list = node
-            .docker
-            .list_containers(Some(opts))
-            .await
-            .map_err(|e| BackendError::Other(e.to_string()))?;
+        let list = self.managed_list_by_status(node, "exited", true).await?;
         Ok(list
             .into_iter()
             .filter_map(|c| c.id)
@@ -313,17 +315,7 @@ impl DockerBackend {
         &self,
         node: &Node,
     ) -> Result<Vec<RunningContainer>, BackendError> {
-        let opts = ListContainersOptionsBuilder::default()
-            .filters(&HashMap::from([
-                ("label".to_string(), vec![format!("{MANAGED_LABEL}=true")]),
-                ("status".to_string(), vec!["running".to_string()]),
-            ]))
-            .build();
-        let list = node
-            .docker
-            .list_containers(Some(opts))
-            .await
-            .map_err(|e| BackendError::Other(e.to_string()))?;
+        let list = self.managed_list_by_status(node, "running", false).await?;
         Ok(list
             .into_iter()
             .filter_map(|c| {
@@ -535,45 +527,12 @@ impl ContainerBackend for DockerBackend {
 
     async fn logs(&self, id: &ContainerId) -> Result<Vec<u8>, BackendError> {
         let (node, cid) = self.route(id)?;
-        // `follow: false` — this is called after exit, and following would hang.
-        // Both streams: a failed build's message is as often on stderr as
-        // stdout. Cross-stream ordering is Docker's, by timestamp, and is not
-        // exact for same-millisecond writes.
-        let opts = LogsOptionsBuilder::default()
-            .follow(false)
-            .stdout(true)
-            .stderr(true)
-            .build();
-        let mut stream = node.docker.logs(cid, Some(opts));
-        let mut out = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(log) => out.extend_from_slice(log.into_bytes().as_ref()),
-                Err(e) => return Err(map_err(id, e)),
-            }
-        }
-        Ok(out)
+        logs_collect(node, cid, id).await
     }
 
     async fn logs_tail(&self, id: &ContainerId, since: u64) -> Result<LogTail, BackendError> {
         let (node, cid) = self.route(id)?;
-        // `follow: false` on a *running* container: bollard returns what has
-        // been captured so far and the stream ends, so this never blocks (the
-        // hang warning on `logs` is specifically about `follow: true`). Both
-        // streams, same as `logs`, since a build's progress lands on either.
-        let opts = LogsOptionsBuilder::default()
-            .follow(false)
-            .stdout(true)
-            .stderr(true)
-            .build();
-        let mut stream = node.docker.logs(cid, Some(opts));
-        let mut out = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(log) => out.extend_from_slice(log.into_bytes().as_ref()),
-                Err(e) => return Err(map_err(id, e)),
-            }
-        }
+        let out = logs_collect(node, cid, id).await?;
         Ok(LogTail::slice(&out, since))
     }
 
@@ -671,6 +630,31 @@ fn managed_labels(config: &ContainerLaunchConfig) -> HashMap<String, String> {
         }
     }
     labels
+}
+
+/// Everything a container has written so far, stdout and stderr interleaved.
+///
+/// `follow: false` is load-bearing on both callers: after exit there is nothing
+/// more to come and following would hang, and on a *running* container bollard
+/// returns what has been captured so far and ends the stream — so this never
+/// blocks. Both streams because a failed build's message is as often on stderr
+/// as stdout; cross-stream ordering is Docker's, by timestamp, and is not exact
+/// for same-millisecond writes.
+async fn logs_collect(node: &Node, cid: &str, id: &ContainerId) -> Result<Vec<u8>, BackendError> {
+    let opts = LogsOptionsBuilder::default()
+        .follow(false)
+        .stdout(true)
+        .stderr(true)
+        .build();
+    let mut stream = node.docker.logs(cid, Some(opts));
+    let mut out = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(log) => out.extend_from_slice(log.into_bytes().as_ref()),
+            Err(e) => return Err(map_err(id, e)),
+        }
+    }
+    Ok(out)
 }
 
 fn map_err(id: &ContainerId, e: bollard::errors::Error) -> BackendError {

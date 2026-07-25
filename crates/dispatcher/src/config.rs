@@ -131,54 +131,11 @@ impl DispatcherConfig {
         })
     }
 
-    /// Read the age identity written by `chuggernaut init` (§12.1). Missing
-    /// file → None: secrets are injected as stored (dev raw mode, §8.2).
-    pub async fn age_identity(&self) -> Result<Option<String>> {
-        let path = self.keys_dir.join("age_private.key");
-        match tokio::fs::read_to_string(&path).await {
-            Ok(s) => Ok(Some(s.trim().to_string())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(CoreError::Config(format!(
-                "reading {}: {e}",
-                path.display()
-            ))),
-        }
-    }
-
-    /// Read the artifacts age identity written by `chuggernaut init` (§12.1).
-    /// Distinct from `age_private.key`: the API also holds this one so it can
-    /// decrypt transcripts for display, while the secrets key stays
-    /// dispatcher-only (§10.2). Missing file → None: capture is disabled.
-    pub async fn artifacts_identity(&self) -> Result<Option<String>> {
-        let path = self.keys_dir.join("age_artifacts.key");
-        match tokio::fs::read_to_string(&path).await {
-            Ok(s) => Ok(Some(s.trim().to_string())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(CoreError::Config(format!(
-                "reading {}: {e}",
-                path.display()
-            ))),
-        }
-    }
-
-    /// Read the platform NATS account seed written by `chuggernaut init`
-    /// (§12.1). Missing file → None: containers connect unauthenticated
-    /// (dev mode without the operator-mode server).
-    pub async fn nats_account_seed(&self) -> Result<Option<String>> {
-        let path = self.keys_dir.join("nats_account.seed");
-        match tokio::fs::read_to_string(&path).await {
-            Ok(s) => Ok(Some(s.trim().to_string())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(CoreError::Config(format!(
-                "reading {}: {e}",
-                path.display()
-            ))),
-        }
-    }
-
-    /// Read `dispatcher.creds` for the dispatcher's own NATS connection.
-    pub async fn dispatcher_creds(&self) -> Result<Option<String>> {
-        let path = self.keys_dir.join("dispatcher.creds");
+    /// One `keys_dir` file, verbatim. Missing file → None: every key below is
+    /// optional by design (dev modes run without them), so a *missing* file is
+    /// configuration and only an unreadable one is an error.
+    async fn key_file_read(&self, name: &str) -> Result<Option<String>> {
+        let path = self.keys_dir.join(name);
         match tokio::fs::read_to_string(&path).await {
             Ok(s) => Ok(Some(s)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -187,6 +144,43 @@ impl DispatcherConfig {
                 path.display()
             ))),
         }
+    }
+
+    /// [`Self::key_file_read`], trimmed — for the single-line keys and seeds,
+    /// where a trailing newline from an editor would corrupt the value.
+    async fn key_file_read_trimmed(&self, name: &str) -> Result<Option<String>> {
+        Ok(self
+            .key_file_read(name)
+            .await?
+            .map(|s| s.trim().to_string()))
+    }
+
+    /// Read the age identity written by `chuggernaut init` (§12.1). Missing
+    /// file → None: secrets are injected as stored (dev raw mode, §8.2).
+    pub async fn age_identity(&self) -> Result<Option<String>> {
+        self.key_file_read_trimmed("age_private.key").await
+    }
+
+    /// Read the artifacts age identity written by `chuggernaut init` (§12.1).
+    /// Distinct from `age_private.key`: the API also holds this one so it can
+    /// decrypt transcripts for display, while the secrets key stays
+    /// dispatcher-only (§10.2). Missing file → None: capture is disabled.
+    pub async fn artifacts_identity(&self) -> Result<Option<String>> {
+        self.key_file_read_trimmed("age_artifacts.key").await
+    }
+
+    /// Read the platform NATS account seed written by `chuggernaut init`
+    /// (§12.1). Missing file → None: containers connect unauthenticated
+    /// (dev mode without the operator-mode server).
+    pub async fn nats_account_seed(&self) -> Result<Option<String>> {
+        self.key_file_read_trimmed("nats_account.seed").await
+    }
+
+    /// Read `dispatcher.creds` for the dispatcher's own NATS connection. NOT
+    /// trimmed: a creds file is a multi-line PEM-ish document that async-nats
+    /// parses as written.
+    pub async fn dispatcher_creds(&self) -> Result<Option<String>> {
+        self.key_file_read("dispatcher.creds").await
     }
 
     pub async fn core_config(&self) -> Result<CoreConfig> {

@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, type ProjectConfig } from '../api'
-import { ProjectHeader } from '../components/ProjectHeader'
+import { ProjectPage } from '../components/ProjectPage'
 import { SkeletonLines } from '../components/Skeleton'
 
 /** Read-only project settings: git origin, environment vars, secret names. */
@@ -26,10 +26,7 @@ export function SettingsPage() {
   }, [owner, project, navigate])
 
   return (
-    <div className="page">
-      <ProjectHeader owner={owner} project={project} />
-      {error && <div className="error banner">{error}</div>}
-
+    <ProjectPage owner={owner} project={project} error={error}>
       {!cfg &&
         !error &&
         ['Git origin', 'Environment variables', 'Secrets'].map((h) => (
@@ -110,7 +107,7 @@ export function SettingsPage() {
           </section>
         </>
       )}
-    </div>
+    </ProjectPage>
   )
 }
 

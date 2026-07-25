@@ -12,6 +12,7 @@ import { prefersReducedMotion, useTypewriter } from '../useTypewriter'
 import { Markdown } from './Markdown'
 import { RichSelect } from './RichSelect'
 import { JobAttachments } from './Attachments'
+import { depCandidates } from '../jobFilters'
 
 // The editable fields, used as keys for focus/dirty/flash tracking. `eval` is
 // not edited here — it round-trips unchanged on the full-replace PATCH.
@@ -236,21 +237,7 @@ export function DraftEditor({
     edit('deps')
   }
 
-  // Dependency candidates: existing non-revoked jobs, excluding self and any
-  // already chosen. Matching mirrors the create form's picker.
-  const depMatches = allJobs
-    .filter((j) => j.id !== job.id && j.state !== 'Revoked' && !deps.includes(j.id))
-    .filter((j) => {
-      const q = depQuery.trim().toLowerCase()
-      if (!q) return true
-      return (
-        `#${j.id}`.includes(q) ||
-        String(j.id).startsWith(q.replace('#', '')) ||
-        j.title.toLowerCase().includes(q) ||
-        j.type.toLowerCase().includes(q)
-      )
-    })
-    .slice(0, 8)
+  const depMatches = depCandidates(allJobs, deps, depQuery, job.id)
 
   // Tag options: the vocabulary plus any tags already on the job that aren't in it.
   const tagOptions = [...new Set([...availTags, ...tags])]

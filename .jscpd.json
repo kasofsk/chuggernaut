@@ -1,0 +1,24 @@
+{
+  "minLines": 10,
+  "minTokens": 80,
+  "threshold": 0,
+  "reporters": ["console"],
+  "ignorePattern": [
+    "**/node_modules/**",
+    "**/target/**",
+    "**/dist/**",
+    "**/.claude/**",
+    "**/.git/**",
+    "**/templates/**",
+    "**/tests/**",
+    "**/*.test.*",
+    "**/*.md",
+    "**/*.json",
+    "**/*.yaml",
+    "**/*.yml",
+    "**/*.svg",
+    "**/*.log",
+    "**/*.lock",
+    "**/*.txt"
+  ]
+}

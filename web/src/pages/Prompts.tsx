@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, type JobTypeDetail } from '../api'
-import { ProjectHeader } from '../components/ProjectHeader'
-import { Skeleton, SkeletonLines } from '../components/Skeleton'
+import { ProjectPage } from '../components/ProjectPage'
+import { SkeletonCards } from '../components/Skeleton'
 
 type PromptEntry = {
   /** which task uses it: "work" or the evaluator's name */
@@ -83,18 +83,8 @@ export function PromptsPage() {
   }, [owner, project, navigate])
 
   return (
-    <div className="page">
-      <ProjectHeader owner={owner} project={project} />
-      {error && <div className="error banner">{error}</div>}
-
-      {!loaded &&
-        !error &&
-        [0, 1].map((i) => (
-          <section className="card" key={i}>
-            <Skeleton width="10rem" height="1.2em" />
-            <SkeletonLines n={5} />
-          </section>
-        ))}
+    <ProjectPage owner={owner} project={project} error={error}>
+      {!loaded && !error && <SkeletonCards titleWidth="10rem" lines={5} />}
       {loaded &&
         groups.map(({ t, prompts }) => (
           <section className="card" key={t.name} id={t.name}>
@@ -134,6 +124,6 @@ export function PromptsPage() {
           <div className="dim">no job types yet</div>
         </section>
       )}
-    </div>
+    </ProjectPage>
   )
 }

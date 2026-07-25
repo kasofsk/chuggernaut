@@ -27,6 +27,16 @@ use store::NatsStore;
 use types::{TaskResolution, TaskState};
 use vcs::RepoManager;
 
+/// `req.{family}.{verb}.{owner}.{project}.{seq}` — the job-addressing tail every
+/// container-facing subject shares. `None` is a malformed subject: a request the
+/// dispatcher must reject rather than guess an owner for, since guessing would
+/// route a submission into another project's job record.
+fn subject_job_parts(subject: &str) -> Option<(String, String, u64)> {
+    let parts: Vec<&str> = subject.split('.').collect();
+    let seq = parts.get(5)?.parse::<u64>().ok()?;
+    Some((parts.get(3)?.to_string(), parts.get(4)?.to_string(), seq))
+}
+
 /// Subscribe the container-facing subjects. Returns after subscriptions are
 /// established; handler tasks run for the life of the NATS connection.
 // TODO(track-C7): dissolved by the handlers.rs -> handlers/ split.
@@ -37,12 +47,7 @@ pub async fn spawn_container_handlers(store: &NatsStore, handle: CoreHandle) -> 
     tokio::spawn(async move {
         while let Some(req) = work_sub.next().await {
             // req.work.submit.{owner}.{project}.{seq}
-            let parts: Vec<&str> = req.subject.split('.').collect();
-            let (Some(owner), Some(project), Some(seq)) = (
-                parts.get(3).copied(),
-                parts.get(4).copied(),
-                parts.get(5).and_then(|s| s.parse::<u64>().ok()),
-            ) else {
+            let Some((owner, project, seq)) = subject_job_parts(&req.subject) else {
                 req.respond(br#"{"error":"malformed subject"}"#.to_vec())
                     .await;
                 continue;
@@ -55,7 +60,7 @@ pub async fn spawn_container_handlers(store: &NatsStore, handle: CoreHandle) -> 
                 format!(r#"{{"error":{}}}"#, serde_json::json!(err))
             } else {
                 match work_handle
-                    .submit_result(owner, project, seq, submission)
+                    .submit_result(&owner, &project, seq, submission)
                     .await
                 {
                     Ok(()) => r#"{"ok":true}"#.to_string(),
@@ -115,12 +120,7 @@ pub async fn spawn_container_handlers(store: &NatsStore, handle: CoreHandle) -> 
         let handle = handle.clone();
         tokio::spawn(async move {
             while let Some(req) = sub.next().await {
-                let parts: Vec<&str> = req.subject.split('.').collect();
-                let (Some(owner), Some(project), Some(seq)) = (
-                    parts.get(3).copied(),
-                    parts.get(4).copied(),
-                    parts.get(5).and_then(|s| s.parse::<u64>().ok()),
-                ) else {
+                let Some((owner, project, seq)) = subject_job_parts(&req.subject) else {
                     req.respond(br#"{"error":"malformed subject"}"#.to_vec())
                         .await;
                     continue;
@@ -131,7 +131,7 @@ pub async fn spawn_container_handlers(store: &NatsStore, handle: CoreHandle) -> 
                 };
                 let body = match post {
                     Err(e) => format!(r#"{{"error":{}}}"#, serde_json::json!(e.to_string())),
-                    Ok(post) => match handle.channel_post(owner, project, seq, post).await {
+                    Ok(post) => match handle.channel_post(&owner, &project, seq, post).await {
                         Ok(()) => r#"{"ok":true}"#.to_string(),
                         Err(e) => format!(r#"{{"error":{}}}"#, serde_json::json!(e.to_string())),
                     },
