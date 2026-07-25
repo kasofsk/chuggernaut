@@ -209,7 +209,11 @@ export interface EvalStructured {
 export interface WorkResult {
   kind: 'Work'
   summary?: string | null
-  structured?: WorkStructured | null
+  /** an agent's submit_result payload — or, for a *command* work task such as a
+   *  deploy's, whatever that command harvested (a `DeployReport` envelope; the
+   *  Work result is where a deploy that succeeded records it). Read it through
+   *  a tolerant parser, never by field. */
+  structured?: WorkStructured | DeployReport | null
   token_usage?: TokenUsage | null
   /** Optional agent-authored HTML cover page (job #143), rendered beside the
    *  summary in a sandboxed frame. Presentational only. */

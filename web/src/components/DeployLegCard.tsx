@@ -74,16 +74,19 @@ export function deployReportOf(structured: unknown): DeployReport | null {
   return Array.isArray(value.legs) ? (value as unknown as DeployReport) : null
 }
 
-// The deploy leg report for a whole job, harvested from its tasks: the command
-// work task carries the structured DeployReport. Scans newest-first so a
-// re-deploy's latest attempt wins.
+// The deploy leg report for a whole job, harvested from its tasks. Which result
+// kind carries it depends on how the deploy ended — a command work task records
+// `Work` when it succeeds and `Command` only when it fails — so discriminating
+// on `kind` would see exactly one of the two (ticket #275: every successful
+// deploy read as "no leg report"). The honest predicate is "this result carries
+// a legs-shaped `structured`", which `deployReportOf` already decides. Scans
+// newest-first so a re-deploy's latest attempt wins.
 export function deployReportOfTasks(tasks: Task[]): DeployReport | null {
   for (let i = tasks.length - 1; i >= 0; i--) {
     const r = tasks[i].result
-    if (r && r.kind === 'Command') {
-      const report = deployReportOf(r.structured)
-      if (report) return report
-    }
+    if (!r || !('structured' in r)) continue
+    const report = deployReportOf(r.structured)
+    if (report) return report
   }
   return null
 }
