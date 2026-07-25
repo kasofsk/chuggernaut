@@ -1727,10 +1727,19 @@ table.jobs tbody tr.row-draft td:first-child {
      padding, so titles and the metadata line wrapped earlier than they had
      to. The card keeps its top/bottom padding, and the toolbar above re-adds
      the side inset so its controls don't sit on the screen edge (its padding
-     is in the responsive-chrome block below). */
+     is in the responsive-chrome block below).
+     With the side padding gone the card's own side border and corner radius
+     were all that stood between the state accent stripe and the screen edge —
+     a rounded frame drawn on the viewport edge, which reads as a stray inset
+     rather than as a card. So the card runs edge to edge on phones: no side
+     border, no radius, keeping the top/bottom border that separates it from
+     the chrome above and below. The stripe now starts at x=0. */
   .jobs-main {
     padding-left: 0;
     padding-right: 0;
+    border-left: 0;
+    border-right: 0;
+    border-radius: 0;
   }
   .jobs-list thead {
     display: none;
