@@ -2460,9 +2460,10 @@ table.jobs tbody tr.row-draft td:first-child {
   display: flex;
   align-items: center;
 }
-/* Launch button (#245): shares the readout's pill on one row, at the bottom-right
-   corner where it is easiest to thumb-tap. The card carries the drop shadow when
-   the two are combined; standalone (feed down) the button carries its own. */
+/* Launch button (#245): shares the readout's pill on one row and leads it, so the
+   primary action sits at the pill's leading edge instead of behind the status
+   readout. The card carries the drop shadow when the two are combined; standalone
+   (feed down) the button carries its own. */
 .capacity-newjob {
   display: inline-flex;
   align-items: center;
@@ -2501,13 +2502,14 @@ table.jobs tbody tr.row-draft td:first-child {
   box-shadow: var(--shadow-card);
   cursor: pointer;
 }
-/* The shell holding both halves: readout (or collapsed dot) on the left, launch
-   button inset on the right. */
+/* The shell holding both halves: launch button inset on the left, readout (or
+   collapsed dot) on the right. The trailing padding is the wider one — it pads
+   bare text/dot, while the pill-shaped button needs almost none. */
 .capacity-card {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  padding: 0.25rem 0.25rem 0.25rem 0.6rem;
+  padding: 0.25rem 0.6rem 0.25rem 0.25rem;
   border-radius: var(--r-full);
   border: 1px solid var(--border);
   background: var(--card);

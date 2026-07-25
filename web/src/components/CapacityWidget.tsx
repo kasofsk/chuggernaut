@@ -21,8 +21,8 @@ function loadBand(busy: number, total: number, queue: number): 'ok' | 'high' | '
  * cluster view. Collapsible to a dot (remembered in localStorage); the capacity
  * readout hides when the feed is unavailable rather than showing zeros.
  *
- * The "new job" launch button (#245) shares the pill, sat on the same row to the
- * right of the readout so the pair reads as one widget rather than a stack; it
+ * The "new job" launch button (#245) shares the pill, sat on the same row and
+ * leading the readout so the pair reads as one widget rather than a stack; it
  * always renders, even when the capacity readout is hidden, so job creation is
  * never lost with the feed.
  */
@@ -44,8 +44,9 @@ export function CapacityWidget({
     if (v) setExpanded(false)
   }
 
-  // The launch button always renders; the capacity readout is grafted on to its
-  // left inside the same pill only when the feed has real numbers.
+  // The launch button always renders and leads the pill; the capacity readout is
+  // grafted on to its right inside the same pill only when the feed has real
+  // numbers.
   const newJobButton = (
     <Link to={newJobHref} className="capacity-newjob" title="start a new job">
       + new job
@@ -67,6 +68,7 @@ export function CapacityWidget({
     return (
       <div className="capacity-widget" data-band={band}>
         <div className="capacity-card">
+          {newJobButton}
           <button
             type="button"
             className="capacity-dot"
@@ -74,7 +76,6 @@ export function CapacityWidget({
             aria-label={`fleet capacity ${busy} of ${total} busy`}
             onClick={() => setCollapse(false)}
           />
-          {newJobButton}
         </div>
       </div>
     )
@@ -88,6 +89,7 @@ export function CapacityWidget({
   return (
     <div className="capacity-widget" data-band={band}>
       <div className="capacity-card">
+        {newJobButton}
         {/* Hover scope for the breakdown is the readout only — the breakdown is a
             child so moving into it never counts as a leave, and hovering the
             launch button next door doesn't pop it open. */}
@@ -155,7 +157,6 @@ export function CapacityWidget({
             </div>
           )}
         </div>
-        {newJobButton}
       </div>
     </div>
   )
