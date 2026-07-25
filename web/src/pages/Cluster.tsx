@@ -249,10 +249,10 @@ export function ClusterPage() {
   )
 }
 
-// prod-vs-main drift: deployed SHA, main tip, commits-behind, and the auto-deploy
-// posture. Green when in sync, amber when prod trails main, neutral when the
-// dispatcher hasn't reported the CD fields (a local/dev build, or an older
-// snapshot). Platform-scoped, so it lives on Cluster alongside the fleet graph.
+// prod-vs-main drift: deployed SHA, main tip, and commits-behind. Green when in
+// sync, amber when prod trails main, neutral when the dispatcher hasn't reported
+// the CD fields (a local/dev build, an older snapshot, or SELF_REPO unset).
+// Platform-scoped, so it lives on Cluster alongside the fleet graph.
 function DriftBanner({
   d,
 }: {
@@ -261,7 +261,6 @@ function DriftBanner({
   const deployed = d?.dispatcher_sha ?? null
   const tip = d?.main_tip_sha ?? null
   const behind = d?.commits_behind ?? null
-  const auto = d?.auto_deploy
   const known = behind != null
   const current = behind === 0
   const tone = !known ? 'neutral' : current ? 'ok' : 'behind'
@@ -277,14 +276,6 @@ function DriftBanner({
               ? 'Prod is up to date with main'
               : `Prod is ${behind} commit${behind === 1 ? '' : 's'} behind main`}
         </span>
-        {auto != null && (
-          <span
-            className={`badge ${auto ? 'badge-blue' : 'badge-gray'} drift-auto`}
-            title={auto ? 'deploys land automatically' : 'deploys are manual'}
-          >
-            auto-deploy {auto ? 'on' : 'off'}
-          </span>
-        )}
       </div>
       <div className="drift-shas">
         <span>

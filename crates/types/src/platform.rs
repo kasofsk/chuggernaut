@@ -71,7 +71,6 @@ mod tests {
             dispatcher_sha: Some("abc123".into()),
             main_tip_sha: Some("def456".into()),
             commits_behind: Some(3),
-            auto_deploy: None,
             placement_policy: "busyness".into(),
             schema_epoch: 1,
         }
@@ -84,7 +83,6 @@ mod tests {
         assert!(json.contains("dispatcher_sha"));
         assert!(json.contains("main_tip_sha"));
         assert!(json.contains("commits_behind"));
-        assert!(json.contains("auto_deploy"));
         assert!(json.contains("placement_policy"));
         assert!(json.contains("schema_epoch"));
         let back: DispatcherConfigSnapshot = serde_json::from_str(&json).unwrap();
@@ -92,11 +90,15 @@ mod tests {
     }
 
     /// A snapshot serialized before the CD/deploy-drift fields existed must
-    /// still deserialize (the api reads it back from the platform bucket).
+    /// still deserialize (the api reads it back from the platform bucket) — as
+    /// must one written *after*, carrying the since-removed `auto_deploy` key
+    /// (ticket #276): the bucket holds the last dispatcher's bytes until the new
+    /// one republishes, so an unknown field must be ignored, not fatal.
     #[test]
     fn old_snapshot_deserializes() {
         let old = r#"{
             "nodes": [{"name":"local","endpoint":"unix:///var/run/docker.sock","slots":4}],
+            "auto_deploy": true,
             "agent_provider_default": "claude",
             "agent_model_default": null,
             "repos_root": "/data/repos",
@@ -117,7 +119,6 @@ mod tests {
         assert_eq!(snap.dispatcher_sha, None);
         assert_eq!(snap.main_tip_sha, None);
         assert_eq!(snap.commits_behind, None);
-        assert_eq!(snap.auto_deploy, None);
         // Snapshots predating the configurable policy default to the old
         // hardcoded behavior (headroom), not the new busyness default.
         assert_eq!(snap.placement_policy, "headroom");
@@ -176,10 +177,6 @@ pub struct DispatcherConfigSnapshot {
     /// from its history).
     #[serde(default)]
     pub commits_behind: Option<u64>,
-    /// CD auto-deploy posture, populated once the CD engine lands (`Some(true)`
-    /// = deploys land automatically, `Some(false)` = manual). `None` until then.
-    #[serde(default)]
-    pub auto_deploy: Option<bool>,
     /// `PLACEMENT_POLICY` — the active fleet placement policy (`busyness` |
     /// `headroom`, §3.1), so the UI can show how the fleet schedules. Defaults
     /// to `busyness` for snapshots written before this field existed.

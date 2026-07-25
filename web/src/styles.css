@@ -2872,9 +2872,6 @@ table.jobs tbody tr.row-draft td:first-child {
 .drift-behind .drift-dot {
   background: var(--orange);
 }
-.drift-auto {
-  margin-left: auto;
-}
 .drift-shas {
   display: flex;
   align-items: center;

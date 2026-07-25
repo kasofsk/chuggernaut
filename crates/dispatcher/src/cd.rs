@@ -76,8 +76,6 @@ pub(crate) fn build_base_snapshot(
         // Filled by the scan tick from the self-repo, if configured.
         main_tip_sha: None,
         commits_behind: None,
-        // Populated once the CD engine lands.
-        auto_deploy: None,
         placement_policy: config.placement_policy.as_str().to_string(),
         schema_epoch: types::CONFIG_SCHEMA_EPOCH,
     }
@@ -255,6 +253,9 @@ mod tests {
 
     /// The base snapshot maps config + boot fleet probe onto the wire type,
     /// carrying the deployed SHA and leaving the scan-filled drift fields empty.
+    /// The drift fields stay empty on an install with `SELF_REPO` unset: the
+    /// gate is `ConfigSnapshot::self_repo` in `refresh_config_snapshot`, which
+    /// skips the tip lookup entirely, so the UI reads "unavailable".
     #[test]
     fn base_snapshot_maps_fleet_and_sha() {
         let fleet = vec![NodeStatus {
@@ -270,7 +271,6 @@ mod tests {
         assert_eq!(snap.dispatcher_sha.as_deref(), Some("abc"));
         assert_eq!(snap.main_tip_sha, None);
         assert_eq!(snap.commits_behind, None);
-        assert_eq!(snap.auto_deploy, None);
     }
 
     /// The republish decision compares serialized bytes: an identical snapshot

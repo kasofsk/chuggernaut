@@ -466,9 +466,6 @@ export interface DispatcherSnapshot {
   /** How many commits `dispatcher_sha` is behind `main_tip_sha` (0 = in sync);
    *  null when drift can't be computed. */
   commits_behind?: number | null
-  /** CD auto-deploy posture: true = deploys land automatically, false = manual;
-   *  null until the CD engine lands. */
-  auto_deploy?: boolean | null
 }
 
 /**

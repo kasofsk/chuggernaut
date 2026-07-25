@@ -89,6 +89,9 @@ cmd_preflight() {
 		# shellcheck disable=SC2154  # val is set by the eval above
 		[ -n "$val" ] || warn "env var $var is unset"
 	done
+	# Optional, but silently unset it makes the Cluster drift banner read
+	# "unavailable" forever (#276) — say so rather than leave it to be discovered.
+	[ -n "${SELF_REPO:-}" ] || warn "env var SELF_REPO is unset — deploy-drift reporting stays unavailable (see env.example)"
 	# Validate any repo-authored job-type config offline (same rules as CI),
 	# when the binary is built. Best-effort — CI is the authority.
 	BIN="$REPO/target/release/chuggernaut"
@@ -193,13 +196,20 @@ cmd_project_import() {
 	run git -C "$TMP/src.git" push "$BARE" '+refs/heads/main:refs/heads/main' \
 		|| warn "push of main into $BARE failed — the source may use a non-main default branch; re-run with the right ref"
 
-	# 3. wire the GitHub remote as the MIRROR TARGET and install the per-project
+	# 3. when the repo we just imported IS the platform's own source, record it as
+	#    SELF_REPO so deploy-drift reporting works on this install (#276). Runs
+	#    here, right after the push that establishes the fact it is derived from,
+	#    so an unrelated failure in a later step cannot cost a fresh install its
+	#    SELF_REPO line.
+	self_repo_record "$OWNER" "$NAME" "$BARE"
+
+	# 4. wire the GitHub remote as the MIRROR TARGET and install the per-project
 	#    mirror agent. Store the push credential as deploy-key guidance only —
 	#    never write secrets here.
 	log "installing the per-project GitHub mirror (main -> $MIRROR_URL, read-only mirror)"
 	run "$HERE/chug-mirror-install.sh" --owner "$OWNER" --name "$NAME" --mirror-url "$MIRROR_URL"
 
-	# 4. verify a round trip is POSSIBLE (the bare repo has main and a mirror
+	# 5. verify a round trip is POSSIBLE (the bare repo has main and a mirror
 	#    remote). A full commit->GitHub round trip is a live-stack check (see the
 	#    skill / verification checklist).
 	if [ "$DRY_RUN" -eq 0 ] && [ -d "$BARE" ]; then
@@ -209,7 +219,39 @@ cmd_project_import() {
 			warn "$BARE has no 'main' ref yet — the source push may not have landed"
 		fi
 	fi
+
 	log "project-import complete (or previewed). Push a commit as a job and watch it appear on the mirror."
+}
+
+# self_repo_record <owner> <name> <bare-repo> — write SELF_REPO into the env file
+# when the imported project is the platform's own source repo.
+#
+# The dispatcher reads SELF_REPO to resolve the platform repo's main tip each
+# scan tick; without it the Cluster page's drift banner has nothing to show and
+# reads "Deploy drift unavailable" forever (#276). Only the platform repo
+# qualifies, so it is DETECTED from the tree just pushed (a chuggernaut checkout
+# carries crates/dispatcher) rather than asked of the operator, who has already
+# named the project once. An existing value is never overwritten.
+self_repo_record() {
+	if [ -n "${SELF_REPO:-}" ]; then
+		log "SELF_REPO already set to $SELF_REPO — leaving it"
+		return 0
+	fi
+	if ! git -C "$3" cat-file -e "main:crates/dispatcher/Cargo.toml" 2>/dev/null; then
+		return 0 # an ordinary project, not the platform's own source
+	fi
+	log "$1/$2 is the platform's own source repo — recording SELF_REPO in $ENV_FILE"
+	if [ "$DRY_RUN" -eq 1 ]; then
+		printf '  \033[2m$ echo SELF_REPO=%s/%s >> %s\033[0m\n' "$1" "$2" "$ENV_FILE"
+		return 0
+	fi
+	{
+		printf '\n# Platform self-repo — deploy-drift reporting on the Cluster page\n'
+		printf '# (written by chug-install.sh project-import; see env.example).\n'
+		printf 'SELF_REPO=%s/%s\n' "$1" "$2"
+	} >> "$ENV_FILE"
+	SELF_REPO="$1/$2"
+	log "SELF_REPO=$1/$2 recorded — restart the dispatcher to pick it up"
 }
 
 # ── worker-join: provision a worker node ────────────────────────────────────

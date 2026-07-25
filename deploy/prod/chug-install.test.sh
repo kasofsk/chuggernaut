@@ -1,10 +1,16 @@
 #!/bin/sh
-# Shell test for chug-install.sh preflight — no real deps, no live stack.
+# Shell test for chug-install.sh preflight + project-import — no live stack.
 #
 # It builds an isolated fake repo tree (chug-install.sh derives REPO from its own
 # location), drops in a stub `chuggernaut` binary whose `validate` FAILS, plus a
 # jobs/*.yaml to validate, and stubs the required deps on PATH. Then it asserts
-# the #186 contract: a config-validation failure is FATAL unless --force.
+# the #186 contract: a config-validation failure is FATAL unless --force; and the
+# #276 contract: importing the platform's own source repo records SELF_REPO in
+# the env file (an ordinary project does not, an existing value is kept, and a
+# failing mirror step downstream cannot cost the install its SELF_REPO line).
+#
+# `git` is NOT stubbed — the import cases exercise real clone/push against local
+# repos, which is what the SELF_REPO detection reads.
 #
 # Run:  deploy/prod/chug-install.test.sh   (exits 0 iff all cases pass)
 set -eu
@@ -32,10 +38,11 @@ chmod +x "$REPO/target/release/chuggernaut"
 # A job file to validate (not _defaults.yaml, which preflight skips).
 printf 'job_type: demo\n' > "$REPO/jobs/demo.yaml"
 
-# Required deps as no-op stubs so preflight's dependency gate passes.
+# Required deps as no-op stubs so preflight's dependency gate passes. `git` is
+# deliberately absent: the import cases need the real thing.
 BIN="$WORK/bin"
 mkdir -p "$BIN"
-for d in git docker node age curl; do
+for d in docker node age curl; do
   printf '#!/bin/sh\nexit 0\n' > "$BIN/$d"
   chmod +x "$BIN/$d"
 done
@@ -78,6 +85,88 @@ if [ "$RC" -eq 0 ] && grep -qF "preflight OK" "$OUT"; then
   pass=$((pass + 1))
 else
   echo "FAIL - --force should let preflight complete (rc=$RC)"
+  cat "$OUT"
+  fail=$((fail + 1))
+fi
+
+# ── project-import: SELF_REPO recording (#276) ────────────────────────────────
+# The mirror installer is out of scope here — stub it where the SUT looks.
+printf '#!/bin/sh\nexit 0\n' > "$REPO/deploy/prod/chug-mirror-install.sh"
+chmod +x "$REPO/deploy/prod/chug-mirror-install.sh"
+
+# make_src <dir> <path-to-commit> — a one-commit source repo on `main`.
+make_src() {
+  mkdir -p "$(dirname "$1/$2")"
+  git init -q "$1"
+  git -C "$1" symbolic-ref HEAD refs/heads/main
+  printf 'x\n' > "$1/$2"
+  git -C "$1" add -A
+  git -C "$1" -c user.name=t -c user.email=t@example.com commit -q -m init
+}
+
+# make_bare <owner> <name> — the platform-owned bare repo `admin project create`
+# would have made, so the import skips creation (the stub binary makes nothing).
+make_bare() {
+  git init -q --bare "$WORK/repos/$1/$2.git"
+}
+
+# A chuggernaut checkout is recognised by its dispatcher crate; anything else is
+# an ordinary project.
+make_src "$WORK/src-platform" crates/dispatcher/Cargo.toml
+make_src "$WORK/src-plain" README.md
+make_bare acme chuggernaut
+make_bare acme widgets
+
+# ── Case 3: importing the platform's own repo records SELF_REPO ───────────────
+run --env "$ENVF" project-import "$WORK/src-platform" --owner acme --name chuggernaut
+if [ "$RC" -eq 0 ] && grep -qx "SELF_REPO=acme/chuggernaut" "$ENVF"; then
+  echo "ok   - importing the platform repo records SELF_REPO in the env file"
+  pass=$((pass + 1))
+else
+  echo "FAIL - platform-repo import must record SELF_REPO (rc=$RC)"
+  cat "$OUT"
+  fail=$((fail + 1))
+fi
+
+# ── Case 4: a re-import keeps the existing value (no duplicate lines) ─────────
+run --env "$ENVF" project-import "$WORK/src-platform" --owner acme --name chuggernaut
+if [ "$RC" -eq 0 ] && [ "$(grep -c '^SELF_REPO=' "$ENVF")" -eq 1 ] &&
+  grep -qF "SELF_REPO already set" "$OUT"; then
+  echo "ok   - re-import leaves the recorded SELF_REPO alone"
+  pass=$((pass + 1))
+else
+  echo "FAIL - re-import must not rewrite SELF_REPO (rc=$RC)"
+  cat "$OUT"
+  fail=$((fail + 1))
+fi
+
+# ── Case 5: an ordinary project import records nothing ────────────────────────
+ENVF2="$WORK/plain.env"
+cp "$ENVF" "$ENVF2"
+sed '/^SELF_REPO=/d' "$ENVF2" > "$ENVF2.tmp" && mv "$ENVF2.tmp" "$ENVF2"
+run --env "$ENVF2" project-import "$WORK/src-plain" --owner acme --name widgets
+if [ "$RC" -eq 0 ] && ! grep -q '^SELF_REPO=' "$ENVF2"; then
+  echo "ok   - an ordinary project import does not claim SELF_REPO"
+  pass=$((pass + 1))
+else
+  echo "FAIL - only the platform repo may set SELF_REPO (rc=$RC)"
+  cat "$OUT"
+  fail=$((fail + 1))
+fi
+
+# ── Case 6: SELF_REPO survives a failing mirror step ──────────────────────────
+# The mirror install is the one unguarded step in project-import, so under
+# `set -eu` it aborts the whole subcommand. Recording must therefore not sit
+# downstream of it: a fresh install whose mirror fails still gets SELF_REPO.
+printf '#!/bin/sh\nexit 1\n' > "$REPO/deploy/prod/chug-mirror-install.sh"
+ENVF3="$WORK/mirror-fail.env"
+sed '/^SELF_REPO=/d' "$ENVF" > "$ENVF3"
+run --env "$ENVF3" project-import "$WORK/src-platform" --owner acme --name chuggernaut
+if grep -qx "SELF_REPO=acme/chuggernaut" "$ENVF3"; then
+  echo "ok   - a failing mirror step does not cost the install its SELF_REPO"
+  pass=$((pass + 1))
+else
+  echo "FAIL - SELF_REPO must be recorded before the mirror step (rc=$RC)"
   cat "$OUT"
   fail=$((fail + 1))
 fi
