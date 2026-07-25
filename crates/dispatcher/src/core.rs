@@ -12,6 +12,7 @@
 //!   processed one at a time; no shared mutable state, so no lock to misuse.
 //! - **Spec:** §3.1.
 
+use crate::decide::ready;
 use crate::graph::JobGraph;
 use crate::origin::OriginStatusResponse;
 use crate::queue::{QueuedJob, QueuedLaunch, ReadyQueue};
@@ -1833,7 +1834,7 @@ impl Core {
     /// Absorb a batch's members: each Frozen→Batched with `batch_id` set,
     /// emitting `job-batched` (spec §2.1). Shared by atomic create and the
     /// finalize/release paths where a Draft batch commits its members.
-    async fn absorb_batch(
+    pub(crate) async fn absorb_batch(
         &mut self,
         owner: &str,
         project: &str,
@@ -1942,18 +1943,51 @@ impl Core {
             Vec::new()
         };
 
+        let head = self.release_validation(owner, project, &job).await?;
+
+        // The validated release is the C4 decider's `Released` event: dependency
+        // satisfaction, the `base_ref` pin, queue admission, the batch's
+        // membership commit, and both announcements are its decision (§2.1,
+        // §2.2, §3.1).
+        self.run_ready(
+            owner,
+            project,
+            seq,
+            ready::ReadyEvent::Released {
+                head,
+                from_draft,
+                absorb: batch_members,
+            },
+        )
+        .await?;
+        Ok(self.must_get(owner, project, seq)?.state)
+    }
+
+    /// The §2.2 release-time pass: resolve the default branch HEAD and run the
+    /// wiring and static checks against the job exactly as it will be committed
+    /// (a Draft batch's unions are already folded in). Returns the validated
+    /// HEAD — the commit an admitted job pins as its `base_ref`. Unlike the
+    /// Blocked→Ready re-validation this one checks KV names too, since a release
+    /// is where an operator learns a declared secret is missing.
+    async fn release_validation(
+        &mut self,
+        owner: &str,
+        project: &str,
+        job: &Job,
+    ) -> Result<String> {
         let default_branch = self.repos.default_branch(owner, project).await?;
         let head = self
             .repos
             .resolve_ref(owner, project, &default_branch)
             .await?;
+        let seq = job.id;
 
         let job_type =
             release::load_job_type(&self.repos, owner, project, &head, &job.r#type, Some(seq))
                 .await?;
-        let job_type = release::with_job_evaluators(job_type, &job)?;
+        let job_type = release::with_job_evaluators(job_type, job)?;
         let graph = self.graphs.entry(job.project.clone()).or_default();
-        let mut errs = release::wiring_errors(&job, graph);
+        let mut errs = release::wiring_errors(job, graph);
         let kv = self.kv_names(owner, project).await?;
         errs.extend(
             release::static_errors(
@@ -1961,7 +1995,7 @@ impl Core {
                 owner,
                 project,
                 &head,
-                &job,
+                job,
                 &job_type,
                 Some(&kv),
             )
@@ -1970,51 +2004,7 @@ impl Core {
         if !errs.is_empty() {
             return Err(errs.into());
         }
-
-        let graph = self.graphs.entry(job.project.clone()).or_default();
-        let target = if graph.deps_done(seq) {
-            JobState::Ready
-        } else {
-            JobState::Blocked
-        };
-        let mut updated = job;
-        if target == JobState::Ready {
-            updated.base_ref = Some(head);
-            updated.ready_at.get_or_insert_with(Utc::now);
-        }
-        self.set_state(&mut updated, target).await?;
-        if target == JobState::Ready {
-            self.queue.enqueue(QueuedJob {
-                owner: owner.into(),
-                project: project.into(),
-                seq,
-            });
-        }
-        // A Draft batch now absorbs its members (Frozen→Batched) — validation
-        // has passed, so the commit is atomic with the release (§2.1). Index the
-        // newly-committed union deps too (best-effort, §2.3).
-        if !batch_members.is_empty() {
-            for &upstream in &updated.deps {
-                let _ = self.rdeps.append(owner, project, upstream, seq).await;
-            }
-            self.absorb_batch(owner, project, seq, &batch_members)
-                .await?;
-        }
-        // Leaving Draft finalizes the edited definition: emit job-finalized so
-        // the UI/SSE can distinguish it from a plain Frozen release (§2.1).
-        if from_draft {
-            self.publish(owner, project, seq, "job-finalized", serde_json::json!({}))
-                .await?;
-        }
-        self.publish(
-            owner,
-            project,
-            seq,
-            "job-released",
-            serde_json::json!({ "state": target }),
-        )
-        .await?;
-        Ok(target)
+        Ok(head)
     }
 
     /// Handle a job reaching Done (spec §3.1 step 2): unblock dependents whose
@@ -2030,72 +2020,6 @@ impl Core {
 
         for dep_seq in dependents {
             self.try_unblock(owner, project, dep_seq).await?;
-        }
-        Ok(())
-    }
-
-    /// §2.1 Blocked→Ready with the §2.2 Ready-transition re-validation pass.
-    /// No-op unless the job is Blocked with all dependencies Done. Also used
-    /// by restart reconciliation (§3.6 step 3).
-    pub(crate) async fn try_unblock(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
-        let slug = format!("{owner}/{project}");
-        let Some(dep) = self.graphs.get(&slug).and_then(|g| g.get(seq)) else {
-            return Ok(());
-        };
-        let ready = dep.state == JobState::Blocked
-            && self.graphs.get(&slug).is_some_and(|g| g.deps_done(seq));
-        if !ready {
-            return Ok(());
-        }
-        let mut dep = dep.clone();
-
-        let default_branch = self.repos.default_branch(owner, project).await?;
-        let head = self
-            .repos
-            .resolve_ref(owner, project, &default_branch)
-            .await?;
-
-        let revalidation = match release::load_job_type(
-            &self.repos,
-            owner,
-            project,
-            &head,
-            &dep.r#type,
-            Some(seq),
-        )
-        .await
-        .and_then(|jt| release::with_job_evaluators(jt, &dep))
-        {
-            Ok(jt) => release::static_errors(&self.repos, owner, project, &head, &dep, &jt, None)
-                .await
-                .and_then(|errs| if errs.is_empty() { Ok(()) } else { Err(errs) }),
-            Err(errs) => Err(errs),
-        };
-
-        match revalidation {
-            Ok(()) => {
-                dep.base_ref = Some(head);
-                dep.ready_at.get_or_insert_with(Utc::now);
-                self.set_state(&mut dep, JobState::Ready).await?;
-                self.queue.enqueue(QueuedJob {
-                    owner: owner.into(),
-                    project: project.into(),
-                    seq,
-                });
-                self.publish(owner, project, seq, "job-unblocked", serde_json::json!({}))
-                    .await?;
-            }
-            Err(errs) => {
-                let detail = errs
-                    .iter()
-                    .map(|e| format!("- {}: {}", e.field, e.message))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let prompt =
-                    format!("Job {seq} failed Ready-transition re-validation at {head}:\n{detail}");
-                self.stall(owner, project, seq, "revalidation_failed", prompt, None)
-                    .await?;
-            }
         }
         Ok(())
     }

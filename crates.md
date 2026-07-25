@@ -112,6 +112,11 @@ domain/ (chuggernaut-domain — pure: no tokio/async-nats/store/vcs/auth)
     escalation.rs— the C1 template decider: the escalate/stall family (§1.2, §3.4)
     merge_gate.rs— the C2 landing decider: depth-1 queue + gate as a decider-owned
                    value, continuation events for effect results (§3.3)
+    wrapup.rs    — the C3 wrap-up decider: the post-merge publish fork and terminal
+                   stamping, incl. a batch's Done fan-out (§3.2 step 12, §2.1)
+    ready.rs     — the C4 Ready-phase decider: dep satisfaction, the base_ref pin,
+                   queue admission both ends, the Blocked→Ready re-validation fork
+                   (§2.1, §2.2, §3.1)
 ```
 
 ```
@@ -119,6 +124,8 @@ dispatcher/
   core.rs        — the single-writer event loop (see below); all mutable state lives here
   release.rs     — release validation, ref-reading half: jobs/*.yaml loading + prompt/KV
                    checks through the vcs port (§2.2, §14); re-exports the pure half
+  ready.rs       — the Ready-phase shim: view/decide/apply/interpret for decide/ready,
+                   plus queue admission, batch absorption and the Work hand-off (§2.1, §3.1)
   exec.rs        — the §3.2 work-execution sequence (Ready→Work, retry, rework/conflict re-entry)
   eval.rs        — evaluator fan-out and reduce (§3.3), post-eval finalization and the
                    depth-1 merge gate (§3.2 step 12)

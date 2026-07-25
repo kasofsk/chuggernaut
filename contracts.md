@@ -113,6 +113,21 @@ this event). Work the pure crate cannot express — because it reads dispatcher
 state that is not part of the decision — is *named* by the decider rather than
 left implicit in the shim, so the shim keeps no branching of its own.
 
+**C4 (ready) put the two together and found the gate.** The Ready phase
+(`chuggernaut_domain::decide::ready`, shim `Core::run_ready`) is decided by four
+events — `Released`, `DepsChanged`, `Revalidated`, `Dequeued` — and its
+`ReadyStep` uses C2's continuation *to keep expensive I/O behind the decision*:
+`DepsChanged` decides eligibility only, and the §2.2 Ready-transition
+re-validation (ref reads, config loads) runs solely because the decider returned
+`Revalidate`, its verdict re-entering as `Revalidated`. That inverts the usual
+reason for the continuation contract — C2 emitted an effect because the decision
+needed its result; C4 emits one so the effect never runs for a decision that was
+not going to move — and it is the shape every later phase with a costly guard
+should copy. The step also gained an ordering position: `Admitted`'s queue
+admission and batch-membership commit run *between* the transitions and the
+effects, because admitting a job to the ready queue is part of committing the
+§2.1 record, not an artifact of it.
+
 ### 3. Invariants — what must always hold
 
 Harvest every "must"/"always"/"never" comment and defensive pattern into one

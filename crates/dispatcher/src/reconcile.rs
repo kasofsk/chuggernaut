@@ -369,7 +369,7 @@ impl Core {
                         project: project.to_string(),
                         seq,
                         task_id: task.id,
-                        priority: crate::launch_queue::launch_priority(task.phase),
+                        priority: crate::queue::launch_priority(task.phase),
                         // Restore the persisted enqueue time (§3.5) so the queue's
                         // FIFO order and the max-wait clock survive this restart;
                         // fall back to now for records written before it existed.
@@ -630,7 +630,7 @@ impl Core {
                             project: project.to_string(),
                             seq,
                             task_id: task.id,
-                            priority: crate::launch_queue::launch_priority(task.phase),
+                            priority: crate::queue::launch_priority(task.phase),
                             // Persisted enqueue time (§3.5): stable FIFO + clock
                             // across restarts. See recover_work for the rationale.
                             queued_at: task.queued_at.unwrap_or_else(Utc::now),

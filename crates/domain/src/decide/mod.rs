@@ -21,7 +21,7 @@
 //! two writes lost (the escalation heal in the dispatcher's `reconcile`).
 //!
 //! [`escalation`] is the worked template (refactor-plan C1) every later
-//! phase decider — [`merge_gate`], [`wrapup`], `ready`, `eval`, `work` —
+//! phase decider — [`merge_gate`], [`wrapup`], [`ready`], `eval`, `work` —
 //! copies.
 //!
 //! - **Accepts:** a phase view (read-only borrows + pre-read scalars) and an
@@ -35,6 +35,7 @@ use types::{Job, JobState};
 
 pub mod escalation;
 pub mod merge_gate;
+pub mod ready;
 pub mod wrapup;
 
 /// One §2.1 state change a decider decided: the job record to persist (with

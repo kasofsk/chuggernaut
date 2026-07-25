@@ -25,7 +25,7 @@
 
 use crate::core::{Core, Msg, Result, TaskExit};
 use crate::exec::{ChannelRole, eval_image, task_timeout};
-use crate::queue::{LaunchPriority, QueuedLaunch};
+use crate::queue::{QueuedLaunch, launch_priority};
 use crate::triage::tail;
 use chrono::Utc;
 use container::{BackendError, ContainerLaunchConfig, bootstrap_cmd};
@@ -45,16 +45,6 @@ const GATE_LOG_TAIL_BYTES: usize = 8_000;
 /// Escalation reason for a launch that outwaited the queue (spec §3.5). A
 /// stable, clear code a later structured-escalation pass (job #76) can adopt.
 pub(crate) const QUEUE_TIMEOUT_REASON: &str = "no_free_slots_timeout";
-
-/// The drain-priority class of a launch by its phase (spec §3.5, job #140):
-/// evaluation, merge gate, and wrap-up are finishing-phase launches that jump
-/// ahead of queued work.
-pub(crate) fn launch_priority(phase: TaskPhase) -> LaunchPriority {
-    match phase {
-        TaskPhase::Work => LaunchPriority::Work,
-        _ => LaunchPriority::Finishing,
-    }
-}
 
 /// The container monitor a resumed launch needs — mirrors the two command
 /// monitor shapes the initial launch paths spawn.
@@ -271,7 +261,7 @@ impl Core {
             // misses agent evals that are mid-relaunch whenever it fires.
             let now = Utc::now();
             let max_wait = self.config.launch_queue_max_wait.unwrap_or(MAX_QUEUE_WAIT);
-            if (now - q.queued_at).to_std().unwrap_or_default() > max_wait {
+            if q.is_expired(now, max_wait) {
                 self.expire_queued_launch(&q, now, max_wait).await?;
                 continue;
             }
@@ -588,7 +578,7 @@ impl Core {
         let expired: Vec<QueuedLaunch> = self
             .launch_queue
             .iter()
-            .filter(|q| (now - q.queued_at).to_std().unwrap_or_default() > max_wait)
+            .filter(|q| q.is_expired(now, max_wait))
             .cloned()
             .collect();
         for q in expired {
@@ -632,7 +622,7 @@ impl Core {
         ) {
             return Ok(());
         }
-        let waited = (now - q.queued_at).to_std().unwrap_or_default();
+        let waited = q.waited(now);
         task.state = TaskState::Failed;
         task.completed_at = Some(now);
         // No longer queued — drop the markers so nothing reads it as waiting.

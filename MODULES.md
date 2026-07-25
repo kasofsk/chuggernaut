@@ -27,12 +27,13 @@ one surface.
 | --- | --- | --- |
 | `state` | The transition table — the sole authority on legal state edges; pure, synchronous, terminal states absorbing. | §2.1 |
 | `graph` | In-memory per-project DAG (petgraph): rdeps maintenance, dependency queries, revoke cascades; a working copy, KV stays truth. | §1.4, §2.3 |
-| `queue` | In-memory FIFO of Ready job IDs; lives in the actor, never persisted, rebuilt on restart. | §3.1 |
+| `queue` | In-memory FIFO of Ready job IDs, plus the §3.5 launch queue's pure half (drain-priority class, max-wait budget arithmetic); lives in the actor, never persisted, rebuilt on restart. | §3.1, §3.5 |
 | `release` | Release validation, pure half: error vocabulary, graph wiring rules, additive-evaluator merge; the ref-reading half stays dispatcher-side. | §2.2, §2.3 |
 | `effects` | The effect vocabulary: an `Effect` enum naming each port action as `serde` data, with a variant→port-method table. Plain data, no I/O. | contracts.md §2 |
 | `decide` | The decider layer: `Transition` + one pure module per lifecycle phase, each `decide(view, event) -> (Vec<Transition>, Vec<Effect>)`; never performs an effect. | contracts.md §2 |
 | `decide/escalation` | The C1 template decider: the escalate/stall family — Human task + WHY stamp + Escalated/Stalled transition + announcement, as values. | §1.2, §3.4 |
 | `decide/merge_gate` | The C2 landing decider: depth-1 serialization (`gating: Option` — by type), fast-vs-gate pivot, verdict classification, gate-fix budget, conflict re-entry — a continuation machine whose effect results re-enter as events. | §3.3 |
+| `decide/ready` | The C4 Ready-phase decider: dependency satisfaction at release, the `base_ref` pin, queue admission both ends (enqueue on Ready, still-eligible on dequeue), and the Blocked→Ready re-validation fork — a continuation machine whose §2.2 pass re-enters as an event. | §2.1, §2.2, §3.1 |
 | `decide/wrapup` | The C3 wrap-up decider: the post-merge fork (`wrap_up.run` publish vs straight to Done), the publish exit verdict, the operator's publish-only Retry, and terminal stamping incl. a batch's Done fan-out. | §3.2, §2.1 |
 
 ## `dispatcher` — `crates/dispatcher/src/`
@@ -42,6 +43,7 @@ one surface.
 | `core` | Single-writer event loop: owns all mutable state; every other slice is `impl Core` reached via the `Msg` channel. | §3.1 |
 | `invariants` | Executable invariant checker: pure/total read-only `CoreState` view → `Vec<Violation>`; negative-space assertions run after every message in tests. | §1.4, §2.1, §3.1, §3.2, §3.3 |
 | `release` | Release validation, ref-reading half: `jobs/*.yaml` loading + prompt/KV checks through the `vcs` port; re-exports the pure half. | §2.2, §14 |
+| `ready` | Ready-phase shim: gathers the view, applies `decide/ready`'s transitions and effects, then does the bookkeeping its step names — queue admission, a Draft batch's membership commit, the §2.2 re-validation hop, the Work hand-off. | §2.1, §2.2, §3.1 |
 | `exec` | Work-execution sequence: Ready→Work, container launch, crash recover-or-reset, rework/conflict re-entry. | §3.2 |
 | `eval` | Evaluator fan-out/reduce, plus the merge-gate shim: the landing fold that drives `decide/merge_gate` (gather view → decide → swap state → apply → interpret, outcomes re-entering as events). | §3.3, §3.2 |
 | `interpret` | The effect interpreter: `Core::interpret` executes one `Effect` through the port it names; the sole `&mut Core` coupling deciders keep. | contracts.md §2 |

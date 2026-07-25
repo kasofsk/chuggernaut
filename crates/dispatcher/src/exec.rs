@@ -86,16 +86,6 @@ impl ExecState {
 }
 
 impl Core {
-    /// Ready→Work entry (§3.2 steps 1–6).
-    pub(crate) async fn start_job(&mut self, q: QueuedJob) -> Result<()> {
-        let job = self.must_get(&q.owner, &q.project, q.seq)?.clone();
-        if job.state != JobState::Ready {
-            return Ok(()); // revoked or escalated while queued
-        }
-        self.enter_work(&q.owner, &q.project, q.seq, 1, Vec::new(), None, None)
-            .await
-    }
-
     /// Shared Work entry for cycle 1, retries, rework, and conflict re-entry.
     /// Creates or resets `job/{seq}` at `base_ref`, then launches attempt 1 of
     /// the cycle's work task. `rework_reason` is `None` for cycle 1 and set by
