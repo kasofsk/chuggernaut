@@ -10,7 +10,7 @@ import {
   type SlotOccupant,
 } from '../api'
 import { useFleet } from '../useFleet'
-import { fmtDuration, nodeStale, phaseToState, shortSha, versionHasSha } from '../format'
+import { fmtDuration, nodeStale, phaseToState, shortSha, shortVersion, versionHasSha } from '../format'
 import { StateBadge } from '../components/StateBadge'
 import { Skeleton } from '../components/Skeleton'
 
@@ -216,7 +216,8 @@ export function ClusterPage() {
           )}
           {commonVersion && (
             <div className="cluster-note dim">
-              ⚠ version drift across workers — nodes off <code>{commonVersion}</code> are marked.
+              ⚠ version drift across workers — nodes off{' '}
+              <code title={commonVersion}>{shortVersion(commonVersion)}</code> are marked.
             </div>
           )}
         </section>
@@ -324,7 +325,9 @@ function FreshnessRow({
     <li className="freshness-row">
       <span className="freshness-name">{node.name}</span>
       <span className={`badge ${chip.cls}`}>{chip.text}</span>
-      <code className="freshness-ver dim">{node.version ?? '—'}</code>
+      <code className="freshness-ver dim" title={node.version ?? undefined}>
+        {node.version ? shortVersion(node.version) : '—'}
+      </code>
       <RefreshChip outcome={node.refresh_outcome} />
       {!node.available && <span className="badge badge-orange">out of service</span>}
     </li>
@@ -410,7 +413,11 @@ function WorkerNode({ node, now, drift }: { node: FleetNode; now: number; drift:
         </span>
       </div>
       <div className="cl-node-sub dim">
-        {node.version ? <code title={drift ? 'version drift' : undefined}>{node.version}</code> : 'worker'}
+        {node.version ? (
+          <code title={drift ? `${node.version} — version drift` : node.version}>{shortVersion(node.version)}</code>
+        ) : (
+          'worker'
+        )}
         {!node.available && <span className="cl-out-tag"> out of service</span>}
       </div>
       <div className="cl-slots">

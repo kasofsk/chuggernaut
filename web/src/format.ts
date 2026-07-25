@@ -15,6 +15,18 @@ export function shortSha(sha: string | null | undefined): string {
   return sha ? sha.slice(0, 12) : ''
 }
 
+/** A worker's build `version` (`{pkg}+{sha}`) with the SHA cut to 12 chars for
+ *  compact display: `0.1.0+f63d8c4fa1b31713…` → `0.1.0+f63d8c4fa1b3`. The package
+ *  part is left alone; a version with no `+`, or one whose SHA is already short,
+ *  passes through unchanged; '' for a nullish version. Display only — staleness
+ *  and drift comparisons must keep operating on the unmodified version. */
+export function shortVersion(version: string | null | undefined): string {
+  if (!version) return ''
+  const plus = version.indexOf('+')
+  if (plus < 0) return version
+  return version.slice(0, plus + 1) + shortSha(version.slice(plus + 1))
+}
+
 /** Whether a node's reported build `version` (`{pkg}+{sha}`) carries the deployed
  *  `sha` — i.e. the node is running the deployed platform SHA. Mirrors the
  *  dispatcher's own confirm needle (`+{sha[..12]}`, types::worker). Returns false
