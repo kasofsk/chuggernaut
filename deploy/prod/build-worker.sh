@@ -104,6 +104,15 @@ fi
 if [ -n "${WORKER_REFRESH_DISK_PATH:-}" ]; then
   DISK_ENV="$DISK_ENV -e WORKER_REFRESH_DISK_PATH=$WORKER_REFRESH_DISK_PATH"
 fi
+# Log level for the daemon (ticket #270). The binary filters on RUST_LOG and its
+# default directive is ERROR, so a daemon started without it emits nothing — not
+# even the "worker up" line the probe below waits for, nor the refresh relay that
+# is the node's only account of a self-refresh. `info` is where those lines live
+# and costs nothing per-op; deps stay at warn. Overridable per node at creation
+# via WORKER_RUST_LOG (a dedicated knob, so an unrelated RUST_LOG in the
+# operator's own shell cannot leak into the fleet), and worker-refresh.sh's swap
+# carries whatever is set forward across self-refreshes.
+LOG_ENV="-e RUST_LOG=${WORKER_RUST_LOG:-info,async_nats=warn}"
 REMOTE="docker rm -f chug-worker >/dev/null 2>&1 || true
 docker run -d --restart=always --name chug-worker \
   -v /var/run/docker.sock:/var/run/docker.sock \
@@ -111,6 +120,7 @@ docker run -d --restart=always --name chug-worker \
   -e WORKER_NODE=$NODE \
   -e NATS_URL=$NATS \
   -e NATS_CREDS=/data/keys/worker.creds \
+  $LOG_ENV \
   $REFRESH_ENV \
   $CACHE_ENV \
   $DISK_ENV \

@@ -702,8 +702,9 @@ impl Core {
         // reads the persisted verdict whatever exit code we synthesize.
         let exit = match &task.container_id {
             Some(cid) => match self.backend.inspect(cid).await {
-                Ok(Some(container::ContainerStatus::Running)) => {
-                    // Still running across the restart: re-attach the *same*
+                Ok(Some(status)) => {
+                    // The container is still there — running, or exited while
+                    // this dispatcher was down. Either way, re-attach the *same*
                     // monitor the launch path uses for this phase, so exit
                     // handling is byte-identical — not a bespoke inline monitor
                     // that drops the structured result. A command work / wrap-up
@@ -714,19 +715,36 @@ impl Core {
                     // dispatcher restart, so this re-attach is the only path its
                     // report can survive on — the report the Deploys page (#188)
                     // renders. Evaluators keep their eval-result.json monitor.
+                    //
+                    // An ALREADY-EXITED container takes the same path (ticket
+                    // #270): the monitor's `wait` returns its recorded code at
+                    // once, and the harvest that follows is what stores the
+                    // task's `stdout.log` artifact. Synthesizing the exit inline
+                    // instead — as this arm used to for `Exited` — skipped the
+                    // harvest entirely, so a deploy whose work container exited
+                    // in the seconds between restart-verify's `kickstart` and
+                    // this reconcile (the common case: the ssh session ends as
+                    // soon as update.sh returns) left NO record at all: empty
+                    // artifacts, empty task output, no legs (deploy #267).
                     let cid = cid.clone();
-                    match task.phase {
-                        TaskPhase::Work | TaskPhase::WrapUp => {
-                            self.spawn_logs_monitor(owner, project, seq, task.id, cid)
+                    match (task.phase, status) {
+                        (TaskPhase::Work | TaskPhase::WrapUp, _) => {
+                            self.spawn_logs_monitor(owner, project, seq, task.id, cid);
+                            return Ok(());
                         }
-                        _ => self.spawn_eval_monitor(owner, project, seq, task.id, cid),
+                        (_, container::ContainerStatus::Running) => {
+                            self.spawn_eval_monitor(owner, project, seq, task.id, cid);
+                            return Ok(());
+                        }
+                        // An evaluator that exited during the downtime keeps the
+                        // pre-#270 shape: a real exit the crash lost, whose code
+                        // is authoritative and keeps burning budget exactly as it
+                        // would have live. Only the work/wrap-up harvest — the
+                        // deploy's paper trail — changed.
+                        (_, container::ContainerStatus::Exited { exit_code }) => {
+                            TaskExit::code(exit_code)
+                        }
                     }
-                    return Ok(());
-                }
-                Ok(Some(container::ContainerStatus::Exited { exit_code })) => {
-                    // A real exit the crash lost: the code is authoritative and
-                    // keeps burning budget, exactly as it would have live.
-                    TaskExit::code(exit_code)
                 }
                 // The container is GONE — pruned, node rebooted, colima
                 // restarted (or the backend can't answer). We recorded an id, so

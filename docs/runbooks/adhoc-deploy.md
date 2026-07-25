@@ -148,10 +148,20 @@ docker run -d --restart=always --name chug-worker \
   -e WORKER_REFRESH_GIT_URL=ssh://git@100.x.y.z:2222/<owner>/chuggernaut.git \
   -e WORKER_GIT_KEY=/data/keys/worker_git \
   -e WORKER_CACHE_DIR=/var/cache/chuggernaut/sccache \
+  -e RUST_LOG=info,async_nats=warn \
   chuggernaut/worker:prod'
 ```
 
-Two env details are load-bearing:
+Three env details are load-bearing:
+
+- **`RUST_LOG`.** Omit it and the daemon logs **nothing**: the binary filters on
+  `RUST_LOG` and its default directive is `error`, so `docker logs chug-worker`
+  shows no "worker up", no refresh phase markers, and none of the relayed
+  `worker-refresh.sh` output — the silence that made deploy #267 a live
+  post-mortem across three hosts (#270). `info` is where those lines are;
+  `async_nats=warn` keeps a reconnect storm from drowning them. `build-worker.sh`
+  and the self-refresh swap both set this default now, so a daemon you start by
+  hand is the only way back to a silent node.
 
 - **`WORKER_CACHE_DIR` + sccache.** This is passed to the **daemon as env
   only** — there is **no sccache mount on the daemon itself**. The daemon reads

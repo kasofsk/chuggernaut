@@ -554,6 +554,34 @@ Notes:
   aborted the deploy. A node that had already started swapping stays swapped —
   its leg says so, and the fleet snapshot's per-node version is the
   cross-check. To cancel a hand-run refresh, the same command works standalone.
+- **The deploy keeps the paper trail (#270).** Three things make a failed
+  refresh diagnosable from the deploy job alone:
+  1. **Per-node transcript recap.** The fan-out keeps each node's CLI
+     transcript in a `mktemp` dir; before deleting it, `update.sh` copies a
+     bounded tail of each node's `.log` (and `.cancel`) into the deploy's own
+     stdout, one node at a time, labelled `update: [<node> log] …`. That is
+     the interleaved live stream sorted back into per-node stories.
+     Overridable per deploy with `WORKER_REFRESH_TRANSCRIPT_LINES_MAX` /
+     `_COLS_MAX` — a bound, not a dump: this stdout becomes the task record.
+  2. **The daemon actually logs.** The daemon container runs with
+     `RUST_LOG=info,async_nats=warn` (set by `build-worker.sh` at node
+     creation as `WORKER_RUST_LOG`, and carried forward by every swap). Without
+     it the binary's tracing default is `error` and `docker logs chug-worker`
+     says *nothing* about a refresh — the silence deploy #267 was
+     reconstructed around. An override on the live daemon survives a refresh.
+  3. **The swapper is retained.** The detached sibling that removes the old
+     daemon and starts the new one is named `chug-worker-swap` and no longer
+     runs `--rm`, so when a replacement fails to start the reason survives as
+     `docker logs chug-worker-swap` (on a journald node also
+     `journalctl CONTAINER_NAME=chug-worker-swap`). One retained container per
+     node — each swap removes the previous one first. This one *cannot* reach
+     the deploy job: the daemon that reports to the dispatcher is the very
+     thing being replaced.
+
+  On the dispatcher side, the deploy Work task's `stdout.log` artifact is now
+  harvested on the exit paths a self-deploy actually takes — a container found
+  already exited by restart reconciliation (§3.6), and a task the
+  `task_timeout` scan kills — not only when a live monitor sees the exit.
 
 ### Fast image builds (BuildKit dependency caching, #115)
 

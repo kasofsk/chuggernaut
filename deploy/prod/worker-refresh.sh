@@ -339,6 +339,21 @@ swap)
   fi
   SOCK_SRC="${SOCK_SRC:-/var/run/docker.sock}"
 
+  # The daemon's own log level (ticket #270). The binary configures tracing from
+  # RUST_LOG (`tracing_subscriber::fmt::init`) whose default directive is ERROR,
+  # so a daemon started without it emits NOTHING an operator can use: not the
+  # refresh phase markers, not the per-line relay of THIS script's output
+  # (`worker-refresh: <line>`, daemon.rs), not "worker up". That silence is why
+  # the deploy #267 post-mortem had to be reconstructed from docker event ring
+  # buffers. `info` is exactly the level those lines live at, and it is not a
+  # firehose: the daemon logs nothing per-op (launch/inspect/logs/ping are
+  # silent), and `docker build -q` keeps a ten-minute image build to one line per
+  # phase. Dependencies stay at warn so an async-nats reconnect storm cannot
+  # drown the refresh story. Carried forward like the other knobs so an operator
+  # who raised the level on the live daemon keeps it across self-refreshes
+  # (#55/#82's silent-revert lesson).
+  RUST_LOG_NEW="${RUST_LOG:-info,async_nats=warn}"
+
   # The refreshed worker image already contains the (new SHA's) worker-refresh.sh
   # and daemon binary, so no script is mounted from the host. All bind sources
   # below are literal host paths (already expanded), so evaluating RUN_NEW inside
@@ -347,18 +362,38 @@ swap)
     -v $SOCK_SRC:/var/run/docker.sock \
     -v $KEYS_SRC:/data/keys:ro \
     -e WORKER_NODE=$NODE -e NATS_URL=$NATS -e NATS_CREDS=$CREDS \
+    -e RUST_LOG=$RUST_LOG_NEW \
     -e WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-} \
     -e WORKER_GIT_KEY=${WORKER_GIT_KEY:-/data/keys/worker_git} \
     $CACHE_ARGS $DISK_ARGS chuggernaut/worker:$TAG"
 
+  # Keep the swapper's transcript (ticket #270). This sibling container holds the
+  # only record of the moment the node is most likely to break — it removes the
+  # live daemon and starts its replacement — and it used to run `--rm`, so a
+  # `$RUN_NEW` that failed took its own error message with it seconds later,
+  # leaving a node with neither a daemon nor a reason. Named and retained, that
+  # transcript survives as `docker logs chug-worker-swap` (and, on a journald
+  # node, `journalctl CONTAINER_NAME=chug-worker-swap`). Bounded to ONE retained
+  # container per node: each swap force-removes the previous one by name first.
+  #
+  # It cannot ride back into the deploy job's output: the daemon that reports to
+  # the dispatcher is the very thing being replaced. That is why the node-side
+  # record has to survive at all.
+  SWAP_NAME="chug-worker-swap"
+  docker rm -f "$SWAP_NAME" >/dev/null 2>&1 || true
+
   # sleep briefly so this RPC's reply flushes before the old daemon is removed.
+  # The inner `docker rm -f chug-worker` keeps its STDERR (only the removed-id
+  # echo is dropped): its failure — a docker socket that stopped answering, a
+  # container that will not die — is the first thing to know when the replacement
+  # never appears. Still non-fatal, exactly as before: the swap proceeds.
   refresh_phase "swap-container"
-  docker run -d --rm \
+  docker run -d --name "$SWAP_NAME" \
     -v /var/run/docker.sock:/var/run/docker.sock \
     "$SWAP_IMAGE" \
-    sh -c "sleep 2; docker rm -f chug-worker >/dev/null 2>&1 || true; $RUN_NEW"
+    sh -c "sleep 2; docker rm -f chug-worker >/dev/null || echo 'worker-refresh: docker rm -f chug-worker failed — continuing to start the replacement' >&2; $RUN_NEW"
 
-  echo "worker-refresh: swap scheduled -> chuggernaut/worker:$TAG on $NODE"
+  echo "worker-refresh: swap scheduled -> chuggernaut/worker:$TAG on $NODE (RUST_LOG=$RUST_LOG_NEW; swapper transcript: docker logs $SWAP_NAME)"
   ;;
 
 *)

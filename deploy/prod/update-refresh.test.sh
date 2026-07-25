@@ -547,6 +547,51 @@ else
   fi
 fi
 
+# ── Case 11: each node's transcript is recapped into the deploy's stdout ──────
+# Ticket #270. The per-node files under $CHUG_WR_DIR are the only de-interleaved
+# account of the fan-out and the dir is a mktemp that dies with the deploy, so
+# before it goes each node's transcript is copied into the deploy's own stdout,
+# labelled with the node. That is what makes a failed swap diagnosable from the
+# job's output with no ssh: nuc's failure detail must appear under nuc's label,
+# and the cancelled node's cancel transcript under air's.
+fleet_reset
+export CHUG_LEGS_PENDING="worker-refresh:nuc worker-refresh:air"
+echo "fail:1" > "$WORK/behave.nuc"
+echo "cancellable:60" > "$WORK/behave.air"
+if CHUG_BIN="$BIN/chug-fleet" refresh_workers >"$WORK/out11" 2>&1; then
+  echo "FAIL - a failing fleet must still fail the deploy step"
+  fail=$((fail + 1))
+else
+  if grep -q "worker-refresh transcript: nuc (failed)" "$WORK/out11" \
+    && grep -qF "[nuc log] WARNING: worker refresh node=nuc FAILED at build" "$WORK/out11" \
+    && grep -qF "[air cancel] refresh cancelled: node=air" "$WORK/out11"; then
+    echo "ok   - each node's transcript is recapped into the deploy output, labelled by node"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - the deploy output should carry a per-node transcript recap"
+    cat "$WORK/out11"
+    fail=$((fail + 1))
+  fi
+  # Bounded (STYLE): a refresh relays a ten-minute build, so the recap is a tail
+  # per file, not a dump. With the cap at 2 lines the whole two-node recap cannot
+  # exceed 2 nodes x 2 files x 2 lines plus its own headers.
+  mkdir -p "$WORK/legs"
+  _i=0
+  while [ "$_i" -lt 50 ]; do
+    echo "line$_i" >> "$WORK/legs/nuc.log"
+    _i=$((_i + 1))
+  done
+  _recap="$( (CHUG_WR_DIR="$WORK/legs"; WORKER_REFRESH_TRANSCRIPT_LINES_MAX=2; \
+    refresh_workers_transcripts nuc) | grep -c '\[nuc log\]')"
+  if [ "$_recap" -eq 2 ]; then
+    echo "ok   - the recap is bounded to a tail per node file"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - the per-node recap must honour WORKER_REFRESH_TRANSCRIPT_LINES_MAX"
+    fail=$((fail + 1))
+  fi
+fi
+
 echo
 echo "passed $pass, failed $fail"
 [ "$fail" -eq 0 ]

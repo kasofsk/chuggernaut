@@ -75,6 +75,11 @@ grep_log "WORKER_CACHE_DIR=/var/cache/chuggernaut/sccache"
 grep_log "WORKER_REFRESH_GIT_URL=ssh://git@front:2222/acme/chug.git"
 grep_log "WORKER_GIT_KEY=/data/keys/worker_git"
 grep_log "WORKER_NODE=nuc"
+# A daemon started with no RUST_LOG logs at ERROR only (ticket #270): no "worker
+# up", no refresh relay, so `docker logs chug-worker` is silent about the one
+# thing an operator needs it for. The node-creation path sets the same floor the
+# self-refresh swap carries forward.
+grep_log "RUST_LOG=info,async_nats=warn"
 # Env only: no cache bind-mount into the daemon container itself.
 if grep -qF -- "-v /var/cache/chuggernaut/sccache:" "$LOG"; then
   fail "WORKER_CACHE_DIR must be env only on the daemon, not a bind-mount"

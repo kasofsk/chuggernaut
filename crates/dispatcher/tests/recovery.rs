@@ -66,6 +66,19 @@ work:
 job_deadline: 1s
 "#;
 
+// A command work type whose task_timeout is short enough for the timeout scan to
+// fire in a test — the deploy shape (ticket #270): one command task, no
+// evaluators, no retries, so a timeout escalates immediately.
+const CMD_WORK_SLOW: &str = r#"
+name: cmd-work-slow
+image: img:latest
+work:
+  type: command
+  run: ./deploy.sh
+resources:
+  task_timeout: 1s
+"#;
+
 // Agent work + agent eval with a rework budget (job #155): a cycle-1 review can
 // fail and drive a rework, so a cycle-2 evaluator relaunched after a restart
 // must rebuild its re-review context from the persisted task log.
@@ -2935,6 +2948,290 @@ async fn restart_reattach_harvests_command_work_deploy_report() {
     assert!(!report.rollback);
     // The re-attached container was reclaimed once its report was out (§3.6).
     assert_eq!(backend.removed(), vec![cid.to_string()]);
+}
+
+/// What a deploy's `update.sh` prints: human progress, the per-leg `@chug:leg`
+/// lines and the closing `@chug:report` envelope (ticket #187).
+const DEPLOY_STDOUT: &str = concat!(
+    "update: deploying abc123\n",
+    "@chug:leg {\"name\":\"build-dispatcher\",\"status\":\"ok\",\"secs\":41}\n",
+    "update: worker 'nuc' refresh NOT confirmed on abc123 — FAILING deploy\n",
+    "@chug:leg {\"name\":\"worker-refresh:nuc\",\"status\":\"failed\",\"secs\":900,",
+    "\"error\":\"refresh not confirmed\"}\n",
+    "@chug:report {\"from_sha\":\"prev999\",\"to_sha\":\"abc123\",\"rollback\":false}\n",
+);
+
+/// Seed the crash state §3.6 reconciles from: job 1 of `job_type` sitting in
+/// Work with one Running command task pointing at `cid`, started at
+/// `started_at`. Written straight to KV — the task log is the source of truth a
+/// restarted dispatcher recovers from.
+async fn seed_command_work_crash_state(
+    store: &NatsStore,
+    repo: &TempRepo,
+    job_type: &str,
+    yaml: &str,
+    cid: &str,
+    started_at: chrono::DateTime<Utc>,
+) {
+    let clone = repo.clone_branch("main").await;
+    clone
+        .commit_file(&format!("jobs/{job_type}.yaml"), yaml.as_bytes(), "type")
+        .await;
+    clone.push("main").await;
+    let head = repo.head().await;
+    repo.create_job_branch(1, &head).await;
+    store
+        .jobs()
+        .await
+        .unwrap()
+        .put(&crash_state_job(job_type, head))
+        .await
+        .unwrap();
+    store
+        .tasks()
+        .await
+        .unwrap()
+        .put(&crash_state_task(cid, started_at))
+        .await
+        .unwrap();
+}
+
+/// Job 1 as the crashed dispatcher left it: mid-Work on its own branch.
+fn crash_state_job(job_type: &str, head: String) -> Job {
+    Job {
+        id: 1,
+        project: "acme/api".into(),
+        r#type: job_type.into(),
+        title: String::new(),
+        description: String::new(),
+        cover_html: None,
+        deps: vec![],
+        members: vec![],
+        batch_id: None,
+        state: JobState::Work,
+        branch: "job/1".into(),
+        base_ref: Some(head),
+        knowledge_tags: vec![],
+        eval: vec![],
+        timeout: None,
+        model: None,
+        claim_next: false,
+        escalation: None,
+        factory: None,
+        created_at: Utc::now(),
+        ready_at: Some(Utc::now()),
+        completed_at: None,
+    }
+}
+
+/// Its work task: Running, with the container id the restart reconciles against.
+fn crash_state_task(cid: &str, started_at: chrono::DateTime<Utc>) -> Task {
+    Task {
+        id: 1,
+        job_seq: 1,
+        project: "acme/api".into(),
+        phase: TaskPhase::Work,
+        cycle: 1,
+        kind: TaskKind::Command {
+            run: "./deploy.sh".into(),
+        },
+        state: TaskState::Running,
+        attempt: 1,
+        evaluator: None,
+        label: None,
+        stage: 0,
+        performed_by: None,
+        container_id: Some(cid.into()),
+        rework_reason: None,
+        infra_loss: false,
+        pending_reason: None,
+        queued_at: None,
+        session_id: None,
+        reviewed_tip: None,
+        result: None,
+        created_at: Utc::now(),
+        started_at: Some(started_at),
+        completed_at: None,
+    }
+}
+
+/// A core with artifact capture enabled, so a test can read back the
+/// `stdout.log` a harvest stored. Returns its handle and the identity to open
+/// the artifact store with.
+async fn spawn_core_capturing_artifacts(
+    store: &NatsStore,
+    repo: &TempRepo,
+    backend: Arc<FakeBackend>,
+    nats_url: &str,
+) -> (CoreHandle, String) {
+    let (identity, _) = store::secrets::generate_age_keypair();
+    let repos_root = repo
+        .bare_path()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root),
+        backend,
+        Arc::new(FakeProvider::new()),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: nats_url.into(),
+            artifacts_identity: Some(identity.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    (spawn(core), identity)
+}
+
+/// The stored `stdout.log` for a task, polled until it lands (harvests run off
+/// the actor thread) or the bound elapses.
+async fn wait_for_stdout_artifact(store: &NatsStore, identity: &str, task_id: u64) -> Vec<u8> {
+    let artifacts = store
+        .artifacts(store::ArtifactCrypto::with_identity(identity).unwrap())
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if let Some(bytes) = artifacts
+            .get("acme", "api", 1, task_id, store::ArtifactKind::Stdout)
+            .await
+            .unwrap()
+        {
+            return bytes;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("task {task_id} stored no stdout.log artifact within the bound");
+}
+
+/// §3.6 harvest of a container that exited during the downtime (ticket #270,
+/// deploy #267): a self-deploy restarts the dispatcher that supervises it, and
+/// its ssh session — hence its work container — ends within seconds of that
+/// restart, so reconciliation routinely finds the container already Exited
+/// rather than Running. That arm used to synthesize the exit inline and skip the
+/// harvest entirely, leaving the deploy with an empty `stdout.log`, empty task
+/// output and no legs: the deploy job recorded nothing about its own deploy. It
+/// must harvest exactly as the still-Running arm does.
+#[tokio::test]
+async fn restart_harvests_command_work_that_exited_during_the_downtime() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let cid = "exited/deploy-1";
+    seed_command_work_crash_state(&store, &repo, "cmd-work", CMD_WORK, cid, Utc::now()).await;
+
+    // The container ran to completion while the dispatcher was down: `inspect`
+    // reports Exited, and its whole deploy stream is still readable off the node.
+    let backend = Arc::new(FakeBackend::new());
+    backend.seed_exited(cid, 0);
+    backend.put_logs(DEPLOY_STDOUT.as_bytes().to_vec());
+
+    let (_handle, identity) =
+        spawn_core_capturing_artifacts(&store, &repo, backend.clone(), server.url()).await;
+
+    // cmd-work has no evaluators, so an exit-0 work task carries the job to Done.
+    wait_for_state(&store, 1, JobState::Done).await;
+
+    // The operator-visible record: the container's own output, harvested before
+    // the container was reclaimed.
+    let stdout = wait_for_stdout_artifact(&store, &identity, 1).await;
+    let text = String::from_utf8_lossy(&stdout);
+    assert!(
+        text.contains("update: deploying abc123")
+            && text.contains("worker 'nuc' refresh NOT confirmed"),
+        "harvested stdout.log missing the deploy's output: {text}"
+    );
+
+    // …and the same bytes yield the structured report, exactly as on the launch
+    // and still-Running-re-attach paths.
+    let works: Vec<Task> = store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", 1)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.phase == TaskPhase::Work)
+        .collect();
+    assert_eq!(works.len(), 1, "re-attached, not relaunched: {works:?}");
+    let Some(TaskResult::Work {
+        structured: Some(value),
+        ..
+    }) = &works[0].result
+    else {
+        panic!(
+            "an exited-during-downtime command work task must still carry its \
+             harvested deploy report, got {:?}",
+            works[0].result
+        );
+    };
+    let report: types::DeployReport = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(report.legs.len(), 2, "both legs harvested: {report:?}");
+    assert_eq!(report.legs[1].name, "worker-refresh:nuc");
+    assert_eq!(report.to_sha.as_deref(), Some("abc123"));
+    assert_eq!(backend.removed(), vec![cid.to_string()]);
+}
+
+/// A task the timeout scan gives up on still leaves its log behind (ticket
+/// #270). The launch-path monitor normally harvests at exit, but it is parked in
+/// `backend.wait` — and when the node holding the container is what broke
+/// (deploy #267: the worker daemons died mid-deploy, so every poll answered with
+/// a transport error) that wait never returns. Without a harvest on the timeout
+/// path itself, the record of a deploy the dispatcher killed at `task_timeout`
+/// is `{"artifacts":[]}` — precisely the #267 post-mortem's problem.
+#[tokio::test]
+async fn task_timeout_harvests_the_container_log_before_giving_up() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+    let repo = TempRepo::create("acme", "api").await;
+    let cid = "wedged/deploy-1";
+    // Started long before the type's 1s task_timeout, so the first scan expires it.
+    seed_command_work_crash_state(
+        &store,
+        &repo,
+        "cmd-work-slow",
+        CMD_WORK_SLOW,
+        cid,
+        Utc::now() - chrono::Duration::seconds(60),
+    )
+    .await;
+
+    // The container never exits: `inspect` says Running and `wait` parks forever,
+    // so the re-attached monitor never reaches its own harvest. Its logs — the
+    // deploy's story up to the point it wedged — are still readable.
+    let backend = Arc::new(FakeBackend::new());
+    backend.seed_running([cid.to_string()]);
+    backend.put_logs(DEPLOY_STDOUT.as_bytes().to_vec());
+
+    let (handle, identity) =
+        spawn_core_capturing_artifacts(&store, &repo, backend.clone(), server.url()).await;
+    handle.trigger_scan().await.unwrap();
+
+    // No retries on this type, so the timeout escalates the job…
+    wait_for_state(&store, 1, JobState::Escalated).await;
+    assert_eq!(backend.killed(), vec![cid.to_string()], "container killed");
+    // …and the log is captured anyway, which is the whole point.
+    let stdout = wait_for_stdout_artifact(&store, &identity, 1).await;
+    assert!(
+        String::from_utf8_lossy(&stdout).contains("worker 'nuc' refresh NOT confirmed"),
+        "a timed-out task must still leave its container log as stdout.log"
+    );
 }
 
 /// §3.6 graceful drain: even with a busy mailbox the drain completes well under

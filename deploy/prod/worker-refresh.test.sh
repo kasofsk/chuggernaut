@@ -350,9 +350,9 @@ PATH="$BIN:$PATH" \
   WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
   sh "$SUT" swap prod
 
-# The swapper is detached (`run -d --rm`) so `docker rm -f chug-worker` can't
-# kill it, and it recreates the daemon on the new tag.
-grep_log "docker run -d --rm"
+# The swapper is detached (`run -d`) so `docker rm -f chug-worker` can't kill it,
+# and it recreates the daemon on the new tag.
+grep_log "docker run -d --name chug-worker-swap"
 grep_log "docker rm -f chug-worker"
 grep_log "chuggernaut/worker:prod"
 grep_log "WORKER_NODE=nuc"
@@ -365,6 +365,47 @@ if grep -qF '$HOME' "$LOG"; then
   fail "swap must not mount a \$HOME-derived keys path (strands creds in the swapper)"
 fi
 echo "ok: swap schedules a detached self-replace mounting the real keys source"
+
+# ── Case 3a: the swapper's transcript survives the swap (ticket #270) ──────────
+# The sibling that removes the live daemon and starts its replacement holds the
+# only account of the riskiest moment of a refresh. Under `--rm` a failed
+# `$RUN_NEW` was deleted seconds later, leaving a node with no daemon and no
+# reason (deploy #267). It must be NAMED and RETAINED — one per node, the previous
+# one force-removed first — and its inner `docker rm -f` must keep stderr.
+if grep -qF -- "--rm" "$LOG"; then
+  fail "the swapper must not run --rm (its transcript is the only record of a failed swap)"
+fi
+# Bounded retention: the prior swapper is removed by name before this one starts.
+grep_log "docker rm -f chug-worker-swap"
+# stdout of the inner rm is dropped (the id echo), stderr is NOT.
+if grep -F "sh -c" "$LOG" | grep -qF "rm -f chug-worker >/dev/null 2>&1"; then
+  fail "the swapper's docker rm -f must keep its stderr (2>&1 >/dev/null discards the cause)"
+fi
+# The deploy log says where the transcript is, so an operator does not have to
+# know the container's name by heart.
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+grep_out "docker logs chug-worker-swap"
+echo "ok: swap retains its named swapper transcript and keeps the inner rm's stderr"
+
+# ── Case 3d: the replacement daemon gets a usable RUST_LOG (ticket #270) ───────
+# Without RUST_LOG the daemon's tracing default is ERROR, so every phase marker
+# and every relayed refresh line is filtered out and `docker logs chug-worker`
+# says nothing about a refresh — the silence the #267 post-mortem hit. Default to
+# info with noisy deps damped; an override on the live daemon is carried forward
+# (the #55/#82 silent-revert class of bug).
+grep_log "RUST_LOG=info,async_nats=warn"
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  RUST_LOG=debug \
+  sh "$SUT" swap prod
+grep_log "RUST_LOG=debug"
+if grep -qF "RUST_LOG=info" "$LOG"; then
+  fail "swap must carry the daemon's own RUST_LOG forward, not overwrite it"
+fi
+echo "ok: swap gives the replacement daemon RUST_LOG=info by default, honouring an override"
 
 # ── Case 3b: swap carries WORKER_CACHE_DIR forward (env only, no daemon mount) ─
 # The refreshed daemon must inherit the node-local build cache config (#55/#82):

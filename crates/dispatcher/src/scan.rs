@@ -124,12 +124,46 @@ impl Core {
                 tracing::warn!("task {}#{} timed out after {timeout:?}", seq, task.id);
                 if let Some(cid) = &task.container_id {
                     let _ = self.backend.kill(cid).await;
+                    self.spawn_timeout_harvest(&owner, &project, seq, task.id, cid.clone());
                 }
                 self.on_task_exited(&owner, &project, seq, task.id, TaskExit::code(-1))
                     .await?;
             }
         }
         Ok(())
+    }
+
+    /// Store a timed-out task's container logs as its `stdout.log` artifact
+    /// (ticket #270), off the actor thread.
+    ///
+    /// A killed container's launch-path monitor normally harvests at exit — but
+    /// that monitor is parked in `backend.wait`, and when the thing that broke IS
+    /// the node holding the container (deploy #267: the worker daemons died
+    /// mid-deploy, so every `inspect` poll answered with a transport error) the
+    /// wait never returns and the task's only record is lost. This is the second,
+    /// independent attempt: it runs on the exit path the timeout scan itself
+    /// owns, so a task the dispatcher gives up on still leaves the log an
+    /// operator reads the failure out of.
+    ///
+    /// Spawned, never awaited: `logs` on an unreachable node must not block the
+    /// single-writer loop. The harvest writes no job/task state, and re-storing
+    /// the same artifact if the monitor later wakes and harvests too is a
+    /// same-key overwrite. Disposal is deliberately left to the monitor — the
+    /// container may still be draining, and reclaiming it here would race the
+    /// harvest we just started.
+    fn spawn_timeout_harvest(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task_id: u64,
+        id: container::ContainerId,
+    ) {
+        let harvest = self.harvester();
+        let (o, p) = (owner.to_string(), project.to_string());
+        tokio::spawn(async move {
+            harvest.collect_logs(&o, &p, seq, task_id, &id).await;
+        });
     }
 
     /// Jobs in Ready/Work/Evaluation past `job_deadline` (anchored at

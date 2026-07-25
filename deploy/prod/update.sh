@@ -127,8 +127,51 @@ refresh_workers() {
   done
   _rc=0
   refresh_workers_collect "$_nodes" || _rc=1
+  # The per-node files are the only de-interleaved account of the fan-out, and
+  # they live in a mktemp dir that is about to go — copy them where the operator
+  # already looks before deleting it (ticket #270).
+  refresh_workers_transcripts "$_nodes"
   rm -rf "$CHUG_WR_DIR"
   return "$_rc"
+}
+
+# Recap each node's refresh into the DEPLOY's stdout, one node at a time, before
+# $CHUG_WR_DIR is removed (ticket #270).
+#
+# Everything the fan-out learns about a node is in these files, and the deploy
+# #267 post-mortem could read none of it: the live `tee` stream interleaves every
+# node's lines (that is the price of building them in parallel, #254) and the dir
+# holding the per-node copies is gone by the time anyone investigates. This is
+# that stream sorted back into per-node stories, each line labelled with the node
+# it came from, so "what did gumbo-nuc-0 do" is answerable from the deploy job's
+# own output with no ssh.
+#
+# BOUNDED per STYLE, by lines and by columns: a refresh relays a ten-minute build
+# and this stdout is harvested into the task record, so the recap is a tail per
+# file, never a dump. Both caps are env-overridable for a one-off investigation.
+#
+# Nothing NEW is disclosed: `.log`/`.cancel` are copies of CLI output that was
+# already relayed to this same stdout. The refresh env (NATS_CREDS,
+# MINI_DEPLOY_KEY, ssh key paths) is never echoed by the CLI and is not read here
+# — only these two transcript files are; the pid files are skipped as noise.
+# `printf`, not `echo`: a transcript line is arbitrary text and some shells'
+# `echo` expands backslash escapes in it.
+refresh_workers_transcripts() {
+  _lines_max="${WORKER_REFRESH_TRANSCRIPT_LINES_MAX:-40}"
+  _cols_max="${WORKER_REFRESH_TRANSCRIPT_COLS_MAX:-500}"
+  for _n in $1; do
+    _verdict="$(cat "$CHUG_WR_DIR/$_n.done" 2>/dev/null || echo 'no verdict')"
+    printf 'update: ---- worker-refresh transcript: %s (%s) ----\n' "$_n" "$_verdict"
+    for _f in log cancel; do
+      [ -s "$CHUG_WR_DIR/$_n.$_f" ] || continue
+      tail -n "$_lines_max" "$CHUG_WR_DIR/$_n.$_f" \
+        | cut -c "1-$_cols_max" \
+        | while IFS= read -r _line; do
+            printf 'update: [%s %s] %s\n' "$_n" "$_f" "$_line"
+          done
+    done
+  done
+  printf 'update: ---- end worker-refresh transcripts ----\n'
 }
 
 # The `worker`-endpoint node names in DOCKER_NODES, one per line. One parser

@@ -98,10 +98,20 @@ will run and wait.
 
 ## Troubleshooting a failed worker refresh
 
-1. Build-failure output never leaves the node (#213). Diagnose by ssh'ing
-   the node and reading `docker logs chug-worker` — output is buffer-flushed
-   in one lump and may lag or be empty.
-2. **Recurring cause on dev-air**: colima docker disk pressure (~80%+ full)
+1. **Read the deploy job's own output first — no ssh (#270).** The failing
+   node's `worker-refresh:{node}` leg carries the harvested failure detail,
+   and after the fan-out update.sh recaps each node's transcript into the
+   deploy's stdout (`update: [<node> log] …`, a bounded tail per node) so the
+   nodes' interleaved live lines are readable per node. The deploy Work task's
+   `stdout.log` artifact is harvested even when the deploy's own restart or a
+   `task_timeout` kill ended the task.
+2. On the node, `docker logs chug-worker` now actually carries the refresh
+   phase lines — the daemon runs with `RUST_LOG=info,async_nats=warn`. A node
+   whose daemon vanished after a swap: the swapper container is retained, so
+   `docker logs chug-worker-swap` (or `journalctl
+   CONTAINER_NAME=chug-worker-swap` on a journald node) holds the reason the
+   replacement never started.
+3. **Recurring cause on dev-air**: colima docker disk pressure (~80%+ full)
    kills the `cargo build` inside the image build. The script now owns this
    itself (#250): a **disk pre-flight** refuses in seconds with
    `insufficient docker disk: need ~20GB … have NGB free` (a leg failing that
@@ -111,12 +121,12 @@ will run and wait.
    a conservative constant; a node with a different disk shape overrides it
    with `WORKER_REFRESH_DISK_FREE_GB_MIN` (and `_DISK_PATH`) in the daemon's
    env at node creation — a self-refresh carries the override forward.
-3. Safe cleanup by hand (**ask first — it deletes**), same pair the script runs:
+4. Safe cleanup by hand (**ask first — it deletes**), same pair the script runs:
    `docker image prune -f` (dangling only, **never `-a`**) and
    `docker builder prune -f --keep-storage 15GB`.
-4. Verify with a manual rebuild (validate-first, can't hurt live tags):
+5. Verify with a manual rebuild (validate-first, can't hurt live tags):
    `docker exec chug-worker /usr/local/lib/chuggernaut/worker-refresh.sh build <sha> prod`
-5. Retry the failed deploy via its escalation task:
+6. Retry the failed deploy via its escalation task:
    `POST .../tasks/{id}/resolve {"kind":"Escalation","action":"Retry"}`.
 
 ## Hard-won rules
