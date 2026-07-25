@@ -2458,12 +2458,11 @@ table.jobs tbody tr.row-draft td:first-child {
   z-index: 50;
   --band: var(--green);
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: var(--sp-2);
+  align-items: center;
 }
-/* Launch button: the anchor of the floating cluster, sat at the bottom-right
-   corner where it is easiest to thumb-tap (#245). */
+/* Launch button (#245): shares the readout's pill on one row, at the bottom-right
+   corner where it is easiest to thumb-tap. The card carries the drop shadow when
+   the two are combined; standalone (feed down) the button carries its own. */
 .capacity-newjob {
   display: inline-flex;
   align-items: center;
@@ -2473,8 +2472,12 @@ table.jobs tbody tr.row-draft td:first-child {
   color: #fff;
   font-weight: 600;
   font-size: var(--fs-md);
-  padding: 0.5rem 0.95rem;
+  padding: 0.45rem 0.9rem;
   border-radius: var(--r-full);
+  white-space: nowrap;
+}
+.capacity-widget > .capacity-newjob {
+  padding: 0.5rem 0.95rem;
   box-shadow: 0 6px 20px -6px var(--glow);
 }
 .capacity-newjob:hover {
@@ -2498,16 +2501,24 @@ table.jobs tbody tr.row-draft td:first-child {
   box-shadow: var(--shadow-card);
   cursor: pointer;
 }
+/* The shell holding both halves: readout (or collapsed dot) on the left, launch
+   button inset on the right. */
 .capacity-card {
-  position: relative;
   display: flex;
   align-items: center;
-  gap: var(--sp-1);
-  padding: 0.3rem 0.5rem 0.3rem 0.6rem;
+  gap: var(--sp-2);
+  padding: 0.25rem 0.25rem 0.25rem 0.6rem;
   border-radius: var(--r-full);
   border: 1px solid var(--border);
   background: var(--card);
   box-shadow: var(--shadow-card);
+}
+/* Anchors the hover breakdown, and scopes the hover to the readout half. */
+.capacity-gauge {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
 }
 .capacity-summary {
   display: inline-flex;
@@ -4415,6 +4426,12 @@ tr[data-state='Batched'] {
   .capacity-widget,
   .theme-picker {
     bottom: 62px;
+  }
+  /* Readout and launch button share one row, so on a phone the pill sheds the
+     per-slot dot strip (up to 16 dots ≈ 160px) to fit a 360px screen; the
+     busy/total fraction and the queue count still read. */
+  .capacity-dots {
+    display: none;
   }
   /* …and the last thing on the deploys page clear of the raised picker. */
   .deploy-more {

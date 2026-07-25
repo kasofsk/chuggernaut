@@ -21,9 +21,10 @@ function loadBand(busy: number, total: number, queue: number): 'ok' | 'high' | '
  * cluster view. Collapsible to a dot (remembered in localStorage); the capacity
  * readout hides when the feed is unavailable rather than showing zeros.
  *
- * The "new job" launch button (#245) lives here too so it floats at the bottom of
- * the page where it is easy to thumb-tap; it always renders, even when the
- * capacity readout is hidden, so job creation is never lost with the feed.
+ * The "new job" launch button (#245) shares the pill, sat on the same row to the
+ * right of the readout so the pair reads as one widget rather than a stack; it
+ * always renders, even when the capacity readout is hidden, so job creation is
+ * never lost with the feed.
  */
 export function CapacityWidget({
   fleet,
@@ -43,8 +44,8 @@ export function CapacityWidget({
     if (v) setExpanded(false)
   }
 
-  // The launch button is the anchor of the cluster and always renders. The
-  // capacity pill is grafted on above it only when the feed has real numbers.
+  // The launch button always renders; the capacity readout is grafted on to its
+  // left inside the same pill only when the feed has real numbers.
   const newJobButton = (
     <Link to={newJobHref} className="capacity-newjob" title="start a new job">
       + new job
@@ -65,14 +66,16 @@ export function CapacityWidget({
   if (collapsed) {
     return (
       <div className="capacity-widget" data-band={band}>
-        <button
-          type="button"
-          className="capacity-dot"
-          title={`fleet: ${busy} / ${total} slots busy${queue ? ` · ${queue} queued` : ''} — click to expand`}
-          aria-label={`fleet capacity ${busy} of ${total} busy`}
-          onClick={() => setCollapse(false)}
-        />
-        {newJobButton}
+        <div className="capacity-card">
+          <button
+            type="button"
+            className="capacity-dot"
+            title={`fleet: ${busy} / ${total} slots busy${queue ? ` · ${queue} queued` : ''} — click to expand`}
+            aria-label={`fleet capacity ${busy} of ${total} busy`}
+            onClick={() => setCollapse(false)}
+          />
+          {newJobButton}
+        </div>
       </div>
     )
   }
@@ -84,71 +87,76 @@ export function CapacityWidget({
 
   return (
     <div className="capacity-widget" data-band={band}>
-      <div
-        className="capacity-card"
-        onMouseEnter={() => setExpanded(true)}
-        onMouseLeave={() => setExpanded(false)}
-      >
-        <button
-          type="button"
-          className="capacity-summary"
-          onClick={() => setExpanded((v) => !v)}
-          aria-expanded={expanded}
-          title="fleet slot usage — click for the per-node breakdown"
+      <div className="capacity-card">
+        {/* Hover scope for the breakdown is the readout only — the breakdown is a
+            child so moving into it never counts as a leave, and hovering the
+            launch button next door doesn't pop it open. */}
+        <div
+          className="capacity-gauge"
+          onMouseEnter={() => setExpanded(true)}
+          onMouseLeave={() => setExpanded(false)}
         >
-          <span className="capacity-frac">
-            {busy} <span className="capacity-slash">/</span> {total}
-          </span>
-          <span className="capacity-dots" aria-hidden="true">
-            {Array.from({ length: dotCount }, (_, i) => (
-              <span key={i} className={`cap-dot${i < filled ? ' on' : ''}`} />
-            ))}
-          </span>
-          {queue > 0 && <span className="capacity-queue">· {queue} queued</span>}
-        </button>
-        <button
-          type="button"
-          className="capacity-min"
-          title="collapse"
-          aria-label="collapse capacity widget"
-          onClick={() => setCollapse(true)}
-        >
-          –
-        </button>
-        {expanded && (
-          <div className="capacity-breakdown">
-            {fleet.nodes.map((n) => (
-              <div key={n.name} className={`cap-node${n.available ? '' : ' cap-out'}`}>
-                <div className="cap-node-head">
-                  <span className="cap-node-name">{n.name}</span>
-                  <span className="cap-node-frac dim">
-                    {n.occupied} / {n.slots ?? '?'}
-                    {!n.available && ' · out'}
-                  </span>
-                </div>
-                {n.running.length > 0 && (
-                  <div className="cap-node-jobs">
-                    {n.running.map((s) => (
-                      <Link
-                        key={`${s.project}:${s.job_seq}:${s.task_id}`}
-                        className="cap-job"
-                        to={`/p/${s.project}/jobs/${s.job_seq}`}
-                        title={`${s.project} · ${s.job_type} · ${s.task_kind}`}
-                      >
-                        #{s.job_seq}
-                      </Link>
-                    ))}
+          <button
+            type="button"
+            className="capacity-summary"
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            title="fleet slot usage — click for the per-node breakdown"
+          >
+            <span className="capacity-frac">
+              {busy} <span className="capacity-slash">/</span> {total}
+            </span>
+            <span className="capacity-dots" aria-hidden="true">
+              {Array.from({ length: dotCount }, (_, i) => (
+                <span key={i} className={`cap-dot${i < filled ? ' on' : ''}`} />
+              ))}
+            </span>
+            {queue > 0 && <span className="capacity-queue">· {queue} queued</span>}
+          </button>
+          <button
+            type="button"
+            className="capacity-min"
+            title="collapse"
+            aria-label="collapse capacity widget"
+            onClick={() => setCollapse(true)}
+          >
+            –
+          </button>
+          {expanded && (
+            <div className="capacity-breakdown">
+              {fleet.nodes.map((n) => (
+                <div key={n.name} className={`cap-node${n.available ? '' : ' cap-out'}`}>
+                  <div className="cap-node-head">
+                    <span className="cap-node-name">{n.name}</span>
+                    <span className="cap-node-frac dim">
+                      {n.occupied} / {n.slots ?? '?'}
+                      {!n.available && ' · out'}
+                    </span>
                   </div>
-                )}
-              </div>
-            ))}
-            <Link className="capacity-cluster-link" to="/cluster">
-              cluster view ↗
-            </Link>
-          </div>
-        )}
+                  {n.running.length > 0 && (
+                    <div className="cap-node-jobs">
+                      {n.running.map((s) => (
+                        <Link
+                          key={`${s.project}:${s.job_seq}:${s.task_id}`}
+                          className="cap-job"
+                          to={`/p/${s.project}/jobs/${s.job_seq}`}
+                          title={`${s.project} · ${s.job_type} · ${s.task_kind}`}
+                        >
+                          #{s.job_seq}
+                        </Link>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+              <Link className="capacity-cluster-link" to="/cluster">
+                cluster view ↗
+              </Link>
+            </div>
+          )}
+        </div>
+        {newJobButton}
       </div>
-      {newJobButton}
     </div>
   )
 }
