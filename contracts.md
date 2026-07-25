@@ -128,6 +128,27 @@ admission and batch-membership commit run *between* the transitions and the
 effects, because admitting a job to the ready queue is part of committing the
 §2.1 record, not an artifact of it.
 
+**C5 (eval) showed what a decider does with a phase's own working memory.**
+The Evaluation phase (`chuggernaut_domain::decide::eval`, shim
+`Core::run_eval`) decides the staged fan-out, each evaluator type's verdict,
+three budgets (`eval_retries`, the evidence-free relaunch cap, `rework_budget`)
+and the reduce's pass / rework / abort / escalate fork. The round it decides
+over — which slots are in flight, which stages have not been created, which
+already passed — became a **decider-owned value** the shim swaps per decision,
+the same move C2 made with `MergeGateState`, which puts "one stage in flight
+per job" in the type rather than in a comment. Two consequences worth copying:
+
+- A launch effect's *identity* comes back as an event. Task ids exist only once
+  the launch ran, so `LaunchEvalStage`/`LaunchEvaluator` re-enter as
+  `StageLaunched`/`SlotRelaunched` and the decider is what lands them on the
+  round — the shim never reaches into the value it handed over.
+- A read the decision *might* need must be gathered before the branch that
+  needs it is taken. The evidence-free relaunch count was a read-after-write on
+  one branch of the old `eval_no_output_failure`; as a view field it is read on
+  every eval exit and counts the retirement the decider has not emitted yet.
+  Where C4 uses the continuation to keep an expensive read behind the decision,
+  a cheap read simply moves into the view.
+
 ### 3. Invariants — what must always hold
 
 Harvest every "must"/"always"/"never" comment and defensive pattern into one

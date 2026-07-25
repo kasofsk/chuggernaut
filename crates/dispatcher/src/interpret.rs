@@ -49,6 +49,12 @@ pub enum Outcome {
     Rebase(vcs::ConflictRebaseOutcome),
     /// The `LaunchGateStage` slots — the gate round the shim parks.
     GateSlots(Vec<crate::eval::EvalSlot>),
+    /// The `LaunchEvalStage` slots — the Evaluation stage now in flight, which
+    /// re-enters the eval decider as `StageLaunched` (refactor-plan C5).
+    EvalSlots(Vec<crate::eval::EvalSlot>),
+    /// A `LaunchEvaluator` task id — the slot's new task after a retry or an
+    /// evidence-free relaunch.
+    EvaluatorTask(u64),
 }
 
 impl Core {
@@ -307,6 +313,46 @@ impl Core {
                     .launch_gate_stage(&owner, &project, seq, &gate_branch, cycle, evaluators)
                     .await?;
                 return Ok(Outcome::GateSlots(slots));
+            }
+            // The Evaluation fan-out (§3.3). Deliberately NOT trace-recorded:
+            // the golden fixtures pin the pre-C5 effect list, where an eval
+            // launch was recorded only through the `task-created` events it
+            // publishes (unlike the gate stage, which always logged its own).
+            Effect::LaunchEvalStage {
+                owner,
+                project,
+                seq,
+                branch,
+                cycle,
+                evaluators,
+            } => {
+                let slots = self
+                    .launch_eval_stage(&owner, &project, seq, &branch, cycle, evaluators)
+                    .await?;
+                return Ok(Outcome::EvalSlots(slots));
+            }
+            Effect::LaunchEvaluator {
+                owner,
+                project,
+                seq,
+                branch,
+                cycle,
+                evaluator,
+                attempt,
+            } => {
+                let task_id = self
+                    .launch_evaluator_task(
+                        &owner,
+                        &project,
+                        seq,
+                        types::TaskPhase::Evaluation,
+                        &branch,
+                        cycle,
+                        &evaluator,
+                        attempt,
+                    )
+                    .await?;
+                return Ok(Outcome::EvaluatorTask(task_id));
             }
             Effect::EnterWork {
                 owner,

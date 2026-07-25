@@ -123,6 +123,9 @@ In rough order of risk: `merge_gate` (carved from `eval.rs`), `wrapup`,
 traces are richest. Per NORTH-STAR, these are **opportunistic** — file C1 as
 scheduled work, then extract whichever phase the next real job touches;
 C2–C6 are backlog stubs plus a standing rule, not a scheduled series.
+**C2 (`merge_gate`), C3 (`wrapup`), C4 (`ready`) and C5 (`eval`) have landed**
+— `eval.rs` is down to its launch/monitor half plus the two folds, so only
+C6 (`work`/`exec`) remains of the series.
 
 **C7. `handlers.rs` → `handlers/`** *(code, small, independent)*
 Mechanical split of the 1,727-line file along its existing seams

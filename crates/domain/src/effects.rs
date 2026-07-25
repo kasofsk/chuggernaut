@@ -49,6 +49,8 @@
 //! | `AdvanceDefault` | `repos.advance_default` |
 //! | `RebaseOntoWithConflict` | `repos.rebase_onto_with_conflict` |
 //! | `LaunchGateStage` | `Core::launch_gate_stage` → `provider.run` |
+//! | `LaunchEvalStage` | `Core::launch_eval_stage` → `provider.run` |
+//! | `LaunchEvaluator` | `Core::launch_evaluator_task` → `provider.run` |
 //! | `EnterWork` | `Core::enter_work` |
 //! | `IssueCredentials` | `SshCa::issue_job_credential` |
 //! | `Escalate` | `Core::escalate` |
@@ -308,6 +310,38 @@ pub enum Effect {
         evaluators: Vec<Evaluator>,
     },
 
+    // --- Evaluation fan-out (§3.3) ---
+    /// Fan one Evaluation stage out against the job branch: one task per
+    /// evaluator, launched together (§3.3 staged evaluation). Maps to
+    /// `Core::launch_eval_stage`; the launched slots re-enter the eval decider
+    /// as its live stage (refactor-plan C5).
+    ///
+    /// Example call site: `eval.rs::enter_evaluation` creating stage 0.
+    LaunchEvalStage {
+        owner: String,
+        project: String,
+        seq: u64,
+        branch: String,
+        cycle: u32,
+        evaluators: Vec<Evaluator>,
+    },
+    /// (Re-)create ONE Evaluation slot's task at `attempt` — an `eval_retries`
+    /// retry, or an evidence-free relaunch that spends no budget (#167, §3.6).
+    /// Maps to `Core::launch_evaluator_task` with `TaskPhase::Evaluation`; the
+    /// new task id re-enters the eval decider, which lands it on the slot the
+    /// relaunch replaced.
+    ///
+    /// Example call site: `eval.rs` infra-failed slot retry.
+    LaunchEvaluator {
+        owner: String,
+        project: String,
+        seq: u64,
+        branch: String,
+        cycle: u32,
+        evaluator: Box<Evaluator>,
+        attempt: u32,
+    },
+
     // --- Work re-entry composite (§3.2) ---
     /// Re-enter the Work phase for a rework cycle (gate failure, conflict,
     /// gate-fix). Maps to `Core::enter_work` — a composite in the same spirit
@@ -381,6 +415,8 @@ impl Effect {
             Effect::AdvanceDefault { .. } => "repos.advance_default",
             Effect::RebaseOntoWithConflict { .. } => "repos.rebase_onto_with_conflict",
             Effect::LaunchGateStage { .. } => "Core::launch_gate_stage",
+            Effect::LaunchEvalStage { .. } => "Core::launch_eval_stage",
+            Effect::LaunchEvaluator { .. } => "Core::launch_evaluator_task",
             Effect::EnterWork { .. } => "Core::enter_work",
             Effect::IssueCredentials { .. } => "SshCa::issue_job_credential",
             Effect::Escalate { .. } => "Core::escalate",
@@ -652,6 +688,38 @@ mod tests {
                 rework_reason: Some(types::ReworkReason::GateCiFailure),
             },
             "Core::enter_work",
+        );
+    }
+
+    #[test]
+    fn eval_fanout_group() {
+        assert_roundtrip(
+            Effect::LaunchEvalStage {
+                owner: "acme".into(),
+                project: "api".into(),
+                seq: 3,
+                branch: "job/3".into(),
+                cycle: 1,
+                evaluators: vec![],
+            },
+            "Core::launch_eval_stage",
+        );
+        assert_roundtrip(
+            Effect::LaunchEvaluator {
+                owner: "acme".into(),
+                project: "api".into(),
+                seq: 3,
+                branch: "job/3".into(),
+                cycle: 1,
+                evaluator: Box::new(
+                    serde_json::from_str(
+                        r#"{ "name": "ci", "type": "command", "run": "./ci.sh" }"#,
+                    )
+                    .expect("sample evaluator"),
+                ),
+                attempt: 2,
+            },
+            "Core::launch_evaluator_task",
         );
     }
 

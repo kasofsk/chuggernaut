@@ -661,7 +661,7 @@ impl Core {
             // No Running tasks and every slot in the stage resolved before the
             // crash: replay the advance-or-reduce decision — it may launch the
             // next stage or run the (lost) reduce and merge.
-            return self.stage_complete(owner, project, seq).await;
+            return self.eval_stage_settled(owner, project, seq).await;
         }
         Ok(())
     }

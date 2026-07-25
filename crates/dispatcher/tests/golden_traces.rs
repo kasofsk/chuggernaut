@@ -71,6 +71,18 @@ work:
   prompt: prompts/impl.md
 "#;
 
+// Agent work + the appended `ci` default evaluator, WITH a rework budget: a
+// failing required evaluator reworks the job (§3.3 reduce) rather than
+// escalating, so the trace pins the reduce's rework arm.
+const IMPL_REWORK_YAML: &str = r#"
+name: impl-rework
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+rework_budget: 1
+"#;
+
 // Agent work + a STAGED command gate (job #154, mirrors gate_and_human.rs
 // `GATEFIX`): build at stage 0, tests at stage 1, so a stage-0 gate failure
 // classifies as compile and takes the gate-fix fast path.
@@ -138,6 +150,13 @@ async fn seed_repo_with(repo: &TempRepo, with_defaults: bool) {
         .await;
     clone
         .commit_file("jobs/gatefix.yaml", GATEFIX_YAML.as_bytes(), "add gatefix")
+        .await;
+    clone
+        .commit_file(
+            "jobs/impl-rework.yaml",
+            IMPL_REWORK_YAML.as_bytes(),
+            "add impl-rework",
+        )
         .await;
     clone
         .commit_file("prompts/build.md", b"build it", "prompt")
@@ -592,6 +611,86 @@ async fn trace_conflict_reentry() {
     wait_trace_effect(&rig.sink, "PublishEvent job-done").await;
 
     assert_trace(&rig.sink, "conflict_reentry");
+}
+
+/// `execution.rs::eval_failure_reworks_with_context_then_passes`, distilled to
+/// its decision trace: the required evaluator fails on cycle 1, the §3.3 reduce
+/// spends a rework budget (Evaluation→Work, `job-rework-started`), and cycle 2
+/// passes and lands. Pins the reduce's rework arm for the C5 extraction.
+#[tokio::test]
+async fn trace_eval_failure_rework() {
+    let Some(rig) = spawn_setup_with(SpawnOpts {
+        script_exits: vec![1, 0],
+        work_hooks: vec![WorkHook::Commit, WorkHook::Recommit],
+        ..Default::default()
+    })
+    .await
+    else {
+        return;
+    };
+
+    rig.sink
+        .begin("eval fails → rework → cycle-2 eval passes → land");
+    let job = rig
+        .handle
+        .create_job(req("impl-rework", &[]))
+        .await
+        .unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
+    wait_trace_effect(&rig.sink, "PublishEvent job-done").await;
+
+    assert_trace(&rig.sink, "eval_failure_rework");
+}
+
+/// The reduce's escalate arm: the same required-evaluator failure on a type with
+/// no `rework_budget` escalates `rework_budget_exhausted` straight out of
+/// Evaluation, behind a Human task (§3.3, §1.2).
+#[tokio::test]
+async fn trace_eval_failure_no_budget_escalates() {
+    let Some(rig) = spawn_setup_with(SpawnOpts {
+        script_exits: vec![1],
+        ..Default::default()
+    })
+    .await
+    else {
+        return;
+    };
+
+    rig.sink
+        .begin("eval fails with no rework budget → escalate");
+    let job = rig.handle.create_job(req("impl-cmd", &[])).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Escalated).await;
+    wait_trace_effect(&rig.sink, "PublishEvent job-escalated").await;
+
+    assert_trace(&rig.sink, "eval_failure_no_budget_escalates");
+}
+
+/// Staged evaluation (§3.3): the staged `gatefix` type's stage-0 `build`
+/// evaluator fails, so stage 1 (`test`) is never created — exactly one
+/// `task-created` in the eval fan-out — and the reduce escalates over the
+/// stages that actually ran. Pins the staged short-circuit for C5.
+#[tokio::test]
+async fn trace_staged_eval_short_circuit() {
+    let Some(rig) = spawn_setup_with(SpawnOpts {
+        script_exits: vec![1],
+        no_defaults: true,
+        ..Default::default()
+    })
+    .await
+    else {
+        return;
+    };
+
+    rig.sink
+        .begin("staged eval: stage-0 fails → stage 1 never launched → escalate");
+    let job = rig.handle.create_job(req("gatefix", &[])).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Escalated).await;
+    wait_trace_effect(&rig.sink, "PublishEvent job-escalated").await;
+
+    assert_trace(&rig.sink, "staged_eval_short_circuit");
 }
 
 /// Block until the captured trace's final step records `effect`. Used to

@@ -1,47 +1,58 @@
-//! Evaluator fan-out and reduce (spec §3.3), and post-eval finalization
-//! (§3.2 step 12): squash-merge, conflict re-entry, and the merge gate.
+//! The Evaluation-phase shim (spec §3.3) and post-eval finalization (§3.2
+//! step 12): the launch/monitor half of evaluation, plus the merge-gate fold.
 //!
-//! All finalization flows through a per-project depth-1 merge queue. The fast
+//! Everything decided about a round — the staged fan-out, each evaluator's
+//! verdict, the retry/rework budgets, abort and escalate — is a pure function
+//! in `chuggernaut_domain::decide::eval` (refactor-plan C5); this module gathers
+//! its view, applies its transitions, interprets its effects, and performs the
+//! bookkeeping its `EvalStep` names. What stays here is the I/O the decision
+//! cannot express: composing evaluator prompts (the §3.3 re-review context),
+//! launching containers, and the pre-eval rebase whose `base_ref` pin the entry
+//! transition persists.
+//!
+//! Finalization then flows through a per-project depth-1 merge queue. The fast
 //! path (default HEAD unmoved, or no commits) merges immediately; a moved HEAD
 //! parks the candidate squash commit on `merge-gate/{seq}` and re-runs the
 //! required command evaluators against it before promoting — nothing reaches
 //! the default branch untested against the exact tree that lands.
 //!
-//! - **Accepts:** a job entering Evaluation; evaluator submissions; merge-gate
-//!   re-runs.
+//! - **Accepts:** a job entering Evaluation; evaluator exits and submissions;
+//!   inbox resolutions of Human evaluators; merge-gate re-runs.
 //! - **Emits:** evaluator container launches, the `EvalResult` reduction,
 //!   squash-merge to the default branch or conflict re-entry, and merge-gate
 //!   parking on `merge-gate/{seq}`.
-//! - **Guarantees:** every merge flows through a per-project depth-1 queue;
-//!   nothing lands on the default branch untested against the exact tree.
-//! - **Spec:** §3.3; §3.2 step 12. Runs as `impl Core` — core stays the single
-//!   writer.
+//! - **Guarantees:** no evaluation decision of its own — every branch in the
+//!   fold is a `match` on a value the decider returned; every merge flows
+//!   through a per-project depth-1 queue; nothing lands on the default branch
+//!   untested against the exact tree.
+//! - **Spec:** §3.3; §3.2 step 12; contracts.md §2. Runs as `impl Core` — core
+//!   stays the single writer.
 
 use crate::core::{Core, CoreError, EvalSubmission, Msg, Result, TaskExit};
-use crate::decide::merge_gate::{self, group_stages};
+use crate::decide::eval as decide_eval;
+use crate::decide::merge_gate;
 use crate::decide::wrapup;
 use crate::effects::Effect;
 use crate::exec::{ChannelRole, INFRA_RELAUNCH_CAP, eval_image, task_timeout};
 use crate::interpret::Outcome;
 use agent::AgentRunConfig;
 use chrono::Utc;
-use std::collections::VecDeque;
 use types::{
     EvalResult, Evaluator, EvaluatorType, Job, JobState, ReworkReason, Task, TaskKind, TaskPhase,
     TaskResult, TaskState, WorkType, WrapUpMode,
 };
 use vcs::{ConflictRebaseOutcome, RebaseOutcome};
 
-/// Machine code for an evaluator that exited without ever delivering a verdict
-/// (#167, narrowed #198): a Command whose container died before it could judge —
-/// an ABNORMAL exit (a signal kill `>= 128`, or the negative backend-`wait`
-/// sentinel) with an empty captured stream — or an Agent ending without a
-/// `submit_eval` verdict. Distinct from a product failure — the code was never
-/// actually judged. A *normal* non-zero command exit (1..=127) IS a verdict and
-/// reworks like any product fail, even with empty output (#198). Surfaced on the
-/// `task-failed`/`job-escalated` event `reason`; the retire path stamps the task
-/// `infra_loss` (reusing the §3.6/#83 no-retry-burned machinery).
-pub(crate) const EVAL_NO_OUTPUT_REASON: &str = "evaluator_no_output";
+// The round is a decider-owned value (refactor-plan C5); re-exported so the
+// dispatcher-side readers of it — the merge gate's parked round, restart
+// reconciliation's rebuild, the §3.6 infra-loss relaunch — keep one surface.
+pub use crate::decide::eval::{EvalRound, EvalSlot, SlotOutcome, stage_passed};
+
+/// Hard cap on continuation hops in one evaluation fold (STYLE.md Tier 2 #3).
+/// Each hop consumes exactly one launch outcome — a stage fan-out or one slot's
+/// relaunch — so a real round finishes in a handful; the cap turns a decider
+/// that fails to settle into a loud error instead of a spinning actor.
+const EVAL_FOLD_STEPS_MAX: usize = 64;
 
 /// Scoped framing for a gate-fix task's prompt (job #154): the branch was
 /// already approved by review; a rebase onto moved main broke compilation only.
@@ -55,69 +66,6 @@ const GATE_FIX_FRAMING: &str = "\n\n---\n## Gate-Fix (compile only, job #154)\n\
     reproduce the exact errors, fix them in place, then commit. This goes \
     straight back to the merge gate — gate CI is the final authority — so no \
     re-review runs; keep the change small and obviously-correct.\n";
-
-/// One cycle's evaluation, run as an ascending sequence of stages (spec §3.3
-/// staged evaluation). Only the current stage has live tasks: `slots` is the
-/// stage in flight, `pending` the stages not yet created, `done` the outcomes
-/// of stages that already completed and passed. The reduce folds `done` and
-/// `slots` together. A single-stage round leaves `pending`/`done` empty and is
-/// byte-for-byte the unstaged behavior; the merge gate always builds one.
-pub struct EvalRound {
-    pub slots: Vec<EvalSlot>,
-    /// Evaluators for stages not yet launched, grouped ascending by `stage`.
-    pub pending: VecDeque<Vec<Evaluator>>,
-    /// Slots from earlier stages that completed and let the round advance.
-    pub done: Vec<EvalSlot>,
-}
-
-impl EvalRound {
-    /// A single-stage round: the merge gate, and the compatibility shape for a
-    /// job whose evaluators all share one stage.
-    pub fn single(slots: Vec<EvalSlot>) -> Self {
-        EvalRound {
-            slots,
-            pending: VecDeque::new(),
-            done: Vec::new(),
-        }
-    }
-}
-
-/// Whether a completed stage lets the next stage start: every *required*
-/// evaluator resolved to a product `pass: true`. A required product fail, an
-/// abort (which implies `pass: false`), or an infra failure closes the round —
-/// later stages are not created. Advisory (`required: false`) outcomes never
-/// block progression.
-pub(crate) fn stage_passed(slots: &[EvalSlot]) -> bool {
-    slots.iter().all(|s| {
-        !s.evaluator.required.unwrap_or(true)
-            || matches!(s.outcome, Some(SlotOutcome::Product { pass: true, .. }))
-    })
-}
-
-#[derive(Debug)]
-pub struct EvalSlot {
-    pub evaluator: Evaluator,
-    pub task_id: u64,
-    pub attempt: u32,
-    pub outcome: Option<SlotOutcome>,
-}
-
-#[derive(Debug, Clone)]
-pub enum SlotOutcome {
-    Product {
-        pass: bool,
-        /// "Not satisfiable by rework" (design-lifecycle.md): a required
-        /// evaluator's abort escalates at reduce instead of consuming budget.
-        abort: bool,
-        structured: Option<serde_json::Value>,
-        /// A command evaluator's captured output tail (#167), threaded into the
-        /// rework/re-review context as the failure evidence. `None` for agent
-        /// evaluators, which report through `structured` findings.
-        output: Option<String>,
-    },
-    /// Agent eval exhausted `eval_retries` without a `submit_eval` (§3.3).
-    Infra,
-}
 
 /// A parked candidate awaiting its gate verdict (§3.3 Merge Gate).
 pub struct GateState {
@@ -141,62 +89,304 @@ struct LandingViewData {
     gate_old_head: Option<String>,
 }
 
+/// The owned read-set behind a [`decide_eval::EvalView`] borrow — one
+/// evaluation decision's inputs, assembled by `gather_eval_view`.
+struct EvalViewData {
+    evaluators: Vec<Evaluator>,
+    cycle: u32,
+    reworks_used: u32,
+    rework_budget: u32,
+    work_type: WorkType,
+    eval_retries: u32,
+    infra_losses_prior: u32,
+}
+
+impl EvalViewData {
+    /// Borrow the read-set as the decider's view, with the two inputs the
+    /// gather does not own: the job record (the entry hop's is the rebase's
+    /// in-memory pin) and the live drain flag.
+    fn view<'a>(&'a self, job: &'a Job, draining: bool) -> decide_eval::EvalView<'a> {
+        decide_eval::EvalView {
+            job,
+            evaluators: &self.evaluators,
+            cycle: self.cycle,
+            reworks_used: self.reworks_used,
+            rework_budget: self.rework_budget,
+            work_type: self.work_type,
+            eval_retries: self.eval_retries,
+            infra_losses_prior: self.infra_losses_prior,
+            infra_relaunch_cap: INFRA_RELAUNCH_CAP,
+            draining,
+            now: Utc::now(),
+        }
+    }
+}
+
 impl Core {
-    /// Work→Evaluation (§3.2 steps 9–10): one task per evaluator, fanned out.
-    /// No evaluators → auto-pass straight to finalization.
+    /// Work→Evaluation (§3.2 steps 9–10): the decider's entry event. The
+    /// pre-eval rebase runs first because its `base_ref` pin is what the entry
+    /// transition persists — the one piece of Evaluation entry that is I/O.
     pub(crate) async fn enter_evaluation(
         &mut self,
         owner: &str,
         project: &str,
         seq: u64,
     ) -> Result<()> {
-        // Draining (spec §3.6): launch no evaluator containers. The job stays in
-        // Work with its Done work task; restart reconciliation re-enters here.
-        if self.draining {
-            return Ok(());
-        }
-        let key = (owner.to_string(), project.to_string(), seq);
-        let (evaluators, cycle) = {
-            let exec = self.active.get(&key).expect("exec state");
-            (exec.job_type.eval.clone(), exec.cycle)
-        };
         let mut job = self.must_get(owner, project, seq)?.clone();
-        // §3.2: rebase `job/{seq}` onto current default HEAD before evaluating,
-        // so the evaluators test exactly the stack that would merge. `base_ref`
-        // advances to what we tested against, which lets the wrap-up merge gate
-        // fire only if main moves *again* during evaluation. Bookkeeping, not
-        // rework: no cycle bump, no rework budget consumed (a conflict falls
-        // through to old-base evaluation + the wrap-up gate).
-        self.rebase_for_evaluation(owner, project, seq, &mut job)
-            .await?;
-        self.set_state(&mut job, JobState::Evaluation).await?;
-        self.publish(
+        // Draining (spec §3.6): the decider holds the job in Work — and the
+        // rebase is skipped for the same reason, since a drain launches no
+        // evaluator container to test the restacked branch anyway. Restart
+        // reconciliation re-enters here.
+        if !self.draining {
+            self.rebase_for_evaluation(owner, project, seq, &mut job)
+                .await?;
+        }
+        self.run_eval(
             owner,
             project,
             seq,
-            "job-evaluation-started",
-            serde_json::json!({ "cycle": cycle }),
+            decide_eval::EvalEvent::Entered,
+            Some(job),
         )
-        .await?;
+        .await
+    }
 
-        if evaluators.is_empty() {
-            return self.finalize_pass(owner, project, seq).await;
+    /// The C5 fold for one evaluation decision (contracts.md §2), the four-step
+    /// shape C1 set: gather the reads into the view, call the pure decider, swap
+    /// the round value it owns, apply its transitions through `set_state`, run
+    /// its effects through `interpret` — and when a launch effect returns task
+    /// ids, feed them back as the next event (C2's continuation contract) until
+    /// the round settles.
+    ///
+    /// `entry_job` is the pre-eval rebase's in-memory record, which only the
+    /// entry hop has; every later hop re-reads the job, so a decision never runs
+    /// on a view the world moved under.
+    async fn run_eval(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        event: decide_eval::EvalEvent,
+        entry_job: Option<Job>,
+    ) -> Result<()> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        let mut event = event;
+        let mut entry_job = entry_job;
+        for _ in 0..EVAL_FOLD_STEPS_MAX {
+            // 1. Reads feed the view — they are not effects.
+            let Some(inputs) = self.gather_eval_view(owner, project, seq, &event).await? else {
+                // No execution slice: a late container exit from a job that was
+                // revoked or completed. There is nothing to decide — and this is
+                // the guard class that once panicked the actor (§3.6).
+                tracing::warn!(
+                    "eval event for {owner}/{project}#{seq}: no exec state \
+                     (job revoked or completed); ignoring"
+                );
+                return Ok(());
+            };
+            let job = match entry_job.take() {
+                Some(job) => job,
+                None => self.must_get(owner, project, seq)?.clone(),
+            };
+            let view = inputs.view(&job, self.draining);
+            // 2. The decision, made purely — over the round it owns.
+            let round = self.active.get_mut(&key).and_then(|e| e.round.take());
+            let (round, transitions, effects, step) = decide_eval::decide(round, &view, event);
+            if let Some(exec) = self.active.get_mut(&key) {
+                exec.round = round;
+            }
+            // 3. Commit the decision: transitions first (§2.1 record is the
+            // source of truth; the task records and announcements are its
+            // artifacts, re-derived by restart reconciliation if a crash loses
+            // them).
+            for mut t in transitions {
+                self.set_state(&mut t.job, t.to).await?;
+            }
+            self.commit_eval_step(&key, &step);
+            // 4. The artifacts of the decision, and the event a launch answers with.
+            let next = self.interpret_eval_effects(effects).await?;
+            // 5. The bookkeeping the step names, and the hop it asks for.
+            match self.run_eval_step(owner, project, seq, step, next).await? {
+                Some(hop) => event = hop,
+                None => return Ok(()),
+            }
         }
+        Err(CoreError::Config(format!(
+            "evaluation fold for {owner}/{project}#{seq} did not settle in \
+             {EVAL_FOLD_STEPS_MAX} steps"
+        )))
+    }
 
-        // Staged fan-out (§3.3): launch stage 0 now, hold the rest until each
-        // prior stage passes. A single-stage job launches everything at once.
-        let branch = job.branch.clone();
-        let mut pending = group_stages(evaluators);
-        let first = pending.pop_front().expect("non-empty evaluators");
-        let slots = self
-            .launch_eval_stage(owner, project, seq, &branch, cycle, first)
-            .await?;
-        self.active.get_mut(&key).expect("exec state").round = Some(EvalRound {
-            slots,
-            pending,
-            done: Vec::new(),
-        });
-        Ok(())
+    /// The dispatcher-side bookkeeping an [`decide_eval::EvalStep`] names — the
+    /// landing hand-off and the rework re-entry, both of which touch shell state
+    /// the pure crate cannot see. Returns the event to re-enter the decider with,
+    /// or `None` when this fold is finished.
+    async fn run_eval_step(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        step: decide_eval::EvalStep,
+        next: Option<decide_eval::EvalEvent>,
+    ) -> Result<Option<decide_eval::EvalEvent>> {
+        match step {
+            decide_eval::EvalStep::AwaitOutcome => Ok(Some(
+                next.expect("AwaitOutcome step without a launch effect"),
+            )),
+            decide_eval::EvalStep::Finalize => {
+                self.finalize_pass(owner, project, seq).await?;
+                Ok(None)
+            }
+            decide_eval::EvalStep::Rework {
+                cycle,
+                eval_context,
+                ..
+            } => {
+                self.enter_work(
+                    owner,
+                    project,
+                    seq,
+                    cycle,
+                    eval_context,
+                    None,
+                    Some(ReworkReason::EvalFailure),
+                )
+                .await?;
+                Ok(None)
+            }
+            decide_eval::EvalStep::Await
+            | decide_eval::EvalStep::Hold
+            | decide_eval::EvalStep::Ignored
+            | decide_eval::EvalStep::EscalatedDropExec => Ok(None),
+        }
+    }
+
+    /// The part of committing an evaluation decision that touches the execution
+    /// slice, between the transitions and the effects:
+    ///
+    /// - a rework spends one `reworks_used` BEFORE the effects, because
+    ///   re-entering Work preserves the counter it reads (C4's `Admitted`
+    ///   placement);
+    /// - an escalation releases the slice BEFORE the effects (parity with C2's
+    ///   `CompletedDropExec` and C3), so the escalation task is not stamped with
+    ///   the cycle of a slice the decision just ended.
+    fn commit_eval_step(&mut self, key: &(String, String, u64), step: &decide_eval::EvalStep) {
+        if let decide_eval::EvalStep::Rework { reworks_used, .. } = step
+            && let Some(exec) = self.active.get_mut(key)
+        {
+            exec.reworks_used = *reworks_used;
+        }
+        if step.drops_exec() {
+            self.active.remove(key);
+        }
+    }
+
+    /// Run one decision's effects, returning the event its launch answered with
+    /// (contracts.md §2's continuation contract): a stage's slots or a
+    /// relaunched slot's task id, which exist only once the launch ran.
+    async fn interpret_eval_effects(
+        &mut self,
+        effects: Vec<Effect>,
+    ) -> Result<Option<decide_eval::EvalEvent>> {
+        let mut next = None;
+        for effect in effects {
+            let relaunched = match &effect {
+                Effect::LaunchEvaluator {
+                    evaluator, attempt, ..
+                } => Some((evaluator.name.clone(), *attempt)),
+                _ => None,
+            };
+            match self.interpret(effect).await? {
+                Outcome::EvalSlots(slots) => {
+                    next = Some(decide_eval::EvalEvent::StageLaunched { slots });
+                }
+                Outcome::EvaluatorTask(task_id) => {
+                    let (evaluator, attempt) =
+                        relaunched.expect("a task id comes from a LaunchEvaluator effect");
+                    next = Some(decide_eval::EvalEvent::SlotRelaunched {
+                        evaluator,
+                        task_id,
+                        attempt,
+                    });
+                }
+                Outcome::Done => {}
+                // The eval decider emits no repo or gate effect, so no landing
+                // outcome can reach this fold. Matched explicitly (not `_`) so a
+                // new variant breaks the build here.
+                Outcome::Merge(_)
+                | Outcome::CasRefused
+                | Outcome::Rebase(_)
+                | Outcome::GateSlots(_) => {
+                    debug_assert!(false, "landing outcome in an evaluation decision");
+                }
+            }
+        }
+        Ok(next)
+    }
+
+    /// Assemble the read-only inputs for one evaluation decision (contracts.md
+    /// §2: reads feed the view, they are not effects). `None` when the job has
+    /// no execution slice — nothing to decide.
+    async fn gather_eval_view(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        event: &decide_eval::EvalEvent,
+    ) -> Result<Option<EvalViewData>> {
+        let key = (owner.to_string(), project.to_string(), seq);
+        let Some(exec) = self.active.get(&key) else {
+            return Ok(None);
+        };
+        // The evidence-free relaunch budget (#167) counts one evaluator
+        // lineage's already-retired losses. Read on every exit rather than only
+        // where the branch needs it: a pure decision cannot read, so the count
+        // has to be in the view before the decider picks that branch. The
+        // exiting task is excluded — its own retirement is an effect that has
+        // not run yet, and the decider counts it in.
+        let infra_losses_prior = match event {
+            decide_eval::EvalEvent::SlotExited { task, .. } => self
+                .tasks
+                .list_for_job(owner, project, seq)
+                .await?
+                .iter()
+                .filter(|t| {
+                    t.id != task.id
+                        && t.infra_loss
+                        && t.phase == TaskPhase::Evaluation
+                        && t.cycle == task.cycle
+                        && t.evaluator == task.evaluator
+                })
+                .count() as u32,
+            _ => 0,
+        };
+        Ok(Some(EvalViewData {
+            evaluators: exec.job_type.eval.clone(),
+            cycle: exec.cycle,
+            reworks_used: exec.reworks_used,
+            rework_budget: exec.job_type.rework_budget.unwrap_or(0),
+            work_type: exec.job_type.work.r#type,
+            eval_retries: exec.job_type.eval_retries.unwrap_or(1),
+            infra_losses_prior,
+        }))
+    }
+
+    /// Restart reconciliation rebuilt the round from the task log (§3.6): replay
+    /// the advance-or-reduce decision the crash lost.
+    pub(crate) async fn eval_stage_settled(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+    ) -> Result<()> {
+        self.run_eval(
+            owner,
+            project,
+            seq,
+            decide_eval::EvalEvent::StageSettled,
+            None,
+        )
+        .await
     }
 
     /// Rebase `job/{seq}` onto current default HEAD at Evaluation entry so the
@@ -866,8 +1056,9 @@ impl Core {
         Ok(())
     }
 
-    /// Human evaluator resolved via the inbox: record the verdict on the slot
-    /// and reduce if the round is complete. Called from the resolve handler.
+    /// Human evaluator resolved via the inbox (§3.3): hand the verdict to the
+    /// decider, which records it on the slot and settles the round. Called from
+    /// the resolve handler.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn resolve_eval_slot(
         &mut self,
@@ -879,581 +1070,76 @@ impl Core {
         abort: bool,
         structured: Option<serde_json::Value>,
     ) -> Result<()> {
-        let key = (owner.to_string(), project.to_string(), seq);
-        let Some(slot_idx) = self
+        // Precondition (contracts.md §1): the resolution must name an OPEN slot
+        // of the live round. Checked here, not decided: the operator gets an
+        // error back rather than a silently dropped verdict, and a `CoreError`
+        // is not something a pure decider can return.
+        let open = self
             .active
-            .get(&key)
+            .get(&(owner.to_string(), project.to_string(), seq))
             .and_then(|e| e.round.as_ref())
-            .and_then(|r| {
-                r.slots
-                    .iter()
-                    .position(|s| s.task_id == task_id && s.outcome.is_none())
-            })
-        else {
+            .is_some_and(|r| r.open_slot(task_id).is_some());
+        if !open {
             return Err(CoreError::InvalidResolution(format!(
                 "task {task_id} is not an open evaluator slot"
             )));
-        };
-        let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
-        round.slots[slot_idx].outcome = Some(SlotOutcome::Product {
-            pass,
-            abort,
-            structured,
-            output: None, // agents report through structured findings
-        });
-        self.stage_complete(owner, project, seq).await
+        }
+        self.run_eval(
+            owner,
+            project,
+            seq,
+            decide_eval::EvalEvent::SlotResolved {
+                task_id,
+                pass,
+                abort,
+                structured,
+            },
+            None,
+        )
+        .await
     }
 
-    /// Eval container exited. The verdict source depends on the type: command
-    /// exit code is the verdict; an agent exit without a prior `submit_eval`
-    /// is an infra error retried per `eval_retries` (§3.3).
+    /// Eval container exited (§3.3): hand it to the decider as the round's
+    /// verdict source — a command's exit code, an agent's `submit_eval`, or a
+    /// verdict-less exit that routes to the evidence-free path (#167/#198).
     pub(crate) async fn on_eval_exited(
         &mut self,
         owner: &str,
         project: &str,
         seq: u64,
-        mut task: Task,
+        task: Task,
         exit: TaskExit,
     ) -> Result<()> {
-        let TaskExit {
-            exit_code,
-            eval_json,
-            usage,
-            launch_error,
-            log_tail,
-            ..
-        } = exit;
-        let key = (owner.to_string(), project.to_string(), seq);
-        let Some(slot_idx) = self
-            .active
-            .get(&key)
-            .and_then(|e| e.round.as_ref())
-            .and_then(|r| {
-                r.slots
-                    .iter()
-                    .position(|s| s.task_id == task.id && s.outcome.is_none())
-            })
-        else {
-            return Ok(()); // stale monitor from a superseded round, or duplicate exit
+        // The one read this exit owes the decision: `handle_submit_eval` marks an
+        // agent evaluator's task Done (with its verdict) BEFORE the container
+        // exits, so the record must be re-read — the snapshot the exit fan-in
+        // carries may predate the verdict.
+        let task = match task.kind {
+            TaskKind::Agent { .. } => self
+                .tasks
+                .get(owner, project, seq, task.id)
+                .await?
+                .unwrap_or(task),
+            _ => task,
         };
-
-        // The container never launched: an infra failure regardless of the
-        // evaluator's type (a Command exit code or an Agent verdict would need a
-        // container that ran). Record why on the task, then route through the
-        // same eval_retries → Infra path an agent's missing verdict uses.
-        if let Some(reason) = launch_error {
-            task.result = Some(TaskResult::Command {
-                pass: false,
-                exit_code,
-                output: reason,
-                structured: None,
-            });
-            task.state = TaskState::Failed;
-            task.completed_at = Some(Utc::now());
-            self.tasks.put(&task).await?;
-            self.publish(
-                owner,
-                project,
-                seq,
-                "task-failed",
-                serde_json::json!({
-                    "task_id": task.id, "phase": "Evaluation", "reason": "container launch failed",
-                }),
-            )
-            .await?;
-            return self
-                .eval_infra_failure(owner, project, seq, task, slot_idx)
-                .await;
-        }
-
-        let outcome = match &task.kind {
-            TaskKind::Command { .. } => {
-                let pass = exit_code == 0;
-                // #167: embed the captured output tail (last ~8 KB, harvested by
-                // the eval monitor) as the result's evidence — the failure reason
-                // for the job page, rework context, and #155's re-review. The full
-                // stream stays in the logs.
-                let output = log_tail.clone().unwrap_or_default();
-                // #167/#198: a command's EXIT CODE is its verdict. A normal
-                // non-zero exit (1..=127) is a real product failure the job must
-                // rework against — even with a completely empty captured stream (a
-                // legitimately silent failure, e.g. `test -f x || exit 1`). #167's
-                // original guard mislabelled every empty-output fail as evidence-
-                // free and auto-retried it, silently discarding real failure
-                // verdicts (job #198). The evidence-free infra-loss case #167
-                // actually targets — a container that died before it could judge
-                // (an OOM/timeout signal kill, or a backend `wait` that never
-                // resolved) — surfaces as an ABNORMAL exit: a signal code (>= 128)
-                // or the negative wait sentinel. Only such a verdict-less exit with
-                // no output is retried via the infra-loss machinery (no
-                // `eval_retries` burned, no rework, no cycle consumed); on
-                // exhaustion escalate `evaluator_no_output` so a human sees "the
-                // evaluator can't produce evidence" rather than "the code failed
-                // review". A normal program exit is 0..=127; anything outside that
-                // range (a signal kill >= 128, or the negative sentinel) is the
-                // verdict-less case.
-                let verdict_less = !(0..128).contains(&exit_code);
-                if verdict_less && output.trim().is_empty() {
-                    task.result = Some(TaskResult::Command {
-                        pass: false,
-                        exit_code,
-                        output,
-                        structured: eval_json.clone(),
-                    });
-                    task.state = TaskState::Failed;
-                    task.infra_loss = true;
-                    task.completed_at = Some(Utc::now());
-                    self.tasks.put(&task).await?;
-                    self.publish(
-                        owner,
-                        project,
-                        seq,
-                        "task-failed",
-                        serde_json::json!({
-                            "task_id": task.id, "phase": "Evaluation",
-                            "reason": EVAL_NO_OUTPUT_REASON,
-                        }),
-                    )
-                    .await?;
-                    return self
-                        .eval_no_output_failure(owner, project, seq, task, slot_idx)
-                        .await;
-                }
-                // The captured tail rides along as the failure evidence for the
-                // rework/re-review context (#167) — a non-empty output on a fail
-                // is what the next work agent reads to see WHY ci failed.
-                let slot_output = (!output.is_empty()).then(|| output.clone());
-                task.result = Some(TaskResult::Command {
-                    pass,
-                    exit_code,
-                    output,
-                    structured: eval_json.clone(),
-                });
-                task.state = TaskState::Done;
-                task.completed_at = Some(Utc::now());
-                self.tasks.put(&task).await?;
-                self.publish(
-                    owner,
-                    project,
-                    seq,
-                    "task-completed",
-                    serde_json::json!({
-                        "task_id": task.id, "phase": "Evaluation", "pass": pass,
-                    }),
-                )
-                .await?;
-                // Command evaluators can't judge fixability: no abort verdict.
-                Some(SlotOutcome::Product {
-                    pass,
-                    abort: false,
-                    structured: eval_json,
-                    output: slot_output,
-                })
-            }
-            TaskKind::Agent { .. } => {
-                // handle_submit_eval marks the task Done before the container
-                // exits; the record we were passed is the pre-exit snapshot.
-                let mut current = self
-                    .tasks
-                    .get(owner, project, seq, task.id)
-                    .await?
-                    .unwrap_or(task);
-                // submit_eval could only self-report usage. Now that the
-                // container is gone we have the CLI's measured figure — prefer
-                // it, the same way the work path does.
-                if let (Some(measured), Some(TaskResult::Agent { token_usage, .. })) =
-                    (usage, current.result.as_mut())
-                {
-                    *token_usage = Some(measured);
-                    self.tasks.put(&current).await?;
-                }
-                match &current.result {
-                    Some(TaskResult::Agent {
-                        pass,
-                        abort,
-                        structured,
-                        ..
-                    }) => Some(SlotOutcome::Product {
-                        pass: *pass,
-                        abort: *abort,
-                        structured: structured.clone(),
-                        output: None, // agents report through structured findings
-                    }),
-                    _ => {
-                        // #167: an agent evaluator that ended without a
-                        // `submit_eval` verdict produced no evidence — the same
-                        // invalid-fail class as a Command with an empty stream.
-                        // Route it through the no-output path (infra-loss
-                        // semantics: no `eval_retries` burned, escalates
-                        // `evaluator_no_output`) rather than a plain infra retry,
-                        // so the reason distinguishes "no verdict" from a real
-                        // infra loss and the round is never failed on nothing.
-                        let mut failed = current;
-                        failed.state = TaskState::Failed;
-                        failed.infra_loss = true;
-                        failed.completed_at = Some(Utc::now());
-                        self.tasks.put(&failed).await?;
-                        self.publish(
-                            owner,
-                            project,
-                            seq,
-                            "task-failed",
-                            serde_json::json!({
-                                "task_id": failed.id, "phase": "Evaluation",
-                                "reason": EVAL_NO_OUTPUT_REASON,
-                            }),
-                        )
-                        .await?;
-                        return self
-                            .eval_no_output_failure(owner, project, seq, failed, slot_idx)
-                            .await;
-                    }
-                }
-            }
-            TaskKind::Human { .. } => None, // resolved via the inbox, not an exit
+        let exit = decide_eval::EvalExit {
+            exit_code: exit.exit_code,
+            eval_json: exit.eval_json,
+            usage: exit.usage,
+            launch_error: exit.launch_error,
+            log_tail: exit.log_tail,
         };
-
-        if let Some(outcome) = outcome {
-            let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
-            round.slots[slot_idx].outcome = Some(outcome);
-            return self.stage_complete(owner, project, seq).await;
-        }
-        Ok(())
-    }
-
-    /// An eval slot failed for infra reasons — the agent produced no verdict, or
-    /// its container never launched (§3.3). Retry per `eval_retries`; once the
-    /// budget is spent, resolve the slot as [`SlotOutcome::Infra`] and run the
-    /// reduce (a required infra failure escalates). The failed task is already
-    /// persisted terminal by the caller.
-    async fn eval_infra_failure(
-        &mut self,
-        owner: &str,
-        project: &str,
-        seq: u64,
-        failed: Task,
-        slot_idx: usize,
-    ) -> Result<()> {
-        let key = (owner.to_string(), project.to_string(), seq);
-        let eval_retries = self
-            .active
-            .get(&key)
-            .and_then(|e| e.job_type.eval_retries)
-            .unwrap_or(1);
-        if failed.attempt <= eval_retries {
-            let (evaluator, cycle) = {
-                let exec = self.active.get(&key).expect("exec state");
-                let slot = &exec.round.as_ref().unwrap().slots[slot_idx];
-                (slot.evaluator.clone(), exec.cycle)
-            };
-            let branch = self.must_get(owner, project, seq)?.branch.clone();
-            let new_id = self
-                .launch_evaluator_task(
-                    owner,
-                    project,
-                    seq,
-                    TaskPhase::Evaluation,
-                    &branch,
-                    cycle,
-                    &evaluator,
-                    failed.attempt + 1,
-                )
-                .await?;
-            let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
-            round.slots[slot_idx].task_id = new_id;
-            round.slots[slot_idx].attempt = failed.attempt + 1;
-            return Ok(());
-        }
-        let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
-        round.slots[slot_idx].outcome = Some(SlotOutcome::Infra);
-        self.stage_complete(owner, project, seq).await
-    }
-
-    /// #167 (narrowed #198): an evaluator exited without ever delivering a
-    /// verdict — a Command whose container died before judging (an abnormal
-    /// signal/sentinel exit) with an empty captured stream, or an Agent ending
-    /// without a `submit_eval` verdict. This is infrastructure loss, not a
-    /// product verdict:
-    /// relaunch the SAME attempt WITHOUT spending an `eval_retries` budget (the
-    /// §3.6/#83 infra-loss semantics — no rework, no cycle consumed), bounded by
-    /// [`INFRA_RELAUNCH_CAP`] over the evaluator's lineage. On exhaustion escalate
-    /// with reason `evaluator_no_output`, so a human sees the evaluator cannot
-    /// produce evidence rather than the round failing on nothing. The failed task
-    /// is already persisted terminal (stamped `infra_loss`) by the caller.
-    async fn eval_no_output_failure(
-        &mut self,
-        owner: &str,
-        project: &str,
-        seq: u64,
-        failed: Task,
-        slot_idx: usize,
-    ) -> Result<()> {
-        let key = (owner.to_string(), project.to_string(), seq);
-        // Count evidence-free losses for this evaluator's lineage (same cycle +
-        // evaluator): the freshly-stamped attempt is included, so the Nth loss
-        // sees count N. Shares the `infra_loss` marker and cap with §3.6 restart
-        // losses — both are infrastructure, both escalate to a human.
-        let losses = self
-            .tasks
-            .list_for_job(owner, project, seq)
-            .await?
-            .iter()
-            .filter(|t| {
-                t.infra_loss
-                    && t.phase == TaskPhase::Evaluation
-                    && t.cycle == failed.cycle
-                    && t.evaluator == failed.evaluator
-            })
-            .count();
-        if losses > INFRA_RELAUNCH_CAP as usize {
-            self.active.remove(&key);
-            return self
-                .escalate(
-                    owner,
-                    project,
-                    seq,
-                    EVAL_NO_OUTPUT_REASON,
-                    format!(
-                        "Job {seq}: evaluator '{}' exited without producing any output \
-                         {losses} times — it cannot produce evidence of a verdict. A human \
-                         should review the evaluator itself rather than the code.",
-                        failed.evaluator.as_deref().unwrap_or("?")
-                    ),
-                    Some(failed.id),
-                )
-                .await;
-        }
-        let (evaluator, cycle) = {
-            let exec = self.active.get(&key).expect("exec state");
-            let slot = &exec.round.as_ref().unwrap().slots[slot_idx];
-            (slot.evaluator.clone(), exec.cycle)
-        };
-        let branch = self.must_get(owner, project, seq)?.branch.clone();
-        // Same attempt: `eval_retries` untouched (infra loss, not a real failure).
-        let new_id = self
-            .launch_evaluator_task(
-                owner,
-                project,
-                seq,
-                TaskPhase::Evaluation,
-                &branch,
-                cycle,
-                &evaluator,
-                failed.attempt,
-            )
-            .await?;
-        let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
-        round.slots[slot_idx].task_id = new_id;
-        Ok(())
-    }
-
-    /// Called whenever a slot in the current stage resolves. A no-op while the
-    /// stage is still in flight. Once every slot in the stage is terminal:
-    /// advance to the next stage when every *required* evaluator passed and a
-    /// later stage remains (§3.3 staged evaluation); otherwise run the reduce
-    /// over every stage that ran. A short-circuited stage leaves the pending
-    /// stages uncreated — they simply have no task records for this cycle.
-    pub(crate) async fn stage_complete(
-        &mut self,
-        owner: &str,
-        project: &str,
-        seq: u64,
-    ) -> Result<()> {
-        // Draining (spec §3.6): don't advance to the next stage, run the reduce,
-        // or open the merge gate. Restart reconciliation rebuilds the round from
-        // the task log and replays this decision.
-        if self.draining {
-            return Ok(());
-        }
-        let key = (owner.to_string(), project.to_string(), seq);
-        let (complete, advance) = {
-            let Some(round) = self.active.get(&key).and_then(|e| e.round.as_ref()) else {
-                return Ok(());
-            };
-            let complete = round.slots.iter().all(|s| s.outcome.is_some());
-            (
-                complete,
-                complete && stage_passed(&round.slots) && !round.pending.is_empty(),
-            )
-        };
-        if !complete {
-            return Ok(());
-        }
-        if !advance {
-            return self.reduce(owner, project, seq).await;
-        }
-        // Fold the finished stage into `done` and fan out the next one.
-        let branch = self.must_get(owner, project, seq)?.branch.clone();
-        let cycle = self.active.get(&key).expect("exec state").cycle;
-        let next = self
-            .active
-            .get_mut(&key)
-            .unwrap()
-            .round
-            .as_mut()
-            .unwrap()
-            .pending
-            .pop_front()
-            .expect("advance implies a pending stage");
-        let new_slots = self
-            .launch_eval_stage(owner, project, seq, &branch, cycle, next)
-            .await?;
-        let round = self.active.get_mut(&key).unwrap().round.as_mut().unwrap();
-        let finished = std::mem::replace(&mut round.slots, new_slots);
-        round.done.extend(finished);
-        Ok(())
-    }
-
-    /// §3.3 reduce, applied once all eval tasks resolved.
-    async fn reduce(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
-        let key = (owner.to_string(), project.to_string(), seq);
-        let (
-            results,
-            required_infra_failure,
-            overall_pass,
-            aborted,
-            cycle,
-            reworks_used,
-            work_type,
-            budget,
-        ) = {
-            let exec = self.active.get(&key).expect("exec state");
-            let round = exec.round.as_ref().expect("round");
-            let mut results = Vec::new();
-            let mut infra = false;
-            let mut pass = true;
-            // Required evaluators that declared the work unsalvageable
-            // (design-lifecycle.md abort verdict). Advisory aborts are plain
-            // advisory fails.
-            let mut aborted: Vec<String> = Vec::new();
-            // Every stage that ran: earlier stages that passed (`done`) plus the
-            // final stage (`slots`). Stages that were never created — skipped by
-            // a short-circuit — contribute nothing, exactly as intended.
-            for slot in round.done.iter().chain(round.slots.iter()) {
-                let required = slot.evaluator.required.unwrap_or(true);
-                match slot.outcome.as_ref().expect("complete") {
-                    SlotOutcome::Product {
-                        pass: p,
-                        abort,
-                        structured,
-                        output,
-                    } => {
-                        results.push(EvalResult {
-                            evaluator: slot.evaluator.name.clone(),
-                            pass: *p,
-                            structured: structured.clone(),
-                            output: output.clone(),
-                        });
-                        if required && !*p {
-                            pass = false;
-                        }
-                        if required && *abort {
-                            aborted.push(slot.evaluator.name.clone());
-                        }
-                    }
-                    SlotOutcome::Infra => {
-                        results.push(EvalResult {
-                            evaluator: slot.evaluator.name.clone(),
-                            pass: false,
-                            structured: None,
-                            output: None,
-                        });
-                        if required {
-                            infra = true;
-                        }
-                    }
-                }
-            }
-            (
-                results,
-                infra,
-                pass,
-                aborted,
-                exec.cycle,
-                exec.reworks_used,
-                exec.job_type.work.r#type,
-                exec.job_type.rework_budget.unwrap_or(0),
-            )
-        };
-
-        if required_infra_failure {
-            self.active.remove(&key);
-            return self
-                .escalate(
-                    owner,
-                    project,
-                    seq,
-                    "eval_infra_failure",
-                    format!("Job {seq}: a required evaluator exhausted eval_retries"),
-                    None,
-                )
-                .await;
-        }
-        if overall_pass {
-            return self.finalize_pass(owner, project, seq).await;
-        }
-
-        // Abort verdict: rework can't fix this — skip the remaining budget and
-        // hand the evaluators' findings to a human (design-lifecycle.md).
-        if !aborted.is_empty() {
-            let findings = results
-                .iter()
-                .filter(|r| aborted.contains(&r.evaluator))
-                .map(|r| {
-                    let detail = r
-                        .structured
-                        .as_ref()
-                        .and_then(|v| serde_json::to_string_pretty(v).ok())
-                        .unwrap_or_else(|| "(no structured findings)".into());
-                    format!("**{}**:\n{detail}", r.evaluator)
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            self.active.remove(&key);
-            return self.escalate(owner, project, seq, "eval_abort",
-                format!(
-                    "Job {seq}: evaluator(s) {} declared cycle {cycle} not satisfiable by rework:\n\n{findings}",
-                    aborted.join(", ")
-                ), None)
-                .await;
-        }
-
-        // Product failure: rework under budget, else escalate (§3.3).
-        if work_type != WorkType::Command && reworks_used < budget {
-            // enter_work preserves reworks_used from the existing state.
-            self.active.get_mut(&key).unwrap().reworks_used = reworks_used + 1;
-            self.publish(
-                owner,
-                project,
-                seq,
-                "job-rework-started",
-                serde_json::json!({
-                    "cycle": cycle + 1, "reason": "eval_failure", "eval_context": results,
-                }),
-            )
-            .await?;
-            self.enter_work(
-                owner,
-                project,
-                seq,
-                cycle + 1,
-                results,
-                None,
-                Some(ReworkReason::EvalFailure),
-            )
-            .await
-        } else {
-            self.active.remove(&key);
-            self.escalate(
-                owner,
-                project,
-                seq,
-                "rework_budget_exhausted",
-                format!("Job {seq}: evaluation failed in cycle {cycle} with no rework budget left"),
-                None,
-            )
-            .await
-        }
+        self.run_eval(
+            owner,
+            project,
+            seq,
+            decide_eval::EvalEvent::SlotExited {
+                task: Box::new(task),
+                exit,
+            },
+            None,
+        )
+        .await
     }
 
     /// §3.2 step 12 entry: queue the job for finalization and pump. The
@@ -1765,6 +1451,12 @@ impl Core {
                                 done: Vec::new(),
                             },
                         });
+                    }
+                    // The landing emits no Evaluation fan-out effect, so these
+                    // cannot arrive here. Matched explicitly so a new variant
+                    // breaks the build rather than falling into a wildcard.
+                    Outcome::EvalSlots(_) | Outcome::EvaluatorTask(_) => {
+                        debug_assert!(false, "evaluation outcome in a landing decision");
                     }
                 }
             }
@@ -2464,130 +2156,12 @@ fn history_digest(tasks: &[types::Task], cycles: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    //! Unit coverage for the staged-evaluation decision core (spec §3.3): how
-    //! evaluators partition into stages, and whether a completed stage lets the
-    //! next one start. These are the pure fragments of the reduce path; the
-    //! stateful reduce/advance flow is exercised end-to-end in Tier-2
-    //! (`tests/execution.rs`).
+    //! Unit coverage for this module's pure prompt-composition helpers (job
+    //! #155): the re-review delta and the per-cycle history digest. The
+    //! evaluation decisions themselves are tier-1 tested in
+    //! `chuggernaut_domain::decide::eval`, and the flow end-to-end in Tier-2
+    //! (`tests/execution.rs`, `tests/golden_traces.rs`).
     use super::*;
-    use types::EvaluatorType;
-
-    fn evaluator(name: &str, stage: u32, required: Option<bool>) -> Evaluator {
-        Evaluator {
-            name: name.into(),
-            r#type: EvaluatorType::Command,
-            image: None,
-            run: Some("true".into()),
-            prompt: None,
-            provider: None,
-            model: None,
-            secrets: vec![],
-            required,
-            stage,
-        }
-    }
-
-    fn slot(name: &str, stage: u32, required: Option<bool>, outcome: SlotOutcome) -> EvalSlot {
-        EvalSlot {
-            evaluator: evaluator(name, stage, required),
-            task_id: 0,
-            attempt: 1,
-            outcome: Some(outcome),
-        }
-    }
-
-    fn product(pass: bool, abort: bool) -> SlotOutcome {
-        SlotOutcome::Product {
-            pass,
-            abort,
-            structured: None,
-            output: None,
-        }
-    }
-
-    #[test]
-    fn group_stages_single_stage_is_one_group() {
-        // The compatibility story: every evaluator at the default stage 0 →
-        // exactly one stage, in declared order.
-        let evs = vec![
-            evaluator("a", 0, None),
-            evaluator("b", 0, None),
-            evaluator("c", 0, None),
-        ];
-        let stages = group_stages(evs);
-        assert_eq!(stages.len(), 1);
-        let names: Vec<_> = stages[0].iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, ["a", "b", "c"]);
-    }
-
-    #[test]
-    fn group_stages_orders_by_stage_stable_within() {
-        // Out-of-order, multi-stage input sorts ascending; declared order is
-        // preserved within a stage (stable).
-        let evs = vec![
-            evaluator("ci", 1, None),
-            evaluator("review", 0, None),
-            evaluator("lint", 1, None),
-            evaluator("gate", 2, None),
-        ];
-        let stages: Vec<Vec<_>> = group_stages(evs)
-            .into_iter()
-            .map(|s| s.into_iter().map(|e| e.name).collect())
-            .collect();
-        assert_eq!(
-            stages,
-            vec![
-                vec!["review".to_string()],
-                vec!["ci".to_string(), "lint".to_string()],
-                vec!["gate".to_string()],
-            ]
-        );
-    }
-
-    #[test]
-    fn stage_passed_all_required_pass() {
-        let slots = vec![
-            slot("a", 0, None, product(true, false)),
-            slot("b", 0, Some(true), product(true, false)),
-        ];
-        assert!(stage_passed(&slots));
-    }
-
-    #[test]
-    fn stage_passed_required_fail_blocks() {
-        let slots = vec![
-            slot("a", 0, None, product(true, false)),
-            slot("b", 0, None, product(false, false)),
-        ];
-        assert!(!stage_passed(&slots));
-    }
-
-    #[test]
-    fn stage_passed_required_abort_blocks() {
-        let slots = vec![slot("a", 0, None, product(false, true))];
-        assert!(!stage_passed(&slots));
-    }
-
-    #[test]
-    fn stage_passed_required_infra_blocks() {
-        let slots = vec![slot("a", 0, None, SlotOutcome::Infra)];
-        assert!(!stage_passed(&slots));
-    }
-
-    #[test]
-    fn stage_passed_advisory_failures_never_block() {
-        // Advisory fail, advisory abort, advisory infra — none stop the next
-        // stage from starting.
-        let slots = vec![
-            slot("pass", 0, None, product(true, false)),
-            slot("adv-fail", 0, Some(false), product(false, false)),
-            slot("adv-abort", 0, Some(false), product(false, true)),
-            slot("adv-infra", 0, Some(false), SlotOutcome::Infra),
-        ];
-        assert!(stage_passed(&slots));
-    }
-
-    // ── re-review context helpers (job #155) ────────────────────────────────
 
     fn eval_task(id: u64, cycle: u32, name: &str, pass: bool) -> types::Task {
         review_task(id, cycle, TaskPhase::Evaluation, Some(name), pass, None)

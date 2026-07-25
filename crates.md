@@ -117,6 +117,9 @@ domain/ (chuggernaut-domain — pure: no tokio/async-nats/store/vcs/auth)
     ready.rs     — the C4 Ready-phase decider: dep satisfaction, the base_ref pin,
                    queue admission both ends, the Blocked→Ready re-validation fork
                    (§2.1, §2.2, §3.1)
+    eval.rs      — the C5 evaluation decider: the staged fan-out, each evaluator type's
+                   verdict, the retry/rework budgets, the reduce's pass/rework/abort/
+                   escalate fork; owns the round as a value (§3.3)
 ```
 
 ```
@@ -127,8 +130,9 @@ dispatcher/
   ready.rs       — the Ready-phase shim: view/decide/apply/interpret for decide/ready,
                    plus queue admission, batch absorption and the Work hand-off (§2.1, §3.1)
   exec.rs        — the §3.2 work-execution sequence (Ready→Work, retry, rework/conflict re-entry)
-  eval.rs        — evaluator fan-out and reduce (§3.3), post-eval finalization and the
-                   depth-1 merge gate (§3.2 step 12)
+  eval.rs        — the Evaluation shim: evaluator prompts and launches driving
+                   decide/eval (§3.3), post-eval finalization and the depth-1 merge
+                   gate driving decide/merge_gate (§3.2 step 12)
   interpret.rs   — the effect interpreter: `Core::interpret` runs one Effect through its
                    port; the sole `&mut Core` coupling deciders keep (contracts.md §2)
   invariants.rs  — executable invariant checker over the read-only CoreState view (B1)

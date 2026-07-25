@@ -35,6 +35,7 @@ one surface.
 | `decide/merge_gate` | The C2 landing decider: depth-1 serialization (`gating: Option` — by type), fast-vs-gate pivot, verdict classification, gate-fix budget, conflict re-entry — a continuation machine whose effect results re-enter as events. | §3.3 |
 | `decide/ready` | The C4 Ready-phase decider: dependency satisfaction at release, the `base_ref` pin, queue admission both ends (enqueue on Ready, still-eligible on dequeue), and the Blocked→Ready re-validation fork — a continuation machine whose §2.2 pass re-enters as an event. | §2.1, §2.2, §3.1 |
 | `decide/wrapup` | The C3 wrap-up decider: the post-merge fork (`wrap_up.run` publish vs straight to Done), the publish exit verdict, the operator's publish-only Retry, and terminal stamping incl. a batch's Done fan-out. | §3.2, §2.1 |
+| `decide/eval` | The C5 evaluation decider: the staged fan-out (later stages uncreated when one fails), each evaluator type's verdict incl. the verdict-less/evidence-free class, the `eval_retries` + evidence-free + `rework_budget` budgets, and the reduce's pass / rework / abort / escalate fork. Owns the round as a value. | §3.3, §3.2 |
 
 ## `dispatcher` — `crates/dispatcher/src/`
 
@@ -45,7 +46,7 @@ one surface.
 | `release` | Release validation, ref-reading half: `jobs/*.yaml` loading + prompt/KV checks through the `vcs` port; re-exports the pure half. | §2.2, §14 |
 | `ready` | Ready-phase shim: gathers the view, applies `decide/ready`'s transitions and effects, then does the bookkeeping its step names — queue admission, a Draft batch's membership commit, the §2.2 re-validation hop, the Work hand-off. | §2.1, §2.2, §3.1 |
 | `exec` | Work-execution sequence: Ready→Work, container launch, crash recover-or-reset, rework/conflict re-entry. | §3.2 |
-| `eval` | Evaluator fan-out/reduce, plus the merge-gate shim: the landing fold that drives `decide/merge_gate` (gather view → decide → swap state → apply → interpret, outcomes re-entering as events). | §3.3, §3.2 |
+| `eval` | Evaluation shim: the launch/monitor half (evaluator prompts, the §3.3 re-review context, the pre-eval rebase) driving `decide/eval`, plus the merge-gate landing fold driving `decide/merge_gate` — both gather view → decide → swap state → apply → interpret, outcomes re-entering as events. | §3.3, §3.2 |
 | `interpret` | The effect interpreter: `Core::interpret` executes one `Effect` through the port it names; the sole `&mut Core` coupling deciders keep. | contracts.md §2 |
 | `trace` | Test-only golden-trace recorder: an inert-in-prod `TraceSink` a test attaches via `Core::attach_trace` to capture every `set_state` transition and `publish`/escalation effect as YAML fixtures (`tests/traces/`, regen `UPDATE_TRACES=1`); pins decisions during Track C. | refactor-plan B3 |
 | `launch_queue` | Capacity-aware launch queue: park on `NoCapacity`, drain on slot-freed, escalate past `MAX_QUEUE_WAIT`. | §3.5 |

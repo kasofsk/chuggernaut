@@ -1,0 +1,43 @@
+steps:
+- event: eval fails → rework → cycle-2 eval passes → land
+  transitions:
+  - job: 1
+    from: Frozen
+    to: Ready
+  - job: 1
+    from: Ready
+    to: Work
+  - job: 1
+    from: Work
+    to: Evaluation
+  - job: 1
+    from: Evaluation
+    to: Work
+  - job: 1
+    from: Work
+    to: Evaluation
+  - job: 1
+    from: Evaluation
+    to: WrapUp
+  - job: 1
+    from: WrapUp
+    to: Done
+  effects:
+  - PublishEvent job-created
+  - PublishEvent job-released
+  - PublishEvent job-started
+  - PublishEvent task-created
+  - PublishEvent task-completed
+  - PublishEvent job-evaluation-started
+  - PublishEvent task-created
+  - PublishEvent task-completed
+  - PublishEvent job-rework-started
+  - PublishEvent task-created
+  - PublishEvent task-completed
+  - PublishEvent job-evaluation-started
+  - PublishEvent task-created
+  - PublishEvent task-completed
+  - PublishEvent job-wrapup-started
+  - SquashMerge
+  - DeleteBranch job/1
+  - PublishEvent job-done

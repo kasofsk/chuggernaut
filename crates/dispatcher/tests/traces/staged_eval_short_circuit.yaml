@@ -1,0 +1,26 @@
+steps:
+- event: 'staged eval: stage-0 fails → stage 1 never launched → escalate'
+  transitions:
+  - job: 1
+    from: Frozen
+    to: Ready
+  - job: 1
+    from: Ready
+    to: Work
+  - job: 1
+    from: Work
+    to: Evaluation
+  - job: 1
+    from: Evaluation
+    to: Escalated
+  effects:
+  - PublishEvent job-created
+  - PublishEvent job-released
+  - PublishEvent job-started
+  - PublishEvent task-created
+  - PublishEvent task-completed
+  - PublishEvent job-evaluation-started
+  - PublishEvent task-created
+  - PublishEvent task-completed
+  - PutTask Human(escalation)
+  - PublishEvent job-escalated
