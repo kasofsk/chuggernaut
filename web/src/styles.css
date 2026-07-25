@@ -1794,6 +1794,11 @@ table.jobs tbody tr.row-draft td:first-child {
     font-size: var(--fs-md);
     font-weight: 600;
     line-height: 1.3;
+    /* Titles carry paths, identifiers and URLs — tokens with no break
+       opportunity that are wider than a phone. Wrapping is the only way out
+       here: the item widget has no columns to scroll, so an unbroken token
+       instead panned the whole full-bleed list sideways under the thumb. */
+    overflow-wrap: anywhere;
   }
   .jobs-list .job-channel {
     max-width: none;
@@ -4466,6 +4471,23 @@ tr[data-state='Batched'] {
   }
   .status-footer {
     gap: var(--sp-3);
+  }
+  /* A footer segment is label-beside-body, and the fleet body is a bar (min
+     80px) beside a readout that is one nowrap token by design — "33% · 2/6
+     slots used · 2 queued" reads as two numbers once it wraps mid-phrase. On a
+     phone those three do not fit one line, and since none of them may shrink
+     below its min-content width the spill landed on the document: the jobs page
+     scrolled ~90px sideways whenever the fleet feed was live (operators only —
+     the segment hides itself for anyone the feed 403s). So the rows wrap here.
+     Both need the explicit basis: a flexed item's hypothetical size is 0, so
+     without it neither takes the new line the wrap exists to give it. */
+  .sf-seg,
+  .sf-fleet-body {
+    flex-wrap: wrap;
+  }
+  .sf-fleet,
+  .sf-fleet-body {
+    flex-basis: 100%;
   }
   .sf-active {
     margin-left: 0;
