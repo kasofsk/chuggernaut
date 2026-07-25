@@ -29,6 +29,21 @@ const FILTER_STATES: JobState[] = [
 
 type SortKey = 'id' | 'state' | 'type' | 'completed'
 
+// Which direction a freshly picked sort key opens in: the numeric/temporal keys
+// read newest-first, the categorical ones A→Z.
+const sortDirDefault = (key: SortKey): 'asc' | 'desc' =>
+  key === 'id' || key === 'completed' ? 'desc' : 'asc'
+
+// The toolbar's sort-by control. It offers exactly the sortable columns, because
+// on phones the table header — and with it the click-to-sort affordance — is not
+// on screen: the rows render as two-line item widgets, not columns.
+const SORT_OPTIONS: { key: SortKey; label: string }[] = [
+  { key: 'state', label: 'State' },
+  { key: 'id', label: 'Number' },
+  { key: 'type', label: 'Type' },
+  { key: 'completed', label: 'Completed' },
+]
+
 // Compact local timestamp for the jobs table (reuses JobDetail's #57
 // conventions): time-only when the moment is today, date prepended otherwise.
 // Callers pass the raw ISO string as the cell's `title` for the full tooltip.
@@ -291,8 +306,9 @@ export function ProjectPage() {
     setSort((s) =>
       s.key === key
         ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' }
-        : { key, dir: key === 'id' || key === 'completed' ? 'desc' : 'asc' },
+        : { key, dir: sortDirDefault(key) },
     )
+  const flipSortDir = () => setSort((s) => ({ ...s, dir: s.dir === 'asc' ? 'desc' : 'asc' }))
   const sortIndicator = (key: SortKey) =>
     sort.key === key ? <span className="sort-ind">{sort.dir === 'asc' ? '▲' : '▼'}</span> : null
 
@@ -445,10 +461,36 @@ export function ProjectPage() {
                   </option>
                 ))}
               </select>
+              <div className="sort-field">
+                <select
+                  className="sort-select"
+                  value={sort.key}
+                  onChange={(e) => {
+                    const key = e.target.value as SortKey
+                    setSort({ key, dir: sortDirDefault(key) })
+                  }}
+                  aria-label="Sort jobs by"
+                >
+                  {SORT_OPTIONS.map((o) => (
+                    <option key={o.key} value={o.key}>
+                      sort: {o.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="sort-dir"
+                  onClick={flipSortDir}
+                  title={sort.dir === 'asc' ? 'ascending — click to reverse' : 'descending — click to reverse'}
+                  aria-label={`sort direction ${sort.dir === 'asc' ? 'ascending' : 'descending'}`}
+                >
+                  {sort.dir === 'asc' ? '▲' : '▼'}
+                </button>
+              </div>
             </div>
           </div>
           <div className="table-scroll">
-            <table className="jobs">
+            <table className="jobs jobs-list">
             <thead>
             <tr>
               <th className="spark-col" aria-label="starred"></th>
@@ -498,10 +540,10 @@ export function ProjectPage() {
                 <td className="spark-cell">
                   <span className="row-spark" aria-hidden="true">✦</span>
                 </td>
-                <td>
+                <td className="col-num">
                   <Link to={`/p/${owner}/${project}/jobs/${j.id}`}>{j.id}</Link>
                 </td>
-                <td>
+                <td className="col-title">
                   {member && (
                     <span className="batch-indent dim" aria-hidden="true">
                       ↳
@@ -517,7 +559,7 @@ export function ProjectPage() {
                     </div>
                   )}
                 </td>
-                <td>
+                <td className="col-type">
                   <Link className="dim" to={`/p/${owner}/${project}/job-types/${encodeURIComponent(j.type)}`}>
                     {j.type}
                   </Link>
@@ -539,7 +581,7 @@ export function ProjectPage() {
                     </button>
                   )}
                 </td>
-                <td>
+                <td className="col-state">
                   <StateBadge state={j.state} />
                   {j.state === 'Batched' && j.batch_id != null && !member && (
                     <Link
@@ -567,10 +609,10 @@ export function ProjectPage() {
                     </span>
                   )}
                 </td>
-                <td className="dim">
+                <td className="dim col-deps">
                   {j.deps.map((d) => `#${d}`).join(', ')}
                 </td>
-                <td className="dim" title={completedTip(j)}>
+                <td className="dim col-done" title={completedTip(j)}>
                   {j.completed_at ? (
                     <>
                       {fmtStamp(j.completed_at)}
@@ -579,7 +621,9 @@ export function ProjectPage() {
                       </span>
                     </>
                   ) : (
-                    '—'
+                    // A live job has no completion moment: the table wants a
+                    // placeholder in the column, the mobile item layout drops it.
+                    <span className="col-done-none">—</span>
                   )}
                 </td>
                 <td className="actions">

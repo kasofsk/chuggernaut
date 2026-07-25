@@ -1712,6 +1712,111 @@ table.jobs tbody tr.row-draft td:first-child {
   .job-channel {
     max-width: 200px;
   }
+  /* ── Jobs list on phones: a two-row item widget, not eight columns ─────────
+     Eight columns at 360px squeezed the title — the field you actually scan
+     for — into a sliver. So each row reads as one item: the job number keeps a
+     leading gutter, row 1 is the title at reading size, row 2 packs
+     type/state/deps/completed and the actions into a single compact line that
+     wraps. This is a display-level re-layout of the very same cells, so there
+     is no second markup to keep in sync with the desktop table. The gutter is
+     a negative margin rather than absolute positioning, so a five-digit job
+     number pushes the title along instead of overlapping it. */
+  .jobs-list thead {
+    display: none;
+  }
+  .jobs-list,
+  .jobs-list tbody {
+    display: block;
+  }
+  .jobs-list tbody tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    /* No column gap: the fields carry their own spacing (below), so that
+       nothing but the number's own width counts against the gutter — a gap
+       here would push the title onto its own line for any wide job number. */
+    column-gap: 0;
+    row-gap: 0.2rem;
+    padding: 0.5rem 0.35rem 0.55rem 3.2rem;
+    border-bottom: 1px solid var(--border-faint);
+  }
+  .jobs-list tbody td {
+    padding: 0;
+    border: 0;
+    font-size: var(--fs-xs);
+  }
+  /* The spark column, and any field a job doesn't have (no deps, no actions),
+     would only spend width and leave a gap where a value never comes. */
+  .jobs-list .spark-cell,
+  .jobs-list tbody td:empty {
+    display: none;
+  }
+  /* With the spark column gone the state accent rides the whole item. */
+  .jobs-list tbody tr.row-accent {
+    box-shadow: inset 3px 0 0 var(--row-accent, transparent);
+  }
+  .jobs-list tbody tr.row-accent td:first-child {
+    box-shadow: none;
+  }
+  /* The number sits in the gutter the row's left padding opens up. Its width is
+     content-driven, so an unusually long number pushes the title along (and, at
+     the extreme, onto its own line) instead of running into it. */
+  .jobs-list td.col-num {
+    flex: none;
+    min-width: 2.6rem;
+    margin-left: -3.2rem;
+    padding-right: 0.35rem;
+    font-variant-numeric: tabular-nums;
+    font-size: var(--fs-sm);
+  }
+  .jobs-list td.col-title {
+    flex: 1 1 100%; /* claims the line, so the metadata wraps below it */
+    min-width: 0;
+    font-size: var(--fs-md);
+    font-weight: 600;
+    line-height: 1.3;
+  }
+  .jobs-list .job-channel {
+    max-width: none;
+    font-weight: 400;
+  }
+  /* Each metadata field carries its own trailing space rather than leaning on
+     the row's column gap (see above). Spacing, not dot separators: this line
+     wraps on a narrow screen, and a separator that starts a wrapped line reads
+     as a typo. */
+  .jobs-list td.col-type,
+  .jobs-list td.col-state,
+  .jobs-list td.col-deps,
+  .jobs-list td.col-done {
+    margin-right: 0.55rem;
+  }
+  /* A live job's "—" completion placeholder earns its keep in a column, not
+     here, where it is one more thing to read past — drop the whole field. */
+  .jobs-list td.col-done:has(.col-done-none) {
+    display: none;
+  }
+  .jobs-list td.actions {
+    margin-left: auto; /* actions hug the right end of the metadata line */
+  }
+  /* Narrower, not shorter: the actions have to share the metadata line, but the
+     tap target keeps its height. */
+  .jobs-list td.actions button {
+    padding: 0.35rem 0.6rem;
+    font-size: var(--fs-xs);
+  }
+  /* A batch member indents as a whole item, so the desktop title-cell inset
+     (which would push the title out of line with the metadata) comes off. */
+  .jobs-list tbody tr.row-batch-member {
+    margin-left: 1.1rem;
+  }
+  .jobs-list tbody tr.row-batch-member td.col-title {
+    padding-left: 0;
+  }
+  /* The loading skeleton and the empty state are one wide cell — give them the
+     whole line instead of letting them share it with a following field. */
+  .jobs-list tbody td[colspan] {
+    flex: 1 1 100%;
+  }
   /* evaluator rows and resolve controls stack instead of overflowing */
   .kv-row {
     flex-wrap: wrap;
@@ -3360,6 +3465,24 @@ table.jobs tbody tr.row-draft td:first-child {
 }
 .state-filter {
   padding: 0.45rem 0.6rem;
+}
+/* Sort-by control: the select picks the key, the button flips the direction.
+   It shares its state with the click-to-sort table headers — and on phones,
+   where the header row is replaced by two-row item widgets, it is the only
+   sort affordance there is. */
+.sort-field {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+}
+.sort-select {
+  padding: 0.45rem 0.6rem;
+}
+.sort-dir {
+  padding: 0.35rem 0.55rem;
+  font-size: 0.7rem;
+  color: var(--accent);
+  line-height: 1;
 }
 .btn-primary-glow {
   background: linear-gradient(120deg, var(--accent), var(--accent-2));
