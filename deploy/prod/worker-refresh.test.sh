@@ -450,6 +450,30 @@ if grep -qF "WORKER_REFRESH_DISK_" "$LOG"; then
 fi
 echo "ok: swap carries the disk pre-flight knobs forward, and passes none when unset"
 
+# ── Case 3e: swap carries the node's capacity forward (WORKER_SLOTS) ───────────
+# The loudest member of the silent-revert class: the daemon announces its own slot
+# count and that announcement wins over the dispatcher's DOCKER_NODES seed (spec
+# §3.1), so a swap that dropped WORKER_SLOTS would put a node deliberately capped
+# at 2 back on the default 4 — more concurrent job containers than the node was
+# sized for, and nothing fleet-side to explain it. Unset ⇒ nothing passed.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=air NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  WORKER_SLOTS=2 \
+  sh "$SUT" swap prod
+
+grep_log "WORKER_SLOTS=2"
+
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  sh "$SUT" swap prod
+
+if grep -qF "WORKER_SLOTS" "$LOG"; then
+  fail "swap must not pass WORKER_SLOTS when unset (daemon default applies)"
+fi
+echo "ok: swap carries WORKER_SLOTS forward, and passes none when unset"
+
 # ── Case 4: unknown phase is a hard error ────────────────────────────────────
 if PATH="$BIN:$PATH" sh "$SUT" frobnicate 2>/dev/null; then
   fail "unknown phase should exit non-zero"

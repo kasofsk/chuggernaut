@@ -526,6 +526,25 @@ Notes:
 - **Verify placement** — during a job: `ssh worksalot@gumbo-nuc-0 docker ps`
   shows the work/eval containers; the Mini's colima shows none
   (`docker ps --filter label=chuggernaut.managed`).
+- **Capacity is set on the node, not in `DOCKER_NODES`.** The daemon announces
+  its own slot count (`WORKER_SLOTS`, default 4) every heartbeat and the live
+  announcement **wins** over the `DOCKER_NODES` seed (spec §3.1), so lowering the
+  seed alone changes nothing. Set `WORKER_SLOTS` in the env `build-worker.sh`
+  reads (`chuggernaut.env`, or inline for a hand-run rebuild) and the swap phase
+  carries it forward across every self-refresh. Prod: **air runs 2**
+  (6cpu/12GiB colima — 4 concurrent job containers oversubscribed it), nuc 4.
+  Prod reaches air over the no-ssh self-refresh path, whose swap inherits the
+  *live daemon's* env, so a node's capacity is set once at (re)creation and then
+  survives every deploy:
+
+  ```sh
+  WORKER_SSH=worksalot@dev-air.tail20c474.ts.net CHUG_WORKER_NODE=air \
+    WORKER_SLOTS=2 WORKER_NATS_URL=nats://100.116.243.42:4222 \
+    deploy/prod/build-worker.sh
+  ```
+
+  Confirm from the fleet snapshot (`GET /api/v1/config` → `nodes`), not from
+  `DOCKER_NODES`: the node's announced `slots` is the number placement uses.
 - The daemon's version is reported in its ping; the dispatcher logs a warning
   when it drifts from the dispatcher's own (stale node artifacts).
 - **Watch a refresh from the deploy job, not the node.** `worker-refresh.sh`

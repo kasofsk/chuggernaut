@@ -104,6 +104,17 @@ fi
 if [ -n "${WORKER_REFRESH_DISK_PATH:-}" ]; then
   DISK_ENV="$DISK_ENV -e WORKER_REFRESH_DISK_PATH=$WORKER_REFRESH_DISK_PATH"
 fi
+# The node's advertised capacity (`WORKER_SLOTS`, spec §3.1 dynamic registration).
+# This — not the dispatcher's `DOCKER_NODES` seed — is where a node's concurrency
+# is actually set: the daemon announces its own slot count every heartbeat and the
+# live announcement WINS over the seed, so editing DOCKER_NODES alone cannot lower
+# a node below what its daemon advertises. Set it at creation (air runs 2 on a
+# 6cpu/12GiB colima; nuc, 12c/31GB, runs more) and worker-refresh.sh's swap carries
+# it forward. Empty when unset ⇒ the daemon's documented default of 4.
+SLOTS_ENV=""
+if [ -n "${WORKER_SLOTS:-}" ]; then
+  SLOTS_ENV="-e WORKER_SLOTS=$WORKER_SLOTS"
+fi
 # Log level for the daemon (ticket #270). The binary filters on RUST_LOG and its
 # default directive is ERROR, so a daemon started without it emits nothing — not
 # even the "worker up" line the probe below waits for, nor the refresh relay that
@@ -124,6 +135,7 @@ docker run -d --restart=always --name chug-worker \
   $REFRESH_ENV \
   $CACHE_ENV \
   $DISK_ENV \
+  $SLOTS_ENV \
   chuggernaut/worker:$TAG >/dev/null"
 ssh "$WORKER_SSH" "$REMOTE"
 

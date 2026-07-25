@@ -103,7 +103,11 @@ fi
 if grep -qF "WORKER_REFRESH_DISK_" "$LOG"; then
   fail "WORKER_REFRESH_DISK_* must not be passed when unset (documented default applies)"
 fi
-echo "ok: no WORKER_CACHE_DIR or WORKER_REFRESH_DISK_* passed when unset"
+# And the capacity knob: unset ⇒ the daemon's own default of 4 applies.
+if grep -qF "WORKER_SLOTS" "$LOG"; then
+  fail "WORKER_SLOTS must not be passed when unset (daemon default applies)"
+fi
+echo "ok: no WORKER_CACHE_DIR, WORKER_REFRESH_DISK_* or WORKER_SLOTS passed when unset"
 
 # Also assert the label + health verification happened on the success path.
 grep_log "chug.git.sha=deadbeefcafe"                 # SHA baked as an image LABEL
@@ -128,6 +132,25 @@ PATH="$BIN:$PATH" \
 grep_log "WORKER_REFRESH_DISK_FREE_GB_MIN=30"
 grep_log "WORKER_REFRESH_DISK_PATH=/var/lib/docker"
 echo "ok: daemon run carries the disk pre-flight knobs when set"
+
+# ── Case 2c: the node's capacity reaches the daemon (WORKER_SLOTS) ─────────────
+# The daemon announces its OWN slot count and that announcement wins over the
+# dispatcher's DOCKER_NODES seed (spec §3.1), so node creation is the only place
+# a node can be capped below the daemon's default 4 — air at 2. A knob the daemon
+# never receives is an inert knob, and the node would silently keep running 4
+# concurrent job containers. (worker-refresh.test.sh covers the other half: the
+# swap carrying it forward so a self-refresh does not restore the default.)
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  WORKER_SLOTS=2 \
+  sh "$SUT"
+
+grep_log "WORKER_SLOTS=2"
+grep_log "WORKER_NODE=air"
+echo "ok: daemon run carries WORKER_SLOTS when set"
 
 # ── Case 3: no worker node ⇒ clean no-op ──────────────────────────────────────
 : > "$LOG"
