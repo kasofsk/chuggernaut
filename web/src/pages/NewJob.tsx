@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { useEffect, useState, type FormEvent, type KeyboardEvent } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
@@ -67,6 +67,18 @@ export function NewJobPage() {
 
 type EvalRow = { name: string; type: Evaluator['type']; action: string; required: boolean }
 
+/** Departure switch position — the state the job is created in. */
+type JobMode = 'draft' | 'frozen' | 'ready'
+
+/**
+ * Submit-button label. Once tapped it reports the in-flight create rather than
+ * the mode: the button and the mode selector are both frozen for the duration,
+ * so repeating the mode there would say nothing the selector isn't showing.
+ */
+export function createJobSubmitLabel(mode: JobMode, submitting: boolean): string {
+  return submitting ? 'Creating…' : `Create ${mode}`
+}
+
 function CreateJob({
   owner,
   project,
@@ -120,9 +132,12 @@ function CreateJob({
   const [model, setModel] = useState('')
   const typeModel = typeDetail?.job_type?.work?.model ?? null
   // Departure switch: 'release' schedules the run; 'draft' parks it on the siding.
-  const [mode, setMode] = useState<'draft' | 'frozen' | 'ready'>('frozen')
+  const [mode, setMode] = useState<JobMode>('frozen')
   const [error, setError] = useState<string | null>(null)
-  const busy = useRef(false)
+  // State, not a ref: the button has to re-render to disable itself. It stays
+  // true through a successful create — the page navigates away rather than
+  // returning to an armed form.
+  const [submitting, setSubmitting] = useState(false)
 
   function toggleTag(tag: string) {
     setSelectedTags((ts) => (ts.includes(tag) ? ts.filter((t) => t !== tag) : [...ts, tag]))
@@ -140,7 +155,7 @@ function CreateJob({
   const allTags = [...selectedTags, ...extraTags.filter((t) => !selectedTags.includes(t))]
 
   function build(draft: boolean) {
-    if (busy.current) return
+    if (submitting) return
     const evals: Evaluator[] = []
     for (const r of evalRows) {
       const name = r.name.trim()
@@ -163,7 +178,7 @@ function CreateJob({
       return
     }
     setError(null)
-    busy.current = true
+    setSubmitting(true)
     api
       .createJob(owner, project, {
         type,
@@ -191,7 +206,7 @@ function CreateJob({
           navigate(`/p/${owner}/${project}/jobs/${job.id}`)
         },
         (e) => {
-          busy.current = false
+          setSubmitting(false)
           const msg = e instanceof Error ? e.message : 'create failed'
           setError(msg)
           onError(msg)
@@ -478,14 +493,23 @@ function CreateJob({
                 aria-checked={mode === m}
                 className={`mode-seg-opt${mode === m ? ' mode-seg-on' : ''}`}
                 title={tip}
+                // Frozen while a create is in flight: the release step reads
+                // `mode` after the POST resolves, so a mid-flight switch would
+                // change what happens to an already-created job.
+                disabled={submitting}
                 onClick={() => setMode(m)}
               >
                 {label}
               </button>
             ))}
           </div>
-          <button type="submit" className="btn-primary-glow" disabled={busy.current}>
-            {mode === 'draft' ? 'Create draft' : mode === 'frozen' ? 'Create frozen' : 'Create ready'}
+          <button
+            type="submit"
+            className="btn-primary-glow"
+            disabled={submitting}
+            aria-busy={submitting}
+          >
+            {createJobSubmitLabel(mode, submitting)}
           </button>
         </div>
         {error && <div className="error">{error}</div>}
