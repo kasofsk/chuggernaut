@@ -321,6 +321,29 @@ secret (injected as an env var — the private-key value; the script writes it t
 `chug admin ... secret set --project kasofsk/chuggernaut --name MINI_DEPLOY_KEY`
 (register the public half in the Mini's `~/.ssh/authorized_keys`).
 
+**The health-gate API token.** `tasks/deploy-health.sh` asserts a live *fleet*
+as well as a live dispatcher (deploy #267: both worker daemons were dead, the
+gate passed on the dispatcher alone, and the deploy then hung in Evaluation with
+nothing alive to report its container's exit). Fleet liveness comes from `GET
+/api/v1/platform/fleet`, which is platform-admin only, so the gate authenticates
+with the `DEPLOY_HEALTH_API_TOKEN` project secret — declared on the `health`
+evaluator in `jobs/deploy.yaml`, injected into that eval container only. (The
+name avoids the reserved `CHUG_` prefix: declaring one of those is itself a
+release-validation error, spec §11.) Provision it with a long-TTL admin bearer
+token:
+`chuggernaut admin user token --email you@example.com --ttl 8760h`, then
+`chug admin ... secret set --project kasofsk/chuggernaut --name DEPLOY_HEALTH_API_TOKEN`.
+
+**Until the secret exists, releasing a `deploy` job is rejected up front** —
+release validation errors with `secret 'DEPLOY_HEALTH_API_TOKEN' is not set` and
+the job never reaches Work, so `update.sh` is not invoked and nothing lands.
+That is deliberate and is strictly safer than the hang it replaces: a gate that
+cannot see the fleet must not pass. The remedy is to set the secret and release
+again. If the secret is set but *stale* (expired or non-admin), the deploy does
+run and then fails its health gate with `fleet endpoint refused our
+credentials` — at that point the deploy has already landed (`wrap_up: none`), so
+refresh the token and re-run the job.
+
 **Manual deploy / rollback** (still available by hand, from the checkout):
 ```sh
 CHUG_REPO=~/chuggernaut deploy/prod/update.sh              # deploy origin/main now

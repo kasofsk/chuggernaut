@@ -24,6 +24,15 @@ eval:
     image: chuggernaut/agent:prod
     run: ./tasks/deploy-health.sh
     stage: 0
+    # The gate's second assertion — a live worker fleet (#267) — reads
+    # GET /api/v1/platform/fleet, which is platform-admin only. Injected into
+    # this eval container alone (spec §1.1), never into work. Provision it once:
+    # deploy/prod/README.md §3 "The health-gate API token" — until it is set,
+    # release validation rejects a deploy job outright ("secret ... is not
+    # set"), so the gate can never pass blind on an unverified fleet, the blind
+    # spot #267 exploited. The name avoids the reserved `CHUG_` prefix, which is
+    # a release-validation error in itself (spec §11).
+    secrets: [DEPLOY_HEALTH_API_TOKEN]
   # The appended project ci default (jobs/_defaults.yaml) stays at stage 1 and
   # only runs once health passes. A deploy job carries no commits, so ci sees an
   # empty diff and glob-skips its cargo build in seconds (tasks/ci.sh) — it
