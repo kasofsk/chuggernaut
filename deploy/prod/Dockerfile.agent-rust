@@ -117,15 +117,19 @@ RUN git config --system user.name "Chuggernaut Agent" \
  && git config --system user.email "agent@chuggernaut.local" \
  && git config --system --add safe.directory '*'
 
-# Same ownership marker the dispatcher stamps on every container it launches
-# (MANAGED_LABEL, crates/container/src/docker.rs) — one key means "Chuggernaut
-# owns this Docker object", container or image; the two must not drift. Nothing
-# runs from this image between jobs, so a host-level `docker system prune --all`
-# (daily timer on gumbo-nuc-0) deletes it and the next job on that node fails to
-# launch with a 404 — the host spares it via `--filter
-# label!=chuggernaut.managed`.
+# Image-ownership marker, in the `chug.*` image namespace next to
+# `chug.git.sha`. Nothing runs from this image between jobs, so a host-level
+# `docker system prune --all` (daily timer on gumbo-nuc-0) deletes it and the
+# next job on that node fails to launch with a 404 — the host spares it via
+# `--filter label!=chug.managed`.
+#
+# NOT `chuggernaut.managed` (MANAGED_LABEL, crates/container/src/docker.rs):
+# that key marks a job container the dispatcher owns and may reap, and a
+# container inherits its image's labels — which is how the worker daemon became
+# reapable and the startup sweep killed the fleet on every dispatcher restart
+# (#268). deploy/managed-label.test.sh enforces the separation.
 #
 # Kept LAST, below the warm-target seed: a LABEL is its own layer, so anything
 # above it would be invalidated by an edit here — and above the seed that costs
 # the 10+ minute workspace bake on every subsequent build.
-LABEL chuggernaut.managed="true"
+LABEL chug.managed="true"

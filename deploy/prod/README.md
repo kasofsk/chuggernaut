@@ -557,21 +557,34 @@ the dependency layer so a SHA-only change never invalidates the deps.
   the image — it compiles into the cache mount, then `cp -a`s the result into
   the baked `/opt/chug-prebuilt-target`.
 - **Prune protection.** All three images (`worker`, `agent`, `agent-rust`) carry
-  `LABEL chuggernaut.managed="true"` — the same `MANAGED_LABEL` the dispatcher
-  stamps on every container it launches. A host-level `docker system prune
-  --all` (gumbo-nuc-0 runs one on a daily timer) removes every image not backing
-  a *running* container, and the agent images back nothing between jobs, so an
+  `LABEL chug.managed="true"`. A host-level `docker system prune --all`
+  (gumbo-nuc-0 runs one on a daily timer) removes every image not backing a
+  *running* container, and the agent images back nothing between jobs, so an
   unfiltered sweep deletes them and the next job on that node fails to launch
   with `404: No such image`. The host spares them with `--filter
-  label!=chuggernaut.managed`; that filter is inert unless every image carries
-  the label, so the pairing is checked statically:
+  label!=chug.managed`; that filter is inert unless every image carries the
+  label, so the pairing is checked statically:
 
   ```sh
-  deploy/managed-label.test.sh   # all three carry it, key read from docker.rs
+  deploy/managed-label.test.sh   # all three carry it, and never the container key
   ```
 
   The label lives in the Dockerfiles (constant property of the image), unlike
   `chug.git.sha`, which stays a CLI `--label` because it is per-build.
+- **The image key is NOT `chuggernaut.managed`** (#268). That key is the
+  dispatcher's *container*-ownership marker (`MANAGED_LABEL`), and a container
+  inherits its image's labels: while the images carried it (#266), `chug-worker`
+  was indistinguishable from a job container, so the §3.6 startup orphan sweep
+  killed the worker on **both nodes on every dispatcher restart** — and with no
+  worker alive, nothing reported container exits, so the in-flight deploy hung
+  in Evaluation until `docker start chug-worker` was run by hand on each node.
+  `chuggernaut.*` is the container namespace, `chug.*` the image namespace; they
+  must not converge. The sweep also now refuses to reap a marker-bearing
+  container that lacks the `chuggernaut.project/.job/.task` identity labels every
+  launch stamps, so a future collision degrades to a log line instead of an
+  outage. **Deploying the fix reaps the workers one last time** — the running
+  images still carry the old label until that deploy rebuilds them — so expect
+  to `docker start chug-worker` on both nodes once more after it lands.
 - **MEASURE cold vs warm (manual, run on the node).** CI cannot build images, so
   the warm-cache win is a manual measurement — capture it once on dev-air:
 

@@ -161,8 +161,14 @@ impl Core {
     /// manually removes it, and every retry fails with `no free slots`. A
     /// container is kept only when it re-attaches to a live task — matched by
     /// its `(project, job, task)` identity labels or by a live task's recorded
-    /// `container_id` — so recovery's monitor still lands. Anything else,
-    /// including a pre-labels container with no resolvable identity, is reaped.
+    /// `container_id` — so recovery's monitor still lands. Anything else is
+    /// reaped.
+    ///
+    /// A container carrying the marker but **no identity labels** is not ours to
+    /// reap: every launch stamps the identity alongside the marker, so a bare
+    /// marker means the container inherited it from its image (#268 — the
+    /// `chug-worker` daemon did, and this sweep killed the fleet on every
+    /// restart). It is logged and left running.
     ///
     /// Best-effort: a backend hiccup only warns and never blocks startup.
     // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
@@ -209,12 +215,24 @@ impl Core {
         }
 
         for rc in running {
-            let matched = live_cids.contains(&rc.id)
-                || match (&rc.project, rc.job, rc.task) {
-                    (Some(p), Some(j), Some(t)) => live_tasks.contains(&(p.clone(), j, t)),
-                    _ => false,
-                };
-            if matched {
+            if live_cids.contains(&rc.id) {
+                continue;
+            }
+            // The marker alone does not make a container ours to kill: a launch
+            // stamps the `(project, job, task)` identity labels alongside it, so
+            // a marker without an identity was not launched by this dispatcher.
+            // Anything that inherits the marker from its image lands here — the
+            // `chug-worker` daemon did, and reaping on the marker alone took the
+            // fleet down on every restart (#268). Leave it alone and say so.
+            let (Some(project), Some(job), Some(task)) = (&rc.project, rc.job, rc.task) else {
+                tracing::warn!(
+                    "startup fleet sweep: container {} carries the managed marker but no \
+                     identity labels — not a dispatcher launch, left running",
+                    rc.id
+                );
+                continue;
+            };
+            if live_tasks.contains(&(project.clone(), job, task)) {
                 continue;
             }
             // Orphan: kill it to free the slot. The task it belonged to was
@@ -222,34 +240,29 @@ impl Core {
             // so reaping (not re-adoption) is the simple, safe choice.
             match self.backend.kill(&rc.id).await {
                 Ok(()) => {
-                    let label = match (&rc.project, rc.job, rc.task) {
-                        (Some(_), Some(j), Some(t)) => format!("{j}/{t}"),
-                        _ => "unknown job/task".to_string(),
-                    };
+                    let label = format!("{job}/{task}");
                     tracing::info!(
                         "startup fleet sweep: reaped orphan container {} for {label}",
                         rc.id
                     );
-                    // Attribute the reap to its job when the identity resolves.
-                    if let (Some(p), Some(j)) = (&rc.project, rc.job) {
-                        let (owner, project) = split(p);
-                        let _ = self
-                            .publish(
-                                &owner,
-                                &project,
-                                j,
-                                "container-reaped",
-                                serde_json::json!({
-                                    "container_id": rc.id,
-                                    "task_id": rc.task,
-                                    "detail": format!(
-                                        "reaped orphan container {} for {label}",
-                                        rc.id
-                                    ),
-                                }),
-                            )
-                            .await;
-                    }
+                    // Attribute the reap to its owning job.
+                    let (owner, project) = split(project);
+                    let _ = self
+                        .publish(
+                            &owner,
+                            &project,
+                            job,
+                            "container-reaped",
+                            serde_json::json!({
+                                "container_id": rc.id,
+                                "task_id": task,
+                                "detail": format!(
+                                    "reaped orphan container {} for {label}",
+                                    rc.id
+                                ),
+                            }),
+                        )
+                        .await;
                 }
                 Err(e) => tracing::warn!(
                     "startup fleet sweep: killing orphan container {} failed: {e}",

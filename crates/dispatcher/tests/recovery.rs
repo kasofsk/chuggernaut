@@ -1824,44 +1824,30 @@ async fn wait_killed(backend: &FakeBackend, want: usize) -> Vec<String> {
 /// by no live task is reaped, freeing its slot. This is the durable fix for the
 /// 2026-07-22 incident, where pre-upgrade in-flight tasks were failed as
 /// container-gone while their containers kept running and holding fleet slots
-/// until an operator manually removed them. An identity-bearing orphan emits a
-/// `container-reaped` platform event; an identity-less one (a pre-labels
-/// container, exactly the incident's shape) is still reaped, event or not.
+/// until an operator manually removed them. The reap emits a `container-reaped`
+/// platform event attributed to the owning job.
 #[tokio::test]
 async fn startup_fleet_sweep_reaps_orphan_running_container() {
     let backend = Arc::new(FakeBackend::new());
     // The pre-upgrade task recovery already failed as container-gone.
     let tasks = vec![work_task(2, TaskState::Failed, Some("dev-air/c-orphan"))];
-    // Its container is still alive (identity resolves to job 51 / task 2), plus
-    // a legacy container with no identity labels at all.
-    backend.seed_managed_running([
-        container::RunningContainer {
-            id: "dev-air/c-orphan".into(),
-            project: Some("acme/api".into()),
-            job: Some(51),
-            task: Some(2),
-        },
-        container::RunningContainer {
-            id: "dev-air/c-legacy".into(),
-            project: None,
-            job: None,
-            task: None,
-        },
-    ]);
+    // Its container is still alive (identity resolves to job 51 / task 2).
+    backend.seed_managed_running([container::RunningContainer {
+        id: "dev-air/c-orphan".into(),
+        project: Some("acme/api".into()),
+        job: Some(51),
+        task: Some(2),
+    }]);
     let Some((store, _server, _handle, _repo)) = fleet_sweep_core(tasks, backend.clone()).await
     else {
         return;
     };
 
-    let mut killed = wait_killed(&backend, 2).await;
-    killed.sort();
+    let killed = wait_killed(&backend, 1).await;
     assert_eq!(
         killed,
-        vec![
-            "dev-air/c-legacy".to_string(),
-            "dev-air/c-orphan".to_string()
-        ],
-        "both orphan containers reaped to free their slots"
+        vec!["dev-air/c-orphan".to_string()],
+        "the orphan container is reaped to free its slot"
     );
 
     // The identity-bearing reap is attributed to its job as a platform event.
@@ -1928,6 +1914,38 @@ async fn startup_fleet_sweep_keeps_container_of_running_task() {
     assert!(
         backend.killed().is_empty(),
         "containers of live Running tasks are re-attached, never reaped: {:?}",
+        backend.killed()
+    );
+}
+
+/// §3.6 fleet-sweep ownership guard (#268): a running container that carries
+/// the managed marker but **no identity labels** was not launched by the
+/// dispatcher — most plausibly it inherited the marker from its image, which is
+/// how the long-lived `chug-worker` daemon became reapable and every dispatcher
+/// restart killed the worker fleet. The marker alone is not ownership; the
+/// identity labels every launch stamps beside it are. Nothing here is named
+/// `chug-worker` on purpose — the rule is about what the label means.
+#[tokio::test]
+async fn startup_fleet_sweep_spares_container_without_identity_labels() {
+    let backend = Arc::new(FakeBackend::new());
+    // No live task owns it, so only the missing identity keeps it alive.
+    let tasks = vec![work_task(2, TaskState::Failed, Some("dev-air/c-orphan"))];
+    backend.seed_managed_running([container::RunningContainer {
+        id: "dev-air/c-daemon".into(),
+        project: None,
+        job: None,
+        task: None,
+    }]);
+    let Some((_store, _server, _handle, _repo)) = fleet_sweep_core(tasks, backend.clone()).await
+    else {
+        return;
+    };
+
+    // Give the sweep ample time to run, then assert it reaped nothing.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        backend.killed().is_empty(),
+        "a marker-bearing container with no identity is not the dispatcher's to reap: {:?}",
         backend.killed()
     );
 }

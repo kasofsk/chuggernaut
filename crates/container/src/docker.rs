@@ -23,14 +23,19 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Label stamped on every container we launch; placement counts by it. The
-/// three built images carry the same key as a `LABEL` (`deploy/prod/
-/// Dockerfile.worker`, `deploy/dev/Dockerfile.agent`, `deploy/prod/
-/// Dockerfile.agent-rust`) so one marker means "Chuggernaut owns this Docker
-/// object" whatever kind it is, and a host `docker system prune --all` can
-/// spare them with `--filter label!=chuggernaut.managed`. Renaming it here
-/// without renaming it there strands the images — `deploy/managed-label.test.sh`
-/// reads this constant and fails on the drift.
+/// Label stamped on every container we launch; placement counts by it and the
+/// §3.6 startup sweeps reap by it. It means exactly *"a job container the
+/// dispatcher owns and may kill or remove"* — nothing weaker.
+///
+/// **This key must never appear on an image.** A container inherits its image's
+/// labels, so every container started from such an image would carry the marker
+/// and be treated as a dispatcher-owned job container: the orphan sweep kills
+/// it, the exited sweep removes it, and while it runs it occupies a phantom
+/// fleet slot. #266 put it on the three built images for prune protection and
+/// the long-lived `chug-worker` daemon inherited it — a dispatcher restart then
+/// reaped the whole worker fleet (#268). Images use `chug.managed` instead, in
+/// the `chug.*` image namespace alongside `chug.git.sha`;
+/// `deploy/managed-label.test.sh` fails if the two keys ever converge.
 const MANAGED_LABEL: &str = "chuggernaut.managed";
 
 /// Identity labels stamped alongside [`MANAGED_LABEL`] so the §3.6 fleet sweep

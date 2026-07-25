@@ -53,14 +53,20 @@ COPY --from=build /out/chuggernaut-channel /usr/local/lib/chuggernaut/chuggernau
 # image so a refreshed daemon runs the refreshed script.
 COPY deploy/prod/worker-refresh.sh /usr/local/lib/chuggernaut/worker-refresh.sh
 RUN chmod +x /usr/local/lib/chuggernaut/worker-refresh.sh
-# Same ownership marker the dispatcher stamps on every container it launches
-# (MANAGED_LABEL, crates/container/src/docker.rs) — one key means "Chuggernaut
-# owns this Docker object", container or image; the two must not drift. A host
-# `docker system prune --all` on a daily timer removes every image not backing a
-# RUNNING container, and nothing runs from the agent images between jobs; the
-# host filters on this label (`--filter label!=chuggernaut.managed`) to spare
-# them. Placed last: a LABEL is its own layer, so it stays clear of the
-# expensive build above. Distinct from the CLI `--label chug.git.sha`, which
-# carries a per-build value and so cannot live in the image definition.
-LABEL chuggernaut.managed="true"
+# Image-ownership marker, in the `chug.*` image namespace next to
+# `chug.git.sha`. A host `docker system prune --all` on a daily timer removes
+# every image not backing a RUNNING container, and nothing runs from the agent
+# images between jobs; the host spares them with `--filter label!=chug.managed`.
+#
+# It must NOT be `chuggernaut.managed` (MANAGED_LABEL,
+# crates/container/src/docker.rs): that key marks a *job container the
+# dispatcher owns and may reap*, and a container inherits its image's labels —
+# so `chug-worker`, running from this image, looked like an orphan job container
+# and the startup sweep killed the fleet on every dispatcher restart (#268).
+# The two namespaces stay disjoint; deploy/managed-label.test.sh enforces it.
+#
+# Placed last: a LABEL is its own layer, so it stays clear of the expensive
+# build above. Distinct from the CLI `--label chug.git.sha`, which carries a
+# per-build value and so cannot live in the image definition.
+LABEL chug.managed="true"
 ENTRYPOINT ["/usr/local/bin/chuggernaut", "worker"]
