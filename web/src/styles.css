@@ -1758,13 +1758,15 @@ table.jobs tbody tr.row-draft td:first-child {
   .jobs-list tbody tr.row-accent td:first-child {
     box-shadow: none;
   }
-  /* The number sits in the gutter the row's left padding opens up. Its width is
-     content-driven, so an unusually long number pushes the title along (and, at
-     the extreme, onto its own line) instead of running into it. */
+  /* The number sits in the gutter the row's left padding opens up, starting
+     0.5rem in from the row edge so the state accent stripe (3px, inset above)
+     doesn't paint over its first digit. Its width is content-driven, so an
+     unusually long number pushes the title along (and, at the extreme, onto its
+     own line) instead of running into it. */
   .jobs-list td.col-num {
     flex: none;
     min-width: 2.6rem;
-    margin-left: -3.2rem;
+    margin-left: -2.7rem;
     padding-right: 0.35rem;
     font-variant-numeric: tabular-nums;
     font-size: var(--fs-sm);
