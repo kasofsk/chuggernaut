@@ -2,6 +2,8 @@
 //! scans (§3.5). Crash states are constructed directly in KV — the task log
 //! is the source of truth the dispatcher recovers from.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use chrono::Utc;
 use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, EvalSubmission, spawn};
 use std::sync::Arc;
@@ -182,6 +184,8 @@ async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> Job {
 /// Running task, and no container exists. Reconciliation treats it as a
 /// failure, retries per `work_retries`, and the job completes.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn restart_recovers_orphaned_running_work_task() {
     // Fresh infra WITHOUT spawning a core yet — the crash state comes first.
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
@@ -317,6 +321,8 @@ async fn restart_recovers_orphaned_running_work_task() {
 /// whose prompt must still carry the prior findings, the last-reviewed SHA, and
 /// the delta — proving nothing depended on the crashed dispatcher's memory.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn restart_rebuilds_re_review_context_from_persisted_records() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -534,6 +540,8 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
 /// distinguishing fact vs `restart_recovers_orphaned_running_work_task` is that
 /// a container id WAS recorded, so the container demonstrably existed.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn restart_infra_loss_relaunches_work_without_burning_budget() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -675,6 +683,8 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
 /// rather than a `work_retries`-exhausted failure. The prior losses are seeded
 /// directly (three restarts compressed into one crash state).
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -816,6 +826,8 @@ async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
 /// failures. Here the container is present-and-exited(1), not gone, so the exit
 /// code is authoritative and the retry advances to attempt 2.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn restart_real_nonzero_exit_still_burns_budget() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -953,6 +965,8 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
 /// now-available fleet accepts it, the *same* task launches and the job lands —
 /// no new attempt, no retry consumed.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn restart_requeues_queued_pending_work_task() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -1316,6 +1330,8 @@ async fn restart_preserves_queue_wait_clock_for_timeout() {
 /// the fleet has capacity the *same* task relaunches through the provider, the
 /// evaluator passes, and the job lands.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn restart_requeues_queued_pending_agent_eval() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -1527,6 +1543,8 @@ async fn restart_requeues_queued_pending_agent_eval() {
 /// This is the other half of the disk-leak fix: task-exit removal covers the
 /// happy path, the sweep covers containers orphaned by a crash before that ran.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -1670,6 +1688,8 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
 /// Escalated so step-2 recovery leaves it (and its tasks) untouched, isolating
 /// the running-container sweep. Returns the store, the spawned core handle, and
 /// the backend (already seeded by the caller before `spawn`).
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn fleet_sweep_core(
     tasks: Vec<Task>,
     backend: Arc<FakeBackend>,
@@ -1943,6 +1963,8 @@ async fn startup_fleet_sweep_tolerates_backend_error() {
 /// on restart. Reconciliation re-enters it into the queue and it lands
 /// (§2.1 WrapUp; §3.6 step 3). No gate was in flight, so the fast path squashes.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn restart_lands_job_orphaned_in_wrapup() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -2070,6 +2092,8 @@ async fn restart_lands_job_orphaned_in_wrapup() {
 /// relaunch the pending publish, which then carries the job to Done. This is
 /// the correctness requirement that killed the first attempt as churn.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn restart_during_wrapup_relaunches_pending_publish() {
     const WEBPUB: &str = r#"
 name: webpub
@@ -2421,6 +2445,8 @@ async fn job_deadline_escalates_once_for_stalled_human_work() {
 /// The submission is now persisted to the task record on arrival and recovered
 /// from the task log on restart.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -2585,6 +2611,8 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
 /// id from the live fleet. On restart the task re-attaches (same container, still
 /// Running) with zero reconcile-failure and zero synthetic -1.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -2732,6 +2760,8 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
 /// fix the re-attach monitor threaded `structured: None`, so a self-deploy — which
 /// always spans its own dispatcher restart — lost its report every time.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn restart_reattach_harvests_command_work_deploy_report() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;

@@ -127,6 +127,7 @@ impl ReadyQueue {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     //! Tier-1 coverage of the queue arithmetic the dispatcher's `launch_queue`
     //! decides with (refactor-plan C4): pure values in, pure values out.
     use super::*;

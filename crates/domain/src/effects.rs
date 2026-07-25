@@ -427,6 +427,7 @@ impl Effect {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     //! Narrow unit coverage per variant group: every `Effect` round-trips
     //! through `serde` (the JSON-Schema-bound vocabulary must serialize) and
     //! reports the port method the module-header table promises. These are pure

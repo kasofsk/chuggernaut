@@ -286,6 +286,8 @@ impl Core {
     /// Re-attempt one queued command launch against the current fleet. Rebuilds
     /// the launch from the persisted task and live exec state, so a restart or a
     /// slot freeing drives it exactly like the initial attempt.
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::expect_used, clippy::too_many_lines)]
     async fn resume_launch(&mut self, q: &QueuedLaunch) -> Result<ResumeOutcome> {
         let (owner, project, seq, task_id) = (&q.owner, &q.project, q.seq, q.task_id);
         let Some(task) = self.tasks.get(owner, project, seq, task_id).await? else {
@@ -471,6 +473,8 @@ impl Core {
     /// Monitor for a command work / wrap-up container: wait, harvest logs,
     /// reclaim the overlay, report the exit. Shared by the initial launch paths
     /// and the queue resume so both behave identically.
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::expect_used)]
     pub(crate) fn spawn_logs_monitor(
         &self,
         owner: &str,
@@ -515,6 +519,8 @@ impl Core {
     /// Monitor for a command evaluator / merge-gate container: like
     /// [`Core::spawn_logs_monitor`] plus extracting `/workspace/eval-result.json`
     /// as the structured verdict (§3.3).
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::expect_used)]
     pub(crate) fn spawn_eval_monitor(
         &self,
         owner: &str,

@@ -879,6 +879,8 @@ pub async fn create_user(
     Ok(true)
 }
 
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::too_many_lines)]
 async fn run_project(store: &NatsStore, cmd: ProjectCmd) -> Result<()> {
     let counters = store.raw_bucket(store::buckets::COUNTERS).await?;
     match cmd {
@@ -983,6 +985,7 @@ async fn run_project(store: &NatsStore, cmd: ProjectCmd) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     /// `one_line` collapses a multi-line tail into a single bounded log line, so

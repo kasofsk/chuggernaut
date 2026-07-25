@@ -50,23 +50,32 @@ that debt is what the pending checks will pin down.
   makes `ui/` presentational-by-construction and keeps fetching in one
   auditable layer (NORTH-STAR §3).
 
-- **Function length: 70 lines.** *(pending: the gate's clippy `-D warnings`
-  doesn't catch this — `clippy::too_many_lines` is allow-by-default and needs a
-  `clippy.toml` with `too-many-lines-threshold = 70` plus an explicit deny;
-  today reviewer-checked, and much of `eval.rs` exceeds it.)* *Why:* a function that fits on one screen can be reviewed as a
-  unit; `eval.rs` reached ~2,900 lines precisely because no numeric limit
-  existed.
+- **Function length: 70 lines.** *(live: `clippy.toml` sets
+  `too-many-lines-threshold = 70` and the root `Cargo.toml`'s
+  `[workspace.lints.clippy]` denies `too_many_lines`, so the gate's clippy
+  `-D warnings` fails on a 71-line function — refactor-plan A4.)* *Why:* a
+  function that fits on one screen can be reviewed as a unit; `eval.rs`
+  reached ~2,900 lines precisely because no numeric limit existed.
 
-- **No `.unwrap()` / `.expect()` outside tests.** *(pending: like function
-  length, `clippy::unwrap_used`/`expect_used` are allow-by-default and need an
-  explicit deny; today reviewer-checked, and non-test domain code still
-  contains such calls to be cleaned up.)* *Why:* the large
-  majority of catastrophic distributed-system failures trace to mishandled
-  errors; in the dispatcher a panic stalls every job in the DAG.
+- **No `.unwrap()` / `.expect()` outside tests.** *(live: the same workspace
+  lint table denies `unwrap_used` and `expect_used`; `#[cfg(test)]` modules
+  and `tests/` targets carry the exemption as an explicit top-of-scope
+  `#![allow]` — refactor-plan A4.)* *Why:* the large majority of catastrophic
+  distributed-system failures trace to mishandled errors; in the dispatcher a
+  panic stalls every job in the DAG.
+
+  Both denies landed as a **ratchet, not a cleanup**: the violations the tree
+  already had wear a site-specific `#[allow]` with a `TODO` naming the Track C
+  ticket that dissolves them, so existing debt is greppable
+  (`git grep 'clippy::too_many_lines'`) while new code cannot add a violation
+  without an explicit, reviewable allow. Crate-level `#![allow]` of these
+  three lints defeats the ratchet and is rejected on sight.
 
 - **Formatting is `rustfmt` / `prettier` defaults.** *(live for Rust:
-  `tasks/ci.sh` runs `cargo fmt --all -- --check` on every merge; pending for
-  web: no `prettier --check` in the gate yet.)* *Why:* zero decisions, zero
+  `tasks/ci.sh` runs `cargo fmt --all -- --check` on every merge. Pending for
+  web: `web/` has `prettier` and an `npm run format:check` script as of A4,
+  but nothing runs it — the gate wiring and the one-time reformat of the 55
+  files that fail it belong to refactor-plan E1.)* *Why:* zero decisions, zero
   diffs about decisions.
 
 ## Tier 2 — mechanical rules a reviewer checks by name

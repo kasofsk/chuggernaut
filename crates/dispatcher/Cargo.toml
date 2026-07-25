@@ -30,3 +30,6 @@ test-utils.workspace = true
 futures.workspace = true
 nkeys.workspace = true
 serde_yaml.workspace = true
+
+[lints]
+workspace = true

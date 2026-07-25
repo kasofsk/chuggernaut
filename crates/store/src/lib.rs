@@ -591,6 +591,7 @@ impl InboundRequest {
 
 #[cfg(test)]
 mod namespace_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::namespaced;
 
     /// #206: the empty (production) prefix must be byte-identical to the raw

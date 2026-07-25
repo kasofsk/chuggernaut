@@ -239,6 +239,8 @@ pub fn decide_enqueue(
 /// Decide one landing step. Pure: every await the old `try_finalize` /
 /// `gate_reduce` interleaved is either a pre-read in the view or an
 /// [`Effect`] whose result re-enters as the next event.
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::too_many_lines)]
 pub fn decide(
     state: MergeGateState,
     view: &LandingView<'_>,
@@ -596,6 +598,7 @@ fn escalate_markers(owner: &str, project: &str, seq: u64, files: &[String]) -> E
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     //! Branch-complete tier-1 coverage (the C2 payoff): every event arm ×
     //! every outcome, pure values in and out — no NATS, no Docker. The
     //! dispatcher's golden traces pin the same decisions end-to-end.

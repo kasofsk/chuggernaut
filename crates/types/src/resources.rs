@@ -66,6 +66,7 @@ pub fn parse_memory(input: &str) -> Result<i64, MemoryParseError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

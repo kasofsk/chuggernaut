@@ -514,6 +514,7 @@ async fn run(program: &str, args: &[&str]) -> Result<(), AuthError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn roles(role: ProjectRole) -> HashMap<String, ProjectRole> {

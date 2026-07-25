@@ -4,6 +4,8 @@
 //! wedged node, and — the whole point of serving it off the core actor — a
 //! stalled tail never blocking the rest of the `req.tasks.>` family.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use dispatcher::core::{Core, CoreConfig, spawn};
 use dispatcher::handlers::spawn_tasks_handler;
 use std::sync::Arc;

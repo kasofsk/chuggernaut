@@ -51,6 +51,7 @@ pub const CONFIG_TEMPLATE: &[(&str, &str)] = &[
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     /// The embedded job type must always parse and validate — a broken

@@ -191,6 +191,7 @@ pub async fn install_pre_receive_hook(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

@@ -226,6 +226,7 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use container::docker::DockerNodeConfig;
     use std::path::PathBuf;

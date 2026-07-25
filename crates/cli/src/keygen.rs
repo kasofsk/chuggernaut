@@ -13,6 +13,8 @@ pub struct KeygenReport {
     pub skipped: Vec<String>,
 }
 
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::too_many_lines, clippy::unwrap_used)]
 pub async fn ensure_all(dir: &Path) -> Result<KeygenReport> {
     tokio::fs::create_dir_all(dir)
         .await

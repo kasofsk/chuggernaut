@@ -3,6 +3,8 @@
 //! `CHUG_` secret filtering. The "GitHub" origin is a second local bare repo
 //! (`FakeOrigin`, `file://` URL); the PR API is a scripted fake.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use async_trait::async_trait;
 use dispatcher::core::{Core, CoreConfig, CoreError, CreateJobRequest, spawn};
 use dispatcher::github::{GithubError, PrInfo, PullRequestApi};
@@ -434,6 +436,8 @@ work:
 /// (integration unmoved); after the PR squash-merges and sync runs, the held
 /// job lands on the reset integration.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn held_job_lands_after_merged_release_sync() {
     let Some(rig) = rig().await else { return };
     let mut core = rig.core().await;

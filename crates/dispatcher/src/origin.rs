@@ -118,6 +118,8 @@ impl Core {
     /// existence and credentials, creates the repo fetched from the origin
     /// with `HEAD` → `integration`, installs the hook, seeds the chuggernaut
     /// config surface (skip-existing), and writes the project record.
+    // TODO(track-C8): dissolved by the named-contexts regroup.
+    #[allow(clippy::too_many_lines)]
     pub async fn link_project(
         &mut self,
         owner: &str,
@@ -229,6 +231,8 @@ impl Core {
     /// push, so a crash mid-release burns `n` (an orphan branch on the origin
     /// is harmless) instead of ever reusing it; `ReleaseState` + hold commit
     /// last, atomically with respect to the single-writer actor.
+    // TODO(track-C8): dissolved by the named-contexts regroup.
+    #[allow(clippy::too_many_lines)]
     pub async fn origin_release(&mut self, owner: &str, project: &str) -> Result<ProjectRecord> {
         let (mut record, link) = self.linked_record(owner, project).await?;
         let slug = format!("{owner}/{project}");

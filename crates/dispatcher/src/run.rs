@@ -96,6 +96,8 @@ pub async fn wait_for_signal() {
 /// Bring up the dispatcher and return the running handle; the process stays
 /// alive as long as the caller holds it and drives shutdown via
 /// [`Dispatcher::shutdown`] on SIGTERM/SIGINT.
+// TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+#[allow(clippy::too_many_lines)]
 pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
     // Operator-mode NATS requires the dispatcher credentials from init
     // (§12.1); without them (open dev server) connect plain.

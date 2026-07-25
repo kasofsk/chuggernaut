@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::process::Command;
 
 /// True when a local Docker daemon answers; pulls the alpine test image.
+// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+#[allow(clippy::expect_used)]
 pub fn docker_available() -> bool {
     let up = Command::new("docker")
         .args(["info", "--format", "{{.ServerVersion}}"])
@@ -44,6 +46,8 @@ pub fn cfg(cmd: &str) -> ContainerLaunchConfig {
 }
 
 /// Remove a test container by its `{node}/{docker_id}` id.
+// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+#[allow(clippy::unwrap_used)]
 pub fn rm(id: &str) {
     let cid = id.split_once('/').unwrap().1;
     let _ = Command::new("docker").args(["rm", "-f", cid]).output();
@@ -51,6 +55,8 @@ pub fn rm(id: &str) {
 
 /// Log capture is the only window into a failed command task. Both streams
 /// must come back; within-stream order holds (cross-stream order is Docker's).
+// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+#[allow(clippy::unwrap_used)]
 pub async fn logs_capture_both_streams_after_exit(be: &dyn ContainerBackend, node: &str) {
     let id = be
         .launch(cfg(
@@ -80,6 +86,8 @@ pub async fn logs_capture_both_streams_after_exit(be: &dyn ContainerBackend, nod
 /// the container is still RUNNING (the whole point of the /output endpoint),
 /// and keep serving the same offsets after exit so a poller never loses the
 /// tail. `follow: false`, so no call ever hangs.
+// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+#[allow(clippy::unwrap_used)]
 pub async fn logs_tail_grows_while_running(be: &dyn ContainerBackend, node: &str) {
     // A line every 100ms, then exit — output accrues across polls.
     let id = be
@@ -142,6 +150,8 @@ pub async fn logs_tail_grows_while_running(be: &dyn ContainerBackend, node: &str
     rm(&id);
 }
 
+// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+#[allow(clippy::unwrap_used)]
 pub async fn exit_codes_round_trip(be: &dyn ContainerBackend) {
     let ok = be.launch(cfg("exit 0")).await.unwrap();
     let fail = be.launch(cfg("exit 7")).await.unwrap();
@@ -153,6 +163,8 @@ pub async fn exit_codes_round_trip(be: &dyn ContainerBackend) {
     rm(&fail);
 }
 
+// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+#[allow(clippy::unwrap_used)]
 pub async fn env_file_injection_and_copy_out(be: &dyn ContainerBackend) {
     let mut config = cfg(
         "cat /chuggernaut/prompt.md > /out.txt && printf %s \"$FOO\" >> /out.txt && \
@@ -185,6 +197,8 @@ pub async fn env_file_injection_and_copy_out(be: &dyn ContainerBackend) {
     rm(&id);
 }
 
+// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+#[allow(clippy::unwrap_used)]
 pub async fn inspect_kill_and_not_found(be: &dyn ContainerBackend, node: &str) {
     let id = be.launch(cfg("sleep 30")).await.unwrap();
     assert_eq!(
@@ -213,6 +227,8 @@ pub async fn inspect_kill_and_not_found(be: &dyn ContainerBackend, node: &str) {
 /// occupancy snapshot (#138) and busyness placement (#153) read, so every
 /// backend — including the NATS-proxied worker fleet — must report it faithfully
 /// (the DockerBackend's own list is unit-covered, but the proxy path was not).
+// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+#[allow(clippy::unwrap_used)]
 pub async fn running_count_reflects_launch_and_exit(be: &dyn ContainerBackend, node: &str) {
     let mut config = cfg("sleep 30");
     config.env.insert("JOB_PROJECT".into(), "acme/api".into());

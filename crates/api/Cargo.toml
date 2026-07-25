@@ -25,3 +25,6 @@ vcs.workspace = true
 test-utils.workspace = true
 tempfile.workspace = true
 tower.workspace = true
+
+[lints]
+workspace = true

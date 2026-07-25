@@ -2,6 +2,8 @@
 //! and the local Docker daemon. The fleet backend must satisfy the same
 //! behavioral contract as DockerBackend, through the proxy.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use container::ContainerBackend;
 use container::PlacementPolicy;
 use container::docker::DockerNodeConfig;
@@ -632,6 +634,8 @@ async fn refresh_rpc_and_quiesce_window() {
 ///    off `ping` and reports "FAILED at cancelled", so a node the deploy itself
 ///    stopped is never diagnosed as a node whose build is broken.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn refresh_cancel_aborts_only_its_own_sha() {
     use store::worker::WorkerRpc;
     use types::worker::{

@@ -108,6 +108,7 @@ fn channel_event(post: &ChannelPost) -> (&'static str, serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::channel_event;
     use crate::core::ChannelPost;
     use types::{AgentReply, ChannelOrigin, ChannelUpdate};

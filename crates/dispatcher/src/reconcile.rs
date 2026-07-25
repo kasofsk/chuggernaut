@@ -165,6 +165,8 @@ impl Core {
     /// including a pre-labels container with no resolvable identity, is reaped.
     ///
     /// Best-effort: a backend hiccup only warns and never blocks startup.
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::too_many_lines)]
     async fn sweep_orphan_running_containers(&self, jobs: &[Job]) {
         let running = match self.backend.list_managed_running().await {
             Ok(cs) => cs,
@@ -317,6 +319,8 @@ impl Core {
         }
     }
 
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::expect_used)]
     async fn recover_work(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         self.ensure_exec_state(owner, project, seq).await?;
         let key = (owner.to_string(), project.to_string(), seq);
@@ -405,6 +409,8 @@ impl Core {
     ///   `refinalize` → `finish_landing` re-launches the publish on the re-merge,
     ///   so a crash in the narrow window before the publish task was written still
     ///   ships it.
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::expect_used)]
     async fn recover_wrapup(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         self.ensure_exec_state(owner, project, seq).await?;
         let key = (owner.to_string(), project.to_string(), seq);
@@ -502,6 +508,8 @@ impl Core {
         }
     }
 
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::expect_used, clippy::too_many_lines)]
     async fn recover_evaluation(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         self.ensure_exec_state(owner, project, seq).await?;
         let key = (owner.to_string(), project.to_string(), seq);
@@ -724,6 +732,8 @@ impl Core {
             .await
     }
 
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::expect_used)]
     async fn retry_or_escalate_failed_work(
         &mut self,
         owner: &str,
@@ -767,6 +777,8 @@ impl Core {
     }
 }
 
+// TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+#[allow(clippy::expect_used)]
 fn split(slug: &str) -> (String, String) {
     let (o, p) = slug.split_once('/').expect("owner/project slug");
     (o.to_string(), p.to_string())

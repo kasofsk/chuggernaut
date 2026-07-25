@@ -110,6 +110,8 @@ pub async fn load_job_type(
 /// Static configuration checks (§2.2): prompt paths exist at `reference`;
 /// declared secrets and vars exist in KV. Pass `check_kv: false` for the
 /// Blocked→Ready re-validation, which re-checks files only.
+// TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+#[allow(clippy::too_many_lines)]
 pub async fn static_errors(
     repo: &RepoManager,
     owner: &str,

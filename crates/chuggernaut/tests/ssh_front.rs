@@ -3,6 +3,8 @@
 //! transport in place of sshd (the transport hands the pack protocol to our
 //! forced command over stdio exactly as sshd would).
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use std::path::{Path, PathBuf};

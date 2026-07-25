@@ -5,6 +5,8 @@
 //! origin credentials are surfaced as presence flags, and the platform view is
 //! admin-gated.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use api::{ApiState, SharedState};
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -72,6 +74,8 @@ async fn get(router: &axum::Router, path: &str, bearer: &str) -> (StatusCode, se
 }
 
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn config_endpoints() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -244,6 +248,8 @@ async fn config_endpoints() {
 /// verbatim, and returns an empty fleet (never a 404) before the dispatcher has
 /// published anything.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn platform_fleet_endpoint() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;

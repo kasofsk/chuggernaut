@@ -1,6 +1,8 @@
 //! Tier-2 integration tests (testing.md): store against a real NATS server
 //! in Docker. Skips when the Docker daemon is unavailable.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use chrono::Utc;
 use store::NatsStore;
 use test_utils::require_nats;
@@ -133,6 +135,8 @@ async fn topology_and_typed_stores_round_trip() {
 /// This asserts a >1MB blob survives the full gzip+age+chunking round trip, and
 /// that a handle without the identity cannot read it back.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn artifacts_round_trip_a_blob_larger_than_max_payload() {
     let server = require_nats!();
     let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
@@ -240,6 +244,8 @@ async fn artifacts_round_trip_a_blob_larger_than_max_payload() {
 /// content type and original size without opening the blob, are scoped per job,
 /// and can be deleted. A larger-than-`max_payload` blob confirms chunking.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn job_attachments_round_trip_list_and_delete() {
     let server = require_nats!();
     let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())

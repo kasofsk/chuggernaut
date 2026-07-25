@@ -254,6 +254,7 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::fleet_node;
 
     /// The occupancy availability rule (spec §3.1), the pure core of

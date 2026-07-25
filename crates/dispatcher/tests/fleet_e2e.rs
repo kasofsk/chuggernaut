@@ -9,6 +9,8 @@
 //! Skips unless both NATS and Docker are available (the `e2e!`/`require_nats!`
 //! guards handle CI-less environments).
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use chrono::Utc;
 use container::docker::DockerNodeConfig;
 use container::{ContainerBackend, ContainerLaunchConfig, PlacementPolicy};
@@ -307,6 +309,8 @@ async fn read_fleet(store: &NatsStore, pred: impl Fn(&FleetStatus) -> bool) -> F
 /// `platform` KV exactly as the api serves it. Rebuilt from the live containers
 /// the worker reports, never from in-memory state (a fresh process has none).
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn occupancy_reflects_worker_rpc_launch_and_exit_through_the_store() {
     let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
         return;

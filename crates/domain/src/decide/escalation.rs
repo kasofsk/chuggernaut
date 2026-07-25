@@ -184,6 +184,7 @@ pub fn escalation_task(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     //! Tier-1 coverage of the whole decision: pure values in, pure values
     //! out, no NATS/Docker. The dispatcher's golden traces pin the same
     //! decision end-to-end (`stall_on_revalidation_failure.yaml`).

@@ -62,6 +62,7 @@ pub const CHANNEL_PROTOCOL_VERSION: u32 = 1;
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

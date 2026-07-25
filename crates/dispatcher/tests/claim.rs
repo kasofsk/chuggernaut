@@ -5,6 +5,8 @@
 //! no-conversion property) with the branch PRESERVED and the Fail notes
 //! handed off (#121), unclaim → normal launch, in-flight claim → 409.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
 use std::sync::Arc;
 use std::time::Duration;

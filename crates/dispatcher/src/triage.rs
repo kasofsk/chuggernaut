@@ -71,6 +71,8 @@ impl Core {
     /// over the job. Guards on Escalated/Stalled and a configured `TRIAGE_IMAGE`;
     /// creates a `TaskPhase::Triage` task and spawns the run. Never changes job
     /// state, so it is not routed through `set_state`/`assert_transition`.
+    // TODO(track-C8): dissolved by the named-contexts regroup.
+    #[allow(clippy::expect_used, clippy::too_many_lines)]
     pub async fn triage_job(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let job = self.must_get(owner, project, seq)?.clone();
         // §1.2: triage is an operator aid for the two intervention states.

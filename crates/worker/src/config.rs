@@ -149,6 +149,7 @@ pub fn is_subject_safe(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

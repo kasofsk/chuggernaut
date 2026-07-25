@@ -65,6 +65,8 @@ impl Core {
     /// Result-carrying arms hand their port's answer back so the calling shim
     /// can re-enter its decider with it as the next event — the effect stays
     /// fire-and-forget from the decider's side.
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::too_many_lines)]
     pub async fn interpret(&mut self, effect: Effect) -> Result<Outcome> {
         match effect {
             // --- Job records & graph ---
@@ -428,6 +430,7 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     //! The vocabulary ↔ port-type mapping is the one piece of interpreter
     //! logic that is pure, so it is unit-tested here; the port dispatch itself
     //! is exercised end-to-end by the Tier-2 tests.

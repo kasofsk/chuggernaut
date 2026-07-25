@@ -36,6 +36,8 @@ pub enum SchemaKind {
     Defaults,
 }
 
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::expect_used)]
 pub fn generate(kind: SchemaKind) -> String {
     let schema = match kind {
         SchemaKind::JobType => schemars::schema_for!(types::JobType),
@@ -53,6 +55,7 @@ pub fn run(args: SchemaArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     /// The committed schemas (schemas/) must match what the current types

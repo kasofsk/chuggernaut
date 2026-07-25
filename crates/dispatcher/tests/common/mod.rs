@@ -6,6 +6,8 @@
 //! the production crate — the recorder itself ([`dispatcher::trace`]) needs only
 //! `serde`.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use dispatcher::trace::TraceSink;
 
 /// Directory holding the committed golden-trace fixtures, resolved from the

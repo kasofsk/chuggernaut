@@ -191,6 +191,8 @@ impl Bucket {
     /// the watch is created (so no put is lost in the gap). `watch_with_history`
     /// is deliberately avoided: it terminates immediately when no key matches at
     /// creation, which is exactly the wait-for-a-future-key case.
+    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+    #[allow(clippy::expect_used)]
     pub async fn watch(&self, key: &str) -> Result<KvWatch> {
         use async_nats::jetstream::kv::Operation;
         use futures::StreamExt as _;

@@ -2,6 +2,8 @@
 //! submit over req.work.submit / req.eval.submit exactly like the channel MCP
 //! binary does — bounded-retry request until the dispatcher acks.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use dispatcher::core::{Core, CoreConfig, CreateJobRequest, spawn};
 use dispatcher::handlers::spawn_container_handlers;
 use std::sync::Arc;
@@ -24,6 +26,8 @@ eval:
 "#;
 
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn submits_flow_over_nats_to_the_core() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -180,6 +184,8 @@ async fn submits_flow_over_nats_to_the_core() {
 /// `onerror`, an external `<img>`/CSS `@import` fetch) survives ingest untouched
 /// and, being presentational, never leaks into the squash body.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -393,6 +399,8 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
 /// latest-value cache §6.2's `GET .../status` reads, and publishes an event
 /// that *is* the history.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;

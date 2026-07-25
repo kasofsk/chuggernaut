@@ -92,6 +92,7 @@ pub struct DeployReport {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     /// A full report — envelope plus a mix of ok/failed/skipped legs —

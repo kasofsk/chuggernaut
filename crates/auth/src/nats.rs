@@ -334,6 +334,7 @@ pub fn triage_container_permissions(owner: &str, project: &str, seq: u64) -> Per
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn decode_segment(seg: &str) -> Value {

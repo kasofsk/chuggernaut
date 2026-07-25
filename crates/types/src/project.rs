@@ -83,6 +83,7 @@ pub fn github_repo_from_url(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

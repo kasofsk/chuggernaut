@@ -72,6 +72,7 @@ pub fn assert_transition(from: JobState, to: JobState) -> Result<(), InvalidTran
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use types::JobState::*;
 

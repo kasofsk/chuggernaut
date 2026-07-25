@@ -368,6 +368,7 @@ fn admitted_record(job: &Job, to: JobState, head: &str, now: DateTime<Utc>) -> J
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     //! Tier-1 coverage of every Ready-phase branch: pure values in, pure values
     //! out, no NATS/Docker (`testing.md` tier 1). The dispatcher's golden traces
     //! pin the same decisions end-to-end (`release_block_unblock.yaml`,

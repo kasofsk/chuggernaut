@@ -2,12 +2,16 @@
 //! a dispatcher-side responder through real NATS (Docker). Skips without
 //! Docker.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::process::Stdio;
 use std::time::Duration;
 use store::NatsStore;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn binary_speaks_mcp_and_submits_over_nats() {
     let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
         return;

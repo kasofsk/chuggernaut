@@ -1047,6 +1047,7 @@ fn split_project(job: &Job) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     //! Tier-1 coverage of every evaluation branch: pure values in, pure values
     //! out, no NATS/Docker (testing.md tier 1). This is C5's payoff — the
     //! reduce's budgets, the evidence-free relaunch bound and the staged

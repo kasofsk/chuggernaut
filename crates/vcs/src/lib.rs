@@ -231,6 +231,8 @@ impl RepoManager {
 
     /// Write `hooks/pre-receive` into a bare repo (body from `auth::ssh`,
     /// §5.2/§12.2), mode 0755.
+    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+    #[allow(clippy::unwrap_used)]
     pub async fn install_pre_receive_hook(
         &self,
         owner: &str,
@@ -560,6 +562,8 @@ impl RepoManager {
     /// commit whose change already landed on `new_base` as an empty commit
     /// rather than stopping — that is not a conflict. Only a real content
     /// conflict (`--diff-filter=U`) yields [`RebaseOutcome::Conflict`].
+    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+    #[allow(clippy::too_many_lines)]
     pub async fn rebase_branch(
         &self,
         owner: &str,
@@ -1346,6 +1350,8 @@ impl RepoManager {
         self.exec_with(repo, args, stdin, None, env).await
     }
 
+    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+    #[allow(clippy::expect_used)]
     async fn exec_with(
         &self,
         repo: &Path,

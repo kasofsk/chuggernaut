@@ -6,6 +6,8 @@
 //! green solo and collide on the communal gate server, resurrecting exactly
 //! the cross-test interference #206 eliminated.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::path::{Path, PathBuf};
 
 /// Substrings that mark a direct-NATS bypass in TEST code. `async_nats` is

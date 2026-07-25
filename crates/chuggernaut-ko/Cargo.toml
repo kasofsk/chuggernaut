@@ -16,3 +16,6 @@ serde_json.workspace = true
 tokio.workspace = true
 
 # Will add: an MCP server library (stdio transport)
+
+[lints]
+workspace = true

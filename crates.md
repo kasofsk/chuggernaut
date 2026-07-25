@@ -198,7 +198,7 @@ chuggernaut-channel / chuggernaut-ko / chuggernaut-harness (bins) ► types, sto
 test-utils ► types, store, container (fake backend), agent (fake provider), vcs (temp repos)
 ```
 
-Invariants worth enforcing (enforced in `test-utils/tests/boundary_guard.rs` over `cargo metadata`, refactor-plan A3): only `store` depends on `async-nats`; only `container` and `agent` know about containers; `api` never depends on `dispatcher` (they communicate exclusively over NATS); `types` has no async runtime dependency; `chuggernaut-domain` resolves neither `tokio` nor `async-nats` (nor `store`/`vcs`/`auth`) anywhere in its subtree, plus a zero-`.await` sweep over its sources.
+Invariants worth enforcing (enforced in `test-utils/tests/boundary_guard.rs` over `cargo metadata`, refactor-plan A3): only `store` depends on `async-nats`; only `container` and `agent` know about containers; `api` never depends on `dispatcher` (they communicate exclusively over NATS); `types` has no async runtime dependency; `chuggernaut-domain` resolves neither `tokio` nor `async-nats` (nor `store`/`vcs`/`auth`) anywhere in its subtree, plus a zero-`.await` sweep over its sources. The sibling `test-utils/tests/lint_guard.rs` (refactor-plan A4) guards the other half of STYLE.md Tier 1 — the `clippy.toml` line limit, the `[workspace.lints.clippy]` denies, and every member's `lints.workspace = true` opt-in, without which a new crate would sit silently outside the clippy gate.
 
 ## Not crates
 

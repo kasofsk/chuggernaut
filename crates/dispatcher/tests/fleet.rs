@@ -5,6 +5,8 @@
 //! reports, so a fresh (restarted) dispatcher reports true usage, not a stale
 //! in-memory count. Crash/occupancy states are constructed directly in KV.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use chrono::Utc;
 use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
 use std::sync::Arc;

@@ -6,6 +6,8 @@
 //! back to Frozen (re-batchable), the eval-union collision error, and the
 //! single rework budget shared across the whole batch.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use dispatcher::core::{
     Core, CoreConfig, CoreError, CoreHandle, CreateJobRequest, EvalSubmission, spawn,
 };
@@ -720,6 +722,8 @@ async fn draft_batch_stages_without_absorbing() {
 /// batch-of-batch all reject and leave the list unchanged) and emitting
 /// `job-updated` for the changes that stick.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn draft_batch_edit_members_validates_adds() {
     let Some(rig) = rig().await else { return };
 

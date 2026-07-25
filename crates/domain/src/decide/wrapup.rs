@@ -382,6 +382,7 @@ fn decide_completing(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     //! Tier-1 coverage of every WrapUp branch: pure values in, pure values
     //! out, no NATS/Docker. The dispatcher's golden traces pin the same
     //! decisions end-to-end (`work_eval_merge_no_gate.yaml` and the gate

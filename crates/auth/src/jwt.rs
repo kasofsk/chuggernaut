@@ -95,6 +95,7 @@ pub fn token_from_cookie_header(header: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     // Test-only RSA keypair generated once with:

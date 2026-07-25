@@ -45,6 +45,7 @@ fn default_available() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn sample() -> DispatcherConfigSnapshot {
@@ -279,6 +280,7 @@ pub struct SlotOccupant {
 
 #[cfg(test)]
 mod fleet_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

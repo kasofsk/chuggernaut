@@ -3,6 +3,8 @@
 //! unblock-with-revalidation, escalation, and revoke cascade — everything
 //! before Ready→Work.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use dispatcher::core::{Core, CoreConfig, CoreError, CreateJobRequest};
 use std::sync::Arc;
 use store::NatsStore;
@@ -300,6 +302,8 @@ async fn unblock_revalidation_failure_stalls_with_human_task() {
 /// Ready-transition re-validation — reaching Ready once the type parses again.
 /// The dedicated state is what makes Resolve→Evaluation impossible here.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
     let Some((_server, store, repo, mut core)) = setup().await else {
         return;

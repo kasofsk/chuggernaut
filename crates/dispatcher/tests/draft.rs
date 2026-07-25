@@ -5,6 +5,8 @@
 //! staying Blocked until the draft releases and completes, and claim rejected
 //! on a Draft.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use dispatcher::core::{
     Core, CoreConfig, CoreError, CoreHandle, CreateJobRequest, UpdateJobRequest, spawn,
 };

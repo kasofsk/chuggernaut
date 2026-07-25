@@ -135,6 +135,7 @@ impl TraceSink {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     //! The recorder is plain in-memory data (no NATS/Docker), so its grouping
     //! and no-op-without-a-step contract are unit-testable directly.
     use super::*;

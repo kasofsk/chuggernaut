@@ -228,6 +228,8 @@ impl FleetBackend {
     /// lock, then release it so callers do their awaits lock-free. Registration
     /// (the sole writer, the single-threaded dispatcher actor) may append or
     /// mutate a node in between, which a reader simply sees on its next snapshot.
+    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+    #[allow(clippy::unwrap_used)]
     fn snapshot(&self) -> Vec<Arc<FleetNode>> {
         self.nodes.read().unwrap().clone()
     }
@@ -286,6 +288,8 @@ impl FleetBackend {
 
     /// Ping a worker node; updates in_service and returns its live load
     /// (running + free slots) when live.
+    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+    #[allow(clippy::unwrap_used)]
     async fn probe_worker(&self, node: &FleetNode) -> Option<NodeLoad> {
         let NodeHandle::Worker {
             rpc,
@@ -443,6 +447,8 @@ impl FleetBackend {
     /// version)` as of the last successful ping. `None` for docker-endpoint
     /// nodes (they carry no chuggernaut version) and for workers that have not
     /// answered yet. Lets the UI show fleet versions and spot deploy drift.
+    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+    #[allow(clippy::unwrap_used)]
     pub fn node_versions(&self) -> Vec<(String, Option<String>)> {
         self.snapshot()
             .iter()
@@ -459,6 +465,8 @@ impl FleetBackend {
     /// Per-node last self-refresh outcome for the platform snapshot (ticket
     /// #187): `(name, outcome)` as of the last successful ping. `None` for
     /// docker-endpoint nodes and workers that have not reported a refresh.
+    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+    #[allow(clippy::unwrap_used)]
     pub fn node_refreshes(&self) -> Vec<(String, Option<RefreshOutcome>)> {
         self.snapshot()
             .iter()
@@ -737,6 +745,8 @@ impl ContainerBackend for FleetBackend {
     /// Returns whether fleet membership or capacity changed (a join, or a slot
     /// change) so the caller logs a join and re-drains the launch queue only when
     /// it matters. Runs on the single-writer actor — the fleet's only writer.
+    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+    #[allow(clippy::unwrap_used)]
     fn register_worker(&self, name: &str, slots: u32, version: Option<String>) -> bool {
         let mut nodes = self.nodes.write().unwrap();
         let shape: Vec<(&str, bool)> = nodes
@@ -845,6 +855,7 @@ pub type SharedFleet = Arc<FleetBackend>;
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     //! Fleet-level startup capacity (spec §3.1/§3.6) — the pure decision, no
     //! docker daemon or NATS needed. `(reachable, slots)` faithfully models each
     //! node's boot probe regardless of transport (docker or worker).

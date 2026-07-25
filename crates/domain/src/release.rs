@@ -148,6 +148,7 @@ pub fn with_job_evaluators(job_type: JobType, job: &Job) -> Result<JobType, Vec<
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use chrono::Utc;
     use types::{Evaluator, EvaluatorType};

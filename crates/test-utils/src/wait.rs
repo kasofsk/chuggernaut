@@ -59,6 +59,8 @@ pub async fn job_state(
 /// Wait until job `seq` satisfies `pred`, returning the record. Watches the job
 /// key: an initial read (taken after the watch is created, so no put is lost)
 /// then every delivered revision, bounded by [`DEFAULT_TIMEOUT`].
+// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+#[allow(clippy::unwrap_used)]
 pub async fn job_where(
     store: &NatsStore,
     owner: &str,
@@ -79,6 +81,8 @@ pub async fn job_where(
 /// Wait until some task of job `seq` satisfies `pred`, returning it. Watches the
 /// job's task keys (initial scan + every delivered revision), so a transient
 /// task state is caught rather than raced past.
+// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+#[allow(clippy::unwrap_used)]
 pub async fn task_where(
     store: &NatsStore,
     owner: &str,

@@ -92,6 +92,8 @@ impl Core {
     /// each of the three rework callers (§3.3), stamped onto the cycle's Work
     /// tasks so the record self-explains.
     #[allow(clippy::too_many_arguments)]
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn enter_work(
         &mut self,
         owner: &str,
@@ -278,6 +280,8 @@ impl Core {
     /// set by the crash-recovery paths when the job branch was kept (not reset)
     /// because a previous attempt left commits on it; it injects a resume note
     /// into the agent prompt (§3.2 crash recovery).
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used, clippy::too_many_lines)]
     pub(crate) async fn launch_work_task(
         &mut self,
         owner: &str,
@@ -605,6 +609,8 @@ impl Core {
     /// The reason is single-wrapped: `container {backend_error}` reads e.g.
     /// `container launch failed: invalid memory limit "5g"` — no double
     /// `launch failed: launch failed:` and no spurious `job not found:` prefix.
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used)]
     pub(crate) fn report_launch_failure(
         &self,
         owner: &str,
@@ -702,6 +708,8 @@ impl Core {
         }
     }
 
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used, clippy::too_many_lines)]
     async fn on_work_exited(
         &mut self,
         owner: &str,
@@ -901,6 +909,8 @@ impl Core {
     /// relaunch the next attempt (recovering the branch per §3.2 crash
     /// recovery), or escalate `work_retries_exhausted` when the budget is spent.
     /// Used by a nonzero container exit and the exit-0 empty-output guard alike.
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used)]
     async fn retry_or_escalate_work(
         &mut self,
         owner: &str,
@@ -949,6 +959,8 @@ impl Core {
     /// [`INFRA_RELAUNCH_CAP`] per task (this cycle, this evaluator) so a
     /// genuinely-vanishing environment still escalates with reason `infra_loss`
     /// instead of looping forever.
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used, clippy::too_many_lines, clippy::unwrap_used)]
     async fn on_infra_loss(
         &mut self,
         owner: &str,
@@ -1135,6 +1147,8 @@ impl Core {
     /// Operator resolution of a Pending Human task (§1.2): human work tasks,
     /// human evaluator tasks, and escalation tasks — the valid `kind` depends
     /// on the job state, wrong kinds are rejected (the API layer's 400).
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn handle_resolve_task(
         &mut self,
         owner: &str,
@@ -1434,6 +1448,8 @@ impl Core {
     /// Re-run Work after a work-phase escalation (#141, pre-existing behavior):
     /// new work task, same cycle, attempt++, branch used AS-IS — the operator
     /// may have modified it. `work_retries` budget is not reset.
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used)]
     async fn retry_work(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
         let cycle = self.active.get(&key).expect("exec state").cycle;
@@ -1621,6 +1637,8 @@ impl Core {
     /// §3.6 loss) reuses the same attempt number across the lineage. Command (ci)
     /// retries are deterministic scripts and never call this.
     #[allow(clippy::too_many_arguments)]
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used)]
     pub(crate) async fn predecessor_block(
         &self,
         owner: &str,
@@ -1720,6 +1738,8 @@ impl Core {
     }
 
     #[allow(clippy::too_many_arguments)]
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn container_env(
         &self,
         owner: &str,
@@ -1944,6 +1964,8 @@ impl Core {
 
     /// §7.4 per-job SSH credential as injected files (work rw, eval ro).
     /// Empty when the SSH front isn't configured (file:// dev repos, tests).
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used)]
     pub(crate) async fn ssh_credential_files(
         &self,
         owner: &str,
@@ -2327,6 +2349,7 @@ pub(crate) fn eval_image(job_type: &JobType, evaluator: &Evaluator) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     //! Unit coverage for the §3.2 crash-recovery branch decision — the pure
     //! recover-or-reset lookup over a real bare repo. The end-to-end resume
     //! (crash-after-push → retry recovers + prompt notes it) is exercised in

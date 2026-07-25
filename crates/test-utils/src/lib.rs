@@ -119,11 +119,15 @@ impl FakeBackend {
     }
 
     /// Queue exit codes for upcoming launches (consumed in order).
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn script_exits(&self, codes: impl IntoIterator<Item = i32>) {
         self.state.lock().unwrap().scripted_exits.extend(codes);
     }
 
     /// Make a file available to `copy_file` (e.g. `/workspace/eval-result.json`).
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn put_file(&self, path: &str, contents: impl Into<Vec<u8>>) {
         self.state
             .lock()
@@ -134,22 +138,30 @@ impl FakeBackend {
 
     /// Script what `logs` returns for every container (and what `logs_tail`
     /// slices its cursor pages from).
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn put_logs(&self, contents: impl Into<Vec<u8>>) {
         self.state.lock().unwrap().logs = contents.into();
     }
 
     /// Make `logs_tail` sleep before returning — simulate a slow/wedged node so
     /// a test can prove that one stalled output read never blocks other reads.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn stall_logs_tail(&self, delay: Duration) {
         self.state.lock().unwrap().logs_tail_stall = Some(delay);
     }
 
     /// Make `logs_tail` fail with `BackendError::Unavailable` — an unreachable
     /// node, so the output handler must reply with an error envelope.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn fail_logs_tail(&self, reason: impl Into<String>) {
         self.state.lock().unwrap().logs_tail_fail = Some(reason.into());
     }
 
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn launches(&self) -> Vec<ContainerLaunchConfig> {
         self.state.lock().unwrap().launches.clone()
     }
@@ -158,6 +170,8 @@ impl FakeBackend {
     /// awaited before `launch` returns the container id — the window during
     /// which the "container" is running (e.g. move `main` while an evaluation
     /// container runs, so the wrap-up merge gate fires).
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn on_launch<F, Fut>(&self, hook: F)
     where
         F: FnOnce(ContainerLaunchConfig) -> Fut + Send + 'static,
@@ -174,6 +188,8 @@ impl FakeBackend {
     /// `BackendError::Launch(reason)` — the backend refusing a container before
     /// it ever starts (bad image, invalid resource limit, node pressure). A
     /// rejected launch produces no container and consumes no scripted exit.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn fail_launch_if<F>(&self, f: F)
     where
         F: Fn(&ContainerLaunchConfig) -> Option<String> + Send + 'static,
@@ -186,6 +202,8 @@ impl FakeBackend {
     /// signal the dispatcher queues on (spec §3.5) instead of failing the task.
     /// `f` returning `Some(reason)` refuses that launch; flipping it (via shared
     /// state a test captures) frees capacity so the queued launch can proceed.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn fail_launch_no_capacity_if<F>(&self, f: F)
     where
         F: Fn(&ContainerLaunchConfig) -> Option<String> + Send + 'static,
@@ -198,6 +216,8 @@ impl FakeBackend {
     /// reports `Exited { exit_code }` and `wait` returns it — a container that
     /// ran and exited before this (restarted) dispatcher observed it, as restart
     /// reconciliation (§3.6) would find one.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn seed_exited(&self, id: impl Into<ContainerId>, exit_code: i32) {
         self.state
             .lock()
@@ -210,6 +230,8 @@ impl FakeBackend {
     /// blocks (as a live container would). Lets a test exercise the §3.6 restart
     /// re-attach path, where reconciliation finds a Running task's container
     /// still alive and resumes monitoring it rather than failing the task.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn seed_running(&self, ids: impl IntoIterator<Item = ContainerId>) {
         self.state.lock().unwrap().running.extend(ids);
     }
@@ -219,6 +241,8 @@ impl FakeBackend {
     /// up to the exit. Lets a test drive the §3.6 re-attach monitor through to
     /// its harvest-at-exit (the #187 deploy report) without racing the
     /// reconcile-time `inspect`.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn finish_running(&self, id: impl Into<ContainerId>, exit_code: i32) {
         self.state
             .lock()
@@ -229,6 +253,8 @@ impl FakeBackend {
 
     /// Seed the ids that `list_managed_exited` reports — the exited managed
     /// containers a startup sweep should consider.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn seed_managed_exited(&self, ids: impl IntoIterator<Item = ContainerId>) {
         self.state.lock().unwrap().managed_exited.extend(ids);
     }
@@ -236,6 +262,8 @@ impl FakeBackend {
     /// Seed the running managed containers `list_managed_running` reports — the
     /// §3.6 fleet-sweep set. Each carries the `(project, job, task)` identity a
     /// real container's labels would (or `None`, for a pre-labels orphan).
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn seed_managed_running(&self, containers: impl IntoIterator<Item = RunningContainer>) {
         self.state
             .lock()
@@ -247,34 +275,46 @@ impl FakeBackend {
     /// Replace the running managed containers `list_managed_running` reports.
     /// Unlike [`seed_managed_running`] (which appends), this sets the whole set —
     /// the way to simulate a container exiting (drop it) after a launch.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn set_managed_running(&self, containers: impl IntoIterator<Item = RunningContainer>) {
         self.state.lock().unwrap().managed_running = containers.into_iter().collect();
     }
 
     /// Make `list_managed_running` fail — an unreachable node the fleet sweep
     /// must tolerate (log, continue) without crashing the dispatcher.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn fail_list_managed_running(&self, reason: impl Into<String>) {
         self.state.lock().unwrap().list_running_fail = Some(reason.into());
     }
 
     /// Container ids passed to `remove`, in call order.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn removed(&self) -> Vec<ContainerId> {
         self.state.lock().unwrap().removed.clone()
     }
 
     /// Container ids passed to `kill`, in call order — the §3.6 fleet-sweep
     /// reaps and any explicit gate/supersede kills.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn killed(&self) -> Vec<ContainerId> {
         self.state.lock().unwrap().killed.clone()
     }
 
     /// Announces the backend received via `register_worker`, in call order
     /// (spec §3.1 dynamic registration).
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn registered(&self) -> Vec<(String, u32, Option<String>)> {
         self.state.lock().unwrap().registered.clone()
     }
 
     /// Workers the backend was told to deregister via `mark_worker_unschedulable`.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn unschedulable(&self) -> Vec<String> {
         self.state.lock().unwrap().unschedulable.clone()
     }
@@ -282,6 +322,8 @@ impl FakeBackend {
     /// Model a non-fleet backend (single-node Docker): `supports_dynamic_workers`
     /// then reports `false`, so the dispatcher drops stray worker announces
     /// instead of inserting a phantom node into the roster.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn disable_dynamic_workers(&self) {
         self.state.lock().unwrap().no_dynamic_workers = true;
     }
@@ -290,6 +332,8 @@ impl FakeBackend {
     /// a real backend fills from worker pings (spec §3.1, ticket #187). Lets a
     /// test prove a ping-reported refresh outcome flows into the published
     /// `FleetStatus`.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn set_fleet_status(&self, statuses: impl IntoIterator<Item = NodeStatus>) {
         self.state.lock().unwrap().fleet_status = statuses.into_iter().collect();
     }
@@ -297,6 +341,8 @@ impl FakeBackend {
 
 #[async_trait]
 impl ContainerBackend for FakeBackend {
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     async fn launch(&self, config: ContainerLaunchConfig) -> Result<ContainerId, BackendError> {
         // Rejected before allocating an id or recording the launch: a refused
         // container never exists, exactly as a real backend refusal.
@@ -332,6 +378,8 @@ impl ContainerBackend for FakeBackend {
         Ok(id)
     }
 
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     async fn wait(&self, id: &ContainerId) -> Result<i32, BackendError> {
         enum Wait {
             Exited(i32),
@@ -363,11 +411,15 @@ impl ContainerBackend for FakeBackend {
         }
     }
 
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     async fn kill(&self, id: &ContainerId) -> Result<(), BackendError> {
         self.state.lock().unwrap().killed.push(id.clone());
         Ok(())
     }
 
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     async fn inspect(&self, id: &ContainerId) -> Result<Option<ContainerStatus>, BackendError> {
         let st = self.state.lock().unwrap();
         if let Some(&exit_code) = st.exits.get(id) {
@@ -379,6 +431,8 @@ impl ContainerBackend for FakeBackend {
         }
     }
 
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     async fn copy_file(
         &self,
         _id: &ContainerId,
@@ -387,10 +441,14 @@ impl ContainerBackend for FakeBackend {
         Ok(self.state.lock().unwrap().files.get(path).cloned())
     }
 
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     async fn logs(&self, _id: &ContainerId) -> Result<Vec<u8>, BackendError> {
         Ok(self.state.lock().unwrap().logs.clone())
     }
 
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     async fn logs_tail(&self, _id: &ContainerId, since: u64) -> Result<LogTail, BackendError> {
         let (logs, stall, fail) = {
             let st = self.state.lock().unwrap();
@@ -409,6 +467,8 @@ impl ContainerBackend for FakeBackend {
         Ok(LogTail::slice(&logs, since))
     }
 
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     async fn remove(&self, id: &ContainerId) -> Result<(), BackendError> {
         let mut st = self.state.lock().unwrap();
         // Drop it from the launch bookkeeping so `inspect`/`wait` afterward
@@ -421,10 +481,14 @@ impl ContainerBackend for FakeBackend {
         Ok(())
     }
 
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     async fn list_managed_exited(&self) -> Result<Vec<ContainerId>, BackendError> {
         Ok(self.state.lock().unwrap().managed_exited.clone())
     }
 
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     async fn list_managed_running(&self) -> Result<Vec<RunningContainer>, BackendError> {
         let st = self.state.lock().unwrap();
         if let Some(reason) = &st.list_running_fail {
@@ -437,6 +501,8 @@ impl ContainerBackend for FakeBackend {
     /// as the fake's stand-in for capacity appearing, clear any `launch_fail` so
     /// a launch the fleet was refusing for NoCapacity now proceeds. Returns
     /// `true` (membership/capacity changed) so the caller re-drains the queue.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     fn register_worker(&self, name: &str, slots: u32, version: Option<String>) -> bool {
         let mut st = self.state.lock().unwrap();
         st.registered.push((name.to_string(), slots, version));
@@ -449,10 +515,14 @@ impl ContainerBackend for FakeBackend {
     /// matching the real [`FleetBackend`] and letting the dispatcher apply its
     /// roster mutation. [`FakeBackend::disable_dynamic_workers`] flips it off to
     /// model a non-fleet backend.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     fn supports_dynamic_workers(&self) -> bool {
         !self.state.lock().unwrap().no_dynamic_workers
     }
 
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     fn fleet_status(&self) -> Vec<NodeStatus> {
         self.state.lock().unwrap().fleet_status.clone()
     }
@@ -461,6 +531,8 @@ impl ContainerBackend for FakeBackend {
     /// fake's stand-in for the announced capacity vanishing, refuse new launches
     /// with NoCapacity again — so a test sees new placements queue while any
     /// already-running container (seeded in `managed_running`) stays tracked.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     fn mark_worker_unschedulable(&self, name: &str) {
         let mut st = self.state.lock().unwrap();
         st.unschedulable.push(name.to_string());
@@ -523,12 +595,16 @@ impl FakeProvider {
         }
     }
 
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn script_exits(&self, codes: impl IntoIterator<Item = i32>) {
         self.state.lock().unwrap().scripted_exits.extend(codes);
     }
 
     /// Queue a side-effect hook for the next un-hooked run. The hook is awaited
     /// before the run returns its exit code.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn on_run<F, Fut>(&self, hook: F)
     where
         F: FnOnce(AgentRunConfig) -> Fut + Send + 'static,
@@ -541,6 +617,8 @@ impl FakeProvider {
             .push(Some(Box::new(move |cfg| Box::pin(hook(cfg)))));
     }
 
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     pub fn runs(&self) -> Vec<AgentRunConfig> {
         self.state.lock().unwrap().runs.clone()
     }
@@ -548,6 +626,8 @@ impl FakeProvider {
 
 #[async_trait]
 impl AgentProvider for FakeProvider {
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
     async fn run(
         &self,
         config: AgentRunConfig,
@@ -607,6 +687,7 @@ impl AgentProvider for FakeProvider {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::collections::HashMap;
 

@@ -1,6 +1,8 @@
 //! Tier-2 integration tests for RepoManager: real git, temp bare repos,
 //! WorkClone as the simulated agent (testing.md).
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use test_utils::repo::TempRepo;
 use types::{Job, JobState};
 use vcs::{BlobEncoding, ConflictRebaseOutcome, MergeOutcome, RebaseOutcome};

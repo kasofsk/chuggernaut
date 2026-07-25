@@ -136,6 +136,8 @@ impl NatsTestServer {
         Self::start(Some(config), false).await
     }
 
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::too_many_lines)]
     async fn start(config: Option<&str>, shared: bool) -> Option<Self> {
         // External-URL override — NAMESPACED (shared) callers only. The full
         // gate (tasks/ci.sh) starts ONE communal server and points every

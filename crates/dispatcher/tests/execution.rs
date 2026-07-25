@@ -3,6 +3,8 @@
 //! happy path (agent commits → eval passes → squash-merge → Done), work retry
 //! exhaustion, and the eval-failure rework loop with §4.3 context injection.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use dispatcher::core::{
     Core, CoreConfig, CoreHandle, CreateJobRequest, EvalSubmission, WorkSubmission, spawn,
 };
@@ -723,6 +725,8 @@ async fn work_command_launch_failure_retries_then_escalates() {
 }
 
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn eval_failure_reworks_with_context_then_passes() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
@@ -815,6 +819,8 @@ async fn eval_failure_reworks_with_context_then_passes() {
 /// its prior verdict/findings, the SHA it last reviewed, the delta diff since,
 /// and a job-history digest — while the cycle-1 review is unchanged.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn cycle2_evaluator_gets_prior_review_context() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
@@ -914,6 +920,8 @@ async fn cycle2_evaluator_gets_prior_review_context() {
 /// (the branch was rebased onto a moved base), the re-review block says so and
 /// omits a bogus delta rather than diffing across the rebase.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn cycle2_evaluator_after_rebase_gets_full_diff_note() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
@@ -1009,6 +1017,8 @@ async fn cycle2_evaluator_after_rebase_gets_full_diff_note() {
 /// never runs that cycle; on cycle 2 `review` carries re-review context while
 /// `review2`, appearing for the first time, does not.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn evaluator_first_appearing_on_cycle2_gets_no_context() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
@@ -1674,6 +1684,8 @@ async fn queued_eval_escalates_after_max_wait_not_retry_exhaustion() {
 /// relaunches the *same* task, which passes → the job lands. The command work
 /// took the earlier slot, so only the eval — the finishing-phase launch — waits.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn agent_eval_queues_on_no_capacity_then_launches_when_freed() {
     // The provider launches through the backend (artifacts capture on), so an
     // agent eval's launch actually reaches NoCapacity — mirroring ClaudeProvider.
@@ -1833,6 +1845,8 @@ async fn agent_eval_escalates_after_max_wait_not_retry_exhaustion() {
 /// (never restamped), exactly one eval task runs at attempt 1 (no `eval_retries`
 /// burned), and the resumed record drops its `QueuedForCapacity` badge.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn agent_eval_redefer_preserves_queue_time_and_burns_no_retries() {
     let (identity, _public) = store::secrets::generate_age_keypair();
     let Some(rig) = rig_full(Some(identity), None).await else {
@@ -2102,6 +2116,8 @@ work:
 /// Full launch wiring (§4.2/§8.2): the channel MCP binary is injected with
 /// its config entry, and declared secrets arrive age-decrypted in the env.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -2270,6 +2286,8 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
 /// died with its container: the provider dropped the container id, so nothing
 /// could name the file even though the container itself was never removed.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn agent_run_captures_transcript_logs_and_measured_usage() {
     let (identity, _public) = store::secrets::generate_age_keypair();
     let Some(rig) = rig_with_artifacts(Some(identity.clone())).await else {
@@ -3754,6 +3772,8 @@ async fn no_output_command_eval_retries_without_burning_retries_then_escalates()
 /// discarded. (This is the prod scenario the #198 hotfix protects: a failing
 /// review with empty log capture must rework, not silently retry into a pass.)
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn agent_eval_fail_with_findings_empty_output_reworks_not_invalid() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();

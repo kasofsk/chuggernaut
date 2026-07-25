@@ -102,6 +102,8 @@ pub struct PlacementCandidate<'a> {
 ///   out-of-service pin yields the same `NoCapacity` "no free slots" shape as
 ///   the unpinned case; an unknown pin is a hard `Launch` error naming the
 ///   known nodes.
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::expect_used)]
 pub fn choose_placement(
     policy: PlacementPolicy,
     candidates: &[PlacementCandidate<'_>],
@@ -421,6 +423,7 @@ fn shell_quote(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn cand<'a>(name: &'a str, running: i64, free: i64, index: usize) -> PlacementCandidate<'a> {

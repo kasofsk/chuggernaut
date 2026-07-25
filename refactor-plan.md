@@ -28,7 +28,7 @@ independent; E builds on D. Each ticket is sized to be a scopeable
 Chuggernaut job.
 
 ```
-A1, A2 ──► A3          (week-one, all small)
+A1, A2 ──► A3, A4      (week-one, all small)
 B1 ─────► B2 ─► B3 ─► C1 ─► C2…C6 (opportunistic, one per subsequent touch)
 C7, C8                 (any time, independent)
 D1 ─► D2 ─► E1 ─► E2 ─► E3…E5
@@ -69,6 +69,27 @@ Two homes, both already-established patterns:
   the Rust early-exit** (the `config_schema_gate` precedent): a docs-only diff
   skips cargo, so a registry check living only in Rust tests would be
   silently bypassed by exactly the changes most likely to break it.
+
+**A4. `clippy.toml` + the Tier 1 lint denies** *(code, small — sibling of A3)*
+A3 landed the dependency-graph half of STYLE.md Tier 1 and left the clippy
+half unfiled. `clippy::too_many_lines`, `unwrap_used` and `expect_used` are
+all allow-by-default, so `tasks/ci.sh`'s `cargo clippy --workspace
+--all-targets -- -D warnings` could not see them and the three rules were
+reviewer-honour-system. A4 adds `clippy.toml` (`too-many-lines-threshold =
+70`) plus `[workspace.lints.clippy]` denies in the root `Cargo.toml`, with
+`lints.workspace = true` on every member.
+
+It is a **ratchet, not a cleanup**: the ~280 pre-existing violations wear a
+site-specific `#[allow]` with a `TODO` naming the ticket that dissolves them
+(C6 for `eval.rs`/`exec.rs`, C7 for `handlers.rs`, C8 for `triage`/`origin`),
+so the debt stays greppable while new code cannot add a violation without an
+explicit, reviewable allow. Rewriting the oversized functions is Track C's
+job, one decider at a time — a blanket crate-level `#![allow]` is rejected.
+Test code takes STYLE.md's own "outside tests" exemption as a top-of-scope
+`#![allow]` in `#[cfg(test)]` modules and `tests/` targets, for the two
+panic lints only; `too_many_lines` applies to tests too. A4 also lands
+`prettier` + an `npm run format:check` script in `web/`, leaving the gate
+wiring to E1.
 
 ## Track B — Dispatcher contracts (`contracts.md` steps 1–3)
 
@@ -160,6 +181,9 @@ round-trip test (serialize from Rust, parse in TS).
 No ESLint exists today; add it with the import-boundary rules from day one
 (`ui/` can't import `data/`; only `data/` imports `api/`) — as `warn` while
 files still violate them, flipped to `error` per path as migration proceeds.
+E1 also owns the **web section of `tasks/ci.sh`**: the `npm run format:check`
+that A4 wired into `web/package.json` has no caller yet, and turning it green
+means a one-time `prettier --write` over the 55 files that currently fail it.
 
 **E2. `data/` fetching layer** *(code, medium — depends on D2)*
 One hook module per resource (`useJob`, `useProject`, `useFleet` — the

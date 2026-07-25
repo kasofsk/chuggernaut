@@ -31,6 +31,8 @@ pub type SharedState = Arc<ApiState>;
 
 /// Build the axum router: auth + the §6.2 project surface implemented so far,
 /// with the SPA (when `ui_dist` is given) served as the fallback.
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::too_many_lines)]
 pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
     use axum::routing::{get, post};
 

@@ -20,6 +20,17 @@ members = [
     "crates/test-utils",
 ]
 
+[workspace.lints.clippy]
+# STYLE.md Tier 1 denies. All three lints are allow-by-default in clippy, so
+# `cargo clippy -D warnings` cannot see them without an explicit deny here;
+# members opt in with `lints.workspace = true`. Existing violations carry a
+# site-specific `#[allow]` with a TODO pointing at the refactor-plan Track C
+# ticket that dissolves them — the ratchet is that new code cannot add one
+# without an explicit, reviewable allow. Never blanket-allow at crate level.
+too_many_lines = "deny"   # threshold 70, set in clippy.toml
+unwrap_used = "deny"      # "outside tests": test targets allow it at their top
+expect_used = "deny"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"

@@ -235,6 +235,7 @@ fn check_terminal_is_absorbing(state: &CoreState, out: &mut Vec<Violation>) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::collections::HashMap;
     use types::{Job, JobState};

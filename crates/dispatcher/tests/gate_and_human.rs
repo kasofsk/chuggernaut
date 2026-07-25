@@ -3,6 +3,8 @@
 //! rework on the new base, human work/evaluator resolution, and escalation
 //! Retry.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
 use std::sync::Arc;
 use std::time::Duration;
@@ -551,6 +553,8 @@ async fn merge_gate_failure_reworks_on_new_base_without_budget() {
 /// an approved branch launches a scoped gate-fix task that returns straight to
 /// the gate — no re-review, no eval-phase CI — and lands once the re-gate passes.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn gate_compile_failure_takes_fast_path_and_relands() {
     let Some(rig) = rig().await else { return };
     // eval build(0) pass, eval test(0) pass, gate build FAIL(1) → compile;
@@ -948,6 +952,8 @@ async fn resolved_wip_markers_squash_clean_on_no_evaluator_job() {
 }
 
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn human_evaluator_and_human_work_resolve_via_inbox() {
     let Some(rig) = rig().await else { return };
     commit_branch(&rig, "src/gated.rs"); // agent work produces output (§3.2 guard)

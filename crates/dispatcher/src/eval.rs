@@ -221,6 +221,8 @@ impl Core {
     /// landing hand-off and the rework re-entry, both of which touch shell state
     /// the pure crate cannot see. Returns the event to re-enter the decider with,
     /// or `None` when this fold is finished.
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used)]
     async fn run_eval_step(
         &mut self,
         owner: &str,
@@ -284,6 +286,8 @@ impl Core {
     /// Run one decision's effects, returning the event its launch answered with
     /// (contracts.md §2's continuation contract): a stage's slots or a
     /// relaunched slot's task id, which exist only once the launch ran.
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used)]
     async fn interpret_eval_effects(
         &mut self,
         effects: Vec<Effect>,
@@ -528,6 +532,8 @@ impl Core {
     /// Create + launch one evaluator task (§3.3 evaluator types). Shared by the
     /// Evaluation fan-out (job branch) and the merge gate (candidate branch).
     #[allow(clippy::too_many_arguments)]
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used, clippy::too_many_lines)]
     pub(crate) async fn launch_evaluator_task(
         &mut self,
         owner: &str,
@@ -716,6 +722,8 @@ impl Core {
     /// not run on a prior cycle / a non-agent prior result. Assembled entirely
     /// from persisted records (the task log + the bare repo), so it is rebuilt
     /// faithfully after a dispatcher restart.
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::too_many_lines)]
     async fn prior_review_block(
         &self,
         owner: &str,
@@ -837,6 +845,8 @@ impl Core {
     }
 
     #[allow(clippy::too_many_arguments)]
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used, clippy::too_many_lines)]
     pub(crate) async fn spawn_eval_agent(
         &mut self,
         owner: &str,
@@ -1342,6 +1352,8 @@ impl Core {
     /// when an effect carries a result, feed it back as the next event until
     /// the decider settles. This loop IS the shape every later phase decider's
     /// shim copies.
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used, clippy::too_many_lines)]
     async fn run_landing(
         &mut self,
         owner: &str,
@@ -1477,6 +1489,8 @@ impl Core {
 
     /// Gate container exited: command evaluators only, exit code is the
     /// verdict (§3.3 Merge Gate).
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used, clippy::too_many_lines, clippy::unwrap_used)]
     pub(crate) async fn on_gate_exited(
         &mut self,
         owner: &str,
@@ -1589,6 +1603,8 @@ impl Core {
     /// The gate's verdict (§3.3): fold the round's slots into the failure
     /// set, derive the deterministic classification inputs, and re-enter the
     /// landing fold with [`merge_gate::LandingEvent::GateVerdict`].
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
     async fn gate_reduce(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
         let gate = self
@@ -1693,6 +1709,8 @@ impl Core {
         out
     }
 
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used)]
     pub(crate) async fn launch_gate_fix(
         &mut self,
         owner: &str,
@@ -1871,6 +1889,8 @@ impl Core {
     /// the restart marker: its presence tells reconciliation the merge is done
     /// and only the publish remains (§3.6). Idempotent by contract — a restart
     /// may re-launch it.
+    // TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+    #[allow(clippy::expect_used, clippy::too_many_lines)]
     pub(crate) async fn launch_wrapup_task(
         &mut self,
         owner: &str,
@@ -2077,6 +2097,8 @@ fn fenced_delta(diff: &str) -> String {
 /// page tells a human skimming it — a few lines per cycle with each round's
 /// verdicts, rework reasons, and the work agent's summary first line — built
 /// from the persisted task log so it survives restart.
+// TODO(track-C6): dissolved when this phase's decision logic moves to a pure decider.
+#[allow(clippy::too_many_lines)]
 fn history_digest(tasks: &[types::Task], cycles: u32) -> String {
     let first_line = |s: &str| {
         let line = s
@@ -2156,6 +2178,7 @@ fn history_digest(tasks: &[types::Task], cycles: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     //! Unit coverage for this module's pure prompt-composition helpers (job
     //! #155): the re-review delta and the per-cycle history digest. The
     //! evaluation decisions themselves are tier-1 tested in

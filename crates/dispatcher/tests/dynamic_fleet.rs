@@ -7,6 +7,8 @@
 //! containers. The `FakeBackend` models capacity: `register_worker` supplies it
 //! (clears the NoCapacity refusal), `mark_worker_unschedulable` removes it.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use chrono::Utc;
 use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
 use std::sync::Arc;

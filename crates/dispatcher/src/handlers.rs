@@ -29,6 +29,8 @@ use vcs::RepoManager;
 
 /// Subscribe the container-facing subjects. Returns after subscriptions are
 /// established; handler tasks run for the life of the NATS connection.
+// TODO(track-C7): dissolved by the handlers.rs -> handlers/ split.
+#[allow(clippy::too_many_lines, clippy::unwrap_used)]
 pub async fn spawn_container_handlers(store: &NatsStore, handle: CoreHandle) -> store::Result<()> {
     let mut work_sub = store.subscribe_requests("req.work.submit.>").await?;
     let work_handle = handle.clone();
@@ -189,6 +191,8 @@ fn ok_reply<T: serde::Serialize>(value: &T) -> Vec<u8> {
     serde_json::to_vec(value).unwrap_or_else(|_| br#"{"error":{"status":500}}"#.to_vec())
 }
 
+// TODO(track-C7): dissolved by the handlers.rs -> handlers/ split.
+#[allow(clippy::unwrap_used)]
 fn bad_request(message: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "error": { "status": 400, "message": message }
@@ -198,6 +202,8 @@ fn bad_request(message: &str) -> Vec<u8> {
 
 /// 422 for a well-formed body that fails a semantic bound (e.g. an oversized
 /// `cover_html`) — distinct from the 400 a malformed/unparseable body gets.
+// TODO(track-C7): dissolved by the handlers.rs -> handlers/ split.
+#[allow(clippy::unwrap_used)]
 fn unprocessable(message: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "error": { "status": 422, "message": message }
@@ -243,6 +249,8 @@ fn agent_cover_rejection(cover_html: &Option<String>) -> Option<String> {
         })
 }
 
+// TODO(track-C7): dissolved by the handlers.rs -> handlers/ split.
+#[allow(clippy::unwrap_used)]
 fn service_unavailable(message: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "error": { "status": 503, "message": message }
@@ -250,6 +258,8 @@ fn service_unavailable(message: &str) -> Vec<u8> {
     .unwrap()
 }
 
+// TODO(track-C7): dissolved by the handlers.rs -> handlers/ split.
+#[allow(clippy::unwrap_used)]
 fn bad_gateway(message: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "error": { "status": 502, "message": message }
@@ -343,6 +353,8 @@ struct ResolveBody {
 /// Subscribe the API-facing subject families (spec §6.1): jobs, graph.get,
 /// tasks (pending/list/resolve), vcs.diff. Reads go straight to the store or
 /// repos; mutations go through the core actor.
+// TODO(track-C7): dissolved by the handlers.rs -> handlers/ split.
+#[allow(clippy::too_many_lines)]
 pub async fn spawn_api_handlers(
     store: &NatsStore,
     handle: CoreHandle,
@@ -702,6 +714,8 @@ async fn sign_user_cert(
 /// §12.2 project creation, dispatcher-side (the API path; `admin project
 /// create` remains the CLI path). Repo before counter — a failed init leaves
 /// nothing behind, so the request can simply be retried.
+// TODO(track-C7): dissolved by the handlers.rs -> handlers/ split.
+#[allow(clippy::unwrap_used)]
 async fn create_project(
     store: &NatsStore,
     repos: &RepoManager,
@@ -770,6 +784,8 @@ async fn create_project(
 /// one hung tail can't block the list/resolve legs either. A single
 /// subscription owns the whole `req.tasks.>` family; a second overlapping
 /// subscription would double-reply under core NATS.
+// TODO(track-C7): dissolved by the handlers.rs -> handlers/ split.
+#[allow(clippy::too_many_lines)]
 pub async fn spawn_tasks_handler(
     store: &NatsStore,
     handle: CoreHandle,
@@ -935,6 +951,8 @@ fn finished_reply() -> Vec<u8> {
 }
 
 /// The read/mutation subject families behind the project-creation handler.
+// TODO(track-C7): dissolved by the handlers.rs -> handlers/ split.
+#[allow(clippy::too_many_lines)]
 async fn spawn_read_handlers(
     store: &NatsStore,
     handle: CoreHandle,
@@ -1623,6 +1641,7 @@ async fn list_pending(store: &NatsStore, owner: &str, project: &str) -> Vec<u8> 
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::{
         AGENT_COVER_HTML_MAX_BYTES, COVER_HTML_MAX_BYTES, CreateJobBody, UpdateJobBody,
         agent_cover_rejection, cover_too_large, job_reply_with_awaiting, unprocessable,

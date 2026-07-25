@@ -941,6 +941,8 @@ impl Core {
     /// Connect stores and rebuild in-memory state from `jobs.*` KV (spec §3.6
     /// steps 1 and 5): graphs, the rdeps index (written back — it is a derived
     /// cache), and the Ready queue.
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::too_many_lines)]
     pub async fn new(
         store: NatsStore,
         repos: RepoManager,
@@ -1228,6 +1230,8 @@ impl Core {
         }
     }
 
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::too_many_lines)]
     async fn handle_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Ping { reply } => {
@@ -1489,6 +1493,8 @@ impl Core {
     /// tiny forwarder that turns the provider's launch signal into a
     /// [`Msg::TaskContainerStarted`], so the container id reaches the task
     /// record through the single-writer loop rather than a direct mutation.
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::expect_used)]
     pub(crate) fn launch_reporter(
         &self,
         owner: &str,
@@ -1896,6 +1902,8 @@ impl Core {
     /// `job` is left untouched, so the caller keeps it Draft with nothing
     /// absorbed. Returns the member list to absorb once the caller's own
     /// validation passes.
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::expect_used)]
     fn absorb_plan(&self, job: &mut Job) -> Result<Vec<u64>> {
         let (owner, project) = job
             .project
@@ -2090,6 +2098,8 @@ impl Core {
     /// 409 (`Conflict`), so a released job is never mutated. Validation is
     /// identical to create (deferred to release), so the edit just rewrites the
     /// record and publishes `job-updated` naming the fields that changed.
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::too_many_lines)]
     pub async fn update_job(&mut self, req: UpdateJobRequest) -> Result<Job> {
         let UpdateJobRequest {
             owner,

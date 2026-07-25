@@ -2,6 +2,8 @@
 //! skip-guarded). Keygen shells out to openssl/ssh-keygen — present on any
 //! dev/deploy host.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use cli::admin::{self, AdminArgs, AdminCmd, ProjectCmd, RoleCmd, UserCmd};
 use cli::init::{self, InitArgs};
 use store::NatsStore;
@@ -18,6 +20,8 @@ fn init_args(server_url: &str, dir: &std::path::Path) -> InitArgs {
 }
 
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn init_bootstraps_and_is_idempotent() {
     let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
         return;
@@ -190,6 +194,8 @@ async fn admin_project_and_user_commands() {
 }
 
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn admin_user_role_commands() {
     let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
         return;

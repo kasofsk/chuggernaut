@@ -19,6 +19,8 @@
 //! UPDATE_TRACES=1 cargo test -p dispatcher --test golden_traces
 //! ```
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod common;
 
 use common::assert_trace;
@@ -380,6 +382,8 @@ async fn spawn_setup() -> Option<SpawnRig> {
     spawn_setup_with(SpawnOpts::default()).await
 }
 
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn spawn_setup_with(opts: SpawnOpts) -> Option<SpawnRig> {
     let server = test_utils::nats::NatsTestServer::shared().await?;
     let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())

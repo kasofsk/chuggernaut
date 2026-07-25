@@ -1376,6 +1376,7 @@ pub async fn artifact_get(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::inject_sha;
 
     /// A baked SHA is added as `api_sha` alongside the dispatcher's own fields,

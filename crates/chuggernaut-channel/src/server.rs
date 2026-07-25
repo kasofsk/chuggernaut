@@ -67,6 +67,8 @@ impl Server {
         Self { ctx, store: None }
     }
 
+    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+    #[allow(clippy::unwrap_used)]
     async fn store(&mut self) -> Result<&NatsStore, String> {
         if self.store.is_none() {
             let store = if self.ctx.nats_creds.is_empty() {
@@ -178,6 +180,8 @@ impl Server {
         tools
     }
 
+    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+    #[allow(clippy::too_many_lines)]
     async fn call_tool(&mut self, name: &str, args: Value) -> Result<String, String> {
         let (owner, project, seq) = (
             self.ctx.owner.clone(),
@@ -287,6 +291,7 @@ fn tool(name: &str, description: &str, schema: Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn ctx(role: &str) -> JobContext {

@@ -22,6 +22,8 @@ pub struct InitArgs {
     pub admin_password: Option<String>,
 }
 
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::expect_used)]
 pub async fn run(args: InitArgs) -> Result<()> {
     // 1. Keypairs (skip existing).
     let report = keygen::ensure_all(&args.keys_dir).await?;

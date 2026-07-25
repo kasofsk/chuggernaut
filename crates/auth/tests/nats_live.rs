@@ -4,6 +4,8 @@
 //! operator/account keys, then proves a work-container credential can do
 //! exactly what the spec allows — and nothing more.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use auth::nats::{
     NatsUserSigner, Permissions, account_jwt, operator_jwt, resolver_config, system_account_jwt,
     work_container_permissions,
@@ -16,6 +18,8 @@ use store::{NatsStore, buckets, keys, subjects};
 use test_utils::require_nats_config;
 
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn scoped_creds_enforced_by_operator_mode_server() {
     let operator = KeyPair::new_operator();
     let sys = KeyPair::new_account();

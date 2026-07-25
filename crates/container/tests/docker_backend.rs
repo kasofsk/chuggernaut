@@ -3,6 +3,8 @@
 //! `test_utils::backend_suite` — shared with the worker fleet backend, which
 //! must satisfy the identical contract (spec §3.1).
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use container::docker::{DockerBackend, DockerNodeConfig};
 use container::{ContainerBackend, ContainerLaunchConfig};
 use test_utils::backend_suite as suite;

@@ -272,6 +272,8 @@ fn refresh_phase_marker(line: &str) -> Option<&str> {
 /// Fold one line of script output into the live progress: it always joins the
 /// bounded recent-lines window, and a phase marker additionally advances the
 /// phase (restarting the in-phase clock). No-op when no refresh is in flight.
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::unwrap_used)]
 fn refresh_progress_note(slot: &std::sync::Mutex<Option<RefreshProgressState>>, line: &str) {
     let mut guard = slot.lock().unwrap();
     let Some(progress) = guard.as_mut() else {
@@ -292,6 +294,8 @@ fn refresh_progress_note(slot: &std::sync::Mutex<Option<RefreshProgressState>>, 
 /// Advance the phase from the DAEMON's own side of the refresh (the drain and
 /// swap stages it runs between script invocations), so the deploy log never
 /// shows a stale build phase while the daemon is quiescing.
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::unwrap_used)]
 fn refresh_progress_phase(slot: &std::sync::Mutex<Option<RefreshProgressState>>, phase: &str) {
     let mut guard = slot.lock().unwrap();
     if let Some(progress) = guard.as_mut() {
@@ -322,6 +326,8 @@ fn refresh_skip_reason(git_url: Option<&str>, git_key: &Path) -> Option<String> 
 
 /// Run the daemon until ctrl-c. Containers it launched keep running after
 /// shutdown; the dispatcher re-attaches.
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::expect_used, clippy::too_many_lines)]
 pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
     let store = match &config.nats_creds {
         Some(path) => {
@@ -740,6 +746,8 @@ async fn list_running(state: &WorkerState) -> WorkerReply<types::worker::ListRun
     )
 }
 
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::unwrap_used)]
 async fn ping(state: &WorkerState) -> WorkerReply<PingOk> {
     reply(
         async {
@@ -770,6 +778,8 @@ async fn ping(state: &WorkerState) -> WorkerReply<PingOk> {
 /// only the brief swap window quiesces launches. Returns the version we are
 /// refreshing away from — the new one shows up on a later `ping`, clearing the
 /// dispatcher's version-drift warning.
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::unwrap_used)]
 async fn refresh(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<RefreshOk> {
     reply(
         async {
@@ -900,6 +910,8 @@ async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshReque
 /// the next `ping` reports it and the failure becomes durable, queryable fleet
 /// state rather than only this node's log. The error tail is trimmed for the
 /// operator; the swapped-in daemon (on success) never reaches here.
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::unwrap_used)]
 fn record_refresh_failure(state: &WorkerState, stage: &str, error: &str) {
     // `error` already carries the script's captured tail on a build/swap
     // failure; bound it the same way the daemon streams so the ping reply and
@@ -934,6 +946,8 @@ fn refresh_end_cancelled(state: &WorkerState, during: &str) {
 /// `sha`. Soft by construction — a cancel races the build it aborts, so "no
 /// refresh in flight", "a different SHA", and "already swapping" are reported
 /// outcomes, not errors.
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::unwrap_used)]
 async fn refresh_cancel(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<RefreshCancelOk> {
     reply(
         async {
@@ -987,6 +1001,8 @@ async fn refresh_cancel(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply
 ///
 /// A missing pgid is normal — the cancel landed between scripts (during the
 /// drain); the `cancelled` flag alone stops the refresh at the next checkpoint.
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::unwrap_used)]
 fn signal_refresh_build(state: &Arc<WorkerState>, pgid: Option<i32>) {
     let Some(pgid) = pgid else {
         tracing::info!(node = %state.node, "worker refresh cancel: no build process running");
@@ -1055,6 +1071,8 @@ async fn drain(gate: &RefreshGate, timeout: Duration) -> bool {
 /// OWN group for exactly that reason — the daemon must never be able to signal
 /// itself — and the slot is cleared before this returns, so a cancel arriving
 /// after the script exits signals nothing.
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::unwrap_used)]
 async fn run_script(
     script: &Path,
     args: &[&str],
@@ -1103,6 +1121,8 @@ async fn run_script(
 /// Pump the child's stdout+stderr until both close, streaming every line to the
 /// daemon's log and into `progress`, and return the bounded tail. Split out of
 /// [`run_script`] so each stays one readable unit.
+// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+#[allow(clippy::expect_used)]
 async fn run_script_stream(
     child: &mut tokio::process::Child,
     phase: &str,
@@ -1166,6 +1186,7 @@ fn bounded_tail(text: &str, max_lines: usize, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     /// The swap window refuses new launches (retryable NoCapacity), and each

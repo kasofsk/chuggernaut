@@ -3,6 +3,8 @@
 //! via tower — login → create → release → inbox → resolve → Done, plus the
 //! §6.5 auth/error contract and SSE replay.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use api::{ApiState, SharedState};
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -98,6 +100,8 @@ fn gen_jwt_keys(dir: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
 }
 
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn http_bridge_end_to_end() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -858,6 +862,8 @@ async fn http_bridge_end_to_end() {
 /// store-level hang localizes here instead of poisoning the whole bridge run.
 /// Router-only rig: attachments need auth + artifact storage, no dispatcher.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn job_attachments_over_http() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -1005,6 +1011,8 @@ async fn job_attachments_over_http() {
 /// `200 {"dispatcher":"ok","version"}` as `application/json`; with no responder
 /// it answers `503` — never a masquerading `200`. Unauthenticated by design.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn health_endpoint() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -1121,6 +1129,8 @@ fn keygen(path: &std::path::Path, comment: &str) -> String {
 /// key into a 24h cert whose principals are `{email},git` and whose forced
 /// command embeds the caller's roles as read from their user record.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn ssh_cert_minting() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -1268,6 +1278,8 @@ async fn ssh_cert_minting() {
 /// task's container through the dispatcher, enforces viewer auth, and falls
 /// back to the harvested `stdout.log` artifact once the task has finished.
 #[tokio::test]
+// TODO(style): oversized tier-2 test — split when this file is next touched.
+#[allow(clippy::too_many_lines)]
 async fn task_output_endpoint() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;

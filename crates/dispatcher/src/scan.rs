@@ -134,6 +134,8 @@ impl Core {
 
     /// Jobs in Ready/Work/Evaluation past `job_deadline` (anchored at
     /// `ready_at`): kill containers, escalate once (§3.5 one-shot rule).
+    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
+    #[allow(clippy::expect_used, clippy::too_many_lines)]
     async fn scan_job_deadlines(&mut self) -> Result<()> {
         let now = Utc::now();
         let candidates: Vec<(String, u64)> = self

@@ -359,6 +359,8 @@ impl JobType {
 
     /// Enforce the §1.1 field-rules matrices. Returns all violations, not just
     /// the first.
+    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Vec<FieldRuleError> {
         let mut errs = Vec::new();
         let ctx = |w: WorkType| format!("work.type: {w:?}").to_lowercase();
@@ -722,6 +724,7 @@ impl ProjectDefaults {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     const SPEC_EXAMPLE: &str = r#"
