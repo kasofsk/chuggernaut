@@ -184,6 +184,26 @@ stop_gate_nats() {
 	GATE_NATS_NAME=""
 }
 
+# Typecheck + bundle the operator UI. Same two commands tasks/web-publish.sh
+# runs to produce the published dist, so a green CI here means the post-merge
+# publish will build too — `web/package.json` defines `build` as
+# `tsc -b && vite build`, giving typecheck and bundle in one step.
+#
+# This gate used to live in tasks/review-web.md, i.e. inside the *reviewer*.
+# Reviewers read now; executing belongs to CI, and a web change that never
+# touched Rust previously reached the merge gate with nothing having compiled
+# it.
+run_web_ci() {
+	echo "ci: web changes — npm ci + build"
+	# Subshell: the caller may still run the cargo gate afterwards, and that
+	# expects to be at the workspace root.
+	(
+		cd web
+		npm ci --no-audit --no-fund
+		npm run build
+	)
+}
+
 run_full_ci() {
 	cargo_ran=1
 	cargo fmt --all -- --check
@@ -441,10 +461,12 @@ duplication_gate() {
 	tasks/check-duplication.sh
 }
 
-# Diff-aware gate: only run the (slow) Rust build/test when the change
-# actually touches Rust-relevant paths. This lets docs/web/prompt/job-type
-# changes pass CI in seconds. Rust-relevant globs (see case list below):
-#   crates/**  Cargo.toml  Cargo.lock  rust-toolchain*  tasks/ci.sh
+# Diff-aware gate: run each stage only when the change actually touches paths
+# that stage owns, so docs/prompt/job-type changes still pass in seconds.
+#   Rust stage: crates/**  Cargo.toml  Cargo.lock  rust-toolchain*  tasks/ci.sh
+#   Web stage:  web/**
+# The two are independent — a mixed diff runs both, a web-only diff runs the
+# (fast) web stage and skips the cold cargo build entirely.
 # The change set is HEAD vs the merge-base with origin/$BASE_BRANCH, which
 # works for both the evaluation run (job branch) and the merge-gate rerun
 # (candidate commit) — both sit ahead of the default branch.
@@ -486,6 +508,7 @@ modules_registry_gate
 duplication_gate
 if [ "$diff_ok" -eq 1 ]; then
 	rust_changed=0
+	web_changed=0
 	# Split the changed list on newlines so paths with spaces stay intact.
 	IFS='
 '
@@ -493,11 +516,21 @@ if [ "$diff_ok" -eq 1 ]; then
 		case "$f" in
 		crates/* | Cargo.toml | Cargo.lock | rust-toolchain* | tasks/ci.sh)
 			rust_changed=1
-			break
+			;;
+		web/*)
+			web_changed=1
 			;;
 		esac
 	done
 	unset IFS
+	# Web first: it is the cheap stage, so a mixed diff surfaces a broken
+	# frontend in seconds instead of after a cold cargo build. Spelled as a
+	# full `if` rather than `[ ] && cmd`, whose exit status is the *test's* when
+	# the test fails — a `set -e` footgun that would abort CI on every
+	# Rust-only diff.
+	if [ "$web_changed" -eq 1 ]; then
+		run_web_ci
+	fi
 	if [ "$rust_changed" -eq 0 ]; then
 		echo "ci: no Rust changes — skipping cargo fmt/clippy/test"
 		exit 0
@@ -505,5 +538,6 @@ if [ "$diff_ok" -eq 1 ]; then
 	run_full_ci
 else
 	echo "ci: could not determine changed files — running full CI"
+	run_web_ci
 	run_full_ci
 fi

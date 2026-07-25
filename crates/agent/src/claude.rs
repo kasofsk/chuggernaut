@@ -3,6 +3,7 @@
 //! CMD (inside the workspace bootstrap): `claude -p "$(cat /chuggernaut/prompt.md)"
 //! --output-format stream-json --verbose --model {model}
 //! --append-system-prompt {system_prompt}
+//! --settings /chuggernaut/agent-settings.json
 //! --mcp-config /chuggernaut/mcp-config.json`.
 //! Prompt content is injected at `/chuggernaut/prompt.md` — never a path, never
 //! inline in the shell command. The `--mcp-config` payload carries NATS
@@ -13,7 +14,7 @@
 
 use crate::{
     AgentError, AgentOutput, AgentProvider, AgentRunConfig, LaunchReporter, McpServerConfig,
-    PROMPT_PATH,
+    PROMPT_PATH, PermissionProfile, SETTINGS_PATH,
 };
 use async_trait::async_trait;
 use container::{ContainerBackend, ContainerLaunchConfig, InjectedFile, bootstrap_cmd};
@@ -46,9 +47,14 @@ impl ClaudeProvider {
     /// The shell line executed after the workspace bootstrap's clone+cd, plus
     /// the provider-owned files it references.
     ///
-    /// `--dangerously-skip-permissions`: headless agents cannot answer
-    /// permission prompts; the container is the sandbox (the agent image
-    /// sets IS_SANDBOX=1 so the flag is accepted under root).
+    /// `--settings` carries the run's [`PermissionProfile`], replacing the
+    /// blanket `--dangerously-skip-permissions` this used to pass. Headless
+    /// agents still cannot answer permission prompts — but they do not need to:
+    /// an unmatched tool call is *denied* and reported back to the model, which
+    /// keeps working. So the allow list is a real control rather than advice,
+    /// which is what lets an evaluator be read-only. The container remains the
+    /// security boundary (spec §4.3); this is about what the agent should spend
+    /// its turn on, not about containing an adversary.
     ///
     /// `--session-id` makes the transcript filename deterministic so it can be
     /// harvested after exit. `--output-format stream-json` (which `-p` requires
@@ -66,7 +72,7 @@ impl ClaudeProvider {
     /// carries the NATS credential, which must never enter argv.
     fn claude_invocation(config: &AgentRunConfig) -> Invocation {
         let mut command = format!(
-            "claude -p \"$(cat {PROMPT_PATH})\" --dangerously-skip-permissions \
+            "claude -p \"$(cat {PROMPT_PATH})\" --settings {SETTINGS_PATH} \
              --output-format stream-json --verbose --session-id {}",
             shell_quote(&config.session_id)
         );
@@ -76,7 +82,13 @@ impl ClaudeProvider {
         if let Some(system) = &config.system_prompt {
             command.push_str(&format!(" --append-system-prompt {}", shell_quote(system)));
         }
-        let mut files = vec![];
+        // Carries no credential, so unlike the MCP config it is world-readable.
+        let mut files = vec![InjectedFile {
+            container_path: SETTINGS_PATH.to_string(),
+            contents: settings_json(config.permissions).into_bytes(),
+            mode: 0o644,
+            artifact: None,
+        }];
         if !config.mcp_servers.is_empty() {
             let json = mcp_config_json(&config.mcp_servers);
             command.push_str(&format!(" --mcp-config {MCP_CONFIG_PATH}"));
@@ -154,22 +166,30 @@ impl AgentProvider for ClaudeProvider {
     }
 }
 
-/// Pull real token usage out of the CLI's result object, which is its
-/// documented interface — unlike the session transcript, whose format Anthropic
-/// documents as internal and version-unstable.
+/// The CLI's result object, the one documented interface to a finished run —
+/// unlike the session transcript, whose format Anthropic documents as internal
+/// and version-unstable. Every reader below goes through here, so the shape is
+/// known in one place if the CLI's output changes.
 ///
 /// Under `--output-format stream-json` the result object is the final
 /// `type:"result"` event, and stdout is a stream of JSONL events preceding it
 /// (assistant text, tool_use). Scanning for the last line that parses picks it
 /// out regardless — and also skips anything the container printed before it (the
-/// workspace clone, npm noise). Returns `None` rather than erroring: usage is
-/// reporting, and must never fail a task that otherwise succeeded.
-pub fn parse_usage(stdout: &[u8]) -> Option<types::TokenUsage> {
+/// workspace clone, npm noise). Returns the owned value, not a borrow: the
+/// lossy UTF-8 conversion it parses from does not outlive the call.
+fn parse_result_object(stdout: &[u8]) -> Option<serde_json::Value> {
     let text = String::from_utf8_lossy(stdout);
-    let value: serde_json::Value = text
-        .lines()
+    text.lines()
         .rev()
-        .find_map(|line| serde_json::from_str(line.trim()).ok())?;
+        .find_map(|line| serde_json::from_str(line.trim()).ok())
+}
+
+/// Pull real token usage out of the CLI's result object.
+///
+/// Returns `None` rather than erroring: usage is reporting, and must never fail
+/// a task that otherwise succeeded.
+pub fn parse_usage(stdout: &[u8]) -> Option<types::TokenUsage> {
+    let value = parse_result_object(stdout)?;
     let usage = value.get("usage")?;
     let n = |key: &str| usage.get(key).and_then(|v| v.as_u64());
     Some(types::TokenUsage {
@@ -185,22 +205,61 @@ pub fn parse_usage(stdout: &[u8]) -> Option<types::TokenUsage> {
 /// runs without the channel MCP: there is no `submit_result` call, so the CLI's
 /// own JSON result on stdout is the only channel for the written output.
 ///
-/// Same last-parseable-line scan as [`parse_usage`] — under `stream-json` the
-/// final `type:"result"` event is the last parseable line, and anything printed
-/// before it (clone, npm noise, the streamed assistant/tool_use events) is
-/// skipped. Returns `None` when stdout carries no result object or the result
-/// is empty.
+/// Returns `None` when stdout carries no result object or the result is empty.
 pub fn parse_result(stdout: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(stdout);
-    let value: serde_json::Value = text
-        .lines()
-        .rev()
-        .find_map(|line| serde_json::from_str(line.trim()).ok())?;
-    value
+    parse_result_object(stdout)?
         .get("result")
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .filter(|s| !s.trim().is_empty())
+}
+
+/// Tool calls the CLI refused under the run's [`PermissionProfile`], as compact
+/// one-line summaries — the result object's `permission_denials` array.
+///
+/// This is the feedback loop for the permission profiles: a policy that is too
+/// tight degrades an agent *quietly* (it is told "denied", shrugs, and carries
+/// on with less), so without surfacing denials the only symptom is worse work
+/// for reasons nobody can see. A reviewer silently unable to call `submit_eval`
+/// is indistinguishable from a reviewer that just never reached a verdict.
+///
+/// Same tolerance as [`parse_usage`]: this is reporting, so a missing or
+/// unrecognised field yields fewer entries, never an error.
+pub fn parse_permission_denials(stdout: &[u8]) -> Vec<String> {
+    let Some(value) = parse_result_object(stdout) else {
+        return vec![];
+    };
+    let Some(denials) = value.get("permission_denials").and_then(|v| v.as_array()) else {
+        return vec![];
+    };
+    denials
+        .iter()
+        .map(|d| {
+            let tool = d
+                .get("tool_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            // Bash is the interesting case — the command is what tells an
+            // operator whether the profile is wrong or the agent was.
+            match d
+                .get("tool_input")
+                .and_then(|i| i.get("command"))
+                .and_then(|v| v.as_str())
+            {
+                Some(cmd) => format!("{tool}: {}", truncate(cmd, 120)),
+                None => tool.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// Trim to `max` chars on a char boundary, marking that it was cut.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    format!("{head}…")
 }
 
 /// Claude CLI `--mcp-config` payload: `{"mcpServers": {name: {command, args, env}}}`.
@@ -219,6 +278,86 @@ fn mcp_config_json(servers: &[McpServerConfig]) -> String {
         })
         .collect();
     serde_json::json!({ "mcpServers": map }).to_string()
+}
+
+/// The `--settings` payload for a [`PermissionProfile`] (spec §4.3).
+///
+/// Deny beats allow in the CLI's resolution, but the **allow list is the real
+/// control** here: `Review` never allows a bare `Bash`, so a command that
+/// matches no allowed prefix is denied outright. That closes the escapes a
+/// denylist alone leaves open — `sh -c "cargo test"`, `make`, an `&&` chain
+/// behind a permitted prefix. The explicit denies are belt-and-braces on the
+/// two tools this exists to stop, and they document the intent at the point
+/// someone would go looking for it.
+///
+/// `mcp__chuggernaut-channel` must be allowed in both profiles: it is how a run
+/// reports (`update_status`) and how it terminates meaningfully
+/// (`submit_result` / `submit_eval`, spec §4.2). A reviewer that cannot call
+/// `submit_eval` looks exactly like a broken reviewer.
+pub fn settings_json(profile: PermissionProfile) -> String {
+    let permissions = match profile {
+        // As permissive as the bypass flag it replaces — work agents edit,
+        // build, commit and push. Only the shape is new.
+        PermissionProfile::Work => serde_json::json!({
+            "defaultMode": "acceptEdits",
+            "allow": [
+                "Bash",
+                "Edit",
+                "Write",
+                "Read",
+                "Glob",
+                "Grep",
+                "NotebookEdit",
+                "TodoWrite",
+                "Task",
+                "WebFetch",
+                "WebSearch",
+                "mcp__chuggernaut-channel",
+            ],
+        }),
+        PermissionProfile::Review => serde_json::json!({
+            "defaultMode": "default",
+            "allow": [
+                "Read",
+                "Glob",
+                "Grep",
+                "TodoWrite",
+                "mcp__chuggernaut-channel",
+                // Reading the change under review. `git diff`/`log`/`show` are
+                // what tasks/review-*.md actually ask for. The task container
+                // clones `--single-branch` (crates/container), so the base ref
+                // is absent until fetched — `git fetch`/`merge-base`/`rev-parse`
+                // are what make the prompts' `git diff $BASE_BRANCH...HEAD`
+                // resolve at all, and none of them build or mutate the worktree.
+                "Bash(git diff:*)",
+                "Bash(git log:*)",
+                "Bash(git show:*)",
+                "Bash(git status:*)",
+                "Bash(git branch:*)",
+                "Bash(git fetch:*)",
+                "Bash(git merge-base:*)",
+                "Bash(git rev-parse:*)",
+                "Bash(git blame:*)",
+                "Bash(git grep:*)",
+                "Bash(rg:*)",
+                "Bash(ls:*)",
+                "Bash(cat:*)",
+                "Bash(head:*)",
+                "Bash(tail:*)",
+                "Bash(wc:*)",
+            ],
+            "deny": [
+                "Bash(cargo:*)",
+                "Bash(npm:*)",
+                "Bash(npx:*)",
+                "Bash(make:*)",
+                "Edit",
+                "Write",
+                "NotebookEdit",
+            ],
+        }),
+    };
+    serde_json::json!({ "permissions": permissions }).to_string()
 }
 
 fn shell_quote(s: &str) -> String {
@@ -251,6 +390,7 @@ mod tests {
             merge_conflict: None,
             session_id: "da08d5f3-844e-430e-8363-39b4882f437b".into(),
             node: None,
+            permissions: PermissionProfile::Work,
         }
     }
 
@@ -325,7 +465,7 @@ mod tests {
     fn invocation_composes_all_flags() {
         let inv = ClaudeProvider::claude_invocation(&config());
         assert!(inv.command.starts_with(
-            "claude -p \"$(cat /chuggernaut/prompt.md)\" --dangerously-skip-permissions"
+            "claude -p \"$(cat /chuggernaut/prompt.md)\" --settings /chuggernaut/agent-settings.json"
         ));
         assert!(inv.command.contains("--model 'claude-sonnet-4-6'"));
         assert!(inv.command.contains("--append-system-prompt 'KO facts'"));
@@ -362,11 +502,13 @@ mod tests {
         let inv = ClaudeProvider::claude_invocation(&c);
         assert_eq!(
             inv.command,
-            "claude -p \"$(cat /chuggernaut/prompt.md)\" --dangerously-skip-permissions \
+            "claude -p \"$(cat /chuggernaut/prompt.md)\" --settings /chuggernaut/agent-settings.json \
              --output-format stream-json --verbose \
              --session-id 'da08d5f3-844e-430e-8363-39b4882f437b'"
         );
-        assert!(inv.files.is_empty());
+        // The settings file is not optional — every run carries a profile.
+        assert_eq!(inv.files.len(), 1);
+        assert_eq!(inv.files[0].container_path, SETTINGS_PATH);
     }
 
     /// The credential leak that motivated this change: a plain work task's argv
@@ -418,6 +560,127 @@ mod tests {
         );
         assert!(contents.contains("NATS USER JWT"));
         assert!(file.artifact.is_none());
+    }
+
+    /// Parse the injected settings payload for a profile.
+    fn settings_for(profile: PermissionProfile) -> serde_json::Value {
+        let mut c = config();
+        c.permissions = profile;
+        let inv = ClaudeProvider::claude_invocation(&c);
+        let file = inv
+            .files
+            .iter()
+            .find(|f| f.container_path == SETTINGS_PATH)
+            .expect("settings file injected");
+        // Carries no credential — world-readable is correct, and a 0600 here
+        // would be cargo-culted from the MCP config next door.
+        assert_eq!(file.mode, 0o644);
+        assert!(file.artifact.is_none());
+        serde_json::from_slice(&file.contents).expect("settings are valid JSON")
+    }
+
+    fn allow_list(profile: PermissionProfile) -> Vec<String> {
+        settings_for(profile)["permissions"]["allow"]
+            .as_array()
+            .expect("allow list")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// The point of the whole change: an evaluator cannot build. Note this is
+    /// carried by the ABSENCE of a bare `Bash` allow, not by the deny list —
+    /// a denylist alone is defeated by `sh -c "cargo test"`.
+    #[test]
+    fn review_profile_cannot_reach_build_tooling() {
+        let allow = allow_list(PermissionProfile::Review);
+        assert!(
+            !allow.iter().any(|r| r == "Bash"),
+            "a bare Bash allow would let any command through: {allow:?}"
+        );
+        for rule in &allow {
+            assert!(
+                !rule.starts_with("Bash(cargo") && !rule.starts_with("Bash(npm"),
+                "build tooling must not be allow-listed: {rule}"
+            );
+        }
+        let settings = settings_for(PermissionProfile::Review);
+        let deny: Vec<&str> = settings["permissions"]["deny"]
+            .as_array()
+            .expect("deny list")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        for rule in ["Bash(cargo:*)", "Bash(npm:*)", "Bash(npx:*)"] {
+            assert!(deny.contains(&rule), "{rule} must be denied: {deny:?}");
+        }
+    }
+
+    /// A reviewer that cannot publish a verdict is indistinguishable from a
+    /// broken reviewer — and it must still be able to read the diff it judges.
+    #[test]
+    fn review_profile_can_report_and_read_the_diff() {
+        let allow = allow_list(PermissionProfile::Review);
+        for rule in [
+            "mcp__chuggernaut-channel",
+            "Read",
+            "Grep",
+            "Bash(git diff:*)",
+            "Bash(git log:*)",
+            // The clone is `--single-branch`, so the base ref does not exist in
+            // the reviewer's worktree: without the fetch, every prompt's
+            // step-1 `git diff $BASE_BRANCH...HEAD` fails on a missing revision.
+            "Bash(git fetch:*)",
+            "Bash(git merge-base:*)",
+        ] {
+            assert!(
+                allow.iter().any(|r| r == rule),
+                "{rule} must be allowed: {allow:?}"
+            );
+        }
+    }
+
+    /// Work is deliberately as permissive as the `--dangerously-skip-permissions`
+    /// this replaced: the change makes policy expressible, it does not newly
+    /// restrict authors. A regression here breaks every job.
+    #[test]
+    fn work_profile_stays_permissive() {
+        let allow = allow_list(PermissionProfile::Work);
+        for rule in ["Bash", "Edit", "Write", "mcp__chuggernaut-channel"] {
+            assert!(
+                allow.iter().any(|r| r == rule),
+                "{rule} must be allowed for work: {allow:?}"
+            );
+        }
+        assert!(
+            settings_for(PermissionProfile::Work)["permissions"]
+                .get("deny")
+                .is_none(),
+            "work denies nothing"
+        );
+    }
+
+    /// The recorded fixtures carry `permission_denials: []` — the empty case
+    /// must stay quiet rather than reporting a phantom denial.
+    #[test]
+    fn no_denials_reported_when_the_run_hit_none() {
+        assert!(parse_permission_denials(RESULT_JSON.as_bytes()).is_empty());
+        assert!(parse_permission_denials(STREAM_JSON.as_bytes()).is_empty());
+        assert!(parse_permission_denials(b"not json at all").is_empty());
+    }
+
+    /// A denied Bash call must surface the *command*: that is what tells an
+    /// operator whether the profile is too tight or the prompt asked wrongly.
+    #[test]
+    fn denials_report_the_denied_command() {
+        let line = r#"{"type":"result","subtype":"success","result":"done","permission_denials":[{"tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"command":"cargo test --workspace","description":"run tests"}},{"tool_name":"Write","tool_use_id":"toolu_2","tool_input":{"file_path":"/workspace/x"}}]}"#;
+        assert_eq!(
+            parse_permission_denials(line.as_bytes()),
+            vec![
+                "Bash: cargo test --workspace".to_string(),
+                "Write".to_string()
+            ]
+        );
     }
 
     #[test]

@@ -358,9 +358,11 @@ command eval → squash-merge to `main` in ~10s over the HTTP API.
   (`[ -z "$CHUGGERNAUT_PRINCIPAL" ] && exit 0`) — found live: the baked
   binary path exists only inside the sshd container, so local/`file://`
   pushes (the dispatcher's own) must not depend on it.
-- **Claude invocation includes `--dangerously-skip-permissions`** (headless
-  agents can't answer prompts; the agent image sets `IS_SANDBOX=1` so the
-  CLI accepts it as root). Container-facing NATS URL is a separate config
+- **Claude invocation carries a per-role `PermissionProfile`** (`Work` /
+  `Review`) injected as a `--settings` file at
+  `/chuggernaut/agent-settings.json`; `IS_SANDBOX=1` stays for the CLI's root
+  checks. Reviewers read, CI runs — rationale in spec §4.3.
+  Container-facing NATS URL is a separate config
   knob (`NATS_URL_CONTAINER` → `CoreConfig.nats_url`) because on Docker
   Desktop containers reach the host at `host.docker.internal`, not
   `localhost`.

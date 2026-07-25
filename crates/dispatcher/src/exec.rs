@@ -499,6 +499,9 @@ impl Core {
                     merge_conflict,
                     session_id: session_id.clone().unwrap_or_default(),
                     node: job_type.placement_node().map(String::from),
+                    // Work builds, edits, commits and pushes — the permissive
+                    // profile (spec §4.3).
+                    permissions: agent::PermissionProfile::Work,
                 };
                 let provider = self.provider.clone();
                 let tx = self.self_tx.clone().expect("spawned core");

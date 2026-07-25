@@ -1,8 +1,9 @@
 # Front-end-only changes on the operator UI (web/). Built for fast iteration:
-# the reviewer (stage 0) judges the change and decides for itself whether the
-# built UI needs to be exercised; the project ci gate (stage 1, appended from
-# jobs/_defaults.yaml) self-skips its cargo work on web-only diffs via the
-# tasks/ci.sh glob matcher, so it costs seconds, not a cold workspace build.
+# the reviewer (stage 0) reads the diff and judges it against the brief — it
+# does not build (spec §4.3 Review profile). Building is the project ci gate's
+# job (stage 1, appended from jobs/_defaults.yaml): tasks/ci.sh runs npm ci +
+# npm run build on any diff touching web/, and self-skips its cargo work on
+# web-only diffs, so the gate costs a frontend build, not a cold Rust one.
 # Shipping the merged result to the served UI is jobs/web-publish.yaml —
 # static-content swap, no redeploy.
 name: web
@@ -37,8 +38,8 @@ wrap_up:
 resources:
   cpu: 2
   memory: 2Gi
-  # npm ci + tsc + vite build, possibly twice (work + reviewer) — nowhere near
-  # the Rust hour.
+  # npm ci + tsc + vite build once in the work container — the reviewer no
+  # longer builds. Nowhere near the Rust hour.
   task_timeout: 30m
 work_retries: 1
 eval_retries: 1

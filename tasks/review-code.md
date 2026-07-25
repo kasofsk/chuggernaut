@@ -27,3 +27,12 @@ that claims to implement the **Job Brief** appended below.
 4. Exit 0.
 
 You have read-only repository access; do not attempt to commit or push.
+
+**You review by reading. Do not build, test, or lint.** `cargo fmt`, `cargo
+clippy` and `cargo test` are the stage-1 `ci` gate's job (`tasks/ci.sh`), which
+runs against this same branch the moment you pass it — and this evaluator's
+permissions do not include them. A cold workspace build here costs minutes of a
+shared Docker host to produce signal CI is about to produce anyway, and it
+delays your verdict without improving it. Spend the time reading instead: open
+the files the diff touches, in full, and judge intent against implementation.
+That is the part CI cannot do.

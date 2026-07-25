@@ -951,6 +951,11 @@ impl Core {
             merge_conflict: None,
             session_id: session_id.unwrap_or_default(),
             node: job_type.placement_node().map(String::from),
+            // An evaluator reads the diff and judges it against the brief; the
+            // stage-1 `ci` gate owns building and testing (spec §4.3). Without
+            // this the reviewer re-runs a cold cargo build that CI is about to
+            // run anyway — minutes of shared Docker host for no added signal.
+            permissions: agent::PermissionProfile::Review,
         };
         let provider = self.provider.clone();
         let harvest = self.harvester();

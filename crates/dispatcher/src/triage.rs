@@ -182,6 +182,10 @@ impl Core {
             merge_conflict: None,
             session_id: session_id.clone(),
             node: None, // triage runs on the platform image; no per-type pin
+            // Triage diagnoses a stalled job from a read-only clone and answers
+            // in its result text (§1.2) — it reads, it does not build or edit,
+            // so it shares the evaluator's profile.
+            permissions: agent::PermissionProfile::Review,
         };
         let provider = self.provider.clone();
         let tx = self.self_tx.clone().expect("spawned core");

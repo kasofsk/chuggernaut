@@ -48,18 +48,23 @@ the absence of a workflow file.
   type. It runs `tasks/ci.sh` (stage 1) against the job branch before any merge:
   `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D
   warnings`, and `cargo test --workspace --no-fail-fast` with tier-2 tests
-  executing against a real `nats-server`. It is diff-aware — doc/web/config-only
-  diffs gate in seconds without a cargo build — and it version-skew-gates
-  `jobs/*.yaml` config changes against the deployed dispatcher (spec §14).
-- `tasks/ci.sh` also runs three pure-shell gates **before** that diff-aware
-  early-exit, so a web-only or docs-only change is still gated: the `jobs/*.yaml`
-  version-skew check, the `MODULES.md` registry check, and
-  `tasks/check-duplication.sh` — copy-paste detection via a pinned
-  `jscpd@5.0.5` at `threshold: 0` (STYLE.md Tier 1; ~30ms for the whole repo, so
-  it is unconditional). Any clone fails the gate.
+  executing against a real `nats-server`. It is diff-aware, with two independent
+  stages: a diff touching `web/` runs `npm ci && npm run build` (tsc + vite), a
+  diff touching Rust paths runs the cargo gate, and a doc/config-only diff runs
+  neither and gates in seconds.
+- `tasks/ci.sh` also runs three pure-shell gates **before** those diff-aware
+  stages, so a web-only or docs-only change is still gated: the `jobs/*.yaml`
+  version-skew check against the deployed dispatcher (spec §14), the
+  `MODULES.md` registry check, and `tasks/check-duplication.sh` — copy-paste
+  detection via a pinned `jscpd@5.0.5` at `threshold: 0` (STYLE.md Tier 1;
+  ~30ms for the whole repo, so it is unconditional). Any clone fails the gate.
 - Per-type **stage-0 agent reviewers** run first (`tasks/review-*.md`), so the
-  slow cargo gate is spent only on changes the reviewer accepts; `docs`/`design`
+  slow gate is spent only on changes the reviewer accepts; `docs`/`design`
   jobs additionally gate on `tasks/doc-lint.sh` at stage 1.
+- **Reviewers read; they do not run.** Agent evaluators launch under the
+  read-only `Review` permission profile (spec §4.3) — no `cargo`, no `npm`.
+  Executing is CI's job, so don't add "build it and check" to a
+  `tasks/review-*.md`; add it to `tasks/ci.sh`.
 - The wiring lives in `jobs/*.yaml` (job types) and `prompts/` (work/review
   prompts); the gates themselves are `tasks/*.sh` and `tasks/review-*.md`.
 

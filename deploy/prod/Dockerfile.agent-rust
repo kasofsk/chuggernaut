@@ -108,8 +108,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
  && rm -rf /opt/chug-prebuilt-target/debug/incremental \
  && cd / && rm -rf /workspace
 
-# Headless agents run as root inside a disposable container; IS_SANDBOX lets
-# `--dangerously-skip-permissions` through the CLI's root check.
+# Headless agents run as root inside a disposable container. Kept for the CLI's
+# root checks now that the launch passes `--settings` with a per-role permission
+# profile (spec §4.3) instead of `--dangerously-skip-permissions`.
 ENV IS_SANDBOX=1
 
 # The clone happens as root at /workspace; commits need an identity.

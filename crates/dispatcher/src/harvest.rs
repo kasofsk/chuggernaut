@@ -97,6 +97,24 @@ impl Harvester {
         }
         let result = logs.as_deref().and_then(agent::claude::parse_result);
 
+        // Permission denials are the feedback loop on the §4.3 profiles: a
+        // too-tight policy degrades an agent silently (it is told "denied" and
+        // carries on with less), so an unreported denial shows up only as
+        // mysteriously worse work. WARN — an agent hitting its policy is either
+        // a prompt that asks for the wrong thing or a profile that needs
+        // widening, and both want a human to look.
+        let denials = logs
+            .as_deref()
+            .map(agent::claude::parse_permission_denials)
+            .unwrap_or_default();
+        if !denials.is_empty() {
+            tracing::warn!(
+                "job {seq} task {task_id}: {} tool call(s) denied by the permission profile: {}",
+                denials.len(),
+                denials.join("; ")
+            );
+        }
+
         if let Some(bytes) = logs {
             self.store(owner, project, seq, task_id, ArtifactKind::Stdout, &bytes)
                 .await;

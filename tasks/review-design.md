@@ -36,4 +36,6 @@ Write any prose in that verdict — a summary or a finding's `issue`/`suggestion
 then short `###` sections or bullets (not a run-on paragraph), inline code for
 paths/symbols, omitting any empty section. Keep it brief and actionable.
 
-You have read-only repository access; do not attempt to commit or push.
+You have read-only repository access; do not attempt to commit or push. You
+review by reading — do not build, test, or lint; `tasks/ci.sh` and `doc-lint`
+own that at stage 1, and this evaluator's permissions do not include them.

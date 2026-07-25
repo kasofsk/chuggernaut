@@ -65,6 +65,32 @@ impl LaunchReporter {
     }
 }
 
+/// Which permission policy the provider grants a run.
+///
+/// Before this existed every agent launched with `--dangerously-skip-permissions`
+/// — one blanket bypass for work and evaluation alike — so "the reviewer must
+/// not build" was a request in a prompt and nothing more. The profile is chosen
+/// by *role* at the launch site rather than declared in `jobs/*.yaml`: nothing
+/// needs per-evaluator variation, and `types::Evaluator` is
+/// `deny_unknown_fields`, so a new YAML key would drag in a schema regen and a
+/// spec §14 version-skew gate for no gain.
+///
+/// The provider owns the translation to CLI-specific settings — see
+/// [`claude::settings_json`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionProfile {
+    /// Work and factory-triage agents: edit, build, commit, push. Deliberately
+    /// as permissive as the old bypass flag — the container is still the
+    /// security boundary (spec §4.3). The gain is that policy is now
+    /// *expressible*, not that work is newly restricted.
+    Work,
+    /// Agent evaluators: read the diff, judge it against the brief, publish a
+    /// verdict. No build tooling — the stage-1 `ci` gate owns compiling and
+    /// testing, and a reviewer that re-runs it spends minutes of shared Docker
+    /// host for signal CI is about to produce anyway.
+    Review,
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentRunConfig {
     pub image: String,
@@ -90,6 +116,8 @@ pub struct AgentRunConfig {
     /// Optional fleet node pin from the job type's `placement` (spec §3.1),
     /// forwarded to the backend at launch. `None` = default placement.
     pub node: Option<String>,
+    /// Which tools this run may use (spec §4.3). See [`PermissionProfile`].
+    pub permissions: PermissionProfile,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +159,13 @@ impl AgentOutput {
 pub const PROMPT_PATH: &str = "/chuggernaut/prompt.md";
 /// Path where factory triage jobs receive their event batch (spec §13.4).
 pub const EVENTS_PATH: &str = "/chuggernaut/events.json";
+
+/// Path where providers inject the run's permission settings (spec §4.3).
+///
+/// Under `/chuggernaut`, NOT under `/workspace`: the bootstrap clones into
+/// `/workspace` and git requires that directory empty, so anything pre-injected
+/// there breaks the clone.
+pub const SETTINGS_PATH: &str = "/chuggernaut/agent-settings.json";
 
 /// `CLAUDE_CONFIG_DIR` for agent containers. Pinning this decouples the
 /// transcript path from `HOME` — which is only `/root` today because
