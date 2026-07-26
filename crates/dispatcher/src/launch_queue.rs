@@ -150,7 +150,7 @@ impl Core {
         // dispatcher restart (§3.5).
         task.pending_reason = Some(types::PendingReason::QueuedForCapacity);
         task.queued_at = Some(queued_at);
-        self.tasks.put(task).await?;
+        self.task_put(task).await?;
         self.publish(
             owner,
             project,
@@ -328,7 +328,7 @@ impl Core {
             // so keep `queued_at` on the record: it is the anchor `defer_launch`
             // preserves so the backstop clock accumulates rather than resetting.
             task.pending_reason = None;
-            self.tasks.put(&task).await?;
+            self.task_put(&task).await?;
             self.publish(
                 owner,
                 project,
@@ -445,7 +445,7 @@ impl Core {
                 // UI drops the "queued" badge live and no stale reason lingers.
                 task.pending_reason = None;
                 task.queued_at = None;
-                self.tasks.put(&task).await?;
+                self.task_put(&task).await?;
                 self.publish(
                     owner,
                     project,
@@ -626,7 +626,7 @@ impl Core {
             ),
             structured: None,
         });
-        self.tasks.put(&task).await?;
+        self.task_put(&task).await?;
         self.publish(
             &q.owner,
             &q.project,

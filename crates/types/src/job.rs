@@ -112,6 +112,18 @@ pub struct Job {
     /// written before completion stamping existed deserialize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<DateTime<Utc>>,
+    /// How long the job spent **working**: the sum of its own tasks' spans, per
+    /// [`crate::task::task_time_ms`]. Carried on the record — not derived by the
+    /// UI — so the jobs list can show a job's duration without a per-row task
+    /// fetch, and recomputed from that one job's tasks whenever one of them is
+    /// written back, so a missed write self-heals instead of drifting.
+    ///
+    /// Distinct from `completed_at - created_at`, which is dominated by the
+    /// waiting a job does while Frozen and Blocked. None while no task of the
+    /// job carries a usable span, and on records written before the field
+    /// existed — a `Some(0)` genuinely means "took no measurable time".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_time_ms: Option<u64>,
 }
 
 /// The jobs-**list** projection (spec §6.1): every [`Job`] field except the two
@@ -152,6 +164,8 @@ pub struct JobSummary<'a> {
     pub ready_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_time_ms: Option<u64>,
     /// The job's latest channel post, for the muted progress line the operator
     /// table shows under a live job's title. Not a [`Job`] field — it lives in
     /// the `channels` bucket — and the one deliberate *addition* the projection
@@ -192,6 +206,7 @@ impl<'a> From<&'a Job> for JobSummary<'a> {
             created_at: job.created_at,
             ready_at: job.ready_at,
             completed_at: job.completed_at,
+            task_time_ms: job.task_time_ms,
             // Lives in a different bucket; the list handler joins it in.
             channel: None,
         }
@@ -440,6 +455,43 @@ mod tests {
     }
 
     #[test]
+    fn job_round_trips_with_task_time_and_stays_backward_compat() {
+        // The ~290 records written before task time exists carry no key: they
+        // load as None and stay keyless on the wire, so the UI shows a stamp
+        // with no duration hint rather than a bogus 0s.
+        let json = r#"{
+          "id": 6,
+          "project": "acme/api",
+          "type": "implement-endpoint",
+          "deps": [],
+          "state": "Done",
+          "branch": "job/6",
+          "base_ref": null,
+          "knowledge_tags": [],
+          "factory": null,
+          "created_at": "2026-07-22T10:00:00Z",
+          "ready_at": null
+        }"#;
+        let job: Job = serde_json::from_str(json).unwrap();
+        assert_eq!(job.task_time_ms, None);
+        assert!(
+            !serde_json::to_string(&job)
+                .unwrap()
+                .contains("task_time_ms")
+        );
+
+        // A computed total round-trips, including a genuine zero — which must
+        // stay distinguishable from "nothing to show".
+        for ms in [0u64, 18 * 60 * 1000] {
+            let mut timed = job.clone();
+            timed.task_time_ms = Some(ms);
+            let back = serde_json::to_string(&timed).unwrap();
+            assert!(back.contains(&format!("\"task_time_ms\":{ms}")));
+            assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), timed);
+        }
+    }
+
+    #[test]
     fn job_round_trips_as_batch_and_member() {
         // A batch job carries `members`; a member carries `batch_id`. Both
         // round-trip and the Batched state is a first-class serde variant.
@@ -598,6 +650,7 @@ mod tests {
             created_at: "2026-07-24T09:00:00Z".parse().unwrap(),
             ready_at: Some("2026-07-24T09:30:00Z".parse().unwrap()),
             completed_at: Some("2026-07-24T11:00:00Z".parse().unwrap()),
+            task_time_ms: Some(18 * 60 * 1000),
         }
     }
 

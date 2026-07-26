@@ -151,6 +151,12 @@ export interface Job {
    *  dispatcher at the terminal transition; null while the job is still live or
    *  on records written before completion stamping existed */
   completed_at?: string | null
+  /** how long the job spent *working*: the sum of its own tasks'
+   *  `completed_at - started_at` spans, computed by the dispatcher and carried
+   *  on the record so the table needs no per-row task fetch. Absent/null when no
+   *  task of the job has a usable span and on records written before the field
+   *  existed — a `0` is a genuine "no measurable time", not "unknown". */
+  task_time_ms?: number | null
   /** latest channel post, on live jobs only (see {@link JobChannel}) */
   channel?: JobChannel | null
 }

@@ -53,6 +53,7 @@ fn seeded_job(id: u64) -> Job {
         created_at: Utc::now(),
         ready_at: Some(Utc::now()),
         completed_at: None,
+        task_time_ms: None,
     }
 }
 

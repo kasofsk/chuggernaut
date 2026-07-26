@@ -554,7 +554,7 @@ impl Core {
                 match self.backend.launch(config).await {
                     Ok(id) => {
                         task.container_id = Some(id.clone());
-                        self.tasks.put(&task).await?;
+                        self.task_put(&task).await?;
                         // Logs are the only record of what a command task printed —
                         // TaskResult::Command.output has never carried it.
                         self.spawn_logs_monitor(owner, project, seq, task_id, id);
@@ -930,7 +930,7 @@ impl Core {
         task.state = TaskState::Failed;
         task.infra_loss = true;
         task.completed_at = Some(Utc::now());
-        self.tasks.put(&task).await?;
+        self.task_put(&task).await?;
         self.publish(
             owner,
             project,
@@ -1079,7 +1079,7 @@ impl Core {
                 token_usage: submission.token_usage,
                 cover_html: submission.cover_html,
             });
-            self.tasks.put(&task).await?;
+            self.task_put(&task).await?;
         }
         Ok(())
     }
@@ -1161,7 +1161,7 @@ impl Core {
             // `escalation_retry_phase`); Resolve re-enters Evaluation.
             (JobState::Escalated, TaskResolution::Escalation { action, structured }) => {
                 complete_task(&mut task, true, false, structured, Some(action));
-                self.tasks.put(&task).await?;
+                self.task_put(&task).await?;
                 self.publish(
                     owner,
                     project,
@@ -1193,7 +1193,7 @@ impl Core {
                     ));
                 }
                 complete_task(&mut task, true, false, structured, Some(action));
-                self.tasks.put(&task).await?;
+                self.task_put(&task).await?;
                 self.publish(
                     owner,
                     project,
@@ -1234,7 +1234,7 @@ impl Core {
                 if let Some(TaskResult::Human { summary: s, .. }) = &mut task.result {
                     *s = summary.clone();
                 }
-                self.tasks.put(&task).await?;
+                self.task_put(&task).await?;
                 self.ensure_exec_state(owner, project, seq).await?;
                 // The human's summary is this attempt's submit_result (§1.2
                 // claims): it flows into the squash-merge commit body exactly
@@ -1281,13 +1281,13 @@ impl Core {
             // Human evaluator task (§3.3 human).
             (JobState::Evaluation, TaskResolution::Pass { structured, .. }) => {
                 complete_task(&mut task, true, false, structured.clone(), None);
-                self.tasks.put(&task).await?;
+                self.task_put(&task).await?;
                 self.resolve_eval_slot(owner, project, seq, task_id, true, false, structured)
                     .await
             }
             (JobState::Evaluation, TaskResolution::Fail { structured, abort }) => {
                 complete_task(&mut task, false, abort, Some(structured.clone()), None);
-                self.tasks.put(&task).await?;
+                self.task_put(&task).await?;
                 self.resolve_eval_slot(owner, project, seq, task_id, false, abort, Some(structured))
                     .await
             }
@@ -1467,7 +1467,7 @@ impl Core {
                     format!("Job {seq} still fails re-validation at {head}:\n{detail}"),
                     Utc::now(),
                 );
-                self.tasks.put(&task).await?;
+                self.task_put(&task).await?;
                 Ok(())
             }
         }
@@ -2407,6 +2407,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             ready_at: None,
             completed_at: None,
+            task_time_ms: None,
         };
         let with_cover = types::Job {
             cover_html: Some(

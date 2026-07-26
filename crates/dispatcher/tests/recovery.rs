@@ -247,6 +247,7 @@ async fn restart_recovers_orphaned_running_work_task() {
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
             completed_at: None,
+            task_time_ms: None,
         })
         .await
         .unwrap();
@@ -404,6 +405,7 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
         created_at: Utc::now(),
         ready_at: Some(Utc::now()),
         completed_at: None,
+        task_time_ms: None,
     })
     .await
     .unwrap();
@@ -602,6 +604,7 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
             completed_at: None,
+            task_time_ms: None,
         })
         .await
         .unwrap();
@@ -745,6 +748,7 @@ async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
             completed_at: None,
+            task_time_ms: None,
         })
         .await
         .unwrap();
@@ -888,6 +892,7 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
             completed_at: None,
+            task_time_ms: None,
         })
         .await
         .unwrap();
@@ -1024,6 +1029,7 @@ async fn restart_requeues_queued_pending_work_task() {
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
             completed_at: None,
+            task_time_ms: None,
         })
         .await
         .unwrap();
@@ -1150,6 +1156,7 @@ async fn seed_queued_command_work(
             created_at: queued_at,
             ready_at: Some(queued_at),
             completed_at: None,
+            task_time_ms: None,
         })
         .await
         .unwrap();
@@ -1391,6 +1398,7 @@ async fn restart_requeues_queued_pending_agent_eval() {
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
             completed_at: None,
+            task_time_ms: None,
             cover_html: None,
         })
         .await
@@ -1606,6 +1614,7 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
             completed_at: None,
+            task_time_ms: None,
         })
         .await
         .unwrap();
@@ -1755,6 +1764,7 @@ async fn fleet_sweep_core(
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
             completed_at: None,
+            task_time_ms: None,
         })
         .await
         .unwrap();
@@ -2044,6 +2054,7 @@ async fn restart_lands_job_orphaned_in_wrapup() {
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
             completed_at: None,
+            task_time_ms: None,
         })
         .await
         .unwrap();
@@ -2185,6 +2196,7 @@ wrap_up:
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
             completed_at: None,
+            task_time_ms: None,
         })
         .await
         .unwrap();
@@ -2530,6 +2542,7 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
             completed_at: None,
+            task_time_ms: None,
         })
         .await
         .unwrap();
@@ -2840,6 +2853,7 @@ async fn restart_reattach_harvests_command_work_deploy_report() {
             created_at: Utc::now(),
             ready_at: Some(Utc::now()),
             completed_at: None,
+            task_time_ms: None,
         })
         .await
         .unwrap();
@@ -3021,6 +3035,7 @@ fn crash_state_job(job_type: &str, head: String) -> Job {
         created_at: Utc::now(),
         ready_at: Some(Utc::now()),
         completed_at: None,
+        task_time_ms: None,
     }
 }
 

@@ -31,6 +31,8 @@ pub struct Job {
     pub factory: Option<String>,           // factory name when created by a factory triage agent (see §13); None for operator-created jobs
     pub created_at: DateTime<Utc>,
     pub ready_at: Option<DateTime<Utc>>,   // set once (immutably) when job first enters Ready; anchor for job_deadline; None until then
+    pub completed_at: Option<DateTime<Utc>>,  // when the job reached a terminal state (Done or Revoked); stamped once by the dispatcher's single state-write path at the terminal transition and never cleared, so the jobs list shows completion without opening the job. None while live. Defaults None on old records
+    pub task_time_ms: Option<u64>,         // how long the job spent WORKING: the sum of completed_at - started_at over every task of the job, across cycles and rework attempts. Tasks that never started (parked, queued, cancelled) and the gaps between tasks contribute nothing — completed_at - created_at is mostly the waiting a job does while Frozen and Blocked, which is why that is not the number. Recomputed from the job's own tasks (never a project-wide scan) at the single point a task record is written back, so it is idempotent and self-healing rather than accumulated. None when no task carries a usable span, so a consumer can tell "nothing to show" from a genuine 0; defaults None on old records, which an operator backfills with `chuggernaut admin backfill-task-time`
 }
 
 pub enum JobState { Draft, Frozen, Batched, Blocked, Ready, Work, Evaluation, WrapUp, Escalated, Stalled, Done, Revoked }

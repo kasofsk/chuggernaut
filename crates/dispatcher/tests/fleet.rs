@@ -77,6 +77,7 @@ fn job(id: u64, r#type: &str, state: JobState, base_ref: Option<String>) -> Job 
         created_at: Utc::now(),
         ready_at: Some(Utc::now()),
         completed_at: None,
+        task_time_ms: None,
     }
 }
 

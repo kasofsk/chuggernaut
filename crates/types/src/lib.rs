@@ -38,7 +38,7 @@ pub use resources::{MEMORY_PATTERN, MemoryParseError, parse_memory};
 pub use step::{StepKind, StepRecord, StepStatus};
 pub use task::{
     EscalationAction, EvalResult, PendingReason, Performer, ReworkReason, Task, TaskKind,
-    TaskPhase, TaskResolution, TaskResult, TaskState, TokenUsage,
+    TaskPhase, TaskResolution, TaskResult, TaskState, TokenUsage, task_time_ms,
 };
 pub use user::{Identity, IdentityKind, ProjectRole, User};
 pub use version::{CHANNEL_PROTOCOL_VERSION, CONFIG_SCHEMA_EPOCH, WORKER_RPC_VERSION};

@@ -93,6 +93,24 @@ pub enum AdminCmd {
         #[arg(long)]
         cancel: bool,
     },
+    /// One-shot backfill of `task_time_ms` onto existing job records (spec
+    /// §1.1). The dispatcher recomputes a job's task time whenever one of its
+    /// tasks is written back, so only records that finished *before* the field
+    /// existed need this — they would otherwise show a completion stamp with no
+    /// duration forever. Same summing rule (`types::task_time_ms`), same
+    /// per-job bounded read, and idempotent: re-running it changes nothing.
+    ///
+    /// Terminal jobs only. The dispatcher is the single writer of job records
+    /// and never writes a Done/Revoked one again, so this cannot race it; a
+    /// live job gets its total from the dispatcher on its next task write.
+    BackfillTaskTime {
+        /// `{owner}/{project}`; omit to cover every project.
+        #[arg(long)]
+        project: Option<String>,
+        /// Report what would change and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(clap::Args, Debug)]
@@ -311,10 +329,70 @@ pub async fn run(args: AdminArgs) -> Result<()> {
                 run_worker_refresh(&store, &node, &sha, &tag, wait_secs).await
             }
         }
+        AdminCmd::BackfillTaskTime { project, dry_run } => {
+            run_backfill_task_time(&store, project.as_deref(), dry_run).await
+        }
         AdminCmd::WorkerCreds { .. } | AdminCmd::WorkerGitKey { .. } => {
             unreachable!("handled before connect")
         }
     }
+}
+
+/// Stamp `task_time_ms` onto the terminal job records that predate the field.
+/// Reuses the dispatcher's summing rule verbatim (`types::task_time_ms`) so
+/// there is one implementation of "what a job's task time is", and reads one
+/// job's tasks at a time — never the whole tasks bucket, which is the scan that
+/// took prod down in #290.
+async fn run_backfill_task_time(
+    store: &NatsStore,
+    project: Option<&str>,
+    dry_run: bool,
+) -> Result<()> {
+    let jobs = store.jobs().await?;
+    let tasks = store.tasks().await?;
+    let records = match project {
+        Some(slug) => {
+            let Some((owner, name)) = slug.split_once('/') else {
+                bail!("--project must be owner/project, got {slug:?}");
+            };
+            jobs.list(owner, name).await?
+        }
+        None => jobs.list_all().await?,
+    };
+
+    let (mut stamped, mut unchanged, mut live) = (0usize, 0usize, 0usize);
+    for mut job in records {
+        if !job.state.is_terminal() {
+            live += 1;
+            continue;
+        }
+        let Some((owner, name)) = job.project.split_once('/') else {
+            bail!(
+                "job record {} has a malformed project {:?}",
+                job.id,
+                job.project
+            );
+        };
+        let task_time_ms = types::task_time_ms(&tasks.list_for_job(owner, name, job.id).await?);
+        if job.task_time_ms == task_time_ms {
+            unchanged += 1;
+            continue;
+        }
+        println!(
+            "{}#{}: {:?} -> {:?}",
+            job.project, job.id, job.task_time_ms, task_time_ms
+        );
+        job.task_time_ms = task_time_ms;
+        if !dry_run {
+            jobs.put(&job).await?;
+        }
+        stamped += 1;
+    }
+    println!(
+        "{} {stamped} job(s); {unchanged} already correct, {live} live (owned by the dispatcher)",
+        if dry_run { "would stamp" } else { "stamped" }
+    );
+    Ok(())
 }
 
 /// Prefix of the single-line detail the CLI prints on a FAILED refresh, for

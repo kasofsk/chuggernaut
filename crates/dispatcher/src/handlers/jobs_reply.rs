@@ -226,6 +226,7 @@ mod tests {
             created_at: Utc::now(),
             ready_at: None,
             completed_at: None,
+            task_time_ms: None,
         }
     }
 

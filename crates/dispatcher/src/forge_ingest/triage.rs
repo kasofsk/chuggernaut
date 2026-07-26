@@ -250,7 +250,7 @@ impl Core {
                     assessment,
                     token_usage: exit.usage,
                 });
-                self.tasks.put(&task).await?;
+                self.task_put(&task).await?;
                 self.publish(
                     owner,
                     project,
@@ -273,7 +273,7 @@ impl Core {
                             .to_string(),
                     token_usage: exit.usage,
                 });
-                self.tasks.put(&task).await?;
+                self.task_put(&task).await?;
                 self.publish(
                     owner,
                     project,

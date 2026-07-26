@@ -452,7 +452,7 @@ impl Core {
             }
             failed.state = TaskState::Failed;
             failed.completed_at = Some(Utc::now());
-            self.tasks.put(&failed).await?;
+            self.task_put(&failed).await?;
         }
         let _ = self
             .repos
@@ -514,7 +514,7 @@ impl Core {
                 let mut dead = task.clone();
                 dead.state = TaskState::Failed;
                 dead.completed_at = Some(Utc::now());
-                self.tasks.put(&dead).await?;
+                self.task_put(&dead).await?;
                 self.launch_wrapup_task(owner, project, seq, task.attempt + 1)
                     .await
             }

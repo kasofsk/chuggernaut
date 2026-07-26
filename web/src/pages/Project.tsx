@@ -59,11 +59,23 @@ function fmtStamp(iso: string): string {
 }
 
 // Tooltip for the completed cell: the full ISO instant plus the humanized
-// created→completed duration (the same hint shown muted in the cell). Undefined
-// for live jobs so the cell has no tooltip.
-function completedTip(j: Job): string | undefined {
+// created→completed WALL-CLOCK span. Deliberately not what the cell shows — the
+// gap between this and the task time below is the queueing and waiting the job
+// did while Frozen and Blocked. Undefined for live jobs so the cell has no
+// tooltip.
+export function completedTip(j: Job): string | undefined {
   if (!j.completed_at) return undefined
-  return `${j.completed_at} · took ${fmtDuration(Date.parse(j.completed_at) - Date.parse(j.created_at))}`
+  const wall = fmtDuration(Date.parse(j.completed_at) - Date.parse(j.created_at))
+  return `${j.completed_at} · ${wall} from creation to completion`
+}
+
+// The completed cell's muted hint: how long the job spent *working* — the sum of
+// its own tasks' spans, carried on the jobs-list record (`task_time_ms`) so the
+// table reads it straight off the row instead of fetching tasks per job. Null
+// when no task carried a usable span, which the cell renders as no hint at all
+// rather than a misleading '0s'; a real zero total still shows.
+export function taskTimeHint(j: Job): string | null {
+  return j.task_time_ms == null ? null : fmtDuration(j.task_time_ms)
 }
 
 // Compact "N ago" for a channel post's age. Coarse on purpose — the exact
@@ -524,6 +536,7 @@ export function ProjectPage() {
             )}
             {!loading && rows.map(({ job: j, member }, i) => {
               const gate = j.state === 'Frozen' ? depGate(j) : null
+              const taskTime = taskTimeHint(j)
               return (
               <tr
                 key={j.id}
@@ -616,9 +629,7 @@ export function ProjectPage() {
                   {j.completed_at ? (
                     <>
                       {fmtStamp(j.completed_at)}
-                      <span className="job-dur">
-                        {fmtDuration(Date.parse(j.completed_at) - Date.parse(j.created_at))}
-                      </span>
+                      {taskTime !== null && <span className="job-dur">{taskTime}</span>}
                     </>
                   ) : (
                     // A live job has no completion moment: the table wants a

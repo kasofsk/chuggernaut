@@ -664,7 +664,7 @@ impl Core {
                 match self.backend.launch(config).await {
                     Ok(id) => {
                         task.container_id = Some(id.clone());
-                        self.tasks.put(&task).await?;
+                        self.task_put(&task).await?;
                         self.spawn_eval_monitor(owner, project, seq, task_id, id);
                     }
                     // No free slot: queue the launch and retry when one frees,
@@ -1053,7 +1053,7 @@ impl Core {
         });
         task.state = TaskState::Done;
         task.completed_at = Some(Utc::now());
-        self.tasks.put(&task).await?;
+        self.task_put(&task).await?;
         self.publish(
             owner,
             project,
@@ -1535,7 +1535,7 @@ impl Core {
         });
         task.state = TaskState::Done;
         task.completed_at = Some(Utc::now());
-        self.tasks.put(&task).await?;
+        self.task_put(&task).await?;
         self.publish(
             owner,
             project,
@@ -1974,7 +1974,7 @@ impl Core {
         match self.backend.launch(config).await {
             Ok(id) => {
                 task.container_id = Some(id.clone());
-                self.tasks.put(&task).await?;
+                self.task_put(&task).await?;
                 self.spawn_logs_monitor(owner, project, seq, task_id, id);
             }
             // No free slot: queue the publish and retry when one frees (§3.5).

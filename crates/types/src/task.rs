@@ -315,6 +315,42 @@ pub struct EvalResult {
     pub output: Option<String>,
 }
 
+/// A job's **task time**: the sum of `completed_at - started_at` over every
+/// task in `tasks`, across cycles and rework attempts (spec §1.1
+/// `Job::task_time_ms`).
+///
+/// This is time spent *working*, not elapsed time. A job's
+/// `completed_at - created_at` is mostly waiting — it sits Frozen until an
+/// operator releases it and then Blocked behind its dependencies — so the gap
+/// *between* two tasks is deliberately excluded, as are tasks that never
+/// started (parked human attempts, queued launches, cancelled tasks) and tasks
+/// still running.
+///
+/// `None` when no task carries a usable span, so a consumer can distinguish
+/// "nothing to show" from a job that genuinely took ~0s. Lives here so the
+/// dispatcher's recompute-on-write and the operator backfill share one
+/// implementation of the rule.
+#[must_use]
+pub fn task_time_ms(tasks: &[Task]) -> Option<u64> {
+    let mut total_ms: u64 = 0;
+    let mut spans = 0usize;
+    for task in tasks {
+        let (Some(started), Some(completed)) = (task.started_at, task.completed_at) else {
+            continue;
+        };
+        // A span that runs backwards is host clock skew, not negative work:
+        // count it as no span rather than letting it subtract from the total.
+        let Ok(ms) = u64::try_from((completed - started).num_milliseconds()) else {
+            continue;
+        };
+        total_ms = total_ms.saturating_add(ms);
+        spans += 1;
+    }
+    debug_assert!(spans <= tasks.len(), "counted more spans than tasks");
+    debug_assert!(spans > 0 || total_ms == 0, "no span may not sum above zero");
+    (spans > 0).then_some(total_ms)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -650,6 +686,72 @@ mod tests {
         let json = serde_json::to_string(&labelled).unwrap();
         assert!(json.contains(r#""label":"publish""#));
         assert_eq!(serde_json::from_str::<Task>(&json).unwrap(), labelled);
+    }
+
+    /// A task with the given cycle/attempt and an optional started/completed
+    /// span, minutes past a fixed epoch. `None` for either stamp models the
+    /// real records that carry none: a parked or queued task (no start) and a
+    /// task still running (no completion).
+    fn spanned(cycle: u32, attempt: u32, started_min: Option<i64>, done_min: Option<i64>) -> Task {
+        let json = r#"{
+          "id": 1, "job_seq": 7, "project": "acme/api",
+          "phase": "Work", "cycle": 1,
+          "kind": { "kind": "Agent", "provider": "claude", "model": null, "prompt": "p.md" },
+          "state": "Done", "attempt": 1,
+          "container_id": null, "result": null,
+          "created_at": "2026-07-21T10:00:00Z", "started_at": null, "completed_at": null
+        }"#;
+        let at = |min: i64| {
+            "2026-07-21T10:00:00Z"
+                .parse::<DateTime<Utc>>()
+                .unwrap()
+                .checked_add_signed(chrono::Duration::minutes(min))
+                .unwrap()
+        };
+        let mut task: Task = serde_json::from_str(json).unwrap();
+        task.cycle = cycle;
+        task.attempt = attempt;
+        task.started_at = started_min.map(at);
+        task.completed_at = done_min.map(at);
+        task
+    }
+
+    #[test]
+    fn task_time_sums_every_cycle_and_rework_attempt() {
+        // Two cycles, the second with a rework attempt: 10m + 5m + 3m. The
+        // 30-minute gaps between them are queueing, not work, and are excluded.
+        let tasks = [
+            spanned(1, 1, Some(0), Some(10)),
+            spanned(2, 1, Some(40), Some(45)),
+            spanned(2, 2, Some(75), Some(78)),
+        ];
+        assert_eq!(task_time_ms(&tasks), Some(18 * 60 * 1000));
+    }
+
+    #[test]
+    fn task_time_skips_tasks_with_no_usable_span() {
+        // A never-started task (parked/queued/cancelled) and a still-running one
+        // contribute nothing; the one finished task is the whole total.
+        let tasks = [
+            spanned(1, 1, None, None),
+            spanned(1, 2, None, Some(5)),
+            spanned(1, 3, Some(6), None),
+            spanned(1, 4, Some(6), Some(9)),
+        ];
+        assert_eq!(task_time_ms(&tasks), Some(3 * 60 * 1000));
+    }
+
+    #[test]
+    fn task_time_is_none_without_a_usable_span() {
+        // No tasks at all, and tasks that never produced a span, both report
+        // None — the UI must be able to tell "nothing to show" from a real 0s.
+        assert_eq!(task_time_ms(&[]), None);
+        assert_eq!(task_time_ms(&[spanned(1, 1, None, None)]), None);
+        assert_eq!(task_time_ms(&[spanned(1, 1, Some(3), None)]), None);
+        // Clock skew (completed before started) is not a usable span either.
+        assert_eq!(task_time_ms(&[spanned(1, 1, Some(9), Some(4))]), None);
+        // …but a genuine zero-length span is: Some(0), not None.
+        assert_eq!(task_time_ms(&[spanned(1, 1, Some(4), Some(4))]), Some(0));
     }
 
     #[test]

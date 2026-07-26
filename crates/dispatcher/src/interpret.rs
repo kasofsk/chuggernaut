@@ -107,7 +107,7 @@ impl Core {
 
             // --- Task & project records ---
             Effect::PutTask { task } => {
-                self.tasks.put(&task).await?;
+                self.task_put(&task).await?;
                 // Golden-trace label parity: Human escalation task writes are
                 // the one PutTask production callers recorded before the
                 // decider migration (B3 fixtures pin the exact string).

@@ -1188,7 +1188,7 @@ impl Core {
     /// records the id via [`Msg::TaskContainerStarted`], but that message can be
     /// in flight when SIGTERM lands; this closes the gap. Best-effort — a backend
     /// hiccup only warns, and a missing stamp is no worse than today.
-    async fn flush_running_container_ids(&self) {
+    async fn flush_running_container_ids(&mut self) {
         let running = match self.backend.list_managed_running().await {
             Ok(cs) => cs,
             Err(e) => {
@@ -1229,7 +1229,7 @@ impl Core {
                     && let Some(id) = by_identity.get(&(job.project.clone(), job.id, task.id))
                 {
                     task.container_id = Some(id.clone());
-                    if let Err(e) = self.tasks.put(&task).await {
+                    if let Err(e) = self.task_put(&task).await {
                         tracing::warn!(
                             "drain: stamping container id for {}/{} failed: {e}",
                             job.id,
@@ -1496,7 +1496,7 @@ impl Core {
             return Ok(());
         }
         task.container_id = Some(container_id);
-        self.tasks.put(&task).await?;
+        self.task_put(&task).await?;
         Ok(())
     }
 
@@ -1583,6 +1583,7 @@ impl Core {
             created_at: Utc::now(),
             ready_at: None,
             completed_at: None,
+            task_time_ms: None,
         };
         self.jobs.put(&job).await?;
         for &upstream in &job.deps {
@@ -1675,6 +1676,7 @@ impl Core {
             created_at: Utc::now(),
             ready_at: None,
             completed_at: None,
+            task_time_ms: None,
         };
         self.jobs.put(&batch).await?;
         for &upstream in &batch.deps {
@@ -2058,11 +2060,16 @@ impl Core {
 
         let slug = format!("{owner}/{project}");
         for &target in std::iter::once(&seq).chain(cascaded.iter()) {
-            let mut j = self.must_get(owner, project, target)?.clone();
             self.kill_running_containers(owner, project, target).await;
             self.close_pending_tasks(owner, project, target).await;
             self.active
                 .remove(&(owner.to_string(), project.to_string(), target));
+            // Snapshot the record only after `close_pending_tasks`: closing a
+            // claimed attempt stamps `completed_at`, which refreshes the job's
+            // `task_time_ms`. A clone taken before that would carry the stale
+            // total and `set_state`'s write would revert it — permanently, as
+            // Revoked is terminal and no later task write can self-heal it.
+            let mut j = self.must_get(owner, project, target)?.clone();
             self.set_state(&mut j, JobState::Revoked).await?;
             // Delete job/{seq} and any parked candidate; missing refs are fine.
             let _ = self.repos.delete_branch(owner, project, &j.branch).await;
@@ -2467,7 +2474,7 @@ impl Core {
     /// synthetic `TaskResult::Human` (`operator: "system"`, `action: Revoke`)
     /// so the task log stays truthful and nothing left in the inbox resolves to
     /// a job that no longer exists.
-    pub(crate) async fn close_pending_tasks(&self, owner: &str, project: &str, seq: u64) {
+    pub(crate) async fn close_pending_tasks(&mut self, owner: &str, project: &str, seq: u64) {
         let Ok(tasks) = self.tasks.list_for_job(owner, project, seq).await else {
             return;
         };
@@ -2491,7 +2498,7 @@ impl Core {
             });
             closed.state = types::TaskState::Done;
             closed.completed_at = Some(now);
-            let _ = self.tasks.put(&closed).await;
+            let _ = self.task_put(&closed).await;
         }
     }
 
@@ -2756,7 +2763,7 @@ impl Core {
     /// record's own `job_seq`; `extra` carries only what one phase adds — the
     /// retry attempt, an evaluator's name and stage, a human performer.
     pub(crate) async fn task_create(
-        &self,
+        &mut self,
         owner: &str,
         project: &str,
         task: &types::Task,
@@ -2771,7 +2778,7 @@ impl Core {
             task.completed_at.is_none(),
             "created task already completed"
         );
-        self.tasks.put(task).await?;
+        self.task_put(task).await?;
         let mut payload = serde_json::json!({
             "task_id": task.id,
             "phase": task.phase,
@@ -2782,6 +2789,68 @@ impl Core {
         }
         self.publish(owner, project, task.job_seq, "task-created", payload)
             .await
+    }
+
+    /// The single task-write path: persist the record, then bring the owning
+    /// job's [`Job::task_time_ms`] back in step with it.
+    ///
+    /// A task is written back at a dozen call sites, ten of which stamp
+    /// `completed_at`. Accumulating (`job.task_time_ms += span`) at each would
+    /// be that many copies of one rule — and the first site that forgets drifts
+    /// the total permanently. Recomputing here instead keeps the rule in one
+    /// place, which is what makes it self-healing rather than cumulative.
+    ///
+    /// Public for the same reason the other core operations are: it is the
+    /// contract a tier-2 test drives directly (`tests/task_time.rs`).
+    pub async fn task_put(&mut self, task: &types::Task) -> Result<()> {
+        self.tasks.put(task).await?;
+        // Only a completion can move the total, and the other writes (a
+        // container-id stamp, a queue park, a state flip) are the frequent
+        // ones — so the extra list read is spent only where it can matter.
+        if task.completed_at.is_some() {
+            self.task_put_time_refresh(&task.project, task.job_seq)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Recompute one job's task time from that job's own tasks and write it
+    /// back. The read is bounded by the job's own attempt count — never by the
+    /// project's job or task count, so it cannot become the growing full-bucket
+    /// scan #290 was — and it is idempotent: a write lost to a crash between
+    /// the task and the job self-heals at the next completion instead of
+    /// leaving a permanently wrong sum.
+    async fn task_put_time_refresh(&mut self, slug: &str, job_seq: u64) -> Result<()> {
+        let (owner, project) = split_slug(slug)?;
+        let tasks = self.tasks.list_for_job(&owner, &project, job_seq).await?;
+        let task_time_ms = types::task_time_ms(&tasks);
+        // Take the record from the in-memory graph when it is loaded there:
+        // that is the working copy every other job write starts from, so
+        // writing a KV-read copy back could revert a field the graph is ahead
+        // on. A job absent from the graph (a project not loaded) still gets its
+        // total from KV.
+        let job = match self.must_get(&owner, &project, job_seq) {
+            Ok(job) => Some(job.clone()),
+            Err(_) => self.jobs.get(&owner, &project, job_seq).await?,
+        };
+        // A task whose job record is gone (revoked and swept) has nothing to
+        // stamp; the recompute is advisory, never a reason to fail the write.
+        let Some(mut job) = job else {
+            return Ok(());
+        };
+        if job.task_time_ms == task_time_ms {
+            return Ok(());
+        }
+        job.task_time_ms = task_time_ms;
+        // Dual-write like `set_state`: KV is the truth and the graph is the
+        // copy the next transition is taken from — skip it and that transition
+        // writes the stale value straight back over this one.
+        self.jobs.put(&job).await?;
+        self.graphs
+            .entry(job.project.clone())
+            .or_default()
+            .insert(job);
+        Ok(())
     }
 }
 

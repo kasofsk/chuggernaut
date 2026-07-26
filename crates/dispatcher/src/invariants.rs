@@ -264,6 +264,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             ready_at: None,
             completed_at: None,
+            task_time_ms: None,
         }
     }
 
