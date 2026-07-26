@@ -122,6 +122,9 @@ domain/ (chuggernaut-domain — pure: no tokio/async-nats/store/vcs/auth)
     eval.rs      — the C5 evaluation decider: the staged fan-out, each evaluator type's
                    verdict, the retry/rework budgets, the reduce's pass/rework/abort/
                    escalate fork; owns the round as a value (§3.3)
+    work.rs      — the C6 Work decider: the launch-time validation fork, one attempt's
+                   task record incl. claim parking, the exit verdict with the
+                   finish-line guard, and the one retry policy (§3.2, §1.2)
 ```
 
 ```
@@ -131,7 +134,9 @@ dispatcher/
                    checks through the vcs port (§2.2, §14); re-exports the pure half
   ready.rs       — the Ready-phase shim: view/decide/apply/interpret for decide/ready,
                    plus queue admission, batch absorption and the Work hand-off (§2.1, §3.1)
-  exec.rs        — the §3.2 work-execution sequence (Ready→Work, retry, rework/conflict re-entry)
+  exec.rs        — the Work-phase shim: view/decide/apply/interpret for decide/work, plus
+                   the I/O it names — container launch, crash recover-or-reset, the
+                   finish-line branch read, the Evaluation hand-off (§3.2)
   eval.rs        — the Evaluation shim: evaluator prompts and launches driving
                    decide/eval (§3.3), post-eval finalization and the depth-1 merge
                    gate driving decide/merge_gate (§3.2 step 12)

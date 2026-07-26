@@ -81,7 +81,8 @@ reviewer-honour-system. A4 adds `clippy.toml` (`too-many-lines-threshold =
 
 It is a **ratchet, not a cleanup**: the ~280 pre-existing violations wear a
 site-specific `#[allow]` with a `TODO` naming the ticket that dissolves them
-(C6 for `eval.rs`/`exec.rs`, C7 for `handlers.rs`, C8 for `triage`/`origin`),
+(C6 for `eval.rs`/`exec.rs` — landed, so what it did not dissolve now carries
+`TODO(io-split)`; C7 for `handlers.rs`, C8 for `triage`/`origin`),
 so the debt stays greppable while new code cannot add a violation without an
 explicit, reviewable allow. Rewriting the oversized functions is Track C's
 job, one decider at a time — a blanket crate-level `#![allow]` is rejected.
@@ -144,9 +145,15 @@ In rough order of risk: `merge_gate` (carved from `eval.rs`), `wrapup`,
 traces are richest. Per NORTH-STAR, these are **opportunistic** — file C1 as
 scheduled work, then extract whichever phase the next real job touches;
 C2–C6 are backlog stubs plus a standing rule, not a scheduled series.
-**C2 (`merge_gate`), C3 (`wrapup`), C4 (`ready`) and C5 (`eval`) have landed**
-— `eval.rs` is down to its launch/monitor half plus the two folds, so only
-C6 (`work`/`exec`) remains of the series.
+**The series is complete**: C2 (`merge_gate`), C3 (`wrapup`), C4 (`ready`),
+C5 (`eval`) and C6 (`work`) have all landed. Every lifecycle phase's decisions
+are pure functions in `crates/domain/src/decide/`, and `eval.rs`/`exec.rs` are
+the launch/monitor halves plus the folds that drive them. What remains in the
+two files is I/O assembly — prompt, credential and env building — tagged
+`TODO(io-split)` where it still trips a Tier-1 lint; splitting it is mechanical
+work with no contract to name, so it is not a Track C ticket. `io-split` is a
+standing grep label, **not** a ticket id — there is no C-numbered stub behind
+it, and a reader who greps for one should stop here.
 
 **C7. `handlers.rs` → `handlers/`** *(code, small, independent)*
 Mechanical split of the 1,727-line file along its existing seams

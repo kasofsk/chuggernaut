@@ -33,6 +33,7 @@
 //! | `AppendRdep` | `rdeps.append` |
 //! | `RemoveRdep` | `rdeps.remove` |
 //! | `PutTask` | `tasks.put` |
+//! | `CreateTask` | `Core::task_create` → `tasks.put` + `task-created` |
 //! | `PutProject` | `projects.put` |
 //! | `PublishEvent` | `Core::publish` → `store.publish_event` |
 //! | `PublishStatus` | `store.publish` |
@@ -120,6 +121,20 @@ pub enum Effect {
     ///
     /// Example call site: `exec.rs::launch_work_task` writing the Running task.
     PutTask { task: Box<Task> },
+    /// Persist a FRESHLY CREATED task record and announce it (`task-created`).
+    /// Maps to `Core::task_create`, which owns the pair because it is not
+    /// separable: a stored task with no event is one the operator UI never
+    /// learns about, and an event with no record is a phantom. `extra` carries
+    /// only what the creating phase adds (the retry attempt, a human performer).
+    /// Use [`Effect::PutTask`] for an *update* to a task that already exists.
+    ///
+    /// Example call site: `decide::work` creating one Work attempt (C6).
+    CreateTask {
+        owner: String,
+        project: String,
+        task: Box<Task>,
+        extra: serde_json::Value,
+    },
 
     // --- Project records (ProjectStore) ---
     /// Persist a linked-origin project record. Maps to `projects.put`.
@@ -399,6 +414,7 @@ impl Effect {
             Effect::AppendRdep { .. } => "rdeps.append",
             Effect::RemoveRdep { .. } => "rdeps.remove",
             Effect::PutTask { .. } => "tasks.put",
+            Effect::CreateTask { .. } => "Core::task_create",
             Effect::PutProject { .. } => "projects.put",
             Effect::PublishEvent { .. } => "Core::publish",
             Effect::PublishStatus { .. } => "store.publish",
@@ -512,6 +528,15 @@ mod tests {
                 task: sample_task(),
             },
             "tasks.put",
+        );
+        assert_roundtrip(
+            Effect::CreateTask {
+                owner: "acme".into(),
+                project: "api".into(),
+                task: sample_task(),
+                extra: serde_json::json!({ "attempt": 1 }),
+            },
+            "Core::task_create",
         );
         assert_roundtrip(
             Effect::PutProject {

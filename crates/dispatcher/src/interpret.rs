@@ -2,11 +2,10 @@
 //!
 //! One place that turns an [`Effect`] value into the port call it names. It is
 //! the executable other half of [`crate::effects`]: the enum is the vocabulary
-//! deciders will emit, and [`Core::interpret`] is what performs it. Today no
-//! decider exists, so nothing in production calls this yet — it lands ahead of
-//! its callers (Track C migrates them one decider at a time). The interpreter
-//! holds the *only* remaining coupling to `&mut Core`, so the deciders that
-//! feed it stay pure.
+//! the deciders emit, and [`Core::interpret`] is what performs it. Every phase
+//! decider (C1–C6) now runs its effects through here. The interpreter holds the
+//! *only* remaining coupling to `&mut Core`, so the deciders that feed it stay
+//! pure.
 //!
 //! - **Accepts:** one [`Effect`] at a time, in the single-writer actor.
 //! - **Emits:** exactly the side effect the variant names — a KV write, a
@@ -119,6 +118,14 @@ impl Core {
                     trace.effect("PutTask Human(escalation)");
                 }
             }
+            Effect::CreateTask {
+                owner,
+                project,
+                task,
+                extra,
+            } => {
+                self.task_create(&owner, &project, &task, extra).await?;
+            }
             Effect::PutProject {
                 owner,
                 project,
@@ -166,7 +173,9 @@ impl Core {
                 attempt,
                 resume,
             } => {
-                self.launch_work_task(&owner, &project, seq, cycle, attempt, resume)
+                // Boxed: the launch shim interprets its own `CreateTask`
+                // effect, closing an async cycle through this function.
+                Box::pin(self.launch_work_task(&owner, &project, seq, cycle, attempt, resume))
                     .await?;
             }
             Effect::LaunchWrapupTask {
@@ -189,8 +198,18 @@ impl Core {
                 if let Some(trace) = &self.trace {
                     trace.effect("LaunchGateFix");
                 }
-                self.launch_gate_fix(&owner, &project, seq, new_base, failures, compiler_output)
-                    .await?;
+                // Boxed for the same reason as `LaunchWorkTask`: the gate-fix
+                // launch runs the Work attempt shim, which interprets its own
+                // task-creation effect.
+                Box::pin(self.launch_gate_fix(
+                    &owner,
+                    &project,
+                    seq,
+                    new_base,
+                    failures,
+                    compiler_output,
+                ))
+                .await?;
             }
             Effect::DeferLaunch {
                 owner,
@@ -368,7 +387,9 @@ impl Core {
                 if let Some(trace) = &self.trace {
                     trace.effect("EnterWork");
                 }
-                self.enter_work(
+                // Boxed for the same reason as `LaunchWorkTask`: Work entry
+                // runs the C6 shim, which interprets its own effects.
+                Box::pin(self.enter_work(
                     &owner,
                     &project,
                     seq,
@@ -376,7 +397,7 @@ impl Core {
                     eval_context,
                     merge_conflict,
                     rework_reason,
-                )
+                ))
                 .await?;
             }
             // --- Credentials (§7.4) ---

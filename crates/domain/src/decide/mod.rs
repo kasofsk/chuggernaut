@@ -37,6 +37,7 @@ pub mod escalation;
 pub mod eval;
 pub mod merge_gate;
 pub mod ready;
+pub mod work;
 pub mod wrapup;
 
 /// One §2.1 state change a decider decided: the job record to persist (with
