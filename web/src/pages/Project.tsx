@@ -563,6 +563,7 @@ export function ProjectPage() {
                     </span>
                   )}
                   <Link to={`/p/${owner}/${project}/jobs/${j.id}`}>
+                    <span className="col-title-num">#{j.id}</span>
                     {j.title || <span className="dim">—</span>}
                   </Link>
                   {CHANNEL_STATES.has(j.state) && channelMsgs.has(j.id) && (

@@ -864,6 +864,15 @@ table.jobs tbody tr.row-draft td:first-child {
 .batch-indent {
   margin-right: 0.35rem;
 }
+/* The job number lives in its own `#` column here, so the copy that the phone
+   list prefixes onto the title (unhidden in the responsive block) is dead
+   weight at this width — and reading it twice per row is worse than dead
+   weight. Hidden, not omitted: display:none also takes it out of the
+   accessibility tree, so exactly one number per row is announced at any
+   viewport. */
+.jobs-list .col-title-num {
+  display: none;
+}
 
 /* Collapsible card header (e.g. the job page's Channel section): the whole
    heading is the toggle, styled as plain heading text with a ▸/▾ caret. */
@@ -1746,15 +1755,13 @@ table.jobs tbody tr.row-draft td:first-child {
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
-    /* No column gap: the fields carry their own spacing (below), so that
-       nothing but the number's own width counts against the gutter — a gap
-       here would push the title onto its own line for any wide job number. */
+    /* No column gap: the metadata fields carry their own spacing (below), so a
+       field that wraps to a new line starts flush with the title above it. */
     column-gap: 0;
     row-gap: 0.2rem;
-    /* Right padding matches the 0.5rem the job number keeps on the left, so
-       the item is inset evenly from both screen edges now that the card no
-       longer insets it. */
-    padding: 0.5rem 0.5rem 0.55rem 3.2rem;
+    /* Even inset from both screen edges, now that the card no longer insets the
+       item and the number no longer claims a gutter. */
+    padding: 0.5rem 0.5rem 0.55rem;
     border-bottom: 1px solid var(--border-faint);
   }
   .jobs-list tbody td {
@@ -1775,18 +1782,21 @@ table.jobs tbody tr.row-draft td:first-child {
   .jobs-list tbody tr.row-accent td:first-child {
     box-shadow: none;
   }
-  /* The number sits in the gutter the row's left padding opens up, starting
-     0.5rem in from the row edge so the state accent stripe (3px, inset above)
-     doesn't paint over its first digit. Its width is content-driven, so an
-     unusually long number pushes the title along (and, at the extreme, onto its
-     own line) instead of running into it. */
+  /* A phone has no width to spend on a number column: a gutter wide enough for
+     the longest job number is charged to every row, and the title — the thing
+     being scanned for — starts further from the edge for it. The number becomes
+     a prefix on the title instead (below), so the item reads as one phrase,
+     "#123 fix the header", on one line. */
   .jobs-list td.col-num {
-    flex: none;
-    min-width: 2.6rem;
-    margin-left: -2.7rem;
-    padding-right: 0.35rem;
+    display: none;
+  }
+  /* Bold and tabular so the numbers still form a scannable left edge down the
+     list, and spaced off the title so the phrase has two parts. */
+  .jobs-list .col-title-num {
+    display: inline;
+    margin-right: 0.4rem;
+    font-weight: 700;
     font-variant-numeric: tabular-nums;
-    font-size: var(--fs-sm);
   }
   .jobs-list td.col-title {
     flex: 1 1 100%; /* claims the line, so the metadata wraps below it */
