@@ -12,6 +12,7 @@ pub struct ChannelEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ChannelUpdate {
     pub message: String,
     pub percent: Option<u8>,
@@ -33,6 +34,7 @@ pub struct ChannelUpdate {
 /// correlation (spec §6.3 events). Every field is optional for back-compat:
 /// legacy events carry none and render as before.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ChannelOrigin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<u64>,

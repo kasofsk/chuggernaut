@@ -43,6 +43,14 @@ One fat binary plus three tiny ones:
 
 Pure data: `Job`, `JobState`, `Task`, `TaskKind`/`TaskState`/`TaskResult`, `TaskResolution`, `EscalationAction`, `TokenUsage`, `User`, `Identity`, `ProjectRole`, `ChannelEntry`/`ChannelUpdate`/`AgentReply`, `EvalResult`, event payloads (§6.3), error envelope (§6.5), and the job type YAML schema (`JobType`) with its field-rules validation (§1.1 tables). Serde derives throughout; the YAML field-rules matrices are enforced here so every consumer (dispatcher validation, CLI linting, tests) shares one implementation. No async, no I/O — everything depends on `types`, so it stays dependency-light.
 
+Behind the off-by-default `schema` feature the wire types also derive
+`JsonSchema`, which is what makes `types` the single source of the §6.2 HTTP
+contract: `chuggernaut schema api` emits them to `schemas/api.schema.json` and
+the `committed_schemas_are_current` drift test fails CI when a covered type
+changes without re-emission (refactor-plan D1). The feature is a derive-macro
+dependency only — the purity rule above still holds, machine-checked by
+`boundary_guard`.
+
 ### `store`
 
 The single NATS integration point, wrapping `async-nats`:

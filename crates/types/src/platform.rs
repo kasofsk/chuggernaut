@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// One Docker fleet node the dispatcher schedules onto.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkerNode {
     pub name: String,
     /// `unix:///var/run/docker.sock` or `tcp://host:2375`.
@@ -131,6 +132,7 @@ mod tests {
 /// no secrets — only names, endpoints, and resolved paths an operator needs to
 /// see. Written by the dispatcher at startup, read by the api.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DispatcherConfigSnapshot {
     /// The Docker fleet (`DOCKER_NODES` / `DOCKER_SLOTS`).
     pub nodes: Vec<WorkerNode>,
@@ -219,6 +221,7 @@ fn default_placement_policy() -> String {
 /// (`task-launched`/`task-queued`, task/job state) already on the job-event
 /// stream, on which an SSE client refetches.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FleetStatus {
     /// One entry per fleet node, whether idle or busy.
     pub nodes: Vec<FleetNode>,
@@ -231,6 +234,7 @@ pub struct FleetStatus {
 /// One fleet node's live occupancy. `name`/`slots`/`available`/`version` mirror
 /// [`WorkerNode`]; `occupied`/`running` add the live slot usage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FleetNode {
     pub name: String,
     /// Total concurrent-container capacity ([`WorkerNode::slots`]). `None` for a
@@ -256,6 +260,7 @@ pub struct FleetNode {
 /// What one busy slot is running (spec §3.1) — enough for the UI to link back to
 /// the job/task without a second fetch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SlotOccupant {
     /// `owner/project` slug the job belongs to (a job seq is only unique within
     /// a project).

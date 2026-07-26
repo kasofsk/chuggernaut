@@ -6,6 +6,10 @@ license.workspace = true
 
 [dependencies]
 types = { workspace = true, features = ["schema"] }
+# For `schema api` only: the §6.2 request bodies typed in `api` rather than in
+# `types`. The `chuggernaut` binary already links both crates, so this edge adds
+# no dependency the shipped binary did not have.
+api = { workspace = true, features = ["schema"] }
 schemars.workspace = true
 serde_yaml.workspace = true
 store.workspace = true

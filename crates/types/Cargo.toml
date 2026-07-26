@@ -11,12 +11,16 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
-schemars = { workspace = true, optional = true }
+# `chrono04` supplies the `DateTime<Utc>` impl the §6.2 wire types need — every
+# job/task record carries timestamps, and without it they would each need a
+# hand-written `schemars(with = "String")`.
+schemars = { workspace = true, optional = true, features = ["chrono04"] }
 
 [features]
 # JSON Schema derivation for the repo-authored YAML types (job types, eval
-# packs). Off by default so the schema machinery stays out of the runtime
-# crates; the CLI turns it on for `chuggernaut schema`.
+# packs) and for the §6.2 HTTP surface (`chuggernaut schema api`). Off by
+# default so the schema machinery stays out of the runtime crates; the CLI
+# turns it on for `chuggernaut schema`.
 schema = ["dep:schemars"]
 
 [lints]

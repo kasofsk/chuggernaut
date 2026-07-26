@@ -223,6 +223,7 @@ fn inject_sha(body: &mut serde_json::Value, sha: Option<&str>) {
 // ── Auth (§7.1) ──────────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LoginBody {
     pub email: String,
     pub password: String,
@@ -282,6 +283,7 @@ pub async fn me(Auth(identity): Auth) -> Json<Identity> {
 }
 
 #[derive(serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SshCertBody {
     pub public_key: String,
 }
@@ -604,6 +606,7 @@ pub async fn members_list(
 }
 
 #[derive(serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MemberRoleBody {
     /// `owner` | `member` | `viewer` (`owner` is the top project role, §7.5).
     pub role: String,
@@ -827,6 +830,7 @@ pub async fn tags_list(
 }
 
 #[derive(serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FileQuery {
     pub path: String,
 }
@@ -1110,6 +1114,7 @@ pub async fn diff(
 // so a poller never loses the tail when the container is removed (job #10).
 
 #[derive(serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OutputQuery {
     /// Byte cursor: return output from here on. 0 (default) reads from the start.
     #[serde(default)]

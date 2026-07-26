@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 /// A node in the project DAG. Stored in NATS KV at `jobs.{owner}.{project}.{seq}`;
 /// the dispatcher is its sole writer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Job {
     /// Sequential per project; maintained via counter in NATS KV.
     pub id: u64,
@@ -140,6 +141,7 @@ pub struct Job {
 /// a field added to [`Job`] fails the build until someone decides whether the
 /// list should carry it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct JobSummary<'a> {
     pub id: u64,
     pub project: &'a str,
@@ -225,6 +227,7 @@ impl<'a> JobSummary<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum JobState {
     /// Editable pre-release draft (spec §2.1): the job's definition can be
     /// iterated on (PATCH .../jobs/{seq}) before it enters the DAG for real.
@@ -277,6 +280,7 @@ impl Job {
 /// carried on the job record so operators diagnose from what the API serves
 /// rather than from dispatcher logs (spec §1.2, §3.4).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Escalation {
     /// Machine reason code, matching the `job-escalated`/`job-stalled` event
     /// reason (e.g. `launch_validation_failed`, `work_retries_exhausted`,

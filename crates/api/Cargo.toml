@@ -18,6 +18,14 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 futures.workspace = true
+schemars = { workspace = true, optional = true }
+
+[features]
+# JSON Schema derivation for this crate's own request bodies — the part of the
+# §6.2 surface that is typed here rather than in `types`. Off by default so the
+# serving api pays nothing for it; the CLI turns it on for `chuggernaut schema
+# api`.
+schema = ["dep:schemars", "types/schema"]
 
 [dev-dependencies]
 dispatcher.workspace = true

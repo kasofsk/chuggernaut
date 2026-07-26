@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 /// A point-in-time view of the capacity launch queue, scoped to one project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct QueueSnapshot {
     /// Total launches queued across the whole fleet — the "of M" in the badge.
     pub depth: usize,
@@ -25,6 +26,7 @@ pub struct QueueSnapshot {
 
 /// One queued launch belonging to the requested project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct QueueEntry {
     pub seq: u64,
     pub task_id: u64,

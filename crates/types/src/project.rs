@@ -24,6 +24,7 @@ pub struct ProjectRecord {
 /// Immutable link configuration, mirrored from the bare repo's git config
 /// (`remote.origin.url`) for API/UI consumption.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OriginLink {
     /// Git URL of the external origin (`ssh://git@github.com/owner/repo.git`).
     pub url: String,
@@ -38,6 +39,7 @@ pub struct OriginLink {
 /// One origin release: a frozen snapshot of `integration` pushed to the origin
 /// as `chug/release-{number}` with a PR into the origin's default branch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ReleaseState {
     pub number: u64,
     pub pr_number: u64,
@@ -51,6 +53,7 @@ pub struct ReleaseState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ReleaseStatus {
     /// PR open on the origin; the project's merge queue is held.
     Open,

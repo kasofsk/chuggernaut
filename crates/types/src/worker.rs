@@ -273,6 +273,7 @@ pub struct WorkerAnnounce {
 /// failures — the swapped-in daemon reports the new `version` instead.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "result", rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum RefreshResult {
     /// Accepted and still building/swapping — no terminal verdict yet.
     InProgress,
@@ -289,6 +290,7 @@ pub enum RefreshResult {
 
 /// The last refresh outcome a worker daemon reports (spec §3.1, ticket #187).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RefreshOutcome {
     /// When the daemon accepted the refresh request.
     pub accepted_at: DateTime<Utc>,

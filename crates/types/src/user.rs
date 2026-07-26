@@ -17,6 +17,7 @@ pub struct User {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Identity {
     pub sub: String,
     pub kind: IdentityKind,
@@ -26,6 +27,7 @@ pub struct Identity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum IdentityKind {
     User,
     Dispatcher,
@@ -33,6 +35,7 @@ pub enum IdentityKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ProjectRole {
     Viewer,
     Member,

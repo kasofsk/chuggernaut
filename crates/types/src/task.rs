@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 /// Unit of execution within a job's Work and Evaluation phases. Chronological log,
 /// no task graph. Stored at `tasks.{owner}.{project}.{job_seq}.{task_id}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Task {
     /// Sequential within job, 1-indexed.
     pub id: u64,
@@ -106,6 +107,7 @@ pub struct Task {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum TaskPhase {
     Work,
     Evaluation,
@@ -136,6 +138,7 @@ pub enum TaskPhase {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum TaskKind {
     Command {
         run: String,
@@ -154,11 +157,13 @@ pub enum TaskKind {
 /// normal execution is implied by absence, so the field never restates `kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum Performer {
     Human,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum TaskState {
     Pending,
     Running,
@@ -170,6 +175,7 @@ pub enum TaskState {
 /// (spec §3.5). Kept a distinct enum rather than a bool so later parked-reasons
 /// (e.g. awaiting a claim) can join without another field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum PendingReason {
     /// The capacity launch queue deferred this container launch: the fleet had
     /// no free slot, so the launch waits rather than failing (§3.5). No retry
@@ -182,6 +188,7 @@ pub enum PendingReason {
 /// the tasks list explains itself — a Work task after passed evaluations is no
 /// longer a mystery — without event-stream archaeology.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ReworkReason {
     /// Evaluation failed and rework budget remained (§3.3 product failure).
     EvalFailure,
@@ -199,6 +206,7 @@ pub enum ReworkReason {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum TaskResult {
     Work {
         summary: Option<String>,
@@ -260,6 +268,7 @@ pub enum TaskResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum EscalationAction {
     Retry,
     Resolve,
@@ -267,6 +276,7 @@ pub enum EscalationAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -278,6 +288,7 @@ pub struct TokenUsage {
 /// discriminates. `structured` is required (non-null) on `Fail`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum TaskResolution {
     Pass {
         structured: Option<serde_json::Value>,

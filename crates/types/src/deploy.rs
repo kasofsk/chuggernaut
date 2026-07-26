@@ -27,6 +27,7 @@ pub const REPORT_MARKER: &str = "@chug:report";
 /// report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum LegStatus {
     /// The leg completed successfully.
     Ok,
@@ -42,6 +43,7 @@ pub enum LegStatus {
 /// `worker-refresh:{node}` (one per node), `init`, `ssh-front`,
 /// `restart-verify`, `sha-advance`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DeployLeg {
     /// Leg name — one of the fixed step names above.
     pub name: String,
@@ -71,6 +73,7 @@ pub struct DeployLeg {
 /// leg list. Every field defaults, so a report built from legs alone round-trips
 /// and a record written before a given field existed still deserializes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DeployReport {
     /// SHA the deploy started from (the previously-deployed SHA), if reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
