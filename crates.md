@@ -22,6 +22,7 @@ One fat binary plus three tiny ones:
 |---|---|---|---|
 | `types` | lib | §1 | Shared domain types, no I/O |
 | `chuggernaut-domain` | lib | §2.1–2.2, §3, contracts.md §2 | The pure core (`crates/domain`): state machine, DAG, queue, release validation, effect vocabulary, deciders — no async, no I/O, by construction |
+| `chuggernaut-platform-ops` | lib | §3.1, §3.2, §3.6, §12.2 | The platform-ops context (`crates/platform-ops`): fleet occupancy, config/deploy-drift snapshots, container harvest, project seed template — the platform's own observability and housekeeping, never a job transition |
 | `store` | lib | §1.4–1.5, §8, §9 | NATS KV/stream access; the only crate that talks to NATS |
 | `auth` | lib | §7 | JWT, SSH CA, per-job credentials, permission rules |
 | `container` | lib | §3.1 | `ContainerBackend` trait + Docker and k8s implementations |
@@ -97,8 +98,10 @@ Each module opens with a contract-style `//!` header (accepts / emits /
 guarantees / spec §); `MODULES.md` at the repo root is the one-line registry.
 The map below mirrors the actual `crates/dispatcher/src/**/*.rs` tree; a
 directory in it groups modules under a `mod.rs` that carries the charter they
-share — for `platform_ops/` and `forge_ingest/` a **named context**
-(NORTH-STAR §1), for `handlers/` one module per `req.*` subject family.
+share — for `forge_ingest/` a **named context** (NORTH-STAR §1), for
+`handlers/` one module per `req.*` subject family. The other named context,
+platform-ops, has left this tree for `crates/platform-ops` (refactor-plan C9);
+what remains here is `platform_ops.rs`, the adapter.
 
 The pure pieces live in `crates/domain` (`chuggernaut-domain`, refactor-plan
 C1) and are re-exported by the dispatcher so call sites keep one surface:
@@ -150,13 +153,9 @@ dispatcher/
   reconcile.rs   — restart reconciliation of mid-execution jobs, incl. the escalation
                    inbox heal (§3.6)
   channel.rs     — agent → operator channel posts: writes `channels` KV + job-events (§4.2)
-  platform_ops/  — the platform-ops context (C8): keeping the platform observable and
-                   tidy; no member drives a job transition
-    cd.rs        — config-snapshot freshness: republish live fleet/deploy-drift
-                   state from the scan tick when serialized bytes change
-    fleet.rs     — live fleet occupancy publishing, rebuilt from live containers (§3.1, §3.6)
-    harvest.rs   — pull artifacts out of an exited container, then reclaim its overlay (§3.2)
-    seed.rs      — platform starter template embedded in the binary (§12.2)
+  platform_ops.rs— the adapter for the platform-ops context, which is now its own crate
+                   (C9): lends it `JobLookup`/`FleetView`/`ConfigSnapshot` off Core's
+                   fields, decides nothing (§3.1, §3.6)
   forge_ingest/  — the forge-ingest context (C8): where work and code cross the platform's
                    edge; no member drives a job transition, credentials never leave it
     triage.rs    — operator-dispatched advisory triage runs; never drives a transition (§1.2)
@@ -204,7 +203,8 @@ auth ───► types, store              │
 vcs ────► types                     │
 container ► types                   │
 agent ──► types, store, container   │
-dispatcher ► types, chuggernaut-domain, store, auth, vcs, container, agent
+chuggernaut-platform-ops ► types, store, vcs, container, agent
+dispatcher ► types, chuggernaut-domain, chuggernaut-platform-ops, store, auth, vcs, container, agent
 api ────► types, store, auth
 webhooks ► types, store
 cli ────► types, store, auth, vcs
@@ -213,7 +213,7 @@ chuggernaut-channel / chuggernaut-ko / chuggernaut-harness (bins) ► types, sto
 test-utils ► types, store, container (fake backend), agent (fake provider), vcs (temp repos)
 ```
 
-Invariants worth enforcing (enforced in `test-utils/tests/boundary_guard.rs` over `cargo metadata`, refactor-plan A3): only `store` depends on `async-nats`; only `container` and `agent` know about containers; `api` never depends on `dispatcher` (they communicate exclusively over NATS); `types` has no async runtime dependency; `chuggernaut-domain` resolves neither `tokio` nor `async-nats` (nor `store`/`vcs`/`auth`) anywhere in its subtree, plus a zero-`.await` sweep over its sources. The sibling `test-utils/tests/lint_guard.rs` (refactor-plan A4) guards the other half of STYLE.md Tier 1 — the `clippy.toml` line limit, the `[workspace.lints.clippy]` denies, and every member's `lints.workspace = true` opt-in, without which a new crate would sit silently outside the clippy gate.
+Invariants worth enforcing (enforced in `test-utils/tests/boundary_guard.rs` over `cargo metadata`, refactor-plan A3): only `store` depends on `async-nats`; only `container` and `agent` know about containers; `api` never depends on `dispatcher` (they communicate exclusively over NATS); `types` has no async runtime dependency; `chuggernaut-domain` resolves neither `tokio` nor `async-nats` (nor `store`/`vcs`/`auth`) anywhere in its subtree, plus a zero-`.await` sweep over its sources; and `chuggernaut-platform-ops` (refactor-plan C9) declares only its charter's edges — the port crates it drives, never `dispatcher`, dev-deps included — with the reverse edge asserted so the arrow between context and lifecycle stays one-way. The sibling `test-utils/tests/lint_guard.rs` (refactor-plan A4) guards the other half of STYLE.md Tier 1 — the `clippy.toml` line limit, the `[workspace.lints.clippy]` denies, and every member's `lints.workspace = true` opt-in, without which a new crate would sit silently outside the clippy gate.
 
 ## Not crates
 

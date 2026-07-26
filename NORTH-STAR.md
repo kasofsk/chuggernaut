@@ -90,12 +90,17 @@ Two smaller backend targets:
 - **Promote the grab-bag modules into named contexts.** `triage`/`origin`/
   `github` (the forge-ingest context) and `fleet`/`cd`/`harvest`/`seed` (the
   platform-ops context) are bounded contexts that grew organically. **Landed**
-  (refactor-plan C8): they are `crates/dispatcher/src/forge_ingest/` and
+  (refactor-plan C8): they became `crates/dispatcher/src/forge_ingest/` and
   `platform_ops/`, each a directory whose `mod.rs` carries the charter its
-  members share and a `MODULES.md` section of its own. If forge-ingest ever
-  needs independent scaling, it is the one dispatcher subsystem worth
-  considering as its own process, since it is the only one not part of the
-  single-writer state loop's core job.
+  members share and a `MODULES.md` section of its own. Platform-ops has since
+  graduated to its own crate (`crates/platform-ops`, refactor-plan C9), having
+  met the condition that makes a crate boundary real: nothing in it needs
+  `&mut Core`. Forge-ingest has not — `origin` still writes the merge gate's
+  `release_holds` and `triage` still records tasks through the actor
+  (`docs/design/238-forge-ingest-crate-boundary.md`) — and it is the one
+  dispatcher subsystem worth considering as its own *process* if it ever needs
+  independent scaling, since it is the only one not part of the single-writer
+  state loop's core job.
 
 ## 2. The contract layer: generate, don't transcribe
 

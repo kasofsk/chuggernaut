@@ -10,10 +10,13 @@
 //! registry of these scoping-eligible modules.
 //!
 //! Two of them are **named contexts** rather than single modules
-//! (NORTH-STAR §1): [`platform_ops`] (fleet/CD/harvest/seed — the platform's
-//! own observability and housekeeping) and [`forge_ingest`] (origin/GitHub/
-//! triage — where work crosses the platform's edge). Each carries the same
-//! contract header for the context as a whole.
+//! (NORTH-STAR §1): platform-ops (fleet/CD/harvest/seed — the platform's own
+//! observability and housekeeping) and [`forge_ingest`] (origin/GitHub/triage —
+//! where work crosses the platform's edge). Each carries the same contract
+//! header for the context as a whole. The first has since graduated to its own
+//! crate (`chuggernaut-platform-ops`, refactor-plan C9) — it needed no
+//! `&mut Core` — leaving [`platform_ops`] here as the adapter that lends it the
+//! views it does take.
 
 pub mod channel;
 pub mod config;

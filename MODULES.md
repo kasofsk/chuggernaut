@@ -6,19 +6,24 @@ header (accepts / emits / guarantees / spec §); the rows here are the one-line
 version of that contract, and this file is what jobs get scoped against.
 
 Keep it in sync with the tree: every dispatcher module
-(`crates/dispatcher/src/**/*.rs`) and every domain module
-(`crates/domain/src/**/*.rs`) has a row, and CI fails when a new one lacks
-one (refactor-plan A3) — the mechanism that keeps this from drifting the way
-`crates.md`'s dispatcher map did. Both trees nest, so a directory module
+(`crates/dispatcher/src/**/*.rs`), every domain module
+(`crates/domain/src/**/*.rs`) and every context-crate module
+(`crates/platform-ops/src/**/*.rs`) has a row, and CI fails when a new one
+lacks one (refactor-plan A3) — the mechanism that keeps this from drifting the
+way `crates.md`'s dispatcher map did. The trees nest, so a directory module
 registers under its own name (`handlers`, from its `mod.rs`) and each child
 under `handlers/<child>`. Companion docs: `crates.md` (crate map +
 rationale), `NORTH-STAR.md` (target factoring), `STYLE.md` (the rules).
 
-A **named context** (NORTH-STAR §1) — a directory of modules sharing one
-charter — gets its own section here, headed by the row for its `mod.rs`
-charter; its members are rows named by their src-relative path
-(`platform_ops/fleet`). A job can be scoped to a whole context or to one
-module inside it.
+A **named context** (NORTH-STAR §1) — a set of modules sharing one charter —
+gets its own section here; its charter lives in the section's prose and in the
+`//!` header of the `mod.rs`/`lib.rs` that carries it, and its members are rows
+named by their src-relative path. A job can be scoped to a whole context or to
+one module inside it. A context crate's rows are relative to *its* `src/`, so
+graduating one out of the dispatcher (refactor-plan C9) renames its rows
+(`platform_ops/fleet` → `fleet`) without changing what a job can scope to; the
+charter row it had as a directory (`platform_ops`) becomes a `lib.rs`, which
+the registry excludes the same way it excludes every crate root.
 
 **Web feature modules** (`web/src/features/*`, once the data layer and feature
 folders land per NORTH-STAR priorities #1–2) join this registry as they are
@@ -78,21 +83,23 @@ one surface.
 | `handlers/jobtypes` | `req.jobtypes.{list,get}`: the job-type library at default-branch HEAD; a broken type still lists, with its errors. | §1.1, §6.1 |
 | `handlers/repo` | `req.vcs.{file,tree,diff}` and `req.tags.list`: repo-backed reads, each pinned to one resolved ref. | §6.1, §5.2 |
 | `config` | Dispatcher configuration; `AGENT_PROVIDER_DEFAULT` required, refuses to start without it. | §12.4 |
+| `platform_ops` | Adapter for the platform-ops context crate: turns the single writer's fields into the narrow views it takes (`JobLookup`, `FleetView`, the borrowed `ConfigSnapshot`); gathers, never decides. | §3.1, §3.6 |
 
-## `platform_ops` — `crates/dispatcher/src/platform_ops/`
+## `chuggernaut-platform-ops` — `crates/platform-ops/src/`
 
-The platform-ops context (refactor-plan C8): keeping the platform itself
-observable and tidy, as distinct from driving any one job's lifecycle. No
-member decides a state transition — a bug here degrades visibility or disk,
-never job correctness.
+The platform-ops context (refactor-plan C8, graduated to its own crate by C9):
+keeping the platform itself observable and tidy, as distinct from driving any
+one job's lifecycle. No member decides a state transition and none takes
+`&mut Core` — a bug here degrades visibility or disk, never job correctness.
+Its charter is the `lib.rs` doc header; the dispatcher-side seam is the
+`platform_ops` row above.
 
 | Module | Contract | Spec |
 | --- | --- | --- |
-| `platform_ops` | The context charter: live platform visibility (snapshots rebuilt from live state, written only when their bytes change) plus post-run housekeeping; never a job transition. | §3.1, §3.2, §3.6, §12.2 |
-| `platform_ops/cd` | Config-snapshot freshness: republish live fleet/deploy-drift state from the scan tick when the bytes change. | CD plan C |
-| `platform_ops/fleet` | Live fleet occupancy publishing, rebuilt from live containers (never stale bookkeeping); idle fleet writes nothing. | §3.1, §3.6 |
-| `platform_ops/harvest` | Pull artifacts out of an exited container, then reclaim its overlay; runs off the actor thread, writes no state. | §3.2, §3.6 |
-| `platform_ops/seed` | Platform starter template embedded in the binary — the files a fresh project is seeded with. | §12.2 |
+| `cd` | Config-snapshot freshness: republish live fleet/deploy-drift state from the scan tick when the bytes change. | CD plan C |
+| `fleet` | Live fleet occupancy publishing, rebuilt from live containers (never stale bookkeeping); idle fleet writes nothing. | §3.1, §3.6 |
+| `harvest` | Pull artifacts out of an exited container, then reclaim its overlay; runs off the actor thread, writes no state. | §3.2, §3.6 |
+| `seed` | Platform starter template embedded in the binary — the files a fresh project is seeded with. | §12.2 |
 
 ## `forge_ingest` — `crates/dispatcher/src/forge_ingest/`
 
@@ -100,7 +107,11 @@ The forge-ingest context (refactor-plan C8): where work and code cross the
 platform's edge — the outside forge on one side, operator-dispatched advisory
 runs on the other. NORTH-STAR §1 names it the one dispatcher subsystem worth
 considering as its own process someday, since it is the only one not part of
-the single-writer state loop's core job.
+the single-writer state loop's core job. It stays a directory here rather than
+graduating to a crate alongside platform-ops: `origin` still writes
+`release_holds` and pumps the merge gate, and `triage` still records tasks
+through the actor, so its interface is not yet free of `&mut Core`
+(refactor-plan C9, `docs/design/238-forge-ingest-crate-boundary.md`).
 
 | Module | Contract | Spec |
 | --- | --- | --- |

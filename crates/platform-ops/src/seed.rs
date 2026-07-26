@@ -13,23 +13,20 @@
 /// coding agent reviews it; `tasks/` shows the reusable-task convention
 /// (command task = script, agent task = markdown).
 pub const CODE_TEMPLATE: &[(&str, &str)] = &[
-    ("README.md", include_str!("../../templates/code/README.md")),
+    ("README.md", include_str!("../templates/code/README.md")),
     (
         "jobs/code.yaml",
-        include_str!("../../templates/code/jobs/code.yaml"),
+        include_str!("../templates/code/jobs/code.yaml"),
     ),
     (
         "prompts/work/code.md",
-        include_str!("../../templates/code/prompts/work/code.md"),
+        include_str!("../templates/code/prompts/work/code.md"),
     ),
     (
         "tasks/review-code.md",
-        include_str!("../../templates/code/tasks/review-code.md"),
+        include_str!("../templates/code/tasks/review-code.md"),
     ),
-    (
-        "tasks/ci.sh",
-        include_str!("../../templates/code/tasks/ci.sh"),
-    ),
+    ("tasks/ci.sh", include_str!("../templates/code/tasks/ci.sh")),
 ];
 
 /// The subset of [`CODE_TEMPLATE`] seeded into a linked-origin project: the
@@ -39,20 +36,17 @@ pub const CODE_TEMPLATE: &[(&str, &str)] = &[
 pub const CONFIG_TEMPLATE: &[(&str, &str)] = &[
     (
         "jobs/code.yaml",
-        include_str!("../../templates/code/jobs/code.yaml"),
+        include_str!("../templates/code/jobs/code.yaml"),
     ),
     (
         "prompts/work/code.md",
-        include_str!("../../templates/code/prompts/work/code.md"),
+        include_str!("../templates/code/prompts/work/code.md"),
     ),
     (
         "tasks/review-code.md",
-        include_str!("../../templates/code/tasks/review-code.md"),
+        include_str!("../templates/code/tasks/review-code.md"),
     ),
-    (
-        "tasks/ci.sh",
-        include_str!("../../templates/code/tasks/ci.sh"),
-    ),
+    ("tasks/ci.sh", include_str!("../templates/code/tasks/ci.sh")),
 ];
 
 #[cfg(test)]

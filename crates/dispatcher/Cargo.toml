@@ -9,6 +9,7 @@ async-trait.workspace = true
 reqwest.workspace = true
 types.workspace = true
 chuggernaut-domain.workspace = true
+chuggernaut-platform-ops.workspace = true
 store.workspace = true
 auth.workspace = true
 vcs.workspace = true

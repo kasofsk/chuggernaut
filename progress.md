@@ -82,7 +82,7 @@ repo + pre-receive hook + seeded first commit + counter; `HOOK_BIN` env for
 the sshd-container binary path; `RepoManager::seed_files` commits via a temp
 worktree) → `POST /api/v1/projects` (platform admins only) → Home-page form.
 The **Code starter template is embedded in the binary**
-(`dispatcher/templates/code/`, guarded by a template-validity unit test):
+(`crates/platform-ops/templates/code/`, guarded by a template-validity unit test):
 `jobs/code.yaml` (agent implements the ticket, second agent reviews),
 `tasks/ci.sh` + `tasks/review-code.md`, `prompts/work/code.md`, README.
 **Reusable tasks DECIDED as files, not schema** (design-lifecycle.md

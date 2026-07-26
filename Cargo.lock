@@ -712,6 +712,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "chuggernaut-platform-ops"
+version = "0.1.0"
+dependencies = [
+ "agent",
+ "container",
+ "serde_json",
+ "store",
+ "thiserror 2.0.18",
+ "tracing",
+ "types",
+ "vcs",
+]
+
+[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1009,6 +1023,7 @@ dependencies = [
  "auth",
  "chrono",
  "chuggernaut-domain",
+ "chuggernaut-platform-ops",
  "container",
  "futures",
  "nkeys",

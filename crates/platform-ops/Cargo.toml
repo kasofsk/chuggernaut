@@ -1,0 +1,24 @@
+[package]
+name = "chuggernaut-platform-ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The platform-ops bounded context (NORTH-STAR §1, refactor-plan C8/C9). It is
+# a leaf of the crate graph: it depends on the ports it drives (`container`,
+# `store`, `vcs`, `agent`) and never on `dispatcher`, so the dependency arrow
+# between the context and the lifecycle loop points one way only. The
+# dependency-boundary guard in `test-utils/tests/boundary_guard.rs`
+# machine-checks that edge list.
+[dependencies]
+types.workspace = true
+store.workspace = true
+vcs.workspace = true
+container.workspace = true
+agent.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

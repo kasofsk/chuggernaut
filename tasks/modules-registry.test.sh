@@ -12,7 +12,10 @@
 #
 # What it pins is the refactor-plan C8 rule the flat-glob version could not
 # express: a named context directory registers under its own name via its
-# `mod.rs`, and its members register under their src-relative paths.
+# `mod.rs`, and its members register under their src-relative paths. Plus the
+# C9 rule that grew out of it: when a context graduates to its own crate, the
+# gate follows it there — its rows become relative to the new crate's `src/`,
+# and a member without a row still fails.
 #
 # Run:  tasks/modules-registry.test.sh   (exits 0 iff all cases pass)
 set -eu
@@ -146,6 +149,52 @@ EOF
 rm "$root/MODULES.md"
 run_gate "$root"
 check "missing MODULES.md fails loudly" 1 "$RC" "$OUT" "MODULES.md is missing"
+
+# A context crate tree beside the dispatcher one (refactor-plan C9): modules
+# under `crates/platform-ops/src`, registered by a section naming that path.
+context_crate() { # <fixture-root> <module-name>...
+	root="$1"
+	shift
+	mkdir -p "$root/crates/platform-ops/src"
+	echo '// crate root' >"$root/crates/platform-ops/src/lib.rs"
+	for m in "$@"; do
+		echo '// module' >"$root/crates/platform-ops/src/$m.rs"
+	done
+}
+
+# --- case 6: a graduated context crate registers under its own src/ --------
+root="$(fixture context_crate_ok core <<'EOF'
+| `core` | x | §1 |
+
+## `chuggernaut-platform-ops` — `crates/platform-ops/src/`
+
+| Module | Contract | Spec |
+| --- | --- | --- |
+| `cd` | x | CD plan C |
+| `fleet` | x | §3.1 |
+EOF
+)"
+context_crate "$root" cd fleet
+run_gate "$root"
+check "context crate in sync passes (its lib.rs exempt too)" 0 "$RC" "$OUT" "in sync"
+
+# --- case 7: the gate really walks the context crate, not just past it -----
+# Without this the C9 loop could silently skip the new tree and every case
+# above would still pass — the drift the gate exists to catch.
+root="$(fixture context_crate_drift core <<'EOF'
+| `core` | x | §1 |
+
+## `chuggernaut-platform-ops` — `crates/platform-ops/src/`
+
+| Module | Contract | Spec |
+| --- | --- | --- |
+| `cd` | x | CD plan C |
+EOF
+)"
+context_crate "$root" cd fleet
+run_gate "$root"
+check "context-crate member with no row fails" 1 "$RC" "$OUT" \
+	"crates/platform-ops/src/fleet.rs has no row"
 
 echo
 echo "modules-registry.test.sh: $pass passed, $fail failed"

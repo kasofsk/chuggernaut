@@ -228,13 +228,8 @@ async fn publish_config_snapshot(
     fleet_status: &[container::NodeStatus],
     secrets_encryption: bool,
 ) -> crate::platform_ops::cd::ConfigSnapshot {
-    let deployed_sha = crate::platform_ops::cd::deployed_sha();
-    let base = crate::platform_ops::cd::build_base_snapshot(
-        config,
-        fleet_status,
-        deployed_sha.clone(),
-        secrets_encryption,
-    );
+    let deployed_sha = crate::config::deployed_sha();
+    let base = config.base_snapshot(fleet_status, deployed_sha.clone(), secrets_encryption);
     let last_published = match store.raw_bucket(store::buckets::PLATFORM).await {
         Ok(bucket) => match bucket.put_json("dispatcher.config", &base).await {
             Ok(()) => serde_json::to_vec(&base).ok(),

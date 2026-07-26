@@ -208,6 +208,69 @@ impl DispatcherConfig {
     }
 }
 
+/// The deployed dispatcher's own build SHA (`CHUG_GIT_SHA`, baked at build time
+/// — the SHA component that `version_string()` embeds). `None` for local/dev
+/// builds without it baked in; the drift fields then stay unpopulated. Reads
+/// *this* crate's build environment, which is why it stays here rather than
+/// travelling with the CD snapshot into `chuggernaut-platform-ops`.
+pub fn deployed_sha() -> Option<String> {
+    option_env!("CHUG_GIT_SHA").map(|s| s.to_string())
+}
+
+impl DispatcherConfig {
+    /// The static parts of the config snapshot, mapped once at startup from
+    /// this config plus the boot fleet probe. The dynamic parts (per-node
+    /// health/version, self-repo tip, commits-behind) are recomputed each scan
+    /// tick by [`chuggernaut_platform_ops::cd::refresh`] — the context owns the
+    /// freshness half, the config owns this mapping of itself onto the wire
+    /// type.
+    pub fn base_snapshot(
+        &self,
+        fleet: &[container::NodeStatus],
+        deployed_sha: Option<String>,
+        secrets_encryption: bool,
+    ) -> types::DispatcherConfigSnapshot {
+        types::DispatcherConfigSnapshot {
+            nodes: self
+                .docker_nodes
+                .iter()
+                .map(|n| {
+                    let status = fleet.iter().find(|s| s.name == n.name);
+                    types::WorkerNode {
+                        name: n.name.clone(),
+                        endpoint: n.endpoint.clone(),
+                        slots: n.slots,
+                        // Absent from the probe ⇒ assume up (same node set, so
+                        // this is belt-and-suspenders).
+                        available: status.map(|s| s.available).unwrap_or(true),
+                        version: status.and_then(|s| s.version.clone()),
+                        refresh_outcome: status.and_then(|s| s.refresh_outcome.clone()),
+                    }
+                })
+                .collect(),
+            agent_provider_default: self.agent_provider_default.clone(),
+            agent_model_default: self.agent_model_default.clone(),
+            triage_image: self.triage_image.clone(),
+            repos_root: self.repos_root.display().to_string(),
+            repo_url_base: self.repo_url_base.clone(),
+            nats_url: self.nats_url.clone(),
+            nats_url_container: self.nats_url_container.clone(),
+            channel_binary: self
+                .channel_binary
+                .as_ref()
+                .map(|p| p.display().to_string()),
+            hook_bin: self.hook_bin.as_ref().map(|p| p.display().to_string()),
+            secrets_encryption,
+            dispatcher_sha: deployed_sha,
+            // Filled by the scan tick from the self-repo, if configured.
+            main_tip_sha: None,
+            commits_behind: None,
+            placement_policy: self.placement_policy.as_str().to_string(),
+            schema_epoch: types::CONFIG_SCHEMA_EPOCH,
+        }
+    }
+}
+
 fn parse_docker_nodes(spec: &str) -> Result<Vec<DockerNodeConfig>> {
     spec.split(',')
         .map(|entry| {
@@ -278,6 +341,80 @@ mod tests {
         assert!(parse_docker_nodes("|worker|4").is_err());
         // Unknown endpoint schemes rejected at parse, not at backend construction.
         assert!(parse_docker_nodes("a|ssh://host|4").is_err());
+    }
+
+    fn snapshot_config() -> DispatcherConfig {
+        DispatcherConfig {
+            nats_url: "nats://localhost:4222".into(),
+            repos_root: PathBuf::from("/data/repos"),
+            repo_url_base: "file:///data/repos".into(),
+            keys_dir: PathBuf::from("/data/keys"),
+            nats_url_container: None,
+            channel_binary: None,
+            agent_provider_default: "claude".into(),
+            agent_model_default: None,
+            triage_image: None,
+            docker_nodes: vec![DockerNodeConfig {
+                name: "nuc".into(),
+                endpoint: "worker".into(),
+                slots: 4,
+            }],
+            hook_bin: None,
+            self_repo: None,
+            placement_policy: PlacementPolicy::Busyness,
+        }
+    }
+
+    /// The base snapshot maps config + boot fleet probe onto the wire type,
+    /// carrying the deployed SHA and leaving the scan-filled drift fields empty.
+    /// The drift fields stay empty on an install with `SELF_REPO` unset: the
+    /// gate is `ConfigSnapshot::self_repo` in `platform_ops::cd::refresh`, which
+    /// skips the tip lookup entirely, so the UI reads "unavailable".
+    #[test]
+    fn base_snapshot_maps_fleet_and_sha() {
+        let fleet = vec![container::NodeStatus {
+            name: "nuc".into(),
+            available: false,
+            version: Some("0.1.0+abc".into()),
+            refresh_outcome: None,
+        }];
+        let snap = snapshot_config().base_snapshot(&fleet, Some("abc".into()), true);
+        assert_eq!(snap.nodes.len(), 1);
+        assert!(!snap.nodes[0].available);
+        assert_eq!(snap.nodes[0].version.as_deref(), Some("0.1.0+abc"));
+        assert_eq!(snap.dispatcher_sha.as_deref(), Some("abc"));
+        assert_eq!(snap.main_tip_sha, None);
+        assert_eq!(snap.commits_behind, None);
+    }
+
+    /// The republish decision `platform_ops::cd::refresh` makes compares
+    /// serialized bytes: an identical snapshot is skipped (the common
+    /// every-30s no-op), a changed node version fires.
+    #[test]
+    fn republish_only_on_change() {
+        let fleet = vec![container::NodeStatus {
+            name: "nuc".into(),
+            available: true,
+            version: Some("0.1.0+abc".into()),
+            refresh_outcome: None,
+        }];
+        let base = snapshot_config().base_snapshot(&fleet, Some("abc".into()), true);
+        let published = serde_json::to_vec(&base).unwrap();
+
+        // Same content ⇒ identical bytes ⇒ skip.
+        let same = serde_json::to_vec(&base).unwrap();
+        assert_eq!(published, same);
+
+        // A worker self-refresh bumps the node version ⇒ bytes differ ⇒ fire.
+        let mut changed = base.clone();
+        changed.nodes[0].version = Some("0.2.0+def".into());
+        assert_ne!(published, serde_json::to_vec(&changed).unwrap());
+
+        // So does the self-repo drift moving.
+        let mut behind = base.clone();
+        behind.main_tip_sha = Some("def456".into());
+        behind.commits_behind = Some(2);
+        assert_ne!(published, serde_json::to_vec(&behind).unwrap());
     }
 
     #[test]

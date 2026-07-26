@@ -7,10 +7,10 @@
 //! A cargo-building job's overlay is 5–10 GB, so leaving exited containers
 //! around fills the host disk (the 2026-07-21 outage).
 //!
-//! Runs on a clone of the handles rather than `&Core` because collection
-//! happens inside the per-task `tokio::spawn`, off the actor thread. Nothing
-//! here writes job or task state — it returns what it found and lets the actor
-//! record it, preserving the single-writer rule.
+//! Runs on a clone of the handles rather than on the dispatcher's core because
+//! collection happens inside the per-task `tokio::spawn`, off the actor thread.
+//! Nothing here writes job or task state — it returns what it found and lets
+//! the actor record it, preserving the single-writer rule.
 //!
 //! - **Accepts:** an exited container's handles (logs, session transcript,
 //!   `eval-result.json`).
@@ -20,7 +20,6 @@
 //!   job/task state (single-writer preserved).
 //! - **Spec:** §3.2 (container removal after harvest); §3.6 (crash sweep).
 
-use crate::core::CoreError;
 use agent::AgentOutput;
 use container::ContainerBackend;
 use std::sync::Arc;
@@ -29,16 +28,13 @@ use types::TokenUsage;
 
 /// Handles needed to collect artifacts, cloneable into a spawned task.
 #[derive(Clone)]
-pub(crate) struct Harvester {
+pub struct Harvester {
     backend: Arc<dyn ContainerBackend>,
     artifacts: Option<Arc<ArtifactStore>>,
 }
 
 impl Harvester {
-    pub(crate) fn new(
-        backend: Arc<dyn ContainerBackend>,
-        artifacts: Option<Arc<ArtifactStore>>,
-    ) -> Self {
+    pub fn new(backend: Arc<dyn ContainerBackend>, artifacts: Option<Arc<ArtifactStore>>) -> Self {
         Self { backend, artifacts }
     }
 
@@ -50,7 +46,7 @@ impl Harvester {
     /// Best-effort throughout: a job must never fail because its *reporting*
     /// failed. Every miss is logged, since silent absence is indistinguishable
     /// from "the agent produced nothing".
-    pub(crate) async fn collect(
+    pub async fn collect(
         &self,
         owner: &str,
         project: &str,
@@ -68,7 +64,7 @@ impl Harvester {
     /// runs only need the usage (via [`collect`]); triage (spec §1.2) also needs
     /// the result text — it runs without the channel MCP, so the CLI's own JSON
     /// result on stdout is the only channel for the assessment.
-    pub(crate) async fn collect_agent(
+    pub async fn collect_agent(
         &self,
         owner: &str,
         project: &str,
@@ -152,7 +148,7 @@ impl Harvester {
     /// that also needs the output inline (e.g. the gate monitor threading a
     /// failing stage's compiler stderr into the gate-fix brief, job #154) does
     /// not have to fetch them a second time.
-    pub(crate) async fn collect_logs(
+    pub async fn collect_logs(
         &self,
         owner: &str,
         project: &str,
@@ -178,7 +174,7 @@ impl Harvester {
     /// each work/eval overlay holds a full `/workspace/target` build. Called
     /// last, once every `logs`/`copy_file` read is done. Best-effort: a failed
     /// removal leaks disk but must never fail a job, so it only warns.
-    pub(crate) async fn dispose(&self, seq: u64, task_id: u64, id: &container::ContainerId) {
+    pub async fn dispose(&self, seq: u64, task_id: u64, id: &container::ContainerId) {
         if let Err(e) = self.backend.remove(id).await {
             tracing::warn!("job {seq} task {task_id}: removing container {id} failed: {e}");
         }
@@ -223,7 +219,7 @@ impl Harvester {
 /// than failing the whole report, and non-marker output is ignored untouched.
 /// Returns `None` when no marker line was present, so an ordinary command task's
 /// result is left exactly as it was.
-pub(crate) fn parse_deploy_report(logs: &str) -> Option<types::DeployReport> {
+pub fn parse_deploy_report(logs: &str) -> Option<types::DeployReport> {
     use types::deploy::{LEG_MARKER, REPORT_MARKER};
     let mut report = types::DeployReport::default();
     let mut found = false;
@@ -250,22 +246,30 @@ pub(crate) fn parse_deploy_report(logs: &str) -> Option<types::DeployReport> {
     found.then_some(report)
 }
 
+/// A misconfiguration that stops the artifact store being built at all — as
+/// opposed to the best-effort misses everything else here logs. Its own type
+/// rather than the dispatcher's `CoreError` so the context owes the lifecycle
+/// crate nothing; the caller classifies it (today: a startup config error).
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct ArtifactStoreError(String);
+
 /// Build the artifact store from the dispatcher's `age_artifacts` identity.
 /// `None` disables capture rather than failing startup — a platform without the
 /// key still runs jobs, it just keeps no transcripts.
-pub(crate) async fn artifact_store(
+pub async fn artifact_store(
     store: &store::NatsStore,
     identity: Option<&str>,
-) -> Result<Option<Arc<ArtifactStore>>, CoreError> {
+) -> Result<Option<Arc<ArtifactStore>>, ArtifactStoreError> {
     let Some(identity) = identity else {
         tracing::warn!("no age_artifacts identity: transcripts and logs will not be captured");
         return Ok(None);
     };
     let crypto = store::ArtifactCrypto::with_identity(identity)
-        .map_err(|e| CoreError::Config(format!("age_artifacts identity: {e}")))?;
+        .map_err(|e| ArtifactStoreError(format!("age_artifacts identity: {e}")))?;
     let handle = store
         .artifacts(crypto)
         .await
-        .map_err(|e| CoreError::Config(format!("artifacts object store: {e}")))?;
+        .map_err(|e| ArtifactStoreError(format!("artifacts object store: {e}")))?;
     Ok(Some(Arc::new(handle)))
 }

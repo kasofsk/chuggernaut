@@ -43,7 +43,7 @@ scopeable Chuggernaut job.
 A1, A2 ──► A3, A4              (week-one, all small)
 B1 ─► B2 ─► B3 ─► C1 ─► C2…C6  (opportunistic, one per subsequent touch)
 B1 ─► B1a ─► F, G, H, I        (the invariant wiring the new tracks need)
-C7, C8                         (any time, independent)
+C7, C8 ─► C9                   (any time, independent; C9's forge half after H)
 D1 ─► D2 ─► E1 ─► E2 ─► E3…E5
 B2, B3 ─► F1 ─► F2, F3, F4     (authoring)
 F1, F4 ─► G1                   (reconcile, after F opens its heal window)
@@ -59,11 +59,10 @@ decider, no effects vocabulary and no traces: job **authoring** (~790 lines of
 create/edit/claim/revoke half of the write API), **reconcile** (855 lines),
 the **launch queue** (699), the **forge** and advisory **triage** (under
 `crates/dispatcher/src/forge_ingest/`: `origin.rs` 502, `github.rs` 207,
-`triage.rs` 451), and **platform-ops** (under
-`crates/dispatcher/src/platform_ops/`: `cd.rs` 353, `fleet.rs` 286,
-`harvest.rs` 271, `seed.rs` 84). C8 gave the last two of those a directory to
-live in, which is the one thing already done here; what none of them has,
-housed or not, is a decider. Two consequences
+`triage.rs` 451), and **platform-ops** (`cd.rs`, `fleet.rs`, `harvest.rs`,
+`seed.rs`, since C9 in `crates/platform-ops/`). C8 gave the last two of those
+a directory to live in and C9 gave platform-ops a crate, which is what is
+already done here; what none of them has, housed or not, is a decider. Two consequences
 shape the tracks below: the `Effect` enum covers job-lifecycle writes only, so
 each track extends it before it can carve; and `invariants.rs` has five rules
 (`check_ready_queue_only_ready`, `check_rdeps_inverts_deps`,
@@ -235,6 +234,31 @@ only when their decisions leave. **They now resolve to H1 and H2.** Read C8
 as having built the two houses that H and I move into: neither track has a
 directory to deliver, and both carve their deciders out into `crates/domain`,
 leaving the I/O tail where C8 put it.
+
+**C9. Context crates** *(code, medium — depends on C8)* — **half landed.**
+Graduate each named context from a directory to its own crate, under the same
+rule the domain crate graduated by: only once the context's interface no
+longer needs `&mut Core`.
+
+**platform-ops has landed** as `crates/platform-ops`
+(`chuggernaut-platform-ops`). What it needed from the core turned out to be
+two ports it is handed, a `FleetView` (roster, launch-queue depth, and a
+sync read-only `JobLookup` over the graphs) and a borrowed `ConfigSnapshot`;
+`crates/dispatcher/src/platform_ops.rs` is what remains — the adapter that
+gathers those off `Core`'s fields and decides nothing. The base-snapshot
+mapping went the other way, to `config.rs`, since it reads dispatcher config
+and this crate's `CHUG_GIT_SHA`. `boundary_guard.rs` pins the context's
+allowed edges (the port crates, never `dispatcher`, dev-deps included) and
+asserts the reverse edge so the arrow stays one-way; the `tasks/ci.sh`
+registry gate now walks any context crate's `src/`.
+
+**forge-ingest did not, deliberately** — `docs/design/238-forge-ingest-crate-boundary.md`
+records the finding. `origin.rs` writes `release_holds` (a merge-gate input
+`eval.rs` reads) and calls `pump_merges` from both `origin_sync` arms;
+`triage.rs` creates task records and launches containers through the actor's
+own machinery. Carving either today would mean a second writer of job state or
+an "interface" wider than the code it replaces. It is a follow-on ticket
+**after H1 and H2**, whose whole job is to empty those functions of decisions.
 
 ## Track D — Generated TS contract (NORTH-STAR priority #1, independent)
 
@@ -523,22 +547,23 @@ Carve those four, and widen the `MODULES.md` `queue` row to match once it
 lands.
 
 **I2. Occupancy + CD skew** *(code, medium — depends on B2)*
-The two snapshot builders in `platform_ops/`, both of which compute a
-`platform`-bucket value and write it back only when the bytes changed. Its
-`fleet.rs` (286 lines) is occupancy *reporting*, as its header says:
-`compute_fleet_status` rebuilds which slot on which node is busy from the
-live container list
+The two snapshot builders in `crates/platform-ops/` (C9 moved them there,
+which does not carve them — a crate boundary is not a decider), both of which
+compute a `platform`-bucket value and write it back only when the bytes
+changed. Its `fleet.rs` is occupancy *reporting*, as its header says:
+`fleet::compute` rebuilds which slot on which node is busy from the live
+container list
 (`ContainerBackend::list_managed_running`) rather than from in-memory
 bookkeeping, and that reconstruction — container id → node → occupant, plus
 the unlisted-node-is-out-of-service rule its one unit test pins — is the
-decision worth carving. `cd.rs` (353) is the version-skew half: `deployed_sha`
+decision worth carving. `cd.rs` is the version-skew half: the deployed SHA
 against the self-repo tip, `commits_behind`, and the seed-vs-announced slot
 merge in `merge_live_fleet`. Both funnel through the `WriteKv` effect that
 already carries those snapshots, so I2 adds **no new effect variants** — it
 converts two `async fn`s that interleave probing and computing into a probe
 step and a pure `decide`.
 
-*Not carved here.* Worker **placement** is not in `platform_ops/` at all:
+*Not carved here.* Worker **placement** is not in platform-ops at all:
 `container::choose_placement` (`crates/container/src/lib.rs`) is already a
 sync `pub fn` over `&[PlacementCandidate]`, already carries the full /
 out-of-service / unknown-pin rules (#60), and already has its own unit tests.
@@ -549,7 +574,7 @@ next touched.
 
 **I3. Fleet membership** *(code, medium — depends on B2, I2)*
 Split out of I2 the way F4 was split out of F1, because it is a different
-shape and — uniquely in Track I — it reaches **outside `platform_ops/`**. Who
+shape and — uniquely in Track I — it reaches **outside platform-ops**. Who
 is in the fleet is decided in two places: `Core::on_worker_announce`
 (`core.rs:1085`) gates on `supports_dynamic_workers`, then merges the announce
 into the seed-vs-announced roster, and `Core::scan_worker_heartbeats`

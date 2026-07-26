@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/types",
     "crates/domain",
+    "crates/platform-ops",
     "crates/store",
     "crates/auth",
     "crates/container",
@@ -40,6 +41,7 @@ license = "MIT"
 # internal
 types = { path = "crates/types" }
 chuggernaut-domain = { path = "crates/domain" }
+chuggernaut-platform-ops = { path = "crates/platform-ops" }
 store = { path = "crates/store" }
 auth = { path = "crates/auth" }
 container = { path = "crates/container" }

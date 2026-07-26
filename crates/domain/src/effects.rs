@@ -167,8 +167,8 @@ pub enum Effect {
     /// Write a JSON value into a raw KV bucket (the `platform` fleet/config
     /// snapshot). Maps to `store.raw_bucket().put_json`.
     ///
-    /// Example call site: `fleet.rs::refresh_fleet_status` writing
-    /// `fleet.status`.
+    /// Example call site: `chuggernaut-platform-ops`'s `fleet::publish`
+    /// writing `fleet.status`.
     WriteKv {
         bucket: String,
         key: String,

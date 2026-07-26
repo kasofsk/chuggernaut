@@ -976,7 +976,8 @@ impl Core {
             &store,
             config.artifacts_identity.as_deref(),
         )
-        .await?;
+        .await
+        .map_err(|e| CoreError::Config(e.to_string()))?;
 
         let mut core = Self {
             store,

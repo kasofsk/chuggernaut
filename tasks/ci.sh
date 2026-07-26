@@ -427,13 +427,16 @@ modules_registry_gate() {
 
 	_gate_failed=0
 	modules_registry_compare "$_disp_dir"
-	# Same drift check for the pure domain crate (refactor-plan C1).
-	if [ -d crates/domain/src ]; then
-		modules_registry_compare crates/domain/src
-	fi
+	# Same drift check for the pure domain crate (refactor-plan C1) and for
+	# each context crate carved out of the dispatcher (C9). A context that
+	# leaves for its own crate keeps its registry section — it is still what
+	# jobs get scoped against — so the gate has to follow it out.
+	for _extra_dir in crates/domain/src crates/platform-ops/src; do
+		[ -d "$_extra_dir" ] && modules_registry_compare "$_extra_dir"
+	done
 
 	[ "$_gate_failed" -eq 0 ] || exit 1
-	echo "ci: MODULES.md registry gate — dispatcher and domain modules are in sync"
+	echo "ci: MODULES.md registry gate — dispatcher, domain and context modules are in sync"
 }
 
 # --- copy-paste detection gate (STYLE.md Tier 1, ticket A5) -------------------

@@ -11,6 +11,9 @@
 //! - `chuggernaut-domain` stays sync the same way (refactor-plan C1): the
 //!   pure core cannot even *reach* a runtime, so purity holds by
 //!   construction.
+//! - `chuggernaut-platform-ops` — the first *context* crate (refactor-plan
+//!   C9) — declares exactly the edges its charter allows, and never one back
+//!   to `dispatcher`.
 //!
 //! The source-level `.await` guard sweeps every file of the domain crate.
 
@@ -215,6 +218,81 @@ fn domain_subtree_is_sync() {
         offenders.is_empty(),
         "`chuggernaut-domain` must stay pure/sync (STYLE.md Tier 1, \
          refactor-plan C1) but its dependency subtree pulls in: {offenders:?}"
+    );
+}
+
+/// The workspace crates `crate_name` depends on directly, split by whether
+/// every edge to them is dev-only. Third-party packages are filtered out: the
+/// context rules below are about the shape of the *internal* crate graph.
+fn workspace_deps(g: &Graph, crate_name: &str) -> (HashSet<String>, HashSet<String>) {
+    let id = g.id_of(crate_name);
+    let mut normal = HashSet::new();
+    let mut dev = HashSet::new();
+    for (pkg, dev_only) in g.deps_of.get(&id).into_iter().flatten() {
+        if !g.workspace.contains(pkg) {
+            continue;
+        }
+        let name = g.name_of[pkg].clone();
+        if *dev_only {
+            dev.insert(name)
+        } else {
+            normal.insert(name)
+        };
+    }
+    (normal, dev)
+}
+
+/// NORTH-STAR §1 / refactor-plan C9: the platform-ops context is a **leaf** of
+/// the internal crate graph. Its charter is the platform's own observability
+/// and housekeeping, driven through ports it is handed — so it may depend on
+/// the port crates and on nothing else, and above all not on `dispatcher`.
+///
+/// The allow-list is spelled out rather than merely forbidding `dispatcher`,
+/// because the way this boundary actually erodes is by acquiring one more
+/// "harmless" edge at a time until the context is a second lifecycle crate.
+/// Widening it is a deliberate, reviewable edit — which is the point.
+#[test]
+fn platform_ops_declares_only_its_charter_edges() {
+    const ALLOWED: [&str; 5] = ["types", "store", "vcs", "container", "agent"];
+
+    let g = load_graph();
+    let (normal, dev) = workspace_deps(&g, "chuggernaut-platform-ops");
+
+    let mut unexpected: Vec<&str> = normal
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !ALLOWED.contains(name))
+        .collect();
+    unexpected.sort_unstable();
+    assert!(
+        unexpected.is_empty(),
+        "`chuggernaut-platform-ops` may depend only on {ALLOWED:?} \
+         (NORTH-STAR §1, refactor-plan C9) but also depends on: {unexpected:?}"
+    );
+
+    // Dev-deps are held to the same rule: a test fixture reaching back into
+    // `dispatcher` would make the context untestable on its own, which is the
+    // property the crate split bought.
+    assert!(
+        !dev.contains("dispatcher"),
+        "`chuggernaut-platform-ops` must not depend on `dispatcher`, dev-deps \
+         included — the context arrow points one way (refactor-plan C9)"
+    );
+}
+
+/// The other half of the C9 seam: `dispatcher` depends on the context crate,
+/// so anything that ever pointed the arrow the other way would be a cycle
+/// cargo rejects. Asserting the edge exists keeps the two tests honest — a
+/// `chuggernaut-platform-ops` that nothing consumed would pass the rule above
+/// vacuously.
+#[test]
+fn dispatcher_consumes_the_platform_ops_context() {
+    let g = load_graph();
+    let (normal, _dev) = workspace_deps(&g, "dispatcher");
+    assert!(
+        normal.contains("chuggernaut-platform-ops"),
+        "`dispatcher` must depend on the platform-ops context crate \
+         (refactor-plan C9); found: {normal:?}"
     );
 }
 
