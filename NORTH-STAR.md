@@ -84,7 +84,9 @@ never new writers or processes.
 Two smaller backend targets:
 
 - **`handlers.rs` → `handlers/`** per subject family — `crates.md` already
-  specifies this; reality regressed to one ~1,700-line file.
+  specified this and reality had regressed to one ~1,700-line file. **Landed**
+  (refactor-plan C7): thirteen modules, one per `req.*` subject family, each
+  with a contract header and a `MODULES.md` row.
 - **Promote the grab-bag modules into named contexts.** `triage`/`origin`/
   `github` (the forge-ingest context) and `fleet`/`cd`/`harvest`/`seed` (the
   platform-ops context) are bounded contexts that grew organically. **Landed**

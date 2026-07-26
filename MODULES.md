@@ -9,7 +9,9 @@ Keep it in sync with the tree: every dispatcher module
 (`crates/dispatcher/src/**/*.rs`) and every domain module
 (`crates/domain/src/**/*.rs`) has a row, and CI fails when a new one lacks
 one (refactor-plan A3) — the mechanism that keeps this from drifting the way
-`crates.md`'s dispatcher map did. Companion docs: `crates.md` (crate map +
+`crates.md`'s dispatcher map did. Both trees nest, so a directory module
+registers under its own name (`handlers`, from its `mod.rs`) and each child
+under `handlers/<child>`. Companion docs: `crates.md` (crate map +
 rationale), `NORTH-STAR.md` (target factoring), `STYLE.md` (the rules).
 
 A **named context** (NORTH-STAR §1) — a directory of modules sharing one
@@ -61,7 +63,20 @@ one surface.
 | `reconcile` | Restart reconciliation of jobs left mid-execution, incl. re-deriving a parked job's missing escalation task from its stamped record; runs in the actor before the message loop. | §3.6 |
 | `channel` | Agent → operator channel posts: dispatcher writes `channels` KV and publishes each post to `job-events`. | §4.2 |
 | `run` | Production startup: wire store, repos, Docker fleet, provider into a spawned core; fail fast. | §3.6, §12.4 |
-| `handlers` | NATS `req.*` subject handlers: translate a request into a `CoreHandle` call and reply per the §6.5 envelope. | §6.1, §6.5 |
+| `handlers` | NATS `req.*` subject handlers: translate a request into a `CoreHandle` call and reply per the §6.5 envelope. One module per subject family; `mod.rs` is wiring only — the family table plus the three spawn entry points. | §6.1, §6.5 |
+| `handlers/reply` | The §6.5 reply envelope: resource JSON on success, `{"error":{status,message,errors?}}` on failure; total, so a serializer failure never fails a reply. | §6.5 |
+| `handlers/container` | The container-facing subjects: `req.{work,eval}.submit` and `req.channel.{update,reply}`, incl. the agent `cover_html` cap. | §4.2, §6.1 |
+| `handlers/worker` | `req.worker.announce`: forwards a node's heartbeat into the live fleet; transient by design (losing the stream deregisters the node). | §3.1 |
+| `handlers/status` | `req.health` and `req.queue.list`: the two probes that round-trip the core actor, so a wedged state loop reads as unhealthy. | §3.5, §6.1 |
+| `handlers/projects` | `req.projects.{create,link}`: bare-repo creation (repo before counter) and the linked-origin flow. | §12.2, §5.3 |
+| `handlers/origin` | `req.origin.{release,status,sync}`: the origin PR surface; read-only with respect to job state. | §5.3 |
+| `handlers/access` | `req.ssh.sign-user-cert` and `req.members.*`: cert minting from the user's stored roles, and §7.5 role writes (single writer of `users.*`). | §7.3, §7.5 |
+| `handlers/jobs` | The `req.jobs.*` family: wire bodies, the `cover_html` cap, and one handler per verb — create, the Draft edits, release/revoke, claims, triage, criteria. | §6.2, §2.1, §1.2 |
+| `handlers/jobs_reply` | The jobs family's reply bodies: the derived `awaiting_human` view, the resolved criteria, and the channel-progress join — all derived on read, never stored. | §1.1, §4.2 |
+| `handlers/graph` | `req.graph.get`: every job record in the project, unsummarized; a pure store read. | §6.1, §1.4 |
+| `handlers/tasks` | The `req.tasks.*` family: the human inbox, a job's task log, operator resolutions, and the live container tail served off the core actor. | §6.1, §4.2 |
+| `handlers/jobtypes` | `req.jobtypes.{list,get}`: the job-type library at default-branch HEAD; a broken type still lists, with its errors. | §1.1, §6.1 |
+| `handlers/repo` | `req.vcs.{file,tree,diff}` and `req.tags.list`: repo-backed reads, each pinned to one resolved ref. | §6.1, §5.2 |
 | `config` | Dispatcher configuration; `AGENT_PROVIDER_DEFAULT` required, refuses to start without it. | §12.4 |
 
 ## `platform_ops` — `crates/dispatcher/src/platform_ops/`

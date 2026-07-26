@@ -95,9 +95,10 @@ The core. Internal module map:
 
 Each module opens with a contract-style `//!` header (accepts / emits /
 guarantees / spec §); `MODULES.md` at the repo root is the one-line registry.
-The map below mirrors the actual `crates/dispatcher/src/` tree; a
-directory in it is a **named context** (NORTH-STAR §1) whose `mod.rs` carries
-the charter its members share.
+The map below mirrors the actual `crates/dispatcher/src/**/*.rs` tree; a
+directory in it groups modules under a `mod.rs` that carries the charter they
+share — for `platform_ops/` and `forge_ingest/` a **named context**
+(NORTH-STAR §1), for `handlers/` one module per `req.*` subject family.
 
 The pure pieces live in `crates/domain` (`chuggernaut-domain`, refactor-plan
 C1) and are re-exported by the dispatcher so call sites keep one surface:
@@ -162,13 +163,16 @@ dispatcher/
     origin.rs    — linked-origin projects: the link flow and the origin-release PR surface (§5.3)
     github.rs    — minimal GitHub REST client (create/read PRs) behind a trait for the origin surface (§5.3)
   run.rs         — production startup: wire store, repos, fleet, provider; fail fast (§3.6, §12.4)
-  handlers.rs    — NATS req.* subject handlers, one spawn fn per subject family (§6.1, §6.5)
+  handlers/      — NATS req.* subject handlers, one module per subject family (§6.1, §6.5):
+                   mod.rs (wiring + the three spawn entry points), reply.rs (§6.5 envelope),
+                   container.rs, worker.rs, status.rs, projects.rs, origin.rs, access.rs,
+                   jobs.rs + jobs_reply.rs, graph.rs, tasks.rs, jobtypes.rs, repo.rs
   config.rs      — dispatcher config (AGENT_PROVIDER_DEFAULT etc., §12.4)
 ```
 
-`handlers.rs` is still a single file; splitting it into a `handlers/`
-directory (one module per subject family) is scheduled refactor work, not
-current state.
+Every `handlers/` module carries its own contract header and a `MODULES.md`
+row (the registry gate covers nested modules); `mod.rs` holds no request
+handling of its own — it names the families and hands each one its ports.
 
 **Single-writer core:** `core.rs` owns all mutable state (job records, task log tail, DAG, work queue) inside one tokio task. Everything else — NATS request handlers, container monitors, scan timers — sends messages over an `mpsc` channel and never mutates state directly. Container monitoring is concurrent (one lightweight task per running container, each just awaiting `backend.wait()` and posting the exit back to the core loop). This makes the "state transitions are processed one at a time" guarantee (§3.1) structural rather than disciplinary: there is no lock to misuse because there is no shared mutable state.
 

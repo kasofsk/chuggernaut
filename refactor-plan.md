@@ -155,11 +155,14 @@ work with no contract to name, so it is not a Track C ticket. `io-split` is a
 standing grep label, **not** a ticket id — there is no C-numbered stub behind
 it, and a reader who greps for one should stop here.
 
-**C7. `handlers.rs` → `handlers/`** *(code, small, independent)*
-Mechanical split of the 1,727-line file along its existing seams
-(`spawn_container_handlers`, `spawn_api_handlers`, `spawn_tasks_handler`,
-`spawn_read_handlers`, `spawn_worker_announce_handler`) into one module per
-subject family — what `crates.md` already specifies.
+**C7. `handlers.rs` → `handlers/`** *(code, small, independent)* — **landed.**
+The 1,824-line file split along its existing seams into thirteen modules, one
+per `req.*` subject family (`container`, `worker`, `status`, `projects`,
+`origin`, `access`, `jobs` + `jobs_reply`, `graph`, `tasks`, `jobtypes`,
+`repo`) plus the shared §6.5 `reply` envelope; the directory's `mod.rs` is wiring
+only. Each module carries a contract header and a `MODULES.md` row, and the
+registry gate in `tasks/ci.sh` now walks nested dispatcher modules the way it
+already walked the domain crate's.
 
 **C8. Named contexts** *(code, small, independent)*
 Group `fleet`/`cd`/`harvest`/`seed` (platform-ops) and

@@ -27,7 +27,10 @@ layering, and its two biggest files are where most UI changes land.
   `handlers/` directory with one module per subject family — reality is a
   single 1,727-line `handlers.rs`. Nine current modules aren't documented at
   all: `channel`, `fleet`, `github`, `harvest`, `launch_queue`, `origin`,
-  `run`, `seed`, `triage`.
+  `run`, `seed`, `triage`. *(Since closed: `crates.md` now documents all nine,
+  refactor-plan C7 split `handlers.rs` into `handlers/`, and the A3
+  `MODULES.md` registry gate in `tasks/ci.sh` fails the build on a module
+  without a row — this class of drift can no longer accumulate silently.)*
 - **The dispatcher is ~14,700 lines — over half the workspace's library
   code** (next largest: `types` at ~4,000). Scoping "by crate" gives almost no
   discrimination for orchestrator work; the real modules are the dispatcher's
