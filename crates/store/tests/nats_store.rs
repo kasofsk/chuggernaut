@@ -612,3 +612,52 @@ async fn prefix_scan_scopes_by_project_and_skips_tombstones() {
     // consumer that never delivers.
     assert!(jobs.list("acme", "absent").await.unwrap().is_empty());
 }
+
+/// A scan acks nothing, so with the default ack policy the server stops
+/// delivering at `max_ack_pending` (1000) and the scan hangs until its
+/// per-message deadline. That is exactly what took `/tasks/pending` down once
+/// the dogfood project passed 1000 task records (#290) — nothing covered past
+/// the cliff, so pin it here just above 1000.
+#[tokio::test]
+async fn prefix_scan_returns_every_key_past_the_ack_pending_cap() {
+    const KEYS: u64 = 1050;
+
+    let server = require_nats!();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+    let bucket = store.raw_bucket(store::buckets::TASKS).await.unwrap();
+
+    for i in 0..KEYS {
+        bucket.put_json(&format!("acme.api.{i}"), &i).await.unwrap();
+    }
+
+    let listed: Vec<u64> = bucket.list_prefix("acme.api.").await.unwrap();
+    assert_eq!(
+        listed.len() as u64,
+        KEYS,
+        "a scan larger than the default max_ack_pending must complete, not stall"
+    );
+    let mut sorted = listed;
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        (0..KEYS).collect::<Vec<_>>(),
+        "every stored key must come back exactly once"
+    );
+
+    // The scan's ephemeral consumer is deleted by the scan itself, not left for
+    // the server's inactivity reaper — a dozen were live at once on prod. Only
+    // scans touch this bucket in this test, so anything left is a leak.
+    let mut stream = store
+        .jetstream()
+        .get_stream(format!("KV_{}{}", store.prefix(), store::buckets::TASKS))
+        .await
+        .unwrap();
+    assert_eq!(
+        stream.info().await.unwrap().state.consumer_count,
+        0,
+        "a finished scan must delete its ephemeral consumer"
+    );
+}

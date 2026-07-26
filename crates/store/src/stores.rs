@@ -18,6 +18,10 @@ fn nats_err(e: impl std::fmt::Display) -> StoreError {
 /// so a wedged connection surfaces as an error instead of a hung dispatcher.
 const SCAN_MESSAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The ephemeral pull consumer one [`Bucket::scan_prefix`] reads through.
+type ScanConsumer =
+    async_nats::jetstream::consumer::Consumer<async_nats::jetstream::consumer::pull::Config>;
+
 /// The `KV-Operation` header async-nats stamps on a delete/purge. It keeps its
 /// own parser private, so the name is repeated here.
 const KV_OPERATION_HEADER: &str = "KV-Operation";
@@ -112,12 +116,20 @@ impl Bucket {
     /// Bounded by the consumer's `num_pending` at creation and a per-message
     /// deadline: a snapshot, so a concurrent write simply is not reflected,
     /// exactly as the previous key-then-get spelling behaved.
+    ///
+    /// **The consumer must never accumulate unacked messages.** A scan reads a
+    /// snapshot and acks nothing, so with the default `max_ack_pending` (1000)
+    /// the server stops delivering at message 1000 and the scan hangs until the
+    /// per-message deadline — every list call in the process dies once one
+    /// project crosses 1000 keys (#290: `KV_tasks` reached 1004 in prod and
+    /// `/tasks/pending` timed out). `AckPolicy::None` removes the ceiling
+    /// altogether; do not fall back to the default policy here.
     async fn scan_prefix(
         &self,
         prefix: &str,
         headers_only: bool,
     ) -> Result<Vec<(String, Vec<u8>)>> {
-        use async_nats::jetstream::consumer::{DeliverPolicy, pull};
+        use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, pull};
 
         // Subject filters match whole tokens, but `prefix` is a string prefix
         // and callers may end mid-token. Narrow to the token-aligned part and
@@ -127,21 +139,39 @@ impl Bucket {
             Some(i) => &prefix[..=i],
             None => "",
         };
-        let consumer = self
-            .kv
-            .stream
+        let stream = self.kv.stream.clone();
+        let consumer = stream
             .clone()
             .create_consumer(pull::Config {
                 description: Some("chuggernaut prefix scan".to_string()),
                 filter_subject: format!("{}{aligned}>", self.kv.prefix),
                 // Only the latest revision of each key is the current value.
                 deliver_policy: DeliverPolicy::LastPerSubject,
+                // A snapshot read has nothing to ack; see the doc comment.
+                ack_policy: AckPolicy::None,
                 headers_only,
                 ..Default::default()
             })
             .await
             .map_err(nats_err)?;
 
+        let name = consumer.cached_info().name.clone();
+        let scanned = self.scan_prefix_drain(consumer, prefix).await;
+        // Ephemeral consumers only disappear once the server's inactivity
+        // threshold reaps them, so an un-deleted one lingers per list call.
+        // Best-effort on both paths: the scan's own result is what callers
+        // asked for, and the reaper is still the backstop if this fails.
+        let _ = stream.delete_consumer(&name).await;
+        scanned
+    }
+
+    /// Read one [`Bucket::scan_prefix`] consumer to exhaustion, keeping the
+    /// current values whose key really starts with `prefix`.
+    async fn scan_prefix_drain(
+        &self,
+        consumer: ScanConsumer,
+        prefix: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
         let expected = consumer.cached_info().num_pending;
         let mut messages = consumer.messages().await.map_err(nats_err)?;
         let mut out = Vec::new();
