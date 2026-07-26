@@ -4,6 +4,7 @@ import {
   ApiError,
   api,
   type Evaluator,
+  type EvaluatorInput,
   type Job,
   type JobTypeDetail,
   type JobTypeSummary,
@@ -156,7 +157,7 @@ function CreateJob({
 
   function build(draft: boolean) {
     if (submitting) return
-    const evals: Evaluator[] = []
+    const evals: EvaluatorInput[] = []
     for (const r of evalRows) {
       const name = r.name.trim()
       const action = r.action.trim()

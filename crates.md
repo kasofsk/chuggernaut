@@ -51,6 +51,16 @@ changes without re-emission (refactor-plan D1). The feature is a derive-macro
 dependency only — the purity rule above still holds, machine-checked by
 `boundary_guard`.
 
+The operator UI's `web/src/api/types.gen.ts` is generated from that schema, so
+these types are now the compiled-against definition on both sides of the wire
+(refactor-plan D2). Responses are emitted under schemars' **serialize**
+contract and request bodies under the deserialize one — a `#[serde(default)]`
+field a record always writes is required in the generated client, while the
+same field on a request body stays optional for the caller.
+`chuggernaut schema api-samples` emits one serialized example per response type
+into `web/src/api/wire-samples.json`, which the web round-trip test parses
+against the generated types.
+
 ### `store`
 
 The single NATS integration point, wrapping `async-nats`:

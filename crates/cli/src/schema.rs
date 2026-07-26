@@ -25,12 +25,23 @@
 //! chuggernaut schema api > schemas/api.schema.json
 //! ```
 //!
-//! It is the machine-readable half of the wire contract the operator UI
-//! hand-mirrors today (NORTH-STAR §2): one bundle document whose `$defs` holds
-//! a named schema per type the API serializes, generated from the same serde
-//! types that serve it. Emission stays on stdout like the other kinds — the CLI
-//! also runs inside consumer project repos, where a hardcoded output path would
-//! be meaningless.
+//! It is the machine-readable half of the wire contract, and the source the
+//! operator UI's TypeScript is generated from (NORTH-STAR §2, `web/src/api/`):
+//! one bundle document whose `$defs` holds a named schema per type the API
+//! serializes, generated from the same serde types that serve it. Emission
+//! stays on stdout like the other kinds — the CLI also runs inside consumer
+//! project repos, where a hardcoded output path would be meaningless.
+//!
+//! A fourth kind emits example *payloads* rather than a schema:
+//!
+//! ```sh
+//! chuggernaut schema api-samples > web/src/api/wire-samples.json
+//! ```
+//!
+//! One serialized value per covered response type, so the web round-trip test
+//! parses bytes serde actually produced instead of bytes a TypeScript author
+//! imagined (see `web/src/api/roundtrip.test.ts`). Both files are held current
+//! by `committed_schemas_are_current`.
 
 use clap::{Parser, ValueEnum};
 
@@ -49,17 +60,28 @@ pub enum SchemaKind {
     Defaults,
     /// The §6.2 HTTP surface (schemas/api.schema.json)
     Api,
+    /// Example payloads for the §6.2 types (web/src/api/wire-samples.json)
+    ApiSamples,
 }
 
+/// Each arm serializes its own document: `schemars::Schema` carries a custom
+/// `Serialize` that emits keywords in reading order (`$schema`, `title`, …), so
+/// routing everything through `serde_json::to_value` first would re-sort every
+/// schema alphabetically and churn all three committed files.
 pub fn generate(kind: SchemaKind) -> anyhow::Result<String> {
-    let schema = match kind {
-        SchemaKind::JobType => schemars::schema_for!(types::JobType),
-        SchemaKind::Defaults => schemars::schema_for!(types::ProjectDefaults),
+    let mut pretty = match kind {
+        SchemaKind::JobType => {
+            serde_json::to_string_pretty(&schemars::schema_for!(types::JobType))?
+        }
+        SchemaKind::Defaults => {
+            serde_json::to_string_pretty(&schemars::schema_for!(types::ProjectDefaults))?
+        }
         // Not one root type but the whole wire vocabulary, so this arm builds
         // its document rather than naming a single `schema_for!` root.
-        SchemaKind::Api => api_bundle(),
+        SchemaKind::Api => serde_json::to_string_pretty(&api_bundle()?)?,
+        // Payloads, not a schema (see `crate::wire_samples`).
+        SchemaKind::ApiSamples => serde_json::to_string_pretty(&crate::wire_samples::bundle()?)?,
     };
-    let mut pretty = serde_json::to_string_pretty(&schema)?;
     pretty.push('\n');
     Ok(pretty)
 }
@@ -91,15 +113,27 @@ macro_rules! cover {
 /// `serde_json::Value` request bodies the api forwards verbatim (job create/
 /// update/members, project create/link). Naming those in Rust is its own
 /// change; until then they stay hand-mirrored in TypeScript.
-fn api_bundle() -> schemars::Schema {
-    let mut generator = schemars::SchemaGenerator::default();
-    api_bundle_job_records(&mut generator);
-    api_bundle_platform_records(&mut generator);
-    api_bundle_job_config(&mut generator);
-    api_bundle_request_bodies(&mut generator);
+fn api_bundle() -> anyhow::Result<schemars::Schema> {
+    // Responses describe what the server WRITES, so they take schemars'
+    // serialize contract: a `#[serde(default)]` field the record always emits
+    // (`Job::title`) is required, and only a `skip_serializing_if` field is
+    // optional. Under the deserialize contract — right for a config file the
+    // platform reads, and what `schema job-type` keeps — every defaulted field
+    // reads as optional, which would hand the generated client a `title?:
+    // string` the wire never omits and push a `?? ''` into every consumer.
+    let mut responses = schemars::generate::SchemaSettings::default()
+        .for_serialize()
+        .into_generator();
+    api_bundle_job_records(&mut responses);
+    api_bundle_platform_records(&mut responses);
+    api_bundle_job_config(&mut responses);
+    // Request bodies are the mirror image: they describe what the server
+    // READS, so a defaulted field is genuinely optional for the caller.
+    let mut requests = schemars::SchemaGenerator::default();
+    api_bundle_request_bodies(&mut requests);
 
     let mut root = serde_json::Map::new();
-    if let Some(meta_schema) = generator.settings().meta_schema.clone() {
+    if let Some(meta_schema) = responses.settings().meta_schema.clone() {
         root.insert("$schema".into(), meta_schema.into_owned().into());
     }
     root.insert("title".into(), "chuggernaut HTTP surface".into());
@@ -109,13 +143,41 @@ fn api_bundle() -> schemars::Schema {
          `committed_schemas_are_current` fails when this file goes stale."
             .into(),
     );
-    // Sorted, so the emitted order is a property of this code rather than of
-    // schemars' traversal or a downstream `preserve_order` feature — a drift
-    // test that flapped would poison every unrelated job's CI.
-    let defs: std::collections::BTreeMap<String, serde_json::Value> =
-        generator.take_definitions(true).into_iter().collect();
+    let defs = api_bundle_defs(&mut responses, &mut requests)?;
     root.insert("$defs".into(), defs.into_iter().collect());
-    root.into()
+    Ok(root.into())
+}
+
+/// Both generators' definitions as one `$defs` map.
+///
+/// Sorted, so the emitted order is a property of this code rather than of
+/// schemars' traversal or a downstream `preserve_order` feature — a drift test
+/// that flapped would poison every unrelated job's CI.
+///
+/// A type reachable from both sides is only safe to emit once when the two
+/// contracts agree about it (they do for the plain enums that qualify today).
+/// One that disagreed would need two names on the wire, and silently keeping
+/// either version would be a schema that lies to half its consumers — so it
+/// fails the emission instead.
+fn api_bundle_defs(
+    responses: &mut schemars::SchemaGenerator,
+    requests: &mut schemars::SchemaGenerator,
+) -> anyhow::Result<std::collections::BTreeMap<String, serde_json::Value>> {
+    let mut defs: std::collections::BTreeMap<String, serde_json::Value> =
+        responses.take_definitions(true).into_iter().collect();
+    for (name, schema) in requests.take_definitions(true) {
+        if let Some(from_response) = defs.get(&name) {
+            anyhow::ensure!(
+                from_response == &schema,
+                "`{name}` is reachable from both a response type and a request body, and the \
+                 serialize/deserialize contracts disagree about it — give the request side its \
+                 own type rather than picking one shape for both"
+            );
+            continue;
+        }
+        defs.insert(name, schema);
+    }
+    Ok(defs)
 }
 
 /// The job and task records the jobs/tasks/queue endpoints serve, plus the
@@ -207,31 +269,90 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    /// The committed schemas (schemas/) must match what the current types
-    /// generate. Regenerate with:
+    /// The committed schemas (and the sample payloads the web round-trip test
+    /// parses) must match what the current types generate. Regenerate with:
     ///   cargo run -p chuggernaut -- schema job-type > schemas/job-type.schema.json
     ///   cargo run -p chuggernaut -- schema defaults > schemas/defaults.schema.json
     ///   cargo run -p chuggernaut -- schema api > schemas/api.schema.json
+    ///   cargo run -p chuggernaut -- schema api-samples > web/src/api/wire-samples.json
     ///
     /// For `api` this is the whole enforcement of the §6.2 contract: a field
     /// added to any covered type changes the generated bundle, so a change that
     /// does not re-emit it fails here rather than silently desynchronizing the
-    /// generated TypeScript client from the wire.
+    /// generated TypeScript client from the wire. (The other half of that
+    /// chain — TypeScript regenerated from the re-emitted schema — is
+    /// `npm run codegen:check`, which `tasks/ci.sh` runs for any diff touching
+    /// `schemas/` or `web/`.)
     #[test]
     fn committed_schemas_are_current() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         for (kind, file) in [
-            (SchemaKind::JobType, "job-type.schema.json"),
-            (SchemaKind::Defaults, "defaults.schema.json"),
-            (SchemaKind::Api, "api.schema.json"),
+            (SchemaKind::JobType, "schemas/job-type.schema.json"),
+            (SchemaKind::Defaults, "schemas/defaults.schema.json"),
+            (SchemaKind::Api, "schemas/api.schema.json"),
+            (SchemaKind::ApiSamples, "web/src/api/wire-samples.json"),
         ] {
             let committed = std::fs::read_to_string(root.join(file))
-                .unwrap_or_else(|e| panic!("read schemas/{file}: {e} — regenerate (see test doc)"));
+                .unwrap_or_else(|e| panic!("read {file}: {e} — regenerate (see test doc)"));
             assert_eq!(
                 committed,
                 generate(kind).unwrap(),
-                "schemas/{file} is stale — regenerate (see test doc)"
+                "{file} is stale — regenerate (see test doc)"
             );
+        }
+    }
+
+    /// Every sample names a type the bundle covers, and every sample is a JSON
+    /// object: the web generator turns each into `<name> satisfies <Type>`, so
+    /// a sample keyed on a name with no `$defs` entry would emit TypeScript
+    /// that imports a type which does not exist.
+    #[test]
+    fn api_samples_name_covered_types() {
+        let bundle: serde_json::Value =
+            serde_json::from_str(&generate(SchemaKind::Api).unwrap()).unwrap();
+        let defs = bundle["$defs"].as_object().unwrap();
+        let samples: serde_json::Value =
+            serde_json::from_str(&generate(SchemaKind::ApiSamples).unwrap()).unwrap();
+        let samples = samples.as_object().unwrap();
+        assert!(!samples.is_empty(), "no sample payloads emitted");
+        for (name, payload) in samples {
+            assert!(defs.contains_key(name), "sample `{name}` is not in $defs");
+            assert!(payload.is_object(), "sample `{name}` is not a JSON object");
+        }
+        for name in ["Job", "JobSummary", "Task", "TaskResult", "FleetStatus"] {
+            assert!(samples.contains_key(name), "no sample for {name}");
+        }
+    }
+
+    /// A serialized [`types::Job`] carries every field the bundle marks
+    /// required, and nothing the bundle does not declare.
+    ///
+    /// This is the Rust-side half of the round trip (the TypeScript half is
+    /// `web/src/api/roundtrip.test.ts`): the api bundle describes responses
+    /// under schemars' **serialize** contract, and the whole point of that
+    /// choice is that `required` means "serde always writes this key". A
+    /// contract that drifted from serde would hand the UI a non-null field
+    /// that arrives `undefined`.
+    #[test]
+    fn job_sample_matches_the_schema_field_set() {
+        let bundle: serde_json::Value =
+            serde_json::from_str(&generate(SchemaKind::Api).unwrap()).unwrap();
+        let samples: serde_json::Value =
+            serde_json::from_str(&generate(SchemaKind::ApiSamples).unwrap()).unwrap();
+        for name in ["Job", "JobSummary", "Task"] {
+            let schema = &bundle["$defs"][name];
+            let properties = schema["properties"].as_object().unwrap();
+            let payload = samples[name].as_object().unwrap();
+            for required in schema["required"].as_array().unwrap() {
+                let key = required.as_str().unwrap();
+                assert!(payload.contains_key(key), "{name}: serde omitted `{key}`");
+            }
+            for key in payload.keys() {
+                assert!(
+                    properties.contains_key(key),
+                    "{name}: serde wrote `{key}`, which the schema does not declare"
+                );
+            }
         }
     }
 

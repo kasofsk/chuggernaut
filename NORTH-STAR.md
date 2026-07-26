@@ -104,15 +104,23 @@ Two smaller backend targets:
 
 ## 2. The contract layer: generate, don't transcribe
 
-Today the HTTP surface exists three times: Rust types in `types`, handler
+The HTTP surface used to exist three times: Rust types in `types`, handler
 wiring in `api`, and a hand-written ~600-line `web/src/api.ts`. In the north
-star, `types` is the single source and the TypeScript is **generated** (ts-rs,
-or schemars → OpenAPI → client).
+star, `types` is the single source and the TypeScript is **generated**.
 
 This is the highest-leverage single change on the list: it converts the
 fuzziest boundary in the system (backend↔frontend, currently synchronized by
 human care) into a compiler-checked one — and it is exactly the boundary that
 module-scoped agent jobs will trip over most.
+
+**Landed** (refactor-plan D1+D2) as schemars → JSON Schema → TypeScript:
+`chuggernaut schema api` emits `schemas/api.schema.json`, `npm run codegen`
+turns it into `web/src/api/types.gen.ts`, and both halves are drift-gated
+(`committed_schemas_are_current` in cargo, `npm run codegen:check` in the web
+stage of `tasks/ci.sh`). `api.ts` keeps only the fetch methods; what remains
+hand-written is `api/envelopes.ts` — the replies the dispatcher builds with
+`serde_json::json!`, which have no Rust type to generate from. Shrinking that
+file is what "finishing" §2 means.
 
 ## 3. Web: feature modules over technical folders, one fetching layer
 

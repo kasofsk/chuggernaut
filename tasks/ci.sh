@@ -194,13 +194,24 @@ stop_gate_nats() {
 # touched Rust previously reached the merge gate with nothing having compiled
 # it.
 run_web_ci() {
-	echo "ci: web changes — npm ci + build"
+	echo "ci: web changes — npm ci + codegen check + build + tests"
 	# Subshell: the caller may still run the cargo gate afterwards, and that
 	# expects to be at the workspace root.
 	(
 		cd web
 		npm ci --no-audit --no-fund
+		# The generated wire client (refactor-plan D2): regenerate from
+		# schemas/api.schema.json and fail if the committed output differs.
+		# The TypeScript mirror of the Rust `committed_schemas_are_current`,
+		# and it has to live HERE rather than in a cargo test: a diff that
+		# regenerates the schema without regenerating the client touches
+		# crates/** and schemas/** — which is why schemas/** is a web-stage
+		# trigger below — while a web-only diff never reaches cargo at all.
+		npm run codegen:check
 		npm run build
+		# Unit tests, including the Rust→TS round trip over the emitted
+		# sample payloads (web/src/api/roundtrip.test.ts).
+		npm test
 	)
 }
 
@@ -508,7 +519,11 @@ if [ "$diff_ok" -eq 1 ]; then
 		crates/* | Cargo.toml | Cargo.lock | rust-toolchain* | tasks/ci.sh)
 			rust_changed=1
 			;;
-		web/*)
+		web/* | schemas/*)
+			# schemas/** is a WEB trigger too: the generated TypeScript client
+			# is built from schemas/api.schema.json, so a Rust type change that
+			# re-emits the schema without regenerating the client leaves the
+			# two out of step — and that diff touches no web/ path at all.
 			web_changed=1
 			;;
 		esac

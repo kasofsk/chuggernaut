@@ -273,7 +273,12 @@ guarded by the same committed-schema drift test.
 JSON Schema → TS types generated into `web/src/api/types.gen.ts`, replacing
 the ~580 hand-mirrored interface lines in `api.ts`; the ~41 one-liner method
 bodies stay hand-written. Exit gate: `tsc -b` green on generated types plus a
-round-trip test (serialize from Rust, parse in TS).
+round-trip test (serialize from Rust, parse in TS). **Landed** — via
+`json-schema-to-typescript` behind `npm run codegen`, with `codegen:check` in
+the web stage of `tasks/ci.sh` (which `schemas/**` now triggers) and the round
+trip over `chuggernaut schema api-samples` payloads. `api.ts` is 352 lines; the
+envelopes with no Rust type moved to `web/src/api/envelopes.ts`, which is the
+remaining hand-mirrored surface.
 
 ## Track E — Web layering (after D)
 

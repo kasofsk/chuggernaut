@@ -11,6 +11,7 @@ pub mod schema;
 pub mod sshcert;
 pub mod sshfront;
 pub mod validate;
+pub mod wire_samples;
 
 pub use admin::AdminArgs;
 pub use init::InitArgs;

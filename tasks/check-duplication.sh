@@ -18,6 +18,14 @@
 #     `ignorePattern` matching. Bump this deliberately, with the clone set
 #     re-measured in the same change.
 #
+# Why `**/*.gen.ts` is in .jscpd.json's ignorePattern (refactor-plan D2):
+# generated code is not refactorable. `web/src/api/types.gen.ts` repeats itself
+# exactly where its SOURCE does — `JobSummary` is a projection of `Job`, so the
+# two carry the same field docs — and the only way to satisfy the gate would be
+# to hand-edit a file stamped DO-NOT-EDIT, which the codegen drift check then
+# fails. The duplication that matters is duplication a human wrote; the source
+# of these files (the Rust `types` crate) is itself under this gate.
+#
 # CI (tasks/ci.sh) and the pre-commit hook both call THIS script, so "clean
 # locally" and "clean in CI" cannot diverge. The whole-repo run costs ~30ms, so
 # it is unconditional — no diff scoping, and none should be added: a web-only or

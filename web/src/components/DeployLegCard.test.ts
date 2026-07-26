@@ -34,6 +34,8 @@ function task(result: TaskResult | null): Task {
     state: 'Done',
     attempt: 1,
     evaluator: null,
+    stage: 0,
+    infra_loss: false,
     container_id: null,
     session_id: null,
     result,
@@ -47,6 +49,7 @@ const workResult = (structured: DeployReport | null): WorkResult => ({
   kind: 'Work',
   summary: 'deployed',
   structured,
+  token_usage: null,
 })
 
 const commandResult = (structured: Record<string, unknown> | null): CommandResult => ({
@@ -57,7 +60,11 @@ const commandResult = (structured: Record<string, unknown> | null): CommandResul
   structured,
 })
 
-const triageResult: TriageResult = { kind: 'Triage', assessment: 'looks fine' }
+const triageResult: TriageResult = {
+  kind: 'Triage',
+  assessment: 'looks fine',
+  token_usage: null,
+}
 
 describe('deployReportOfTasks', () => {
   it('finds the report on a successful deploy (Work result)', () => {

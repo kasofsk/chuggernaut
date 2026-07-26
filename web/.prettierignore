@@ -1,2 +1,6 @@
 dist
 package-lock.json
+
+# Rust-emitted: `chuggernaut schema api-samples` writes this file and the cargo
+# drift test compares its exact bytes, so prettier must not reformat it.
+src/api/wire-samples.json

@@ -77,7 +77,8 @@
         }
       },
       "required": [
-        "message"
+        "message",
+        "percent"
       ]
     },
     "DeployLeg": {
@@ -159,7 +160,11 @@
             "null"
           ]
         }
-      }
+      },
+      "required": [
+        "rollback",
+        "legs"
+      ]
     },
     "DispatcherConfigSnapshot": {
       "description": "A snapshot of the dispatcher's runtime configuration for display. Contains\nno secrets — only names, endpoints, and resolved paths an operator needs to\nsee. Written by the dispatcher at startup, read by the api.",
@@ -270,10 +275,20 @@
       "required": [
         "nodes",
         "agent_provider_default",
+        "agent_model_default",
+        "triage_image",
         "repos_root",
         "repo_url_base",
         "nats_url",
-        "secrets_encryption"
+        "nats_url_container",
+        "channel_binary",
+        "hook_bin",
+        "secrets_encryption",
+        "dispatcher_sha",
+        "main_tip_sha",
+        "commits_behind",
+        "placement_policy",
+        "schema_epoch"
       ]
     },
     "Escalation": {
@@ -386,7 +401,15 @@
       "additionalProperties": false,
       "required": [
         "name",
-        "type"
+        "type",
+        "image",
+        "run",
+        "prompt",
+        "provider",
+        "model",
+        "secrets",
+        "required",
+        "stage"
       ]
     },
     "EvaluatorType": {
@@ -462,8 +485,10 @@
       },
       "required": [
         "name",
+        "slots",
         "occupied",
         "available",
+        "version",
         "running"
       ]
     },
@@ -688,10 +713,21 @@
         "id",
         "project",
         "type",
+        "title",
+        "description",
+        "deps",
+        "members",
         "state",
         "branch",
+        "base_ref",
         "knowledge_tags",
-        "created_at"
+        "eval",
+        "timeout",
+        "model",
+        "claim_next",
+        "factory",
+        "created_at",
+        "ready_at"
       ]
     },
     "JobState": {
@@ -879,10 +915,15 @@
         "members",
         "state",
         "branch",
+        "base_ref",
         "knowledge_tags",
         "eval",
+        "timeout",
+        "model",
         "claim_next",
-        "created_at"
+        "factory",
+        "created_at",
+        "ready_at"
       ]
     },
     "JobType": {
@@ -1007,7 +1048,20 @@
       },
       "required": [
         "name",
-        "work"
+        "display_name",
+        "description",
+        "image",
+        "work",
+        "wrap_up",
+        "resources",
+        "placement",
+        "job_deadline",
+        "work_retries",
+        "eval_retries",
+        "rework_budget",
+        "eval",
+        "knowledge",
+        "vars"
       ]
     },
     "LegStatus": {
@@ -1079,7 +1133,8 @@
       },
       "required": [
         "url",
-        "main_branch"
+        "main_branch",
+        "github_repo"
       ]
     },
     "OutputQuery": {
@@ -1123,7 +1178,10 @@
           ]
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "node"
+      ]
     },
     "ProjectRole": {
       "type": "string",
@@ -1369,7 +1427,12 @@
           ]
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "cpu",
+        "memory",
+        "task_timeout"
+      ]
     },
     "ReviewSpec": {
       "description": "Inline review loop declaration (spec §1.1, §4.5). The reviewer runs inside\nthe work container; its acceptance gates `submit_result`, not the merge.",
@@ -1408,7 +1471,10 @@
       },
       "additionalProperties": false,
       "required": [
-        "prompt"
+        "prompt",
+        "provider",
+        "model",
+        "iterations"
       ]
     },
     "ReworkReason": {
@@ -1483,7 +1549,8 @@
         "task_id",
         "task_kind",
         "job_type",
-        "phase"
+        "phase",
+        "started_at"
       ]
     },
     "SshCertBody": {
@@ -1663,7 +1730,15 @@
         "kind",
         "state",
         "attempt",
-        "created_at"
+        "evaluator",
+        "stage",
+        "container_id",
+        "infra_loss",
+        "session_id",
+        "result",
+        "created_at",
+        "started_at",
+        "completed_at"
       ]
     },
     "TaskKind": {
@@ -1707,6 +1782,7 @@
           "required": [
             "kind",
             "provider",
+            "model",
             "prompt"
           ]
         },
@@ -1856,7 +1932,10 @@
             }
           },
           "required": [
-            "kind"
+            "kind",
+            "summary",
+            "structured",
+            "token_usage"
           ]
         },
         {
@@ -1882,7 +1961,8 @@
             "kind",
             "pass",
             "exit_code",
-            "output"
+            "output",
+            "structured"
           ]
         },
         {
@@ -1921,7 +2001,10 @@
           },
           "required": [
             "kind",
-            "pass"
+            "pass",
+            "abort",
+            "structured",
+            "token_usage"
           ]
         },
         {
@@ -1968,6 +2051,9 @@
           "required": [
             "kind",
             "pass",
+            "abort",
+            "structured",
+            "action",
             "operator",
             "resolved_at"
           ]
@@ -1996,7 +2082,8 @@
           },
           "required": [
             "kind",
-            "assessment"
+            "assessment",
+            "token_usage"
           ]
         }
       ]
@@ -2042,7 +2129,9 @@
       },
       "required": [
         "input_tokens",
-        "output_tokens"
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens"
       ]
     },
     "WorkSpec": {
@@ -2105,7 +2194,13 @@
       },
       "additionalProperties": false,
       "required": [
-        "type"
+        "type",
+        "prompt",
+        "provider",
+        "model",
+        "review",
+        "run",
+        "secrets"
       ]
     },
     "WorkType": {
@@ -2161,7 +2256,9 @@
       "required": [
         "name",
         "endpoint",
-        "slots"
+        "slots",
+        "available",
+        "version"
       ]
     },
     "WrapUpMode": {
@@ -2217,7 +2314,10 @@
           "default": "merge"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ]
     }
   }
 }
