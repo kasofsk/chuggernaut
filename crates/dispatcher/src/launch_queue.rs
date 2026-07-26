@@ -25,8 +25,8 @@
 
 use crate::core::{Core, Msg, Result, TaskExit};
 use crate::exec::{ChannelRole, eval_image, task_timeout};
+use crate::forge_ingest::triage::tail;
 use crate::queue::{QueuedLaunch, launch_priority};
-use crate::triage::tail;
 use chrono::Utc;
 use container::{BackendError, ContainerLaunchConfig, bootstrap_cmd};
 use std::time::Duration;
@@ -664,7 +664,7 @@ impl Core {
 /// structured result instead of an opaque log. `collect_logs` stores the bytes as
 /// the task's stdout artifact either way.
 async fn monitor_harvest_deploy_report(
-    harvest: &crate::harvest::Harvester,
+    harvest: &crate::platform_ops::harvest::Harvester,
     owner: &str,
     project: &str,
     seq: u64,
@@ -674,7 +674,9 @@ async fn monitor_harvest_deploy_report(
     harvest
         .collect_logs(owner, project, seq, task_id, id)
         .await
-        .and_then(|bytes| crate::harvest::parse_deploy_report(&String::from_utf8_lossy(&bytes)))
+        .and_then(|bytes| {
+            crate::platform_ops::harvest::parse_deploy_report(&String::from_utf8_lossy(&bytes))
+        })
         .and_then(|report| serde_json::to_value(report).ok())
 }
 
@@ -682,7 +684,7 @@ async fn monitor_harvest_deploy_report(
 /// the exit, so a failing gate build stage's compiler errors can ride into the
 /// gate-fix brief (job #154). Empty output yields None rather than a blank tail.
 async fn monitor_harvest_log_tail(
-    harvest: &crate::harvest::Harvester,
+    harvest: &crate::platform_ops::harvest::Harvester,
     owner: &str,
     project: &str,
     seq: u64,

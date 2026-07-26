@@ -763,7 +763,7 @@ async fn create_project(
         .seed_files(
             owner,
             name,
-            crate::seed::CODE_TEMPLATE,
+            crate::platform_ops::seed::CODE_TEMPLATE,
             "chuggernaut: seed the Code starter template",
             false,
         )

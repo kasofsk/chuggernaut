@@ -13,8 +13,8 @@
 //! - **Spec:** §3.1.
 
 use crate::decide::ready;
+use crate::forge_ingest::origin::OriginStatusResponse;
 use crate::graph::JobGraph;
-use crate::origin::OriginStatusResponse;
 use crate::queue::{QueuedJob, QueuedLaunch, ReadyQueue};
 use crate::release::{self, KvNames, ValidationError};
 use crate::state::{InvalidTransition, assert_transition};
@@ -853,7 +853,7 @@ pub struct Core {
     /// Platform project records (linked-origin state).
     pub(crate) projects: ProjectStore,
     /// PR surface for origin releases; a fake in integration tests.
-    pub(crate) pr_api: Arc<dyn crate::github::PullRequestApi>,
+    pub(crate) pr_api: Arc<dyn crate::forge_ingest::github::PullRequestApi>,
     /// Project slugs whose merge queue is held by an Open origin release
     /// (nothing lands on integration until the release PR resolves). Derived
     /// from `projects.*` KV; rebuilt at startup.
@@ -868,12 +868,13 @@ pub struct Core {
     /// and flush memory-only state to KV so records are true at exit.
     pub(crate) draining: bool,
     /// Config-snapshot republish state (CD deploy-drift visibility, see
-    /// [`crate::cd`]). `None` when snapshot publishing isn't wired (most tests);
-    /// the scan tick republishes it when the serialized bytes change.
-    pub(crate) snapshot: Option<crate::cd::ConfigSnapshot>,
+    /// [`crate::platform_ops::cd`]). `None` when snapshot publishing isn't
+    /// wired (most tests); the scan tick republishes it when the serialized
+    /// bytes change.
+    pub(crate) snapshot: Option<crate::platform_ops::cd::ConfigSnapshot>,
     /// The fleet roster (node names + slot caps + boot health) for live
-    /// occupancy publishing (see [`crate::fleet`]). Mirrors the config
-    /// snapshot's `nodes`; empty in tests that don't wire a fleet. Live
+    /// occupancy publishing (see [`crate::platform_ops::fleet`]). Mirrors the
+    /// config snapshot's `nodes`; empty in tests that don't wire a fleet. Live
     /// health/version comes from the backend, slot caps from here.
     pub(crate) fleet_roster: Vec<types::WorkerNode>,
     /// Last-published `fleet.status` bytes, for change detection — a launch/exit
@@ -971,8 +972,11 @@ impl Core {
             )?),
             None => None,
         };
-        let artifacts =
-            crate::harvest::artifact_store(&store, config.artifacts_identity.as_deref()).await?;
+        let artifacts = crate::platform_ops::harvest::artifact_store(
+            &store,
+            config.artifacts_identity.as_deref(),
+        )
+        .await?;
 
         let mut core = Self {
             store,
@@ -993,7 +997,7 @@ impl Core {
             active: HashMap::new(),
             merge_gates: HashMap::new(),
             projects,
-            pr_api: Arc::new(crate::github::GithubClient::new()),
+            pr_api: Arc::new(crate::forge_ingest::github::GithubClient::new()),
             release_holds: HashSet::new(),
             self_tx: None,
             draining: false,
@@ -1039,23 +1043,30 @@ impl Core {
     }
 
     /// Swap the PR client — integration tests inject a scripted fake.
-    pub fn with_pr_api(mut self, pr_api: Arc<dyn crate::github::PullRequestApi>) -> Self {
+    pub fn with_pr_api(
+        mut self,
+        pr_api: Arc<dyn crate::forge_ingest::github::PullRequestApi>,
+    ) -> Self {
         self.pr_api = pr_api;
         self
     }
 
     /// Attach the config-snapshot republish state so the scan tick keeps the
-    /// `platform` bucket fresh (CD deploy-drift, see [`crate::cd`]). Wired by
-    /// [`crate::run`] after the boot-time publish.
-    pub(crate) fn with_config_snapshot(mut self, snapshot: crate::cd::ConfigSnapshot) -> Self {
+    /// `platform` bucket fresh (CD deploy-drift, see
+    /// [`crate::platform_ops::cd`]). Wired by [`crate::run`] after the
+    /// boot-time publish.
+    pub(crate) fn with_config_snapshot(
+        mut self,
+        snapshot: crate::platform_ops::cd::ConfigSnapshot,
+    ) -> Self {
         self.snapshot = Some(snapshot);
         self
     }
 
     /// Attach the fleet roster (node names + slot caps) so live occupancy
     /// publishing reports every node — idle ones included — with its capacity
-    /// (see [`crate::fleet`]). Wired by [`crate::run`] from the config snapshot's
-    /// nodes; tests set it to assert per-node slots.
+    /// (see [`crate::platform_ops::fleet`]). Wired by [`crate::run`] from the
+    /// config snapshot's nodes; tests set it to assert per-node slots.
     pub fn with_fleet_roster(mut self, roster: Vec<types::WorkerNode>) -> Self {
         // The seed set is the boot roster's names: these stay ping-managed and
         // are never heartbeat-gated (spec §3.1 dynamic registration).

@@ -95,7 +95,9 @@ The core. Internal module map:
 
 Each module opens with a contract-style `//!` header (accepts / emits /
 guarantees / spec §); `MODULES.md` at the repo root is the one-line registry.
-The map below mirrors the actual `crates/dispatcher/src/*.rs` tree.
+The map below mirrors the actual `crates/dispatcher/src/` tree; a
+directory in it is a **named context** (NORTH-STAR §1) whose `mod.rs` carries
+the charter its members share.
 
 The pure pieces live in `crates/domain` (`chuggernaut-domain`, refactor-plan
 C1) and are re-exported by the dispatcher so call sites keep one surface:
@@ -141,15 +143,19 @@ dispatcher/
   scan.rs        — task-timeout and one-shot job-deadline scans (§3.5)
   reconcile.rs   — restart reconciliation of mid-execution jobs, incl. the escalation
                    inbox heal (§3.6)
-  cd.rs          — config-snapshot freshness: republish live fleet/deploy-drift
-                   state from the scan tick when serialized bytes change
-  fleet.rs       — live fleet occupancy publishing, rebuilt from live containers (§3.1, §3.6)
-  harvest.rs     — pull artifacts out of an exited container, then reclaim its overlay (§3.2)
   channel.rs     — agent → operator channel posts: writes `channels` KV + job-events (§4.2)
-  triage.rs      — operator-dispatched advisory triage runs; never drives a transition (§1.2)
-  origin.rs      — linked-origin projects: the link flow and the origin-release PR surface (§5.3)
-  github.rs      — minimal GitHub REST client (create/read PRs) behind a trait for the origin surface (§5.3)
-  seed.rs        — platform starter template embedded in the binary (§12.2)
+  platform_ops/  — the platform-ops context (C8): keeping the platform observable and
+                   tidy; no member drives a job transition
+    cd.rs        — config-snapshot freshness: republish live fleet/deploy-drift
+                   state from the scan tick when serialized bytes change
+    fleet.rs     — live fleet occupancy publishing, rebuilt from live containers (§3.1, §3.6)
+    harvest.rs   — pull artifacts out of an exited container, then reclaim its overlay (§3.2)
+    seed.rs      — platform starter template embedded in the binary (§12.2)
+  forge_ingest/  — the forge-ingest context (C8): where work and code cross the platform's
+                   edge; no member drives a job transition, credentials never leave it
+    triage.rs    — operator-dispatched advisory triage runs; never drives a transition (§1.2)
+    origin.rs    — linked-origin projects: the link flow and the origin-release PR surface (§5.3)
+    github.rs    — minimal GitHub REST client (create/read PRs) behind a trait for the origin surface (§5.3)
   run.rs         — production startup: wire store, repos, fleet, provider; fail fast (§3.6, §12.4)
   handlers.rs    — NATS req.* subject handlers, one spawn fn per subject family (§6.1, §6.5)
   config.rs      — dispatcher config (AGENT_PROVIDER_DEFAULT etc., §12.4)

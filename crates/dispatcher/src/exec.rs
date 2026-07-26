@@ -595,8 +595,8 @@ impl Core {
     /// Container exit fan-in: route by the task's phase.
     /// Handles for collecting artifacts off the actor thread, inside the
     /// per-task monitor.
-    pub(crate) fn harvester(&self) -> crate::harvest::Harvester {
-        crate::harvest::Harvester::new(self.backend.clone(), self.artifacts.clone())
+    pub(crate) fn harvester(&self) -> crate::platform_ops::harvest::Harvester {
+        crate::platform_ops::harvest::Harvester::new(self.backend.clone(), self.artifacts.clone())
     }
 
     /// A just-created task's container failed to launch. The task is already
@@ -1697,7 +1697,10 @@ impl Core {
             .await
             .ok()
             .flatten()?;
-        let tail = crate::triage::tail(&String::from_utf8_lossy(&bytes), PREDECESSOR_TAIL_BYTES);
+        let tail = crate::forge_ingest::triage::tail(
+            &String::from_utf8_lossy(&bytes),
+            PREDECESSOR_TAIL_BYTES,
+        );
         (!tail.trim().is_empty()).then_some(tail)
     }
 
@@ -1828,7 +1831,7 @@ impl Core {
         // if a job record predates the rule.
         let injectable = secrets_declared
             .iter()
-            .filter(|n| !n.starts_with(crate::origin::RESERVED_SECRET_PREFIX));
+            .filter(|n| !n.starts_with(crate::forge_ingest::origin::RESERVED_SECRET_PREFIX));
         match &self.secrets {
             // §8.2: age-decrypted immediately before injection.
             Some(secrets) => {
@@ -1914,7 +1917,7 @@ impl Core {
             Some(secrets) => {
                 use store::secrets::SecretStore;
                 for name in secrets.list(owner, SCOPE).await? {
-                    if name.starts_with(crate::origin::RESERVED_SECRET_PREFIX) {
+                    if name.starts_with(crate::forge_ingest::origin::RESERVED_SECRET_PREFIX) {
                         continue;
                     }
                     if let Some(value) = secrets.get(owner, SCOPE, &name).await? {
@@ -1930,7 +1933,7 @@ impl Core {
                     if let (Some(name), Some(value)) = (
                         key.strip_prefix(&prefix),
                         bucket.get_json::<String>(&key).await?,
-                    ) && !name.starts_with(crate::origin::RESERVED_SECRET_PREFIX)
+                    ) && !name.starts_with(crate::forge_ingest::origin::RESERVED_SECRET_PREFIX)
                     {
                         env.entry(name.to_string()).or_insert(value);
                     }

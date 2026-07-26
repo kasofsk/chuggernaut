@@ -5,12 +5,18 @@ be scoped to (NORTH-STAR §4). Each module carries a contract-style `//!` doc
 header (accepts / emits / guarantees / spec §); the rows here are the one-line
 version of that contract, and this file is what jobs get scoped against.
 
-Keep it in sync with the tree: every top-level dispatcher module
-(`crates/dispatcher/src/*.rs`) and every domain module
+Keep it in sync with the tree: every dispatcher module
+(`crates/dispatcher/src/**/*.rs`) and every domain module
 (`crates/domain/src/**/*.rs`) has a row, and CI fails when a new one lacks
 one (refactor-plan A3) — the mechanism that keeps this from drifting the way
 `crates.md`'s dispatcher map did. Companion docs: `crates.md` (crate map +
 rationale), `NORTH-STAR.md` (target factoring), `STYLE.md` (the rules).
+
+A **named context** (NORTH-STAR §1) — a directory of modules sharing one
+charter — gets its own section here, headed by the row for its `mod.rs`
+charter; its members are rows named by their src-relative path
+(`platform_ops/fleet`). A job can be scoped to a whole context or to one
+module inside it.
 
 **Web feature modules** (`web/src/features/*`, once the data layer and feature
 folders land per NORTH-STAR priorities #1–2) join this registry as they are
@@ -52,14 +58,37 @@ one surface.
 | `launch_queue` | Capacity-aware launch queue: park on `NoCapacity`, drain on slot-freed, escalate past `MAX_QUEUE_WAIT`. | §3.5 |
 | `scan` | Task-timeout and one-shot job-deadline scans; run inside the single-writer loop; also drains the launch queue. | §3.5 |
 | `reconcile` | Restart reconciliation of jobs left mid-execution, incl. re-deriving a parked job's missing escalation task from its stamped record; runs in the actor before the message loop. | §3.6 |
-| `cd` | Config-snapshot freshness: republish live fleet/deploy-drift state from the scan tick when the bytes change. | CD plan C |
-| `fleet` | Live fleet occupancy publishing, rebuilt from live containers (never stale bookkeeping); idle fleet writes nothing. | §3.1, §3.6 |
-| `harvest` | Pull artifacts out of an exited container, then reclaim its overlay; runs off the actor thread, writes no state. | §3.2, §3.6 |
 | `channel` | Agent → operator channel posts: dispatcher writes `channels` KV and publishes each post to `job-events`. | §4.2 |
-| `triage` | Operator-dispatched advisory triage runs; purely advisory — never drives a transition. | §1.2 |
-| `origin` | Linked-origin projects: the link flow and the origin-release PR surface; credentials never enter containers. | §5.3 |
-| `github` | Minimal GitHub REST client (create/read PRs) behind a trait; PAT resolved per call, never held. | §5.3 |
-| `seed` | Platform starter template embedded in the binary — the files a fresh project is seeded with. | §12.2 |
 | `run` | Production startup: wire store, repos, Docker fleet, provider into a spawned core; fail fast. | §3.6, §12.4 |
 | `handlers` | NATS `req.*` subject handlers: translate a request into a `CoreHandle` call and reply per the §6.5 envelope. | §6.1, §6.5 |
 | `config` | Dispatcher configuration; `AGENT_PROVIDER_DEFAULT` required, refuses to start without it. | §12.4 |
+
+## `platform_ops` — `crates/dispatcher/src/platform_ops/`
+
+The platform-ops context (refactor-plan C8): keeping the platform itself
+observable and tidy, as distinct from driving any one job's lifecycle. No
+member decides a state transition — a bug here degrades visibility or disk,
+never job correctness.
+
+| Module | Contract | Spec |
+| --- | --- | --- |
+| `platform_ops` | The context charter: live platform visibility (snapshots rebuilt from live state, written only when their bytes change) plus post-run housekeeping; never a job transition. | §3.1, §3.2, §3.6, §12.2 |
+| `platform_ops/cd` | Config-snapshot freshness: republish live fleet/deploy-drift state from the scan tick when the bytes change. | CD plan C |
+| `platform_ops/fleet` | Live fleet occupancy publishing, rebuilt from live containers (never stale bookkeeping); idle fleet writes nothing. | §3.1, §3.6 |
+| `platform_ops/harvest` | Pull artifacts out of an exited container, then reclaim its overlay; runs off the actor thread, writes no state. | §3.2, §3.6 |
+| `platform_ops/seed` | Platform starter template embedded in the binary — the files a fresh project is seeded with. | §12.2 |
+
+## `forge_ingest` — `crates/dispatcher/src/forge_ingest/`
+
+The forge-ingest context (refactor-plan C8): where work and code cross the
+platform's edge — the outside forge on one side, operator-dispatched advisory
+runs on the other. NORTH-STAR §1 names it the one dispatcher subsystem worth
+considering as its own process someday, since it is the only one not part of
+the single-writer state loop's core job.
+
+| Module | Contract | Spec |
+| --- | --- | --- |
+| `forge_ingest` | The context charter: everything that talks to something the dispatcher does not own; no member drives a transition, and credentials never leave the context. | §1.2, §5.3 |
+| `forge_ingest/triage` | Operator-dispatched advisory triage runs; purely advisory — never drives a transition. | §1.2 |
+| `forge_ingest/origin` | Linked-origin projects: the link flow and the origin-release PR surface; credentials never enter containers. | §5.3 |
+| `forge_ingest/github` | Minimal GitHub REST client (create/read PRs) behind a trait; PAT resolved per call, never held. | §5.3 |

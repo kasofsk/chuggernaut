@@ -172,13 +172,13 @@ pub async fn static_errors(
         for s in declared_secrets {
             // Origin credentials are dispatcher-only: reserved names never
             // reach a container, so declaring one is a static error.
-            if s.starts_with(crate::origin::RESERVED_SECRET_PREFIX) {
+            if s.starts_with(crate::forge_ingest::origin::RESERVED_SECRET_PREFIX) {
                 errs.push(ValidationError::new(
                     seq,
                     "secrets",
                     format!(
                         "secret '{s}' uses the reserved '{}' prefix (dispatcher-only origin credentials)",
-                        crate::origin::RESERVED_SECRET_PREFIX
+                        crate::forge_ingest::origin::RESERVED_SECRET_PREFIX
                     ),
                 ));
             } else if !kv.secrets.contains(s) {

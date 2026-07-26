@@ -85,13 +85,15 @@ Two smaller backend targets:
 
 - **`handlers.rs` → `handlers/`** per subject family — `crates.md` already
   specifies this; reality regressed to one ~1,700-line file.
-- **Promote the grab-bag modules into named contexts.** `factory`/`triage`
-  (the forge/ingest context) and `fleet`/`cd`/`harvest`/`seed` (the
-  platform-ops context) are bounded contexts that grew organically. In the
-  north star they are two directories with their own doc headers — and if
-  factory/ingest ever needs independent scaling, it is the one dispatcher
-  subsystem worth considering as its own process, since it is the only one
-  not part of the single-writer state loop's core job.
+- **Promote the grab-bag modules into named contexts.** `triage`/`origin`/
+  `github` (the forge-ingest context) and `fleet`/`cd`/`harvest`/`seed` (the
+  platform-ops context) are bounded contexts that grew organically. **Landed**
+  (refactor-plan C8): they are `crates/dispatcher/src/forge_ingest/` and
+  `platform_ops/`, each a directory whose `mod.rs` carries the charter its
+  members share and a `MODULES.md` section of its own. If forge-ingest ever
+  needs independent scaling, it is the one dispatcher subsystem worth
+  considering as its own process, since it is the only one not part of the
+  single-writer state loop's core job.
 
 ## 2. The contract layer: generate, don't transcribe
 

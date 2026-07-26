@@ -323,7 +323,7 @@ grow a taxonomy; one uniform block, and code deps whose entire delivery is
 ### E15 — Triage: the benchmark
 
 The triage prompt (`build_triage_prompt` in
-`crates/dispatcher/src/triage.rs`) assembles brief + escalation detail +
+`crates/dispatcher/src/forge_ingest/triage.rs`) assembles brief + escalation detail +
 the full task log with per-task result renderings and 4 KB stdout tails —
 including human resolutions with `action`, operator, and structured notes.
 It is the existence proof that every datum this design proposes to forward

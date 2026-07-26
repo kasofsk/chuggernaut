@@ -1,6 +1,6 @@
 //! Live fleet occupancy publishing (spec §3.1).
 //!
-//! The config snapshot ([`crate::cd`]) describes the fleet *statically* — node
+//! The config snapshot ([`super::cd`]) describes the fleet *statically* — node
 //! names, slot counts, versions. This module reports live *usage*: which slots
 //! on which node are busy and what job/task each busy slot runs. With more than
 //! one node the UI can't place work on nodes without it.

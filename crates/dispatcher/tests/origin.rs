@@ -7,8 +7,8 @@
 
 use async_trait::async_trait;
 use dispatcher::core::{Core, CoreConfig, CoreError, CreateJobRequest, spawn};
-use dispatcher::github::{GithubError, PrInfo, PullRequestApi};
-use dispatcher::origin::{SECRET_DEPLOY_KEY, SECRET_PAT};
+use dispatcher::forge_ingest::github::{GithubError, PrInfo, PullRequestApi};
+use dispatcher::forge_ingest::origin::{SECRET_DEPLOY_KEY, SECRET_PAT};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use store::NatsStore;

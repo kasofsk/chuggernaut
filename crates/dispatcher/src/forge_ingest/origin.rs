@@ -188,7 +188,7 @@ impl Core {
             .seed_files(
                 owner,
                 name,
-                crate::seed::CONFIG_TEMPLATE,
+                crate::platform_ops::seed::CONFIG_TEMPLATE,
                 "chuggernaut: seed job types and prompts",
                 true,
             )

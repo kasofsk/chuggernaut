@@ -159,6 +159,11 @@ Group `fleet`/`cd`/`harvest`/`seed` (platform-ops) and
 `factory`/`triage`/`origin`/`github` (forge/ingest) into two context
 directories with doc headers. Mostly `git mv`; clean up the `factory.rs` /
 `launch.rs` 2-line stubs here.
+**C8 has landed** as `platform_ops/` and `forge_ingest/`, each with a charter
+`mod.rs` and its own `MODULES.md` section; the `factory.rs`/`launch.rs` stubs
+were already deleted by job/225, so nothing was left to absorb. The A3
+registry gate now walks the dispatcher tree recursively (`<dir>/mod.rs`
+registers as `<dir>`), the same rule it already applied to `domain`.
 
 ## Track D — Generated TS contract (NORTH-STAR priority #1, independent)
 

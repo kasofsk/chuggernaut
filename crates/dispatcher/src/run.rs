@@ -142,7 +142,7 @@ pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
     };
     // Per-node health and build version as of the boot probe, for the platform
     // snapshot (spec §3.1). The scan tick keeps it fresh as nodes drop/recover
-    // and workers self-refresh (see `crate::cd`).
+    // and workers self-refresh (see `crate::platform_ops::cd`).
     let fleet_status = backend.fleet_status();
 
     let provider: Arc<dyn AgentProvider> = match config.agent_provider_default.as_str() {
@@ -171,7 +171,7 @@ pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
     // api/UI can display it — this config otherwise lives only in this process's
     // env. Best-effort: a failed write must not stop the dispatcher from
     // starting. The returned state lets the scan tick republish it live
-    // (`crate::cd`).
+    // (`crate::platform_ops::cd`).
     let snapshot = publish_config_snapshot(
         &store,
         &config,
@@ -217,7 +217,8 @@ pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
 
 /// Write the boot-time runtime config snapshot to the `platform` bucket for the
 /// api/UI to read (see `types::DispatcherConfigSnapshot`), and return the
-/// republish state the scan tick uses to keep it fresh (`crate::cd`).
+/// republish state the scan tick uses to keep it fresh
+/// (`crate::platform_ops::cd`).
 /// Best-effort — logs and returns on any write failure so a missing bucket
 /// never blocks startup; `last_published` is left unset on failure so the first
 /// scan retries the write.
@@ -226,9 +227,9 @@ async fn publish_config_snapshot(
     config: &DispatcherConfig,
     fleet_status: &[container::NodeStatus],
     secrets_encryption: bool,
-) -> crate::cd::ConfigSnapshot {
-    let deployed_sha = crate::cd::deployed_sha();
-    let base = crate::cd::build_base_snapshot(
+) -> crate::platform_ops::cd::ConfigSnapshot {
+    let deployed_sha = crate::platform_ops::cd::deployed_sha();
+    let base = crate::platform_ops::cd::build_base_snapshot(
         config,
         fleet_status,
         deployed_sha.clone(),
@@ -247,7 +248,7 @@ async fn publish_config_snapshot(
             None
         }
     };
-    crate::cd::ConfigSnapshot {
+    crate::platform_ops::cd::ConfigSnapshot {
         base,
         deployed_sha,
         self_repo: config.self_repo.clone(),
