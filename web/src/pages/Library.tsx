@@ -7,7 +7,7 @@ import { YamlView } from '../components/YamlView'
 import { Skeleton, SkeletonLines } from '../components/Skeleton'
 
 /**
- * The job type library: every jobs/{type}.yaml at default-branch HEAD, shown
+ * The job type library: every .chug/jobs/{type}.yaml at default-branch HEAD, shown
  * as the platform sees it (defaults merged). Jobs are instances of these; the
  * work phase and the evaluation phase both run tasks declared here.
  */
@@ -52,7 +52,7 @@ export function LibraryPage() {
       {!loading && types.length === 0 && !error && (
         <section className="card">
           <div className="dim">
-            no job types yet — add <code>jobs/&#123;type&#125;.yaml</code> on the default branch
+            no job types yet — add <code>.chug/jobs/&#123;type&#125;.yaml</code> on the default branch
           </div>
         </section>
       )}
@@ -181,14 +181,14 @@ function TypeCard({
       {expanded ? (
         <>
           <h3 className="subhead">
-            jobs/{t.name}.yaml <span className="dim">· at {t.ref.slice(0, 10)}</span>
+            {t.path} <span className="dim">· at {t.ref.slice(0, 10)}</span>
           </h3>
           <YamlView yaml={t.yaml} full />
         </>
       ) : (
         <details className="yaml">
           <summary className="dim">
-            jobs/{t.name}.yaml <span className="dim">· at {t.ref.slice(0, 10)}</span>
+            {t.path} <span className="dim">· at {t.ref.slice(0, 10)}</span>
           </summary>
           <YamlView yaml={t.yaml} />
         </details>

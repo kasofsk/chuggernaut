@@ -21,8 +21,8 @@ naming the rule.
 These are the invariants that must never be violated and that NORTH-STAR §4
 targets for machine enforcement, so that a worker cannot drift on them even
 without reading this file. **CI here is the evaluation gate, not a workflow
-file**: `jobs/_defaults.yaml` appends the `ci` command evaluator to every job
-type, and `tasks/ci.sh` runs fmt, clippy `-D warnings`, and the full workspace
+file**: `.chug/jobs/_defaults.yaml` appends the `ci` command evaluator to every job
+type, and `.chug/tasks/ci.sh` runs fmt, clippy `-D warnings`, and the full workspace
 test suite on every merge (see CLAUDE.md "CI — the evaluation gates ARE the
 CI"). Each item below is tagged **live** (the gate already enforces it) or
 **pending** (needs config or a script the gate doesn't run yet; until then
@@ -33,7 +33,7 @@ that debt is what the pending checks will pin down.
 
 - **Dependency-graph invariants.** *(enforced:
   `crates/test-utils/tests/boundary_guard.rs` over `cargo metadata`, riding
-  the workspace test run in `tasks/ci.sh` — refactor-plan A3.)* Only `store`
+  the workspace test run in `.chug/tasks/ci.sh` — refactor-plan A3.)* Only `store`
   depends on `async-nats`; `api` never depends on `dispatcher` outside
   dev-deps; `types` has no async runtime or I/O dependencies; and
   `chuggernaut-domain` — the pure core (refactor-plan C1) — resolves neither
@@ -72,14 +72,14 @@ that debt is what the pending checks will pin down.
   three lints defeats the ratchet and is rejected on sight.
 
 - **Formatting is `rustfmt` / `prettier` defaults.** *(live for Rust:
-  `tasks/ci.sh` runs `cargo fmt --all -- --check` on every merge. Pending for
+  `.chug/tasks/ci.sh` runs `cargo fmt --all -- --check` on every merge. Pending for
   web: `web/` has `prettier` and an `npm run format:check` script as of A4,
   but nothing runs it — the gate wiring and the one-time reformat of the 55
   files that fail it belong to refactor-plan E1.)* *Why:* zero decisions, zero
   diffs about decisions.
 
-- **No duplicated code: zero clones.** *(live: `tasks/check-duplication.sh`
-  runs `jscpd@5.0.5` — pinned exactly — over the whole repo from `tasks/ci.sh`,
+- **No duplicated code: zero clones.** *(live: `.chug/tasks/check-duplication.sh`
+  runs `jscpd@5.0.5` — pinned exactly — over the whole repo from `.chug/tasks/ci.sh`,
   unconditionally and before the Rust early-exit, at `threshold: 0`. Config:
   `.jscpd.json`, 10 lines / 80 tokens; integration tests, vendored and
   generated trees excluded — ticket A5.)* Any clone fails the gate; extract the

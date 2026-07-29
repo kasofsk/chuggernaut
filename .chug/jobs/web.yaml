@@ -1,0 +1,46 @@
+# Front-end-only changes on the operator UI (web/). Built for fast iteration:
+# the reviewer (stage 0) reads the diff and judges it against the brief — it
+# does not build (spec §4.3 Review profile). Building is the project ci gate's
+# job (stage 1, appended from .chug/jobs/_defaults.yaml): .chug/tasks/ci.sh runs npm ci +
+# npm run build on any diff touching web/, and self-skips its cargo work on
+# web-only diffs, so the gate costs a frontend build, not a cold Rust one.
+# Shipping the merged result to the served UI is .chug/jobs/web-publish.yaml —
+# static-content swap, no redeploy.
+name: web
+display_name: Web UI
+description: Front-end-only change in web/; agent-reviewed, cheap CI, published instantly via web-publish.
+image: chuggernaut/agent-rust:prod   # node 22 + claude CLI ride along in the rust agent image
+# Injected into every work container's system prompt (spec §4.4): the
+# distilled STYLE.md / NORTH-STAR.md rules that keep agent output consistent.
+knowledge:
+  - north-star-blessed-practices
+work:
+  type: agent
+  prompt: .chug/prompts/work/web.md
+eval:
+  - name: review-web
+    type: agent
+    prompt: .chug/tasks/review-web.md
+    stage: 0
+# Ship the merged result automatically: once the squash lands on main, the
+# wrap-up command builds web/dist at the merged HEAD and swaps it into the
+# served UI dir (same script as the standalone .chug/jobs/web-publish.yaml). Runs in
+# the WrapUp phase, against merged main — never on a job that is revoked or
+# escalated before landing — so a merged web job publishes itself instead of
+# waiting for an operator to release web-publish by hand. A failed publish
+# escalates; the merge stays. web-publish.yaml remains for manual re-publishes.
+wrap_up:
+  run: ./.chug/tasks/web-publish.sh
+  name: publish                     # task label (#146): renders `Command · publish`, not a bare `Command`
+  # Same key as web-publish.yaml (spec §8.2): the private-key VALUE, written to
+  # a 0600 tempfile for `ssh -i` by the script.
+  secrets: [MINI_DEPLOY_KEY]
+resources:
+  cpu: 2
+  memory: 2Gi
+  # npm ci + tsc + vite build once in the work container — the reviewer no
+  # longer builds. Nowhere near the Rust hour.
+  task_timeout: 30m
+work_retries: 1
+eval_retries: 1
+rework_budget: 2

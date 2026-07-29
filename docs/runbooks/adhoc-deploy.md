@@ -1,7 +1,7 @@
 # Ad-hoc (out-of-band) deploy runbook
 
 **Audience:** the on-call operator, mid-incident, when the normal `deploy` job
-(`jobs/deploy.yaml` → `tasks/deploy.sh` → `deploy/prod/update.sh`) cannot run or
+(`.chug/jobs/deploy.yaml` → `.chug/tasks/deploy.sh` → `deploy/prod/update.sh`) cannot run or
 cannot finish, and you must ship or repair prod **by hand**.
 
 This is a checklist, not an essay. Two hard rules first, then the interventions,
@@ -230,7 +230,7 @@ it belongs in deploy history like any other.
 **Before** the intervention (or, in a genuine emergency, **immediately after**):
 
 1. **File a `deploy`-type job** on the platform (the normal `deploy` job type,
-   `jobs/deploy.yaml`).
+   `.chug/jobs/deploy.yaml`).
 2. **Claim it** — `POST .../jobs/{seq}/claim` (`spec.md` §1.2). Claiming parks
    the job's work attempt as a **pending, human-performed task** (`performed_by:
    human`) instead of launching the deploy container. It **holds no fleet slot**

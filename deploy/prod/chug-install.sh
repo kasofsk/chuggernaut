@@ -95,12 +95,16 @@ cmd_preflight() {
 	# Validate any repo-authored job-type config offline (same rules as CI),
 	# when the binary is built. Best-effort — CI is the authority.
 	BIN="$REPO/target/release/chuggernaut"
-	if [ -x "$BIN" ] && [ -d "$REPO/jobs" ]; then
-		log "preflight: validating jobs/*.yaml (chuggernaut validate)"
+	# The config root (`.chug/`), falling back to the pre-`.chug` repo-root
+	# layout so an existing checkout still gets its config validated.
+	JOBS_DIR="$REPO/.chug/jobs"
+	[ -d "$JOBS_DIR" ] || JOBS_DIR="$REPO/jobs"
+	if [ -x "$BIN" ] && [ -d "$JOBS_DIR" ]; then
+		log "preflight: validating .chug/jobs/*.yaml (chuggernaut validate)"
 		# A validation failure is FATAL: shipping config that fails the same rules
 		# CI enforces would deploy a broken job type. `--force` downgrades it to a
 		# warning for the operator who knowingly wants to proceed anyway.
-		for f in "$REPO"/jobs/*.yaml; do
+		for f in "$JOBS_DIR"/*.yaml; do
 			[ "$(basename "$f")" = "_defaults.yaml" ] && continue
 			[ -f "$f" ] || continue
 			if ! "$BIN" validate "$f" >/dev/null 2>&1; then

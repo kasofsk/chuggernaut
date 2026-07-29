@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Rust agent image for the chuggernaut-on-chuggernaut dogfood project
-# (jobs/code.yaml `image:`): full Rust toolchain + the claude CLI. Built with
+# (.chug/jobs/code.yaml `image:`): full Rust toolchain + the claude CLI. Built with
 # the repo root as context so the whole workspace can be compiled at image-build
 # time — the image bakes the toolchain plus a prebuilt target/ (the warm-target
 # seed below, #123) so agent containers start from "latest main already built".
@@ -35,7 +35,7 @@ RUN curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_
 
 # nats-server binary for tier-2 (NATS) integration tests. A single ~15 MB
 # static binary; test-utils' harness spawns it as an ephemeral process (no
-# Docker needed) so `tasks/ci.sh` in this image actually EXECUTES the NATS
+# Docker needed) so `.chug/tasks/ci.sh` in this image actually EXECUTES the NATS
 # tier instead of silently skipping it (testing.md).
 ARG NATS_VERSION=2.10.22
 RUN curl -fsSL "https://github.com/nats-io/nats-server/releases/download/v${NATS_VERSION}/nats-server-v${NATS_VERSION}-linux-amd64.tar.gz" \
@@ -73,7 +73,7 @@ RUN rustup component add rustfmt clippy \
 # (its files carry the checkout's mtime); that residual is intentionally left to
 # sccache + the warm dep graph rather than mtime-rewriting in the shared
 # bootstrap, which every image would inherit. Debug profile only: agent tasks
-# and tasks/ci.sh run `cargo test` / `cargo clippy` (debug), never `--release`,
+# and .chug/tasks/ci.sh run `cargo test` / `cargo clippy` (debug), never `--release`,
 # so a release target would only bloat the image for no reuse.
 #
 # Per-container privacy is free: each container's cargo writes land on its own

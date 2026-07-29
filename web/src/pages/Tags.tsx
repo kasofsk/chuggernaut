@@ -5,13 +5,13 @@ import { ProjectPage } from '../components/ProjectPage'
 import { SkeletonCards } from '../components/Skeleton'
 
 /**
- * Knowledge tags: every tags/{tag}.md at default-branch HEAD, with its
+ * Knowledge tags: every .chug/tags/{tag}.md at default-branch HEAD, with its
  * contents — the meaning a tag carries when a job is created with it.
  */
 export function TagsPage() {
   const { owner = '', project = '' } = useParams()
   const navigate = useNavigate()
-  const [tags, setTags] = useState<{ name: string; content: string }[]>([])
+  const [tags, setTags] = useState<{ name: string; path: string; content: string }[]>([])
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -19,12 +19,15 @@ export function TagsPage() {
     setLoaded(false) // param change: back to skeletons until the new fetch lands
     api
       .tags(owner, project)
+      // Read each tag back at the path the listing resolved to — the file
+      // endpoint reads verbatim, and a project that predates the config root
+      // still keeps its tags at the repo root (spec §1.1).
       .then((names) =>
         Promise.all(
-          names.map((name) =>
-            api.file(owner, project, `tags/${name}.md`).then(
-              (f) => ({ name, content: f.content }),
-              () => ({ name, content: '(unreadable)' }),
+          names.map(({ name, path }) =>
+            api.file(owner, project, path).then(
+              (f) => ({ name, path, content: f.content }),
+              () => ({ name, path, content: '(unreadable)' }),
             ),
           ),
         ),
@@ -50,8 +53,8 @@ export function TagsPage() {
               <div>
                 <h2 className="type-title">{t.name}</h2>
                 <div className="dim type-slug">
-                  <Link to={`/p/${owner}/${project}/files?path=${encodeURIComponent(`tags/${t.name}.md`)}`}>
-                    tags/{t.name}.md
+                  <Link to={`/p/${owner}/${project}/files?path=${encodeURIComponent(t.path)}`}>
+                    {t.path}
                   </Link>
                 </div>
               </div>
@@ -62,7 +65,7 @@ export function TagsPage() {
       {loaded && tags.length === 0 && !error && (
         <section className="card">
           <div className="dim">
-            no tags yet — a tag is a <code>tags/&#123;name&#125;.md</code> file on the default
+            no tags yet — a tag is a <code>.chug/tags/&#123;name&#125;.md</code> file on the default
             branch describing what the tag means; tag a job at creation to attach it
           </div>
         </section>

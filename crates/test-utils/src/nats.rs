@@ -140,7 +140,7 @@ impl NatsTestServer {
     #[allow(clippy::too_many_lines)]
     async fn start(config: Option<&str>, shared: bool) -> Option<Self> {
         // External-URL override — NAMESPACED (shared) callers only. The full
-        // gate (tasks/ci.sh) starts ONE communal server and points every
+        // gate (.chug/tasks/ci.sh) starts ONE communal server and points every
         // binary's `shared()` at it; per-test namespaces make that safe. The
         // private `spawn()`/`spawn_with_config()` suites are exactly the ones
         // that use PRODUCTION names or bespoke server config (cli init, the

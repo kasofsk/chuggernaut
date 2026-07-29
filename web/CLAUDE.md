@@ -45,9 +45,9 @@ in the same change.
 - **`src/api.ts`** is the single typed wrapper over the HTTP API — add endpoints there, not
   ad-hoc `fetch` calls in components. `ApiError` carries the status.
 - **The wire types are generated — do not hand-edit them.** `src/api/types.gen.ts` comes from
-  `schemas/api.schema.json` (which `chuggernaut schema api` derives from the Rust `types`
+  `.chug/schemas/api.schema.json` (which `chuggernaut schema api` derives from the Rust `types`
   crate). After a backend type changes: re-emit the schema, then `npm run codegen`. CI runs
-  `npm run codegen:check` for any diff touching `web/` or `schemas/` and fails on a stale file.
+  `npm run codegen:check` for any diff touching `web/` or `.chug/schemas/` and fails on a stale file.
   The shapes that *are* hand-written live in `src/api/envelopes.ts` — the replies the
   dispatcher assembles with `serde_json::json!`, which no Rust type describes. If you need a
   new type there, prefer naming it in Rust and covering it in `cli::schema::api_bundle`.

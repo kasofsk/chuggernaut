@@ -1,7 +1,7 @@
 /**
  * GENERATED — DO NOT EDIT.
  *
- * The §6.2 HTTP surface as TypeScript, generated from schemas/api.schema.json
+ * The §6.2 HTTP surface as TypeScript, generated from .chug/schemas/api.schema.json
  * (itself generated from the Rust `types` crate by `chuggernaut schema api`).
  * Regenerate with `npm run codegen`; `npm run codegen:check` fails CI when
  * this file is stale.
@@ -712,7 +712,7 @@ export interface Job {
    * Optional per-job model override for the Work agent (spec §1.1, §12.4).
    * The most specific choice an operator can make, so it wins over every
    * other layer: the job type's `work.model`, the project default
-   * (`jobs/_defaults.yaml`), and the platform default (`AGENT_MODEL_DEFAULT`).
+   * (`.chug/jobs/_defaults.yaml`), and the platform default (`AGENT_MODEL_DEFAULT`).
    * Applies to Work-phase agent tasks only — evaluators keep the
    * type/project/platform resolution, exactly as [`Job::timeout`] scopes to
    * Work. None → the resolution chain applies. Defaulted for records written
@@ -758,7 +758,7 @@ export interface Job {
    */
   title: string;
   /**
-   * Job type name; references `jobs/{type}.yaml` at `base_ref`.
+   * Job type name; references `.chug/jobs/{type}.yaml` at `base_ref`.
    */
   type: string;
 }
@@ -965,7 +965,7 @@ export interface WrapUpSpec {
    * an evaluator (`Command · publish` instead of a bare `Command`, job #146).
    * Validated like an evaluator name. Unset → derived from the mode (see
    * [`WrapUpSpec::label`]): a command wrap-up takes its script's basename
-   * (`tasks/web-publish.sh` → `web-publish`).
+   * (`.chug/tasks/web-publish.sh` → `web-publish`).
    */
   name?: string | null;
   /**

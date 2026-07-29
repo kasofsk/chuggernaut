@@ -1,0 +1,423 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JobType",
+  "description": "The top-level job-type struct deliberately does **not** carry\n`deny_unknown_fields` (unlike every nested block below): an unknown\ntop-level key is captured into [`JobType::unknown`] and surfaced as a\n*warning*, not a parse error. This is the schema-tolerance half of the\nconfig/binary version-skew contract (spec §14): job-type config is read\nlive from the default branch, so a config change can land ahead of the\nrunning dispatcher. A newly-added top-level section (a future `wrap_up`,\n`deploy`, …) an older binary doesn't know about means \"a feature is quietly\noff\" — acceptable when flagged loudly, and vastly preferable to the\n2026-07-22 incident where the strict parser rejected the whole config and\nescalated every job.\n\nLaxity is safe *only* at the top level. The nested blocks keep\n`deny_unknown_fields` because an unknown field inside a security-relevant\nsection is not benign: an ignored key inside an [`Evaluator`] could silently\nskip a *gate* (a typo'd `required: flase`, a mis-nested check), turning\n\"config ahead of binary\" into \"a merge gate quietly disabled\". Those stay\nhard errors; see [`JobType::validate`].",
+  "type": "object",
+  "properties": {
+    "description": {
+      "description": "One-line summary shown alongside the display name in the type picker.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "display_name": {
+      "description": "Human-facing name for the library and the create-form type picker;\nfalls back to `name`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "eval": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Evaluator"
+      }
+    },
+    "eval_retries": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "image": {
+      "description": "Required for agent/command work; disallowed at top level for human work.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "job_deadline": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "knowledge": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "min_dispatcher": {
+      "description": "Minimum dispatcher schema epoch this config requires (spec §14). When\nset and greater than the running dispatcher's\n[`crate::version::CONFIG_SCHEMA_EPOCH`], the config is ahead of the\nbinary: the dispatcher parks the job with a platform-level diagnostic\n(\"config requires dispatcher >= X\") instead of launching it, and the\nmerge-time CI check fails the config's own build if it can reach a\ndeployed dispatcher advertising an older epoch. Author it in the same\ncommit that relies on a schema feature the previous generation lacks, so\n\"merging config\" can never silently become \"deploying config\".",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "name": {
+      "type": "string"
+    },
+    "placement": {
+      "description": "Optional placement pin (spec §3.1). When set, every container this job\ntype launches is placed on the named fleet node instead of the\nmost-free one. A single pin — no labels, no anti-affinity, no spillover.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Placement"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "resources": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Resources"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "rework_budget": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "vars": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "work": {
+      "$ref": "#/$defs/WorkSpec"
+    },
+    "work_retries": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "wrap_up": {
+      "description": "The third step of the job (work → evaluation → wrap-up): what happens\nafter eval-pass (design-lifecycle.md).",
+      "$ref": "#/$defs/WrapUpSpec",
+      "default": {
+        "type": "merge"
+      }
+    }
+  },
+  "required": [
+    "name",
+    "work"
+  ],
+  "$defs": {
+    "Evaluator": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "description": "command/agent: optional, falls back to top-level image; one of the two required.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required": {
+          "description": "Default true; false = advisory.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "run": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secrets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "stage": {
+          "description": "Staged evaluation ordering (spec §3.3): evaluators run in ascending\n`stage` order; within a stage they fan out in parallel. A later stage's\ntasks are created only after every *required* evaluator in the prior\nstage passes. Default 0 — a single-stage job is byte-for-byte the\nunstaged behavior. Non-negative (`u32`, enforced at parse).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "type": {
+          "$ref": "#/$defs/EvaluatorType"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "EvaluatorType": {
+      "type": "string",
+      "enum": [
+        "command",
+        "agent",
+        "human"
+      ]
+    },
+    "Placement": {
+      "description": "Placement pin (spec §3.1). Shape-only here: `node` names a fleet node, but\nwhether that node is actually configured cannot be checked offline (the\nfleet lives in the dispatcher's env), so release/`validate` only enforce the\nname is a well-formed node token — the launch honors or errors on it.",
+      "type": "object",
+      "properties": {
+        "node": {
+          "description": "Fleet node name to pin onto (`[A-Za-z0-9_-]+`, the same subject-safe\ntoken the fleet config uses).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Provider": {
+      "type": "string",
+      "enum": [
+        "claude",
+        "codex"
+      ]
+    },
+    "Resources": {
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "memory": {
+          "description": "Memory limit: a positive integer, optionally suffixed with a binary\nunit (`Ki`/`Mi`/`Gi`), or plain bytes — e.g. `512Mi`, `4Gi`, `1048576`.\nNo other suffixes (`5g`, `4GB` are rejected). Validated at parse time so\na bad value fails offline instead of at container launch.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+(Ki|Mi|Gi)?$"
+        },
+        "task_timeout": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ReviewSpec": {
+      "description": "Inline review loop declaration (spec §1.1, §4.5). The reviewer runs inside\nthe work container; its acceptance gates `submit_result`, not the merge.",
+      "type": "object",
+      "properties": {
+        "iterations": {
+          "description": "Max author↔reviewer rounds before submitting anyway. Default 5.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "description": "Path to reviewer prompt file in repo (resolved from base_ref).",
+          "type": "string"
+        },
+        "provider": {
+          "description": "Defaults to the work provider. v1 supports claude only (release-time\nvalidation).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "prompt"
+      ]
+    },
+    "WorkSpec": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "agent only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "description": "agent/human: required. command: disallowed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "description": "agent only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "review": {
+          "description": "agent only; enables the inline review loop (spec §4.5).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run": {
+          "description": "command only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secrets": {
+          "description": "Secrets injected into the work container (agent/command). Scoped here\nbecause that is the only container they reach — evaluators declare\ntheir own (§4.1). Disallowed for human work (no container).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "type": {
+          "$ref": "#/$defs/WorkType"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ]
+    },
+    "WorkType": {
+      "type": "string",
+      "enum": [
+        "agent",
+        "command",
+        "human"
+      ]
+    },
+    "WrapUpMode": {
+      "description": "Wrap-up mode after eval-pass (design-lifecycle.md).",
+      "oneOf": [
+        {
+          "description": "Squash-merge the job branch to the default branch (merge queue, merge\ngate, conflict rework) — the code-change wrap-up.",
+          "type": "string",
+          "const": "merge"
+        },
+        {
+          "description": "Nothing to land: eval-pass goes straight to Done. The job branch is\nscratch and is deleted unmerged.",
+          "type": "string",
+          "const": "none"
+        }
+      ]
+    },
+    "WrapUpSpec": {
+      "description": "Wrap-up declaration (design-lifecycle.md): the job's third step. A block\nrather than a bare scalar so future wrap-up behavior (e.g. a\n`deployed/{env}` tag ref) extends it without reshaping the schema.",
+      "type": "object",
+      "properties": {
+        "image": {
+          "description": "Image for the `run` container; falls back to the job's top-level image\n(like an evaluator, §1.1). Required when `run` is set and the job type\ndeclares no top-level image (`work.type: human`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Human-facing label for the wrap-up task, so it is as self-describing as\nan evaluator (`Command · publish` instead of a bare `Command`, job #146).\nValidated like an evaluator name. Unset → derived from the mode (see\n[`WrapUpSpec::label`]): a command wrap-up takes its script's basename\n(`.chug/tasks/web-publish.sh` → `web-publish`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run": {
+          "description": "Optional post-merge command (spec §3.2, design-lifecycle.md wrap-up\nhook): a shell command run in the WrapUp phase *after* the squash lands\non the default branch, against the merged main content. It ships the\nmerged result — a web job publishing its built UI, say — so it only runs\nonce the merge is final, and never at all if the job is revoked or\nescalated before landing. Valid with `type: merge` only. A non-zero exit\nescalates the job (the merge is not undone). The command clones the\ndefault branch, so it must be idempotent (a restart may re-launch it).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secrets": {
+          "description": "Secrets injected into the `run` container. Scoped here because that is\nthe only container they reach; not inherited from `work.secrets`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "type": {
+          "description": "`merge` (default) squash-merges the job branch through the merge\nqueue/gate; `none` goes straight to Done — for jobs whose effect is\nexternal (deploys, reports) and whose branch is scratch.",
+          "$ref": "#/$defs/WrapUpMode",
+          "default": "merge"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

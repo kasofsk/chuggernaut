@@ -2,7 +2,7 @@
 //! vocabulary, graph wiring rules, and the additive-evaluator merge. Used at
 //! release time (against current HEAD) and at the Blocked→Ready re-validation
 //! (against the freshly pinned `base_ref`). The ref-reading half — loading
-//! `jobs/*.yaml` and checking prompt paths at a git ref — needs the `vcs`
+//! `.chug/jobs/*.yaml` and checking prompt paths at a git ref — needs the `vcs`
 //! port, so it lives in the dispatcher's `release` module, which re-exports
 //! this one to keep one `release::*` surface.
 //!

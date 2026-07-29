@@ -4,7 +4,7 @@
 //! a deploy job should carry a typed record of each leg instead of one opaque
 //! log. `deploy/prod/update.sh` emits one machine-readable line per leg to
 //! stdout — `@chug:leg {"name":"build-dispatcher","status":"ok","secs":41}` —
-//! plus a single `@chug:report {…}` envelope; `tasks/deploy.sh` passes stdout
+//! plus a single `@chug:report {…}` envelope; `.chug/tasks/deploy.sh` passes stdout
 //! through unchanged, and the dispatcher harvests those lines (crate
 //! `dispatcher`'s `harvest`) from the command work task's captured logs into a
 //! [`DeployReport`] on the task's structured result.

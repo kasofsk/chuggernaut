@@ -813,7 +813,8 @@ pub async fn job_type_get(
     .await
 }
 
-/// Available knowledge tags (`tags/*.md` stems at default HEAD).
+/// Available knowledge tags at default HEAD, as `{ name, path }` — the path each
+/// `.chug/tags/*.md` resolved to (spec §1.1).
 pub async fn tags_list(
     State(state): State<SharedState>,
     Path((owner, project)): Path<(String, String)>,

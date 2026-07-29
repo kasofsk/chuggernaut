@@ -4,7 +4,7 @@ Normal tests plus fixture-driven end-to-end runs. Three tiers, in increasing cos
 
 ## What CI actually runs
 
-The merge gate (`tasks/ci.sh`, mirrored by `.github/workflows/ci.yml`) runs
+The merge gate (`.chug/tasks/ci.sh`, mirrored by `.github/workflows/ci.yml`) runs
 tiers 1 **and 2**. The `agent-rust` image bakes a `nats-server` binary
 (`deploy/prod/Dockerfile.agent-rust`), and the `test-utils` harness spawns it as
 an ephemeral per-test process — so the NATS tier executes for real rather than
@@ -59,7 +59,7 @@ The v1 fixture format (`title`/`body`/`deps`/`priority`/`capabilities`) predates
 
 ## Duplication: integration tests are out of scope
 
-The copy-paste gate (`tasks/check-duplication.sh`, STYLE.md Tier 1) runs at
+The copy-paste gate (`.chug/tasks/check-duplication.sh`, STYLE.md Tier 1) runs at
 `threshold: 0` over the repo, but `.jscpd.json` excludes `**/tests/**` and
 `**/*.test.*` **deliberately**: integration-test setup blocks repeat by nature —
 spawn NATS, seed a project, drive the same first three states — and forcing them

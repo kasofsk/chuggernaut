@@ -10,6 +10,8 @@
 //!   `req.tags.list.{owner}.{project}`.
 //! - **Emits:** `RepoManager::{default_branch, resolve_ref, read_file_at, tree,
 //!   diff_for_job}` reads; file/tree/diff/tag JSON or a §6.5 error envelope.
+//!   Tags list as `{ name, path }` — the file read is verbatim, so the caller
+//!   fetching a tag back needs the path the listing resolved to.
 //! - **Guarantees:** read-only, and pinned to one resolved ref per reply — the
 //!   same file an agent would receive, not a mix of two HEADs.
 //! - **Spec:** §6.1, §5.2.
@@ -77,7 +79,8 @@ async fn spawn_tree_handler(store: &NatsStore, repos: Arc<RepoManager>) -> store
     Ok(())
 }
 
-/// `req.tags.list.{owner}.{project}` — `String[]` of `tags/*.md` stems.
+/// `req.tags.list.{owner}.{project}` — `{ name, path }[]` for the project's
+/// `.chug/tags/*.md`.
 async fn spawn_tags_handler(store: &NatsStore, repos: Arc<RepoManager>) -> store::Result<()> {
     let mut tags_sub = store.subscribe_requests("req.tags.list.>").await?;
     tokio::spawn(async move {
@@ -171,21 +174,22 @@ async fn read_repo_file(repos: &RepoManager, owner: &str, project: &str, path: &
     }
 }
 
-/// Enumerate available knowledge tags: top-level `tags/{tag}.md` stems at
-/// default-branch HEAD. Tags are repo-versioned — a tag's meaning lives in
-/// its markdown file, next to the code it describes.
-async fn list_tags(repos: &RepoManager, owner: &str, project: &str) -> vcs::Result<Vec<String>> {
+/// Enumerate available knowledge tags: top-level `.chug/tags/{tag}.md` at
+/// default-branch HEAD, each as `{ name, path }`. Tags are repo-versioned — a
+/// tag's meaning lives in its markdown file, next to the code it describes.
+///
+/// The path is the one the listing resolved to, because `read_repo_file` is the
+/// plain file browser and reads verbatim: a caller fetching a tag's contents
+/// back must use the path found here, not re-guess the layout.
+async fn list_tags(
+    repos: &RepoManager,
+    owner: &str,
+    project: &str,
+) -> vcs::Result<Vec<serde_json::Value>> {
     let branch = repos.default_branch(owner, project).await?;
-    let mut tags: Vec<String> = repos
-        .tree(owner, project, &branch)
-        .await?
+    let tree = repos.tree(owner, project, &branch).await?;
+    Ok(crate::project_config::entries(&tree, "tags", ".md")
         .into_iter()
-        .filter(|e| e.r#type == "blob")
-        .filter_map(|e| {
-            let name = e.path.strip_prefix("tags/")?.strip_suffix(".md")?;
-            (!name.is_empty() && !name.contains('/')).then(|| name.to_string())
-        })
-        .collect();
-    tags.sort();
-    Ok(tags)
+        .map(|entry| serde_json::json!({ "name": entry.stem, "path": entry.path }))
+        .collect())
 }

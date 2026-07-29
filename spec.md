@@ -12,7 +12,7 @@ The fundamental primitive. A **job** is a node in a DAG stored in NATS KV. One R
 pub struct Job {
     pub id: u64,                           // sequential per project; maintained via counter in NATS KV
     pub project: String,                   // "{owner}/{repo}" slug
-    pub r#type: String,                    // job type name; references jobs/{type}.yaml at base_ref
+    pub r#type: String,                    // job type name; references .chug/jobs/{type}.yaml at base_ref
     pub title: String,                     // ticket-style instance identity: what this run is for (may be empty). The type carries the *how*; title/description carry the *what*.
     pub description: String,               // the ticket body; injected into work and eval prompts as the §4.3 job brief
     pub cover_html: Option<String>,        // optional rich cover page for the operator UI: PRESENTATIONAL ONLY — never injected into any agent prompt (the §4.3 job brief consumes only title/description), so it can carry an exciting formatted page without polluting what agents read. Accepted on create and the Draft PATCH, size-capped at ~256 KiB (over → 422). Rendered above the description in a sandboxed iframe (no scripts, no forms) with an injected `default-src 'none'` CSP that also blocks external fetches (external `<img>`, CSS `url()`/`@import`); authors ship self-contained styling. Stored verbatim — containment is at this shared render choke point, not an ingest stripper. None → no cover; defaults None on old records
@@ -26,7 +26,7 @@ pub struct Job {
     pub eval: Vec<Evaluator>,              // additive per-job evaluators, layered on top of the type's eval list at execution; the type's evaluators are a floor — creation can add criteria, never remove or override them; name collisions are a release-time error (see design-lifecycle.md)
     pub claim_next: bool,                  // a human has claimed the job's NEXT work attempt (§1.2 claims): instead of launching, the dispatcher parks that attempt as a Pending task with the declared kind and performed_by: human, then clears the flag — a claim covers exactly one attempt. Defaults false on old records
     pub timeout: Option<String>,           // optional per-job work-task timeout override (duration string, e.g. "45m"), layering over the type's resources.task_timeout exactly like `eval` layers over the type's evaluators — but Work-phase tasks only; evaluators keep the type default. Any valid duration. Parseability validated at release. None → the type default applies
-    pub model: Option<String>,             // optional per-job model override for the Work agent (§12.4). The most specific choice, so it wins over every other layer: the job type's work.model, the project default (jobs/_defaults.yaml), and the platform default. Work-phase agent tasks only — evaluators keep the type/project/platform resolution, exactly as `timeout` scopes to Work. None → the resolution chain applies. Defaults None on old records
+    pub model: Option<String>,             // optional per-job model override for the Work agent (§12.4). The most specific choice, so it wins over every other layer: the job type's work.model, the project default (.chug/jobs/_defaults.yaml), and the platform default. Work-phase agent tasks only — evaluators keep the type/project/platform resolution, exactly as `timeout` scopes to Work. None → the resolution chain applies. Defaults None on old records
     pub escalation: Option<Escalation>,    // structured record of the job's most recent escalation/stall: reason code, human-readable detail, failing task (when one exists), and timestamp — written at every escalate/stall site so operators diagnose from the record the API serves, not from dispatcher logs. Advisory; no transition consults it. None until the job first escalates. Defaults None on old records
     pub factory: Option<String>,           // factory name when created by a factory triage agent (see §13); None for operator-created jobs
     pub created_at: DateTime<Utc>,
@@ -78,9 +78,17 @@ IDs are sequential integers scoped per project, maintained via a counter at `cou
 
 **Branch lifecycle:** each job works on a dedicated branch `job/{seq}`. The branch name is deterministic and stored at creation; the actual git branch is created from the default branch when the job first enters Work. Upstream dependencies are guaranteed Done (and their branches squash-merged) before a dependent job starts. Data flows between jobs implicitly through VCS — no separate artifact routing.
 
+#### The config root
+
+Everything the platform reads out of a project repo — job types, prompts, reusable tasks, knowledge tags — lives under one directory, **`.chug/`**, the way `.github/` holds a repo's GitHub config. A project's chuggernaut config is therefore one tree to find, review, and copy between projects, not five directories scattered through the repo root.
+
+Every config read resolves two candidate paths in order: `.chug/{path}` first, then the bare repo-root `{path}`. The second is the layout that predates the config root; it stays readable because a job pins its `base_ref` at launch, so a job released before a project migrated must still load the config that ref carries. Writes (the §12.2 starter template) only ever use `.chug/`. A file present at both locations resolves to the `.chug/` copy — never a merge of the two.
+
+**Migrating a project** moves the directories and rewrites the paths its job types name (`prompt:`, `run:`), which are ordinary repo paths and follow the files. Because the *deployed* dispatcher is what reads them, a project whose platform predates the config root must deploy a dispatcher that understands `.chug/` **before** the move lands; otherwise its job types become unfindable and no job can be created until the deploy catches up (§14, `docs/runbooks/adhoc-deploy.md`).
+
 #### Job Type
 
-Declarative YAML, one file per job type, lives under `jobs/` in the repo and is version-controlled. Declares only the contract — image, resources, eval criteria, retry limits, secrets, vars. Not an instance; no imperative logic. (Dependencies are per-instance, chosen at job creation — the type does not declare them.)
+Declarative YAML, one file per job type, lives under `.chug/jobs/` in the repo and is version-controlled. Declares only the contract — image, resources, eval criteria, retry limits, secrets, vars. Not an instance; no imperative logic. (Dependencies are per-instance, chosen at job creation — the type does not declare them.)
 
 **Canonical schema:**
 
@@ -124,7 +132,7 @@ placement:                     # optional; pins every container this job type la
 wrap_up:                       # optional; the job's third step (work → evaluation → wrap-up); see design-lifecycle.md
   type: merge | none           # default merge: squash-merge the job branch through the merge queue/gate. none: eval-pass goes straight to Done — for jobs whose effect is external (deploys, reports); the job branch is scratch and is deleted unmerged
   run: string                  # optional; post-merge command (§3.2). Runs in the WrapUp phase AFTER the squash lands on the default branch, against the merged main content (the container clones the default branch). Ships the merged result (e.g. a web job publishing its built UI); never runs if the job is revoked/escalated before landing. Requires type: merge. A non-zero exit escalates the job — the merge is NOT undone. Must be idempotent (a restart may re-launch it, §3.6)
-  name: string                 # optional; human-facing label for the wrap-up task, validated like an evaluator name ([A-Za-z0-9._-]+). Unset → derived from the mode: a command wrap-up takes its script's basename (tasks/web-publish.sh → web-publish). Stamped onto the task record's `label` so the UI reads `Command · publish`, not a bare `Command`
+  name: string                 # optional; human-facing label for the wrap-up task, validated like an evaluator name ([A-Za-z0-9._-]+). Unset → derived from the mode: a command wrap-up takes its script's basename (.chug/tasks/web-publish.sh → web-publish). Stamped onto the task record's `label` so the UI reads `Command · publish`, not a bare `Command`
   image: string                # optional; image for the run container; falls back to top-level image (required when run is set and the job type has no top-level image). Disallowed without run
   secrets: [string]            # optional; secrets injected into the run container; not inherited from work.secrets. Disallowed without run
 
@@ -205,16 +213,16 @@ vars: [string]                 # injected into work container and all eval conta
 **Example job type files:**
 
 ```yaml
-# jobs/implement-endpoint.yaml
+# .chug/jobs/implement-endpoint.yaml
 name: implement-endpoint
 image: registry.acme.com/agents/impl:latest
 work:
   type: agent
-  prompt: prompts/work/implement-endpoint.md
+  prompt: .chug/prompts/work/implement-endpoint.md
   provider: claude
   model: claude-sonnet-4-6
   review:
-    prompt: prompts/review/implement-endpoint.md
+    prompt: .chug/prompts/review/implement-endpoint.md
     model: claude-sonnet-4-6
     iterations: 5
 resources:
@@ -231,17 +239,17 @@ eval:
     run: cargo test --no-fail-fast
   - name: security-review
     type: agent
-    prompt: prompts/eval/security-review.md
+    prompt: .chug/prompts/eval/security-review.md
     provider: claude
     model: claude-opus-4-6
     secrets: [GITHUB_TOKEN]
   - name: architecture-review
     type: agent
-    prompt: prompts/eval/architecture-review.md
+    prompt: .chug/prompts/eval/architecture-review.md
     required: false
   - name: human-approval
     type: human
-    prompt: prompts/eval/human-approval.md
+    prompt: .chug/prompts/eval/human-approval.md
 knowledge:
   - rust
   - rest-api
@@ -250,7 +258,7 @@ vars: [RUST_EDITION]
 ```
 
 ```yaml
-# jobs/deploy-staging.yaml
+# .chug/jobs/deploy-staging.yaml
 name: deploy-staging
 image: registry.acme.com/runners/deploy:latest
 work:
@@ -273,13 +281,13 @@ The YAML schema above is machine-derived from the platform's own parse types
 (single source of truth — it cannot drift from the code):
 
 - `chuggernaut schema job-type | defaults` emits the JSON Schema
-  (draft 2020-12). Canonical copies live in `schemas/` (platform repo,
+  (draft 2020-12). Canonical copies live in `.chug/schemas/` (platform repo,
   regenerated under test). In a project repo, commit it next to the files it
   describes and add a yaml-language-server modeline for in-editor validation,
   autocomplete, and hover docs:
 
   ```sh
-  chuggernaut schema job-type > jobs/.job-type.schema.json
+  chuggernaut schema job-type > .chug/jobs/.job-type.schema.json
   ```
   ```yaml
   # yaml-language-server: $schema=.job-type.schema.json
@@ -287,17 +295,17 @@ The YAML schema above is machine-derived from the platform's own parse types
   ...
   ```
 
-- `chuggernaut validate jobs/*.yaml` runs the static slice offline (parse +
+- `chuggernaut validate .chug/jobs/*.yaml` runs the static slice offline (parse +
   the field-rules matrices below, with a sibling `_defaults.yaml` merged) —
   for contributors and CI. Repo-dependent checks (prompt files exist,
   secrets/vars set) still run at release (§2.2).
 
 #### Project Defaults
 
-An optional file `jobs/_defaults.yaml` declares project-wide defaults applied to **every** job type. It carries two things: `eval` (evaluators appended to every type's `eval` list — how a project gates all changes on an evergreen test suite without each job type author remembering to declare it) and `model` (a project-level default agent model, §12.4):
+An optional file `.chug/jobs/_defaults.yaml` declares project-wide defaults applied to **every** job type. It carries two things: `eval` (evaluators appended to every type's `eval` list — how a project gates all changes on an evergreen test suite without each job type author remembering to declare it) and `model` (a project-level default agent model, §12.4):
 
 ```yaml
-# jobs/_defaults.yaml
+# .chug/jobs/_defaults.yaml
 model: claude-opus-4-8            # optional; project-level default agent model (§12.4)
 eval:
   - name: ci
@@ -755,10 +763,10 @@ Graph wiring rules (all five must hold):
 - No duplicate dependencies
 
 Static configuration (fail-fast check against current HEAD of default branch):
-- The job type file (`jobs/{type}.yaml`) exists
+- The job type file (`.chug/jobs/{type}.yaml`) exists
 - For `work.type: agent` jobs: `work.prompt` path exists
 - For `work.type: agent` jobs with a `review` block: `work.review.prompt` path exists; the resolved review provider (`work.review.provider`, defaulting to the resolved work provider) is `claude` — inline review is not supported for other providers in v1
-- If `jobs/_defaults.yaml` exists: it parses against the evaluator schema, and no default evaluator name collides with an evaluator declared in any job type being validated
+- If `.chug/jobs/_defaults.yaml` exists: it parses against the evaluator schema, and no default evaluator name collides with an evaluator declared in any job type being validated
 - For each agent or human evaluator (including project defaults): the evaluator's `prompt` path exists
 - Every secret named in `secrets:` (`work.secrets` and per-evaluator) has an entry in the `secrets.*` KV bucket
 - Every var named in `vars:` has an entry in the `vars.*` KV bucket
@@ -941,7 +949,7 @@ For each Ready job, the dispatcher executes the following sequence:
 11. Apply eval reduce (see §3.3); handle pass or fail outcomes
 12. On eval reduce pass: if the job type declares `wrap_up.type: none`, skip the merge gate and squash-merge entirely — transition straight to Done (the work's effect is external; the job branch is scratch and is deleted unmerged). Otherwise transition to **`WrapUp`** and run the merge gate (see §3.3 Merge Gate) — the whole merge path (queue, gate, squash, conflict rework) runs in `WrapUp`, not `Evaluation`. If default HEAD still equals `base_ref`, or `job/{seq}` has no commits beyond `base_ref`, the gate is skipped. If HEAD moved and the candidate squash-merge is clean, the gate re-runs the required command evaluators against the candidate merge commit — gate pass → proceed to squash-merge below; gate failure → update `base_ref` to current default HEAD, increment cycle (rework_budget NOT consumed), rebase `job/{seq}` onto the new `base_ref` — committing the 3-way-merged tree (`git merge-tree`, reusing the tree it already writes; conflict markers in the conflicting hunks only) as a single WIP commit parented on the new base — so the agent resolves markers in place rather than reimplementing, inject the gate output as findings plus conflict-style context, re-enter Work (step 2). On gate pass or skip: squash-merge `job/{seq}` to default branch. If no commits on `job/{seq}` beyond `base_ref`, this is a no-op. If commits exist and merge is clean → **land** the job (see the post-merge wrap-up command below), which transitions to Done. If conflict → snapshot the current `base_ref` into a local variable `old_base_ref` (this value is held in dispatcher memory only — not persisted to the job record), update `job.base_ref` to current default HEAD, increment cycle (without consuming `rework_budget`), rebase `job/{seq}` onto the new `base_ref` by committing the 3-way-merged tree as a WIP commit (conflict markers in the conflicting hunks only; the agent resolves them in place, NOT from scratch), build conflict context using `old_base_ref` and new `base_ref` (see §4.3 for format), re-enter Work (step 2). Eval-failure rework (§3.3, distinct from these merge-driven paths) keeps `base_ref` unchanged and **preserves** `job/{seq}` on re-entry — the prior cycle's commits carry forward and the agent fixes in place. **Guard:** a job with no evaluators auto-squashes with no review to catch markers, so before landing a squash the dispatcher scans the previously-conflicted files in the squash tree for residual conflict markers; if any remain (a WIP rebase the agent never resolved), it escalates (`unresolved_conflict_markers`) instead of merging. **Squash-merge commit message format:** subject line is `job/{seq}: {job_type}`; if the work task's `TaskResult::Work.summary` is non-null, append it as the commit body. Example: `job/42: implement-endpoint\n\nAdded /api/v1/stripe/webhook handler with idempotency key.`
     **Finalization hard failures**: wrap-up is designed to be infallible, but an unexpected error in any finalization step (git plumbing, repo IO — anything other than a `Conflict`, which has its own rework path) creates a Human escalation task (reason `finalize_failed`) and the merge queue advances past the job instead of stalling (design-lifecycle.md: unexpected wrap-up failure → triage).
-    **Post-merge wrap-up command (`wrap_up.run`)**: when the squash lands and the job type declares a `wrap_up.run` command, the job does **not** go straight to Done. Instead the dispatcher launches a command task (phase `WrapUp`, `TaskKind::Command`) that clones the **default branch** — the squash is already on it, so its HEAD carries exactly the merged content the command must ship — and the job **stays in `WrapUp`** while it runs. The merge queue advances immediately (the publish is an external effect, like a `wrap_up: none` deploy, not a merge that others block on). On exit 0 → Done (branch cleanup, `job-done`). On non-zero exit (or a container that never launched) → escalate (reason `wrap_up_failed`): the squash **already landed and is not undone** — only the external publish failed, and a human (or a manual re-run, e.g. `jobs/web-publish.yaml`) finishes it. The command must be idempotent: if the dispatcher restarts between the squash landing and the publish completing, reconciliation (§3.6) re-launches or re-verifies it — the presence of a `WrapUp`-phase task in the log is the marker that the merge is already done and only the publish remains, so recovery does not re-drive the merge queue. `wrap_up.run` requires `wrap_up.type: merge`; a `wrap_up: none` job has no merge to follow.
+    **Post-merge wrap-up command (`wrap_up.run`)**: when the squash lands and the job type declares a `wrap_up.run` command, the job does **not** go straight to Done. Instead the dispatcher launches a command task (phase `WrapUp`, `TaskKind::Command`) that clones the **default branch** — the squash is already on it, so its HEAD carries exactly the merged content the command must ship — and the job **stays in `WrapUp`** while it runs. The merge queue advances immediately (the publish is an external effect, like a `wrap_up: none` deploy, not a merge that others block on). On exit 0 → Done (branch cleanup, `job-done`). On non-zero exit (or a container that never launched) → escalate (reason `wrap_up_failed`): the squash **already landed and is not undone** — only the external publish failed, and a human (or a manual re-run, e.g. `.chug/jobs/web-publish.yaml`) finishes it. The command must be idempotent: if the dispatcher restarts between the squash landing and the publish completing, reconciliation (§3.6) re-launches or re-verifies it — the presence of a `WrapUp`-phase task in the log is the marker that the merge is already done and only the publish remains, so recovery does not re-drive the merge queue. `wrap_up.run` requires `wrap_up.type: merge`; a `wrap_up: none` job has no merge to follow.
 13. On eval reduce product failure: for `agent | human` work — if under rework budget, increment cycle, inject eval findings, re-enter Work (step 2); if rework budget exhausted, create Human escalation task → Escalated. For `command` work — escalate immediately (rework_budget disallowed). If a required evaluator returned `abort: true`, escalate immediately regardless of remaining budget (reason `eval_abort`; see §1.2 Abort verdict)
 14. On escalation Human task completion: read `action`. Post-work (job `Escalated`) — `Retry`: new work task same cycle; `Resolve`: re-enter Evaluation; `Revoke`: Revoked. Pre-work (job `Stalled`) — `Retry`: re-run the failed step (Ready-transition re-validation / re-enqueue → Ready); `Resolve`: rejected (400); `Revoke`: Revoked
 
@@ -1239,11 +1247,11 @@ pub struct AgentOutput {
 
 `AgentProvider.run()` is responsible for launching the container using the dispatcher's backend, injecting the provider-specific agent CLI invocation as the container CMD, monitoring the container until it exits, and returning the result. The declared job `image` provides the full development environment including the agent CLI binary and all runtime tooling.
 
-Provider and model are configured at platform level (see §12.4) with per-job-type overrides at `work:` level or per eval step. The model resolution chain is: per-job override → job-type declaration → project default (`jobs/_defaults.yaml`) → platform default (§12.4). Provider resolution is job-type declaration → platform default; per-project provider defaults and team-level defaults are deferred.
+Provider and model are configured at platform level (see §12.4) with per-job-type overrides at `work:` level or per eval step. The model resolution chain is: per-job override → job-type declaration → project default (`.chug/jobs/_defaults.yaml`) → platform default (§12.4). Provider resolution is job-type declaration → platform default; per-project provider defaults and team-level defaults are deferred.
 
 **`ClaudeProvider`** — container CMD: `claude -p "$(cat /chuggernaut/prompt.md)" --settings /chuggernaut/agent-settings.json --output-format stream-json --verbose --model {model} --append-system-prompt {system_prompt} --mcp-config /chuggernaut/mcp-config.json`. `--output-format stream-json` (which `-p` requires be paired with `--verbose`) makes the CLI emit JSONL events — assistant text, tool_use, and a final `type:"result"` event — to stdout *as it works*, so the live log viewer (and the harvested `stdout.log` artifact) show intermediate activity rather than silence until exit. The final result event carries the same `usage`/`result`/`session_id` fields the single-object `json` format did, so usage/result harvesting is unchanged; exit-code semantics are unchanged. The serialized `Vec<McpServerConfig>` (`{"mcpServers": …}`) carries the channel server's `NATS_CREDS`, so it is **not** passed inline on argv — inline argv leaks into `ps`, `/proc/*/cmdline`, and crash reports. Instead the dispatcher-composed payload is injected as a mode-0600 file at `/chuggernaut/mcp-config.json` (the CLI accepts a path for `--mcp-config`); credentials travel via injected files or container env, never argv.
 
-**Permission profiles** — every agent run carries a **permission profile**, injected as a mode-0644 settings file at `/chuggernaut/agent-settings.json` and passed via `--settings`. The profile is chosen by **role** at the launch site, not declared in `jobs/*.yaml`:
+**Permission profiles** — every agent run carries a **permission profile**, injected as a mode-0644 settings file at `/chuggernaut/agent-settings.json` and passed via `--settings`. The profile is chosen by **role** at the launch site, not declared in `.chug/jobs/*.yaml`:
 
 | Role | Profile | Policy |
 |---|---|---|
@@ -1315,7 +1323,7 @@ Changes on main since base commit abc1234:
 
 Knowledge Objects (KOs) follow a `(subject, predicate) → object` model. Each KO is a discrete fact retrievable in O(1). Three scoped buckets (see §1.4 for KV keys).
 
-**Upfront injection (tagged, work containers only) — IMPLEMENTED, repo-versioned form:** job types declare default knowledge tags (`knowledge:`); operators may add more at job creation. At launch the dispatcher resolves the union by reading `tags/{tag}.md` from the project repo at `base_ref` (tags without a file are skipped), concatenates them into a `## Project Knowledge` block, and injects it via `--append-system-prompt` for Claude (prepended to the prompt for Codex). Work containers only — eval containers do not receive a pre-injected system prompt. The repo is the primary tag store; the NATS KO buckets described below (global/team scopes, runtime queries via chuggernaut-ko) remain the deferred extension for knowledge that spans projects.
+**Upfront injection (tagged, work containers only) — IMPLEMENTED, repo-versioned form:** job types declare default knowledge tags (`knowledge:`); operators may add more at job creation. At launch the dispatcher resolves the union by reading `.chug/tags/{tag}.md` from the project repo at `base_ref` (tags without a file are skipped), concatenates them into a `## Project Knowledge` block, and injects it via `--append-system-prompt` for Claude (prepended to the prompt for Codex). Work containers only — eval containers do not receive a pre-injected system prompt. The repo is the primary tag store; the NATS KO buckets described below (global/team scopes, runtime queries via chuggernaut-ko) remain the deferred extension for knowledge that spans projects.
 
 **Runtime querying (MCP, all agent containers):** agents query further KOs at runtime via the `chuggernaut-ko` MCP server. Both work and eval containers receive NATS JWT credentials with read access to all three knowledge buckets (see §7.4); the MCP server uses these to resolve queries without dispatcher involvement.
 
@@ -1398,7 +1406,7 @@ A project may be **linked** to an existing externally-hosted repo (GitHub): the 
 
 **Branch model.** The local bare repo's `HEAD` symref points at a chuggernaut-owned **`integration`** branch, so the entire §3.2/§3.3 merge machinery (job branches, squash-merge, merge queue, merge gate, SSH branch protection) operates on `integration` untouched — "default branch" *is* integration. The origin's default branch is tracked as `refs/remotes/origin/{main}` via a normal fetch refspec: not a local head, so unpushable through the SSH front. Agents keep talking only to the internal SSH front / local repo; `REPO_URL` never points at the origin.
 
-**Creation** (`req.projects.link`): init bare + `remote add origin` + single-branch fetch refspec; origin main autodetected via `ls-remote --symref` when unspecified; `integration` created at origin main; pre-receive hook installed; the config subset of the starter template (jobs/, prompts/, tasks/ — no README) seeded **skip-existing** onto integration, reaching the origin via the first release PR.
+**Creation** (`req.projects.link`): init bare + `remote add origin` + single-branch fetch refspec; origin main autodetected via `ls-remote --symref` when unspecified; `integration` created at origin main; pre-receive hook installed; the config subset of the starter template (.chug/jobs/, .chug/prompts/, .chug/tasks/ — no README) seeded **skip-existing** onto integration, reaching the origin via the first release PR.
 
 **Credentials.** Project secrets `CHUG_ORIGIN_DEPLOY_KEY` (OpenSSH private key, write deploy key — git fetch/push) and `CHUG_ORIGIN_PAT` (fine-grained PAT, pull requests read/write — PR API), set via `admin secret set` before linking. The `CHUG_` name prefix is **reserved**: declaring such a secret in a job type is a release-validation error and injection skips them — origin credentials are dispatcher-only and never reach a container. Origin git ops decrypt the key to a 0600 tempfile for the duration of the command (`GIT_SSH_COMMAND`, `StrictHostKeyChecking=accept-new`) with a 60s timeout so a hung remote cannot wedge the single-writer actor.
 
@@ -1438,8 +1446,8 @@ req.jobs.revoke.{owner}.{project}.{seq}
 req.jobs.claim.{owner}.{project}.{seq}
 req.jobs.unclaim.{owner}.{project}.{seq}
 req.jobs.criteria.{owner}.{project}.{seq}                    response: { ref, wrap_up, evaluators: [Evaluator + source: "type"|"job"], errors: [string] } — resolved eval criteria at the job's pinned ref
-req.jobtypes.get.{owner}.{project}                           payload: { name }; response: { name, ref, yaml, job_type: JobType|null, errors } — one type in full (raw + parsed, defaults merged) for the library UI
-req.tags.list.{owner}.{project}                              response: string[] — available knowledge tags (`tags/*.md` stems at default HEAD; a tag's meaning lives in its repo-versioned markdown file)
+req.jobtypes.get.{owner}.{project}                           payload: { name }; response: { name, ref, path, yaml, job_type: JobType|null, errors } — one type in full (raw + parsed, defaults merged) for the library UI; `path` is the location the definition resolved to (§1.1)
+req.tags.list.{owner}.{project}                              response: [{ name, path }] — available knowledge tags (`.chug/tags/*.md` at default HEAD; a tag's meaning lives in its repo-versioned markdown file). `path` is the location the tag resolved to (§1.1), so a reader fetching its contents back never re-guesses the layout
 req.projects.create                                          payload: { owner, name }; creates the bare repo (+ pre-receive hook, + Code starter template seed, + job counter); 409 if it exists. Platform admins only at the API layer.
 req.projects.link                                            payload: { owner, name, origin_url, main_branch? }; linked-origin project creation (§5.3): fetch from origin, HEAD → integration, config seed (skip-existing), project record + counter. Requires CHUG_ORIGIN_* project secrets first. Platform admins only at the API layer.
 req.origin.release.{owner}.{project}                         open an origin release (§5.3): push integration → chug/release-{n} on the origin, open the PR, hold the merge queue; 409 when a release is open / a gate is in flight / nothing to release
@@ -1538,9 +1546,9 @@ DELETE /api/v1/projects/{owner}/{project}/members/{email}           → 200 OK; 
 GET    /api/v1/projects/{owner}/{project}/origin                    → 200 OK; body: { origin, release, release_counter, origin_main_sha, integration_sha, ahead_by, held }; 404 on classic projects. Viewer+.
 POST   /api/v1/projects/{owner}/{project}/origin/release            → 201; opens the release PR and holds the merge queue; 409 when a release is open / gate in flight / nothing to release. Project Admin.
 POST   /api/v1/projects/{owner}/{project}/origin/sync               → 200 OK; fetch + reconcile (merged PR → integration reset + hold cleared). Project Admin.
-GET    /api/v1/projects/{owner}/{project}/job-types                 → 200 OK; body: [{ name, display_name, description }] (jobs/*.yaml at default HEAD; display metadata for the type picker — a file that fails to parse still lists, stem only)
-GET    /api/v1/projects/{owner}/{project}/job-types/{name}          → 200 OK; body: { name, ref, yaml, job_type, errors } — the library view (raw + parsed, defaults merged)
-GET    /api/v1/projects/{owner}/{project}/tags                      → 200 OK; body: string[] — available knowledge tags (tags/*.md stems; drives the create-form tag picker)
+GET    /api/v1/projects/{owner}/{project}/job-types                 → 200 OK; body: [{ name, display_name, description }] (.chug/jobs/*.yaml at default HEAD; display metadata for the type picker — a file that fails to parse still lists, stem only)
+GET    /api/v1/projects/{owner}/{project}/job-types/{name}          → 200 OK; body: { name, ref, path, yaml, job_type, errors } — the library view (raw + parsed, defaults merged; path = where the definition resolved)
+GET    /api/v1/projects/{owner}/{project}/tags                      → 200 OK; body: [{ name, path }] — available knowledge tags (.chug/tags/*.md; drives the create-form tag picker; path = where the tag resolved)
 GET    /api/v1/projects/{owner}/{project}/file?path={path}          → 200 OK; body: { path, ref, content } — one repo file at default HEAD (the create form's prompt links; 404 if absent)
 GET    /api/v1/projects/{owner}/{project}/tree                      → 200 OK; body: { branch, ref, entries } — full recursive tree at default HEAD (Files tab)
 GET    /api/v1/projects/{owner}/{project}/jobs/{seq}                → 200 OK; body: Job
@@ -1729,7 +1737,7 @@ GET /api/v1/health   → 200 { "dispatcher": "ok", "version": string }   (dispat
 
 A liveness probe that proves the **dispatcher**, not just the api process. The api issues a bounded (`~3s`) `req.health` NATS request (§6.1) that round-trips the dispatcher's single-writer core actor; a genuine `{"dispatcher":"ok","version"}` reply returns `200`, anything else — no responder (a crash-looping dispatcher), a timeout (a wedged actor), or an unexpected body — returns `503`. Because it round-trips the actor, a dispatcher whose HTTP-answering api is up while its state loop is dead reads as **unhealthy**, which is the case the api-only probe missed on the 2026-07-22 outage.
 
-**Unauthenticated by design.** The endpoint is exempt from §7.1 auth: the body leaks only liveness and the build version, never any project data. This is what lets an outside client (and the `deploy` job's `tasks/deploy-health.sh` gate) confirm a release came up. The gate requires all of a `200`, an `application/json` content-type, and the health JSON — a `text/html` body is an automatic fail, so the SPA fallback (which answers `200 index.html` for any unknown route) can never masquerade as health. If project-liveness detail is ever added, gate the endpoint and update the deploy gate to authenticate.
+**Unauthenticated by design.** The endpoint is exempt from §7.1 auth: the body leaks only liveness and the build version, never any project data. This is what lets an outside client (and the `deploy` job's `.chug/tasks/deploy-health.sh` gate) confirm a release came up. The gate requires all of a `200`, an `application/json` content-type, and the health JSON — a `text/html` body is an automatic fail, so the SPA fallback (which answers `200 index.html` for any unknown route) can never masquerade as health. If project-liveness detail is ever added, gate the endpoint and update the deploy gate to authenticate.
 
 ---
 
@@ -1942,9 +1950,9 @@ A project's markdown documentation is a first-class output produced by agent job
 - **`design`** — architecture/plan documents that argue a decision's tradeoffs and set direction, written to `docs/design/<slug>.md`. Typical flow: a `design` job lands the document, then `code`/`web` jobs depend on it and cite it. The reviewer judges whether the document addresses the brief, weighs its alternatives and tradeoffs honestly, and stays consistent with `spec.md` and the codebase as they exist.
 - **`docs`** — reference/wiki pages that teach, written anywhere under `docs/`. The reviewer judges accuracy against the current code (spot-checking claims against the source), placement/navigation, and audience fit.
 
-**The docs tree is the wiki.** The repo's `docs/` directory is the project wiki root; `docs/design/` holds design documents. Documentation is versioned with the code it describes and travels with the project repo, exactly like job types and prompts (§1.1) rather than living in a separate control plane. Knowledge tags (§4.4, `tags/{tag}.md`) unify into this tree over time — a tag becomes a `docs/` page marked injectable via front-matter — but that migration is deferred; the two stores coexist today.
+**The docs tree is the wiki.** The repo's `docs/` directory is the project wiki root; `docs/design/` holds design documents. Documentation is versioned with the code it describes and travels with the project repo, exactly like job types and prompts (§1.1) rather than living in a separate control plane. Knowledge tags (§4.4, `.chug/tags/{tag}.md`) unify into this tree over time — a tag becomes a `docs/` page marked injectable via front-matter — but that migration is deferred; the two stores coexist today.
 
-**Gating.** Both types stage their evaluators (§3.3): stage 0 is the agent reviewer described above; stage 1 is a shared documentation lint (`tasks/doc-lint.sh` — markdown well-formedness, intra-repo link resolution, and best-effort code-path existence) that runs alongside the appended project `ci` default (§1.1). Both stage-1 checks are diff-aware and self-skip a diff with no relevant files, so a doc-only change is gated in seconds — `ci` skips its build because no `crates/**` path changed, and `doc-lint` runs only over the changed `.md` files.
+**Gating.** Both types stage their evaluators (§3.3): stage 0 is the agent reviewer described above; stage 1 is a shared documentation lint (`.chug/tasks/doc-lint.sh` — markdown well-formedness, intra-repo link resolution, and best-effort code-path existence) that runs alongside the appended project `ci` default (§1.1). Both stage-1 checks are diff-aware and self-skip a diff with no relevant files, so a doc-only change is gated in seconds — `ci` skips its build because no `crates/**` path changed, and `doc-lint` runs only over the changed `.md` files.
 
 ---
 
@@ -2102,7 +2110,7 @@ chuggernaut admin secret rotate-key
 
 Platform-level agent provider and model defaults are supplied as dispatcher configuration at startup — not stored in NATS KV.
 
-**Model resolution chain** (most specific wins): per-job override (`Job.model`, §1.1) → job-type declaration (`work.model` / evaluator `model:`) → project default (`jobs/_defaults.yaml` `model:`, §1.1) → platform config default (`AGENT_MODEL_DEFAULT`). The per-job override applies to the **Work agent only** (evaluators keep the type/project/platform resolution, exactly as `Job.timeout` scopes to Work); every other layer applies to the work agent and agent evaluators alike. **Provider** resolution is unchanged: job-type declaration → platform config default (per-project provider defaults and per-job provider overrides remain deferred).
+**Model resolution chain** (most specific wins): per-job override (`Job.model`, §1.1) → job-type declaration (`work.model` / evaluator `model:`) → project default (`.chug/jobs/_defaults.yaml` `model:`, §1.1) → platform config default (`AGENT_MODEL_DEFAULT`). The per-job override applies to the **Work agent only** (evaluators keep the type/project/platform resolution, exactly as `Job.timeout` scopes to Work); every other layer applies to the work agent and agent evaluators alike. **Provider** resolution is unchanged: job-type declaration → platform config default (per-project provider defaults and per-job provider overrides remain deferred).
 
 Dispatcher configuration (environment variables or config file):
 
@@ -2213,7 +2221,7 @@ order, not atomically. Both facts mean the platform must tolerate the running
 binary and the config/peer services being **one deploy generation** out of step.
 
 On 2026-07-22 they were not: job #63 merged a `wrap_up` section into
-`jobs/web.yaml`; the running dispatcher's strict parser rejected the unknown key
+`.chug/jobs/web.yaml`; the running dispatcher's strict parser rejected the unknown key
 and escalated every `web` job at launch (`launch_validation_failed`, first
 victim #69) until an operator deployed. Merging config had silently become
 deploying config. This part defines the rules that make that a *detected,
@@ -2268,7 +2276,7 @@ burning launches into `Escalated` one job at a time.
 ### 14.3 Merge-time gate
 
 The dispatcher publishes its `CONFIG_SCHEMA_EPOCH` in the config snapshot
-(`GET /api/v1/platform/config` → `dispatcher.schema_epoch`). `tasks/ci.sh`'s
+(`GET /api/v1/platform/config` → `dispatcher.schema_epoch`). `.chug/tasks/ci.sh`'s
 config-skew gate — and `chuggernaut validate --deployed-epoch <N>` — compare a
 config's declared `min_dispatcher` against the **deployed** dispatcher's epoch
 and **fail the config's own CI** ("requires dispatcher >= X; deploy first or gate
@@ -2312,7 +2320,7 @@ Platform init generates: JWT RS256 keypair, SSH CA keypair, age keypair, VAPID k
 - **Commit signing**: GPG-signed squash-merges. Deferred.
 - **Schema registry**: available as a platform service for applications to use; not a platform primitive.
 - **User git CLI (`chuggernaut` client)**: a wrapper CLI that transparently refreshes SSH certificates (via `POST /auth/ssh-cert`) before invoking `git`. In v1, users refresh SSH certs manually via the API or their own tooling and use `git` directly with the certificate.
-- **Project/team-level provider defaults**: a project-level default **model** (`jobs/_defaults.yaml` `model:`) and a per-job model override (`Job.model`) are supported (§12.4). Per-project/per-team **provider** defaults and all team-level defaults remain deferred.
+- **Project/team-level provider defaults**: a project-level default **model** (`.chug/jobs/_defaults.yaml` `model:`) and a per-job model override (`Job.model`) are supported (§12.4). Per-project/per-team **provider** defaults and all team-level defaults remain deferred.
 - **Per-project / cross-node dependency caching**: per-project caches (node_modules, a pull-through registry cache) and cache sharing *across* nodes. The node-local build cache (§3.1, "Node-local build caching") ships now and covers the cargo-compile case within a node; richer per-project and cross-node caching remains deferred. v1 mitigation for the rest: bake toolchains and dependencies into the declared `image`.
 - **k8s-Secret-based secret injection**: dispatcher writes a Kubernetes Secret referenced by the Job spec instead of decrypting secrets into env vars it assembles itself, keeping plaintext out of the dispatcher's launch path. v1 injects env vars directly.
 - **Direct-mode factories**: event → job templating without a triage agent (payload→job-fields mapping mini-language). v1 factories are triage-only (§13.1); a trivial triage prompt covers the direct case at the cost of agent tokens.

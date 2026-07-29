@@ -70,7 +70,7 @@ impl LaunchReporter {
 /// Before this existed every agent launched with `--dangerously-skip-permissions`
 /// — one blanket bypass for work and evaluation alike — so "the reviewer must
 /// not build" was a request in a prompt and nothing more. The profile is chosen
-/// by *role* at the launch site rather than declared in `jobs/*.yaml`: nothing
+/// by *role* at the launch site rather than declared in `.chug/jobs/*.yaml`: nothing
 /// needs per-evaluator variation, and `types::Evaluator` is
 /// `deny_unknown_fields`, so a new YAML key would drag in a schema regen and a
 /// spec §14 version-skew gate for no gain.

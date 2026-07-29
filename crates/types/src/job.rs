@@ -14,7 +14,7 @@ pub struct Job {
     pub id: u64,
     /// `"{owner}/{repo}"` slug.
     pub project: String,
-    /// Job type name; references `jobs/{type}.yaml` at `base_ref`.
+    /// Job type name; references `.chug/jobs/{type}.yaml` at `base_ref`.
     pub r#type: String,
     /// Ticket-style instance identity: what this particular run is for.
     /// The type carries the *how* (prompts, evaluators); title/description
@@ -77,7 +77,7 @@ pub struct Job {
     /// Optional per-job model override for the Work agent (spec §1.1, §12.4).
     /// The most specific choice an operator can make, so it wins over every
     /// other layer: the job type's `work.model`, the project default
-    /// (`jobs/_defaults.yaml`), and the platform default (`AGENT_MODEL_DEFAULT`).
+    /// (`.chug/jobs/_defaults.yaml`), and the platform default (`AGENT_MODEL_DEFAULT`).
     /// Applies to Work-phase agent tasks only — evaluators keep the
     /// type/project/platform resolution, exactly as [`Job::timeout`] scopes to
     /// Work. None → the resolution chain applies. Defaulted for records written

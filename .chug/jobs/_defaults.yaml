@@ -1,0 +1,12 @@
+# Appended to every job type's eval list (spec §1.1) — the evergreen CI gate.
+# stage: 1 places CI after any stage-0 evaluators (spec §3.3 staged evaluation):
+# for the `code` type, the authoritative review runs first and CI — a slow cold
+# cargo build on the shared Docker host — runs only once review passes. Types
+# with no stage-0 evaluators of their own run CI as their sole (stage-1) stage,
+# unchanged from before.
+eval:
+  - name: ci
+    type: command
+    image: chuggernaut/agent-rust:prod
+    run: ./.chug/tasks/ci.sh
+    stage: 1

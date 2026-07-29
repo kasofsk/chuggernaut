@@ -49,7 +49,7 @@ has "cd /workspace" "seed must build from /workspace"
 echo "ok: seed builds at /workspace (matches the runtime clone path)"
 
 # 3. Warm the debug profile the agent actually runs; never a release target
-#    (pure image bloat — agent tasks and tasks/ci.sh run debug test/clippy).
+#    (pure image bloat — agent tasks and .chug/tasks/ci.sh run debug test/clippy).
 has "cargo build --workspace --all-targets" "seed must warm the workspace build"
 has "cargo test --workspace --no-run"       "seed must warm the test binaries"
 hasnt "cargo (build|test)[^\n]*--release" \

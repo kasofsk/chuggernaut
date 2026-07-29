@@ -45,7 +45,7 @@ Pure data: `Job`, `JobState`, `Task`, `TaskKind`/`TaskState`/`TaskResult`, `Task
 
 Behind the off-by-default `schema` feature the wire types also derive
 `JsonSchema`, which is what makes `types` the single source of the §6.2 HTTP
-contract: `chuggernaut schema api` emits them to `schemas/api.schema.json` and
+contract: `chuggernaut schema api` emits them to `.chug/schemas/api.schema.json` and
 the `committed_schemas_are_current` drift test fails CI when a covered type
 changes without re-emission (refactor-plan D1). The feature is a derive-macro
 dependency only — the purity rule above still holds, machine-checked by
@@ -152,7 +152,7 @@ domain/ (chuggernaut-domain — pure: no tokio/async-nats/store/vcs/auth)
 ```
 dispatcher/
   core.rs        — the single-writer event loop (see below); all mutable state lives here
-  release.rs     — release validation, ref-reading half: jobs/*.yaml loading + prompt/KV
+  release.rs     — release validation, ref-reading half: .chug/jobs/*.yaml loading + prompt/KV
                    checks through the vcs port (§2.2, §14); re-exports the pure half
   ready.rs       — the Ready-phase shim: view/decide/apply/interpret for decide/ready,
                    plus queue admission, batch absorption and the Work hand-off (§2.1, §3.1)

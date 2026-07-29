@@ -114,10 +114,10 @@ human care) into a compiler-checked one — and it is exactly the boundary that
 module-scoped agent jobs will trip over most.
 
 **Landed** (refactor-plan D1+D2) as schemars → JSON Schema → TypeScript:
-`chuggernaut schema api` emits `schemas/api.schema.json`, `npm run codegen`
+`chuggernaut schema api` emits `.chug/schemas/api.schema.json`, `npm run codegen`
 turns it into `web/src/api/types.gen.ts`, and both halves are drift-gated
 (`committed_schemas_are_current` in cargo, `npm run codegen:check` in the web
-stage of `tasks/ci.sh`). `api.ts` keeps only the fetch methods; what remains
+stage of `.chug/tasks/ci.sh`). `api.ts` keeps only the fetch methods; what remains
 hand-written is `api/envelopes.ts` — the replies the dispatcher builds with
 `serde_json::json!`, which have no Rust type to generate from. Shrinking that
 file is what "finishing" §2 means.

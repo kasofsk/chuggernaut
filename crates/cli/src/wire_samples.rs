@@ -2,7 +2,7 @@
 //! type, emitted from real Rust values.
 //!
 //! The generated TypeScript client (`web/src/api/types.gen.ts`) is produced
-//! from `schemas/api.schema.json`, which schemars derives from these same
+//! from `.chug/schemas/api.schema.json`, which schemars derives from these same
 //! types. That chain proves the client matches the *schema*; it cannot prove
 //! the schema matches what **serde** writes — a `skip_serializing_if` schemars
 //! reads differently, an adjacent tag, a chrono format. This file closes that
@@ -65,7 +65,7 @@ fn sample_evaluator() -> types::Evaluator {
         name: "ci".into(),
         r#type: types::EvaluatorType::Command,
         image: Some("chuggernaut/agent-rust:latest".into()),
-        run: Some("tasks/ci.sh".into()),
+        run: Some(".chug/tasks/ci.sh".into()),
         prompt: None,
         provider: None,
         model: None,
@@ -118,7 +118,7 @@ fn sample_task() -> types::Task {
         kind: types::TaskKind::Agent {
             provider: "claude".into(),
             model: Some("claude-opus-5".into()),
-            prompt: "prompts/work.md".into(),
+            prompt: ".chug/prompts/work.md".into(),
         },
         state: types::TaskState::Done,
         attempt: 1,
@@ -274,7 +274,7 @@ fn sample_deploy_report() -> types::DeployReport {
 }
 
 /// Parsed from YAML rather than built field by field: [`types::JobType`] is the
-/// one covered type whose canonical source *is* a `jobs/*.yaml` file, and the
+/// one covered type whose canonical source *is* a `.chug/jobs/*.yaml` file, and the
 /// parser is what the job-type detail endpoint serves through.
 fn sample_job_type() -> anyhow::Result<types::JobType> {
     let yaml = r"
@@ -284,10 +284,10 @@ description: Implement a ticket.
 image: chuggernaut/agent-rust:latest
 work:
   type: agent
-  prompt: prompts/work-code.md
+  prompt: .chug/prompts/work-code.md
   provider: claude
   review:
-    prompt: tasks/review-code.md
+    prompt: .chug/tasks/review-code.md
     iterations: 2
   secrets:
     - GH_TOKEN
@@ -304,7 +304,7 @@ rework_budget: 3
 eval:
   - name: ci
     type: command
-    run: tasks/ci.sh
+    run: .chug/tasks/ci.sh
 knowledge:
   - rust
 vars:

@@ -269,7 +269,7 @@ fn decide_publish_exited_escalation(
         detail: format!(
             "Job {seq}: the wrap-up publish command failed (exit {exit_code}). \
              The squash already landed on the default branch — the merge is final; \
-             only the publish did not run. Re-run the publish (jobs/web-publish.yaml) \
+             only the publish did not run. Re-run the publish (.chug/jobs/web-publish.yaml) \
              or resolve."
         ),
         failing_task: Some(task_id),

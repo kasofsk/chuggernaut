@@ -83,8 +83,9 @@ pub fn job_types_get(owner: &str, project: &str) -> String {
     format!("req.jobtypes.get.{owner}.{project}")
 }
 
-/// Available knowledge tags at default-branch HEAD (`tags/*.md` stems), for
-/// the create-job tag picker. Tags are repo-versioned like job types.
+/// Available knowledge tags at default-branch HEAD (`.chug/tags/*.md`) as
+/// `{ name, path }[]`, for the create-job tag picker. Tags are repo-versioned
+/// like job types.
 pub fn tags_list(owner: &str, project: &str) -> String {
     format!("req.tags.list.{owner}.{project}")
 }

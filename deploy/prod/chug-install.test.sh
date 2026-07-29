@@ -3,7 +3,7 @@
 #
 # It builds an isolated fake repo tree (chug-install.sh derives REPO from its own
 # location), drops in a stub `chuggernaut` binary whose `validate` FAILS, plus a
-# jobs/*.yaml to validate, and stubs the required deps on PATH. Then it asserts
+# .chug/jobs/*.yaml to validate, and stubs the required deps on PATH. Then it asserts
 # the #186 contract: a config-validation failure is FATAL unless --force; and the
 # #276 contract: importing the platform's own source repo records SELF_REPO in
 # the env file (an ordinary project does not, an existing value is kept, and a
@@ -22,7 +22,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 # Isolated fake repo: SUT copied so its REPO ($HERE/../..) is our sandbox.
 REPO="$WORK/repo"
-mkdir -p "$REPO/deploy/prod" "$REPO/target/release" "$REPO/jobs"
+mkdir -p "$REPO/deploy/prod" "$REPO/target/release" "$REPO/.chug/jobs"
 SUT="$REPO/deploy/prod/chug-install.sh"
 cp "$HERE/chug-install.sh" "$SUT"
 chmod +x "$SUT"
@@ -36,7 +36,7 @@ EOF
 chmod +x "$REPO/target/release/chuggernaut"
 
 # A job file to validate (not _defaults.yaml, which preflight skips).
-printf 'job_type: demo\n' > "$REPO/jobs/demo.yaml"
+printf 'job_type: demo\n' > "$REPO/.chug/jobs/demo.yaml"
 
 # Required deps as no-op stubs so preflight's dependency gate passes. `git` is
 # deliberately absent: the import cases need the real thing.

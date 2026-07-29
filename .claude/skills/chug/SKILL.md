@@ -55,7 +55,7 @@ cd ~/chuggernaut
 **Job** = graph node (`#N`, ticket-style title/description, deps, lifecycle
 work → evaluation → wrap-up). **Task** = one execution inside a job (phase
 Work|Evaluation, kind command|agent|human). **Job type** = repo-versioned
-definition (`jobs/{type}.yaml`). Reusable tasks are plain files in the
+definition (`.chug/jobs/{type}.yaml`). Reusable tasks are plain files in the
 project repo: scripts (command tasks) and markdown instructions (agent
 tasks).
 
@@ -75,7 +75,7 @@ tasks).
 | `GET /api/v1/projects/{o}/{p}/diff/{seq}` | the job branch's diff |
 | `GET /api/v1/projects/{o}/{p}/job-types` | [{name, display_name, description}] |
 | `GET /api/v1/projects/{o}/{p}/job-types/{name}` | full type (raw YAML + parsed) |
-| `GET /api/v1/projects/{o}/{p}/tags` | knowledge tags (tags/*.md stems) |
+| `GET /api/v1/projects/{o}/{p}/tags` | [{name, path}] — knowledge tags; `path` is where each `.chug/tags/*.md` resolved (§1.1) |
 | `GET /api/v1/projects/{o}/{p}/tasks/pending` | human-task inbox |
 | `GET /api/v1/projects/{o}/{p}/events` (SSE) | live events; `.../jobs/{seq}/events` per job |
 | `GET /api/v1/projects/{o}/{p}/origin` | linked-origin status: release state, ahead_by, held |

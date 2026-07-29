@@ -37,7 +37,7 @@ export function NewJobPage() {
     Promise.all([api.jobTypes(owner, project), api.tags(owner, project), api.jobs(owner, project)])
       .then(([types, tags, js]) => {
         setJobTypes(types)
-        setAvailableTags(tags)
+        setAvailableTags(tags.map((t) => t.name)) // the picker names tags; the paths are for readers
         setJobs(js)
         setError(null)
       })
@@ -419,7 +419,7 @@ function CreateJob({
         <div className="field">
           <span>
             Knowledge tags{' '}
-            <span className="dim">(optional; a tag's meaning lives in tags/&#123;tag&#125;.md)</span>
+            <span className="dim">(optional; a tag's meaning lives in .chug/tags/&#123;tag&#125;.md)</span>
           </span>
           {availableTags.length > 0 && (
             <div className="tag-row">

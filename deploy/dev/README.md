@@ -155,15 +155,15 @@ storage with the same care as the keys dir itself.
 
 ## Job types
 
-Job types live in the project repo (`jobs/*.yaml` on the default branch).
+Job types live in the project repo (`.chug/jobs/*.yaml` on the default branch).
 Seed the repo through the SSH front or clone the bare repo directly:
 
 ```sh
 DEV=~/chuggernaut/deploy/dev
 git clone $DEV/data/repos/acme/demo.git /tmp/demo && cd /tmp/demo
-mkdir -p jobs prompts/work
-cp $DEV/jobs-hello.yaml jobs/hello.yaml
-cp $DEV/prompt-hello.md prompts/work/hello.md
+mkdir -p .chug/jobs .chug/prompts/work
+cp $DEV/jobs-hello.yaml .chug/jobs/hello.yaml
+cp $DEV/prompt-hello.md .chug/prompts/work/hello.md
 git add . && git commit -m "add hello job type" && git push origin main
 ```
 

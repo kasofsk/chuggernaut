@@ -27,7 +27,7 @@
 //! 3. **A change that cannot satisfy N-1 compat must say so and fail CI.** Bump
 //!    the relevant version constant *in the same commit* as a breaking change;
 //!    the merge-time check (`chuggernaut validate --deployed-epoch`, wired in
-//!    `tasks/ci.sh`) compares a config's declared [`JobType::min_dispatcher`]
+//!    `.chug/tasks/ci.sh`) compares a config's declared [`JobType::min_dispatcher`]
 //!    against the *deployed* dispatcher's [`CONFIG_SCHEMA_EPOCH`] and fails the
 //!    config's own CI with "requires dispatcher >= X; deploy first or gate it"
 //!    rather than merging a time bomb.

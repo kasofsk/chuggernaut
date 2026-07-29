@@ -10,23 +10,26 @@
 //! - **Spec:** §12.2.
 
 /// The "Code" starter: a coding agent implements the job ticket, a second
-/// coding agent reviews it; `tasks/` shows the reusable-task convention
+/// coding agent reviews it; `.chug/tasks/` shows the reusable-task convention
 /// (command task = script, agent task = markdown).
 pub const CODE_TEMPLATE: &[(&str, &str)] = &[
     ("README.md", include_str!("../templates/code/README.md")),
     (
-        "jobs/code.yaml",
-        include_str!("../templates/code/jobs/code.yaml"),
+        ".chug/jobs/code.yaml",
+        include_str!("../templates/code/.chug/jobs/code.yaml"),
     ),
     (
-        "prompts/work/code.md",
-        include_str!("../templates/code/prompts/work/code.md"),
+        ".chug/prompts/work/code.md",
+        include_str!("../templates/code/.chug/prompts/work/code.md"),
     ),
     (
-        "tasks/review-code.md",
-        include_str!("../templates/code/tasks/review-code.md"),
+        ".chug/tasks/review-code.md",
+        include_str!("../templates/code/.chug/tasks/review-code.md"),
     ),
-    ("tasks/ci.sh", include_str!("../templates/code/tasks/ci.sh")),
+    (
+        ".chug/tasks/ci.sh",
+        include_str!("../templates/code/.chug/tasks/ci.sh"),
+    ),
 ];
 
 /// The subset of [`CODE_TEMPLATE`] seeded into a linked-origin project: the
@@ -35,18 +38,21 @@ pub const CODE_TEMPLATE: &[(&str, &str)] = &[
 /// so a repo that already carries chuggernaut config keeps its own files.
 pub const CONFIG_TEMPLATE: &[(&str, &str)] = &[
     (
-        "jobs/code.yaml",
-        include_str!("../templates/code/jobs/code.yaml"),
+        ".chug/jobs/code.yaml",
+        include_str!("../templates/code/.chug/jobs/code.yaml"),
     ),
     (
-        "prompts/work/code.md",
-        include_str!("../templates/code/prompts/work/code.md"),
+        ".chug/prompts/work/code.md",
+        include_str!("../templates/code/.chug/prompts/work/code.md"),
     ),
     (
-        "tasks/review-code.md",
-        include_str!("../templates/code/tasks/review-code.md"),
+        ".chug/tasks/review-code.md",
+        include_str!("../templates/code/.chug/tasks/review-code.md"),
     ),
-    ("tasks/ci.sh", include_str!("../templates/code/tasks/ci.sh")),
+    (
+        ".chug/tasks/ci.sh",
+        include_str!("../templates/code/.chug/tasks/ci.sh"),
+    ),
 ];
 
 #[cfg(test)]
@@ -60,7 +66,7 @@ mod tests {
     fn code_template_job_type_is_valid() {
         let yaml = CODE_TEMPLATE
             .iter()
-            .find(|(p, _)| *p == "jobs/code.yaml")
+            .find(|(p, _)| *p == ".chug/jobs/code.yaml")
             .unwrap()
             .1;
         let jt = types::JobType::parse(yaml).unwrap();
@@ -68,11 +74,32 @@ mod tests {
         assert_eq!(jt.display_name.as_deref(), Some("Code"));
         assert_eq!(jt.validate(), vec![]);
         // Every repo path the type references ships in the template.
-        for path in ["prompts/work/code.md", "tasks/review-code.md"] {
+        for path in [".chug/prompts/work/code.md", ".chug/tasks/review-code.md"] {
             assert!(
                 CODE_TEMPLATE.iter().any(|(p, _)| *p == path),
                 "missing {path}"
             );
         }
+    }
+
+    /// Every seeded config file lands under the `.chug/` config root (§1.1) —
+    /// the platform reads job types, prompts and tasks from there, so a
+    /// repo-root path would seed a file nothing loads. Only the README, which
+    /// is the project's own front page rather than platform config, sits
+    /// outside it.
+    #[test]
+    fn seeded_config_lives_under_the_config_root() {
+        let prefix = format!("{}/", types::CONFIG_DIR);
+        for (path, _) in CODE_TEMPLATE.iter().chain(CONFIG_TEMPLATE) {
+            assert!(
+                *path == "README.md" || path.starts_with(&prefix),
+                "seeded path '{path}' is outside {}",
+                types::CONFIG_DIR
+            );
+        }
+        assert!(
+            !CONFIG_TEMPLATE.iter().any(|(p, _)| *p == "README.md"),
+            "the linked-origin subset seeds config only, never a README"
+        );
     }
 }

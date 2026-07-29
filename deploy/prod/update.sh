@@ -1,7 +1,7 @@
 #!/bin/sh
 # Chuggernaut deploy workhorse — build the target commit natively and restart
 # the host services, idempotently. Invoked over ssh by a `deploy` job's
-# tasks/deploy.sh (which passes the released SHA), and runnable by hand.
+# .chug/tasks/deploy.sh (which passes the released SHA), and runnable by hand.
 #
 # It operates on the DEPLOYED checkout ($CHUG_REPO), NOT on wherever this script
 # happens to be invoked from — the deploy job's container/checkout is a
@@ -304,7 +304,7 @@ refresh_workers_cancel() {
     # minutes. Kill the CLI ITSELF, not just the background job: `$!` is the
     # waiter SUBSHELL, and its children — the CLI and the `tee` relaying it —
     # survive a kill of their parent, reparented and still holding this shell's
-    # stdout. That stdout is the deploy's ssh session (tasks/deploy.sh runs ssh
+    # stdout. That stdout is the deploy's ssh session (.chug/tasks/deploy.sh runs ssh
     # without a tty), so sshd would hold the session open until the orphan's own
     # --wait-secs elapsed: the exact wall-clock this fan-out exists to remove.
     # Killing the CLI is what ends the wait; `tee` then reads EOF and goes.
@@ -437,7 +437,7 @@ export CHUG_GIT_SHA="$TARGET_SHA"
 # --- structured deploy legs (ticket #187) ------------------------------------
 # Each step below is a "leg". We time it and emit one machine-readable
 # `@chug:leg {json}` line to stdout; a single `@chug:report {json}` envelope
-# follows at exit. tasks/deploy.sh streams stdout back unchanged, and the
+# follows at exit. .chug/tasks/deploy.sh streams stdout back unchanged, and the
 # dispatcher harvests these lines into the deploy task's structured result — so a
 # deploy's outcome is a typed record, not one opaque log. Purely additive: the
 # wrapped commands are unchanged, and this is confined to a few helper calls.

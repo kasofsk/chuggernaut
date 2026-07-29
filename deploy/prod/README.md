@@ -232,7 +232,7 @@ refused by the pre-receive hook.
 
 **GitHub Actions CD is gone.** There is no `.github/workflows/deploy.yml`, no
 self-hosted runner in the deploy path, and no push-triggered deploy. Deploying is
-now an **explicit chuggernaut `deploy` job** (`jobs/deploy.yaml`) — you create it
+now an **explicit chuggernaut `deploy` job** (`.chug/jobs/deploy.yaml`) — you create it
 and release it, exactly like any other job.
 
 > **When the normal deploy job can't run or finish** — a broken build toolchain
@@ -250,7 +250,7 @@ and release it, exactly like any other job.
 1. **Create** a `deploy` job (API `POST .../jobs` with `{type: "deploy"}`, or the
    UI create-form → type *Deploy*).
 2. **Release** it. A deploy job carries no commits, so its `job/N` branch sits at
-   `main`'s HEAD — that SHA is what ships. Its work step, `tasks/deploy.sh`,
+   `main`'s HEAD — that SHA is what ships. Its work step, `.chug/tasks/deploy.sh`,
    ssh's into the Mini and runs `deploy/prod/update.sh <sha>`. `wrap_up: none`,
    so on eval-pass the job goes straight to Done and its scratch branch is dropped.
 
@@ -315,19 +315,19 @@ probe that reads a GOOD/BAD marker "binary"):
 deploy/prod/restart-verify.test.sh   # exits 0 iff all four cases pass
 ```
 
-**The deploy key.** `tasks/deploy.sh` ssh's in with the `MINI_DEPLOY_KEY` project
+**The deploy key.** `.chug/tasks/deploy.sh` ssh's in with the `MINI_DEPLOY_KEY` project
 secret (injected as an env var — the private-key value; the script writes it to a
 0600 tempfile for `ssh -i`). Provision it once before the first deploy job:
 `chug admin ... secret set --project kasofsk/chuggernaut --name MINI_DEPLOY_KEY`
 (register the public half in the Mini's `~/.ssh/authorized_keys`).
 
-**The health-gate API token.** `tasks/deploy-health.sh` asserts a live *fleet*
+**The health-gate API token.** `.chug/tasks/deploy-health.sh` asserts a live *fleet*
 as well as a live dispatcher (deploy #267: both worker daemons were dead, the
 gate passed on the dispatcher alone, and the deploy then hung in Evaluation with
 nothing alive to report its container's exit). Fleet liveness comes from `GET
 /api/v1/platform/fleet`, which is platform-admin only, so the gate authenticates
 with the `DEPLOY_HEALTH_API_TOKEN` project secret — declared on the `health`
-evaluator in `jobs/deploy.yaml`, injected into that eval container only. (The
+evaluator in `.chug/jobs/deploy.yaml`, injected into that eval container only. (The
 name avoids the reserved `CHUG_` prefix: declaring one of those is itself a
 release-validation error, spec §11.) Provision it with a long-TTL admin bearer
 token:
@@ -684,8 +684,8 @@ No bind mount, no baked-in image copy, no container to restart: refresh the page
 - **Normal deploys stay authoritative**: `update.sh` builds `web/` on the host
   and rsyncs it into `UI_ROOT` on every deploy, so a full deploy and a
   web-publish always land the same content.
-- **Fast path**: after a `web` job (jobs/web.yaml) merges, release a
-  `web-publish` job (jobs/web-publish.yaml). It builds `web/dist` at main and
+- **Fast path**: after a `web` job (.chug/jobs/web.yaml) merges, release a
+  `web-publish` job (.chug/jobs/web-publish.yaml). It builds `web/dist` at main and
   tar-pipes it to the Mini, staging in `UI_ROOT.new` and rsyncing contents
   into place (~30s end to end). Same `MINI_DEPLOY_KEY` ssh path as deploy. The
   native api picks the new files up on the next request — no reload needed.
@@ -730,7 +730,7 @@ launchctl print gui/$(id -u)/com.chuggernaut.api | grep -E 'state|program'
 #    a dispatcher proof — the SPA fallback answers 200 for any route, so a 200
 #    says nothing about the dispatcher (that's the #77/#81 masquerade). For real
 #    dispatcher liveness use /api/v1/health, which round-trips the core actor
-#    (§6.6); that's what tasks/deploy-health.sh gates on and restart-verify.sh
+#    (§6.6); that's what .chug/tasks/deploy-health.sh gates on and restart-verify.sh
 #    proves over NATS.
 for _ in $(seq 1 30); do
   curl -fsS http://127.0.0.1:8080/ >/dev/null 2>&1 && { echo "api OK"; break; }

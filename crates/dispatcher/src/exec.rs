@@ -1808,15 +1808,22 @@ impl Core {
             if !seen.insert(tag) {
                 continue;
             }
-            match self
-                .repos
-                .read_file_at(owner, project, base_ref, &format!("tags/{tag}.md"))
-                .await?
+            match crate::project_config::read_file(
+                &self.repos,
+                owner,
+                project,
+                base_ref,
+                &format!("tags/{tag}.md"),
+            )
+            .await?
             {
-                Some(content) => {
-                    block.push_str(&format!("\n### {tag}\n{content}\n"));
+                Some(file) => {
+                    block.push_str(&format!("\n### {tag}\n{}\n", file.content));
                 }
-                None => tracing::debug!("knowledge tag '{tag}' has no tags/{tag}.md at {base_ref}"),
+                None => tracing::debug!(
+                    "knowledge tag '{tag}' has no {} at {base_ref}",
+                    types::config_path(&format!("tags/{tag}.md"))
+                ),
             }
         }
         if block.is_empty() {

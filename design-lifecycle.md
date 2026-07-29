@@ -67,7 +67,7 @@ so the merge-shaped wrap-up (squash, conflict rework, merge gate) does not apply
 ### `wrap_up:` mode on the job type
 
 ```yaml
-# jobs/deploy-staging.yaml
+# .chug/jobs/deploy-staging.yaml
 name: deploy-staging
 wrap_up:
   type: none          # merge (default) | none
@@ -197,7 +197,7 @@ distinct from "let automation try once more."
 
 ## Decision: eval criteria are a floor, additive per job
 
-Evaluators are declared in `jobs/{type}.yaml` at `base_ref` — repo-versioned,
+Evaluators are declared in `.chug/jobs/{type}.yaml` at `base_ref` — repo-versioned,
 like GitHub Actions workflows. A full per-job override would let a job creator
 silently drop the type's merge-gate protections, so overrides are rejected.
 
@@ -223,7 +223,7 @@ everywhere (spec, UI, docs) should use them consistently:
   then one evaluation task per evaluator (spec §1.2's chronological task
   log). "Evaluator" names an evaluation *slot declared on the type*; the
   thing that executes is a task.
-- **Job type** — the declarative definition (`jobs/{type}.yaml`): which work
+- **Job type** — the declarative definition (`.chug/jobs/{type}.yaml`): which work
   task to run, which evaluation tasks judge it, wrap-up mode, budgets. The
   library UI shows these.
 
@@ -267,12 +267,12 @@ Job types (and job creation, and `_defaults.yaml`) reference packs with
 `use:`, GHA-style, alongside inline evaluators:
 
 ```yaml
-# jobs/implement-endpoint.yaml
+# .chug/jobs/implement-endpoint.yaml
 eval:
   - use: full-ci
   - name: human-approval
     type: human
-    prompt: prompts/eval/human-approval.md
+    prompt: .chug/prompts/eval/human-approval.md
 ```
 
 ```json
@@ -327,16 +327,16 @@ file** — and the evaluator schema already references both by path:
 eval:
   - name: ci
     type: command
-    run: ./tasks/ci.sh          # the reusable command task IS the script
+    run: ./.chug/tasks/ci.sh          # the reusable command task IS the script
   - name: review
     type: agent
-    prompt: tasks/review-code.md # the reusable agent task IS the markdown
+    prompt: .chug/tasks/review-code.md # the reusable agent task IS the markdown
 ```
 
-Convention: reusable tasks live under `tasks/` in the project repo
-(`tasks/*.sh` command tasks, `tasks/*.md` agent tasks), seeded by the
+Convention: reusable tasks live under `.chug/tasks/` in the project repo
+(`.chug/tasks/*.sh` command tasks, `.chug/tasks/*.md` agent tasks), seeded by the
 platform starter template. Reuse across job types is a shared path; a
-project-wide gate is the same line in `jobs/_defaults.yaml`. No `use:`
+project-wide gate is the same line in `.chug/jobs/_defaults.yaml`. No `use:`
 indirection, no TaskDef schema, no expansion pass — the file is the unit,
 git is the registry. What remains from the packs proposal, if ever needed:
 `needs:` ordering within a round, and per-evaluator images for
@@ -390,9 +390,9 @@ versions:
 
 | Suggestion | Lands as |
 |---|---|
-| "agents keep re-discovering X about this codebase" | a new/updated `tags/{tag}.md` knowledge tag |
-| "the work prompt caused Y misbehavior repeatedly" | an edit to `prompts/work/*.md` / `tasks/*.md` |
-| "this eval keeps passing broken Z" | a new evaluator / tightened instructions in `jobs/*.yaml` |
+| "agents keep re-discovering X about this codebase" | a new/updated `.chug/tags/{tag}.md` knowledge tag |
+| "the work prompt caused Y misbehavior repeatedly" | an edit to `.chug/prompts/work/*.md` / `.chug/tasks/*.md` |
+| "this eval keeps passing broken Z" | a new evaluator / tightened instructions in `.chug/jobs/*.yaml` |
 | "rework budget N is always exhausted / never touched" | budget tuning in the job type |
 | "operator had to intervene for W" | a doc/note (`docs/`, README) or a follow-up job |
 

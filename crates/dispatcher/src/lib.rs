@@ -29,6 +29,7 @@ pub mod interpret;
 pub mod invariants;
 pub mod launch_queue;
 pub mod platform_ops;
+pub mod project_config;
 pub mod ready;
 pub mod reconcile;
 pub mod release;

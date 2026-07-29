@@ -1,4 +1,4 @@
-// Generate `src/api/types.gen.ts` from the committed `schemas/api.schema.json`
+// Generate `src/api/types.gen.ts` from the committed `.chug/schemas/api.schema.json`
 // (emitted by `chuggernaut schema api`, spec §6.2) — the TypeScript half of the
 // generated wire contract, NORTH-STAR §2.
 //
@@ -25,7 +25,7 @@ import { compile } from 'json-schema-to-typescript'
 import * as prettier from 'prettier'
 
 const webRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
-const schemaPath = join(webRoot, '..', 'schemas', 'api.schema.json')
+const schemaPath = join(webRoot, '..', '.chug', 'schemas', 'api.schema.json')
 const outPath = join(webRoot, 'src', 'api', 'types.gen.ts')
 const samplesPath = join(webRoot, 'src', 'api', 'wire-samples.json')
 const samplesOutPath = join(webRoot, 'src', 'api', 'wire-samples.gen.ts')
@@ -33,7 +33,7 @@ const samplesOutPath = join(webRoot, 'src', 'api', 'wire-samples.gen.ts')
 const BANNER = `/**
  * GENERATED — DO NOT EDIT.
  *
- * The §6.2 HTTP surface as TypeScript, generated from schemas/api.schema.json
+ * The §6.2 HTTP surface as TypeScript, generated from .chug/schemas/api.schema.json
  * (itself generated from the Rust \`types\` crate by \`chuggernaut schema api\`).
  * Regenerate with \`npm run codegen\`; \`npm run codegen:check\` fails CI when
  * this file is stale.

@@ -1,0 +1,49 @@
+# Ship the platform to prod. A `deploy` job carries no commits — releasing it
+# from `main` runs .chug/tasks/deploy.sh, which ssh's into the Mini and kicks
+# update.sh at HEAD (== the released main). The effect is external, so the job
+# branch is scratch: wrap_up: none takes an eval-pass straight to Done with
+# nothing merged. See deploy/prod/README.md §3.
+name: deploy
+display_name: Deploy
+description: Ship the current main to prod (ssh → Mini update.sh). Effect is external; branch is scratch.
+image: chuggernaut/agent:prod       # has ssh + git (.chug/tasks/deploy.sh needs both)
+work:
+  type: command
+  run: ./.chug/tasks/deploy.sh
+  # Injected as an env var (the private-key value) into the work container only
+  # (spec §1.1 — secrets are scoped under work for command jobs). deploy.sh
+  # writes it to a 0600 tempfile for `ssh -i` (§8.2).
+  secrets: [MINI_DEPLOY_KEY]
+eval:
+  # The real deploy gate (spec §3.3 staged evaluation). stage 0 runs first and
+  # alone decides whether the release is healthy: deploy-health.sh curls the
+  # live platform over the tailnet from an eval container on the worker node.
+  # It needs curl, so it rides the agent:prod image.
+  - name: health
+    type: command
+    image: chuggernaut/agent:prod
+    run: ./.chug/tasks/deploy-health.sh
+    stage: 0
+    # The gate's second assertion — a live worker fleet (#267) — reads
+    # GET /api/v1/platform/fleet, which is platform-admin only. Injected into
+    # this eval container alone (spec §1.1), never into work. Provision it once:
+    # deploy/prod/README.md §3 "The health-gate API token" — until it is set,
+    # release validation rejects a deploy job outright ("secret ... is not
+    # set"), so the gate can never pass blind on an unverified fleet, the blind
+    # spot #267 exploited. The name avoids the reserved `CHUG_` prefix, which is
+    # a release-validation error in itself (spec §11).
+    secrets: [DEPLOY_HEALTH_API_TOKEN]
+  # The appended project ci default (.chug/jobs/_defaults.yaml) stays at stage 1 and
+  # only runs once health passes. A deploy job carries no commits, so ci sees an
+  # empty diff and glob-skips its cargo build in seconds (.chug/tasks/ci.sh) — it
+  # verifies nothing relevant here, but it's cheap and harmless, so it stays.
+wrap_up:
+  type: none                        # external effect; the branch is discarded unmerged
+resources:
+  # An ssh shell, not a build — but task_timeout must cover the Mini-side cargo
+  # build kicked by update.sh, which blocks until the deploy finishes.
+  cpu: 1
+  memory: 512Mi
+  task_timeout: 30m
+# work_retries stays at 0 (default): update.sh is idempotent, but a half-applied
+# deploy is the operator's call to re-run, not the dispatcher's.

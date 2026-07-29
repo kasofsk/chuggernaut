@@ -117,7 +117,7 @@
         "prompt": null,
         "provider": null,
         "required": true,
-        "run": "tasks/ci.sh",
+        "run": ".chug/tasks/ci.sh",
         "secrets": [
           "CI_TOKEN"
         ],
@@ -163,7 +163,7 @@
         "prompt": null,
         "provider": null,
         "required": true,
-        "run": "tasks/ci.sh",
+        "run": ".chug/tasks/ci.sh",
         "secrets": [
           "CI_TOKEN"
         ],
@@ -197,7 +197,7 @@
         "prompt": null,
         "provider": null,
         "required": null,
-        "run": "tasks/ci.sh",
+        "run": ".chug/tasks/ci.sh",
         "secrets": [],
         "stage": 0,
         "type": "command"
@@ -222,12 +222,12 @@
     ],
     "work": {
       "model": null,
-      "prompt": "prompts/work-code.md",
+      "prompt": ".chug/prompts/work-code.md",
       "provider": "claude",
       "review": {
         "iterations": 2,
         "model": null,
-        "prompt": "tasks/review-code.md",
+        "prompt": ".chug/tasks/review-code.md",
         "provider": null
       },
       "run": null,
@@ -265,7 +265,7 @@
     "kind": {
       "kind": "Agent",
       "model": "claude-opus-5",
-      "prompt": "prompts/work.md",
+      "prompt": ".chug/prompts/work.md",
       "provider": "claude"
     },
     "label": "work",

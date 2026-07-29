@@ -3,6 +3,7 @@
 //! Pure data — no I/O, no async. Everything downstream depends on this crate.
 
 pub mod channel;
+pub mod config_paths;
 pub mod deploy;
 pub mod duration;
 pub mod ingest;
@@ -22,6 +23,7 @@ pub mod worker;
 pub use channel::{
     AgentReply, ChannelEntry, ChannelOrigin, ChannelStatus, ChannelUpdate, OperatorMessage,
 };
+pub use config_paths::{CONFIG_DIR, config_entry_name, config_path, config_path_candidates};
 pub use deploy::{DeployLeg, DeployReport, LegStatus};
 pub use duration::{DurationParseError, parse_duration};
 pub use ingest::IngestEvent;

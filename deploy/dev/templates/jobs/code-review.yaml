@@ -10,7 +10,7 @@ wrap_up:
   type: none
 work:
   type: agent
-  prompt: prompts/work/code-review.md
+  prompt: .chug/prompts/work/code-review.md
 resources:
   task_timeout: 20m
 work_retries: 1

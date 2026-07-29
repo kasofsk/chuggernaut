@@ -5,8 +5,8 @@
 //! Intended use in a project repo:
 //!
 //! ```sh
-//! chuggernaut schema job-type > jobs/.job-type.schema.json
-//! chuggernaut schema defaults > jobs/.defaults.schema.json
+//! chuggernaut schema job-type > .chug/jobs/.job-type.schema.json
+//! chuggernaut schema defaults > .chug/jobs/.defaults.schema.json
 //! ```
 //!
 //! then point yaml-language-server at it from each file:
@@ -22,7 +22,7 @@
 //! The third kind describes the **§6.2 HTTP surface** instead of a file:
 //!
 //! ```sh
-//! chuggernaut schema api > schemas/api.schema.json
+//! chuggernaut schema api > .chug/schemas/api.schema.json
 //! ```
 //!
 //! It is the machine-readable half of the wire contract, and the source the
@@ -54,11 +54,11 @@ pub struct SchemaArgs {
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum SchemaKind {
-    /// jobs/{type}.yaml
+    /// .chug/jobs/{type}.yaml
     JobType,
-    /// jobs/_defaults.yaml
+    /// .chug/jobs/_defaults.yaml
     Defaults,
-    /// The §6.2 HTTP surface (schemas/api.schema.json)
+    /// The §6.2 HTTP surface (.chug/schemas/api.schema.json)
     Api,
     /// Example payloads for the §6.2 types (web/src/api/wire-samples.json)
     ApiSamples,
@@ -271,9 +271,9 @@ mod tests {
 
     /// The committed schemas (and the sample payloads the web round-trip test
     /// parses) must match what the current types generate. Regenerate with:
-    ///   cargo run -p chuggernaut -- schema job-type > schemas/job-type.schema.json
-    ///   cargo run -p chuggernaut -- schema defaults > schemas/defaults.schema.json
-    ///   cargo run -p chuggernaut -- schema api > schemas/api.schema.json
+    ///   cargo run -p chuggernaut -- schema job-type > .chug/schemas/job-type.schema.json
+    ///   cargo run -p chuggernaut -- schema defaults > .chug/schemas/defaults.schema.json
+    ///   cargo run -p chuggernaut -- schema api > .chug/schemas/api.schema.json
     ///   cargo run -p chuggernaut -- schema api-samples > web/src/api/wire-samples.json
     ///
     /// For `api` this is the whole enforcement of the §6.2 contract: a field
@@ -281,15 +281,15 @@ mod tests {
     /// does not re-emit it fails here rather than silently desynchronizing the
     /// generated TypeScript client from the wire. (The other half of that
     /// chain — TypeScript regenerated from the re-emitted schema — is
-    /// `npm run codegen:check`, which `tasks/ci.sh` runs for any diff touching
-    /// `schemas/` or `web/`.)
+    /// `npm run codegen:check`, which `.chug/tasks/ci.sh` runs for any diff touching
+    /// `.chug/schemas/` or `web/`.)
     #[test]
     fn committed_schemas_are_current() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         for (kind, file) in [
-            (SchemaKind::JobType, "schemas/job-type.schema.json"),
-            (SchemaKind::Defaults, "schemas/defaults.schema.json"),
-            (SchemaKind::Api, "schemas/api.schema.json"),
+            (SchemaKind::JobType, ".chug/schemas/job-type.schema.json"),
+            (SchemaKind::Defaults, ".chug/schemas/defaults.schema.json"),
+            (SchemaKind::Api, ".chug/schemas/api.schema.json"),
             (SchemaKind::ApiSamples, "web/src/api/wire-samples.json"),
         ] {
             let committed = std::fs::read_to_string(root.join(file))

@@ -42,7 +42,7 @@ on human evaluator tasks grew the abort checkbox. Eval **packs**
 proposed, not built — see design-lifecycle.md "Proposed: composable
 evaluation criteria". **Schema/authoring tooling**: `types` grew a `schema`
 feature (schemars 1.x derives on the §1.1 YAML types); `chuggernaut schema
-job-type|defaults` emits JSON Schema (canonical copies in `schemas/`, guarded
+job-type|defaults` emits JSON Schema (canonical copies in `.chug/schemas/`, guarded
 by a drift test in `cli`); `chuggernaut validate <files>` runs parse + field
 rules offline with sibling `_defaults.yaml` merged. Editor story: commit the
 schema into a project repo + yaml-language-server modeline (spec §1.1
@@ -54,7 +54,7 @@ YAML + parsed-with-defaults view) and a Library tab in the UI (Jobs |
 Library per project; type names in the jobs table deep-link to it).
 Vocabulary settled in design-lifecycle.md: jobs are graph nodes, **both work
 and evaluation run tasks**; UI copy now says "work task" / "evaluation
-tasks". Proposal extended: reusable **task definitions** (`tasks/{name}.yaml`
+tasks". Proposal extended: reusable **task definitions** (`.chug/tasks/{name}.yaml`
 + `use:` from both `work:` and `eval:`) generalize eval packs.
 **Job title/description (ticket identity)**: `Job.title`/`Job.description`
 (serde-defaulted), set at creation (API/UI), injected as the **§4.3 Job
@@ -83,11 +83,11 @@ the sshd-container binary path; `RepoManager::seed_files` commits via a temp
 worktree) → `POST /api/v1/projects` (platform admins only) → Home-page form.
 The **Code starter template is embedded in the binary**
 (`crates/platform-ops/templates/code/`, guarded by a template-validity unit test):
-`jobs/code.yaml` (agent implements the ticket, second agent reviews),
-`tasks/ci.sh` + `tasks/review-code.md`, `prompts/work/code.md`, README.
+`.chug/jobs/code.yaml` (agent implements the ticket, second agent reviews),
+`.chug/tasks/ci.sh` + `.chug/tasks/review-code.md`, `.chug/prompts/work/code.md`, README.
 **Reusable tasks DECIDED as files, not schema** (design-lifecycle.md
-"Resolution"): command task = script (`tasks/*.sh`), agent task = markdown
-(`tasks/*.md`); `run:`/`prompt:` already reference them by path; git is the
+"Resolution"): command task = script (`.chug/tasks/*.sh`), agent task = markdown
+(`.chug/tasks/*.md`); `run:`/`prompt:` already reference them by path; git is the
 registry. The `use:`/TaskDef proposal is dropped. NOTE: owner in
 `{owner}/{name}` is a bare namespace string — no org entity, no user↔owner
 link; users via `admin user create`, roles via the user record only. Org
@@ -145,11 +145,11 @@ cards link to it with `?type=` prefill). `JobType` gained
 the type picker is an autocomplete showing "Display — description",
 defaulting to the Feature type. Title/description placeholders removed.
 **Knowledge tags are repo-versioned** (decision): a tag's meaning lives in
-`tags/{tag}.md` on the default branch. `req.tags.list` + `GET .../tags`
+`.chug/tags/{tag}.md` on the default branch. `req.tags.list` + `GET .../tags`
 enumerate the stems; the create form shows them as toggleable chips (plus
 free-text extras with datalist suggestions). Demo repo seeded with
 backend/frontend/style tags. §4.4 upfront injection is now
-**wired**: union of type `knowledge:` + job tags → `tags/{tag}.md` at
+**wired**: union of type `knowledge:` + job tags → `.chug/tags/{tag}.md` at
 `base_ref` → `## Project Knowledge` system-prompt block, work agents only
 (missing files skipped; under test). chuggernaut-ko/global buckets stay
 deferred for cross-project knowledge. A **Tags tab** in the UI browses each
@@ -176,7 +176,7 @@ command eval → squash-merge to `main` in ~10s over the HTTP API.
 | Crate | Status | Notes |
 |---|---|---|
 | `types` | ✅ done | Full domain model incl. `ReviewSpec`, `TaskPhase::MergeGate`, `StepRecord`, `ProjectDefaults`, `Task.evaluator`, shared duration parser |
-| `store` | ✅ done (core) | `NatsStore` + typed accessors (jobs/tasks/steps/counters/rdeps), topology creation, bounded-retry request, `subscribe_requests`, `read_subject_after`, `read_stream`, `AgeSecretStore`, `ArtifactStore` (object store + gzip + age) | 
+| `store` | ✅ done (core) | `NatsStore` + typed accessors (.chug/jobs/tasks/steps/counters/rdeps), topology creation, bounded-retry request, `subscribe_requests`, `read_subject_after`, `read_stream`, `AgeSecretStore`, `ArtifactStore` (object store + gzip + age) | 
 | `vcs` | ✅ done | Pre-existing + `create_squash_candidate` / `advance_default` (merge gate) |
 | `container` | ✅ done | `DockerBackend` over bollard 0.19: fleet nodes, label-counted slot placement, put-archive injection, `logs()` capture, `{node}/{id}` routing. `k8s.rs` still stub |
 | `dispatcher` | ✅ done (orchestration) | Everything in spec Parts 2–3: lifecycle, execution, rework, merge gate, human tasks, reconciliation, scans, NATS submit handlers |
@@ -193,7 +193,7 @@ command eval → squash-merge to `main` in ~10s over the HTTP API.
 
 ## What works end to end (all under test)
 
-- Create → release (3-pass §2.2 validation incl. `jobs/_defaults.yaml` merge)
+- Create → release (3-pass §2.2 validation incl. `.chug/jobs/_defaults.yaml` merge)
   → Ready/Blocked → Work (branch at pinned `base_ref`, launch-time
   validation, real container or provider launch) → Evaluation fan-out
   (command exit-code verdicts + `eval-result.json`, agent `submit_eval`-or-
@@ -254,7 +254,7 @@ command eval → squash-merge to `main` in ~10s over the HTTP API.
   full loop over HTTP against a real NATS + core — 401s, login (argon2 vs
   users KV) → JWT cookie → `/auth/me`, create job (201) → 422 release with
   the §6.5 `errors` envelope for a bad type → release → human work task in
-  `/tasks/pending` → resolve → human eval task → resolve → Done; jobs/graph/
+  `/tasks/pending` → resolve → human eval task → resolve → Done; .chug/jobs/graph/
   diff/task-log reads en route; SSE stream replays the event trail from seq 0
   with `id:` carrying the stream sequence.
 - **Web UI (`web`)**: builds clean under strict TS (`npm run build`);

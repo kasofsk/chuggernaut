@@ -2,7 +2,7 @@
 //! dependency-graph half lives in `boundary_guard.rs` (refactor-plan A4).
 //!
 //! `clippy::too_many_lines`, `unwrap_used` and `expect_used` are all
-//! allow-by-default, so they only reach `tasks/ci.sh`'s
+//! allow-by-default, so they only reach `.chug/tasks/ci.sh`'s
 //! `cargo clippy --workspace --all-targets -- -D warnings` through two pieces
 //! of configuration that nothing else in the build would miss if they went
 //! away: the `[workspace.lints.clippy]` table, and each member opting in with

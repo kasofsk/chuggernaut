@@ -1,5 +1,5 @@
 //! Release validation, the ref-reading half (spec §2.2): loading and merging
-//! `jobs/*.yaml` at a git ref, and checking prompt paths / KV names. The pure
+//! `.chug/jobs/*.yaml` at a git ref, and checking prompt paths / KV names. The pure
 //! half — the validation-error vocabulary, graph wiring rules, and the
 //! additive-evaluator merge — lives in `chuggernaut_domain::release`
 //! (refactor-plan C1) and is re-exported here so callers keep one
@@ -18,8 +18,11 @@ pub use chuggernaut_domain::release::{
 use types::{Evaluator, EvaluatorType, Job, JobType, ProjectDefaults, WorkType};
 use vcs::RepoManager;
 
-/// Load `jobs/{type}.yaml` at `reference`, apply `jobs/_defaults.yaml` if
-/// present, and run the §1.1 field rules. Returns the merged job type on
+/// The project-wide defaults overlay, config-root-relative (§1.1).
+const DEFAULTS_RELATIVE: &str = "jobs/_defaults.yaml";
+
+/// Load `.chug/jobs/{type}.yaml` at `reference`, apply `.chug/jobs/_defaults.yaml`
+/// if present, and run the §1.1 field rules. Returns the merged job type on
 /// success so callers validate exactly what will execute.
 pub async fn load_job_type(
     repo: &RepoManager,
@@ -29,8 +32,9 @@ pub async fn load_job_type(
     type_name: &str,
     job_seq: Option<u64>,
 ) -> Result<JobType, Vec<ValidationError>> {
-    let path = format!("jobs/{type_name}.yaml");
-    let Some(content) = read(repo, owner, project, reference, &path).await? else {
+    let relative = format!("jobs/{type_name}.yaml");
+    let path = types::config_path(&relative);
+    let Some(content) = read_config(repo, owner, project, reference, &relative).await? else {
         return Err(vec![ValidationError::new(
             job_seq,
             "type",
@@ -79,13 +83,14 @@ pub async fn load_job_type(
         )]);
     }
 
-    let merged = match read(repo, owner, project, reference, "jobs/_defaults.yaml").await? {
+    let defaults_path = types::config_path(DEFAULTS_RELATIVE);
+    let merged = match read_config(repo, owner, project, reference, DEFAULTS_RELATIVE).await? {
         Some(defaults_yaml) => {
             let defaults = ProjectDefaults::parse(&defaults_yaml).map_err(|e| {
                 vec![ValidationError::new(
                     None,
                     "eval",
-                    format!("'jobs/_defaults.yaml' failed to parse: {e}"),
+                    format!("'{defaults_path}' failed to parse: {e}"),
                 )]
             })?;
             job_type
@@ -200,6 +205,27 @@ pub async fn static_errors(
         }
     }
     Ok(errs)
+}
+
+/// [`project_config::read_file`] in the validation-error vocabulary: the config
+/// root resolution lives there, the diagnostic wrapping here.
+async fn read_config(
+    repo: &RepoManager,
+    owner: &str,
+    project: &str,
+    reference: &str,
+    relative: &str,
+) -> Result<Option<String>, Vec<ValidationError>> {
+    crate::project_config::read_file(repo, owner, project, reference, relative)
+        .await
+        .map(|found| found.map(|file| file.content))
+        .map_err(|e| {
+            vec![ValidationError::new(
+                None,
+                relative.to_string(),
+                format!("vcs error reading '{relative}': {e}"),
+            )]
+        })
 }
 
 async fn read(

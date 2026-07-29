@@ -2,7 +2,7 @@
 // (same-origin); a 401 anywhere bounces to /login via the caller.
 //
 // The wire types are GENERATED: `api/types.gen.ts` comes from the Rust `types`
-// crate via `schemas/api.schema.json` (NORTH-STAR §2), so a backend field that
+// crate via `.chug/schemas/api.schema.json` (NORTH-STAR §2), so a backend field that
 // changes shape is a TypeScript error here instead of an `undefined` at
 // runtime. Regenerate with `npm run codegen`; CI fails on a stale file.
 //
@@ -218,8 +218,10 @@ export const api = {
       'GET',
       `/api/v1/projects/${owner}/${project}/file?path=${encodeURIComponent(path)}`,
     ),
+  /** knowledge tags, each with the path it resolved to — read a tag's contents
+   *  back by that path; `file` reads verbatim and both layouts exist (spec §1.1) */
   tags: (owner: string, project: string) =>
-    req<string[]>('GET', `/api/v1/projects/${owner}/${project}/tags`),
+    req<{ name: string; path: string }[]>('GET', `/api/v1/projects/${owner}/${project}/tags`),
   jobType: (owner: string, project: string, name: string) =>
     req<JobTypeDetail>('GET', `/api/v1/projects/${owner}/${project}/job-types/${encodeURIComponent(name)}`),
   jobs: (owner: string, project: string) =>

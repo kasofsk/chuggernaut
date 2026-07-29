@@ -111,7 +111,7 @@ export function Home() {
 
 /**
  * Platform-admin project creation: bare repo, SSH hook, and the Code starter
- * template (jobs/code.yaml + reusable tasks/) seeded as the first commit.
+ * template (.chug/jobs/code.yaml + reusable .chug/tasks/) seeded as the first commit.
  */
 function NewProject({ onCreated }: { onCreated: (slug: string) => void }) {
   const [owner, setOwner] = useState('')
@@ -125,7 +125,7 @@ function NewProject({ onCreated }: { onCreated: (slug: string) => void }) {
       <p className="dim">
         Creates the repo and seeds it with the Code starter (an agent
         implements the job ticket, a second agent reviews it) plus reusable
-        tasks under <code>tasks/</code>. The owner is a namespace (org-style
+        tasks under <code>.chug/tasks/</code>. The owner is a namespace (org-style
         grouping label), not a user — users and roles are managed separately.
       </p>
       <form

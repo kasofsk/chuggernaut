@@ -73,7 +73,8 @@ export function DraftEditor({
   const [allJobs, setAllJobs] = useState<Job[]>([])
   useEffect(() => {
     api.jobTypes(owner, project).then(setJobTypes, () => {})
-    api.tags(owner, project).then(setAvailTags, () => {})
+    // the picker names tags; the paths they resolved to are for readers
+    api.tags(owner, project).then((ts) => setAvailTags(ts.map((t) => t.name)), () => {})
     api.jobs(owner, project).then(setAllJobs, () => {})
   }, [owner, project])
 
@@ -363,7 +364,7 @@ export function DraftEditor({
       <div className={fieldClass('knowledge_tags')}>
         <span>
           Knowledge tags{' '}
-          <span className="dim">(a tag's meaning lives in tags/&#123;tag&#125;.md)</span>{wiz('knowledge_tags')}
+          <span className="dim">(a tag's meaning lives in .chug/tags/&#123;tag&#125;.md)</span>{wiz('knowledge_tags')}
         </span>
         {tagOptions.length > 0 ? (
           <div className="tag-row">

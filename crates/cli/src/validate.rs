@@ -20,7 +20,8 @@ use types::{JobType, ProjectDefaults};
 
 #[derive(Parser)]
 pub struct ValidateArgs {
-    /// YAML files to validate: jobs/{type}.yaml and/or jobs/_defaults.yaml.
+    /// YAML files to validate: .chug/jobs/{type}.yaml and/or
+    /// .chug/jobs/_defaults.yaml.
     /// A job type with a `_defaults.yaml` sibling is validated post-merge,
     /// exactly as the dispatcher loads it.
     #[arg(required = true)]

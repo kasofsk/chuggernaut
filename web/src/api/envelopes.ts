@@ -38,7 +38,7 @@ export interface JobCriteria {
 
 /** GET .../job-types — the type picker's vocabulary. */
 export interface JobTypeSummary {
-  /** file stem — the wire identifier (jobs/{name}.yaml) */
+  /** file stem — the wire identifier (.chug/jobs/{name}.yaml) */
   name: string
   /** human-facing name; falls back to the stem */
   display_name: string
@@ -51,9 +51,12 @@ export interface JobTypeDetail {
   name: string
   /** default-branch HEAD the definition was read at */
   ref: string
+  /** the path the definition resolved to — .chug/jobs/{name}.yaml, or the
+   *  repo-root layout for a project that predates the config root */
+  path: string
   /** the file as authored */
   yaml: string
-  /** parsed, with jobs/_defaults.yaml merged — what actually runs; null on parse failure */
+  /** parsed, with .chug/jobs/_defaults.yaml merged — what actually runs; null on parse failure */
   job_type: JobType | null
   errors: string[]
 }

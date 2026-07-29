@@ -30,7 +30,7 @@ function task(result: TaskResult | null): Task {
     project: 'chuggernaut',
     phase: 'Work',
     cycle: 0,
-    kind: { kind: 'Command', run: 'tasks/deploy.sh' },
+    kind: { kind: 'Command', run: '.chug/tasks/deploy.sh' },
     state: 'Done',
     attempt: 1,
     evaluator: null,

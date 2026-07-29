@@ -1,5 +1,5 @@
 //! STYLE.md Tier 1 dependency-boundary guards, enforced on the existing
-//! `cargo test --workspace` in `tasks/ci.sh` — same route as the
+//! `cargo test --workspace` in `.chug/tasks/ci.sh` — same route as the
 //! `committed_schemas_are_current` drift test (refactor-plan A3).
 //!
 //! The crate-graph rules are read straight off `cargo metadata`'s resolve

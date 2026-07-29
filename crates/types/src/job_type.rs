@@ -163,7 +163,7 @@ pub struct WrapUpSpec {
     /// an evaluator (`Command · publish` instead of a bare `Command`, job #146).
     /// Validated like an evaluator name. Unset → derived from the mode (see
     /// [`WrapUpSpec::label`]): a command wrap-up takes its script's basename
-    /// (`tasks/web-publish.sh` → `web-publish`).
+    /// (`.chug/tasks/web-publish.sh` → `web-publish`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Optional post-merge command (spec §3.2, design-lifecycle.md wrap-up
@@ -657,7 +657,7 @@ impl JobType {
         self.min_dispatcher.filter(|&need| need > dispatcher_epoch)
     }
 
-    /// Append project default evaluators (`jobs/_defaults.yaml`, spec §1.1) and
+    /// Append project default evaluators (`.chug/jobs/_defaults.yaml`, spec §1.1) and
     /// apply the project-level default `model` (spec §12.4). An evaluator name
     /// collision between the defaults and this job type is an error. Validate
     /// the merged result with [`JobType::validate`] — image fallback rules apply
@@ -699,7 +699,7 @@ impl JobType {
     }
 }
 
-/// Project-wide defaults, `jobs/_defaults.yaml` (spec §1.1, §12.4). The `eval`
+/// Project-wide defaults, `.chug/jobs/_defaults.yaml` (spec §1.1, §12.4). The `eval`
 /// list is appended to every job type's evaluators — how a project gates all
 /// changes on an evergreen suite without per-job-type declarations. `model`
 /// sets a project-level default agent model layered between the platform
@@ -732,12 +732,12 @@ name: implement-endpoint
 image: registry.acme.com/agents/impl:latest
 work:
   type: agent
-  prompt: prompts/work/implement-endpoint.md
+  prompt: .chug/prompts/work/implement-endpoint.md
   provider: claude
   model: claude-sonnet-4-6
   secrets: [GITHUB_TOKEN]
   review:
-    prompt: prompts/review/implement-endpoint.md
+    prompt: .chug/prompts/review/implement-endpoint.md
     model: claude-sonnet-4-6
     iterations: 5
 resources:
@@ -754,17 +754,17 @@ eval:
     run: cargo test --no-fail-fast
   - name: security-review
     type: agent
-    prompt: prompts/eval/security-review.md
+    prompt: .chug/prompts/eval/security-review.md
     provider: claude
     model: claude-opus-4-6
     secrets: [GITHUB_TOKEN]
   - name: architecture-review
     type: agent
-    prompt: prompts/eval/architecture-review.md
+    prompt: .chug/prompts/eval/architecture-review.md
     required: false
   - name: human-approval
     type: human
-    prompt: prompts/eval/human-approval.md
+    prompt: .chug/prompts/eval/human-approval.md
 knowledge:
   - rust
   - rest-api
@@ -1036,7 +1036,7 @@ eval:
 name: review-docs
 work:
   type: human
-  prompt: prompts/work/review-docs.md
+  prompt: .chug/prompts/work/review-docs.md
 eval:
   - name: linkcheck
     type: command
@@ -1461,10 +1461,10 @@ rework_budget: 1
         // repo so an edit to either file that breaks the schema fails here, at
         // the lowest tier, instead of at a live job launch.
         let defaults =
-            ProjectDefaults::parse(include_str!("../../../jobs/_defaults.yaml")).unwrap();
+            ProjectDefaults::parse(include_str!("../../../.chug/jobs/_defaults.yaml")).unwrap();
         for (name, yaml) in [
-            ("design", include_str!("../../../jobs/design.yaml")),
-            ("docs", include_str!("../../../jobs/docs.yaml")),
+            ("design", include_str!("../../../.chug/jobs/design.yaml")),
+            ("docs", include_str!("../../../.chug/jobs/docs.yaml")),
         ] {
             let jt =
                 JobType::parse(yaml).unwrap_or_else(|e| panic!("{name}.yaml parse error: {e}"));

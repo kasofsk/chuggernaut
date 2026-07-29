@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProjectDefaults",
+  "description": "Project-wide defaults, `.chug/jobs/_defaults.yaml` (spec §1.1, §12.4). The `eval`\nlist is appended to every job type's evaluators — how a project gates all\nchanges on an evergreen suite without per-job-type declarations. `model`\nsets a project-level default agent model layered between the platform\ndefault and job-type declarations (spec §12.4).",
+  "type": "object",
+  "properties": {
+    "eval": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Evaluator"
+      }
+    },
+    "model": {
+      "description": "Project-level default agent model (spec §12.4). Applied to the work\nagent and agent evaluators that do not declare their own `model`.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "Evaluator": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "description": "command/agent: optional, falls back to top-level image; one of the two required.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required": {
+          "description": "Default true; false = advisory.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "run": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secrets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "stage": {
+          "description": "Staged evaluation ordering (spec §3.3): evaluators run in ascending\n`stage` order; within a stage they fan out in parallel. A later stage's\ntasks are created only after every *required* evaluator in the prior\nstage passes. Default 0 — a single-stage job is byte-for-byte the\nunstaged behavior. Non-negative (`u32`, enforced at parse).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "type": {
+          "$ref": "#/$defs/EvaluatorType"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "EvaluatorType": {
+      "type": "string",
+      "enum": [
+        "command",
+        "agent",
+        "human"
+      ]
+    },
+    "Provider": {
+      "type": "string",
+      "enum": [
+        "claude",
+        "codex"
+      ]
+    }
+  }
+}

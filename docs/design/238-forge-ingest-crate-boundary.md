@@ -110,7 +110,7 @@ as events elsewhere in the tree, and matching that keeps one story.
 2. Keep the context's directory and charter where C8 put them. They are
    accurate — no member drives a transition — and the charter is what H1/H2
    are measured against.
-3. The C9 machinery is reusable as-is: `tasks/ci.sh`'s registry gate now walks
+3. The C9 machinery is reusable as-is: `.chug/tasks/ci.sh`'s registry gate now walks
    any context crate's `src/`, and `boundary_guard.rs` has the
    allowed-edge-list shape (`platform_ops_declares_only_its_charter_edges`)
    that a forge-ingest crate would copy with a different constant.

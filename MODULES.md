@@ -57,7 +57,8 @@ one surface.
 | --- | --- | --- |
 | `core` | Single-writer event loop: owns all mutable state; every other slice is `impl Core` reached via the `Msg` channel. | §3.1 |
 | `invariants` | Executable invariant checker: pure/total read-only `CoreState` view → `Vec<Violation>`; negative-space assertions run after every message in tests. | §1.4, §2.1, §3.1, §3.2, §3.3 |
-| `release` | Release validation, ref-reading half: `jobs/*.yaml` loading + prompt/KV checks through the `vcs` port; re-exports the pure half. | §2.2, §14 |
+| `project_config` | Where a project's repo-versioned chuggernaut config lives and how it is read: resolves a config-root-relative path against `.chug/` before the pre-`.chug` repo-root layout, and lists a config directory's entries from a repo tree as `{ stem, path }` — the stem plus the location it resolved to. | §1.1, §2.2, §4.4 |
+| `release` | Release validation, ref-reading half: `.chug/jobs/*.yaml` loading + prompt/KV checks through the `vcs` port; re-exports the pure half. | §2.2, §14 |
 | `ready` | Ready-phase shim: gathers the view, applies `decide/ready`'s transitions and effects, then does the bookkeeping its step names — queue admission, a Draft batch's membership commit, the §2.2 re-validation hop, the Work hand-off. | §2.1, §2.2, §3.1 |
 | `exec` | Work-execution shim: gathers the view, applies `decide/work`'s transitions and effects, then performs the I/O its step names — container launch, crash recover-or-reset, the finish-line branch read, the Evaluation hand-off. | §3.2 |
 | `eval` | Evaluation shim: the launch/monitor half (evaluator prompts, the §3.3 re-review context, the pre-eval rebase) driving `decide/eval`, plus the merge-gate landing fold driving `decide/merge_gate` — both gather view → decide → swap state → apply → interpret, outcomes re-entering as events. | §3.3, §3.2 |

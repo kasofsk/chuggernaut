@@ -1,0 +1,39 @@
+# A `docs` job maintains the project wiki: reference pages that teach, under
+# `docs/`. The repo's docs tree IS the wiki (spec §9.4). The agent writes/edits
+# markdown; two stages gate it through the normal merge path:
+#   stage 0 — an agent reviewer (.chug/tasks/review-docs.md) spot-checks claims against
+#             the current code, and judges placement/navigation and whether the
+#             page fits its audience.
+#   stage 1 — the shared doc lint (.chug/tasks/doc-lint.sh: markdown well-formedness,
+#             intra-repo link resolution, best-effort code-path existence) runs
+#             alongside the appended project `ci` default (.chug/jobs/_defaults.yaml).
+#             `ci` self-skips a doc-only diff in seconds via its .chug/tasks/ci.sh glob
+#             matcher (no crates/** change → no cargo build), so stage 1 is cheap.
+# No cargo build is ever needed here, so resources are modest.
+name: docs
+display_name: Docs
+description: Write or update a reference/wiki page under docs/; agent-reviewed, doc-lint gated.
+image: chuggernaut/agent-rust:prod
+knowledge:
+  - north-star-blessed-practices
+work:
+  type: agent
+  prompt: .chug/prompts/work/docs.md
+eval:
+  - name: review-docs
+    type: agent
+    prompt: .chug/tasks/review-docs.md
+    stage: 0
+  # Shared with .chug/jobs/design.yaml. Image falls back to the top-level image.
+  - name: doc-lint
+    type: command
+    run: ./.chug/tasks/doc-lint.sh
+    stage: 1
+resources:
+  cpu: 1
+  memory: 1Gi
+  # Prose plus an agent review and two fast shell checks — no workspace build.
+  task_timeout: 30m
+work_retries: 1
+eval_retries: 1
+rework_budget: 2

@@ -1,0 +1,28 @@
+# "Code" — the platform starter job type: a coding agent implements the job
+# ticket, and an independent coding agent reviews the change against the same
+# ticket. Rework findings flow back to the author automatically.
+#
+# This file is yours: edit it, change the image to your project's dev image,
+# and uncomment the ci evaluator once .chug/tasks/ci.sh runs your real tests.
+name: code
+display_name: Code
+description: A coding agent implements the job ticket; a second coding agent reviews the change against it.
+image: chuggernaut/agent:dev
+work:
+  type: agent
+  prompt: .chug/prompts/work/code.md
+resources:
+  task_timeout: 30m
+work_retries: 1
+eval_retries: 1
+rework_budget: 2
+eval:
+  # Reusable tasks are plain files: a command task is a script, an agent task
+  # is a markdown instructions file. Point run:/prompt: at them.
+  # - name: ci
+  #   type: command
+  #   run: ./.chug/tasks/ci.sh
+  - name: review
+    type: agent
+    prompt: .chug/tasks/review-code.md
+  

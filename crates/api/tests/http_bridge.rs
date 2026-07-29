@@ -512,6 +512,9 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(jt["name"], "manual");
+    // This repo predates the config root, so the reply names the file it
+    // actually resolved to — not the canonical `.chug/` path (spec §1.1).
+    assert_eq!(jt["path"], "jobs/manual.yaml");
     assert!(jt["yaml"].as_str().unwrap().contains("type: human"), "{jt}");
     assert_eq!(jt["job_type"]["work"]["type"], "human");
     assert_eq!(jt["job_type"]["wrap_up"]["type"], "merge");
@@ -525,7 +528,9 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    // Tag vocabulary: tags/*.md stems at default HEAD.
+    // Tag vocabulary at default HEAD, each with the path it resolved to — the
+    // UI reads a tag's contents back by that path, and this repo keeps its tags
+    // at the repo root.
     let (status, tags, _) = call(
         &router,
         "GET",
@@ -535,7 +540,10 @@ async fn http_bridge_end_to_end() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(tags, serde_json::json!(["rust"]));
+    assert_eq!(
+        tags,
+        serde_json::json!([{ "name": "rust", "path": "tags/rust.md" }])
+    );
 
     // Release job 1 → human work task lands in the inbox.
     let (status, released, _) = call(

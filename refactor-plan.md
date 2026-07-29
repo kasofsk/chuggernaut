@@ -17,8 +17,8 @@ dispatcher module (zero awaits); `eval.rs`/`exec.rs`/`core.rs`/`handlers.rs`
 carry ~640 await sites between them; no `Effect` enum, invariant checker, or
 boundary lint exists yet; the web `api.ts` is a hand-written 754-line mirror
 of the Rust `types` crate; schemars codegen is already a proven, drift-tested
-pattern (`crates/cli/src/schema.rs` → `schemas/*.schema.json`); CI is
-`tasks/ci.sh`, run as the job evaluator, which executes
+pattern (`crates/cli/src/schema.rs` → `.chug/schemas/*.schema.json`); CI is
+`.chug/tasks/ci.sh`, run as the job evaluator, which executes
 `cargo test --workspace` on Rust-touching diffs.
 
 Read that paragraph as a **dated snapshot, not a current-state claim** — the
@@ -100,9 +100,9 @@ Two homes, both already-established patterns:
   only `store` depends on `async-nats`; `api` never depends on `dispatcher`
   outside dev-deps; `types` stays sync; zero `.await` in `state.rs` (later:
   all of `domain/`). These ride the existing `cargo test --workspace` in
-  `tasks/ci.sh` — same enforcement route as the `committed_schemas_are_current`
+  `.chug/tasks/ci.sh` — same enforcement route as the `committed_schemas_are_current`
   drift test.
-- The `MODULES.md`-completeness check goes in `tasks/ci.sh` itself, **before
+- The `MODULES.md`-completeness check goes in `.chug/tasks/ci.sh` itself, **before
   the Rust early-exit** (the `config_schema_gate` precedent): a docs-only diff
   skips cargo, so a registry check living only in Rust tests would be
   silently bypassed by exactly the changes most likely to break it.
@@ -110,7 +110,7 @@ Two homes, both already-established patterns:
 **A4. `clippy.toml` + the Tier 1 lint denies** *(code, small — sibling of A3)*
 A3 landed the dependency-graph half of STYLE.md Tier 1 and left the clippy
 half unfiled. `clippy::too_many_lines`, `unwrap_used` and `expect_used` are
-all allow-by-default, so `tasks/ci.sh`'s `cargo clippy --workspace
+all allow-by-default, so `.chug/tasks/ci.sh`'s `cargo clippy --workspace
 --all-targets -- -D warnings` could not see them and the three rules were
 reviewer-honour-system. A4 adds `clippy.toml` (`too-many-lines-threshold =
 70`) plus `[workspace.lints.clippy]` denies in the root `Cargo.toml`, with
@@ -211,7 +211,7 @@ per `req.*` subject family (`container`, `worker`, `status`, `projects`,
 `origin`, `access`, `jobs` + `jobs_reply`, `graph`, `tasks`, `jobtypes`,
 `repo`) plus the shared §6.5 `reply` envelope; the directory's `mod.rs` is wiring
 only. Each module carries a contract header and a `MODULES.md` row, and the
-registry gate in `tasks/ci.sh` now walks nested dispatcher modules the way it
+registry gate in `.chug/tasks/ci.sh` now walks nested dispatcher modules the way it
 already walked the domain crate's.
 
 **C8. Named contexts** *(code, small, independent)*
@@ -249,7 +249,7 @@ gathers those off `Core`'s fields and decides nothing. The base-snapshot
 mapping went the other way, to `config.rs`, since it reads dispatcher config
 and this crate's `CHUG_GIT_SHA`. `boundary_guard.rs` pins the context's
 allowed edges (the port crates, never `dispatcher`, dev-deps included) and
-asserts the reverse edge so the arrow stays one-way; the `tasks/ci.sh`
+asserts the reverse edge so the arrow stays one-way; the `.chug/tasks/ci.sh`
 registry gate now walks any context crate's `src/`.
 
 **forge-ingest did not, deliberately** — `docs/design/238-forge-ingest-crate-boundary.md`
@@ -266,7 +266,7 @@ an "interface" wider than the code it replaces. It is a follow-on ticket
 Extend the existing gated pattern (`schema` feature, currently only on
 `job_type.rs`) to the ~40 types the API serializes (`Job`, `Task`,
 `QueueSnapshot`, `FleetStatus`, …) plus `crates/api`'s few request-body
-structs. Emit via a new `chuggernaut schema api` subcommand into `schemas/`,
+structs. Emit via a new `chuggernaut schema api` subcommand into `.chug/schemas/`,
 guarded by the same committed-schema drift test.
 
 **D2. TS codegen + swap** *(code, medium — depends on D1)*
@@ -275,7 +275,7 @@ the ~580 hand-mirrored interface lines in `api.ts`; the ~41 one-liner method
 bodies stay hand-written. Exit gate: `tsc -b` green on generated types plus a
 round-trip test (serialize from Rust, parse in TS). **Landed** — via
 `json-schema-to-typescript` behind `npm run codegen`, with `codegen:check` in
-the web stage of `tasks/ci.sh` (which `schemas/**` now triggers) and the round
+the web stage of `.chug/tasks/ci.sh` (which `.chug/schemas/**` now triggers) and the round
 trip over `chuggernaut schema api-samples` payloads. `api.ts` is 352 lines; the
 envelopes with no Rust type moved to `web/src/api/envelopes.ts`, which is the
 remaining hand-mirrored surface.
@@ -286,7 +286,7 @@ remaining hand-mirrored surface.
 No ESLint exists today; add it with the import-boundary rules from day one
 (`ui/` can't import `data/`; only `data/` imports `api/`) — as `warn` while
 files still violate them, flipped to `error` per path as migration proceeds.
-E1 also owns the **web section of `tasks/ci.sh`**: the `npm run format:check`
+E1 also owns the **web section of `.chug/tasks/ci.sh`**: the `npm run format:check`
 that A4 wired into `web/package.json` has no caller yet, and turning it green
 means a one-time `prettier --write` over the 55 files that currently fail it.
 

@@ -89,7 +89,7 @@ Two refinements the template settled:
 - `transitions` is first-class — `Vec<Transition>` (the decision-stamped job
   record + target state) — and the shim applies transitions through
   `Core::set_state` **before** running the effects: the §2.1 record is the
-  committed decision, tasks/events are its downstream artifacts. A crash
+  committed decision, .chug/tasks/events are its downstream artifacts. A crash
   between the two is healed by restart reconciliation re-deriving the
   artifacts from the stamped record (`heal_missing_escalation_task`) —
   recovery owns crash consistency, so deciders never encode write

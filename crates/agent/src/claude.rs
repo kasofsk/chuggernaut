@@ -324,7 +324,7 @@ pub fn settings_json(profile: PermissionProfile) -> String {
                 "TodoWrite",
                 "mcp__chuggernaut-channel",
                 // Reading the change under review. `git diff`/`log`/`show` are
-                // what tasks/review-*.md actually ask for. The task container
+                // what .chug/tasks/review-*.md actually ask for. The task container
                 // clones `--single-branch` (crates/container), so the base ref
                 // is absent until fetched — `git fetch`/`merge-base`/`rev-parse`
                 // are what make the prompts' `git diff $BASE_BRANCH...HEAD`
