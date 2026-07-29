@@ -6,7 +6,7 @@
 
 use crate::duration::parse_duration;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 /// The top-level job-type struct deliberately does **not** carry
@@ -58,6 +58,24 @@ pub struct JobType {
     pub knowledge: Vec<String>,
     #[serde(default)]
     pub vars: Vec<String>,
+    /// The values a job of this type accepts (spec §1.1, design #311). Empty for
+    /// every job type that declares none, which is every job type that predates
+    /// the feature.
+    ///
+    /// An input is a **value delivered to a running container**, never a
+    /// substitution into this file: nothing here can select an image, an
+    /// evaluator, a secret or a `run:` string, so the job type resolves without
+    /// reading a job's inputs at all (#311 Decision 1). Parameterization happens
+    /// inside the work, where `deploy.sh` reads `$CHUG_INPUT_SERVICE`.
+    ///
+    /// A non-empty list requires [`JobType::min_dispatcher`] — see
+    /// [`JobType::validate`]. To an N-1 dispatcher `inputs:` is just an unknown
+    /// top-level field it tolerates (captured into [`JobType::unknown`]), so the
+    /// declaration would be silently ignored and the container would launch with
+    /// no value at all; `min_dispatcher` is a field that dispatcher *does* parse,
+    /// which is why the skew gate is structural rather than left to authorship.
+    #[serde(default)]
+    pub inputs: Vec<Input>,
     /// Minimum dispatcher schema epoch this config requires (spec §14). When
     /// set and greater than the running dispatcher's
     /// [`crate::version::CONFIG_SCHEMA_EPOCH`], the config is ahead of the
@@ -296,6 +314,68 @@ impl Placement {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     }
+}
+
+/// One declared job input (spec §1.1, design #311 Decision 2): a name, a kind,
+/// and the narrowing that makes a supplied value safe to hand to a script.
+///
+/// A nested block, so it keeps `deny_unknown_fields` like every other
+/// gate-relevant block (§14.2): an ignored key here could silently drop a
+/// `pattern`, and `pattern` is a validation control, not decoration.
+///
+/// The kind set is deliberately two. `bool` is an `enum` over `["true",
+/// "false"]`, `int` is a `string` with `pattern: '^[0-9]+$'`, and lists have no
+/// env representation that is not an encoding decision — the env value is a
+/// string either way, so a richer type system here would be a second config
+/// language.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Input {
+    /// `[a-z][a-z0-9_]*` ([`crate::inputs::INPUT_NAME_PATTERN`]) — lowercase so
+    /// the mapping onto one reserved env name is injective.
+    #[cfg_attr(feature = "schema", schemars(extend("pattern" = crate::inputs::INPUT_NAME_PATTERN)))]
+    pub name: String,
+    pub r#type: InputKind,
+    /// Default false. An optional input with no supplied value and no `default`
+    /// is *absent*, never an empty string: `set -u` catches an unset
+    /// `$CHUG_INPUT_SHA` loudly, where an empty string would silently run
+    /// `update.sh ` with no argument.
+    #[serde(default)]
+    pub required: bool,
+    /// A value the platform materializes onto the job record when the creator
+    /// supplies none — not a create-form pre-fill, so what actually ran is on
+    /// the audit surfaces. Disallowed with `required: true`, and validated here
+    /// against the charset and this declaration's own `pattern`/`values`: a
+    /// default no supply path could have produced would otherwise arrive by the
+    /// back door and be caught only at launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("pattern" = crate::inputs::INPUT_VALUE_PATTERN)))]
+    pub default: Option<String>,
+    /// The closed list for `type: enum`; disallowed for `type: string`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+    /// A regex the **whole** value must match; `type: string` only. It may only
+    /// narrow the default charset, never widen it (the effective check is
+    /// `charset AND pattern` — [`crate::inputs::check_value`]). An input whose
+    /// value reaches an argv position wants one: the charset stops metacharacter
+    /// injection but not a value that begins with `-` or `/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    /// Shown in the create form and in the agent's job brief.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// What kind of value an [`Input`] accepts (spec §1.1, design #311 Decision 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum InputKind {
+    /// Any value inside the default charset, optionally narrowed by `pattern`.
+    String,
+    /// One of a closed list of `values`.
+    Enum,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -627,6 +707,144 @@ impl JobType {
             });
         }
 
+        errs.extend(self.validate_inputs());
+        errs
+    }
+
+    /// The `inputs:` block's declaration rules (spec §1.1, design #311
+    /// Decision 2). Split out of [`JobType::validate`] so the declaration rules
+    /// and the per-input rules each fit inside the 70-line bound; dissolving
+    /// `validate`'s own pre-existing violation is refactor-plan A4, not this
+    /// slice. Everything here is about the *declaration*; what a
+    /// supplied value must satisfy lives in [`crate::inputs`], shared with the
+    /// release, Ready-transition and launch passes.
+    ///
+    /// A type declaring no inputs produces no errors from here, so it validates
+    /// exactly as it did before the feature existed.
+    fn validate_inputs(&self) -> Vec<FieldRuleError> {
+        let mut errs = Vec::new();
+        if self.inputs.is_empty() {
+            return errs;
+        }
+        let ctx = format!("job type '{}'", self.name);
+        // Skew gate (spec §14.1): an N-1 dispatcher tolerates `inputs:` as an
+        // unknown top-level field, so without this the config would run with
+        // required-input validation skipped and no value reaching the container.
+        // Declaring `min_dispatcher` is what makes that refusal happen in a
+        // dispatcher that cannot see `inputs:` at all.
+        if self.min_dispatcher.unwrap_or(0) < crate::version::INPUTS_SCHEMA_EPOCH {
+            errs.push(FieldRuleError::Required {
+                field: "min_dispatcher",
+                context: format!(
+                    "a job type declaring 'inputs:' (needs min_dispatcher >= {})",
+                    crate::version::INPUTS_SCHEMA_EPOCH
+                ),
+            });
+        }
+        if self.inputs.len() > crate::inputs::INPUTS_COUNT_MAX {
+            errs.push(FieldRuleError::Invalid {
+                field: "inputs",
+                context: ctx.clone(),
+                reason: format!(
+                    "{} declared inputs exceeds the limit of {}",
+                    self.inputs.len(),
+                    crate::inputs::INPUTS_COUNT_MAX
+                ),
+            });
+        }
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for input in &self.inputs {
+            if !crate::inputs::name_is_well_formed(&input.name) {
+                errs.push(FieldRuleError::Invalid {
+                    field: "inputs.name",
+                    context: ctx.clone(),
+                    reason: format!(
+                        "{:?} is not a valid input name ({})",
+                        input.name,
+                        crate::inputs::INPUT_NAME_PATTERN
+                    ),
+                });
+            } else if !seen.insert(input.name.as_str()) {
+                errs.push(FieldRuleError::Invalid {
+                    field: "inputs.name",
+                    context: ctx.clone(),
+                    reason: format!("input '{}' is declared twice", input.name),
+                });
+            }
+            errs.extend(self.validate_inputs_declaration(input));
+        }
+        errs
+    }
+
+    /// One [`Input`]'s kind-specific rules and its `default` (design #311
+    /// Decision 2). Kept separate from [`JobType::validate_inputs`], which owns
+    /// the block-level rules (the skew gate, the count bound, name shape).
+    fn validate_inputs_declaration(&self, input: &Input) -> Vec<FieldRuleError> {
+        let mut errs = Vec::new();
+        let ctx = format!("input '{}' in job type '{}'", input.name, self.name);
+        match input.r#type {
+            InputKind::Enum => {
+                if input.values.is_empty() {
+                    errs.push(FieldRuleError::Required {
+                        field: "inputs.values",
+                        context: ctx.clone(),
+                    });
+                }
+                if input.pattern.is_some() {
+                    errs.push(FieldRuleError::Disallowed {
+                        field: "inputs.pattern",
+                        context: ctx.clone(),
+                    });
+                }
+                // A declared value outside the charset is a value no supply path
+                // could ever match — the enum's own version of an unsatisfiable
+                // default.
+                for value in &input.values {
+                    if let Err(e) = crate::inputs::check_value_charset(value) {
+                        errs.push(FieldRuleError::Invalid {
+                            field: "inputs.values",
+                            context: ctx.clone(),
+                            reason: e.to_string(),
+                        });
+                    }
+                }
+            }
+            InputKind::String => {
+                if !input.values.is_empty() {
+                    errs.push(FieldRuleError::Disallowed {
+                        field: "inputs.values",
+                        context: ctx.clone(),
+                    });
+                }
+                if let Some(pattern) = &input.pattern
+                    && let Err(e) = crate::inputs::check_pattern(pattern)
+                {
+                    errs.push(FieldRuleError::Invalid {
+                        field: "inputs.pattern",
+                        context: ctx.clone(),
+                        reason: e.to_string(),
+                    });
+                }
+            }
+        }
+        if let Some(default) = &input.default {
+            if input.required {
+                errs.push(FieldRuleError::Disallowed {
+                    field: "inputs.default",
+                    context: format!("{ctx} with required: true"),
+                });
+            } else if errs.is_empty()
+                && let Err(e) = crate::inputs::check_value(input, default)
+            {
+                // Only checked once the declaration itself is sound, so one
+                // mistake reports once.
+                errs.push(FieldRuleError::Invalid {
+                    field: "inputs.default",
+                    context: ctx,
+                    reason: e.to_string(),
+                });
+            }
+        }
         errs
     }
 
@@ -1429,6 +1647,298 @@ min_dispatcher: 5
         assert_eq!(
             JobType::parse(SPEC_EXAMPLE).unwrap().requires_dispatcher(0),
             None
+        );
+    }
+
+    /// A command job type carrying `block` as its `inputs:` list, with the
+    /// `min_dispatcher` a non-empty block requires already declared — so each
+    /// test below asserts about its own rule and nothing else.
+    fn jt_with_inputs(block: &str) -> JobType {
+        JobType::parse(&format!(
+            "name: rollback\nimage: img:latest\nmin_dispatcher: {}\n\
+             work:\n  type: command\n  run: ./.chug/tasks/rollback.sh\ninputs:\n{block}",
+            crate::version::INPUTS_SCHEMA_EPOCH
+        ))
+        .expect("inputs block should parse")
+    }
+
+    fn input_errors(block: &str) -> Vec<FieldRuleError> {
+        jt_with_inputs(block).validate()
+    }
+
+    #[test]
+    fn inputs_block_parses_and_validates() {
+        // The #311 rollback case, verbatim: one required string narrowed to a git
+        // SHA, plus an optional enum with a default.
+        let jt = jt_with_inputs(
+            "  - name: sha\n    type: string\n    required: true\n    \
+             pattern: '^[0-9a-f]{7,40}$'\n    description: The commit SHA.\n\
+             \x20 - name: service\n    type: enum\n    values: [web, worker, bot]\n    \
+             default: web\n",
+        );
+        assert_eq!(jt.validate(), vec![]);
+        assert_eq!(jt.inputs.len(), 2);
+        assert_eq!(jt.inputs[0].name, "sha");
+        assert_eq!(jt.inputs[0].r#type, InputKind::String);
+        assert!(jt.inputs[0].required);
+        assert_eq!(jt.inputs[1].r#type, InputKind::Enum);
+        // `required` defaults to false and `default` round-trips.
+        assert!(!jt.inputs[1].required);
+        assert_eq!(jt.inputs[1].default.as_deref(), Some("web"));
+        // A type that declares nothing is byte-identical to today: no inputs, no
+        // min_dispatcher requirement, no errors.
+        let none = JobType::parse(SPEC_EXAMPLE).unwrap();
+        assert_eq!(none.inputs, vec![]);
+        assert_eq!(none.validate(), vec![]);
+    }
+
+    #[test]
+    fn unknown_field_inside_an_input_is_a_hard_error() {
+        // Same reasoning as an evaluator (§14.2): a typo'd `patern` would drop a
+        // validation control silently, so the nested block stays strict.
+        let yaml = format!(
+            "name: rollback\nimage: img:latest\nmin_dispatcher: {}\n\
+             work:\n  type: command\n  run: ./r.sh\n\
+             inputs:\n  - name: sha\n    type: string\n    patern: '^[0-9a-f]+$'\n",
+            crate::version::INPUTS_SCHEMA_EPOCH
+        );
+        let err = JobType::parse(&yaml).expect_err("unknown input field must fail parsing");
+        assert!(err.to_string().contains("patern"), "{err}");
+    }
+
+    #[test]
+    fn non_empty_inputs_require_the_min_dispatcher_declaration() {
+        // The structural half of the §14.1 skew gate: an N-1 dispatcher captures
+        // `inputs:` into `unknown` and never sees it, but it *does* parse
+        // `min_dispatcher` — so the declaration is what makes it refuse the
+        // config instead of running a job with no value.
+        let yaml = |line: &str| {
+            format!(
+                "name: rollback\nimage: img:latest\n{line}work:\n  type: command\n  run: ./r.sh\n\
+                 inputs:\n  - name: sha\n    type: string\n"
+            )
+        };
+        let missing = JobType::parse(&yaml("")).unwrap();
+        assert_eq!(
+            missing.validate(),
+            vec![FieldRuleError::Required {
+                field: "min_dispatcher",
+                context: format!(
+                    "a job type declaring 'inputs:' (needs min_dispatcher >= {})",
+                    crate::version::INPUTS_SCHEMA_EPOCH
+                ),
+            }]
+        );
+        // Declaring an older epoch is the same failure — the gate is `>=`.
+        let stale = JobType::parse(&yaml(&format!(
+            "min_dispatcher: {}\n",
+            crate::version::INPUTS_SCHEMA_EPOCH - 1
+        )))
+        .unwrap();
+        assert!(stale.validate().iter().any(|e| matches!(
+            e,
+            FieldRuleError::Required {
+                field: "min_dispatcher",
+                ..
+            }
+        )));
+        // A newer dispatcher than the feature needs is fine.
+        let newer = JobType::parse(&yaml(&format!(
+            "min_dispatcher: {}\n",
+            crate::version::INPUTS_SCHEMA_EPOCH + 1
+        )))
+        .unwrap();
+        assert_eq!(newer.validate(), vec![]);
+        // And a type with no inputs is never asked for one.
+        assert_eq!(
+            JobType::parse("name: x\nimage: i:l\nwork:\n  type: command\n  run: ./r.sh\n")
+                .unwrap()
+                .validate(),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn input_names_are_lowercase_tokens_and_unique() {
+        // Lowercase-only is what makes the env mapping injective; a duplicate
+        // name would collide the same way.
+        for bad in ["IMAGE_TAG", "1sha", "_sha", "image-tag", "image.tag"] {
+            let errs = input_errors(&format!("  - name: {bad}\n    type: string\n"));
+            assert!(
+                errs.iter().any(|e| matches!(
+                    e,
+                    FieldRuleError::Invalid {
+                        field: "inputs.name",
+                        ..
+                    }
+                )),
+                "expected inputs.name error for {bad:?}, got {errs:?}"
+            );
+        }
+        assert_eq!(
+            input_errors("  - name: image_tag\n    type: string\n"),
+            vec![]
+        );
+        let dupes = input_errors(
+            "  - name: sha\n    type: string\n  - name: sha\n    type: string\n    required: true\n",
+        );
+        assert!(
+            dupes.iter().any(|e| matches!(
+                e,
+                FieldRuleError::Invalid {
+                    field: "inputs.name",
+                    reason,
+                    ..
+                } if reason.contains("declared twice")
+            )),
+            "{dupes:?}"
+        );
+    }
+
+    #[test]
+    fn enum_requires_values_and_string_disallows_them() {
+        let no_values = input_errors("  - name: service\n    type: enum\n");
+        assert!(no_values.iter().any(|e| matches!(
+            e,
+            FieldRuleError::Required {
+                field: "inputs.values",
+                ..
+            }
+        )));
+        // An enum value outside the charset is one no supply path could match.
+        let bad_value = input_errors("  - name: service\n    type: enum\n    values: ['a b']\n");
+        assert!(bad_value.iter().any(|e| matches!(
+            e,
+            FieldRuleError::Invalid {
+                field: "inputs.values",
+                ..
+            }
+        )));
+        let string_values = input_errors("  - name: sha\n    type: string\n    values: [a, b]\n");
+        assert!(string_values.iter().any(|e| matches!(
+            e,
+            FieldRuleError::Disallowed {
+                field: "inputs.values",
+                ..
+            }
+        )));
+        assert_eq!(
+            input_errors("  - name: service\n    type: enum\n    values: [web, worker]\n"),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn pattern_is_string_only_and_must_be_a_usable_regex() {
+        let on_enum = input_errors(
+            "  - name: service\n    type: enum\n    values: [web]\n    pattern: '^web$'\n",
+        );
+        assert!(on_enum.iter().any(|e| matches!(
+            e,
+            FieldRuleError::Disallowed {
+                field: "inputs.pattern",
+                ..
+            }
+        )));
+        let broken = input_errors("  - name: sha\n    type: string\n    pattern: '[unclosed'\n");
+        assert!(
+            broken.iter().any(|e| matches!(
+                e,
+                FieldRuleError::Invalid {
+                    field: "inputs.pattern",
+                    ..
+                }
+            )),
+            "{broken:?}"
+        );
+        assert_eq!(
+            input_errors("  - name: sha\n    type: string\n    pattern: '^[0-9a-f]{7,40}$'\n"),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn default_is_disallowed_when_required_and_must_satisfy_its_declaration() {
+        let with_required = input_errors(
+            "  - name: sha\n    type: string\n    required: true\n    default: 4f9c1ab\n",
+        );
+        assert!(with_required.iter().any(|e| matches!(
+            e,
+            FieldRuleError::Disallowed {
+                field: "inputs.default",
+                ..
+            }
+        )));
+        // A default no supply path could have produced is caught here, not at
+        // launch: outside the charset, outside `pattern`, outside `values`.
+        for bad in [
+            "  - name: sha\n    type: string\n    default: 'a;rm -rf'\n",
+            "  - name: sha\n    type: string\n    pattern: '^[0-9a-f]{7,40}$'\n    default: nope\n",
+            "  - name: service\n    type: enum\n    values: [web]\n    default: worker\n",
+        ] {
+            let errs = input_errors(bad);
+            assert!(
+                errs.iter().any(|e| matches!(
+                    e,
+                    FieldRuleError::Invalid {
+                        field: "inputs.default",
+                        ..
+                    }
+                )),
+                "expected inputs.default error for {bad:?}, got {errs:?}"
+            );
+        }
+        assert_eq!(
+            input_errors(
+                "  - name: sha\n    type: string\n    pattern: '^[0-9a-f]{7,40}$'\n    \
+                 default: 4f9c1ab\n"
+            ),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn input_bounds_are_hard_errors_at_the_boundary() {
+        // Count bound: exactly the limit validates, one more is an error.
+        let block = |count: usize| {
+            (0..count)
+                .map(|i| format!("  - name: in_{i}\n    type: string\n"))
+                .collect::<String>()
+        };
+        assert_eq!(
+            input_errors(&block(crate::inputs::INPUTS_COUNT_MAX)),
+            vec![]
+        );
+        let over = input_errors(&block(crate::inputs::INPUTS_COUNT_MAX + 1));
+        assert!(
+            over.iter().any(|e| matches!(
+                e,
+                FieldRuleError::Invalid {
+                    field: "inputs",
+                    ..
+                }
+            )),
+            "{over:?}"
+        );
+        // Value-length bound, reached through the one value a job type can
+        // declare: a `default`.
+        let with_default = |len: usize| {
+            input_errors(&format!(
+                "  - name: sha\n    type: string\n    default: {}\n",
+                "a".repeat(len)
+            ))
+        };
+        assert_eq!(with_default(crate::inputs::INPUT_VALUE_LEN_MAX), vec![]);
+        let too_long = with_default(crate::inputs::INPUT_VALUE_LEN_MAX + 1);
+        assert!(
+            too_long.iter().any(|e| matches!(
+                e,
+                FieldRuleError::Invalid {
+                    field: "inputs.default",
+                    ..
+                }
+            )),
+            "{too_long:?}"
         );
     }
 

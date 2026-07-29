@@ -78,6 +78,9 @@ source. Each changes an argument, so each is recorded.
    legal var name today. Any design that puts inputs behind the `CHUG_` prefix
    must close that gap first — see
    [Decision 4](#decision-4-delivery-via-one-reserved-env-namespace).
+   **Closed by slice A1**: the prefix rule now covers vars in `static_errors_kv`
+   and `container_env`, and spec §5.3/§8.1 say so. This correction records the
+   state that motivated the change, not the state of the tree.
 
 3. **This codebase does not use an `<untrusted_input>` delimiter convention.**
    The single occurrence of "untrusted" in the tree is

@@ -165,6 +165,15 @@ eval:                          # optional; omit or leave empty for auto-pass
 
 knowledge: [string]            # default knowledge tags for KO injection at launch
 vars: [string]                 # injected into work container and all eval containers
+
+inputs:                        # optional; the values a job of this type accepts. A non-empty list requires min_dispatcher >= the inputs epoch (§14.2). An input is a value handed to the running job — never substituted into this file, so nothing here can be chosen by one
+  - name: string               # required; [a-z][a-z0-9_]*, unique within the type — lowercase so the mapping onto one reserved env name is injective
+    type: string | enum        # required
+    required: bool             # optional; default false. An optional input with no supplied value and no default is absent, never an empty string
+    default: string            # optional; disallowed with required: true. Materialized onto the job record, so it must itself satisfy the charset and this declaration's pattern/values
+    values: [string]           # required for type: enum; disallowed for type: string. Each value must satisfy the charset
+    pattern: string            # optional, type: string only; a regex the WHOLE value must match. May only narrow the default charset, never widen it
+    description: string        # optional; shown in the create form and the agent's job brief
 ```
 
 **Field rules by work subtype:**
@@ -201,6 +210,28 @@ vars: [string]                 # injected into work container and all eval conta
 | `stage` | optional | optional | optional |
 
 ² Falls back to the job's top-level `image`. Required per-evaluator when the job declares no top-level image (`work.type: human`).
+
+**Field rules for `inputs`** (all enforced at parse, so release validation and
+`chuggernaut validate` reject them offline):
+
+| Rule | Detail |
+|---|---|
+| Value charset | Every value matches `^[A-Za-z0-9._:/@+-]{1,256}$` — alphanumerics plus seven punctuation characters. Whitespace, quotes, backticks, backslash and every shell metacharacter are excluded: an input value is an *identifier, not prose*, because it can reach a `run:` script that itself crosses further shells. Free text is what `title`/`description` are for |
+| `pattern` narrows only | The effective check is `charset AND pattern` — a declared pattern can never widen the charset. It must be a usable regex, and it matches the **whole** value. An input whose value reaches an argv position wants one: the charset stops metacharacter injection, but not a value beginning with `-` or `/` |
+| Bounds | At most 16 declared inputs per type; at most 256 characters per value. Both hard errors, never truncation |
+| Declaration | `name` matches `[a-z][a-z0-9_]*` and is unique within the type; `values` is required for `type: enum` and disallowed for `type: string`; `pattern` is `type: string` only; `default` is disallowed with `required: true` and must itself satisfy the charset and the declaration's own `pattern`/`values` |
+| Skew | A non-empty `inputs:` requires `min_dispatcher >=` the epoch at which inputs landed. An older dispatcher *tolerates* the unknown `inputs:` field (§14.2) and would run the job with no value at all, so the gate is structural rather than left to authorship |
+
+An `Input` block keeps `deny_unknown_fields` like every other nested block: an
+ignored key there could silently drop a `pattern`, which is a validation
+control. The kind set is deliberately two — `bool` is an `enum` over `["true",
+"false"]` and `int` is a `string` with `pattern: '^[0-9]+$'`, so a third kind
+would buy nothing but a second config language.
+
+How a job supplies inputs, how a declared `default` is materialized onto the job
+record, and how a value reaches a container are the job-record half of the
+feature and are specified with it; this section defines the declaration and its
+validation.
 
 **`work.type: human`** — no container is launched. The dispatcher creates a `Human` task in `Pending` state in the Work phase; it surfaces in the operator task inbox. The operator performs the work manually, then resolves via `POST .../tasks/{task_id}/resolve`:
 - `TaskResolution::Pass` — work complete; proceeds to Evaluation (or Done if no evaluators). A `summary` on the Pass is both used as the squash-merge commit body *and* persisted on the stored `TaskResult::Human { summary }`, so the operator's report renders in the Reports thread like an agent's closing summary.
@@ -770,6 +801,7 @@ Static configuration (fail-fast check against current HEAD of default branch):
 - For each agent or human evaluator (including project defaults): the evaluator's `prompt` path exists
 - Every secret named in `secrets:` (`work.secrets` and per-evaluator) has an entry in the `secrets.*` KV bucket
 - Every var named in `vars:` has an entry in the `vars.*` KV bucket
+- No declared secret or var name uses the reserved `CHUG_` prefix (§5.3)
 
 **Ready-transition re-validation** (Blocked→Ready only; Frozen→Ready already had the check at release):
 
@@ -1112,7 +1144,7 @@ CHUG_PHASE      Work            # originating task phase, stamped onto channel p
 # secrets (decrypted from age-encrypted NATS KV; named as declared in work.secrets:)
 # platform agent credentials (agent containers only): every secret in the reserved global/agents scope, env-named by the secret; declared secrets win on collision
 GITHUB_TOKEN    ...
-# vars (from NATS KV; named as declared in top-level vars:)
+# vars (from NATS KV; named as declared in top-level vars:) — CHUG_* names are reserved (§5.3) and skipped
 RUST_EDITION    2021
 ```
 
@@ -1131,7 +1163,7 @@ CHUG_TASK_ID    43              # originating task id, stamped onto channel post
 CHUG_PHASE      Evaluation      # originating task phase, stamped onto channel posts (§6.3)
 CHUG_EVALUATOR  review          # evaluator name, stamped onto channel posts (§6.3)
 # secrets (only those declared in the evaluator's own secrets: field)
-# vars (from NATS KV; named as declared in top-level vars:)
+# vars (from NATS KV; named as declared in top-level vars:) — CHUG_* names are reserved (§5.3) and skipped
 RUST_EDITION    2021
 ```
 
@@ -1408,7 +1440,7 @@ A project may be **linked** to an existing externally-hosted repo (GitHub): the 
 
 **Creation** (`req.projects.link`): init bare + `remote add origin` + single-branch fetch refspec; origin main autodetected via `ls-remote --symref` when unspecified; `integration` created at origin main; pre-receive hook installed; the config subset of the starter template (.chug/jobs/, .chug/prompts/, .chug/tasks/ — no README) seeded **skip-existing** onto integration, reaching the origin via the first release PR.
 
-**Credentials.** Project secrets `CHUG_ORIGIN_DEPLOY_KEY` (OpenSSH private key, write deploy key — git fetch/push) and `CHUG_ORIGIN_PAT` (fine-grained PAT, pull requests read/write — PR API), set via `admin secret set` before linking. The `CHUG_` name prefix is **reserved**: declaring such a secret in a job type is a release-validation error and injection skips them — origin credentials are dispatcher-only and never reach a container. Origin git ops decrypt the key to a 0600 tempfile for the duration of the command (`GIT_SSH_COMMAND`, `StrictHostKeyChecking=accept-new`) with a 60s timeout so a hung remote cannot wedge the single-writer actor.
+**Credentials.** Project secrets `CHUG_ORIGIN_DEPLOY_KEY` (OpenSSH private key, write deploy key — git fetch/push) and `CHUG_ORIGIN_PAT` (fine-grained PAT, pull requests read/write — PR API), set via `admin secret set` before linking. The `CHUG_` name prefix is **reserved**: declaring such a **secret or var** in a job type is a release-validation error and injection skips them — origin credentials are dispatcher-only and never reach a container, and the §6.3 task-origin stamps (`CHUG_TASK_ID`, `CHUG_PHASE`, `CHUG_EVALUATOR`) share the namespace, so neither may be shadowed by project config. Secret and var names are KV-validated to `[A-Za-z0-9_]+` at write time (§1.4), so the prefix is legal to *store* — the job type is where it is refused. Origin git ops decrypt the key to a 0600 tempfile for the duration of the command (`GIT_SSH_COMMAND`, `StrictHostKeyChecking=accept-new`) with a 60s timeout so a hung remote cannot wedge the single-writer actor.
 
 **Origin release** (`req.origin.release`, explicit trigger only): guards — linked project, no Open release, **no merge gate in flight** (a gate completing after the snapshot would land a commit the post-merge reset silently discards), integration ahead of origin main. Sequence (crash-safe): persist `release_counter`+1 → pin `refs/chug/release-{n}` at the integration tip (keeps pre-reset history reachable for held jobs' `base_ref`s) → push integration to the origin as `chug/release-{n}` → open PR `chug/release-{n}` → main (title `chug release {n}`, body lists squash subjects since the last base) → persist `ReleaseState{Open}` + hold. A crash before the final persist burns `n`; the orphan origin branch is harmless.
 
@@ -1883,6 +1915,8 @@ pub trait VarStore: Send + Sync {
 
 `list` returns both names and values — vars are not sensitive. At job launch the dispatcher reads every var declared in the job type's `vars:` list and injects them as env vars into both work and eval containers. If any declared var is missing at launch, the job transitions to Escalated.
 
+The `CHUG_` name prefix is **reserved** for vars exactly as it is for secrets (§5.3): a `CHUG_`-prefixed name in `vars:` is a release-validation error, and injection skips it so a stored one cannot clobber a task-origin stamp (§4.1, §6.3).
+
 ---
 
 ### 8.2 Secrets
@@ -2272,6 +2306,13 @@ running dispatcher's `CONFIG_SCHEMA_EPOCH`, the config is ahead of the binary:
 version. At launch this parks the job **pre-Work (Stalled)** with that reason —
 Retry/Revoke only, one park, no per-launch escalation storm — rather than
 burning launches into `Escalated` one job at a time.
+
+Some schema features require that declaration rather than leaving it to the
+author: a non-empty `inputs:` (§1.1) is a field rule error unless
+`min_dispatcher` is at least the epoch inputs landed in. The rule exists because
+`min_dispatcher` is the one field an N-1 dispatcher **does** parse — it cannot
+see `inputs:` at all, so without the declaration it would accept the config and
+run the job unparameterized.
 
 ### 14.3 Merge-time gate
 

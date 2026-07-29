@@ -48,7 +48,23 @@
 /// Bumped only when the schema gains a field the *previous* dispatcher
 /// generation cannot safely ignore. Tolerated additive changes (a new optional
 /// top-level field, ignored-with-a-warning by older binaries) do not bump it.
-pub const CONFIG_SCHEMA_EPOCH: u32 = 1;
+///
+/// Epoch 2 is job `inputs:` (#311, [`INPUTS_SCHEMA_EPOCH`]): a top-level field
+/// an N-1 dispatcher *would* tolerate, which is exactly why it needs the bump —
+/// tolerating it means a job runs with no value where the type declares one.
+pub const CONFIG_SCHEMA_EPOCH: u32 = 2;
+
+/// The epoch at which job `inputs:` landed (#311, spec §1.1). A job type
+/// declaring a non-empty `inputs:` must declare `min_dispatcher` at least this
+/// high — [`crate::JobType::validate`] enforces it, so an author cannot omit the
+/// declaration that makes the skew legible to a dispatcher which cannot see
+/// `inputs:` at all.
+///
+/// Deliberately its own constant rather than a read of [`CONFIG_SCHEMA_EPOCH`]:
+/// it is frozen at the epoch the feature shipped, so a later bump for an
+/// unrelated feature does not retroactively raise what an existing `inputs:`
+/// config has to declare.
+pub const INPUTS_SCHEMA_EPOCH: u32 = 2;
 
 /// The worker-node RPC protocol version ([`crate::worker`] ops, spec §3.1).
 /// The daemon logs-and-fallbacks on an unknown op rather than crashing, so an
@@ -76,6 +92,22 @@ mod tests {
             ("channel", CHANNEL_PROTOCOL_VERSION),
         ] {
             assert!(epoch >= 1, "{name} epoch must be >= 1");
+        }
+    }
+
+    #[test]
+    fn feature_epochs_are_understood_by_this_binary() {
+        // A feature epoch names the generation that introduced a schema feature
+        // this binary implements, so it can never exceed the epoch this binary
+        // advertises — that would gate configs on a dispatcher newer than the one
+        // enforcing the gate. Held in a runtime slice for the same reason
+        // `epochs_are_positive` is: a real assertion, not a const one.
+        let feature_epochs: Vec<(&str, u32)> = vec![("inputs", INPUTS_SCHEMA_EPOCH)];
+        for (name, epoch) in feature_epochs {
+            assert!(
+                epoch <= CONFIG_SCHEMA_EPOCH,
+                "{name} epoch {epoch} is ahead of this binary's config epoch {CONFIG_SCHEMA_EPOCH}"
+            );
         }
     }
 }

@@ -7,6 +7,7 @@ pub mod config_paths;
 pub mod deploy;
 pub mod duration;
 pub mod ingest;
+pub mod inputs;
 pub mod job;
 pub mod job_type;
 pub mod knowledge;
@@ -27,10 +28,13 @@ pub use config_paths::{CONFIG_DIR, config_entry_name, config_path, config_path_c
 pub use deploy::{DeployLeg, DeployReport, LegStatus};
 pub use duration::{DurationParseError, parse_duration};
 pub use ingest::IngestEvent;
+pub use inputs::{
+    INPUT_NAME_PATTERN, INPUT_VALUE_LEN_MAX, INPUT_VALUE_PATTERN, INPUTS_COUNT_MAX, InputValueError,
+};
 pub use job::{Escalation, JOB_SUMMARY_EXTRA_FIELDS, Job, JobState, JobSummary};
 pub use job_type::{
-    ConfigWarning, Evaluator, EvaluatorType, JobType, Placement, ProjectDefaults, ReviewSpec,
-    WorkSpec, WorkType, WrapUpMode, WrapUpSpec,
+    ConfigWarning, Evaluator, EvaluatorType, Input, InputKind, JobType, Placement, ProjectDefaults,
+    ReviewSpec, WorkSpec, WorkType, WrapUpMode, WrapUpSpec,
 };
 pub use knowledge::{KnowledgeObject, KnowledgeScope};
 pub use platform::{DispatcherConfigSnapshot, FleetNode, FleetStatus, SlotOccupant, WorkerNode};
@@ -43,4 +47,6 @@ pub use task::{
     TaskPhase, TaskResolution, TaskResult, TaskState, TokenUsage, task_time_ms,
 };
 pub use user::{Identity, IdentityKind, ProjectRole, User};
-pub use version::{CHANNEL_PROTOCOL_VERSION, CONFIG_SCHEMA_EPOCH, WORKER_RPC_VERSION};
+pub use version::{
+    CHANNEL_PROTOCOL_VERSION, CONFIG_SCHEMA_EPOCH, INPUTS_SCHEMA_EPOCH, WORKER_RPC_VERSION,
+};

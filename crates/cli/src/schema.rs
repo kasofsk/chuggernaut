@@ -245,6 +245,8 @@ fn api_bundle_job_config(generator: &mut schemars::SchemaGenerator) {
         types::Evaluator,
         types::EvaluatorType,
         types::Placement,
+        types::Input,
+        types::InputKind,
         types::job_type::Provider,
         types::job_type::Resources,
     );
@@ -423,6 +425,12 @@ mod tests {
         // could silently skip a gate.
         assert_eq!(
             v["$defs"]["Evaluator"]["additionalProperties"],
+            serde_json::json!(false)
+        );
+        // Same for a declared input: an ignored key there could drop a `pattern`,
+        // which is a validation control (#311 Decision 2).
+        assert_eq!(
+            v["$defs"]["Input"]["additionalProperties"],
             serde_json::json!(false)
         );
         let finalize = &v["$defs"]["WrapUpMode"];

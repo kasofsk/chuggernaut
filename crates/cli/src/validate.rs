@@ -205,6 +205,76 @@ mod tests {
         );
     }
 
+    /// Write a job type declaring `inputs` and return its validation errors.
+    /// `head` carries everything above the `inputs:` list, so a test can vary the
+    /// `min_dispatcher` declaration as well as the block itself.
+    fn input_errors(dir: &Path, head: &str, block: &str) -> Vec<String> {
+        let path = dir.join("rollback.yaml");
+        std::fs::write(
+            &path,
+            format!("{head}work:\n  type: command\n  run: ./r.sh\ninputs:\n{block}"),
+        )
+        .unwrap();
+        errors(&path, types::CONFIG_SCHEMA_EPOCH)
+    }
+
+    #[test]
+    fn validate_covers_the_inputs_block() {
+        // `chuggernaut validate` is the offline half of the release checks, so the
+        // whole `inputs:` field-rule set has to reach it — an author fixes a
+        // rollback type at their desk, not by watching a job park.
+        let dir = tempfile::tempdir().unwrap();
+        let head = format!(
+            "name: rollback\nimage: img:latest\nmin_dispatcher: {}\n",
+            types::INPUTS_SCHEMA_EPOCH
+        );
+        let good = "  - name: sha\n    type: string\n    required: true\n    \
+                    pattern: '^[0-9a-f]{7,40}$'\n  - name: service\n    type: enum\n    \
+                    values: [web, worker]\n    default: web\n";
+        assert_eq!(input_errors(dir.path(), &head, good), Vec::<String>::new());
+
+        // Each violation names its own field.
+        for (block, field) in [
+            ("  - name: SHA\n    type: string\n", "inputs.name"),
+            ("  - name: service\n    type: enum\n", "inputs.values"),
+            (
+                "  - name: sha\n    type: string\n    values: [a]\n",
+                "inputs.values",
+            ),
+            (
+                "  - name: service\n    type: enum\n    values: [web]\n    pattern: '^web$'\n",
+                "inputs.pattern",
+            ),
+            (
+                "  - name: sha\n    type: string\n    required: true\n    default: abc1234\n",
+                "inputs.default",
+            ),
+            (
+                "  - name: sha\n    type: string\n    default: 'a b'\n",
+                "inputs.default",
+            ),
+        ] {
+            let errs = input_errors(dir.path(), &head, block);
+            assert!(
+                errs.iter().any(|e| e.contains(field)),
+                "expected a {field} error for {block:?}, got {errs:?}"
+            );
+        }
+
+        // And the skew gate: an `inputs:` block with no `min_dispatcher` is
+        // refused offline, before it can merge and be silently ignored by an
+        // older dispatcher.
+        let ungated = input_errors(
+            dir.path(),
+            "name: rollback\nimage: img:latest\n",
+            "  - name: sha\n    type: string\n",
+        );
+        assert!(
+            ungated.iter().any(|e| e.contains("min_dispatcher")),
+            "{ungated:?}"
+        );
+    }
+
     #[test]
     fn config_requiring_a_newer_dispatcher_fails_the_merge_gate() {
         // The version-skew merge gate: a config declaring a higher

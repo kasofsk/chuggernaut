@@ -115,8 +115,6 @@ pub async fn load_job_type(
 /// Static configuration checks (§2.2): prompt paths exist at `reference`;
 /// declared secrets and vars exist in KV. Pass `check_kv: false` for the
 /// Blocked→Ready re-validation, which re-checks files only.
-// TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-#[allow(clippy::too_many_lines)]
 pub async fn static_errors(
     repo: &RepoManager,
     owner: &str,
@@ -168,43 +166,58 @@ pub async fn static_errors(
     }
 
     if let Some(kv) = kv {
-        let declared_secrets = job_type.work.secrets.iter().chain(
-            job_type
-                .eval
-                .iter()
-                .flat_map(|e: &Evaluator| e.secrets.iter()),
-        );
-        for s in declared_secrets {
-            // Origin credentials are dispatcher-only: reserved names never
-            // reach a container, so declaring one is a static error.
-            if s.starts_with(crate::forge_ingest::origin::RESERVED_SECRET_PREFIX) {
-                errs.push(ValidationError::new(
-                    seq,
-                    "secrets",
-                    format!(
-                        "secret '{s}' uses the reserved '{}' prefix (dispatcher-only origin credentials)",
-                        crate::forge_ingest::origin::RESERVED_SECRET_PREFIX
-                    ),
-                ));
-            } else if !kv.secrets.contains(s) {
-                errs.push(ValidationError::new(
-                    seq,
-                    "secrets",
-                    format!("secret '{s}' is not set"),
-                ));
-            }
-        }
-        for v in &job_type.vars {
-            if !kv.vars.contains(v) {
-                errs.push(ValidationError::new(
-                    seq,
-                    "vars",
-                    format!("var '{v}' is not set"),
-                ));
-            }
-        }
+        errs.extend(static_errors_kv(seq, job_type, kv));
     }
     Ok(errs)
+}
+
+/// The KV-name half of [`static_errors`] (§2.2), pure so it needs no repo or
+/// store: every declared secret and var must exist in the project's buckets, and
+/// neither may use the reserved `CHUG_` prefix.
+///
+/// The prefix rule covers **vars as well as secrets** (spec §5.3, extended by
+/// design #311 Decision 4). Reserved names are dispatcher-only origin
+/// credentials and §6.3 task-origin stamps, and var names are KV-validated to
+/// `[A-Za-z0-9_]+` at write time — so a project could declare `CHUG_PHASE`
+/// today and clobber an origin stamp at injection. Closing it here is also the
+/// prerequisite for inputs arriving under `CHUG_INPUT_*`: an unchecked var could
+/// otherwise shadow one.
+fn static_errors_kv(seq: Option<u64>, job_type: &JobType, kv: &KvNames) -> Vec<ValidationError> {
+    const RESERVED: &str = crate::forge_ingest::origin::RESERVED_SECRET_PREFIX;
+    let secrets = job_type.work.secrets.iter().chain(
+        job_type
+            .eval
+            .iter()
+            .flat_map(|e: &Evaluator| e.secrets.iter()),
+    );
+    let declared = secrets
+        .map(|name| ("secrets", "secret", name, kv.secrets.contains(name)))
+        .chain(
+            job_type
+                .vars
+                .iter()
+                .map(|name| ("vars", "var", name, kv.vars.contains(name))),
+        );
+    let mut errs = Vec::new();
+    for (field, noun, name, present) in declared {
+        if name.starts_with(RESERVED) {
+            errs.push(ValidationError::new(
+                seq,
+                field,
+                format!(
+                    "{noun} '{name}' uses the reserved '{RESERVED}' prefix (dispatcher-only \
+                     origin credentials and task-origin stamps)"
+                ),
+            ));
+        } else if !present {
+            errs.push(ValidationError::new(
+                seq,
+                field,
+                format!("{noun} '{name}' is not set"),
+            ));
+        }
+    }
+    errs
 }
 
 /// [`project_config::read_file`] in the validation-error vocabulary: the config
@@ -244,4 +257,64 @@ async fn read(
                 format!("vcs error reading '{path}': {e}"),
             )]
         })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    fn job_type_with(secrets: &[&str], vars: &[&str]) -> JobType {
+        let mut jt = JobType::parse(
+            "name: deploy\nimage: img:latest\nwork:\n  type: command\n  run: ./deploy.sh\n",
+        )
+        .unwrap();
+        jt.work.secrets = secrets.iter().map(|s| (*s).to_string()).collect();
+        jt.vars = vars.iter().map(|v| (*v).to_string()).collect();
+        jt
+    }
+
+    fn kv(secrets: &[&str], vars: &[&str]) -> KvNames {
+        KvNames {
+            secrets: secrets.iter().map(|s| (*s).to_string()).collect(),
+            vars: vars.iter().map(|v| (*v).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn declared_names_must_exist_in_kv() {
+        let jt = job_type_with(&["DEPLOY_KEY"], &["RUST_EDITION"]);
+        assert_eq!(
+            static_errors_kv(Some(7), &jt, &kv(&["DEPLOY_KEY"], &["RUST_EDITION"])),
+            vec![]
+        );
+        let errs = static_errors_kv(Some(7), &jt, &kv(&[], &[]));
+        let rendered = format!("{errs:?}");
+        assert!(
+            rendered.contains("secret 'DEPLOY_KEY' is not set"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("var 'RUST_EDITION' is not set"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn reserved_prefix_is_rejected_for_vars_as_well_as_secrets() {
+        // A `CHUG_`-prefixed var is a shadow of an origin credential or a §6.3
+        // task-origin stamp (design #311 Decision 4) — and existing in KV does
+        // not redeem it, which is why the prefix check runs before the
+        // existence check.
+        for (secrets, vars, field) in [
+            (vec!["CHUG_ORIGIN_PAT"], vec![], "secrets"),
+            (vec![], vec!["CHUG_PHASE"], "vars"),
+        ] {
+            let jt = job_type_with(&secrets, &vars);
+            let errs = static_errors_kv(Some(7), &jt, &kv(&["CHUG_ORIGIN_PAT"], &["CHUG_PHASE"]));
+            assert_eq!(errs.len(), 1, "{errs:?}");
+            assert_eq!(errs[0].field, field);
+            assert!(errs[0].message.contains("reserved"), "{errs:?}");
+        }
+    }
 }

@@ -48,6 +48,10 @@ export type Provider = "claude" | "codex";
 export type EvaluatorType = "command" | "agent" | "human";
 export type IdentityKind = "user" | "dispatcher";
 export type ProjectRole = "viewer" | "member" | "admin";
+/**
+ * What kind of value an [`Input`] accepts (spec §1.1, design #311 Decision 2).
+ */
+export type InputKind = "string" | "enum";
 export type JobState =
   | (
       | "Frozen"
@@ -615,6 +619,60 @@ export interface Identity {
   sub: string;
 }
 /**
+ * One declared job input (spec §1.1, design #311 Decision 2): a name, a kind,
+ * and the narrowing that makes a supplied value safe to hand to a script.
+ *
+ * A nested block, so it keeps `deny_unknown_fields` like every other
+ * gate-relevant block (§14.2): an ignored key here could silently drop a
+ * `pattern`, and `pattern` is a validation control, not decoration.
+ *
+ * The kind set is deliberately two. `bool` is an `enum` over `["true",
+ * "false"]`, `int` is a `string` with `pattern: '^[0-9]+$'`, and lists have no
+ * env representation that is not an encoding decision — the env value is a
+ * string either way, so a richer type system here would be a second config
+ * language.
+ */
+export interface Input {
+  /**
+   * A value the platform materializes onto the job record when the creator
+   * supplies none — not a create-form pre-fill, so what actually ran is on
+   * the audit surfaces. Disallowed with `required: true`, and validated here
+   * against the charset and this declaration's own `pattern`/`values`: a
+   * default no supply path could have produced would otherwise arrive by the
+   * back door and be caught only at launch.
+   */
+  default?: string | null;
+  /**
+   * Shown in the create form and in the agent's job brief.
+   */
+  description?: string | null;
+  /**
+   * `[a-z][a-z0-9_]*` ([`crate::inputs::INPUT_NAME_PATTERN`]) — lowercase so
+   * the mapping onto one reserved env name is injective.
+   */
+  name: string;
+  /**
+   * A regex the **whole** value must match; `type: string` only. It may only
+   * narrow the default charset, never widen it (the effective check is
+   * `charset AND pattern` — [`crate::inputs::check_value`]). An input whose
+   * value reaches an argv position wants one: the charset stops metacharacter
+   * injection but not a value that begins with `-` or `/`.
+   */
+  pattern?: string | null;
+  /**
+   * Default false. An optional input with no supplied value and no `default`
+   * is *absent*, never an empty string: `set -u` catches an unset
+   * `$CHUG_INPUT_SHA` loudly, where an empty string would silently run
+   * `update.sh ` with no argument.
+   */
+  required: boolean;
+  type: InputKind;
+  /**
+   * The closed list for `type: enum`; disallowed for `type: string`.
+   */
+  values?: string[];
+}
+/**
  * A node in the project DAG. Stored in NATS KV at `jobs.{owner}.{project}.{seq}`;
  * the dispatcher is its sole writer.
  */
@@ -847,6 +905,25 @@ export interface JobType {
    * Required for agent/command work; disallowed at top level for human work.
    */
   image: string | null;
+  /**
+   * The values a job of this type accepts (spec §1.1, design #311). Empty for
+   * every job type that declares none, which is every job type that predates
+   * the feature.
+   *
+   * An input is a **value delivered to a running container**, never a
+   * substitution into this file: nothing here can select an image, an
+   * evaluator, a secret or a `run:` string, so the job type resolves without
+   * reading a job's inputs at all (#311 Decision 1). Parameterization happens
+   * inside the work, where `deploy.sh` reads `$CHUG_INPUT_SERVICE`.
+   *
+   * A non-empty list requires [`JobType::min_dispatcher`] — see
+   * [`JobType::validate`]. To an N-1 dispatcher `inputs:` is just an unknown
+   * top-level field it tolerates (captured into [`JobType::unknown`]), so the
+   * declaration would be silently ignored and the container would launch with
+   * no value at all; `min_dispatcher` is a field that dispatcher *does* parse,
+   * which is why the skew gate is structural rather than left to authorship.
+   */
+  inputs: Input[];
   job_deadline: string | null;
   knowledge: string[];
   /**

@@ -558,8 +558,10 @@ async fn held_job_lands_after_merged_release_sync() {
     );
 }
 
-/// Declared `CHUG_*` secrets fail release validation, and the injection path
-/// never surfaces them in a container env.
+/// Declared `CHUG_*` secrets **and vars** fail release validation, and the
+/// injection path never surfaces them in a container env. Vars joined the rule
+/// with design #311 Decision 4: `CHUG_` is the input namespace's prefix too, and
+/// an unchecked var could shadow an origin credential or a §6.3 origin stamp.
 #[tokio::test]
 async fn reserved_chug_secrets_never_reach_containers() {
     let Some(rig) = rig().await else { return };
@@ -570,7 +572,7 @@ async fn reserved_chug_secrets_never_reach_containers() {
     commit_to_integration(&rig, &[
         (
             "jobs/sneaky.yaml",
-            "name: sneaky\nimage: img:latest\nwork:\n  type: agent\n  prompt: prompts/quick.md\n  secrets: [CHUG_ORIGIN_PAT]\n",
+            "name: sneaky\nimage: img:latest\nwork:\n  type: agent\n  prompt: prompts/quick.md\n  secrets: [CHUG_ORIGIN_PAT]\nvars: [CHUG_PHASE]\n",
         ),
         ("prompts/quick.md", "do the thing"),
     ])
@@ -607,5 +609,14 @@ async fn reserved_chug_secrets_never_reach_containers() {
     let CoreError::Validation(errs) = err else {
         panic!("expected validation failure, got {err}");
     };
-    assert!(format!("{errs:?}").contains("reserved"), "{errs:?}");
+    let rendered = format!("{errs:?}");
+    assert!(rendered.contains("reserved"), "{errs:?}");
+    assert!(
+        errs.iter().any(|e| e.field == "secrets"),
+        "the declared secret is refused: {errs:?}"
+    );
+    assert!(
+        errs.iter().any(|e| e.field == "vars"),
+        "the declared var is refused too (#311): {errs:?}"
+    );
 }

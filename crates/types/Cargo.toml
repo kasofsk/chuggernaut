@@ -11,6 +11,7 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+regex.workspace = true
 # `chrono04` supplies the `DateTime<Utc>` impl the §6.2 wire types need — every
 # job/task record carries timestamps, and without it they would each need a
 # hand-written `schemars(with = "String")`.

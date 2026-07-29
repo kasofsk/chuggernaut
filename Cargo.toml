@@ -62,6 +62,12 @@ schemars = "1"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 anyhow = "1"
+# Declared input `pattern`s (design #311 Decision 5 layer 3) are the control that
+# narrows a value before it reaches an argv position, so they need a real engine:
+# regex 1 is already in the workspace lock (async-nats depends on it), and
+# hand-rolling a matcher in the crate that validates injection-relevant values
+# would be the worse trade.
+regex = "1"
 async-trait = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tokio = { version = "1", features = ["full"] }

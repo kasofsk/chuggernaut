@@ -1743,6 +1743,14 @@ impl Core {
         }
         let vars = self.store.raw_bucket(store::buckets::VARS).await?;
         for name in &job_type.vars {
+            // Reserved names are rejected at release validation for vars as well
+            // as secrets (`release::static_errors_kv`, design #311 Decision 4);
+            // skipping them here too keeps a var written before that rule existed
+            // from shadowing an origin credential or a §6.3 task-origin stamp —
+            // the same defense in depth the secret loop below applies.
+            if name.starts_with(crate::forge_ingest::origin::RESERVED_SECRET_PREFIX) {
+                continue;
+            }
             if let Some(value) = vars
                 .get_json::<String>(&format!("{owner}.{project}.{name}"))
                 .await?

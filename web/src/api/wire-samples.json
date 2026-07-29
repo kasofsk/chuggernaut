@@ -46,7 +46,7 @@
     "placement_policy": "busyness",
     "repo_url_base": "ssh://git@chug.example",
     "repos_root": "/var/lib/chuggernaut/repos",
-    "schema_epoch": 1,
+    "schema_epoch": 2,
     "secrets_encryption": true,
     "triage_image": "chuggernaut/agent-claude:latest"
   },
@@ -205,6 +205,7 @@
     ],
     "eval_retries": 1,
     "image": "chuggernaut/agent-rust:latest",
+    "inputs": [],
     "job_deadline": "6h",
     "knowledge": [
       "rust"
