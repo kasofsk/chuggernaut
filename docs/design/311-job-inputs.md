@@ -11,7 +11,7 @@ Doc 3 of 4 extracting implementable specs from
 case (`rollback` needs an `image_tag`). #308 fixes the frame — an input
 "parameterizes a run without rewriting it" — and defers everything else here.
 
-Sibling docs 1 and 2 — [host-native execution](./host-native-execution.md) and
+Sibling docs 1 and 2 — [host-native execution](./309-host-native-execution.md) and
 [scheduled jobs](./310-scheduled-jobs.md) — are **also PROPOSED and not
 implemented**. Nothing below assumes any field, epoch or mechanism either of
 them proposes exists; where sequencing matters it is called out explicitly
@@ -86,12 +86,10 @@ source. Each changes an argument, so each is recorded.
    would be new. That matters because it cannot be the load-bearing control —
    see [Decision 5](#decision-5-injection-safety).
 
-Two smaller notes: job creation is handled in
+One smaller note: job creation is handled in
 `crates/dispatcher/src/handlers/jobs.rs` (`CreateJobBody` → `CreateJobRequest`
 → the single-writer actor); `crates/api/src/routes.rs` only forwards the body
-opaquely as `serde_json::Value`. And doc 1 merged as
-`docs/design/host-native-execution.md` without a number prefix, so it is linked
-by that name.
+opaquely as `serde_json::Value`.
 
 ## Decision 1: an input is a value, not a substitution
 
@@ -811,7 +809,7 @@ applied to an effect rather than a check.
 `CONFIG_SCHEMA_EPOCH` in the same commit as the parser change, and add a rule to
 `JobType::validate`: **a non-empty `inputs:` requires `min_dispatcher >=` the
 new epoch**, reported as an ordinary `FieldRuleError::Required`. This is the
-same one-line technique [host-native execution](./host-native-execution.md)
+same one-line technique [host-native execution](./309-host-native-execution.md)
 proposes for `runtime.mode: host`, and for the same reason — `min_dispatcher`
 is author-declared, so leaving it to authorship guarantees somebody forgets.
 The crux is that the *gate itself* is N−1-legible: `min_dispatcher` is a field
