@@ -4,7 +4,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use dispatcher::core::{Core, CoreConfig, CreateJobRequest, spawn};
+use dispatcher::core::{Core, CoreConfig, CreateJobRequest};
 use dispatcher::handlers::spawn_container_handlers;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +12,9 @@ use store::NatsStore;
 use test_utils::repo::TempRepo;
 use test_utils::{FakeBackend, FakeProvider};
 use types::JobState;
+
+mod common;
+use common::{assert_invariants_of, spawn_checked};
 
 const IMPL_AGENT: &str = r#"
 name: impl-agent
@@ -68,7 +71,7 @@ async fn submits_flow_over_nats_to_the_core() {
     )
     .await
     .unwrap();
-    let handle = spawn(core);
+    let (handle, sink) = spawn_checked(core);
     spawn_container_handlers(&store, handle.clone())
         .await
         .unwrap();
@@ -142,7 +145,9 @@ async fn submits_flow_over_nats_to_the_core() {
         })
         .await
         .unwrap();
+    assert_invariants_of(&sink);
     handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&sink);
 
     // Watch job 1 until it lands Done (#206 principle 3).
     test_utils::wait::job_state(&store, "acme", "api", 1, JobState::Done).await;
@@ -168,6 +173,7 @@ async fn submits_flow_over_nats_to_the_core() {
         format!("{log:?}").contains("job/1: impl-agent"),
         "squash commit subject missing: {log:?}"
     );
+    assert_invariants_of(&sink);
 }
 
 /// Job #143: an agent may attach an optional `cover_html` to `submit_result`.
@@ -227,7 +233,7 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
     )
     .await
     .unwrap();
-    let handle = spawn(core);
+    let (handle, sink) = spawn_checked(core);
     spawn_container_handlers(&store, handle.clone())
         .await
         .unwrap();
@@ -314,7 +320,9 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
         })
         .await
         .unwrap();
+    assert_invariants_of(&sink);
     handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&sink);
 
     // Watch job 1 until it lands Done (#206 principle 3).
     test_utils::wait::job_state(&store, "acme", "api", 1, JobState::Done).await;
@@ -390,6 +398,7 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
             "cover_html must never reach the squash body ({leaked}): {body:?}"
         );
     }
+    assert_invariants_of(&sink);
 }
 
 /// Channel posts used to be written straight to `channels` KV by the container:
@@ -443,7 +452,7 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
     )
     .await
     .unwrap();
-    let handle = spawn(core);
+    let (handle, sink) = spawn_checked(core);
     spawn_container_handlers(&store, handle.clone())
         .await
         .unwrap();
@@ -500,6 +509,7 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
         })
         .await
         .unwrap();
+    assert_invariants_of(&sink);
     // Subscribe to the event stream BEFORE releasing so no post is missed —
     // a message wait uses a consumer created before the triggering action
     // (#206 principle 3), then drains it under a hard timeout.
@@ -512,6 +522,7 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
         .await
         .unwrap();
     handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&sink);
 
     // Both updates and the reply survive as events — the whole point.
     let mut updates: Vec<serde_json::Value> = Vec::new();
@@ -554,4 +565,5 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
         .expect("channel entry");
     assert_eq!(entry["update"]["message"], "running tests");
     assert_eq!(entry["last_reply"]["text"], "on it");
+    assert_invariants_of(&sink);
 }

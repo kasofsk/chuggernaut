@@ -14,7 +14,7 @@
 use chrono::Utc;
 use container::docker::DockerNodeConfig;
 use container::{ContainerBackend, ContainerLaunchConfig, PlacementPolicy};
-use dispatcher::core::{Core, CoreConfig, spawn};
+use dispatcher::core::{Core, CoreConfig};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,6 +23,9 @@ use test_utils::FakeProvider;
 use test_utils::nats::NatsTestServer;
 use types::{FleetStatus, Job, JobState, Task, TaskKind, TaskPhase, TaskState, WorkerNode};
 use worker::{FleetBackend, WorkerConfig};
+
+mod common;
+use common::{assert_invariants_of, spawn_checked};
 
 const FLAKY: &str = "name: flaky\nimage: img:latest\nwork:\n  type: agent\n  prompt: prompts/impl.md\n  work_retries: 1\n";
 
@@ -278,13 +281,16 @@ async fn worker_that_cannot_list_shows_out_of_service_not_idle() {
         version: None,
         refresh_outcome: None,
     }]);
-    let _handle = spawn(core);
+    let (_handle, sink) = spawn_checked(core);
 
     // The node is present (not dropped) but shown out of service, not idle.
     let fleet_status = read_fleet(&store, |f| {
         f.nodes.iter().any(|n| n.name == "air" && !n.available)
     })
     .await;
+    // No `Core` call to hang a check on: the republish the scan drove is the whole
+    // scenario, so drain the actor's log once the wait above let it through.
+    assert_invariants_of(&sink);
     let air = fleet_status.nodes.iter().find(|n| n.name == "air").unwrap();
     assert!(
         !air.available,
@@ -392,7 +398,7 @@ async fn occupancy_reflects_worker_rpc_launch_and_exit_through_the_store() {
         version: None,
         refresh_outcome: None,
     }]);
-    let handle = spawn(core);
+    let (handle, sink) = spawn_checked(core);
 
     // Occupancy rebuilt on re-attach: w1 shows one busy slot running job 51 /
     // task 1, served through the store the api reads.
@@ -413,6 +419,7 @@ async fn occupancy_reflects_worker_rpc_launch_and_exit_through_the_store() {
     // Nudge a republish; a scan is occupancy-relevant.
     for _ in 0..50 {
         handle.trigger_scan().await.ok();
+        assert_invariants_of(&sink);
         let bucket = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
         if let Some(f) = bucket
             .get_json::<FleetStatus>("fleet.status")
@@ -432,6 +439,7 @@ async fn occupancy_reflects_worker_rpc_launch_and_exit_through_the_store() {
         .await
         .unwrap()
         .unwrap();
+    assert_invariants_of(&sink);
     assert!(
         cleared.nodes.iter().all(|n| n.occupied == 0),
         "freed slot not republished: {:?}",
@@ -439,4 +447,5 @@ async fn occupancy_reflects_worker_rpc_launch_and_exit_through_the_store() {
     );
 
     daemon.abort();
+    assert_invariants_of(&sink);
 }

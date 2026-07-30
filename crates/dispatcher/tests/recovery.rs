@@ -5,7 +5,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use chrono::Utc;
-use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, EvalSubmission, spawn};
+use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, EvalSubmission};
+use dispatcher::invariants::InvariantSink;
 use std::sync::Arc;
 use std::time::Duration;
 use store::NatsStore;
@@ -15,6 +16,9 @@ use types::{
     EscalationAction, Job, JobState, Task, TaskKind, TaskPhase, TaskResolution, TaskResult,
     TaskState,
 };
+
+mod common;
+use common::{assert_invariants_of, spawn_checked};
 
 const FLAKY: &str = r#"
 name: flaky
@@ -101,6 +105,9 @@ struct Rig {
     repo: TempRepo,
     provider: Arc<FakeProvider>,
     handle: CoreHandle,
+    /// Invariant violations the actor logged, drained by
+    /// `assert_invariants_of` (refactor-plan B1a).
+    invariants: InvariantSink,
 }
 
 async fn rig() -> Option<Rig> {
@@ -143,13 +150,14 @@ async fn rig() -> Option<Rig> {
     )
     .await
     .unwrap();
-    let handle = spawn(core);
+    let (handle, invariants) = spawn_checked(core);
     Some(Rig {
         _server: server,
         store,
         repo,
         provider,
         handle,
+        invariants,
     })
 }
 
@@ -313,9 +321,13 @@ async fn restart_recovers_orphaned_running_work_task() {
     )
     .await
     .unwrap();
-    let _handle = spawn(core);
+    let (_handle, sink) = spawn_checked(core);
 
     wait_for_state(&store, 1, JobState::Done).await;
+    // No `Core` call to hang a check on: this scenario is driven entirely by
+    // reconciliation and the messages it fans out, so drain the actor's log once
+    // the wait above has let them all through.
+    assert_invariants_of(&sink);
     let tasks = store
         .tasks()
         .await
@@ -519,7 +531,7 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
     )
     .await
     .unwrap();
-    let _handle = spawn(core);
+    let (_handle, sink) = spawn_checked(core);
 
     // Wait for the reconciled dispatcher to launch the cycle-2 reviewer. This
     // observes in-memory FakeProvider state, so it uses the tightened poll
@@ -528,6 +540,10 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
         provider.runs().first().map(|r| r.prompt.clone())
     })
     .await;
+    // No `Core` call to hang a check on: this scenario is driven entirely by
+    // reconciliation and the messages it fans out, so drain the actor's log once
+    // the wait above has let them all through.
+    assert_invariants_of(&sink);
 
     // The re-review block was rebuilt entirely from the persisted task log.
     assert!(
@@ -673,9 +689,13 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
     )
     .await
     .unwrap();
-    let _handle = spawn(core);
+    let (_handle, sink) = spawn_checked(core);
 
     wait_for_state(&store, 1, JobState::Done).await;
+    // No `Core` call to hang a check on: this scenario is driven entirely by
+    // reconciliation and the messages it fans out, so drain the actor's log once
+    // the wait above has let them all through.
+    assert_invariants_of(&sink);
     let tasks = store
         .tasks()
         .await
@@ -821,9 +841,13 @@ async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
     )
     .await
     .unwrap();
-    let _handle = spawn(core);
+    let (_handle, sink) = spawn_checked(core);
 
     let job = wait_for_state(&store, 1, JobState::Escalated).await;
+    // No `Core` call to hang a check on: this scenario is driven entirely by
+    // reconciliation and the messages it fans out, so drain the actor's log once
+    // the wait above has let them all through.
+    assert_invariants_of(&sink);
     assert_eq!(
         job.escalation.as_ref().map(|e| e.reason.as_str()),
         Some("infra_loss"),
@@ -965,9 +989,13 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
     )
     .await
     .unwrap();
-    let _handle = spawn(core);
+    let (_handle, sink) = spawn_checked(core);
 
     wait_for_state(&store, 1, JobState::Done).await;
+    // No `Core` call to hang a check on: this scenario is driven entirely by
+    // reconciliation and the messages it fans out, so drain the actor's log once
+    // the wait above has let them all through.
+    assert_invariants_of(&sink);
     let tasks = store
         .tasks()
         .await
@@ -1097,9 +1125,13 @@ async fn restart_requeues_queued_pending_work_task() {
     )
     .await
     .unwrap();
-    let _handle = spawn(core);
+    let (_handle, sink) = spawn_checked(core);
 
     wait_for_state(&store, 1, JobState::Done).await;
+    // No `Core` call to hang a check on: this scenario is driven entirely by
+    // reconciliation and the messages it fans out, so drain the actor's log once
+    // the wait above has let them all through.
+    assert_invariants_of(&sink);
     let tasks = store
         .tasks()
         .await
@@ -1257,7 +1289,7 @@ async fn restart_relaunches_queued_tasks_in_persisted_fifo_order() {
     )
     .await
     .unwrap();
-    let _handle = spawn(core);
+    let (_handle, sink) = spawn_checked(core);
 
     // Drain launches the queue front-to-back, so the first three launches are the
     // three work commands in FIFO order. In-memory backend state → tightened
@@ -1266,6 +1298,10 @@ async fn restart_relaunches_queued_tasks_in_persisted_fifo_order() {
         (backend.launches().len() >= 3).then_some(())
     })
     .await;
+    // No `Core` call to hang a check on: this scenario is driven entirely by
+    // reconciliation and the messages it fans out, so drain the actor's log once
+    // the wait above has let them all through.
+    assert_invariants_of(&sink);
     let branches: Vec<String> = backend
         .launches()
         .iter()
@@ -1332,9 +1368,10 @@ async fn restart_preserves_queue_wait_clock_for_timeout() {
     )
     .await
     .unwrap();
-    let handle = spawn(core);
+    let (handle, sink) = spawn_checked(core);
 
     handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&sink);
     wait_for_state(&store, 1, JobState::Escalated).await;
     let tasks = store
         .tasks()
@@ -1349,6 +1386,7 @@ async fn restart_preserves_queue_wait_clock_for_timeout() {
             .any(|t| t.phase == TaskPhase::Work && t.state == TaskState::Failed),
         "the queued task failed on the persisted-clock timeout: {tasks:?}",
     );
+    assert_invariants_of(&sink);
 }
 
 /// A dispatcher died with an **agent** evaluator queued under capacity pressure
@@ -1517,7 +1555,7 @@ async fn restart_requeues_queued_pending_agent_eval() {
     )
     .await
     .unwrap();
-    let handle = spawn(core);
+    let (handle, sink) = spawn_checked(core);
     // Wire the eval verdict now that the core exists: the relaunched agent run
     // submits a pass for task 2.
     let h = handle.clone();
@@ -1547,6 +1585,7 @@ async fn restart_requeues_queued_pending_agent_eval() {
     // launches and the job wedges in Evaluation — this wait would time out.
     full.store(false, std::sync::atomic::Ordering::SeqCst);
     handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&sink);
     wait_for_state(&store, 1, JobState::Done).await;
     let evals: Vec<_> = store
         .tasks()
@@ -1565,6 +1604,7 @@ async fn restart_requeues_queued_pending_agent_eval() {
     );
     assert_eq!((evals[0].id, evals[0].attempt), (2, 1));
     assert_eq!(evals[0].state, TaskState::Done);
+    assert_invariants_of(&sink);
 }
 
 /// §3.6 startup sweep: exited `chuggernaut.managed` containers left behind by
@@ -1698,7 +1738,7 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
     )
     .await
     .unwrap();
-    let _handle = spawn(core);
+    let (_handle, sink) = spawn_checked(core);
 
     // Reconciliation runs once at startup; wait for the sweep to settle
     // (in-memory backend state → tightened poll, #206 principle 3).
@@ -1707,6 +1747,10 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
         (removed.len() >= 2).then_some(removed)
     })
     .await;
+    // No `Core` call to hang a check on: this scenario is driven entirely by
+    // reconciliation and the messages it fans out, so drain the actor's log once
+    // the wait above has let them all through.
+    assert_invariants_of(&sink);
     removed.sort();
     assert_eq!(
         removed,
@@ -1730,6 +1774,7 @@ async fn fleet_sweep_core(
     &'static test_utils::nats::NatsTestServer,
     CoreHandle,
     TempRepo,
+    InvariantSink,
 )> {
     let server = test_utils::nats::NatsTestServer::shared().await?;
     let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
@@ -1808,8 +1853,8 @@ async fn fleet_sweep_core(
     )
     .await
     .unwrap();
-    let handle = spawn(core);
-    Some((store, server, handle, repo))
+    let (handle, sink) = spawn_checked(core);
+    Some((store, server, handle, repo, sink))
 }
 
 fn work_task(id: u64, state: TaskState, container_id: Option<&str>) -> Task {
@@ -1872,12 +1917,16 @@ async fn startup_fleet_sweep_reaps_orphan_running_container() {
         job: Some(51),
         task: Some(2),
     }]);
-    let Some((store, _server, _handle, _repo)) = fleet_sweep_core(tasks, backend.clone()).await
+    let Some((store, _server, _handle, _repo, sink)) =
+        fleet_sweep_core(tasks, backend.clone()).await
     else {
         return;
     };
 
     let killed = wait_killed(&backend, 1).await;
+    // The sweep runs inside the actor with no `Core` call to hang a check on, so
+    // drain its log once the wait above has let it finish.
+    assert_invariants_of(&sink);
     assert_eq!(
         killed,
         vec!["dev-air/c-orphan".to_string()],
@@ -1938,13 +1987,17 @@ async fn startup_fleet_sweep_keeps_container_of_running_task() {
             task: None,
         },
     ]);
-    let Some((_store, _server, _handle, _repo)) = fleet_sweep_core(tasks, backend.clone()).await
+    let Some((_store, _server, _handle, _repo, sink)) =
+        fleet_sweep_core(tasks, backend.clone()).await
     else {
         return;
     };
 
     // Give the sweep ample time to run, then assert it reaped nothing.
     tokio::time::sleep(Duration::from_millis(400)).await;
+    // The sweep runs inside the actor with no `Core` call to hang a check on, so
+    // drain its log once the wait above has let it finish.
+    assert_invariants_of(&sink);
     assert!(
         backend.killed().is_empty(),
         "containers of live Running tasks are re-attached, never reaped: {:?}",
@@ -1970,13 +2023,17 @@ async fn startup_fleet_sweep_spares_container_without_identity_labels() {
         job: None,
         task: None,
     }]);
-    let Some((_store, _server, _handle, _repo)) = fleet_sweep_core(tasks, backend.clone()).await
+    let Some((_store, _server, _handle, _repo, sink)) =
+        fleet_sweep_core(tasks, backend.clone()).await
     else {
         return;
     };
 
     // Give the sweep ample time to run, then assert it reaped nothing.
     tokio::time::sleep(Duration::from_millis(400)).await;
+    // The sweep runs inside the actor with no `Core` call to hang a check on, so
+    // drain its log once the wait above has let it finish.
+    assert_invariants_of(&sink);
     assert!(
         backend.killed().is_empty(),
         "a marker-bearing container with no identity is not the dispatcher's to reap: {:?}",
@@ -1992,7 +2049,8 @@ async fn startup_fleet_sweep_tolerates_backend_error() {
     let backend = Arc::new(FakeBackend::new());
     backend.fail_list_managed_running("dev-air unreachable");
     let tasks = vec![work_task(2, TaskState::Failed, Some("dev-air/c-orphan"))];
-    let Some((store, _server, handle, _repo)) = fleet_sweep_core(tasks, backend.clone()).await
+    let Some((store, _server, handle, _repo, sink)) =
+        fleet_sweep_core(tasks, backend.clone()).await
     else {
         return;
     };
@@ -2006,8 +2064,11 @@ async fn startup_fleet_sweep_tolerates_backend_error() {
     );
 
     let job = handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&sink);
     handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&sink);
     wait_for_state(&store, job.id, JobState::Done).await;
+    assert_invariants_of(&sink);
 }
 
 /// A dispatcher died mid-wrap-up: the job record says WrapUp (eval already
@@ -2133,10 +2194,14 @@ async fn restart_lands_job_orphaned_in_wrapup() {
     )
     .await
     .unwrap();
-    let _handle = spawn(core);
+    let (_handle, sink) = spawn_checked(core);
 
     // Recovery re-drives wrap-up and the job reaches Done.
     wait_for_state(&store, 1, JobState::Done).await;
+    // No `Core` call to hang a check on: this scenario is driven entirely by
+    // reconciliation and the messages it fans out, so drain the actor's log once
+    // the wait above has let them all through.
+    assert_invariants_of(&sink);
 }
 
 /// The §3.6 wrap-up-command gap: a dispatcher died AFTER the squash landed on
@@ -2308,10 +2373,14 @@ wrap_up:
     )
     .await
     .unwrap();
-    let _handle = spawn(core);
+    let (_handle, sink) = spawn_checked(core);
 
     // Recovery relaunches the publish and lands the job.
     wait_for_state(&store, 1, JobState::Done).await;
+    // No `Core` call to hang a check on: this scenario is driven entirely by
+    // reconciliation and the messages it fans out, so drain the actor's log once
+    // the wait above has let them all through.
+    assert_invariants_of(&sink);
 
     // Exactly one relaunch happened — the publish, not a re-merge.
     let launches = backend.launches();
@@ -2352,6 +2421,7 @@ async fn restart_unblocks_dependent_whose_deps_completed() {
     commit_on_run(&rig.provider, rig.repo.bare_path());
 
     let up = rig.handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let down = rig
         .handle
         .create_job(CreateJobRequest {
@@ -2360,10 +2430,12 @@ async fn restart_unblocks_dependent_whose_deps_completed() {
         })
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     // Wire down ← up by rewriting the record before release (creation API has
     // no input here because flaky declares none; use the graph as-is instead).
     // Simpler: up runs to Done; down was Blocked behind it via a crash state.
     rig.handle.release_job("acme", "api", up.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, up.id, JobState::Done).await;
 
     // Simulate: down was released Blocked before the crash (deps not Done yet),
@@ -2396,8 +2468,12 @@ async fn restart_unblocks_dependent_whose_deps_completed() {
     )
     .await
     .unwrap();
-    let _handle2 = spawn(core);
+    let (_handle2, sink2) = spawn_checked(core);
     wait_for_state(&rig.store, down.id, JobState::Done).await;
+    // Two sinks, two actors: the rig's covers the pre-crash core, `sink2` the
+    // restart core whose reconciliation is what this test is about.
+    assert_invariants_of(&rig.invariants);
+    assert_invariants_of(&sink2);
 }
 
 /// A hung work container is killed at `task_timeout` and the failure path
@@ -2411,11 +2487,14 @@ async fn task_timeout_kills_and_fails_hung_work() {
     });
 
     let job = rig.handle.create_job(req("slow")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Work).await;
 
     tokio::time::sleep(Duration::from_millis(1200)).await;
     rig.handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     let tasks = rig
@@ -2427,6 +2506,7 @@ async fn task_timeout_kills_and_fails_hung_work() {
         .await
         .unwrap();
     assert_eq!(tasks[0].state, TaskState::Failed);
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Human tasks never time out, but `job_deadline` summons a human exactly
@@ -2436,11 +2516,14 @@ async fn job_deadline_escalates_once_for_stalled_human_work() {
     let Some(rig) = rig().await else { return };
 
     let job = rig.handle.create_job(req("manual-deadline")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Work).await;
 
     tokio::time::sleep(Duration::from_millis(1200)).await;
     rig.handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     let tasks = rig
@@ -2471,10 +2554,12 @@ async fn job_deadline_escalates_once_for_stalled_human_work() {
         )
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Work).await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     rig.handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&rig.invariants);
     tokio::time::sleep(Duration::from_millis(200)).await;
     let after = rig
         .store
@@ -2490,6 +2575,7 @@ async fn job_deadline_escalates_once_for_stalled_human_work() {
         JobState::Work,
         "one-shot: no second deadline escalation"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// `submit_result` arrives while the container is still running (§4.2
@@ -2624,9 +2710,13 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
     )
     .await
     .unwrap();
-    let _handle = spawn(core);
+    let (_handle, sink) = spawn_checked(core);
 
     wait_for_state(&store, 1, JobState::Done).await;
+    // No `Core` call to hang a check on: this scenario is driven entirely by
+    // reconciliation and the messages it fans out, so drain the actor's log once
+    // the wait above has let them all through.
+    assert_invariants_of(&sink);
 
     // The summary survived the restart and reached the commit message *body*
     // (`build_squash_commit` passes it as a second `-m`; RepoManager::log only
@@ -2714,10 +2804,12 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
     )
     .await
     .unwrap();
-    let handle = spawn(core);
+    let (handle, sink) = spawn_checked(core);
 
     let job = handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&sink);
     handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&sink);
     wait_for_state(&store, job.id, JobState::Work).await;
 
     // Wait until the work task is Running with its container id stamped
@@ -2749,6 +2841,7 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
 
     // Drain: the audit recovers the id, so the record is true at exit.
     handle.drain().await.unwrap();
+    assert_invariants_of(&sink);
     let flushed = tasks
         .get("acme", "api", job.id, work.id)
         .await
@@ -2777,7 +2870,7 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
     )
     .await
     .unwrap();
-    let _handle2 = spawn(core2);
+    let (_handle2, sink2) = spawn_checked(core2);
 
     // Reconciliation re-attaches the container: the task stays Running on the
     // same id, with no retry, no reconcile-failure, and no synthetic -1.
@@ -2808,6 +2901,10 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
         .unwrap();
     assert_eq!(after.state, JobState::Work, "job stays in Work, mid-task");
     assert_eq!(backend2.killed(), Vec::<String>::new(), "nothing reaped");
+    // Two sinks, two actors: `sink` covers the drained pre-restart core, `sink2`
+    // the re-attaching one.
+    assert_invariants_of(&sink);
+    assert_invariants_of(&sink2);
 }
 
 /// §3.6 re-attach harvest (ticket #187, self-deploy report loss on deploy #209):
@@ -2943,10 +3040,14 @@ async fn restart_reattach_harvests_command_work_deploy_report() {
     )
     .await
     .unwrap();
-    let _handle = spawn(core);
+    let (_handle, sink) = spawn_checked(core);
 
     // cmd-work has no evaluators, so a passing work task carries the job to Done.
     wait_for_state(&store, 1, JobState::Done).await;
+    // No `Core` call to hang a check on: this scenario is driven entirely by
+    // reconciliation and the messages it fans out, so drain the actor's log once
+    // the wait above has let them all through.
+    assert_invariants_of(&sink);
     let works: Vec<Task> = store
         .tasks()
         .await
@@ -3094,7 +3195,7 @@ async fn spawn_core_capturing_artifacts(
     repo: &TempRepo,
     backend: Arc<FakeBackend>,
     nats_url: &str,
-) -> (CoreHandle, String) {
+) -> (CoreHandle, String, InvariantSink) {
     let (identity, _) = store::secrets::generate_age_keypair();
     let repos_root = repo
         .bare_path()
@@ -3117,7 +3218,8 @@ async fn spawn_core_capturing_artifacts(
     )
     .await
     .unwrap();
-    (spawn(core), identity)
+    let (handle, sink) = spawn_checked(core);
+    (handle, identity, sink)
 }
 
 /// The stored `stdout.log` for a task, polled until it lands (harvests run off
@@ -3167,11 +3269,14 @@ async fn restart_harvests_command_work_that_exited_during_the_downtime() {
     backend.seed_exited(cid, 0);
     backend.put_logs(DEPLOY_STDOUT.as_bytes().to_vec());
 
-    let (_handle, identity) =
+    let (_handle, identity, sink) =
         spawn_core_capturing_artifacts(&store, &repo, backend.clone(), server.url()).await;
 
     // cmd-work has no evaluators, so an exit-0 work task carries the job to Done.
     wait_for_state(&store, 1, JobState::Done).await;
+    // The sweep runs inside the actor with no `Core` call to hang a check on, so
+    // drain its log once the wait above has let it finish.
+    assert_invariants_of(&sink);
 
     // The operator-visible record: the container's own output, harvested before
     // the container was reclaimed.
@@ -3250,9 +3355,10 @@ async fn task_timeout_harvests_the_container_log_before_giving_up() {
     backend.seed_running([cid.to_string()]);
     backend.put_logs(DEPLOY_STDOUT.as_bytes().to_vec());
 
-    let (handle, identity) =
+    let (handle, identity, sink) =
         spawn_core_capturing_artifacts(&store, &repo, backend.clone(), server.url()).await;
     handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&sink);
 
     // No retries on this type, so the timeout escalates the job…
     wait_for_state(&store, 1, JobState::Escalated).await;
@@ -3263,6 +3369,7 @@ async fn task_timeout_harvests_the_container_log_before_giving_up() {
         String::from_utf8_lossy(&stdout).contains("worker 'nuc' refresh NOT confirmed"),
         "a timed-out task must still leave its container log as stdout.log"
     );
+    assert_invariants_of(&sink);
 }
 
 /// §3.6 graceful drain: even with a busy mailbox the drain completes well under
@@ -3281,10 +3388,12 @@ async fn drain_completes_promptly_with_a_busy_mailbox() {
         }));
     }
     let drained = tokio::time::timeout(Duration::from_secs(5), rig.handle.drain()).await;
+    assert_invariants_of(&rig.invariants);
     assert!(
         matches!(drained, Ok(Ok(()))),
         "drain did not complete under its bound with a busy mailbox: {drained:?}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// §3.6 graceful drain robustness: a drain cut short (here by a 1ms deadline,
@@ -3298,7 +3407,9 @@ async fn cut_short_drain_leaves_records_no_worse() {
         .on_run(|_| async { futures::future::pending::<()>().await });
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     // Wait for the in-flight work task itself to be Running — the job-state Work
     // write can land a beat before the task record, and this test inspects the
     // task, so gate on the task, not just the job state.
@@ -3314,6 +3425,7 @@ async fn cut_short_drain_leaves_records_no_worse() {
 
     // Cut the drain short almost immediately.
     let _ = tokio::time::timeout(Duration::from_millis(1), rig.handle.drain()).await;
+    assert_invariants_of(&rig.invariants);
 
     // Records remain parseable and the Running task was not regressed.
     let log = rig
@@ -3338,6 +3450,7 @@ async fn cut_short_drain_leaves_records_no_worse() {
         TaskState::Running,
         "the in-flight work task is left exactly as it was"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// C1 heal: the escalation shim commits the Stalled/Escalated transition
@@ -3353,6 +3466,7 @@ async fn restart_recreates_missing_escalation_task_from_stamped_record() {
     // The crash state: a job committed to Stalled with WHY stamped, but the
     // Human task write never landed (no tasks exist at all).
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let jobs = rig.store.jobs().await.unwrap();
     let mut stalled = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
     stalled.state = JobState::Stalled;
@@ -3386,7 +3500,7 @@ async fn restart_recreates_missing_escalation_task_from_stamped_record() {
     )
     .await
     .unwrap();
-    let _handle2 = spawn(core);
+    let (_handle2, sink2) = spawn_checked(core);
 
     // The inbox artifact is re-derived: a Pending Human escalation task
     // carrying the stamped detail as its prompt.
@@ -3421,4 +3535,8 @@ async fn restart_recreates_missing_escalation_task_from_stamped_record() {
         after.escalation.as_ref().unwrap().reason,
         "revalidation_failed"
     );
+    // Two sinks, two actors: the rig's covers the core that created the job,
+    // `sink2` the restart core that healed the missing escalation task.
+    assert_invariants_of(&rig.invariants);
+    assert_invariants_of(&sink2);
 }

@@ -17,6 +17,9 @@ use test_utils::repo::TempRepo;
 use test_utils::{FakeBackend, FakeProvider};
 use types::{Task, TaskKind, TaskPhase, TaskState};
 
+mod common;
+use common::assert_invariants;
+
 const BUILD_YAML: &str = r#"
 name: build
 image: img:latest
@@ -77,6 +80,7 @@ async fn setup() -> Option<(NatsStore, Core, u64)> {
         })
         .await
         .unwrap();
+    assert_invariants(&core);
     Some((store, core, job.id))
 }
 
@@ -150,6 +154,7 @@ async fn completing_a_task_recomputes_the_job_total_and_never_accumulates() {
     core.task_put(&task(1, seq, 1, Some(0), Some(10)))
         .await
         .unwrap();
+    assert_invariants(&core);
     assert_eq!(stored_task_time(&store, seq).await, Some(10 * MIN_MS));
 
     // A rework cycle 30 minutes later adds its own 5 minutes — the gap between
@@ -157,6 +162,7 @@ async fn completing_a_task_recomputes_the_job_total_and_never_accumulates() {
     core.task_put(&task(2, seq, 2, Some(40), Some(45)))
         .await
         .unwrap();
+    assert_invariants(&core);
     assert_eq!(stored_task_time(&store, seq).await, Some(15 * MIN_MS));
 
     // Writing an already-counted task again is a recompute, not a `+=`: the
@@ -164,12 +170,14 @@ async fn completing_a_task_recomputes_the_job_total_and_never_accumulates() {
     core.task_put(&task(1, seq, 1, Some(0), Some(10)))
         .await
         .unwrap();
+    assert_invariants(&core);
     assert_eq!(stored_task_time(&store, seq).await, Some(15 * MIN_MS));
 
     // A task that never started contributes nothing.
     let mut parked = task(3, seq, 3, None, None);
     parked.state = TaskState::Pending;
     core.task_put(&parked).await.unwrap();
+    assert_invariants(&core);
     assert_eq!(stored_task_time(&store, seq).await, Some(15 * MIN_MS));
 
     // The in-memory graph — the copy every later job write starts from — moved
@@ -192,9 +200,11 @@ async fn task_time_survives_the_terminal_transition() {
     core.task_put(&task(1, seq, 1, Some(0), Some(10)))
         .await
         .unwrap();
+    assert_invariants(&core);
     // Revoke is the shortest public path to a terminal state-write; the stamp
     // it sets must not carry the job's total away with it.
     core.revoke_job("acme", "api", seq).await.unwrap();
+    assert_invariants(&core);
     let job = store
         .jobs()
         .await
@@ -216,6 +226,7 @@ async fn revoking_keeps_the_span_of_the_attempt_it_closes() {
     core.task_put(&task(1, seq, 1, Some(0), Some(10)))
         .await
         .unwrap();
+    assert_invariants(&core);
 
     // A claimed human attempt: Pending, but with a real `started_at`, so the
     // revoke path's own `close_pending_tasks` stamps it with a span rather
@@ -226,9 +237,11 @@ async fn revoking_keeps_the_span_of_the_attempt_it_closes() {
     claimed.performed_by = Some(types::Performer::Human);
     claimed.started_at = Some(Utc::now() - Duration::minutes(5));
     core.task_put(&claimed).await.unwrap();
+    assert_invariants(&core);
     assert_eq!(stored_task_time(&store, seq).await, Some(10 * MIN_MS));
 
     core.revoke_job("acme", "api", seq).await.unwrap();
+    assert_invariants(&core);
 
     // 10 minutes of finished work plus the ~5 minutes the closed attempt ran.
     let total = stored_task_time(&store, seq).await.unwrap();

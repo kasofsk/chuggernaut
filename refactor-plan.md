@@ -142,15 +142,30 @@ message in the existing integration tests (they already hold the in-process
 half-done, which B1a finishes.
 
 **B1a. Finish the B1 wiring** *(code, small — depends on B1)*
-`assert_invariants` is called from `lifecycle.rs` only. Fourteen integration
-files hold an in-process `Core` — `batch.rs`, `claim.rs`, `draft.rs`,
-`dynamic_fleet.rs`, `execution.rs`, `fleet.rs`, `fleet_e2e.rs`,
-`gate_and_human.rs`, `golden_traces.rs`, `nats_submit.rs`, `origin.rs`,
-`recovery.rs` and `task_output.rs` besides it — so the checker guards one of
-fourteen. Lift the helper into `tests/common` and call it after every `Core`
-call in all of them, which is what B1 specified. Cheap, and
-a prerequisite for F–I: each of those tracks lands new invariants, and there
-is no point adding rules to a checker that most tests do not run.
+`assert_invariants` is called from `lifecycle.rs` only. **Sixteen** integration
+files build a `Core` — `batch.rs`, `claim.rs`, `draft.rs`, `dynamic_fleet.rs`,
+`execution.rs`, `fleet.rs`, `fleet_e2e.rs`, `gate_and_human.rs`,
+`golden_traces.rs`, `inputs.rs`, `nats_submit.rs`, `origin.rs`, `recovery.rs`,
+`task_output.rs` and `task_time.rs` besides it — so the checker guards one of
+sixteen. (Derive the list, don't trust a count: `git grep -lE 'Core::new|core::Core'
+-- 'crates/dispatcher/tests/*.rs' ':!crates/dispatcher/tests/common/*'` — the
+exclusion drops the shared helper module, which names `Core` in its own
+signatures. `task_time.rs` arrived with #291 and `inputs.rs` with #311, after
+this paragraph was first written.) Lift the helper
+into `tests/common` and call it after every `Core` call in all of them, which is
+what B1 specified. Cheap, and a prerequisite for F–I: each of those tracks lands
+new invariants, and there is no point adding rules to a checker that most tests
+do not run.
+
+Note for the implementation: only five of the sixteen keep the `Core`
+in-process. The other eleven hand it to `core::spawn` and drive it over a
+`CoreHandle`, so there is no `Core` left to call `state()` on — those attach an
+`invariants::InvariantSink` before spawning (via `tests/common`'s
+`spawn_checked`) and the state loop checks after *every* message it handles,
+which also covers the container exits and scans no test sends by hand. Draining
+the sink must stay a plain local read: threading a probe message through the
+actor between every pair of real messages lets it finish its post-message drains
+before the test's next observation, which changes the timing these tests pin.
 
 **B2. Effect catalog** *(code, medium)*
 Classify the ~460 await sites in `eval.rs` (152), `exec.rs` (163), `core.rs`

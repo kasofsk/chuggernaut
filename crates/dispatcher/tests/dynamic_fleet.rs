@@ -10,13 +10,17 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use chrono::Utc;
-use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
+use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest};
+use dispatcher::invariants::InvariantSink;
 use std::sync::Arc;
 use std::time::Duration;
 use store::NatsStore;
 use test_utils::repo::TempRepo;
 use test_utils::{FakeBackend, FakeProvider};
 use types::{FleetStatus, Job, JobState, Task, TaskKind, TaskPhase, TaskState, WorkerNode};
+
+mod common;
+use common::{assert_invariants_of, spawn_checked};
 
 const CMD_WORK: &str = r#"
 name: cmd-work
@@ -117,7 +121,7 @@ async fn spawn_core(
     roster: Vec<WorkerNode>,
     heartbeat_timeout: Option<Duration>,
     backend: Arc<FakeBackend>,
-) -> (CoreHandle, TempRepo) {
+) -> (CoreHandle, TempRepo, InvariantSink) {
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
     clone
@@ -147,10 +151,11 @@ async fn spawn_core(
     .await
     .unwrap()
     .with_fleet_roster(roster);
-    (spawn(core), repo)
+    let (handle, sink) = spawn_checked(core);
+    (handle, repo, sink)
 }
 
-async fn release_cmd_work(handle: &CoreHandle) -> u64 {
+async fn release_cmd_work(handle: &CoreHandle, sink: &InvariantSink) -> u64 {
     let created = handle
         .create_job(CreateJobRequest {
             owner: "acme".into(),
@@ -171,7 +176,9 @@ async fn release_cmd_work(handle: &CoreHandle) -> u64 {
         })
         .await
         .unwrap();
+    assert_invariants_of(sink);
     handle.release_job("acme", "api", created.id).await.unwrap();
+    assert_invariants_of(sink);
     created.id
 }
 
@@ -226,7 +233,7 @@ async fn announce_adds_capacity_and_drains_launch_queue() {
     // A one-node fleet that is at capacity: every launch is refused.
     let backend = Arc::new(FakeBackend::new());
     backend.fail_launch_no_capacity_if(|_| Some("full".into()));
-    let (handle, _repo) = spawn_core(
+    let (handle, _repo, sink) = spawn_core(
         server,
         &store,
         vec![worker_node("air", 1, Some("0.1.0+air"))],
@@ -236,7 +243,7 @@ async fn announce_adds_capacity_and_drains_launch_queue() {
     .await;
 
     // The command work launch is refused and queued.
-    release_cmd_work(&handle).await;
+    release_cmd_work(&handle, &sink).await;
     wait_for_fleet(&store, |f| f.queue_depth >= 1).await;
     assert!(backend.launches().is_empty(), "nothing launched while full");
 
@@ -246,6 +253,7 @@ async fn announce_adds_capacity_and_drains_launch_queue() {
         .announce_worker("nuc".into(), 2, "0.1.0+nuc".into())
         .await
         .unwrap();
+    assert_invariants_of(&sink);
 
     wait_until(|| !backend.launches().is_empty()).await;
     let fleet = wait_for_fleet(&store, |f| f.queue_depth == 0).await;
@@ -258,6 +266,7 @@ async fn announce_adds_capacity_and_drains_launch_queue() {
             .any(|(n, s, _)| n == "nuc" && *s == 2)
     );
     assert_eq!(node(&fleet, "nuc").slots, Some(2));
+    assert_invariants_of(&sink);
 }
 
 /// Heartbeat loss stops NEW placements on a dynamically-announced node but never
@@ -298,7 +307,7 @@ async fn heartbeat_loss_stops_placement_but_preserves_running() {
 
     // Zero-seed fleet with a tiny heartbeat timeout so the very next scan after
     // an announce treats it as lapsed.
-    let (handle, _repo) = spawn_core(
+    let (handle, _repo, sink) = spawn_core(
         server,
         &store,
         vec![],
@@ -312,6 +321,7 @@ async fn heartbeat_loss_stops_placement_but_preserves_running() {
         .announce_worker("nuc".into(), 2, "0.1.0+nuc".into())
         .await
         .unwrap();
+    assert_invariants_of(&sink);
     // Its running container shows occupied.
     wait_for_fleet(&store, |f| {
         f.nodes.iter().any(|n| n.name == "nuc" && n.occupied == 1)
@@ -320,10 +330,11 @@ async fn heartbeat_loss_stops_placement_but_preserves_running() {
 
     // The heartbeat lapses (no re-announce): the scan marks `nuc` unschedulable.
     handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&sink);
     wait_until(|| backend.unschedulable().iter().any(|n| n == "nuc")).await;
 
     // A new launch finds no capacity and queues — placement stopped …
-    release_cmd_work(&handle).await;
+    release_cmd_work(&handle, &sink).await;
     let fleet = wait_for_fleet(&store, |f| f.queue_depth >= 1).await;
     // … while the already-running container is still tracked, and the node reads
     // as unavailable (down) rather than gone.
@@ -334,6 +345,7 @@ async fn heartbeat_loss_stops_placement_but_preserves_running() {
         backend.killed().is_empty(),
         "a lost node's container is never killed"
     );
+    assert_invariants_of(&sink);
 }
 
 /// Static seed and a live announcement merge by name, and the live announcement
@@ -351,7 +363,7 @@ async fn static_and_dynamic_merge_precedence() {
 
     let backend = Arc::new(FakeBackend::new());
     // Seed `air` at 4 slots (a DOCKER_NODES worker entry).
-    let (handle, _repo) = spawn_core(
+    let (handle, _repo, sink) = spawn_core(
         server,
         &store,
         vec![worker_node("air", 4, Some("0.1.0+air"))],
@@ -366,11 +378,13 @@ async fn static_and_dynamic_merge_precedence() {
         .announce_worker("air".into(), 5, "0.2.0+air".into())
         .await
         .unwrap();
+    assert_invariants_of(&sink);
     // And a brand-new node joins.
     handle
         .announce_worker("nuc".into(), 2, "0.1.0+nuc".into())
         .await
         .unwrap();
+    assert_invariants_of(&sink);
 
     let fleet = wait_for_fleet(&store, |f| {
         node_slots(f, "air") == Some(Some(5)) && f.nodes.iter().any(|n| n.name == "nuc")
@@ -384,6 +398,7 @@ async fn static_and_dynamic_merge_precedence() {
     let reg = backend.registered();
     assert!(reg.iter().any(|(n, s, _)| n == "air" && *s == 5));
     assert!(reg.iter().any(|(n, s, _)| n == "nuc" && *s == 2));
+    assert_invariants_of(&sink);
 }
 
 /// The #60 interaction: the dispatcher boots with zero configured nodes and
@@ -402,10 +417,10 @@ async fn zero_seed_boot_then_announce() {
     // No capacity at all: launches are refused until a node announces.
     let backend = Arc::new(FakeBackend::new());
     backend.fail_launch_no_capacity_if(|_| Some("no nodes yet".into()));
-    let (handle, _repo) = spawn_core(server, &store, vec![], None, backend.clone()).await;
+    let (handle, _repo, sink) = spawn_core(server, &store, vec![], None, backend.clone()).await;
 
     // A launch on the empty fleet queues rather than failing.
-    release_cmd_work(&handle).await;
+    release_cmd_work(&handle, &sink).await;
     wait_for_fleet(&store, |f| f.queue_depth >= 1).await;
 
     // The first worker announces: it becomes live fleet membership and its
@@ -414,11 +429,13 @@ async fn zero_seed_boot_then_announce() {
         .announce_worker("air".into(), 4, "0.1.0+air".into())
         .await
         .unwrap();
+    assert_invariants_of(&sink);
     wait_until(|| !backend.launches().is_empty()).await;
     let fleet = wait_for_fleet(&store, |f| f.queue_depth == 0).await;
     let air = node(&fleet, "air");
     assert_eq!(air.slots, Some(4));
     assert!(air.available);
+    assert_invariants_of(&sink);
 }
 
 /// A backend that cannot route to announced nodes (single-node Docker) drops a
@@ -437,7 +454,7 @@ async fn non_fleet_backend_drops_stray_announce() {
     // A backend that does not support dynamic workers (a Docker deployment).
     let backend = Arc::new(FakeBackend::new());
     backend.disable_dynamic_workers();
-    let (handle, _repo) = spawn_core(server, &store, vec![], None, backend.clone()).await;
+    let (handle, _repo, sink) = spawn_core(server, &store, vec![], None, backend.clone()).await;
 
     // Its boot fleet publishes with no nodes.
     wait_for_fleet(&store, |f| f.nodes.is_empty()).await;
@@ -447,6 +464,7 @@ async fn non_fleet_backend_drops_stray_announce() {
         .announce_worker("ghost".into(), 2, "0.1.0+ghost".into())
         .await
         .unwrap();
+    assert_invariants_of(&sink);
     // Give the actor a turn to process and republish (a Ping round-trips it).
     handle.ping().await.unwrap();
 
@@ -460,6 +478,7 @@ async fn non_fleet_backend_drops_stray_announce() {
         backend.registered().is_empty(),
         "announce should not reach a non-fleet backend"
     );
+    assert_invariants_of(&sink);
 }
 
 /// A worker's ping-reported refresh outcome (ticket #187) flows through the
@@ -503,10 +522,11 @@ async fn ping_refresh_outcome_lands_in_fleet_status() {
             refresh_outcome: None,
         },
     ]);
-    let (handle, _repo) = spawn_core(server, &store, vec![], None, backend.clone()).await;
+    let (handle, _repo, sink) = spawn_core(server, &store, vec![], None, backend.clone()).await;
 
     // Any non-ping message republishes fleet.status; the scan tick does it.
     handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&sink);
 
     let fleet = wait_for_fleet(&store, |f| {
         f.nodes
@@ -530,6 +550,7 @@ async fn ping_refresh_outcome_lands_in_fleet_status() {
         node(&fleet, "nuc").refresh_outcome.is_none(),
         "a node with no reported refresh outcome must read None"
     );
+    assert_invariants_of(&sink);
 }
 
 /// Helper: the fleet node's `slots` field wrapped so `Some(None)` (present but

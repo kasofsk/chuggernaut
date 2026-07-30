@@ -6,7 +6,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use async_trait::async_trait;
-use dispatcher::core::{Core, CoreConfig, CoreError, CreateJobRequest, spawn};
+use dispatcher::core::{Core, CoreConfig, CoreError, CreateJobRequest};
 use dispatcher::forge_ingest::github::{GithubError, PrInfo, PullRequestApi};
 use dispatcher::forge_ingest::origin::{SECRET_DEPLOY_KEY, SECRET_PAT};
 use std::sync::{Arc, Mutex};
@@ -15,6 +15,9 @@ use store::NatsStore;
 use test_utils::repo::{FakeOrigin, clone_branch_from};
 use test_utils::{FakeBackend, FakeProvider};
 use types::{JobState, ProjectRecord, ReleaseStatus};
+
+mod common;
+use common::{assert_invariants, assert_invariants_of, spawn_checked};
 
 /// Scripted PR API: `create_pr` mints PR #1 open; `get_pr` returns whatever
 /// the test last scripted.
@@ -167,6 +170,7 @@ async fn link_seeds_config_without_clobbering_and_leaves_origin_untouched() {
         .link_project("acme", "api", &rig.origin.url(), None)
         .await
         .unwrap();
+    assert_invariants(&core);
 
     let link = record.origin.expect("linked");
     assert_eq!(link.main_branch, "main");
@@ -209,6 +213,7 @@ async fn link_seeds_config_without_clobbering_and_leaves_origin_untouched() {
             .await,
         Err(CoreError::Conflict(_))
     ));
+    assert_invariants(&core);
 }
 
 #[tokio::test]
@@ -224,6 +229,7 @@ async fn ssh_origin_requires_deploy_key_secret() {
         )
         .await
         .unwrap_err();
+    assert_invariants(&core);
     let CoreError::Validation(errs) = err else {
         panic!("expected validation error, got {err}");
     };
@@ -240,10 +246,12 @@ async fn release_pushes_branch_opens_pr_and_holds() {
         .link_project("acme", "api", &rig.origin.url(), None)
         .await
         .unwrap();
+    assert_invariants(&core);
     rig.pretend_github(&mut record).await;
     commit_to_integration(&rig, &[("src/feature.py", "print('job 1')")]).await;
 
     let record = core.origin_release("acme", "api").await.unwrap();
+    assert_invariants(&core);
     let release = record.release.expect("release state");
     assert_eq!(release.number, 1);
     assert_eq!(release.pr_number, 1);
@@ -271,6 +279,7 @@ async fn release_pushes_branch_opens_pr_and_holds() {
     );
     // Status reflects the hold.
     let status = core.origin_status("acme", "api").await.unwrap();
+    assert_invariants(&core);
     assert!(status.held);
 
     // Second release while open → 409.
@@ -278,6 +287,7 @@ async fn release_pushes_branch_opens_pr_and_holds() {
         core.origin_release("acme", "api").await,
         Err(CoreError::Conflict(_))
     ));
+    assert_invariants(&core);
 }
 
 #[tokio::test]
@@ -287,12 +297,15 @@ async fn release_with_nothing_ahead_is_a_conflict() {
     core.link_project("acme", "api", &rig.origin.url(), None)
         .await
         .unwrap();
+    assert_invariants(&core);
     // Merge the seed commit upstream so integration == origin main.
     let record = core.origin_release("acme", "api").await.unwrap(); // seed commit is releasable
+    assert_invariants(&core);
     rig.origin
         .merge_branch_to_main("chug/release-1", false)
         .await;
     core.origin_sync("acme", "api").await.unwrap();
+    assert_invariants(&core);
     assert_eq!(
         record.release.unwrap().pr_number,
         0,
@@ -301,6 +314,7 @@ async fn release_with_nothing_ahead_is_a_conflict() {
 
     // Now integration has nothing beyond origin main.
     let err = core.origin_release("acme", "api").await.unwrap_err();
+    assert_invariants(&core);
     assert!(matches!(err, CoreError::Conflict(_)), "{err}");
 }
 
@@ -312,9 +326,11 @@ async fn merged_pr_resets_integration_and_clears_hold() {
         .link_project("acme", "api", &rig.origin.url(), None)
         .await
         .unwrap();
+    assert_invariants(&core);
     rig.pretend_github(&mut record).await;
     commit_to_integration(&rig, &[("src/feature.py", "print('job 1')")]).await;
     core.origin_release("acme", "api").await.unwrap();
+    assert_invariants(&core);
 
     // GitHub squash-merges the PR (worst case: shared trees, no shared commits).
     rig.origin
@@ -323,6 +339,7 @@ async fn merged_pr_resets_integration_and_clears_hold() {
     rig.pr.script("closed", true);
 
     let status = core.origin_sync("acme", "api").await.unwrap();
+    assert_invariants(&core);
     assert_eq!(
         status.release.as_ref().unwrap().status,
         ReleaseStatus::Merged
@@ -344,6 +361,7 @@ async fn merged_pr_resets_integration_and_clears_hold() {
     // A fresh release afterward gets n=2.
     commit_to_integration(&rig, &[("src/more.py", "print('job 2')")]).await;
     let record = core.origin_release("acme", "api").await.unwrap();
+    assert_invariants(&core);
     assert_eq!(record.release.unwrap().number, 2);
 }
 
@@ -355,14 +373,17 @@ async fn closed_unmerged_pr_clears_hold_without_reset() {
         .link_project("acme", "api", &rig.origin.url(), None)
         .await
         .unwrap();
+    assert_invariants(&core);
     rig.pretend_github(&mut record).await;
     commit_to_integration(&rig, &[("src/feature.py", "print('job 1')")]).await;
     let record = core.origin_release("acme", "api").await.unwrap();
+    assert_invariants(&core);
     let integration_before = record.release.as_ref().unwrap().integration_sha.clone();
 
     rig.pr.script("closed", false); // closed without merging
 
     let status = core.origin_sync("acme", "api").await.unwrap();
+    assert_invariants(&core);
     assert_eq!(
         status.release.as_ref().unwrap().status,
         ReleaseStatus::Closed
@@ -383,18 +404,22 @@ async fn sync_fast_forwards_external_commits_when_nothing_unreleased() {
     core.link_project("acme", "api", &rig.origin.url(), None)
         .await
         .unwrap();
+    assert_invariants(&core);
     // Ship the seed so integration == origin main.
     core.origin_release("acme", "api").await.unwrap();
+    assert_invariants(&core);
     rig.origin
         .merge_branch_to_main("chug/release-1", false)
         .await;
     core.origin_sync("acme", "api").await.unwrap();
+    assert_invariants(&core);
 
     // A human pushes to GitHub main directly.
     rig.origin
         .commit_to_main("docs/human.md", b"external", "human commit")
         .await;
     let status = core.origin_sync("acme", "api").await.unwrap();
+    assert_invariants(&core);
     assert_eq!(
         status.integration_sha.as_deref(),
         Some(rig.origin.main_sha().await.as_str()),
@@ -410,14 +435,17 @@ async fn restart_restores_hold_for_open_release() {
         .link_project("acme", "api", &rig.origin.url(), None)
         .await
         .unwrap();
+    assert_invariants(&core);
     rig.pretend_github(&mut record).await;
     commit_to_integration(&rig, &[("src/feature.py", "print('job 1')")]).await;
     core.origin_release("acme", "api").await.unwrap();
+    assert_invariants(&core);
     drop(core);
 
     // A fresh Core (restart) must come up held.
     let mut core = rig.core().await;
     let status = core.origin_status("acme", "api").await.unwrap();
+    assert_invariants(&core);
     assert!(
         status.held,
         "hold restored from the project record at startup"
@@ -445,6 +473,7 @@ async fn held_job_lands_after_merged_release_sync() {
         .link_project("acme", "api", &rig.origin.url(), None)
         .await
         .unwrap();
+    assert_invariants(&core);
     rig.pretend_github(&mut record).await;
     commit_to_integration(
         &rig,
@@ -470,9 +499,11 @@ async fn held_job_lands_after_merged_release_sync() {
         }
     });
 
-    let handle = spawn(core);
+    let (handle, sink) = spawn_checked(core);
     handle.origin_release("acme", "api").await.unwrap();
+    assert_invariants_of(&sink);
     let release = handle.origin_status("acme", "api").await.unwrap();
+    assert_invariants_of(&sink);
     assert!(release.held);
     let integration_at_release = release.integration_sha.clone().unwrap();
 
@@ -497,7 +528,9 @@ async fn held_job_lands_after_merged_release_sync() {
         })
         .await
         .unwrap();
+    assert_invariants_of(&sink);
     handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&sink);
 
     // The job passes evaluation and enters WrapUp but cannot land: it parks in
     // the merge queue behind the release hold and integration does not move.
@@ -534,6 +567,7 @@ async fn held_job_lands_after_merged_release_sync() {
         .await;
     rig.pr.script("closed", true);
     handle.origin_sync("acme", "api").await.unwrap();
+    assert_invariants_of(&sink);
 
     test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
     let j = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
@@ -557,6 +591,7 @@ async fn held_job_lands_after_merged_release_sync() {
         1,
         "exactly the job's squash commit sits above the new origin main"
     );
+    assert_invariants_of(&sink);
 }
 
 /// Declared `CHUG_*` secrets **and vars** fail release validation, and the
@@ -570,6 +605,7 @@ async fn reserved_chug_secrets_never_reach_containers() {
     core.link_project("acme", "api", &rig.origin.url(), None)
         .await
         .unwrap();
+    assert_invariants(&core);
     commit_to_integration(&rig, &[
         (
             "jobs/sneaky.yaml",
@@ -586,7 +622,7 @@ async fn reserved_chug_secrets_never_reach_containers() {
         .await
         .unwrap();
 
-    let handle = spawn(core);
+    let (handle, sink) = spawn_checked(core);
     let job = handle
         .create_job(CreateJobRequest {
             owner: "acme".into(),
@@ -607,7 +643,9 @@ async fn reserved_chug_secrets_never_reach_containers() {
         })
         .await
         .unwrap();
+    assert_invariants_of(&sink);
     let err = handle.release_job("acme", "api", job.id).await.unwrap_err();
+    assert_invariants_of(&sink);
     let CoreError::Validation(errs) = err else {
         panic!("expected validation failure, got {err}");
     };
@@ -621,4 +659,5 @@ async fn reserved_chug_secrets_never_reach_containers() {
         errs.iter().any(|e| e.field == "vars"),
         "the declared var is refused too (#311): {errs:?}"
     );
+    assert_invariants_of(&sink);
 }

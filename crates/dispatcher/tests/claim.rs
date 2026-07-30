@@ -7,13 +7,17 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
+use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest};
+use dispatcher::invariants::InvariantSink;
 use std::sync::Arc;
 use std::time::Duration;
 use store::NatsStore;
 use test_utils::repo::{TempRepo, clone_branch_from};
 use test_utils::{FakeBackend, FakeProvider};
 use types::{JobState, Performer, TaskKind, TaskResolution, TaskState};
+
+mod common;
+use common::{assert_invariants_of, spawn_checked};
 
 /// Agent work gated by a command evaluator — the shape a human claims when
 /// they want to do an agent-typed ticket locally.
@@ -55,6 +59,9 @@ struct Rig {
     backend: Arc<FakeBackend>,
     provider: Arc<FakeProvider>,
     handle: CoreHandle,
+    /// Invariant violations the actor logged, drained by
+    /// `assert_invariants_of` (refactor-plan B1a).
+    invariants: InvariantSink,
 }
 
 async fn rig() -> Option<Rig> {
@@ -98,7 +105,7 @@ async fn rig() -> Option<Rig> {
     )
     .await
     .unwrap();
-    let handle = spawn(core);
+    let (handle, invariants) = spawn_checked(core);
     Some(Rig {
         _server: server,
         store,
@@ -106,6 +113,7 @@ async fn rig() -> Option<Rig> {
         backend,
         provider,
         handle,
+        invariants,
     })
 }
 
@@ -167,10 +175,14 @@ async fn claim_parks_declared_kind_and_pass_flows_to_eval_and_merge() {
     let Some(rig) = rig().await else { return };
 
     let job = rig.handle.create_job(req("code")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.claim_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     // Idempotent while pending.
     rig.handle.claim_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Work).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -217,6 +229,7 @@ async fn claim_parks_declared_kind_and_pass_flows_to_eval_and_merge() {
         )
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     // The ci evaluator ran (one command container) and the work merged.
@@ -229,6 +242,7 @@ async fn claim_parks_declared_kind_and_pass_flows_to_eval_and_merge() {
             .unwrap()
             .is_some()
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// The no-conversion property: a human Fail consumes the attempt through the
@@ -240,8 +254,11 @@ async fn claimed_fail_relaunches_next_attempt_per_declared_kind() {
     commit_work(&rig); // the relaunched agent attempt produces output
 
     let job = rig.handle.create_job(req("retryable")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.claim_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Work).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(rig.provider.runs().is_empty());
@@ -260,6 +277,7 @@ async fn claimed_fail_relaunches_next_attempt_per_declared_kind() {
         )
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     // work_retries: 1 → attempt 2 launches per the declared kind (agent),
     // exits 0, and the no-eval job goes to Done.
     wait_for_state(&rig.store, job.id, JobState::Done).await;
@@ -272,6 +290,7 @@ async fn claimed_fail_relaunches_next_attempt_per_declared_kind() {
     assert_eq!(tasks[1].attempt, 2);
     assert!(matches!(tasks[1].kind, TaskKind::Agent { .. }));
     assert_eq!(tasks[1].performed_by, None, "attempt 2 ran normally");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// #121 regression: a human `Fail` resolution is a deliberate handoff at a
@@ -285,8 +304,11 @@ async fn claimed_fail_preserves_branch_and_hands_off_notes() {
     commit_work(&rig); // the relaunched agent attempt produces output
 
     let job = rig.handle.create_job(req("retryable")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.claim_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Work).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(rig.provider.runs().is_empty());
@@ -314,6 +336,7 @@ async fn claimed_fail_preserves_branch_and_hands_off_notes() {
         )
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     // The relaunched agent attempt ran, and its prompt carried the handoff
@@ -343,6 +366,7 @@ async fn claimed_fail_preserves_branch_and_hands_off_notes() {
         Some("<svg>operator asset</svg>"),
         "operator's pre-handoff commit was preserved and merged"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// No double pickup: while an attempt is in flight — parked for a human or
@@ -353,13 +377,16 @@ async fn claim_conflicts_while_attempt_in_flight_or_job_terminal() {
 
     // Declared-human work parks an attempt at launch; claiming then is a 409.
     let manual = rig.handle.create_job(req("manual")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle
         .release_job("acme", "api", manual.id)
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, manual.id, JobState::Work).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     let err = rig.handle.claim_job("acme", "api", manual.id).await;
+    assert_invariants_of(&rig.invariants);
     assert!(matches!(err, Err(dispatcher::core::CoreError::Conflict(_))));
 
     // Terminal jobs cannot be claimed.
@@ -377,9 +404,12 @@ async fn claim_conflicts_while_attempt_in_flight_or_job_terminal() {
         )
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, manual.id, JobState::Done).await;
     let err = rig.handle.claim_job("acme", "api", manual.id).await;
+    assert_invariants_of(&rig.invariants);
     assert!(matches!(err, Err(dispatcher::core::CoreError::Conflict(_))));
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Unclaim before launch clears the claim and the job launches normally per
@@ -390,19 +420,25 @@ async fn unclaim_before_launch_restores_normal_execution() {
     commit_work(&rig); // the normal agent launch produces output
 
     let job = rig.handle.create_job(req("retryable")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let err = rig.handle.unclaim_job("acme", "api", job.id).await;
+    assert_invariants_of(&rig.invariants);
     assert!(
         matches!(err, Err(dispatcher::core::CoreError::Conflict(_))),
         "no pending claim to clear"
     );
     rig.handle.claim_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.unclaim_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     assert_eq!(rig.provider.runs().len(), 1, "normal agent launch");
     let tasks = tasks_for(&rig, job.id).await;
     assert_eq!(tasks[0].performed_by, None);
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Rework cycles launch per the declared kind, unclaimed: after a claimed
@@ -416,8 +452,11 @@ async fn rework_after_claimed_attempt_launches_unclaimed_per_declared_kind() {
     commit_work(&rig); // the rework (cycle-2) agent work produces output
 
     let job = rig.handle.create_job(req("code")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.claim_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Work).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -435,6 +474,7 @@ async fn rework_after_claimed_attempt_launches_unclaimed_per_declared_kind() {
         )
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     // cycle 1 eval fails → rework (budget 1) → cycle 2 agent work runs
     // normally → eval passes → Done.
     wait_for_state(&rig.store, job.id, JobState::Done).await;
@@ -447,4 +487,5 @@ async fn rework_after_claimed_attempt_launches_unclaimed_per_declared_kind() {
         .expect("rework work task");
     assert_eq!(rework.performed_by, None);
     assert!(matches!(rework.kind, TaskKind::Agent { .. }));
+    assert_invariants_of(&rig.invariants);
 }

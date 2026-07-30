@@ -23,8 +23,9 @@
 
 mod common;
 
-use common::assert_trace;
-use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
+use common::{assert_invariants, assert_invariants_of, assert_trace, spawn_checked};
+use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest};
+use dispatcher::invariants::InvariantSink;
 use dispatcher::trace::TraceSink;
 use std::sync::Arc;
 use store::NatsStore;
@@ -237,19 +238,23 @@ async fn trace_release_block_unblock() {
 
     sink.begin("create build");
     let build = core.create_job(req("build", &[])).await.unwrap();
+    assert_invariants(&core);
     sink.begin("create deploy(dep build)");
     let deploy = core.create_job(req("deploy", &[build.id])).await.unwrap();
+    assert_invariants(&core);
 
     sink.begin("release build");
     assert_eq!(
         core.release_job("acme", "api", build.id).await.unwrap(),
         JobState::Ready
     );
+    assert_invariants(&core);
     sink.begin("release deploy");
     assert_eq!(
         core.release_job("acme", "api", deploy.id).await.unwrap(),
         JobState::Blocked
     );
+    assert_invariants(&core);
 
     // Build completes (its execution slice lands elsewhere): mark Done in KV,
     // then reload a fresh core (the restart path) so it observes the completion
@@ -265,6 +270,7 @@ async fn trace_release_block_unblock() {
     core.attach_trace(sink.clone());
     sink.begin("on_job_done build");
     core.on_job_done("acme", "api", build.id).await.unwrap();
+    assert_invariants(&core);
 
     assert_trace(&sink, "release_block_unblock");
 }
@@ -280,11 +286,15 @@ async fn trace_stall_on_revalidation_failure() {
     };
 
     let build = core.create_job(req("build", &[])).await.unwrap();
+    assert_invariants(&core);
     let deploy = core.create_job(req("deploy", &[build.id])).await.unwrap();
+    assert_invariants(&core);
     sink.begin("release build");
     core.release_job("acme", "api", build.id).await.unwrap();
+    assert_invariants(&core);
     sink.begin("release deploy");
     core.release_job("acme", "api", deploy.id).await.unwrap();
+    assert_invariants(&core);
 
     // Break the deploy job type on main after release.
     let clone = repo.clone_branch("main").await;
@@ -303,6 +313,7 @@ async fn trace_stall_on_revalidation_failure() {
     core.attach_trace(sink.clone());
     sink.begin("on_job_done build (deploy re-validation fails)");
     core.on_job_done("acme", "api", build.id).await.unwrap();
+    assert_invariants(&core);
     assert_eq!(
         jobs.get("acme", "api", deploy.id)
             .await
@@ -324,13 +335,18 @@ async fn trace_revoke_cascade() {
     };
 
     let a = core.create_job(req("build", &[])).await.unwrap();
+    assert_invariants(&core);
     let b = core.create_job(req("deploy", &[a.id])).await.unwrap();
+    assert_invariants(&core);
     let c = core.create_job(req("deploy", &[b.id])).await.unwrap();
+    assert_invariants(&core);
     sink.begin("release a");
     core.release_job("acme", "api", a.id).await.unwrap();
+    assert_invariants(&core);
 
     sink.begin("revoke a (cascades b, c)");
     let cascaded = core.revoke_job("acme", "api", a.id).await.unwrap();
+    assert_invariants(&core);
     assert_eq!(cascaded, vec![b.id, c.id]);
 
     assert_trace(&sink, "revoke_cascade");
@@ -345,6 +361,9 @@ struct SpawnRig {
     handle: CoreHandle,
     _repo: TempRepo,
     sink: TraceSink,
+    /// Invariant violations the actor logged, drained by `assert_invariants_of`
+    /// (refactor-plan B1a). Distinct from `sink`, which records the trace.
+    invariants: InvariantSink,
 }
 
 /// Gate-scenario knobs for the actor-driven rig. `Default` reproduces the
@@ -456,12 +475,13 @@ async fn spawn_setup_with(opts: SpawnOpts) -> Option<SpawnRig> {
     let mut core = new_core_with(&store, core_repos_root(&repo), backend.clone(), provider).await;
     let sink = TraceSink::new();
     core.attach_trace(sink.clone());
-    let handle = spawn(core);
+    let (handle, invariants) = spawn_checked(core);
     Some(SpawnRig {
         store,
         handle,
         _repo: repo,
         sink,
+        invariants,
     })
 }
 
@@ -500,7 +520,9 @@ async fn trace_work_eval_merge_no_gate() {
 
     rig.sink.begin("create+release → work → eval → merge");
     let job = rig.handle.create_job(req("impl-cmd", &[])).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
     // `complete_done` writes the Done KV revision (which `job_state` above
     // observes) *before* it publishes the trailing `job-done` event, so the Done
@@ -510,8 +532,10 @@ async fn trace_work_eval_merge_no_gate() {
     // quiesced. Synchronizing on the trace itself (not the KV state) is what
     // keeps this actor-driven scenario from flaking on scheduler timing.
     wait_trace_effect(&rig.sink, "PublishEvent job-done").await;
+    assert_invariants_of(&rig.invariants);
 
     assert_trace(&rig.sink, "work_eval_merge_no_gate");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// `gate_and_human.rs::main_moves_during_eval_fires_merge_gate`: main moves
@@ -532,11 +556,15 @@ async fn trace_gate_entry_and_promote() {
     rig.sink
         .begin("create+release → eval (main moves) → gate → promote");
     let job = rig.handle.create_job(req("impl-cmd", &[])).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
     wait_trace_effect(&rig.sink, "PublishEvent job-done").await;
+    assert_invariants_of(&rig.invariants);
 
     assert_trace(&rig.sink, "gate_entry_and_promote");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// `gate_and_human.rs::merge_gate_failure_reworks_on_new_base_without_budget`:
@@ -558,11 +586,15 @@ async fn trace_gate_failure_full_rework() {
     rig.sink
         .begin("gate fails → rework on new base → cycle-2 fast path");
     let job = rig.handle.create_job(req("impl-cmd", &[])).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
     wait_trace_effect(&rig.sink, "PublishEvent job-done").await;
+    assert_invariants_of(&rig.invariants);
 
     assert_trace(&rig.sink, "gate_failure_full_rework");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// `gate_and_human.rs::gate_compile_failure_takes_fast_path_and_relands` (job
@@ -586,11 +618,15 @@ async fn trace_gate_fix_fast_path() {
     rig.sink
         .begin("gate build fails → gate-fix → re-gate → promote");
     let job = rig.handle.create_job(req("gatefix", &[])).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
     wait_trace_effect(&rig.sink, "PublishEvent job-done").await;
+    assert_invariants_of(&rig.invariants);
 
     assert_trace(&rig.sink, "gate_fix_fast_path");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// `gate_and_human.rs::rebase_conflict_falls_through_to_wrapup_conflict_path`:
@@ -611,11 +647,15 @@ async fn trace_conflict_reentry() {
     rig.sink
         .begin("conflicting land → wrap-up conflict rework → cycle-2 land");
     let job = rig.handle.create_job(req("impl-cmd", &[])).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
     wait_trace_effect(&rig.sink, "PublishEvent job-done").await;
+    assert_invariants_of(&rig.invariants);
 
     assert_trace(&rig.sink, "conflict_reentry");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// `execution.rs::eval_failure_reworks_with_context_then_passes`, distilled to
@@ -641,11 +681,15 @@ async fn trace_eval_failure_rework() {
         .create_job(req("impl-rework", &[]))
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
     wait_trace_effect(&rig.sink, "PublishEvent job-done").await;
+    assert_invariants_of(&rig.invariants);
 
     assert_trace(&rig.sink, "eval_failure_rework");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// The reduce's escalate arm: the same required-evaluator failure on a type with
@@ -665,11 +709,15 @@ async fn trace_eval_failure_no_budget_escalates() {
     rig.sink
         .begin("eval fails with no rework budget → escalate");
     let job = rig.handle.create_job(req("impl-cmd", &[])).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Escalated).await;
     wait_trace_effect(&rig.sink, "PublishEvent job-escalated").await;
+    assert_invariants_of(&rig.invariants);
 
     assert_trace(&rig.sink, "eval_failure_no_budget_escalates");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Staged evaluation (§3.3): the staged `gatefix` type's stage-0 `build`
@@ -691,11 +739,15 @@ async fn trace_staged_eval_short_circuit() {
     rig.sink
         .begin("staged eval: stage-0 fails → stage 1 never launched → escalate");
     let job = rig.handle.create_job(req("gatefix", &[])).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Escalated).await;
     wait_trace_effect(&rig.sink, "PublishEvent job-escalated").await;
+    assert_invariants_of(&rig.invariants);
 
     assert_trace(&rig.sink, "staged_eval_short_circuit");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Block until the captured trace's final step records `effect`. Used to

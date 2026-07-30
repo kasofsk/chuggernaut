@@ -11,13 +11,16 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use dispatcher::core::{Core, CoreConfig, CoreError, CreateJobRequest, spawn};
+use dispatcher::core::{Core, CoreConfig, CoreError, CreateJobRequest};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use store::NatsStore;
 use test_utils::repo::{TempRepo, clone_branch_from};
 use test_utils::{FakeBackend, FakeProvider};
 use types::{Job, JobState};
+
+mod common;
+use common::{assert_invariants, assert_invariants_of, spawn_checked};
 
 /// The worked example from design #311: a required SHA narrowed to hex (the value
 /// that reaches an argv position) and an optional `service` enum with a
@@ -248,6 +251,7 @@ async fn release_to_ready_materializes_declared_defaults() {
         .create_job(req("parameterized", &[], &[("sha", "4f9c1ab")]))
         .await
         .unwrap();
+    assert_invariants(&rig.core);
     // At creation the record holds exactly what was supplied — no defaults yet,
     // because no `base_ref` has been recorded to resolve them against.
     assert_eq!(job.inputs, pairs(&[("sha", "4f9c1ab")]));
@@ -257,6 +261,7 @@ async fn release_to_ready_materializes_declared_defaults() {
         rig.core.release_job("acme", "api", job.id).await.unwrap(),
         JobState::Ready
     );
+    assert_invariants(&rig.core);
     let ready = stored(&rig.store, job.id).await;
     assert!(ready.base_ref.is_some(), "Ready pins base_ref");
     assert_eq!(
@@ -281,7 +286,9 @@ async fn a_supplied_value_survives_the_default_fill() {
         ))
         .await
         .unwrap();
+    assert_invariants(&rig.core);
     rig.core.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants(&rig.core);
 
     assert_eq!(
         stored(&rig.store, job.id).await.inputs,
@@ -301,10 +308,12 @@ async fn release_rejects_a_missing_required_input_by_field() {
         .create_job(req("parameterized", &[], &[]))
         .await
         .unwrap();
+    assert_invariants(&rig.core);
     let Err(CoreError::Validation(errs)) = rig.core.release_job("acme", "api", bare.id).await
     else {
         panic!("a missing required input must fail release validation");
     };
+    assert_invariants(&rig.core);
     assert_eq!(errs.len(), 1, "{errs:?}");
     assert_eq!(errs[0].field, "inputs.sha");
     assert_eq!(errs[0].job_seq, Some(bare.id));
@@ -332,9 +341,11 @@ async fn release_rejects_enum_pattern_and_undeclared_inputs_by_field() {
         ))
         .await
         .unwrap();
+    assert_invariants(&rig.core);
     let Err(CoreError::Validation(errs)) = rig.core.release_job("acme", "api", job.id).await else {
         panic!("bad input values must fail release validation");
     };
+    assert_invariants(&rig.core);
     let fields: Vec<&str> = errs.iter().map(|e| e.field.as_str()).collect();
     assert_eq!(
         fields,
@@ -351,10 +362,12 @@ async fn a_job_with_no_inputs_is_byte_identical_to_today() {
     let Some(mut rig) = rig().await else { return };
 
     let job = rig.core.create_job(req("plain", &[], &[])).await.unwrap();
+    assert_invariants(&rig.core);
     assert_eq!(
         rig.core.release_job("acme", "api", job.id).await.unwrap(),
         JobState::Ready
     );
+    assert_invariants(&rig.core);
     let ready = stored(&rig.store, job.id).await;
     assert!(ready.inputs.is_empty());
     assert!(
@@ -372,19 +385,23 @@ async fn a_blocked_job_resolves_its_defaults_at_the_unblock_ref() {
     let Some(mut rig) = rig().await else { return };
 
     let upstream = rig.core.create_job(req("plain", &[], &[])).await.unwrap();
+    assert_invariants(&rig.core);
     let job = rig
         .core
         .create_job(req("parameterized", &[upstream.id], &[("sha", "4f9c1ab")]))
         .await
         .unwrap();
+    assert_invariants(&rig.core);
     rig.core
         .release_job("acme", "api", upstream.id)
         .await
         .unwrap();
+    assert_invariants(&rig.core);
     assert_eq!(
         rig.core.release_job("acme", "api", job.id).await.unwrap(),
         JobState::Blocked
     );
+    assert_invariants(&rig.core);
     let blocked = stored(&rig.store, job.id).await;
     assert!(blocked.base_ref.is_none());
     assert_eq!(
@@ -412,6 +429,7 @@ async fn a_blocked_job_resolves_its_defaults_at_the_unblock_ref() {
         .on_job_done("acme", "api", upstream.id)
         .await
         .unwrap();
+    assert_invariants(&rig.core);
 
     let unblocked = stored(&rig.store, job.id).await;
     assert_eq!(unblocked.state, JobState::Ready);
@@ -454,12 +472,14 @@ async fn inputs_are_immutable_across_the_pre_eval_rebase() {
         main.push("main").await;
     });
 
-    let handle = spawn(rig.core);
+    let (handle, sink) = spawn_checked(rig.core);
     let job = handle
         .create_job(req("parameterized", &[], &[("sha", "4f9c1ab")]))
         .await
         .unwrap();
+    assert_invariants_of(&sink);
     handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&sink);
     let pinned = test_utils::wait::job_state(&store, "acme", "api", job.id, JobState::Ready)
         .await
         .base_ref
@@ -477,6 +497,7 @@ async fn inputs_are_immutable_across_the_pre_eval_rebase() {
         "the effective set is the one resolved at the FIRST pin: no 'region', and \
          'service' is still the default that was declared then"
     );
+    assert_invariants_of(&sink);
 }
 
 /// **The golden trace** (#311's contracts table): `job-created` carries the
@@ -496,12 +517,14 @@ async fn golden_trace_inputs_reach_work_and_eval_container_envs() {
     let (store, backend, provider) = (rig.store.clone(), rig.backend.clone(), rig.provider.clone());
     commit_on_work(&rig);
 
-    let handle = spawn(rig.core);
+    let (handle, sink) = spawn_checked(rig.core);
     let job = handle
         .create_job(req("parameterized-ci", &[], &[("sha", "4f9c1ab")]))
         .await
         .unwrap();
+    assert_invariants_of(&sink);
     handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&sink);
     test_utils::wait::job_state(&store, "acme", "api", job.id, JobState::Done).await;
 
     // 1. The §10.3 event pair: what was asked for, then what actually ran.
@@ -536,6 +559,7 @@ async fn golden_trace_inputs_reach_work_and_eval_container_envs() {
         .find(|c| c.cmd.iter().any(|arg| arg.contains("./ci.sh")))
         .expect("the ci evaluator ran in a container");
     assert_eq!(injected(&eval.env), expected, "eval container env");
+    assert_invariants_of(&sink);
 }
 
 /// The regression guard for **every job type in this repo today** (#311's
@@ -550,9 +574,11 @@ async fn an_input_free_job_launches_a_byte_identical_eval_env() {
     let (store, backend) = (rig.store.clone(), rig.backend.clone());
     commit_on_work(&rig);
 
-    let handle = spawn(rig.core);
+    let (handle, sink) = spawn_checked(rig.core);
     let job = handle.create_job(req("plain-ci", &[], &[])).await.unwrap();
+    assert_invariants_of(&sink);
     handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&sink);
     test_utils::wait::job_state(&store, "acme", "api", job.id, JobState::Done).await;
 
     let eval = backend
@@ -583,6 +609,7 @@ async fn an_input_free_job_launches_a_byte_identical_eval_env() {
     let released = event(&job_events(&store, job.id).await, "job-released");
     assert_eq!(released["state"], serde_json::json!("Ready"));
     assert!(released["inputs"].is_null(), "{released}");
+    assert_invariants_of(&sink);
 }
 
 /// §2.2's **third and last pass** (#311 Decision 3): a value that no longer
@@ -600,10 +627,12 @@ async fn a_value_outside_the_charset_parks_the_job_at_launch() {
         .create_job(req("parameterized", &[], &[("sha", "4f9c1ab")]))
         .await
         .unwrap();
+    assert_invariants(&rig.core);
     assert_eq!(
         rig.core.release_job("acme", "api", job.id).await.unwrap(),
         JobState::Ready
     );
+    assert_invariants(&rig.core);
 
     // A value no supply path could have produced — three passes reject it — on a
     // job that is otherwise ready to launch.
@@ -622,7 +651,7 @@ async fn a_value_outside_the_charset_parks_the_job_at_launch() {
         rig._server.url(),
     )
     .await;
-    let _handle = spawn(core);
+    let (_handle, sink) = spawn_checked(core);
 
     let parked = test_utils::wait::job_where(
         &rig.store,
@@ -633,6 +662,9 @@ async fn a_value_outside_the_charset_parks_the_job_at_launch() {
         |rec| rec.state != JobState::Ready,
     )
     .await;
+    // The park happens inside the actor with no `Core` call to hang a check on:
+    // the sink caught every message the launch drove, so drain it here.
+    assert_invariants_of(&sink);
     assert_eq!(parked.state, JobState::Escalated, "parks like a missing KV");
     let escalation = parked.escalation.expect("the park records why");
     assert_eq!(escalation.reason, "launch_validation_failed");
@@ -645,6 +677,7 @@ async fn a_value_outside_the_charset_parks_the_job_at_launch() {
         rig.provider.runs().is_empty() && rig.backend.launches().is_empty(),
         "a parked launch launches nothing"
     );
+    assert_invariants_of(&sink);
 }
 
 /// The work-agent hook every launch-reaching test needs: commit on the job branch
@@ -704,17 +737,20 @@ async fn a_batch_refuses_members_that_carry_inputs() {
         .create_job(req("parameterized", &[], &[("sha", "4f9c1ab")]))
         .await
         .unwrap();
+    assert_invariants(&rig.core);
     let b = rig
         .core
         .create_job(req("parameterized", &[], &[("sha", "a91f22c")]))
         .await
         .unwrap();
+    assert_invariants(&rig.core);
 
     let mut batch = req("parameterized", &[], &[("sha", "4f9c1ab")]);
     batch.members = vec![a.id, b.id];
     let Err(CoreError::Validation(errs)) = rig.core.create_job(batch).await else {
         panic!("a batch over members carrying inputs must be rejected");
     };
+    assert_invariants(&rig.core);
     assert_eq!(errs.len(), 2, "{errs:?}");
     assert!(errs.iter().all(|e| e.field == "members"), "{errs:?}");
     assert!(
@@ -724,8 +760,11 @@ async fn a_batch_refuses_members_that_carry_inputs() {
 
     // Members that carry none batch exactly as before.
     let c = rig.core.create_job(req("plain", &[], &[])).await.unwrap();
+    assert_invariants(&rig.core);
     let d = rig.core.create_job(req("plain", &[], &[])).await.unwrap();
+    assert_invariants(&rig.core);
     let mut plain_batch = req("plain", &[], &[]);
     plain_batch.members = vec![c.id, d.id];
     assert!(rig.core.create_job(plain_batch).await.is_ok());
+    assert_invariants(&rig.core);
 }

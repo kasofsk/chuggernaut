@@ -6,14 +6,18 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use dispatcher::core::{
-    Core, CoreConfig, CoreHandle, CreateJobRequest, EvalSubmission, WorkSubmission, spawn,
+    Core, CoreConfig, CoreHandle, CreateJobRequest, EvalSubmission, WorkSubmission,
 };
+use dispatcher::invariants::InvariantSink;
 use std::sync::Arc;
 use std::time::Duration;
 use store::NatsStore;
 use test_utils::repo::{TempRepo, clone_branch_from};
 use test_utils::{FakeBackend, FakeProvider};
 use types::{EscalationAction, JobState, TaskPhase, TaskResolution, TaskState};
+
+mod common;
+use common::{assert_invariants_of, spawn_checked};
 
 const IMPL_CMD_EVAL: &str = r#"
 name: impl-cmd
@@ -188,6 +192,9 @@ struct Rig {
     backend: Arc<FakeBackend>,
     provider: Arc<FakeProvider>,
     handle: CoreHandle,
+    /// Invariant violations the actor logged, drained by
+    /// `assert_invariants_of` (refactor-plan B1a).
+    invariants: InvariantSink,
 }
 
 async fn rig() -> Option<Rig> {
@@ -262,7 +269,7 @@ async fn rig_full(
     )
     .await
     .unwrap();
-    let handle = spawn(core);
+    let (handle, invariants) = spawn_checked(core);
     Some(Rig {
         _server: server,
         store,
@@ -270,6 +277,7 @@ async fn rig_full(
         backend,
         provider,
         handle,
+        invariants,
     })
 }
 
@@ -361,7 +369,9 @@ async fn agent_work_commits_eval_passes_squash_merges_to_done() {
     );
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     // The squash-merge landed the agent's commit on main.
@@ -401,6 +411,7 @@ async fn agent_work_commits_eval_passes_squash_merges_to_done() {
     for e in ["job-started", "job-evaluation-started", "job-done"] {
         assert!(events.contains(&e.to_string()), "missing {e}: {events:?}");
     }
+    assert_invariants_of(&rig.invariants);
 }
 
 #[tokio::test]
@@ -409,7 +420,9 @@ async fn work_failure_retries_with_reset_then_escalates() {
     rig.provider.script_exits([2, 3]); // work_retries: 1 → both attempts fail
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     let tasks = rig
@@ -427,6 +440,7 @@ async fn work_failure_retries_with_reset_then_escalates() {
     assert!(matches!(tasks[2].kind, types::TaskKind::Human { .. }));
     assert_eq!(tasks[2].state, TaskState::Pending);
     assert_eq!(rig.provider.runs().len(), 2);
+    assert_invariants_of(&rig.invariants);
 }
 
 /// §3.2 empty-output guard: a work container that exits 0 but leaves the branch
@@ -442,7 +456,9 @@ async fn work_exit0_empty_branch_empty_summary_fails_with_no_output() {
     // fails → escalate.
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     // Two work attempts ran: the guard burned a retry and relaunched.
@@ -502,6 +518,7 @@ async fn work_exit0_empty_branch_empty_summary_fails_with_no_output() {
         failed.iter().any(|e| e["reason"] == "no_output_produced"),
         "a task-failed event must carry the machine reason: {failed:?}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// §3.2 empty-output guard, exception path: an empty branch with a NON-empty
@@ -531,7 +548,9 @@ async fn work_exit0_empty_branch_with_summary_proceeds() {
     });
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     assert_eq!(
@@ -558,6 +577,7 @@ async fn work_exit0_empty_branch_with_summary_proceeds() {
         }) => assert!(s.contains("no code change")),
         other => panic!("expected a Work result carrying the summary, got {other:?}"),
     }
+    assert_invariants_of(&rig.invariants);
 }
 
 /// §3.2 empty-output guard, regression: exit 0 WITH commits is unchanged even
@@ -567,7 +587,9 @@ async fn work_exit0_with_commits_and_no_summary_proceeds() {
     let Some(rig) = rig().await else { return };
     commit_work(&rig); // commits, submits no summary
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let tasks = rig
@@ -587,6 +609,7 @@ async fn work_exit0_with_commits_and_no_summary_proceeds() {
         TaskState::Done,
         "commits present → work succeeds"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Dogfood-#1 regression: an eval container that fails to *launch* must not
@@ -604,7 +627,9 @@ async fn eval_launch_failure_escalates_instead_of_stuck_running() {
     commit_work(&rig); // work succeeds (agent path) so the job reaches Evaluation
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     // Never stalls in Evaluation with a Running task: after eval_retries the
     // required evaluator's infra failure escalates.
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
@@ -654,6 +679,7 @@ async fn eval_launch_failure_escalates_instead_of_stuck_running() {
                 && t.state == TaskState::Pending),
         "a Human escalation task names the failure"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Work-path parity: a command work container that fails to launch takes the
@@ -666,7 +692,9 @@ async fn work_command_launch_failure_retries_then_escalates() {
         .fail_launch_if(|_| Some("invalid memory limit \"5g\"".into()));
 
     let job = rig.handle.create_job(req("cmd-work")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     // The escalation is self-describing on the job record: reason code, a
@@ -723,6 +751,7 @@ async fn work_command_launch_failure_retries_then_escalates() {
             .any(|t| matches!(t.kind, types::TaskKind::Human { .. })),
         "escalation task exists"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 #[tokio::test]
@@ -777,7 +806,9 @@ async fn eval_failure_reworks_with_context_then_passes() {
     create.title = "Add fortune file".into();
     create.description = "Create fortune.txt with an aphorism.".into();
     let job = rig.handle.create_job(create).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     // Cycle 2's work run received the cycle-1 findings (§4.3).
@@ -814,6 +845,7 @@ async fn eval_failure_reworks_with_context_then_passes() {
     );
     let events = event_types(&rig.store).await;
     assert!(events.contains(&"job-rework-started".to_string()));
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Job #155: a cycle-2 agent evaluator receives a re-review context block —
@@ -883,7 +915,9 @@ async fn cycle2_evaluator_gets_prior_review_context() {
     });
 
     let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let runs = rig.provider.runs();
@@ -915,6 +949,7 @@ async fn cycle2_evaluator_gets_prior_review_context() {
     );
     // The digest records cycle 1's failing review.
     assert!(p.contains("reviewer=fail"), "history verdict missing: {p}");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Job #155 rebase fallback: when the cycle-2 review follows a conflict rework
@@ -994,7 +1029,9 @@ async fn cycle2_evaluator_after_rebase_gets_full_diff_note() {
     });
 
     let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let runs = rig.provider.runs();
@@ -1010,6 +1047,7 @@ async fn cycle2_evaluator_after_rebase_gets_full_diff_note() {
         !p.contains("```diff"),
         "delta diff must be suppressed across a rebase: {p}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Job #155: an evaluator that first appears on cycle 2 gets the unchanged
@@ -1100,7 +1138,9 @@ async fn evaluator_first_appearing_on_cycle2_gets_no_context() {
     });
 
     let job = rig.handle.create_job(req("staged-agents")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let runs = rig.provider.runs();
@@ -1123,6 +1163,7 @@ async fn evaluator_first_appearing_on_cycle2_gets_no_context() {
         "an evaluator first appearing on cycle 2 gets the cycle-1 (no-context) form: {}",
         review2_c2.prompt
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// §3.2 crash recovery: an attempt that pushes commits then crashes is retried
@@ -1145,7 +1186,9 @@ async fn crashed_work_attempt_recovers_branch_and_notes_resume() {
     rig.provider.script_exits([2, 0]); // flaky: work_retries 1 → crash then recover
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let runs = rig.provider.runs();
@@ -1173,6 +1216,7 @@ async fn crashed_work_attempt_recovers_branch_and_notes_resume() {
         Some("partial work"),
         "the recovered commit should land on main"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 // ---- §3.5 capacity queue: no free slots defers the launch, never fails it ----
@@ -1228,7 +1272,9 @@ async fn eval_launch_queues_on_no_capacity_then_launches_when_freed() {
     });
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     // The eval task parks Pending (queued), holding the job in Evaluation.
     let eval = wait_for_task(&rig.store, job.id, |t| {
@@ -1260,6 +1306,7 @@ async fn eval_launch_queues_on_no_capacity_then_launches_when_freed() {
     // Free a slot; the scan message drives the drain and the eval launches.
     full.store(false, Ordering::SeqCst);
     rig.handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let evals: Vec<_> = rig
@@ -1279,6 +1326,7 @@ async fn eval_launch_queues_on_no_capacity_then_launches_when_freed() {
         "one eval task launched from the queue — no retry inflation"
     );
     assert_eq!(evals[0].state, TaskState::Done);
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Work-path parity: a command work container that can't be placed queues
@@ -1294,7 +1342,9 @@ async fn command_work_queues_on_no_capacity_then_launches_when_freed() {
     });
 
     let job = rig.handle.create_job(req("cmd-work")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     let work = wait_for_task(&rig.store, job.id, |t| {
         t.phase == TaskPhase::Work && t.state == TaskState::Pending
@@ -1333,6 +1383,7 @@ async fn command_work_queues_on_no_capacity_then_launches_when_freed() {
 
     full.store(false, Ordering::SeqCst);
     rig.handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let works: Vec<_> = rig
@@ -1359,6 +1410,7 @@ async fn command_work_queues_on_no_capacity_then_launches_when_freed() {
             .depth,
         0
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A command WORK task whose stdout carries `@chug:leg`/`@chug:report` lines
@@ -1383,7 +1435,9 @@ async fn failed_command_work_still_carries_harvested_leg_report() {
     rig.backend.script_exits([1]); // the deploy failed
 
     let job = rig.handle.create_job(req("cmd-work")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     // cmd-work has work_retries: 1 — the retry (exit 0 scripted default, but
     // logs unchanged) is irrelevant here; assert on the FIRST, failed task.
     let failed = wait_for_task(&rig.store, job.id, |t| {
@@ -1407,6 +1461,7 @@ async fn failed_command_work_still_carries_harvested_leg_report() {
     assert_eq!(report.legs[1].status, types::LegStatus::Failed);
     assert_eq!(report.legs[2].status, types::LegStatus::Skipped);
     assert_eq!(report.to_sha.as_deref(), Some("abc123"));
+    assert_invariants_of(&rig.invariants);
 }
 
 #[tokio::test]
@@ -1428,7 +1483,9 @@ async fn command_work_harvests_deploy_legs_into_structured_result() {
     rig.backend.put_logs(logs.as_bytes().to_vec());
 
     let job = rig.handle.create_job(req("cmd-work")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let works: Vec<_> = rig
@@ -1472,6 +1529,7 @@ async fn command_work_harvests_deploy_legs_into_structured_result() {
     assert_eq!(report.to_sha.as_deref(), Some("abc123"));
     assert!(report.rollback);
     assert_eq!(report.health.as_deref(), Some("degraded"));
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A command WORK task that emits no `@chug:` markers (an ordinary build/deploy
@@ -1484,7 +1542,9 @@ async fn command_work_without_legs_has_no_structured_result() {
         .put_logs(b"just some ordinary build output\nno markers here\n".to_vec());
 
     let job = rig.handle.create_job(req("cmd-work")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let work = rig
@@ -1504,6 +1564,7 @@ async fn command_work_without_legs_has_no_structured_result() {
         }
         other => panic!("expected a Work result, got {other:?}"),
     }
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A launch wedged in the queue past the maximum wait escalates with the clear
@@ -1521,7 +1582,9 @@ async fn queued_launch_escalates_after_max_wait() {
         .fail_launch_no_capacity_if(|_| Some("no free slots on any node".to_string()));
 
     let job = rig.handle.create_job(req("cmd-work")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     // It queues first (Pending), then the backstop scan escalates it.
     wait_for_task(&rig.store, job.id, |t| {
@@ -1530,6 +1593,7 @@ async fn queued_launch_escalates_after_max_wait() {
     .await;
     tokio::time::sleep(Duration::from_millis(400)).await;
     rig.handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     let events = event_types(&rig.store).await;
@@ -1558,6 +1622,7 @@ async fn queued_launch_escalates_after_max_wait() {
                 && t.state == TaskState::Pending),
         "an escalation task is raised",
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Priority inversion fix (#140): when the fleet is full and both an eval launch
@@ -1588,15 +1653,19 @@ async fn queued_eval_drains_before_queued_work() {
         .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
 
     let eval_job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle
         .release_job("acme", "api", eval_job.id)
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     let work_job = rig.handle.create_job(req("cmd-work")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle
         .release_job("acme", "api", work_job.id)
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
 
     // Both launches park Pending under capacity pressure.
     wait_for_task(&rig.store, eval_job.id, |t| {
@@ -1611,6 +1680,7 @@ async fn queued_eval_drains_before_queued_work() {
     // Free one slot: the eval drains first and the eval job completes.
     full.store(false, Ordering::SeqCst);
     rig.handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, eval_job.id, JobState::Done).await;
 
     // The work launch never got the slot — still queued Pending, no container.
@@ -1640,6 +1710,7 @@ async fn queued_eval_drains_before_queued_work() {
         .unwrap()
         .state;
     assert_eq!(work_state, JobState::Work, "work job still awaiting a slot");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A starved *eval* launch that outwaits the queue escalates with the
@@ -1659,7 +1730,9 @@ async fn queued_eval_escalates_after_max_wait_not_retry_exhaustion() {
     commit_work(&rig); // agent work passes, so the job reaches Evaluation
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     // The eval queues (Pending, attempt 1 — no eval_retries burned), then the
     // backstop scan escalates it.
@@ -1670,12 +1743,14 @@ async fn queued_eval_escalates_after_max_wait_not_retry_exhaustion() {
     assert_eq!(eval.attempt, 1, "queueing burns no eval_retries");
     tokio::time::sleep(Duration::from_millis(400)).await;
     rig.handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
     assert_eq!(
         escalated.escalation.unwrap().reason,
         "no_free_slots_timeout",
         "starved eval escalates on the queue timeout, not eval_infra_failure",
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// An **agent** evaluator (the #125/#130 shape: `review-web` on a saturated web
@@ -1723,7 +1798,9 @@ async fn agent_eval_queues_on_no_capacity_then_launches_when_freed() {
     });
 
     let job = rig.handle.create_job(req("cmd-agent-eval")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     // The agent eval parks Pending (queued) — attempt 1, no eval_retries burned —
     // holding the job in Evaluation rather than escalating on retry exhaustion.
@@ -1767,6 +1844,7 @@ async fn agent_eval_queues_on_no_capacity_then_launches_when_freed() {
     // task, passes, and the job lands.
     full.store(false, Ordering::SeqCst);
     rig.handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let evals: Vec<_> = rig
@@ -1786,6 +1864,7 @@ async fn agent_eval_queues_on_no_capacity_then_launches_when_freed() {
         "one eval task drained from the queue — no retry inflation"
     );
     assert_eq!(evals[0].state, TaskState::Done);
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A starved *agent* eval that outwaits the queue escalates with the
@@ -1807,7 +1886,9 @@ async fn agent_eval_escalates_after_max_wait_not_retry_exhaustion() {
     });
 
     let job = rig.handle.create_job(req("cmd-agent-eval")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     // A starved agent eval ping-pongs between the queue and an optimistic
     // relaunch, so its Pending state is only ever transient — the assertions
@@ -1816,6 +1897,7 @@ async fn agent_eval_escalates_after_max_wait_not_retry_exhaustion() {
     // eval_retries (the failed record still says attempt 1).
     tokio::time::sleep(Duration::from_millis(200)).await;
     rig.handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
     assert_eq!(
         escalated.escalation.unwrap().reason,
@@ -1835,6 +1917,7 @@ async fn agent_eval_escalates_after_max_wait_not_retry_exhaustion() {
         output.contains("launch queue"),
         "failure records the queue wait: {output}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A queued agent eval that is *resumed* but re-hits `NoCapacity` (it lost the
@@ -1889,7 +1972,9 @@ async fn agent_eval_redefer_preserves_queue_time_and_burns_no_retries() {
     });
 
     let job = rig.handle.create_job(req("cmd-agent-eval")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     // Observe the queued eval and capture its enqueue time; the re-defer must
     // keep this exact value (a reset would restamp it to a later `now`).
@@ -1907,6 +1992,7 @@ async fn agent_eval_redefer_preserves_queue_time_and_burns_no_retries() {
     // the same task, which passes → the job lands.
     full.store(false, Ordering::SeqCst);
     rig.handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
     assert!(
         !redefer.load(Ordering::SeqCst),
@@ -1944,6 +2030,7 @@ async fn agent_eval_redefer_preserves_queue_time_and_burns_no_retries() {
         Some(first_queued_at),
         "every re-defer preserved the original queued_at (backstop accumulates, no reset)"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Eval-exhaustion escalation + Retry (#141) resumes at Evaluation: it re-runs
@@ -1966,17 +2053,23 @@ async fn eval_exhaustion_retry_reruns_evaluation_without_new_work() {
         .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
-    let before = rig
-        .store
-        .tasks()
-        .await
-        .unwrap()
-        .list_for_job("acme", "api", job.id)
-        .await
-        .unwrap();
+    // Read twice — once side of the Retry, once the other — so hoisting the
+    // fetch keeps the two reads provably identical.
+    let tasks_now = || async {
+        rig.store
+            .tasks()
+            .await
+            .unwrap()
+            .list_for_job("acme", "api", job.id)
+            .await
+            .unwrap()
+    };
+    let before = tasks_now().await;
     let work_before = before.iter().filter(|t| t.phase == TaskPhase::Work).count();
     assert_eq!(work_before, 1, "exactly one work task ran");
     let esc = before
@@ -2002,16 +2095,10 @@ async fn eval_exhaustion_retry_reruns_evaluation_without_new_work() {
         )
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
-    let after = rig
-        .store
-        .tasks()
-        .await
-        .unwrap()
-        .list_for_job("acme", "api", job.id)
-        .await
-        .unwrap();
+    let after = tasks_now().await;
     // No new work task: work still ran exactly once, still attempt 1.
     let works: Vec<_> = after
         .iter()
@@ -2031,6 +2118,7 @@ async fn eval_exhaustion_retry_reruns_evaluation_without_new_work() {
         after.iter().all(|t| t.cycle == 1),
         "cycle stays 1 across the escalation retry: {after:?}",
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A wrap-up task carries its label from job-type config (#146): the explicit
@@ -2042,10 +2130,12 @@ async fn wrap_up_task_carries_label() {
     commit_work(&rig); // agent work for the derived job
     // Explicit name → the wrap-up task's label is exactly it.
     let named = rig.handle.create_job(req("webpub-named")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle
         .release_job("acme", "api", named.id)
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, named.id, JobState::Done).await;
     let wrap = rig
         .store
@@ -2062,10 +2152,12 @@ async fn wrap_up_task_carries_label() {
 
     // Unset name → derived from the publish script's basename.
     let derived = rig.handle.create_job(req("webpub")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle
         .release_job("acme", "api", derived.id)
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, derived.id, JobState::Done).await;
     let wrap = rig
         .store
@@ -2079,6 +2171,7 @@ async fn wrap_up_task_carries_label() {
         .find(|t| t.phase == TaskPhase::WrapUp)
         .expect("a wrap-up task");
     assert_eq!(wrap.label.as_deref(), Some("web-publish"));
+    assert_invariants_of(&rig.invariants);
 }
 
 async fn event_types(store: &NatsStore) -> Vec<String> {
@@ -2220,10 +2313,12 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
     )
     .await
     .unwrap();
-    let handle = spawn(core);
+    let (handle, sink) = spawn_checked(core);
 
     let job = handle.create_job(req("impl-secret")).await.unwrap();
+    assert_invariants_of(&sink);
     handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&sink);
     wait_for_state(&store, job.id, JobState::Done).await;
 
     let runs = provider.runs();
@@ -2281,6 +2376,7 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
             .contains("/chuggernaut/ssh/id"),
         "GIT_SSH_COMMAND must reference the injected key"
     );
+    assert_invariants_of(&sink);
 }
 
 /// The artifacts a job leaves behind. Before this, an agent's session transcript
@@ -2325,7 +2421,9 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
         .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let tasks = rig.store.tasks().await.unwrap();
@@ -2405,6 +2503,7 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
         rig.backend.launches().len(),
         "every launched container should be removed after its task exits"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 // ── Lifecycle generalization (design-lifecycle.md) ───────────────────────
@@ -2446,7 +2545,9 @@ async fn finalize_none_completes_without_merging() {
     });
 
     let job = rig.handle.create_job(req("deploy-none")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     // The evaluator still ran; nothing landed on main; the branch is gone.
@@ -2476,6 +2577,7 @@ async fn finalize_none_completes_without_merging() {
             .is_err(),
         "job branch deleted at Done"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A web-style job with a `wrap_up.run` command (spec §3.2): eval passes, the
@@ -2522,7 +2624,9 @@ async fn wrap_up_command_runs_after_merge_against_main() {
     });
 
     let job = rig.handle.create_job(req("webpub")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     // Task log: work Done, then the WrapUp command task Done.
@@ -2557,6 +2661,7 @@ async fn wrap_up_command_runs_after_merge_against_main() {
 
     let events = event_types(&rig.store).await;
     assert!(events.contains(&"job-done".to_string()), "{events:?}");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A failed `wrap_up.run` command escalates the job — but the squash has
@@ -2577,7 +2682,9 @@ async fn wrap_up_command_failure_escalates_but_merge_stays() {
     rig.backend.script_exits([7]); // the publish command fails
 
     let job = rig.handle.create_job(req("webpub")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     // The merge stands — the change is on main despite the failed publish.
@@ -2616,6 +2723,7 @@ async fn wrap_up_command_failure_escalates_but_merge_stays() {
     );
     let events = event_types(&rig.store).await;
     assert!(events.contains(&"job-escalated".to_string()), "{events:?}");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Wrap-up-failure escalation + Retry (#141) resumes at WrapUp: it re-runs only
@@ -2636,7 +2744,9 @@ async fn wrap_up_failure_retry_reruns_only_publish() {
     rig.backend.script_exits([7, 0]); // publish fails, then succeeds on retry
 
     let job = rig.handle.create_job(req("webpub")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     let before = rig
@@ -2669,6 +2779,7 @@ async fn wrap_up_failure_retry_reruns_only_publish() {
         )
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let after = rig
@@ -2694,6 +2805,7 @@ async fn wrap_up_failure_retry_reruns_only_publish() {
         "the retried publish landed the job: {wrapups:?}",
     );
     assert!(after.iter().all(|t| t.cycle == 1), "cycle untouched");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A job revoked before it lands never runs its `wrap_up.run` command: the
@@ -2713,11 +2825,14 @@ async fn revoked_job_never_runs_wrap_up_command() {
     });
 
     let job = rig.handle.create_job(req("webpub")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     started.notified().await; // work is running
     wait_for_state(&rig.store, job.id, JobState::Work).await;
 
     rig.handle.revoke_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     release.notify_one(); // let the (now-orphaned) work run return
 
     wait_for_state(&rig.store, job.id, JobState::Revoked).await;
@@ -2740,6 +2855,7 @@ async fn revoked_job_never_runs_wrap_up_command() {
         rig.backend.launches().is_empty(),
         "no publish container should ever launch for a revoked job"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A run exit collected after its job was revoked is stale noise, not a
@@ -2765,11 +2881,14 @@ async fn late_exit_after_revoke_is_ignored_and_core_survives() {
     });
 
     let job = rig.handle.create_job(req("webpub")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     started.notified().await;
     wait_for_state(&rig.store, job.id, JobState::Work).await;
 
     rig.handle.revoke_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Revoked).await;
     release.notify_one(); // the orphaned run now returns, exit 0
 
@@ -2783,10 +2902,12 @@ async fn late_exit_after_revoke_is_ignored_and_core_survives() {
         "stale exit must not resurrect the job"
     );
     let next = rig.handle.create_job(req("webpub")).await;
+    assert_invariants_of(&rig.invariants);
     assert!(
         next.is_ok(),
         "core loop died handling the stale exit: {next:?}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Abort verdict: a required evaluator declaring the work unsalvageable
@@ -2820,7 +2941,9 @@ async fn eval_abort_escalates_without_consuming_rework_budget() {
 
     // impl-agent has rework_budget: 1 — abort must not spend it.
     let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     assert_eq!(rig.provider.runs().len(), 2, "no cycle-2 work after abort");
@@ -2851,6 +2974,7 @@ async fn eval_abort_escalates_without_consuming_rework_budget() {
         }
         other => panic!("expected escalation task, got {other:?}"),
     }
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Staged evaluation happy path (spec §3.3): the stage-0 review runs first and
@@ -2891,7 +3015,9 @@ async fn staged_eval_review_passes_then_ci_runs_and_merges() {
     });
 
     let job = rig.handle.create_job(req("staged")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let tasks = rig
@@ -2915,6 +3041,7 @@ async fn staged_eval_review_passes_then_ci_runs_and_merges() {
         2,
         "only work + review run agents"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Required stage-0 failure short-circuits: the stage-1 `ci` task is never
@@ -2967,7 +3094,9 @@ async fn staged_eval_required_review_fail_skips_ci_and_reworks_from_stage0() {
     });
 
     let job = rig.handle.create_job(req("staged")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let tasks = rig
@@ -2995,6 +3124,7 @@ async fn staged_eval_required_review_fail_skips_ci_and_reworks_from_stage0() {
             && t.evaluator.as_deref() == Some("review")
             && t.stage == 0
     }));
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Advisory stage-0 failure does not block: a `required: false` review that
@@ -3026,7 +3156,9 @@ async fn staged_eval_advisory_review_fail_still_runs_ci() {
     });
 
     let job = rig.handle.create_job(req("staged-advisory")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let tasks = rig
@@ -3045,6 +3177,7 @@ async fn staged_eval_advisory_review_fail_still_runs_ci() {
     ));
     assert_eq!(tasks[2].evaluator.as_deref(), Some("ci"));
     assert_eq!(tasks[2].state, TaskState::Done);
+    assert_invariants_of(&rig.invariants);
 }
 
 /// An abort from a required stage-0 evaluator escalates immediately: no later
@@ -3075,7 +3208,9 @@ async fn staged_eval_stage0_abort_escalates_without_ci() {
     });
 
     let job = rig.handle.create_job(req("staged")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     assert_eq!(rig.provider.runs().len(), 2, "no rework after abort");
@@ -3094,6 +3229,7 @@ async fn staged_eval_stage0_abort_escalates_without_ci() {
         "the stage-1 ci evaluator must never be created after a stage-0 abort"
     );
     assert!(matches!(tasks[2].kind, types::TaskKind::Human { .. }));
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Additive per-job evaluators: layered on top of the type's list and executed
@@ -3117,7 +3253,9 @@ async fn job_level_evaluators_run_alongside_type_evaluators() {
         stage: 0,
     }];
     let job = rig.handle.create_job(r).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let tasks = rig
@@ -3134,6 +3272,7 @@ async fn job_level_evaluators_run_alongside_type_evaluators() {
         .expect("eval task");
     assert_eq!(eval.evaluator.as_deref(), Some("extra-ci"));
     assert_eq!(eval.state, TaskState::Done);
+    assert_invariants_of(&rig.invariants);
 }
 
 /// §4.4 upfront knowledge injection: the union of the type's `knowledge:`
@@ -3147,7 +3286,9 @@ async fn knowledge_tags_inject_into_work_system_prompt() {
     let mut create = req("flaky"); // type declares knowledge: [rust]
     create.knowledge_tags = vec!["style".into(), "no-such-tag".into()];
     let job = rig.handle.create_job(create).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let runs = rig.provider.runs();
@@ -3162,6 +3303,7 @@ async fn knowledge_tags_inject_into_work_system_prompt() {
         !system.contains("no-such-tag"),
         "missing tags are skipped: {system}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// The type's evaluators are a floor: a job evaluator colliding with a
@@ -3184,12 +3326,15 @@ async fn job_evaluator_name_collision_fails_release() {
         stage: 0,
     }];
     let job = rig.handle.create_job(r).await.unwrap(); // creation always lands Frozen
+    assert_invariants_of(&rig.invariants);
     let err = rig
         .handle
         .release_job("acme", "api", job.id)
         .await
         .unwrap_err();
+    assert_invariants_of(&rig.invariants);
     assert!(err.to_string().contains("collides"), "{err}");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Unexpected wrap-up failure → triage, and the merge queue moves on instead
@@ -3235,7 +3380,9 @@ async fn finalize_hard_failure_escalates_instead_of_wedging() {
     });
 
     let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     let tasks = rig
@@ -3254,6 +3401,7 @@ async fn finalize_hard_failure_escalates_instead_of_wedging() {
     }
     let events = event_types(&rig.store).await;
     assert!(events.contains(&"job-escalated".to_string()));
+    assert_invariants_of(&rig.invariants);
 }
 
 // ── Issue #31: per-job timeout override + operator-dispatched triage ────────
@@ -3289,7 +3437,9 @@ async fn work_timeout_override_applies_to_work_not_eval() {
     let mut create = req("impl-agent");
     create.timeout = Some("45m".into());
     let job = rig.handle.create_job(create).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let runs = rig.provider.runs();
@@ -3297,6 +3447,7 @@ async fn work_timeout_override_applies_to_work_not_eval() {
     // Work: the 45m override. Eval: the type default (no `resources` → 1h).
     assert_eq!(runs[0].task_timeout, Duration::from_secs(45 * 60));
     assert_eq!(runs[1].task_timeout, Duration::from_secs(3600));
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A Work task that outlives the per-job override is killed by the §3.5 timeout
@@ -3311,12 +3462,15 @@ async fn work_timeout_override_times_out_running_work_task() {
     let mut create = req("impl-agent"); // no work_retries → escalates on first fail
     create.timeout = Some("1s".into());
     let job = rig.handle.create_job(create).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Work).await;
 
     // Age the Running work task past the 1s override, then scan.
     tokio::time::sleep(Duration::from_millis(1200)).await;
     rig.handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     let tasks = rig
@@ -3333,6 +3487,7 @@ async fn work_timeout_override_times_out_running_work_task() {
         TaskState::Failed,
         "the override should have timed out the work task"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// The evaluator keeps the type default even when the job carries a short work
@@ -3349,12 +3504,15 @@ async fn eval_task_ignores_work_timeout_override() {
     let mut create = req("impl-agent");
     create.timeout = Some("1s".into());
     let job = rig.handle.create_job(create).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Evaluation).await;
 
     // Age well past the 1s work override; the eval task's 1h default protects it.
     tokio::time::sleep(Duration::from_millis(1200)).await;
     rig.handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     let job_now = rig
         .store
@@ -3387,6 +3545,7 @@ async fn eval_task_ignores_work_timeout_override() {
         TaskState::Running,
         "the work override must not time out the eval task"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A malformed `Job.timeout` is rejected at release (§1.1: parseability
@@ -3397,17 +3556,20 @@ async fn malformed_timeout_override_rejected_at_release() {
     let mut create = req("impl-agent");
     create.timeout = Some("2 hours".into()); // not a valid duration string
     let job = rig.handle.create_job(create).await.unwrap(); // creation is permissive
+    assert_invariants_of(&rig.invariants);
     let err = rig
         .handle
         .release_job("acme", "api", job.id)
         .await
         .unwrap_err();
+    assert_invariants_of(&rig.invariants);
     match err {
         dispatcher::core::CoreError::Validation(errs) => {
             assert!(errs.iter().any(|e| e.field == "timeout"), "{errs:?}");
         }
         other => panic!("expected a validation error on timeout, got {other:?}"),
     }
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Operator-dispatched triage (§1.2) over an Escalated job: creates a Triage
@@ -3423,7 +3585,9 @@ async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
     // Drive the job to Escalated: both work attempts fail (flaky: work_retries 1).
     rig.provider.script_exits([2, 3]);
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     // The triage agent's assessment rides the CLI's JSON `result` on stdout.
@@ -3433,6 +3597,7 @@ async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
     );
 
     rig.handle.triage_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     // Wait for the Triage task to land with a recorded assessment (#206
     // principle 3): watch the job's task keys, inspecting each revision.
@@ -3472,6 +3637,7 @@ async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
         last.mcp_servers.is_empty(),
         "triage runs without the channel MCP"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Triage is rejected unless the job is Escalated or Stalled (§1.2).
@@ -3480,15 +3646,18 @@ async fn triage_rejected_on_non_intervention_state() {
     let Some(rig) = rig().await else { return };
     // A freshly created job is Frozen.
     let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let err = rig
         .handle
         .triage_job("acme", "api", job.id)
         .await
         .unwrap_err();
+    assert_invariants_of(&rig.invariants);
     assert!(
         matches!(err, dispatcher::core::CoreError::Conflict(_)),
         "{err:?}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Poll the task log until the job's Work-phase task exists, then return it.
@@ -3516,7 +3685,9 @@ async fn per_job_model_override_reaches_work_task() {
     let mut r = req("impl-cmd");
     r.model = Some("claude-fable-5".into());
     let job = rig.handle.create_job(r).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     let work = wait_for_work_task(&rig.store, job.id).await;
     match work.kind {
@@ -3525,6 +3696,7 @@ async fn per_job_model_override_reaches_work_task() {
         }
         other => panic!("expected an agent work task, got {other:?}"),
     }
+    assert_invariants_of(&rig.invariants);
 }
 
 // The baseline: with no override, no project default, and no platform default,
@@ -3533,13 +3705,16 @@ async fn per_job_model_override_reaches_work_task() {
 async fn work_task_model_none_without_any_default() {
     let Some(rig) = rig().await else { return };
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     let work = wait_for_work_task(&rig.store, job.id).await;
     match work.kind {
         types::TaskKind::Agent { model, .. } => assert_eq!(model, None),
         other => panic!("expected an agent work task, got {other:?}"),
     }
+    assert_invariants_of(&rig.invariants);
 }
 
 /// #71/#72 regression: an agent work container's id lands on the task record
@@ -3583,7 +3758,9 @@ async fn work_container_id_recorded_while_running_and_kept_after_exit() {
     });
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     // Kept after exit: the completed record still names its container.
@@ -3593,6 +3770,7 @@ async fn work_container_id_recorded_while_running_and_kept_after_exit() {
         work.container_id.is_some(),
         "container_id must survive on the completed record"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A required agent evaluator's abort verdict escalates immediately, and the
@@ -3624,7 +3802,9 @@ async fn abort_verdict_escalates_with_recorded_reason() {
     });
 
     let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     let esc = escalated.escalation.expect("abort records an escalation");
@@ -3635,6 +3815,7 @@ async fn abort_verdict_escalates_with_recorded_reason() {
         esc.detail
     );
     assert_eq!(esc.failing_task, None);
+    assert_invariants_of(&rig.invariants);
 }
 
 // ── #167: evaluator failures carry evidence ─────────────────────────────────
@@ -3658,7 +3839,9 @@ async fn failing_command_eval_embeds_size_capped_output_tail() {
     rig.backend.script_exits([101]); // the ci container exits non-zero
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     // impl-cmd has no rework budget: a product failure escalates.
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
@@ -3697,6 +3880,7 @@ async fn failing_command_eval_embeds_size_capped_output_tail() {
         }
         other => panic!("expected a failing command result with a tail, got {other:?}"),
     }
+    assert_invariants_of(&rig.invariants);
 }
 
 /// #167 fix 2 (narrowed #198): a command evaluator whose container dies before it
@@ -3717,7 +3901,9 @@ async fn no_output_command_eval_retries_without_burning_retries_then_escalates()
     rig.backend.script_exits([137, 137, 137, 137, 137]);
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     assert_eq!(
@@ -3764,6 +3950,7 @@ async fn no_output_command_eval_retries_without_burning_retries_then_escalates()
         !no_output_events.is_empty(),
         "the evaluator_no_output reason must ride the event stream"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// #198 ticket test (a): an AGENT evaluator that submits a FAIL verdict with
@@ -3830,7 +4017,9 @@ async fn agent_eval_fail_with_findings_empty_output_reworks_not_invalid() {
     });
 
     let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let tasks = rig
@@ -3879,6 +4068,7 @@ async fn agent_eval_fail_with_findings_empty_output_reworks_not_invalid() {
         no_output, 0,
         "a delivered verdict must not trigger the evidence-free path"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// #198 ticket test (b): an AGENT evaluator that ends WITHOUT a `submit_eval`
@@ -3894,7 +4084,9 @@ async fn agent_eval_no_verdict_no_output_retries_without_burning_eval_retries_th
     // and carries no output → an evidence-free no-verdict loss each time.
 
     let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
     assert_eq!(
         escalated.escalation.expect("escalation recorded").reason,
@@ -3927,6 +4119,7 @@ async fn agent_eval_no_verdict_no_output_retries_without_burning_eval_retries_th
         1,
         "a verdict-less eval must not trigger rework"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// #198 ticket test (c counterpart): a COMMAND evaluator that exits with a NORMAL
@@ -3953,7 +4146,9 @@ async fn normal_nonzero_command_eval_empty_output_reworks() {
     rig.backend.script_exits([1, 0]);
 
     let job = rig.handle.create_job(req("impl-cmd-rework")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let tasks = rig
@@ -3998,6 +4193,7 @@ async fn normal_nonzero_command_eval_empty_output_reworks() {
         .filter(|e| e["reason"] == "evaluator_no_output")
         .count();
     assert_eq!(no_output, 0, "the evidence-free path must not be taken");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// #167 fix 1, passing path: a passing command evaluator behaves exactly as
@@ -4010,7 +4206,9 @@ async fn passing_command_eval_embeds_tail_and_reaches_done_unchanged() {
     // No scripted exit → the ci container exits 0 (pass).
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let tasks = rig
@@ -4031,6 +4229,7 @@ async fn passing_command_eval_embeds_tail_and_reaches_done_unchanged() {
         }) => assert_eq!(output, "all 42 tests passed", "the small tail is embedded"),
         other => panic!("expected a passing command result, got {other:?}"),
     }
+    assert_invariants_of(&rig.invariants);
 }
 
 /// #167 fix 1 → rework: a failing command evaluator's embedded tail is threaded
@@ -4047,7 +4246,9 @@ async fn rework_context_carries_command_eval_output_tail() {
     rig.backend.script_exits([101]); // first ci fails; the rework's ci defaults to 0
 
     let job = rig.handle.create_job(req("impl-cmd-rework")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     // Wait for the rework work cycle to launch (a second provider run). This
     // observes in-memory FakeProvider state — no KV to watch — so it uses the
@@ -4068,6 +4269,7 @@ async fn rework_context_carries_command_eval_output_tail() {
         prompt.contains("Output (tail) from **ci**"),
         "the tail must be fenced/labelled as the evaluator's output: {prompt}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 // ── #168: task retries see their predecessor ────────────────────────────────
@@ -4093,7 +4295,9 @@ async fn work_retry_prepends_predecessor_block_with_capped_tail() {
     rig.backend.put_logs(log.into_bytes());
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     let runs = rig.provider.runs();
@@ -4122,6 +4326,7 @@ async fn work_retry_prepends_predecessor_block_with_capped_tail() {
     );
     assert!(p.contains("…(truncated)…"), "the cap marks the truncation");
     assert!(p.contains("```"), "the tail is fenced");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// #168: an agent evaluator relaunched after a #167 no-output invalid fail
@@ -4139,7 +4344,9 @@ async fn agent_eval_relaunch_prepends_empty_noted_predecessor_block() {
     // submits a verdict → #167 no-output invalid fail → relaunch loop.
 
     let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     let runs = rig.provider.runs();
@@ -4166,6 +4373,7 @@ async fn agent_eval_relaunch_prepends_empty_noted_predecessor_block() {
         relaunch.contains("produced no captured output"),
         "an empty predecessor is noted, not omitted: {relaunch}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// #168: command (ci) evaluator retries are deterministic scripts that read no
@@ -4179,7 +4387,9 @@ async fn command_eval_retry_gets_no_predecessor_prompt() {
     rig.backend.script_exits([137, 137, 137, 137, 137]);
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     // Only the single agent WORK run went through the provider; every command
@@ -4194,4 +4404,5 @@ async fn command_eval_retry_gets_no_predecessor_prompt() {
         !runs[0].prompt.contains("Previous Attempt (#168)"),
         "the work prompt is untouched by command-eval retries"
     );
+    assert_invariants_of(&rig.invariants);
 }

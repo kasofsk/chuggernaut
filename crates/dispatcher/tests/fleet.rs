@@ -8,12 +8,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use chrono::Utc;
-use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
+use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest};
+use dispatcher::invariants::InvariantSink;
 use std::sync::Arc;
 use store::NatsStore;
 use test_utils::repo::TempRepo;
 use test_utils::{FakeBackend, FakeProvider};
 use types::{FleetStatus, Job, JobState, Task, TaskKind, TaskPhase, TaskState, WorkerNode};
+
+mod common;
+use common::{assert_invariants_of, spawn_checked};
 
 const FLAKY: &str = r#"
 name: flaky
@@ -130,7 +134,7 @@ async fn spawn_core(
     store: &NatsStore,
     types_yaml: &[(&str, &str)],
     backend: Arc<FakeBackend>,
-) -> (CoreHandle, TempRepo) {
+) -> (CoreHandle, TempRepo, InvariantSink) {
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
     for (path, content) in types_yaml {
@@ -162,7 +166,8 @@ async fn spawn_core(
     .await
     .unwrap()
     .with_fleet_roster(roster());
-    (spawn(core), repo)
+    let (handle, sink) = spawn_checked(core);
+    (handle, repo, sink)
 }
 
 /// Poll `fleet.status` until `pred` holds (or time out), returning the snapshot.
@@ -229,7 +234,7 @@ async fn occupancy_reflects_launch_and_exit() {
 
     let backend = Arc::new(FakeBackend::new());
     backend.seed_managed_running([running("air/c1", 51, 1)]);
-    let (handle, _repo) = spawn_core(
+    let (handle, _repo, sink) = spawn_core(
         server,
         &store,
         &[("jobs/flaky.yaml", FLAKY)],
@@ -263,8 +268,10 @@ async fn occupancy_reflects_launch_and_exit() {
     // next transition frees the slot.
     backend.set_managed_running([]);
     handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&sink);
     let fleet = wait_for_fleet(&store, |f| node(f, "air").occupied == 0).await;
     assert!(node(&fleet, "air").running.is_empty());
+    assert_invariants_of(&sink);
 }
 
 /// After a restart the occupancy is rebuilt from the live containers the fleet
@@ -336,11 +343,14 @@ async fn restart_reattach_rebuilds_occupancy_from_live_containers() {
     .await
     .unwrap()
     .with_fleet_roster(roster());
-    let _handle = spawn(core);
+    let (_handle, sink) = spawn_checked(core);
 
     // Occupancy is rebuilt from the live container: `nuc` shows the re-attached
     // work task, with no launch replayed and nothing reaped.
     let fleet = wait_for_fleet(&store, |f| node(f, "nuc").occupied == 1).await;
+    // No `Core` call to hang a check on: reconciliation and the republish it drives
+    // are the whole scenario, so drain the actor's log once the wait let them through.
+    assert_invariants_of(&sink);
     let slot = &node(&fleet, "nuc").running[0];
     assert_eq!(
         (slot.job_seq, slot.task_id, slot.task_kind.as_str()),
@@ -370,7 +380,7 @@ async fn queue_depth_included() {
     // command work launch is queued rather than run.
     let backend = Arc::new(FakeBackend::new());
     backend.fail_launch_no_capacity_if(|_| Some("no free slots".into()));
-    let (handle, _repo) = spawn_core(
+    let (handle, _repo, sink) = spawn_core(
         server,
         &store,
         &[("jobs/cmd-work.yaml", CMD_WORK)],
@@ -398,7 +408,9 @@ async fn queue_depth_included() {
         })
         .await
         .unwrap();
+    assert_invariants_of(&sink);
     handle.release_job("acme", "api", created.id).await.unwrap();
+    assert_invariants_of(&sink);
 
     // The queued launch bumps the depth; no node is occupied (nothing running).
     let fleet = wait_for_fleet(&store, |f| f.queue_depth >= 1).await;
@@ -408,4 +420,5 @@ async fn queue_depth_included() {
         "nothing launched, so no slot is occupied: {:?}",
         fleet.nodes
     );
+    assert_invariants_of(&sink);
 }

@@ -8,14 +8,18 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use dispatcher::core::{
-    Core, CoreConfig, CoreError, CoreHandle, CreateJobRequest, UpdateJobRequest, spawn,
+    Core, CoreConfig, CoreError, CoreHandle, CreateJobRequest, UpdateJobRequest,
 };
+use dispatcher::invariants::InvariantSink;
 use std::sync::Arc;
 use std::time::Duration;
 use store::NatsStore;
 use test_utils::repo::{TempRepo, clone_branch_from};
 use test_utils::{FakeBackend, FakeProvider};
 use types::{Evaluator, EvaluatorType, JobState};
+
+mod common;
+use common::{assert_invariants_of, spawn_checked};
 
 /// A plain agent job, no evaluators: a clean exit takes it straight to Done,
 /// so the harness can assert lifecycle without scripting eval side effects.
@@ -37,6 +41,9 @@ struct Rig {
     store: NatsStore,
     provider: Arc<FakeProvider>,
     handle: CoreHandle,
+    /// Invariant violations the actor logged, drained by
+    /// `assert_invariants_of` (refactor-plan B1a).
+    invariants: InvariantSink,
 }
 
 async fn rig() -> Option<Rig> {
@@ -77,13 +84,14 @@ async fn rig() -> Option<Rig> {
     )
     .await
     .unwrap();
-    let handle = spawn(core);
+    let (handle, invariants) = spawn_checked(core);
     Some(Rig {
         _server: server,
         _repo: repo,
         store,
         provider,
         handle,
+        invariants,
     })
 }
 
@@ -185,14 +193,17 @@ async fn draft_edit_release_runs_edited_description() {
         .create_job(create(true, &[], "ORIGINAL BODY"))
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     assert_eq!(job.state, JobState::Draft, "draft:true lands Draft");
 
     rig.handle
         .update_job(update(job.id, &[], "EDITED BODY REACHES PROMPT"))
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
 
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let prompt = &rig.provider.runs()[0].prompt;
@@ -204,6 +215,7 @@ async fn draft_edit_release_runs_edited_description() {
         !prompt.contains("ORIGINAL BODY"),
         "the pre-edit description must not survive: {prompt}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// `cover_html` round-trips through create and the Draft PATCH, and is
@@ -218,15 +230,18 @@ async fn draft_cover_html_round_trips_and_stays_out_of_prompt() {
     let mut req = create(true, &[], "THE DESCRIPTION");
     req.cover_html = Some("<h1>SPLASHY COVER</h1>".into());
     let job = rig.handle.create_job(req).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     assert_eq!(job.cover_html.as_deref(), Some("<h1>SPLASHY COVER</h1>"));
 
     // Draft PATCH replaces the cover.
     let mut edit = update(job.id, &[], "THE DESCRIPTION");
     edit.cover_html = Some("<h1>EDITED COVER</h1>".into());
     let edited = rig.handle.update_job(edit).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     assert_eq!(edited.cover_html.as_deref(), Some("<h1>EDITED COVER</h1>"));
 
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let done = wait_for_state(&rig.store, job.id, JobState::Done).await;
     // The released record still carries the cover.
     assert_eq!(done.cover_html.as_deref(), Some("<h1>EDITED COVER</h1>"));
@@ -241,6 +256,7 @@ async fn draft_cover_html_round_trips_and_stays_out_of_prompt() {
         !prompt.contains("COVER"),
         "cover_html must never reach the work prompt: {prompt}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Edited deps are enforced at release: a draft edited to depend on an
@@ -253,20 +269,25 @@ async fn draft_edited_deps_are_enforced_at_release() {
     // An upstream that stays Frozen (never released) — a valid, non-terminal
     // dependency that is not Done.
     let upstream = rig.handle.create_job(create(false, &[], "")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     let draft = rig.handle.create_job(create(true, &[], "")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     // Edit adds the dependency the draft was created without.
     rig.handle
         .update_job(update(draft.id, &[upstream.id], ""))
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
 
     let state = rig
         .handle
         .release_job("acme", "api", draft.id)
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     assert_eq!(state, JobState::Blocked, "edited dep (not Done) → Blocked");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// The edit endpoint is Draft-only: once a job is Ready/Work or terminal, an
@@ -278,9 +299,12 @@ async fn edit_rejected_outside_draft() {
     // A released job is running/queued, not editable.
     commit_work(&rig); // work produces output so the job can reach Done below
     let job = rig.handle.create_job(create(false, &[], "")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     // Frozen → Ready happens on release; either way it is no longer Draft.
     let err = rig.handle.update_job(update(job.id, &[], "too late")).await;
+    assert_invariants_of(&rig.invariants);
     assert!(
         matches!(err, Err(CoreError::Conflict(_))),
         "edit of a non-Draft job must conflict, got {err:?}"
@@ -292,10 +316,12 @@ async fn edit_rejected_outside_draft() {
         .handle
         .update_job(update(job.id, &[], "still too late"))
         .await;
+    assert_invariants_of(&rig.invariants);
     assert!(
         matches!(err, Err(CoreError::Conflict(_))),
         "edit of a terminal job must conflict, got {err:?}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Frozen → Draft reopens a never-released job for editing; the edit then
@@ -311,14 +337,17 @@ async fn frozen_to_draft_edit_release() {
         .create_job(create(false, &[], "FROZEN BODY"))
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     assert_eq!(job.state, JobState::Frozen);
 
     // Reopen for editing.
     rig.handle.draft_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     assert_eq!(state_of(&rig.store, job.id).await, JobState::Draft);
 
     // Only Frozen → Draft: a Draft cannot be re-drafted.
     let err = rig.handle.draft_job("acme", "api", job.id).await;
+    assert_invariants_of(&rig.invariants);
     assert!(
         matches!(err, Err(CoreError::Transition(_))),
         "Draft → Draft must be an invalid transition, got {err:?}"
@@ -328,12 +357,15 @@ async fn frozen_to_draft_edit_release() {
         .update_job(update(job.id, &[], "REOPENED AND EDITED"))
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let prompt = &rig.provider.runs()[0].prompt;
     assert!(prompt.contains("REOPENED AND EDITED"), "{prompt}");
     assert!(!prompt.contains("FROZEN BODY"), "{prompt}");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Revoke from Draft is allowed and terminal — the job never ran, so nothing
@@ -343,9 +375,12 @@ async fn revoke_from_draft() {
     let Some(rig) = rig().await else { return };
 
     let job = rig.handle.create_job(create(true, &[], "")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let cascaded = rig.handle.revoke_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     assert!(cascaded.is_empty(), "a Draft never ran; no cascade");
     assert_eq!(state_of(&rig.store, job.id).await, JobState::Revoked);
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A dependent on a Draft job stays Blocked until the draft is released AND
@@ -358,11 +393,13 @@ async fn dep_on_draft_stays_blocked_until_released_and_done() {
     commit_work(&rig);
 
     let draft = rig.handle.create_job(create(true, &[], "")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let dependent = rig
         .handle
         .create_job(create(false, &[draft.id], ""))
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
 
     // Releasing the dependent while its upstream is a Draft → Blocked; the
     // Draft is not Done (nor even released), so the dep is unsatisfied.
@@ -371,6 +408,7 @@ async fn dep_on_draft_stays_blocked_until_released_and_done() {
         .release_job("acme", "api", dependent.id)
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     assert_eq!(state, JobState::Blocked);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
@@ -385,8 +423,10 @@ async fn dep_on_draft_stays_blocked_until_released_and_done() {
         .release_job("acme", "api", draft.id)
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, draft.id, JobState::Done).await;
     wait_for_state(&rig.store, dependent.id, JobState::Done).await;
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Editing a Draft's deps prunes the stale reverse edge: after a draft is
@@ -400,7 +440,9 @@ async fn edit_dropping_upstream_prunes_revoke_cascade() {
     // Two Frozen upstreams; neither is Done, so a dependent on either releases
     // to Blocked (a stable, cascade-eligible state to observe).
     let u = rig.handle.create_job(create(false, &[], "")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let v = rig.handle.create_job(create(false, &[], "")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     // Draft created depending on U, then edited to depend on V instead.
     let draft = rig
@@ -408,10 +450,12 @@ async fn edit_dropping_upstream_prunes_revoke_cascade() {
         .create_job(create(true, &[u.id], ""))
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle
         .update_job(update(draft.id, &[v.id], ""))
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
 
     // Release the draft: its (edited) dep V is not Done → Blocked.
     let state = rig
@@ -419,11 +463,13 @@ async fn edit_dropping_upstream_prunes_revoke_cascade() {
         .release_job("acme", "api", draft.id)
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     assert_eq!(state, JobState::Blocked);
 
     // Revoke U. The draft no longer depends on U, so the stale U→draft edge
     // must not drag it into the cascade.
     let cascaded = rig.handle.revoke_job("acme", "api", u.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     assert!(
         !cascaded.contains(&draft.id),
         "released job no longer depends on U; must not cascade: {cascaded:?}"
@@ -433,6 +479,7 @@ async fn edit_dropping_upstream_prunes_revoke_cascade() {
         JobState::Blocked,
         "job re-pointed away from U must survive U's revoke"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// #166: finalize an edited Draft → Frozen. The edits are preserved, the job
@@ -449,11 +496,14 @@ async fn draft_finalize_parks_frozen_preserves_edits_and_is_batchable() {
         .create_job(create(true, &[], "ORIGINAL A"))
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle
         .update_job(update(a.id, &[], "EDITED A"))
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.finalize_job("acme", "api", a.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     let frozen_a = rig
         .store
@@ -478,7 +528,9 @@ async fn draft_finalize_parks_frozen_preserves_edits_and_is_batchable() {
     );
 
     let b = rig.handle.create_job(create(true, &[], "")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.finalize_job("acme", "api", b.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     // Both members are Frozen, so a batch over them is accepted (a Draft member
     // would be rejected — the strand this ticket closes).
@@ -488,6 +540,7 @@ async fn draft_finalize_parks_frozen_preserves_edits_and_is_batchable() {
         .create_job(batch)
         .await
         .expect("two finalized Frozen jobs are batchable");
+    assert_invariants_of(&rig.invariants);
 }
 
 /// #166: finalize is Draft-only. On any non-Draft state (here a Frozen job that
@@ -497,8 +550,10 @@ async fn finalize_on_non_draft_conflicts() {
     let Some(rig) = rig().await else { return };
 
     let job = rig.handle.create_job(create(false, &[], "")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     assert_eq!(job.state, JobState::Frozen);
     let err = rig.handle.finalize_job("acme", "api", job.id).await;
+    assert_invariants_of(&rig.invariants);
     assert!(
         matches!(err, Err(CoreError::Transition(_))),
         "finalize of a non-Draft job must be an invalid transition, got {err:?}"
@@ -508,6 +563,7 @@ async fn finalize_on_non_draft_conflicts() {
         JobState::Frozen,
         "a rejected finalize leaves the state untouched"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// #166: a definition that fails validation cannot be finalized — the field
@@ -518,6 +574,7 @@ async fn finalize_validation_failure_stays_draft() {
     let Some(rig) = rig().await else { return };
 
     let job = rig.handle.create_job(create(true, &[], "")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     // A command evaluator with no `run` fails the §1.1 field rules.
     let mut bad = update(job.id, &[], "");
     bad.eval = vec![Evaluator {
@@ -533,8 +590,10 @@ async fn finalize_validation_failure_stays_draft() {
         stage: 0,
     }];
     rig.handle.update_job(bad).await.unwrap();
+    assert_invariants_of(&rig.invariants);
 
     let err = rig.handle.finalize_job("acme", "api", job.id).await;
+    assert_invariants_of(&rig.invariants);
     assert!(
         matches!(&err, Err(CoreError::Validation(errs)) if errs.iter().any(|e| e.message.contains("run"))),
         "finalize must reject the malformed evaluator with a field error, got {err:?}"
@@ -544,6 +603,7 @@ async fn finalize_validation_failure_stays_draft() {
         JobState::Draft,
         "a failed finalize leaves the job editable in Draft"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// #166: Frozen → Draft → finalize → Frozen round-trips idempotently — a
@@ -557,15 +617,18 @@ async fn frozen_draft_finalize_round_trip() {
         .create_job(create(false, &[], "BODY"))
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     assert_eq!(job.state, JobState::Frozen);
 
     rig.handle.draft_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     assert_eq!(state_of(&rig.store, job.id).await, JobState::Draft);
 
     rig.handle
         .finalize_job("acme", "api", job.id)
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     let back = rig
         .store
         .jobs()
@@ -580,6 +643,7 @@ async fn frozen_draft_finalize_round_trip() {
         back.description, "BODY",
         "an untouched finalize preserves the record"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A Draft holds no work attempt to claim — claiming is rejected until it is
@@ -589,9 +653,12 @@ async fn claim_on_draft_rejected() {
     let Some(rig) = rig().await else { return };
 
     let job = rig.handle.create_job(create(true, &[], "")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let err = rig.handle.claim_job("acme", "api", job.id).await;
+    assert_invariants_of(&rig.invariants);
     assert!(
         matches!(err, Err(CoreError::Conflict(_))),
         "claim on a Draft must conflict, got {err:?}"
     );
+    assert_invariants_of(&rig.invariants);
 }

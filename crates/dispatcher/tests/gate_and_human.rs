@@ -5,13 +5,17 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, spawn};
+use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest};
+use dispatcher::invariants::InvariantSink;
 use std::sync::Arc;
 use std::time::Duration;
 use store::NatsStore;
 use test_utils::repo::{TempRepo, clone_branch_from};
 use test_utils::{FakeBackend, FakeProvider};
 use types::{EscalationAction, JobState, TaskPhase, TaskResolution, TaskState};
+
+mod common;
+use common::{assert_invariants_of, spawn_checked};
 
 const IMPL_CMD: &str = r#"
 name: impl-cmd
@@ -110,6 +114,9 @@ struct Rig {
     backend: Arc<FakeBackend>,
     provider: Arc<FakeProvider>,
     handle: CoreHandle,
+    /// Invariant violations the actor logged, drained by
+    /// `assert_invariants_of` (refactor-plan B1a).
+    invariants: InvariantSink,
 }
 
 async fn rig() -> Option<Rig> {
@@ -158,7 +165,7 @@ async fn rig() -> Option<Rig> {
     )
     .await
     .unwrap();
-    let handle = spawn(core);
+    let (handle, invariants) = spawn_checked(core);
     // The operator inbox (`req.tasks.list.pending`) is served off the core actor
     // by the tasks handler; wire it up so tests can hit the real request path.
     dispatcher::handlers::spawn_tasks_handler(&store, handle.clone(), backend.clone())
@@ -171,6 +178,7 @@ async fn rig() -> Option<Rig> {
         backend,
         provider,
         handle,
+        invariants,
     })
 }
 
@@ -253,7 +261,9 @@ async fn main_moves_during_work_rebases_and_skips_gate() {
         .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let done = wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     // Both the concurrent land and the job's change are on main.
@@ -299,6 +309,7 @@ async fn main_moves_during_work_rebases_and_skips_gate() {
             .as_deref(),
         Some("landed concurrently")
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Main moves *during evaluation* → the tested stacking is stale, so the
@@ -313,7 +324,9 @@ async fn main_moves_during_eval_fires_merge_gate() {
         .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let m = &rig.repo.manager;
@@ -361,6 +374,7 @@ async fn main_moves_during_eval_fires_merge_gate() {
             .await
             .is_err()
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Main untouched throughout → no rebase, no gate: byte-identical to the
@@ -373,7 +387,9 @@ async fn no_movement_evaluates_and_merges_without_rebase_or_gate() {
         .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let m = &rig.repo.manager;
@@ -400,6 +416,7 @@ async fn no_movement_evaluates_and_merges_without_rebase_or_gate() {
     assert!(!events.contains(&"job-rebased".to_string()));
     assert!(!events.contains(&"job-rebase-conflict".to_string()));
     assert!(!events.contains(&"job-merge-gate-started".to_string()));
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A concurrent land during WORK that *conflicts* with the job's change → the
@@ -443,7 +460,9 @@ async fn rebase_conflict_falls_through_to_wrapup_conflict_path() {
     });
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let events = event_types(&rig.store).await;
@@ -484,6 +503,7 @@ async fn rebase_conflict_falls_through_to_wrapup_conflict_path() {
             .as_deref(),
         Some("job change v2")
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 #[tokio::test]
@@ -513,7 +533,9 @@ async fn merge_gate_failure_reworks_on_new_base_without_budget() {
     });
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let events = event_types(&rig.store).await;
@@ -548,6 +570,7 @@ async fn merge_gate_failure_reworks_on_new_base_without_budget() {
             .unwrap()
             .is_some()
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Job #154 gate-fix fast path: a compile-only gate failure (stage-0 build) on
@@ -589,7 +612,9 @@ async fn gate_compile_failure_takes_fast_path_and_relands() {
     });
 
     let job = rig.handle.create_job(req("gatefix")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let tasks = rig
@@ -646,6 +671,7 @@ async fn gate_compile_failure_takes_fast_path_and_relands() {
         body.contains("gate-fix round"),
         "squash body must note the gate-fix round: {body:?}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Job #154: a gate failure at a LATER stage (tests, not build) is not the
@@ -670,7 +696,9 @@ async fn gate_test_stage_failure_takes_full_rework() {
     });
 
     let job = rig.handle.create_job(req("gatefix")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let tasks = rig
@@ -701,6 +729,7 @@ async fn gate_test_stage_failure_takes_full_rework() {
             .any(|t| t.phase == TaskPhase::Evaluation && t.cycle == 2),
         "the eval phase re-runs on the full loop: {tasks:#?}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Job #154: the gate-fix budget is bounded. A branch that keeps failing the
@@ -716,7 +745,9 @@ async fn gate_fix_budget_exhaustion_falls_back_to_full_rework() {
     move_main_during_eval(&rig);
 
     let job = rig.handle.create_job(req("gatefix")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let tasks = rig
@@ -742,6 +773,7 @@ async fn gate_fix_budget_exhaustion_falls_back_to_full_rework() {
             .any(|t| t.rework_reason == Some(types::ReworkReason::GateCiFailure)),
         "budget exhaustion falls back to full rework: {tasks:#?}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Job #154 safety rail: a SINGLE-stage (opaque) gate cannot be classified —
@@ -766,7 +798,9 @@ async fn single_stage_gate_failure_is_unclassifiable_full_rework() {
     });
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let tasks = rig
@@ -790,6 +824,7 @@ async fn single_stage_gate_failure_is_unclassifiable_full_rework() {
             .any(|t| t.rework_reason == Some(types::ReworkReason::GateCompileFix)),
         "no gate-fix fast path when the gate cannot be classified: {tasks:#?}"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Change A: an eval-failure rework PRESERVES the branch. Cycle 1 commits file
@@ -818,7 +853,9 @@ async fn eval_failure_rework_preserves_prior_commits() {
     });
 
     let job = rig.handle.create_job(req("reworkable")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let m = &rig.repo.manager;
@@ -854,6 +891,7 @@ async fn eval_failure_rework_preserves_prior_commits() {
         .unwrap();
     assert_eq!(tasks.len(), 4);
     assert_eq!(tasks[2].cycle, 2);
+    assert_invariants_of(&rig.invariants);
 }
 
 /// §3.2 step-12 guard: a no-evaluator job auto-squashes with no review to catch
@@ -878,7 +916,9 @@ async fn unresolved_markers_on_no_evaluator_job_escalates() {
     rig.provider.on_run(|_| async {});
 
     let job = rig.handle.create_job(req("no-eval")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     // Nothing with markers reached the default branch.
@@ -899,6 +939,7 @@ async fn unresolved_markers_on_no_evaluator_job_escalates() {
         1,
         "one conflict rework happened before the guard escalated"
     );
+    assert_invariants_of(&rig.invariants);
 }
 
 /// The happy counterpart to the guard: on a no-evaluator job the agent resolves
@@ -932,7 +973,9 @@ async fn resolved_wip_markers_squash_clean_on_no_evaluator_job() {
     });
 
     let job = rig.handle.create_job(req("no-eval")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let m = &rig.repo.manager;
@@ -950,6 +993,7 @@ async fn resolved_wip_markers_squash_clean_on_no_evaluator_job() {
         1
     );
     assert!(!events.contains(&"job-merge-gate-started".to_string()));
+    assert_invariants_of(&rig.invariants);
 }
 
 #[tokio::test]
@@ -961,10 +1005,12 @@ async fn human_evaluator_and_human_work_resolve_via_inbox() {
 
     // Agent work + human evaluator: job parks in Evaluation on a Pending task.
     let gated = rig.handle.create_job(req("human-gated")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle
         .release_job("acme", "api", gated.id)
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, gated.id, JobState::Evaluation).await;
     tokio::time::sleep(Duration::from_millis(100)).await; // task record settles
 
@@ -983,6 +1029,7 @@ async fn human_evaluator_and_human_work_resolve_via_inbox() {
             "david",
         )
         .await;
+    assert_invariants_of(&rig.invariants);
     assert!(err.is_err());
 
     rig.handle
@@ -999,14 +1046,17 @@ async fn human_evaluator_and_human_work_resolve_via_inbox() {
         )
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, gated.id, JobState::Done).await;
 
     // Human work: Pending task in Work phase; Pass → command eval → Done.
     let manual = rig.handle.create_job(req("manual")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle
         .release_job("acme", "api", manual.id)
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, manual.id, JobState::Work).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     rig.handle
@@ -1023,6 +1073,7 @@ async fn human_evaluator_and_human_work_resolve_via_inbox() {
         )
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     let done = wait_for_state(&rig.store, manual.id, JobState::Done).await;
     assert!(done.ready_at.is_some());
 
@@ -1042,6 +1093,7 @@ async fn human_evaluator_and_human_work_resolve_via_inbox() {
         Some(types::TaskResult::Human { pass: true, ref operator, summary: Some(ref s), .. })
             if operator == "david" && s == "Fixed the config and confirmed the build passes."
     ));
+    assert_invariants_of(&rig.invariants);
 }
 
 #[tokio::test]
@@ -1053,7 +1105,9 @@ async fn escalation_retry_relaunches_work_without_branch_reset() {
     commit_branch(&rig, "src/retry.rs"); // Retry attempt commits so it lands (§3.2 guard)
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1072,6 +1126,7 @@ async fn escalation_retry_relaunches_work_without_branch_reset() {
         )
         .await
         .unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await; // third run exits 0
 
     let tasks = rig
@@ -1087,6 +1142,7 @@ async fn escalation_retry_relaunches_work_without_branch_reset() {
     assert_eq!(tasks[3].state, TaskState::Done);
     let events = event_types(&rig.store).await;
     assert!(events.contains(&"job-escalation-resolved".to_string()));
+    assert_invariants_of(&rig.invariants);
 }
 
 /// Hit the real `req.tasks.list.pending` request path — the operator inbox as
@@ -1112,7 +1168,9 @@ async fn revoke_closes_pending_escalation_task() {
     rig.provider.script_exits([1, 1]); // exhaust work_retries: 1 → escalate
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1123,6 +1181,7 @@ async fn revoke_closes_pending_escalation_task() {
     assert_eq!(inbox[0].state, TaskState::Pending);
 
     rig.handle.revoke_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Revoked).await;
 
     // No zombie remains in the inbox.
@@ -1152,6 +1211,7 @@ async fn revoke_closes_pending_escalation_task() {
         }
         other => panic!("expected synthetic Human result, got {other:?}"),
     }
+    assert_invariants_of(&rig.invariants);
 }
 
 /// A zombie predating the revoke-closes-tasks fix — a Pending task whose job is
@@ -1165,6 +1225,7 @@ async fn list_pending_hides_terminal_job_zombie() {
 
     // Seed a Revoked job with a leftover Pending Human escalation task.
     let mut job = rig.handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     job.state = JobState::Revoked;
     jobs.put(&job).await.unwrap();
     let zombie = types::Task {
@@ -1207,6 +1268,7 @@ async fn list_pending_hides_terminal_job_zombie() {
         1
     );
     assert!(pending_inbox(&rig.store).await.is_empty());
+    assert_invariants_of(&rig.invariants);
 }
 
 async fn event_types(store: &NatsStore) -> Vec<String> {
@@ -1242,9 +1304,13 @@ async fn two_concurrent_landings_serialize_and_neither_is_lost() {
     move_main_during_eval(&rig);
 
     let a = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     let b = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", a.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", b.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, a.id, JobState::Done).await;
     wait_for_state(&rig.store, b.id, JobState::Done).await;
 
@@ -1274,4 +1340,5 @@ async fn two_concurrent_landings_serialize_and_neither_is_lost() {
             "merge-gate/{seq} must not survive landing"
         );
     }
+    assert_invariants_of(&rig.invariants);
 }

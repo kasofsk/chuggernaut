@@ -16,6 +16,7 @@
 //! lives in one place (single-writer design), the check is cheap.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use types::JobState;
 
@@ -40,6 +41,66 @@ impl Violation {
             invariant,
             detail: detail.into(),
         }
+    }
+}
+
+/// Everything one message broke: the message that was just handled, plus the
+/// violations live state carried once it had been. The message name is what turns
+/// a violation into a diagnosis — it names the writer that introduced the
+/// corruption, not merely the corrupted datum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Breach {
+    /// The [`Msg`](crate::core::Msg) variant the single writer had just handled.
+    pub message: &'static str,
+    pub violations: Vec<Violation>,
+}
+
+/// A shared log of [`Breach`]es observed *inside* the single writer, in message
+/// order (refactor-plan B1a).
+///
+/// A test-only observability hook, the same shape as [`crate::trace::TraceSink`]:
+/// a test attaches a clone to a [`Core`](crate::core::Core) before
+/// [`spawn`](crate::core::spawn) moves it, then drains this one to assert. That
+/// indirection is what lets a test driving the actor over a `CoreHandle` check
+/// invariants at all — the `Core` itself is gone into the actor task.
+///
+/// Draining is a plain mutex read with **no round trip through the actor**, which
+/// is the property that matters: threading a message between every pair of real
+/// messages would let the actor finish its post-message drains before the test's
+/// next observation, changing the very timing these tests pin.
+#[derive(Debug, Clone, Default)]
+pub struct InvariantSink(Arc<Mutex<Vec<Breach>>>);
+
+impl InvariantSink {
+    /// A fresh, empty log.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check `state` and log a [`Breach`] if anything is broken. Clean states
+    /// record nothing, so the log length is the number of *broken* messages.
+    pub(crate) fn check(&self, message: &'static str, state: &CoreState) {
+        let violations = check_invariants(state);
+        if !violations.is_empty() {
+            self.lock().push(Breach {
+                message,
+                violations,
+            });
+        }
+    }
+
+    /// Take every breach logged since the last drain. Draining (rather than
+    /// snapshotting) keeps one broken message from failing every later assertion
+    /// in the test.
+    pub fn drain(&self) -> Vec<Breach> {
+        std::mem::take(&mut *self.lock())
+    }
+
+    /// Lock the shared log. A poisoned mutex means a thread panicked mid-record;
+    /// recovering the guard lets that panic surface as the real failure rather
+    /// than a lock-poison red herring.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Breach>> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 
@@ -301,13 +362,17 @@ mod tests {
             }
         }
 
-        fn check(&self) -> Vec<Violation> {
-            check_invariants(&CoreState {
+        fn state(&self) -> CoreState<'_> {
+            CoreState {
                 graphs: &self.graphs,
                 queue: &self.queue,
                 active: &self.active,
                 merge_gates: &self.merge_gates,
-            })
+            }
+        }
+
+        fn check(&self) -> Vec<Violation> {
+            check_invariants(&self.state())
         }
     }
 
@@ -418,5 +483,47 @@ mod tests {
                 .any(|x| x.invariant == "merge_queue_is_wrapup" && x.detail.contains("still sits")),
             "{v:?}"
         );
+    }
+
+    /// The sink is plain in-memory data (no NATS/Docker), so its record/drain
+    /// contract is unit-testable directly — the tier a test belongs at
+    /// (`testing.md`).
+    #[test]
+    fn sink_logs_only_broken_messages_and_drains_once() {
+        let clean = Fixture::new(vec![job("acme/api", 1, &[], JobState::Ready)]);
+        let mut broken = Fixture::new(vec![job("acme/api", 1, &[], JobState::Blocked)]);
+        broken.queue.enqueue(queued(1));
+
+        let sink = InvariantSink::new();
+        // A clean message records nothing, so the log length counts breaches, not
+        // messages — the property that keeps a passing test's log empty.
+        sink.check("CreateJob", &clean.state());
+        assert_eq!(sink.drain(), vec![]);
+
+        sink.check("ReleaseJob", &broken.state());
+        let breaches = sink.drain();
+        assert_eq!(breaches.len(), 1, "{breaches:?}");
+        assert_eq!(breaches[0].message, "ReleaseJob");
+        assert!(
+            breaches[0]
+                .violations
+                .iter()
+                .any(|v| v.invariant == "ready_queue_only_ready"),
+            "{breaches:?}"
+        );
+        // Draining is destructive: one broken message must not fail every later
+        // assertion in the test that drains it.
+        assert_eq!(sink.drain(), vec![]);
+    }
+
+    /// Clones share one log, which is what lets a test keep a handle on the sink
+    /// after `spawn` has moved the `Core` that records into it.
+    #[test]
+    fn sink_clones_share_one_log() {
+        let mut broken = Fixture::new(vec![job("acme/api", 1, &[], JobState::Done)]);
+        broken.queue.enqueue(queued(1));
+        let sink = InvariantSink::new();
+        sink.clone().check("TaskExited", &broken.state());
+        assert_eq!(sink.drain().len(), 1);
     }
 }

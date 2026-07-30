@@ -57,7 +57,7 @@ one surface.
 | Module | Contract | Spec |
 | --- | --- | --- |
 | `core` | Single-writer event loop: owns all mutable state; every other slice is `impl Core` reached via the `Msg` channel. | §3.1 |
-| `invariants` | Executable invariant checker: pure/total read-only `CoreState` view → `Vec<Violation>`; negative-space assertions run after every message in tests. | §1.4, §2.1, §3.1, §3.2, §3.3 |
+| `invariants` | Executable invariant checker: pure/total read-only `CoreState` view → `Vec<Violation>`; negative-space assertions run after every message in tests, via `Core::state` in-process or the test-only `InvariantSink` inside the state loop. | §1.4, §2.1, §3.1, §3.2, §3.3 |
 | `project_config` | Where a project's repo-versioned chuggernaut config lives and how it is read: resolves a config-root-relative path against `.chug/` before the pre-`.chug` repo-root layout, and lists a config directory's entries from a repo tree as `{ stem, path }` — the stem plus the location it resolved to. | §1.1, §2.2, §4.4 |
 | `release` | Release validation, ref-reading half: `.chug/jobs/*.yaml` loading + prompt/KV checks through the `vcs` port; re-exports the pure half. | §2.2, §14 |
 | `ready` | Ready-phase shim: gathers the view, applies `decide/ready`'s transitions and effects, then does the bookkeeping its step names — queue admission, a Draft batch's membership commit, the §2.2 re-validation hop, the Work hand-off. | §2.1, §2.2, §3.1 |

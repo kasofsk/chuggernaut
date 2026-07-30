@@ -6,14 +6,18 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use dispatcher::core::{Core, CoreConfig, spawn};
+use dispatcher::core::{Core, CoreConfig};
 use dispatcher::handlers::spawn_tasks_handler;
+use dispatcher::invariants::InvariantSink;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use store::NatsStore;
 use test_utils::repo::TempRepo;
 use test_utils::{FakeBackend, FakeProvider};
 use types::{Task, TaskKind, TaskPhase, TaskState};
+
+mod common;
+use common::{assert_invariants_of, spawn_checked};
 
 fn running_task(id: u64, container_id: Option<&str>) -> Task {
     Task {
@@ -46,7 +50,7 @@ fn running_task(id: u64, container_id: Option<&str>) -> Task {
     }
 }
 
-async fn setup(server_url: &str) -> (NatsStore, Arc<FakeBackend>) {
+async fn setup(server_url: &str) -> (NatsStore, Arc<FakeBackend>, InvariantSink) {
     let store = NatsStore::connect_namespaced(server_url, &test_utils::unique_prefix())
         .await
         .unwrap();
@@ -75,11 +79,11 @@ async fn setup(server_url: &str) -> (NatsStore, Arc<FakeBackend>) {
     )
     .await
     .unwrap();
-    let handle = spawn(core);
+    let (handle, sink) = spawn_checked(core);
     spawn_tasks_handler(&store, handle, backend.clone())
         .await
         .unwrap();
-    (store, backend)
+    (store, backend, sink)
 }
 
 async fn output(store: &NatsStore, task_id: u64, since: u64) -> serde_json::Value {
@@ -101,7 +105,7 @@ async fn output_tails_running_serves_fallback_and_404s() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let (store, backend) = setup(server.url()).await;
+    let (store, backend, sink) = setup(server.url()).await;
     backend.put_logs(b"compiling chuggernaut v0.1.0\ncompiling store\n".to_vec());
     let tasks = store.tasks().await.unwrap();
 
@@ -136,6 +140,10 @@ async fn output_tails_running_serves_fallback_and_404s() {
     // An unknown task → 404.
     let v = output(&store, 999, 0).await;
     assert_eq!(v["error"]["status"], 404);
+
+    // Every request above reached the actor over NATS rather than through a `Core`
+    // call, so drain its log here — after the last one has been answered.
+    assert_invariants_of(&sink);
 }
 
 #[tokio::test]
@@ -143,7 +151,7 @@ async fn wedged_node_errors_without_blocking_other_requests() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
-    let (store, backend) = setup(server.url()).await;
+    let (store, backend, sink) = setup(server.url()).await;
     let tasks = store.tasks().await.unwrap();
     tasks.put(&running_task(1, Some("fake/c1"))).await.unwrap();
 
@@ -179,4 +187,5 @@ async fn wedged_node_errors_without_blocking_other_requests() {
     backend.fail_logs_tail("worker node unreachable");
     let v = output(&store, 1, 0).await;
     assert_eq!(v["error"]["status"], 502, "wedged node should be 502: {v}");
+    assert_invariants_of(&sink);
 }

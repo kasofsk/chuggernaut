@@ -12,19 +12,8 @@ use test_utils::repo::TempRepo;
 use test_utils::{FakeBackend, FakeProvider};
 use types::{EscalationAction, JobState, TaskKind, TaskResolution, TaskState};
 
-/// Assert every dispatcher data invariant holds against the Core's live state
-/// (contracts.md §3, refactor-plan.md B1). Called after each message so state
-/// corruption surfaces at the point it is introduced, not at a distant assert.
-/// `dispatcher::invariants::check_invariants` is the single source of truth for
-/// what "always/never" means; this wrapper is the message-send hook the ticket
-/// asks for.
-fn assert_invariants(core: &Core) {
-    let violations = dispatcher::invariants::check_invariants(&core.state());
-    assert!(
-        violations.is_empty(),
-        "invariant violations: {violations:?}"
-    );
-}
+mod common;
+use common::assert_invariants;
 
 async fn new_core(store: &NatsStore, repos_root: std::path::PathBuf) -> Core {
     Core::new(
@@ -156,7 +145,9 @@ async fn release_blocking_unblocking_and_events() {
     };
 
     let build = core.create_job(req("build", &[])).await.unwrap();
+    assert_invariants(&core);
     let deploy = core.create_job(req("deploy", &[build.id])).await.unwrap();
+    assert_invariants(&core);
     assert_eq!(build.state, JobState::Frozen);
     assert_invariants(&core);
 
@@ -186,6 +177,7 @@ async fn release_blocking_unblocking_and_events() {
         core.release_job("acme", "api", build.id).await,
         Err(CoreError::Transition(_))
     ));
+    assert_invariants(&core);
 
     // Simulate build completing (execution slice lands later): Done in KV,
     // then a fresh Core reload — the restart path — and dependent unblocking.
@@ -242,6 +234,7 @@ async fn release_validation_rejects_bad_wiring_and_missing_secret() {
         .await
         .unwrap();
     let b = core.create_job(req("build", &[])).await.unwrap();
+    assert_invariants(&core);
     let Err(CoreError::Validation(errs)) = core.release_job("acme", "api", b.id).await else {
         panic!("expected validation failure");
     };
@@ -259,8 +252,11 @@ async fn unblock_revalidation_failure_stalls_with_human_task() {
     };
 
     let build = core.create_job(req("build", &[])).await.unwrap();
+    assert_invariants(&core);
     let deploy = core.create_job(req("deploy", &[build.id])).await.unwrap();
+    assert_invariants(&core);
     core.release_job("acme", "api", build.id).await.unwrap();
+    assert_invariants(&core);
     core.release_job("acme", "api", deploy.id).await.unwrap();
     assert_invariants(&core);
 
@@ -311,8 +307,11 @@ async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
     };
 
     let build = core.create_job(req("build", &[])).await.unwrap();
+    assert_invariants(&core);
     let deploy = core.create_job(req("deploy", &[build.id])).await.unwrap();
+    assert_invariants(&core);
     core.release_job("acme", "api", build.id).await.unwrap();
+    assert_invariants(&core);
     core.release_job("acme", "api", deploy.id).await.unwrap();
     assert_invariants(&core);
 
@@ -349,7 +348,7 @@ async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
         .unwrap()[0]
         .id;
 
-    let handle = dispatcher::core::spawn(core2);
+    let (handle, sink) = common::spawn_checked(core2);
 
     // Resolve is rejected and leaves the escalation task Pending (the reject
     // happens before the task is marked done — fix #2's ordering).
@@ -366,10 +365,12 @@ async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
             "david",
         )
         .await;
+    common::assert_invariants_of(&sink);
     assert!(
         matches!(err, Err(CoreError::InvalidResolution(_))),
         "got {err:?}"
     );
+    common::assert_invariants_of(&sink);
     let task = store
         .tasks()
         .await
@@ -411,6 +412,7 @@ async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
         )
         .await
         .unwrap();
+    common::assert_invariants_of(&sink);
 
     // Watch the deploy job until it leaves Stalled; the forward-progress guard
     // fires inside the check (#206 principle 3).
@@ -440,6 +442,7 @@ async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
         },
     )
     .await;
+    common::assert_invariants_of(&sink);
 }
 
 /// spec §14.2 launch park: a job whose pinned config requires a newer dispatcher
@@ -480,7 +483,7 @@ async fn version_skewed_config_parks_stalled_not_escalated_at_launch() {
     // A fresh core enqueues the Ready job at construction; spawning drains the
     // queue, launching it through `enter_work`.
     let core2 = new_core(&store, core_repos_root(&repo)).await;
-    let _handle = dispatcher::core::spawn(core2);
+    let (_handle, sink) = common::spawn_checked(core2);
 
     let rec = test_utils::wait::job_where(
         &store,
@@ -491,6 +494,10 @@ async fn version_skewed_config_parks_stalled_not_escalated_at_launch() {
         |rec| rec.state != JobState::Ready,
     )
     .await;
+
+    // The park happens inside the actor, driven by the queue drain rather than by
+    // a `Core` call the test makes: the sink caught every message it took.
+    common::assert_invariants_of(&sink);
 
     // Parked pre-Work (Stalled), never Escalated — no per-launch storm.
     assert_eq!(
@@ -516,6 +523,7 @@ async fn version_skewed_config_parks_stalled_not_escalated_at_launch() {
     );
     assert!(matches!(tasks[0].kind, TaskKind::Human { .. }));
     assert_eq!(tasks[0].state, TaskState::Pending);
+    common::assert_invariants_of(&sink);
 }
 
 #[tokio::test]
@@ -525,12 +533,16 @@ async fn revoke_cascades_through_pending_dependents() {
     };
 
     let a = core.create_job(req("build", &[])).await.unwrap();
+    assert_invariants(&core);
     let b = core.create_job(req("deploy", &[a.id])).await.unwrap();
+    assert_invariants(&core);
     let c = core.create_job(req("deploy", &[b.id])).await.unwrap();
+    assert_invariants(&core);
     core.release_job("acme", "api", a.id).await.unwrap(); // Ready + queued
     assert_invariants(&core);
 
     let cascaded = core.revoke_job("acme", "api", a.id).await.unwrap();
+    assert_invariants(&core);
     assert_eq!(cascaded, vec![b.id, c.id]);
     assert_invariants(&core); // cascade must leave no terminal job in the queue
     assert!(core.queue.is_empty());
@@ -551,6 +563,7 @@ async fn revoke_cascades_through_pending_dependents() {
         core.revoke_job("acme", "api", a.id).await,
         Err(CoreError::Transition(_))
     ));
+    assert_invariants(&core);
 }
 
 fn core_repos_root(repo: &TempRepo) -> std::path::PathBuf {

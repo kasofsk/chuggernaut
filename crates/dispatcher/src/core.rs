@@ -476,6 +476,43 @@ pub enum Msg {
     },
 }
 
+impl Msg {
+    /// The variant's name, for attributing an invariant violation to the message
+    /// that introduced it (refactor-plan B1a). Spelled out rather than derived so
+    /// a new `Msg` has to be named here too — the compiler's exhaustiveness check
+    /// is what keeps the attribution honest.
+    fn label(&self) -> &'static str {
+        match self {
+            Msg::CreateJob(..) => "CreateJob",
+            Msg::ReleaseJob { .. } => "ReleaseJob",
+            Msg::RevokeJob { .. } => "RevokeJob",
+            Msg::UpdateJob { .. } => "UpdateJob",
+            Msg::DraftJob { .. } => "DraftJob",
+            Msg::FinalizeJob { .. } => "FinalizeJob",
+            Msg::EditMembers { .. } => "EditMembers",
+            Msg::ClaimJob { .. } => "ClaimJob",
+            Msg::UnclaimJob { .. } => "UnclaimJob",
+            Msg::TriageJob { .. } => "TriageJob",
+            Msg::SubmitResult { .. } => "SubmitResult",
+            Msg::SubmitEval { .. } => "SubmitEval",
+            Msg::ResolveTask { .. } => "ResolveTask",
+            Msg::ChannelPost { .. } => "ChannelPost",
+            Msg::LinkProject { .. } => "LinkProject",
+            Msg::OriginRelease { .. } => "OriginRelease",
+            Msg::OriginStatus { .. } => "OriginStatus",
+            Msg::OriginSync { .. } => "OriginSync",
+            Msg::Ping { .. } => "Ping",
+            Msg::QueueSnapshot { .. } => "QueueSnapshot",
+            Msg::Scan { .. } => "Scan",
+            Msg::Drain { .. } => "Drain",
+            Msg::TaskExited { .. } => "TaskExited",
+            Msg::TaskContainerStarted { .. } => "TaskContainerStarted",
+            Msg::LaunchDeferred { .. } => "LaunchDeferred",
+            Msg::WorkerAnnounce { .. } => "WorkerAnnounce",
+        }
+    }
+}
+
 /// Cloneable façade over the core channel; the only way other components
 /// reach the dispatcher's state.
 #[derive(Clone)]
@@ -906,6 +943,13 @@ pub struct Core {
     /// [`Core::attach_trace`] to capture every transition and effect. Inert
     /// otherwise: a single `Option` check per `set_state`/`publish`.
     pub(crate) trace: Option<crate::trace::TraceSink>,
+    /// Invariant-violation log (refactor-plan B1a, [`crate::invariants`]). `None`
+    /// in production — a test attaches an
+    /// [`InvariantSink`](crate::invariants::InvariantSink) via
+    /// [`Core::attach_invariant_sink`] and the state loop then checks every
+    /// invariant after each message it handles. Inert otherwise: a single
+    /// `Option` check per message.
+    pub(crate) invariant_sink: Option<crate::invariants::InvariantSink>,
 }
 
 const SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1019,6 +1063,7 @@ impl Core {
             announced_workers: HashMap::new(),
             seed_node_names: HashSet::new(),
             trace: None,
+            invariant_sink: None,
         };
 
         // Restore merge-queue holds for Open origin releases before reconcile
@@ -1150,6 +1195,7 @@ impl Core {
             // stays current (spec §3.1). Pings are excluded so a busy
             // health-check path never triggers a fleet recompute.
             let occupancy_relevant = !matches!(msg, Msg::Ping { .. });
+            let checked = self.invariant_sink.is_some().then(|| msg.label());
             self.handle_msg(msg).await;
             if let Err(e) = self.drain_queue().await {
                 tracing::error!("drain_queue: {e}");
@@ -1161,6 +1207,13 @@ impl Core {
             }
             if occupancy_relevant {
                 self.refresh_fleet_status().await;
+            }
+            // Check the data invariants once the message has fully settled — the
+            // drains and the fleet republish are part of handling it, and the
+            // queue is legitimately inconsistent midway through them
+            // (refactor-plan B1a). Only ever `Some` under test.
+            if let (Some(label), Some(sink)) = (checked, &self.invariant_sink) {
+                sink.check(label, &self.state());
             }
         }
     }
@@ -2712,6 +2765,15 @@ impl Core {
     /// clone of the shared sink.
     pub fn attach_trace(&mut self, sink: crate::trace::TraceSink) {
         self.trace = Some(sink);
+    }
+
+    /// Attach an invariant log (refactor-plan B1a, [`crate::invariants`]), turning
+    /// on the after-every-message check inside the state loop. A test-only hook,
+    /// like [`attach_trace`](Self::attach_trace): production never calls it, so
+    /// the sink stays `None` and the check never runs. Attach before [`spawn`] so
+    /// the moved `Core` keeps a clone of the shared log.
+    pub fn attach_invariant_sink(&mut self, sink: crate::invariants::InvariantSink) {
+        self.invariant_sink = Some(sink);
     }
 
     /// The single state-write path: §2.1 guard, then KV, then memory.
