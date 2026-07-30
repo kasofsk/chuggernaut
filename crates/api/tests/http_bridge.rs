@@ -1111,6 +1111,307 @@ async fn health_endpoint() {
     );
 }
 
+// ── Platform fleet capacity (spec §3.1 operator capacity control) ───────────
+
+/// One fleet roster entry. `endpoint` is what separates the two transports: a
+/// `worker` node's capacity is operator-changeable, a docker-endpoint node's is
+/// `DOCKER_NODES` config the dispatcher refuses to edit.
+fn capacity_roster_node(name: &str, endpoint: &str, slots: u32) -> types::WorkerNode {
+    types::WorkerNode {
+        name: name.into(),
+        endpoint: endpoint.into(),
+        slots,
+        available: true,
+        version: None,
+        refresh_outcome: None,
+        capacity_source: None,
+        capacity_observed_at: None,
+    }
+}
+
+/// Bring up a core holding `roster`, with the api-facing subjects subscribed.
+/// Returns the repo root, whose `TempDir` must outlive the core.
+async fn capacity_spawn_core(
+    server: &test_utils::nats::NatsTestServer,
+    store: &NatsStore,
+    backend: Arc<FakeBackend>,
+    roster: Vec<types::WorkerNode>,
+) -> tempfile::TempDir {
+    let repos_root = tempfile::tempdir().unwrap();
+    let core = Core::new(
+        store.clone(),
+        vcs::RepoManager::new(repos_root.path()),
+        backend.clone(),
+        Arc::new(FakeProvider::new()),
+        CoreConfig {
+            repo_url_base: "file:///repos".into(),
+            nats_url: server.url().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .with_fleet_roster(roster);
+    spawn_api_handlers(
+        store,
+        spawn(core),
+        Arc::new(vcs::RepoManager::new(repos_root.path())),
+        None,
+        None,
+        backend,
+    )
+    .await
+    .unwrap();
+    repos_root
+}
+
+/// Seed a user record exactly as `admin user create` writes one.
+async fn seed_user(store: &NatsStore, email: &str, password: &str, platform_admin: bool) {
+    let user = User {
+        id: email.into(),
+        email: email.into(),
+        password_hash: auth::hash_password(password).unwrap(),
+        project_roles: Default::default(),
+        platform_admin,
+        created_at: chrono::Utc::now(),
+    };
+    store
+        .raw_bucket(store::buckets::USERS)
+        .await
+        .unwrap()
+        .put_json(&store::keys::user_key(&user.email), &user)
+        .await
+        .unwrap();
+}
+
+/// A router over `store` with no artifact storage — every platform route is a
+/// KV read or a forward, so none of them needs one.
+fn platform_router(store: &NatsStore, keys: &(Vec<u8>, Vec<u8>)) -> axum::Router {
+    let state: SharedState = Arc::new(ApiState {
+        store: store.clone(),
+        signer: auth::jwt::JwtSigner::from_pem(&keys.0).unwrap(),
+        verifier: auth::jwt::JwtVerifier::from_pem(&keys.1).unwrap(),
+        session_ttl: chrono::Duration::hours(1),
+        artifacts: None,
+    });
+    api::router(state, None)
+}
+
+/// Log in and return the session cookie.
+async fn login(router: &axum::Router, email: &str, password: &str) -> String {
+    let (status, body, cookie) = call(
+        router,
+        "POST",
+        "/auth/login",
+        None,
+        Some(serde_json::json!({ "email": email, "password": password })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    cookie.expect("session cookie")
+}
+
+/// `PUT /api/v1/platform/fleet/{node}/capacity` with the given body value for
+/// `slots` — a `Value` so the "not a slot count" case rides the same helper.
+async fn put_capacity(
+    router: &axum::Router,
+    node: &str,
+    slots: serde_json::Value,
+    cookie: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let (status, body, _) = call(
+        router,
+        "PUT",
+        &format!("/api/v1/platform/fleet/{node}/capacity"),
+        cookie,
+        Some(serde_json::json!({ "slots": slots })),
+    )
+    .await;
+    (status, body)
+}
+
+/// `PUT /api/v1/platform/fleet/{node}/capacity` (spec §3.1/§6.1, design #293 §3):
+/// the operator's desired slot count for one worker node, gated to platform
+/// admins and answered **202** — the dispatcher records intent and *starts* the
+/// push without waiting on the node RPC, so a synchronous 200 would be a lie.
+/// The audit stamp is the authenticated identity, never anything a browser could
+/// have put in the body.
+#[tokio::test]
+async fn platform_fleet_capacity_is_accepted_for_a_platform_admin() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let backend = Arc::new(FakeBackend::new());
+    let _repos = capacity_spawn_core(
+        server,
+        &store,
+        backend.clone(),
+        vec![capacity_roster_node("air", "worker", 2)],
+    )
+    .await;
+    seed_user(&store, "root@example.com", "s3cret", true).await;
+    seed_user(&store, "op@example.com", "hunter2", false).await;
+
+    let keys_dir = tempfile::tempdir().unwrap();
+    let router = platform_router(&store, &gen_jwt_keys(keys_dir.path()));
+
+    // Unauthenticated → 401; a non-admin → 403, refused before the request can
+    // reach the dispatcher (§7.5: fleet capacity is platform-level config).
+    let (status, _) = put_capacity(&router, "air", serde_json::json!(1), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let member = login(&router, "op@example.com", "hunter2").await;
+    let (status, _) = put_capacity(&router, "air", serde_json::json!(1), Some(&member)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        backend.slot_commands().is_empty(),
+        "a refused caller must never reach the node"
+    );
+
+    // The admin's edit is accepted: 202, not 200 — nothing waited on the node.
+    let admin = login(&router, "root@example.com", "s3cret").await;
+    let (status, ack) = put_capacity(&router, "air", serde_json::json!(1), Some(&admin)).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{ack}");
+    assert_eq!(ack["node"], "air");
+    assert_eq!(ack["desired"], 1);
+    // The node has never reported, so nothing is in force yet and the ask reads
+    // as converging — never `converged` off the strength of a boot seed.
+    assert_eq!(ack["observed"], serde_json::Value::Null, "{ack}");
+    assert_eq!(ack["state"], "pending", "{ack}");
+
+    // Intent is persisted before the reply is sent, so the 202 having landed is
+    // enough — there is nothing to wait for.
+    let record: types::FleetCapacity = store
+        .raw_bucket(store::buckets::PLATFORM)
+        .await
+        .unwrap()
+        .get_json("fleet.capacity")
+        .await
+        .unwrap()
+        .expect("the ask is durable before the 202");
+    let air = record.nodes.get("air").expect("air intent");
+    assert_eq!(air.slots, 1);
+    assert_eq!(air.set_by, "root@example.com");
+}
+
+/// The refusals, passed through verbatim (§6.5): a docker-endpoint node is a
+/// **409** because `DOCKER_NODES` owns its capacity outright, an unknown node a
+/// 404 — never a silent no-op, which is the failure class design #293 exists to
+/// remove. A body that is not a slot count is a 400, deliberately not the 422
+/// §6.1 reserves for a value the *node* refuses as above its maximum.
+#[tokio::test]
+async fn platform_fleet_capacity_refusals_reach_the_operator() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let backend = Arc::new(FakeBackend::new());
+    let _repos = capacity_spawn_core(
+        server,
+        &store,
+        backend.clone(),
+        vec![
+            capacity_roster_node("air", "worker", 2),
+            capacity_roster_node("local", "unix:///var/run/docker.sock", 4),
+        ],
+    )
+    .await;
+    seed_user(&store, "root@example.com", "s3cret", true).await;
+
+    let keys_dir = tempfile::tempdir().unwrap();
+    let router = platform_router(&store, &gen_jwt_keys(keys_dir.path()));
+    let admin = login(&router, "root@example.com", "s3cret").await;
+
+    let (status, body) = put_capacity(&router, "local", serde_json::json!(1), Some(&admin)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("docker endpoint"),
+        "the 409 must say why: {body}"
+    );
+
+    let (status, body) = put_capacity(&router, "ghost", serde_json::json!(1), Some(&admin)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, body) =
+        put_capacity(&router, "air", serde_json::json!("lots"), Some(&admin)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // None of the three reached the node.
+    assert!(backend.slot_commands().is_empty());
+}
+
+/// `GET /api/v1/platform/fleet` passes the capacity fields through to the UI
+/// (design #293 §8/§10). The route reads `fleet.status` straight out of the
+/// platform KV bucket and does **not** round-trip the dispatcher, so this rig
+/// needs no core: seed the snapshot as the dispatcher writes it, read it back.
+///
+/// What is asserted is that the api drops **nothing**. It re-serializes no typed
+/// view of the record, so a field a newer dispatcher writes — `slots_max` and the
+/// intent's `set_by`/`set_at` are the ones design #293's wire shape still owes —
+/// reaches the operator the moment the dispatcher publishes it, instead of
+/// disappearing silently into an api built against older types.
+#[tokio::test]
+async fn platform_fleet_snapshot_passes_capacity_fields_through() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let at = "2026-07-26T23:14:02Z";
+    let snapshot = serde_json::json!({
+        "nodes": [{
+            "name": "air",
+            "slots": 4,
+            "occupied": 0,
+            "available": true,
+            "version": "0.1.0+air",
+            // Provenance: where the number the scheduler uses came from.
+            "capacity_source": "node",
+            "capacity_observed_at": at,
+            "slots_max": 6,
+            // Intent, beside the observed number and never instead of it.
+            "slots_desired": 8,
+            "capacity_state": "rejected",
+            "capacity_note": "node max is 6",
+            "capacity_set_by": "root@example.com",
+            "capacity_set_at": at,
+            "running": [],
+        }],
+        "queue_depth": 0,
+    });
+    store
+        .raw_bucket(store::buckets::PLATFORM)
+        .await
+        .unwrap()
+        .put_json("fleet.status", &snapshot)
+        .await
+        .unwrap();
+    seed_user(&store, "root@example.com", "s3cret", true).await;
+
+    let keys_dir = tempfile::tempdir().unwrap();
+    let router = platform_router(&store, &gen_jwt_keys(keys_dir.path()));
+    let admin = login(&router, "root@example.com", "s3cret").await;
+
+    let (status, fleet, _) =
+        call(&router, "GET", "/api/v1/platform/fleet", Some(&admin), None).await;
+    assert_eq!(status, StatusCode::OK, "{fleet}");
+    assert_eq!(
+        fleet, snapshot,
+        "the fleet snapshot must reach the UI field for field"
+    );
+}
+
 /// Generate an ed25519 keypair with ssh-keygen; return its public-key line.
 fn keygen(path: &std::path::Path, comment: &str) -> String {
     assert!(

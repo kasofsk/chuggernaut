@@ -55,6 +55,12 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
         .route("/api/v1/platform/config", get(routes::platform_config_get))
         // Live fleet occupancy (read-only; platform admins only)
         .route("/api/v1/platform/fleet", get(routes::platform_fleet_get))
+        // Operator capacity control (§3.1): the desired slot count for one
+        // worker node. 202 — the dispatcher records intent and converges.
+        .route(
+            "/api/v1/platform/fleet/{node}/capacity",
+            axum::routing::put(routes::platform_fleet_capacity_set),
+        )
         // Per-project config (read-only settings; Viewer+)
         .route(
             "/api/v1/projects/{owner}/{project}/config",

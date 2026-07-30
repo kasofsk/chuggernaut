@@ -517,12 +517,73 @@ pub async fn platform_fleet_get(
     Auth(identity): Auth,
 ) -> ApiResult<Response> {
     let platform = platform_bucket_for_admin(&state, &identity).await?;
-    let fleet: types::FleetStatus = platform
+    // Served verbatim rather than re-serialized through `types::FleetStatus`.
+    // The api and the dispatcher deploy at different moments (the reason
+    // `api_sha` exists at all), so a typed round-trip here would silently drop
+    // the per-node capacity fields a *newer* dispatcher writes — a capacity path
+    // failing invisibly, which is the exact class of failure design #293 exists
+    // to remove. This crate is a bridge and reads none of these fields.
+    let fleet: Option<serde_json::Value> = platform
         .get_json("fleet.status")
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?
-        .unwrap_or_default();
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let fleet = match fleet {
+        Some(fleet) => fleet,
+        // Cold start: the dispatcher has published nothing yet. An empty fleet,
+        // never a 404, so the UI needn't special-case it.
+        None => serde_json::to_value(types::FleetStatus::default())
+            .map_err(|e| ApiError::internal(e.to_string()))?,
+    };
     Ok(Json(fleet).into_response())
+}
+
+/// `PUT /api/v1/platform/fleet/{node}/capacity` — set one worker node's desired
+/// slot count (spec §3.1 operator capacity control, §6.1). Platform admins only,
+/// gated exactly like `platform_config_get` / `platform_fleet_get` above:
+/// fleet capacity is platform-level config (§7.5).
+///
+/// Replies **202 Accepted, not 200**. The dispatcher records the operator's
+/// number as intent and *starts* the `set_slots` push without waiting on the
+/// node RPC (the actor is single-threaded by design), so "recorded and
+/// converging" is the honest status; convergence shows up in the next fleet
+/// snapshot, typically within a second. The dispatcher's own refusals pass
+/// through verbatim: 404 for a node the fleet does not hold, 409 for a
+/// docker-endpoint node whose capacity `DOCKER_NODES` still owns.
+///
+/// `by` is the authenticated admin's identity taken from the session — never the
+/// request body — so the record's `set_by` audit stamp cannot be spoofed.
+pub async fn platform_fleet_capacity_set(
+    State(state): State<SharedState>,
+    Path(node): Path<String>,
+    Auth(identity): Auth,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<Response> {
+    platform_admin(&identity)?;
+    let slots = capacity_slots(&body)?;
+    forward(
+        &state,
+        &store::subjects::fleet_capacity_set(),
+        serde_json::json!({ "node": node, "slots": slots, "by": identity.sub }),
+        StatusCode::ACCEPTED,
+    )
+    .await
+}
+
+/// The `{ slots }` body of a capacity command. A missing, negative, fractional
+/// or over-large value is a **400**, deliberately not the 422 axum's typed
+/// extractor would produce: §6.1 reserves 422 for a value the *node* refuses as
+/// above its maximum, and an operator's typo must not read to the UI as "above
+/// the node's ceiling".
+fn capacity_slots(body: &serde_json::Value) -> ApiResult<u32> {
+    body.get("slots")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|slots| u32::try_from(slots).ok())
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "slots must be a non-negative whole number",
+            )
+        })
 }
 
 /// Create a project (§12.2 via the API): bare repo, pre-receive hook, the
@@ -1384,7 +1445,8 @@ pub async fn artifact_get(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use super::inject_sha;
+    use super::{capacity_slots, inject_sha};
+    use axum::http::StatusCode;
 
     /// A baked SHA is added as `api_sha` alongside the dispatcher's own fields,
     /// leaving them untouched — so the cluster view reads the api's build
@@ -1404,5 +1466,32 @@ mod tests {
         let mut body = serde_json::json!({ "dispatcher": "ok" });
         inject_sha(&mut body, None);
         assert!(body.get("api_sha").is_none());
+    }
+
+    /// A capacity command's `{ slots }` body (§6.1). `0` is a full drain, not an
+    /// error; everything unusable is a 400 and never the 422 that §6.1 reserves
+    /// for a value the node refuses as above its maximum — the UI shows those
+    /// two very differently.
+    #[test]
+    fn capacity_slots_accepts_a_slot_count_and_400s_on_anything_else() {
+        assert_eq!(
+            capacity_slots(&serde_json::json!({ "slots": 4 })).ok(),
+            Some(4)
+        );
+        assert_eq!(
+            capacity_slots(&serde_json::json!({ "slots": 0 })).ok(),
+            Some(0)
+        );
+
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({ "slots": "4" }),
+            serde_json::json!({ "slots": -1 }),
+            serde_json::json!({ "slots": 2.5 }),
+            serde_json::json!({ "slots": u64::from(u32::MAX) + 1 }),
+        ] {
+            let status = capacity_slots(&body).err().map(|e| e.status);
+            assert_eq!(status, Some(StatusCode::BAD_REQUEST), "accepted {body}");
+        }
     }
 }
