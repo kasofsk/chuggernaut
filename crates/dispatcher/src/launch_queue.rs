@@ -23,6 +23,7 @@
 //!   unreachable-node and other launch errors keep fail-the-task semantics.
 //! - **Spec:** §3.5.
 
+use crate::capacity::DecidedLaunch;
 use crate::core::{Core, Msg, Result, TaskExit};
 use crate::exec::{ChannelRole, eval_image, task_timeout};
 use crate::forge_ingest::triage::tail;
@@ -289,6 +290,12 @@ impl Core {
     // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
     #[allow(clippy::expect_used, clippy::too_many_lines)]
     async fn resume_launch(&mut self, q: &QueuedLaunch) -> Result<ResumeOutcome> {
+        // Everything from here — the admission checks, the rebuild, the launch —
+        // is one placement decision, and none of it may consult the operator's
+        // capacity intent (design #293 §2). This is the path that would most
+        // plausibly reach for it ("skip a node whose intent is 0"), so the window
+        // opens at the top rather than beside `place_container`.
+        let placement = self.placement_guard();
         let (owner, project, seq, task_id) = (&q.owner, &q.project, q.seq, q.task_id);
         let Some(task) = self.tasks.get(owner, project, seq, task_id).await? else {
             return Ok(ResumeOutcome::Discarded); // task record vanished
@@ -420,8 +427,15 @@ impl Core {
                 owner, project, seq, &branch, &job_type, &secrets, image, run, role, timeout,
             )
             .await?;
-        self.launch_resumed(owner, project, seq, task, config, monitor)
-            .await
+        self.launch_resumed(
+            owner,
+            project,
+            seq,
+            task,
+            DecidedLaunch { config, placement },
+            monitor,
+        )
+        .await
     }
 
     /// Fire one resumed launch: on success flip the task back to `Running` and
@@ -433,10 +447,10 @@ impl Core {
         project: &str,
         seq: u64,
         mut task: Task,
-        config: ContainerLaunchConfig,
+        launch: DecidedLaunch,
         monitor: MonitorKind,
     ) -> Result<ResumeOutcome> {
-        match self.backend.launch(config).await {
+        match self.place_container(launch).await {
             Ok(id) => {
                 task.container_id = Some(id.clone());
                 task.state = TaskState::Running;

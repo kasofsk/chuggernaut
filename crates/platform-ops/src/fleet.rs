@@ -35,6 +35,11 @@ use types::{FleetNode, FleetStatus, JobState, SlotOccupant, TaskPhase, WorkerNod
 /// The fleet KV key in the `platform` bucket, beside `dispatcher.config`.
 pub const FLEET_KEY: &str = "fleet.status";
 
+/// Operator capacity intent, in the same bucket beside the two above (design
+/// #293 §2). Written only by the dispatcher; read by the dispatcher's reconciler
+/// at startup. Named here so one module owns the platform bucket's fleet keys.
+pub const CAPACITY_KEY: &str = "fleet.capacity";
+
 /// What a busy slot's job record contributes to its occupancy entry.
 pub struct JobIdentity {
     pub job_type: String,
@@ -63,6 +68,12 @@ pub struct FleetView<'a> {
     /// Launches parked on capacity (spec §3.5), reported as `queue_depth`.
     pub queue_depth: u32,
     pub jobs: &'a dyn JobLookup,
+    /// Node → the operator's desired capacity and its reconciliation state
+    /// (design #293 §2, intent's second and last consumer: the UI's "desired"
+    /// display). Resolved by the caller from the `fleet.capacity` record, so the
+    /// record itself never reaches this side. Never a placement input — `slots`
+    /// above stays the one number the scheduler reads.
+    pub capacity_intent: &'a BTreeMap<String, types::NodeCapacityDisplay>,
 }
 
 /// Map a task phase to the brief's occupancy vocabulary (`work` | `eval` |
@@ -127,6 +138,12 @@ fn fleet_node(name: String, running: Vec<SlotOccupant>, facts: NodeFacts) -> Fle
         // indistinguishable from one whose daemon confirmed it.
         capacity_source: facts.capacity.map(|c| c.source()),
         capacity_observed_at: facts.capacity.and_then(|c| c.observed_at),
+        // Intent, for display only (design #293 §2). It arrives already resolved
+        // by the dispatcher, so this composer — which sits on the occupancy path —
+        // never reads the intent record itself.
+        slots_desired: facts.intent.as_ref().map(|i| i.slots_desired),
+        capacity_state: facts.intent.as_ref().map(|i| i.state),
+        capacity_note: facts.intent.and_then(|i| i.note),
         name,
         running,
     }
@@ -145,6 +162,10 @@ struct NodeFacts {
     /// Provenance of `slots`; `None` for a docker-endpoint node, whose capacity
     /// `DOCKER_NODES` still owns.
     capacity: Option<types::worker::ObservedCapacity>,
+    /// The operator's desired capacity and how far it is from being observed
+    /// (design #293 §2/§4), resolved by the caller. `None` when no operator has
+    /// ever set one for this node.
+    intent: Option<types::NodeCapacityDisplay>,
     base_available: bool,
     occupancy_listed: bool,
 }
@@ -286,6 +307,7 @@ fn compose_node(
             version,
             refresh_outcome,
             capacity: status.and_then(|s| s.capacity),
+            intent: view.capacity_intent.get(&name).cloned(),
             base_available,
             occupancy_listed: !unlisted.contains(&name),
         },
@@ -335,6 +357,7 @@ mod tests {
             version: None,
             refresh_outcome: None,
             capacity: None,
+            intent: None,
             base_available,
             occupancy_listed,
         }
@@ -410,5 +433,38 @@ mod tests {
         // Docker endpoint: no observation, so no provenance to claim.
         let docker = fleet_node("local".into(), vec![], facts(true, true));
         assert_eq!(docker.capacity_source, None);
+    }
+
+    /// Intent rides the snapshot for display and never touches `slots` (design
+    /// #293 §2): a node the operator asked for 8 on, which the daemon refused,
+    /// still reports the observed number the scheduler is using, with the ask and
+    /// the refusal alongside it.
+    #[test]
+    fn intent_rides_the_snapshot_beside_the_observed_number() {
+        let refused = fleet_node(
+            "air".into(),
+            vec![],
+            NodeFacts {
+                intent: Some(types::NodeCapacityDisplay {
+                    slots_desired: 8,
+                    state: types::CapacityState::Rejected,
+                    note: Some("node max is 4".into()),
+                }),
+                ..facts(true, true)
+            },
+        );
+        assert_eq!(
+            refused.slots,
+            Some(4),
+            "the scheduler's number is untouched"
+        );
+        assert_eq!(refused.slots_desired, Some(8));
+        assert_eq!(refused.capacity_state, Some(types::CapacityState::Rejected));
+        assert_eq!(refused.capacity_note.as_deref(), Some("node max is 4"));
+
+        // No intent for the node: nothing to display, and no state to invent.
+        let untouched = fleet_node("nuc".into(), vec![], facts(true, true));
+        assert_eq!(untouched.slots_desired, None);
+        assert_eq!(untouched.capacity_state, None);
     }
 }

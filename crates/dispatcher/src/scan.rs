@@ -89,6 +89,11 @@ impl Core {
         // exact signature of the denied-publish bug, and the reason §5a's
         // narrowed startup gate is a correct trade rather than a regression.
         self.scan_never_observed_capacity();
+        // Re-assert the operator's capacity intent wherever the fleet disagrees
+        // with it (design #293 §4): one push per node per tick, and a refused
+        // value is left alone. Runs beside the other fleet scans and never blocks
+        // — each push is spawned.
+        self.reconcile_capacity_intent();
         self.scan_job_deadlines().await?;
         // Keep the platform config snapshot fresh: republish only when live
         // fleet state or deploy drift moved (spec §3.1, CD plan C). Best-effort

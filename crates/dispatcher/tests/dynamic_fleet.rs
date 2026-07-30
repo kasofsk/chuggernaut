@@ -668,3 +668,484 @@ async fn ping_refresh_outcome_lands_in_fleet_status() {
 fn node_slots(fleet: &FleetStatus, name: &str) -> Option<Option<u32>> {
     fleet.nodes.iter().find(|n| n.name == name).map(|n| n.slots)
 }
+
+/// A docker-endpoint node the operator might try to edit — `DOCKER_NODES` owns
+/// its capacity outright (design #293 §7), so the edit must be refused rather
+/// than silently doing nothing.
+fn docker_node(name: &str, slots: u32) -> WorkerNode {
+    WorkerNode {
+        endpoint: "unix:///var/run/docker.sock".into(),
+        ..worker_node(name, slots, None)
+    }
+}
+
+/// The command path end to end (design #293 §3): the operator's ask is persisted
+/// as intent in the `platform` bucket, pushed to the node without the actor ever
+/// blocking on the RPC, and the node's adoption converges the snapshot — with
+/// `slots` (what the scheduler uses) and `slots_desired` (what was asked)
+/// reported as the distinct things they are.
+#[tokio::test]
+async fn capacity_intent_is_persisted_pushed_and_converges() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let backend = Arc::new(FakeBackend::new());
+    let (handle, _repo, sink) = spawn_core(
+        server,
+        &store,
+        vec![worker_node("air", 2, Some("0.1.0+air"))],
+        None,
+        backend.clone(),
+    )
+    .await;
+    // The node reports 4 — the number the scheduler is using before any intent.
+    handle
+        .announce_worker(announce("air", 4, "0.1.0+air"))
+        .await
+        .unwrap();
+    wait_for_fleet(&store, |f| node_slots(f, "air") == Some(Some(4))).await;
+
+    let ack = handle
+        .set_node_capacity("air", 2, "operator@example.com")
+        .await
+        .unwrap();
+    assert_eq!(ack.desired, 2);
+    assert_eq!(
+        ack.observed,
+        Some(4),
+        "the 202 names what is still in force"
+    );
+    assert_eq!(ack.state, types::CapacityState::Pending);
+    assert_invariants_of(&sink);
+
+    // Intent is durable, with its audit stamp (design #293 §2/§9).
+    let bucket = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
+    let record: types::FleetCapacity = bucket
+        .get_json("fleet.capacity")
+        .await
+        .unwrap()
+        .expect("intent persisted");
+    let air_intent = record.nodes.get("air").expect("air intent");
+    assert_eq!(air_intent.slots, 2);
+    assert_eq!(air_intent.set_by, "operator@example.com");
+
+    // The push reached the node, and its adoption converges the snapshot.
+    wait_until(|| backend.slot_commands() == vec![("air".to_string(), 2)]).await;
+    let fleet = wait_for_fleet(&store, |f| {
+        f.nodes
+            .iter()
+            .any(|n| n.name == "air" && n.capacity_state == Some(types::CapacityState::Converged))
+    })
+    .await;
+    let air = node(&fleet, "air");
+    assert_eq!(air.slots, Some(2), "the scheduler follows the observation");
+    assert_eq!(air.slots_desired, Some(2));
+    assert_eq!(air.capacity_note, None);
+    assert_invariants_of(&sink);
+}
+
+/// A capacity edit against a docker-endpoint node is a **409**, and against a
+/// node the fleet does not hold a 404 — never a silent no-op (design #293 §7).
+#[tokio::test]
+async fn capacity_edit_is_refused_for_docker_and_unknown_nodes() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let backend = Arc::new(FakeBackend::new());
+    let (handle, _repo, sink) = spawn_core(
+        server,
+        &store,
+        vec![docker_node("local", 4), worker_node("air", 2, None)],
+        None,
+        backend.clone(),
+    )
+    .await;
+
+    let conflict = handle
+        .set_node_capacity("local", 1, "operator@example.com")
+        .await
+        .expect_err("a docker endpoint must refuse the edit");
+    assert!(
+        matches!(conflict, dispatcher::core::CoreError::Conflict(_)),
+        "expected 409 Conflict, got {conflict:?}"
+    );
+    let missing = handle
+        .set_node_capacity("ghost", 1, "operator@example.com")
+        .await
+        .expect_err("an unknown node must 404");
+    assert!(
+        matches!(missing, dispatcher::core::CoreError::NotFound(_)),
+        "expected 404 NotFound, got {missing:?}"
+    );
+    // Neither refusal touched the fleet: no push, and no intent recorded.
+    assert!(backend.slot_commands().is_empty());
+    let bucket = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
+    assert!(
+        bucket
+            .get_json::<types::FleetCapacity>("fleet.capacity")
+            .await
+            .unwrap()
+            .is_none(),
+        "a refused edit must record no intent"
+    );
+    assert_invariants_of(&sink);
+}
+
+/// A refusal is terminal (design #293 §4): the reason surfaces in the snapshot
+/// and the dispatcher stops re-pushing a number the node will not take — however
+/// many scan ticks pass — until the operator changes it.
+#[tokio::test]
+async fn refused_capacity_is_terminal_and_surfaces_its_reason() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let backend = Arc::new(FakeBackend::new());
+    backend.script_slot_reply(
+        "air",
+        test_utils::SlotReply::Refuse {
+            slots_max: 4,
+            note: "requested 8 slots exceeds this node's maximum of 4".into(),
+        },
+    );
+    let (handle, _repo, sink) = spawn_core(
+        server,
+        &store,
+        vec![worker_node("air", 2, Some("0.1.0+air"))],
+        None,
+        backend.clone(),
+    )
+    .await;
+    handle
+        .announce_worker(announce("air", 2, "0.1.0+air"))
+        .await
+        .unwrap();
+    wait_for_fleet(&store, |f| node_slots(f, "air") == Some(Some(2))).await;
+
+    handle
+        .set_node_capacity("air", 8, "operator@example.com")
+        .await
+        .unwrap();
+    let fleet = wait_for_fleet(&store, |f| {
+        f.nodes
+            .iter()
+            .any(|n| n.name == "air" && n.capacity_state == Some(types::CapacityState::Rejected))
+    })
+    .await;
+    let air = node(&fleet, "air");
+    assert_eq!(air.slots, Some(2), "the refused value never took effect");
+    assert_eq!(air.slots_desired, Some(8));
+    assert!(
+        air.capacity_note
+            .as_deref()
+            .is_some_and(|note| note.contains("maximum of 4")),
+        "the daemon's reason must reach the UI: {:?}",
+        air.capacity_note
+    );
+
+    // Terminal: ten scan ticks re-push nothing.
+    for _ in 0..10 {
+        handle.trigger_scan().await.unwrap();
+    }
+    assert_eq!(
+        backend.slot_commands(),
+        vec![("air".to_string(), 8)],
+        "a refused number must never be re-pushed"
+    );
+
+    // A different ask retires the refusal — it was of one value, not of the node.
+    handle
+        .set_node_capacity("air", 4, "operator@example.com")
+        .await
+        .unwrap();
+    wait_until(|| backend.slot_commands().len() == 2).await;
+    assert_eq!(backend.slot_commands()[1], ("air".to_string(), 4));
+    assert_invariants_of(&sink);
+}
+
+/// Intent outlives the node, but the reconciler does not chase it (design #293
+/// §4). A name dropped from `DOCKER_NODES` — or a dynamic node that never
+/// re-announced after this dispatcher started — is still in the persisted record,
+/// because intent is exactly what should survive a node's absence. What must not
+/// survive is the RPC: intent is the one table that never shrinks, so a
+/// decommissioned name that kept being pushed to would burn one failed push per
+/// scan tick forever.
+#[tokio::test]
+async fn intent_for_a_node_the_fleet_lost_is_kept_but_never_pushed() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    // Intent set before this dispatcher booted, for a node its roster no longer
+    // holds and one it does.
+    let mut record = types::FleetCapacity::default();
+    for (node, slots) in [("ghost", 3), ("air", 2)] {
+        record.nodes.insert(
+            node.into(),
+            types::NodeCapacityIntent {
+                slots,
+                set_by: "operator@example.com".into(),
+                set_at: Utc::now(),
+            },
+        );
+    }
+    let bucket = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
+    bucket.put_json("fleet.capacity", &record).await.unwrap();
+
+    let backend = Arc::new(FakeBackend::new());
+    backend.script_slot_reply("air", test_utils::SlotReply::AdoptWithoutObserving);
+    let (handle, _repo, sink) = spawn_core(
+        server,
+        &store,
+        vec![worker_node("air", 2, Some("0.1.0+air"))],
+        None,
+        backend.clone(),
+    )
+    .await;
+    handle
+        .announce_worker(announce("air", 4, "0.1.0+air"))
+        .await
+        .unwrap();
+    wait_for_fleet(&store, |f| node_slots(f, "air") == Some(Some(4))).await;
+
+    // The restored ask for the live node is re-asserted; the lost one is not
+    // pushed to on any tick.
+    for _ in 0..10 {
+        handle.trigger_scan().await.unwrap();
+    }
+    wait_until(|| !backend.slot_commands().is_empty()).await;
+    let pushes = backend.slot_commands();
+    assert!(
+        pushes
+            .iter()
+            .all(|(node, slots)| node == "air" && *slots == 2),
+        "a node the fleet no longer holds must never be pushed to: {pushes:?}"
+    );
+
+    // …and its intent is kept, so it gets its number back if it re-announces.
+    let after: types::FleetCapacity = bucket
+        .get_json("fleet.capacity")
+        .await
+        .unwrap()
+        .expect("intent still persisted");
+    assert_eq!(
+        after.nodes.get("ghost").map(|i| i.slots),
+        Some(3),
+        "intent for an absent node is remembered, not deleted"
+    );
+    assert_invariants_of(&sink);
+}
+
+/// The other half of the same rule: intent is re-asserted the moment a node the
+/// roster has *never* held announces itself (design #293 §4). A dynamically
+/// registered worker is in no `DOCKER_NODES` seed, so it enters the roster only
+/// through its own announce — and the reconciler declines to push to a node the
+/// roster does not hold. The re-assert therefore has to run *after* the announce
+/// has merged the node in; running it before would find no entry, decide
+/// `unacknowledged`, and silently defer the operator's number to a scan tick.
+///
+/// No `trigger_scan` here, and the wait below is bounded well under the 30s scan
+/// interval — both deliberately. The scan tick would eventually restore the
+/// number anyway, so a test that waited it out would pass on the very ordering
+/// bug it exists to catch.
+#[tokio::test]
+async fn a_first_announce_re_asserts_intent_without_waiting_for_a_scan() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    // Intent set before this dispatcher booted, for a node nothing seeds.
+    let mut record = types::FleetCapacity::default();
+    record.nodes.insert(
+        "nuc".into(),
+        types::NodeCapacityIntent {
+            slots: 2,
+            set_by: "operator@example.com".into(),
+            set_at: Utc::now(),
+        },
+    );
+    let bucket = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
+    bucket.put_json("fleet.capacity", &record).await.unwrap();
+
+    let backend = Arc::new(FakeBackend::new());
+    let (handle, _repo, sink) = spawn_core(server, &store, vec![], None, backend.clone()).await;
+
+    // The node appears for the first time, on its boot `WORKER_SLOTS` of 4.
+    handle
+        .announce_worker(announce("nuc", 4, "0.1.0+nuc"))
+        .await
+        .unwrap();
+
+    // A third of the scan interval: long enough for a spawned RPC against the
+    // fake, far short of the tick that would mask the bug.
+    const BEFORE_ANY_SCAN_TICK: Duration = Duration::from_secs(10);
+    test_utils::wait::poll(
+        BEFORE_ANY_SCAN_TICK,
+        "the announce's own capacity push",
+        || (backend.slot_commands() == vec![("nuc".to_string(), 2)]).then_some(()),
+    )
+    .await;
+    let fleet = wait_for_fleet(&store, |f| {
+        f.nodes
+            .iter()
+            .any(|n| n.name == "nuc" && n.capacity_state == Some(types::CapacityState::Converged))
+    })
+    .await;
+    assert_eq!(
+        node(&fleet, "nuc").slots,
+        Some(2),
+        "the operator's number is in force without a scan tick"
+    );
+    assert_invariants_of(&sink);
+}
+
+/// The placement invariant, end to end (design #293 §2): every launch the
+/// dispatcher decides is made inside a placement window, and reading intent
+/// inside one panics. So a fleet that *has* intent must still launch normally —
+/// through the initial launch path and through the launch-queue resume path,
+/// which is the one that would most plausibly grow an intent-aware admission
+/// check. If either path ever consults `fleet.capacity`, the actor panics here
+/// and no container is ever launched.
+#[tokio::test]
+async fn launches_are_decided_without_reading_capacity_intent() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let backend = Arc::new(FakeBackend::new());
+    let (handle, _repo, sink) = spawn_core(
+        server,
+        &store,
+        vec![worker_node("air", 1, Some("0.1.0+air"))],
+        None,
+        backend.clone(),
+    )
+    .await;
+    handle
+        .announce_worker(announce("air", 4, "0.1.0+air"))
+        .await
+        .unwrap();
+    wait_for_fleet(&store, |f| node_slots(f, "air") == Some(Some(4))).await;
+    handle
+        .set_node_capacity("air", 2, "operator@example.com")
+        .await
+        .unwrap();
+
+    // The initial launch path runs with intent on the record: it is refused for
+    // capacity and queues, rather than panicking on a guarded read. The refusal
+    // is armed *after* the announce on purpose — the fake models a registering
+    // worker as capacity appearing, so `register_worker` clears it.
+    backend.fail_launch_no_capacity_if(|_| Some("full".into()));
+    release_cmd_work(&handle, &sink).await;
+    wait_for_fleet(&store, |f| f.queue_depth >= 1).await;
+
+    // …and so does the resume path when capacity appears.
+    backend.fail_launch_no_capacity_if(|_| None);
+    handle
+        .announce_worker(announce("nuc", 2, "0.1.0+nuc"))
+        .await
+        .unwrap();
+    wait_until(|| !backend.launches().is_empty()).await;
+    wait_for_fleet(&store, |f| f.queue_depth == 0).await;
+    assert_invariants_of(&sink);
+}
+
+/// A node that acknowledges `set_slots` and never reports the value — an old
+/// build, or one that adopts and reverts — must keep being re-asserted, must
+/// never read as converged, and must be pushed at most once per scan tick
+/// (design #293 §4).
+#[tokio::test]
+async fn silently_ignored_capacity_is_re_pushed_but_bounded_per_tick() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let backend = Arc::new(FakeBackend::new());
+    backend.script_slot_reply("air", test_utils::SlotReply::AdoptWithoutObserving);
+    let (handle, _repo, sink) = spawn_core(
+        server,
+        &store,
+        vec![worker_node("air", 2, Some("0.1.0+air"))],
+        None,
+        backend.clone(),
+    )
+    .await;
+    handle
+        .announce_worker(announce("air", 4, "0.1.0+air"))
+        .await
+        .unwrap();
+    wait_for_fleet(&store, |f| node_slots(f, "air") == Some(Some(4))).await;
+
+    handle
+        .set_node_capacity("air", 2, "operator@example.com")
+        .await
+        .unwrap();
+    wait_until(|| !backend.slot_commands().is_empty()).await;
+
+    // Each tick re-asserts, and each tick pushes at most once.
+    let ticks = 10;
+    for _ in 0..ticks {
+        handle.trigger_scan().await.unwrap();
+        if backend.slot_commands().len() >= 3 {
+            break;
+        }
+    }
+    let pushes = backend.slot_commands();
+    assert!(
+        pushes.len() >= 2,
+        "a diverging node must keep being re-asserted: {pushes:?}"
+    );
+    assert!(
+        pushes.len() <= ticks + 1,
+        "at most one push per node per tick: {} pushes over {ticks} ticks",
+        pushes.len()
+    );
+    assert!(
+        pushes
+            .iter()
+            .all(|(node, slots)| node == "air" && *slots == 2)
+    );
+
+    // And it is never reported as converged, whatever the node claims.
+    let fleet = wait_for_fleet(&store, |f| {
+        f.nodes
+            .iter()
+            .any(|n| n.name == "air" && n.capacity_state.is_some())
+    })
+    .await;
+    let air = node(&fleet, "air");
+    assert_eq!(air.slots, Some(4), "the observation stands, not the ask");
+    assert_eq!(air.slots_desired, Some(2));
+    assert_ne!(air.capacity_state, Some(types::CapacityState::Converged));
+    assert_invariants_of(&sink);
+}

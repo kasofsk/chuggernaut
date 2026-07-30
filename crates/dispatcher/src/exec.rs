@@ -22,6 +22,7 @@
 //! - **Spec:** §3.2; §1.2 (claims, human work); §2.2 and §14.2 (the launch-time
 //!   pass); §3.6 (drain, infra loss); contracts.md §2.
 
+use crate::capacity::DecidedLaunch;
 use crate::core::{Core, CoreError, Msg, Result, TaskExit, WorkSubmission};
 use crate::decide::{work, wrapup};
 use crate::escalation;
@@ -545,6 +546,11 @@ impl Core {
                 });
             }
             WorkType::Command => {
+                // The placement window opens where the decision to launch does,
+                // not at the launch (design #293 §2): everything from here to
+                // `place_container` is the decision, and none of it may consult
+                // the operator's intent.
+                let placement = self.placement_guard();
                 let run = job_type.work.run.clone().unwrap_or_default();
                 let config = self
                     .command_launch_config(
@@ -560,7 +566,10 @@ impl Core {
                         work_timeout,
                     )
                     .await?;
-                match self.backend.launch(config).await {
+                match self
+                    .place_container(DecidedLaunch { config, placement })
+                    .await
+                {
                     Ok(id) => {
                         task.container_id = Some(id.clone());
                         self.task_put(&task).await?;

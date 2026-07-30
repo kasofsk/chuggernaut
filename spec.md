@@ -1514,6 +1514,7 @@ The API layer publishes to these subjects and awaits a reply. Services subscribe
 
 ```
 req.health                                                   no payload; response: { dispatcher: "ok", version } — round-trips the core actor; the api's GET /api/v1/health (§6.6) bridges it. No responder / wedged actor → no reply → the api returns 503.
+req.fleet.capacity.set                                       payload: { node, slots, by }; response: { node, desired, observed, state } — records the operator's DESIRED slot count as intent (`fleet.capacity`, §3.1) and commands the node on `req.worker.{node}.set_slots`. Answers without waiting on the node RPC (the actor is single-threaded), so the reply is "recorded and converging"; 404 unknown node, 409 a docker-endpoint node (DOCKER_NODES owns those). Platform admins only at the API layer.
 req.jobs.create.{owner}.{project}
 req.jobs.get.{owner}.{project}.{seq}
 req.jobs.list.{owner}.{project}

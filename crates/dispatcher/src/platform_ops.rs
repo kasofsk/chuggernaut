@@ -39,12 +39,17 @@ impl Core {
     /// Recompute live fleet occupancy and republish it when it moved (spec
     /// §3.1). Best-effort inside the context; this half only lends it the view.
     pub(crate) async fn refresh_fleet_status(&mut self) {
+        // Resolved here, so the context receives intent already reduced to what it
+        // displays and the record stays behind its two counted readers
+        // (design #293 §2).
+        let capacity_intent = self.capacity_display();
         let view = fleet::FleetView {
             backend: self.backend.as_ref(),
             tasks: &self.tasks,
             roster: &self.fleet_roster,
             queue_depth: self.launch_queue.len() as u32,
             jobs: self,
+            capacity_intent: &capacity_intent,
         };
         let status = fleet::compute(&view).await;
         fleet::publish(&status, &self.store, &mut self.last_fleet_status).await;

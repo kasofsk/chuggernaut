@@ -263,6 +263,31 @@ pub trait ContainerBackend: Send + Sync {
         false
     }
 
+    /// Command one worker node's slot count (spec §3.1 operator capacity
+    /// control): relay the operator's desired value to the daemon over
+    /// `req.worker.{node}.set_slots`. The node is the authority — a value above
+    /// its `slots_max` comes back `accepted: false` with a reason, which is a
+    /// *reply*, not an error, and is terminal for that value.
+    ///
+    /// Never called on the dispatcher's actor turn: the caller spawns it, because
+    /// state management is single-threaded by design and must not block on a node
+    /// RPC. Not a placement input in either direction — this pushes intent out, it
+    /// never reads capacity in.
+    ///
+    /// Default: `Unavailable`. Only the worker fleet backend has a daemon to
+    /// command; a docker-endpoint node's capacity is static `DOCKER_NODES` config
+    /// (design #293 §7), which is why a capacity edit against one is refused
+    /// upstream rather than silently dropped here.
+    async fn set_node_slots(
+        &self,
+        node: &str,
+        _slots: u32,
+    ) -> Result<types::worker::SetSlotsOk, BackendError> {
+        Err(BackendError::Unavailable(format!(
+            "node {node} has no worker daemon to command"
+        )))
+    }
+
     /// Mark an announced worker unschedulable after its heartbeat lapses (spec
     /// §3.1): placement skips it, but its already-running containers stay
     /// routable — they keep running and the poll-based `wait` re-attaches (spec

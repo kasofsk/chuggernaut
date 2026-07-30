@@ -432,6 +432,27 @@ pub enum Msg {
     WorkerAnnounce {
         announce: types::worker::WorkerAnnounce,
     },
+    /// `req.fleet.capacity.set` (spec §3.1 operator capacity control): record the
+    /// operator's **desired** slot count for a node and command the node to adopt
+    /// it. Answered with the 202 body — the actor persists intent and starts the
+    /// push, and never blocks on the node's RPC.
+    SetNodeCapacity {
+        node: String,
+        slots: u32,
+        /// The platform admin who asked, for the record's audit stamp (§9).
+        by: String,
+        reply: Reply<types::NodeCapacityAck>,
+    },
+    /// One `set_slots` push's reply, posted by the spawned RPC — never by anything
+    /// outside the crate. This is how the ledger stays a thing only the single
+    /// writer writes while the RPC itself runs off the actor thread.
+    CapacityPushed {
+        node: String,
+        /// The value the push carried, so a reply that lost a race with a newer
+        /// operator ask is recognised and dropped.
+        slots: u32,
+        outcome: crate::capacity::PushOutcome,
+    },
 }
 
 impl Msg {
@@ -467,6 +488,8 @@ impl Msg {
             Msg::TaskContainerStarted { .. } => "TaskContainerStarted",
             Msg::LaunchDeferred { .. } => "LaunchDeferred",
             Msg::WorkerAnnounce { .. } => "WorkerAnnounce",
+            Msg::SetNodeCapacity { .. } => "SetNodeCapacity",
+            Msg::CapacityPushed { .. } => "CapacityPushed",
         }
     }
 }
@@ -518,6 +541,25 @@ impl CoreHandle {
             .send(Msg::WorkerAnnounce { announce })
             .await
             .map_err(|_| CoreError::Stopped)
+    }
+
+    /// Set a worker node's desired slot count (spec §3.1 operator capacity
+    /// control). Returns the 202 body: intent is recorded and converging, because
+    /// the actor does not wait on the node's RPC.
+    pub async fn set_node_capacity(
+        &self,
+        node: &str,
+        slots: u32,
+        by: &str,
+    ) -> Result<types::NodeCapacityAck> {
+        let (node, by) = (node.to_string(), by.to_string());
+        self.call(|reply| Msg::SetNodeCapacity {
+            node,
+            slots,
+            by,
+            reply,
+        })
+        .await
     }
 
     pub async fn release_job(&self, owner: &str, project: &str, seq: u64) -> Result<JobState> {
@@ -900,6 +942,19 @@ pub struct Core {
     /// warning stays at a bounded cadence. Pruned each scan to nodes still in
     /// that state, so it can never outgrow the roster.
     pub(crate) capacity_warned_at: HashMap<String, DateTime<Utc>>,
+    /// The operator's desired capacity per node (design #293 §2), mirroring the
+    /// persisted `fleet.capacity` record. **Never a placement input** — see
+    /// [`crate::capacity`], which owns the record and asserts that invariant on
+    /// every launch.
+    pub(crate) capacity_intent: crate::capacity::CapacityIntent,
+    /// Node → what the reconciler has pushed there and what came back (design
+    /// #293 §4). Pruned each scan to nodes that still have intent, so it can never
+    /// outgrow the roster.
+    pub(crate) capacity_pushes: HashMap<String, crate::capacity::PushRecord>,
+    /// Node → when the reconciler last warned about its intent not converging
+    /// (design #293 §4). Bounded exactly like [`Self::capacity_warned_at`], and
+    /// pruned each scan to nodes that still have intent.
+    pub(crate) capacity_intent_warned_at: HashMap<String, DateTime<Utc>>,
     /// Golden-trace recorder (refactor-plan B3, [`crate::trace`]). `None` in
     /// production — a test attaches a [`crate::trace::TraceSink`] via
     /// [`Core::attach_trace`] to capture every transition and effect. Inert
@@ -1026,9 +1081,16 @@ impl Core {
             seed_node_names: HashSet::new(),
             started_at: Utc::now(),
             capacity_warned_at: HashMap::new(),
+            capacity_intent: crate::capacity::CapacityIntent::default(),
+            capacity_pushes: HashMap::new(),
+            capacity_intent_warned_at: HashMap::new(),
             trace: None,
             invariant_sink: None,
         };
+
+        // The operator's capacity asks outlive this process (design #293 §4): load
+        // them before the first scan tick can reconcile against them.
+        core.load_capacity_intent().await;
 
         // Restore merge-queue holds for Open origin releases before reconcile
         // runs — recovered Evaluation jobs must re-enqueue without landing.
@@ -1151,7 +1213,7 @@ impl Core {
             // roster entry starts at what it just reported; provenance is filled
             // from the backend when the snapshot is composed.
             None => self.fleet_roster.push(types::WorkerNode {
-                name: node,
+                name: node.clone(),
                 endpoint: worker::backend::WORKER_ENDPOINT.to_string(),
                 slots: capacity.slots,
                 available: true,
@@ -1160,6 +1222,25 @@ impl Core {
                 capacity_source: None,
                 capacity_observed_at: None,
             }),
+        }
+        if joined {
+            // The observation moved (design #293 §4): a refreshed daemon comes back
+            // on its boot `WORKER_SLOTS`, so re-assert the operator's number now
+            // rather than waiting out a scan tick. Gated on `joined` — a node
+            // reporting the same wrong value every 15s is pushed by the tick
+            // alone, which is what keeps the one-push-per-tick bound honest.
+            //
+            // Deliberately **after** the roster merge above: the reconciler will
+            // not push to a node the roster does not hold, and a node announcing
+            // for the first time is inserted by that merge. Reconciling before it
+            // would silently no-op in exactly the case this fast path exists for,
+            // which is what the assert pins.
+            debug_assert!(
+                self.fleet_holds(&node),
+                "an accepted announce must reach the roster before the capacity \
+                 re-assert reads it (design #293 §4)"
+            );
+            self.reconcile_node_capacity(&node);
         }
     }
 
@@ -1519,6 +1600,22 @@ impl Core {
             }
             Msg::WorkerAnnounce { announce } => {
                 self.on_worker_announce(announce);
+            }
+            Msg::SetNodeCapacity {
+                node,
+                slots,
+                by,
+                reply,
+            } => {
+                let result = self.set_node_capacity(node, slots, by).await;
+                let _ = reply.send(result);
+            }
+            Msg::CapacityPushed {
+                node,
+                slots,
+                outcome,
+            } => {
+                self.on_capacity_pushed(&node, slots, &outcome);
             }
         }
     }

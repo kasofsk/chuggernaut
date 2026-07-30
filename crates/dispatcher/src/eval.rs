@@ -28,6 +28,7 @@
 //! - **Spec:** §3.3; §3.2 step 12; contracts.md §2. Runs as `impl Core` — core
 //!   stays the single writer.
 
+use crate::capacity::DecidedLaunch;
 use crate::core::{Core, CoreError, EvalSubmission, Msg, Result, TaskExit};
 use crate::decide::eval as decide_eval;
 use crate::decide::merge_gate;
@@ -643,6 +644,9 @@ impl Core {
 
         match evaluator.r#type {
             EvaluatorType::Command => {
+                // The window covers the whole launch decision, not just the RPC
+                // (design #293 §2).
+                let placement = self.placement_guard();
                 let run = evaluator.run.clone().unwrap_or_default();
                 let config = self
                     .command_launch_config(
@@ -661,7 +665,10 @@ impl Core {
                         eval_timeout,
                     )
                     .await?;
-                match self.backend.launch(config).await {
+                match self
+                    .place_container(DecidedLaunch { config, placement })
+                    .await
+                {
                     Ok(id) => {
                         task.container_id = Some(id.clone());
                         self.task_put(&task).await?;
@@ -1951,6 +1958,9 @@ impl Core {
         )
         .await?;
 
+        // The window covers the whole launch decision, not just the RPC
+        // (design #293 §2).
+        let placement = self.placement_guard();
         let image = job_type
             .wrap_up
             .image
@@ -1971,7 +1981,10 @@ impl Core {
                 timeout,
             )
             .await?;
-        match self.backend.launch(config).await {
+        match self
+            .place_container(DecidedLaunch { config, placement })
+            .await
+        {
             Ok(id) => {
                 task.container_id = Some(id.clone());
                 self.task_put(&task).await?;

@@ -90,6 +90,7 @@ export const wireSamples = {
         available: true,
         capacity_observed_at: "2026-07-24T17:07:00Z",
         capacity_source: "node",
+        capacity_state: "converged",
         name: "gumbo-mini-0",
         occupied: 1,
         refresh_outcome: {
@@ -115,6 +116,7 @@ export const wireSamples = {
           },
         ],
         slots: 4,
+        slots_desired: 4,
         version: "chuggernaut 0.1.0 (2222222)",
       },
     ],

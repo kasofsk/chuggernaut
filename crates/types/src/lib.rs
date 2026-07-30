@@ -40,7 +40,10 @@ pub use job_type::{
     ReviewSpec, WorkSpec, WorkType, WrapUpMode, WrapUpSpec,
 };
 pub use knowledge::{KnowledgeObject, KnowledgeScope};
-pub use platform::{DispatcherConfigSnapshot, FleetNode, FleetStatus, SlotOccupant, WorkerNode};
+pub use platform::{
+    CapacityState, DispatcherConfigSnapshot, FleetCapacity, FleetNode, FleetStatus,
+    NodeCapacityAck, NodeCapacityDisplay, NodeCapacityIntent, SlotOccupant, WorkerNode,
+};
 pub use project::{OriginLink, ProjectRecord, ReleaseState, ReleaseStatus, github_repo_from_url};
 pub use queue::{QueueEntry, QueueSnapshot};
 pub use resources::{MEMORY_PATTERN, MemoryParseError, parse_memory};

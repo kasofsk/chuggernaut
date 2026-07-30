@@ -58,6 +58,7 @@ one surface.
 | Module | Contract | Spec |
 | --- | --- | --- |
 | `core` | Single-writer event loop: owns all mutable state; every other slice is `impl Core` reached via the `Msg` channel. | §3.1 |
+| `capacity` | Operator capacity intent and its bounded reconciliation: the `fleet.capacity` record behind two counted readers (reconciler, display) so **no placement path can read intent** — asserted on every launch — plus the pure per-node decide (converged / pending / rejected-terminal / unacknowledged) and one push per node per tick. | §3.1 |
 | `invariants` | Executable invariant checker: pure/total read-only `CoreState` view → `Vec<Violation>`; negative-space assertions run after every message in tests, via `Core::state` in-process or the test-only `InvariantSink` inside the state loop. | §1.4, §2.1, §3.1, §3.2, §3.3 |
 | `project_config` | Where a project's repo-versioned chuggernaut config lives and how it is read: resolves a config-root-relative path against `.chug/` before the pre-`.chug` repo-root layout, and lists a config directory's entries from a repo tree as `{ stem, path }` — the stem plus the location it resolved to. | §1.1, §2.2, §4.4 |
 | `release` | Release validation, ref-reading half: `.chug/jobs/*.yaml` loading + prompt/KV checks through the `vcs` port; re-exports the pure half. | §2.2, §14 |
@@ -75,6 +76,7 @@ one surface.
 | `handlers/reply` | The §6.5 reply envelope: resource JSON on success, `{"error":{status,message,errors?}}` on failure; total, so a serializer failure never fails a reply. | §6.5 |
 | `handlers/container` | The container-facing subjects: `req.{work,eval}.submit` and `req.channel.{update,reply}`, incl. the agent `cover_html` cap. | §4.2, §6.1 |
 | `handlers/worker` | `req.worker.announce`: forwards a node's heartbeat into the live fleet; transient by design (losing the stream deregisters the node). | §3.1 |
+| `handlers/fleet` | `req.fleet.capacity.set`: the operator's desired slot count for one node, answered without waiting on the node (404 unknown, 409 docker-endpoint). | §3.1, §6.1 |
 | `handlers/status` | `req.health` and `req.queue.list`: the two probes that round-trip the core actor, so a wedged state loop reads as unhealthy. | §3.5, §6.1 |
 | `handlers/projects` | `req.projects.{create,link}`: bare-repo creation (repo before counter) and the linked-origin flow. | §12.2, §5.3 |
 | `handlers/origin` | `req.origin.{release,status,sync}`: the origin PR surface; read-only with respect to job state. | §5.3 |

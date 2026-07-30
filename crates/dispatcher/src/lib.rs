@@ -18,6 +18,7 @@
 //! `&mut Core` — leaving [`platform_ops`] here as the adapter that lends it the
 //! views it does take.
 
+pub mod capacity;
 pub mod channel;
 pub mod config;
 pub mod core;

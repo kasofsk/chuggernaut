@@ -1002,6 +1002,36 @@ impl ContainerBackend for FleetBackend {
         true
     }
 
+    /// Relay the operator's desired slot count to one node's daemon (spec §3.1
+    /// operator capacity control). Pure push: the reply's capacity fields are
+    /// *not* ingested here, because the caller runs this off the actor thread and
+    /// the node re-announces immediately anyway — so observation keeps arriving
+    /// through the two transports [`ingest_capacity`] orders, and this path can
+    /// never become a third, unordered one.
+    ///
+    /// An unknown name, or a docker-endpoint node (whose capacity `DOCKER_NODES`
+    /// owns), is `Unavailable` — the caller refuses those upstream, so reaching
+    /// here means the roster and the fleet disagree.
+    async fn set_node_slots(
+        &self,
+        node: &str,
+        slots: u32,
+    ) -> Result<types::worker::SetSlotsOk, BackendError> {
+        let handle = self
+            .snapshot()
+            .into_iter()
+            .find(|n| n.name == node)
+            .ok_or_else(|| BackendError::Unavailable(format!("unknown fleet node {node}")))?;
+        let NodeHandle::Worker { rpc, .. } = &handle.handle else {
+            return Err(BackendError::Unavailable(format!(
+                "node {node} is a docker endpoint — DOCKER_NODES owns its capacity"
+            )));
+        };
+        rpc.set_slots(&types::worker::SetSlotsRequest { slots })
+            .await
+            .map_err(|e| rpc_err(None, e))
+    }
+
     /// Mark an announced worker unschedulable after its heartbeat lapses (spec
     /// §3.1): placement skips it (`probe_worker` short-circuits), but `route`
     /// still reaches it, so containers already running there keep being waited on

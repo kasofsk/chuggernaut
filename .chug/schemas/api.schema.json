@@ -18,6 +18,31 @@
         }
       ]
     },
+    "CapacityState": {
+      "description": "How far a node's observed capacity is from the operator's intent (design #293\n§4/§10). Derived on read from intent + observation + the push ledger; never\nstored on the intent record, which holds only what the operator asked for.",
+      "oneOf": [
+        {
+          "description": "The node reports the desired number: nothing left to do.",
+          "type": "string",
+          "const": "converged"
+        },
+        {
+          "description": "A push is in flight, or one has just gone out and the node's report has\nnot caught up yet. Convergence is normally visible within a second.",
+          "type": "string",
+          "const": "pending"
+        },
+        {
+          "description": "The node **refused** the value (above its `slots_max`). Terminal: the\ndispatcher stops re-pushing a number the node will not take, and this\nstate stands until the operator changes the request — otherwise a node\nwhose maximum dropped would be pushed a value it refuses forever.",
+          "type": "string",
+          "const": "rejected"
+        },
+        {
+          "description": "Intent recorded, pushed, not refused — and still not observed. The\nsignature of a daemon that silently ignores `set_slots` (an old build), and\nthe reason such a node must never read as converged.",
+          "type": "string",
+          "const": "unacknowledged"
+        }
+      ]
+    },
     "ChannelOrigin": {
       "description": "The originating task's identity, carried end to end on every channel post so\nthe UI attributes a post to a task directly rather than by timestamp\ncorrelation (spec §6.3 events). Every field is optional for back-compat:\nlegacy events carry none and render as before.",
       "type": "object",
@@ -454,6 +479,13 @@
           "description": "Node health at snapshot time (spec §3.1): `false` when out of service.",
           "type": "boolean"
         },
+        "capacity_note": {
+          "description": "The daemon's reason for refusing the desired value, when it refused one —\nshown beside the node's slot widget until the operator changes the request.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "capacity_observed_at": {
           "description": "When the node last reported its capacity; `None` when it never has.",
           "type": [
@@ -467,6 +499,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/CapacitySource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capacity_state": {
+          "description": "How far intent and observation are apart (design #293 §4/§10). `None` when\nthere is no intent to reconcile.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CapacityState"
             },
             {
               "type": "null"
@@ -502,6 +545,15 @@
         },
         "slots": {
           "description": "Total concurrent-container capacity ([`WorkerNode::slots`]). `None` for a\nnode observed only through a running container (not in the configured\nroster) — its cap is unknown from occupancy alone.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "slots_desired": {
+          "description": "The operator's **desired** slot count for this node (design #293 §2), from\nthe `fleet.capacity` intent record. `None` when no operator has ever set\none. Display only: [`Self::slots`] stays the number the scheduler uses, and\nintent is structurally incapable of placing work.",
           "type": [
             "integer",
             "null"

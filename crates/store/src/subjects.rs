@@ -232,6 +232,20 @@ pub fn ssh_sign_user_cert() -> String {
     "req.ssh.sign-user-cert".into()
 }
 
+// ── Fleet (spec §3.1 operator capacity control) ─────────────────────────────
+// Published by the api, handled by the dispatcher's actor. Fleet-scoped, not
+// project-scoped: a node belongs to the platform, so nothing owner/project rides
+// in the subject.
+
+/// Set a worker node's **desired** slot count (design #293 §3). Payload
+/// `{ node, slots, by }`; the reply is the 202 body
+/// ([`types::NodeCapacityAck`]) or the `{"error": {...}}` envelope. The node name
+/// rides in the payload rather than the subject so one subscription serves the
+/// whole fleet and an unknown name comes back as a 404 rather than silence.
+pub fn fleet_capacity_set() -> String {
+    "req.fleet.capacity.set".into()
+}
+
 // ── Worker-node protocol (spec §3.1) ────────────────────────────────────────
 // Published by the dispatcher's fleet backend, served by the `chuggernaut
 // worker` daemon on the node. Node names are validated subject-safe at

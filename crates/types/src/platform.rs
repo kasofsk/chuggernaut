@@ -274,8 +274,105 @@ pub struct FleetNode {
     /// When the node last reported its capacity; `None` when it never has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_observed_at: Option<DateTime<Utc>>,
+    /// The operator's **desired** slot count for this node (design #293 §2), from
+    /// the `fleet.capacity` intent record. `None` when no operator has ever set
+    /// one. Display only: [`Self::slots`] stays the number the scheduler uses, and
+    /// intent is structurally incapable of placing work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slots_desired: Option<u32>,
+    /// How far intent and observation are apart (design #293 §4/§10). `None` when
+    /// there is no intent to reconcile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_state: Option<CapacityState>,
+    /// The daemon's reason for refusing the desired value, when it refused one —
+    /// shown beside the node's slot widget until the operator changes the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_note: Option<String>,
     /// The occupied slots on this node.
     pub running: Vec<SlotOccupant>,
+}
+
+/// Operator intent for worker capacity (design #293 §2), persisted by the
+/// dispatcher — the single writer — in the `platform` bucket under
+/// `fleet.capacity`, beside `dispatcher.config` and `fleet.status`.
+///
+/// **Invariant (STYLE.md Tier 2 #2, asserted): no placement path ever reads this
+/// record.** It feeds exactly two consumers — the §4 reconciler and the UI's
+/// "desired" display — which is the whole resolution of the design's tension:
+/// intent is stored so it can be re-asserted after a daemon restart, and is
+/// structurally incapable of placing work. The scheduler reads *observed*
+/// capacity ([`crate::worker::ObservedCapacity`]) and nothing else.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FleetCapacity {
+    /// Node name → the operator's last request for it. A node with no entry has
+    /// no intent, and reconciliation leaves it entirely alone.
+    #[serde(default)]
+    pub nodes: std::collections::BTreeMap<String, NodeCapacityIntent>,
+}
+
+/// One node's operator-set desired capacity, with its audit stamp. Last-writer
+/// only — a retained `platform.events` history is a follow-up (design #293 §9),
+/// so the dispatcher also logs a structured line per change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct NodeCapacityIntent {
+    /// Desired concurrent-container capacity. `0` is a full drain, not an error.
+    pub slots: u32,
+    /// Identity of the platform admin who set it (spec §7.5).
+    pub set_by: String,
+    /// When they set it.
+    pub set_at: DateTime<Utc>,
+}
+
+/// How far a node's observed capacity is from the operator's intent (design #293
+/// §4/§10). Derived on read from intent + observation + the push ledger; never
+/// stored on the intent record, which holds only what the operator asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum CapacityState {
+    /// The node reports the desired number: nothing left to do.
+    Converged,
+    /// A push is in flight, or one has just gone out and the node's report has
+    /// not caught up yet. Convergence is normally visible within a second.
+    Pending,
+    /// The node **refused** the value (above its `slots_max`). Terminal: the
+    /// dispatcher stops re-pushing a number the node will not take, and this
+    /// state stands until the operator changes the request — otherwise a node
+    /// whose maximum dropped would be pushed a value it refuses forever.
+    Rejected,
+    /// Intent recorded, pushed, not refused — and still not observed. The
+    /// signature of a daemon that silently ignores `set_slots` (an old build), and
+    /// the reason such a node must never read as converged.
+    Unacknowledged,
+}
+
+/// One node's capacity intent as the fleet snapshot displays it (design #293 §2,
+/// consumer 2 of 2). Handed to the occupancy publisher already resolved, so the
+/// snapshot composer never touches the intent record itself — the reconciler and
+/// this projection are the record's only readers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeCapacityDisplay {
+    pub slots_desired: u32,
+    pub state: CapacityState,
+    /// The daemon's rejection reason, when [`Self::state`] is
+    /// [`CapacityState::Rejected`].
+    pub note: Option<String>,
+}
+
+/// The 202 body of a capacity command (design #293 §3): the actor never blocks on
+/// the node RPC, so "recorded and converging" is the honest answer. `observed` is
+/// what the scheduler is still using at the moment of the reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct NodeCapacityAck {
+    pub node: String,
+    pub desired: u32,
+    /// The node's currently-observed slot count; `None` when it has never
+    /// reported one.
+    pub observed: Option<u32>,
+    pub state: CapacityState,
 }
 
 /// What one busy slot is running (spec §3.1) — enough for the UI to link back to
@@ -328,6 +425,9 @@ mod fleet_tests {
                     }),
                     capacity_source: Some(crate::worker::CapacitySource::Node),
                     capacity_observed_at: Some(Utc::now()),
+                    slots_desired: Some(4),
+                    capacity_state: Some(CapacityState::Converged),
+                    capacity_note: None,
                     running: vec![SlotOccupant {
                         project: "acme/api".into(),
                         job_seq: 42,
@@ -349,6 +449,11 @@ mod fleet_tests {
                     // snapshot says so rather than looking healthy (§293 §8).
                     capacity_source: Some(crate::worker::CapacitySource::Seed),
                     capacity_observed_at: None,
+                    // Refused above the node's ceiling: the reason rides the
+                    // snapshot so the UI can show it (design #293 §4/§10).
+                    slots_desired: Some(8),
+                    capacity_state: Some(CapacityState::Rejected),
+                    capacity_note: Some("node max is 2".into()),
                     running: vec![],
                 },
             ],
@@ -356,8 +461,36 @@ mod fleet_tests {
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains(r#""capacity_source":"seed""#), "{json}");
+        assert!(json.contains(r#""capacity_state":"rejected""#), "{json}");
         let back: FleetStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(status, back);
+    }
+
+    /// The intent record is the operator's ask and its audit stamp — nothing
+    /// derived (design #293 §2/§9). A snapshot with no `nodes` key at all is an
+    /// empty fleet's intent, not a decode failure: the dispatcher writes the key
+    /// only once an operator has set something.
+    #[test]
+    fn fleet_capacity_roundtrips_and_defaults_empty() {
+        let at = Utc::now();
+        let mut capacity = FleetCapacity::default();
+        capacity.nodes.insert(
+            "air".into(),
+            NodeCapacityIntent {
+                slots: 2,
+                set_by: "operator@example.com".into(),
+                set_at: at,
+            },
+        );
+        let json = serde_json::to_string(&capacity).unwrap();
+        assert!(
+            json.contains(r#""set_by":"operator@example.com""#),
+            "{json}"
+        );
+        assert_eq!(capacity, serde_json::from_str(&json).unwrap());
+
+        let empty: FleetCapacity = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty, FleetCapacity::default());
     }
 
     /// The default is an empty fleet — what the api serves before the dispatcher

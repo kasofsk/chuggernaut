@@ -213,6 +213,9 @@ fn sample_fleet() -> types::FleetStatus {
             refresh_outcome: Some(sample_refresh_outcome()),
             capacity_source: Some(types::CapacitySource::Node),
             capacity_observed_at: Some(at("2026-07-24T17:07:00Z")),
+            slots_desired: Some(4),
+            capacity_state: Some(types::CapacityState::Converged),
+            capacity_note: None,
             running: vec![types::SlotOccupant {
                 project: "acme/api".into(),
                 job_seq: 42,

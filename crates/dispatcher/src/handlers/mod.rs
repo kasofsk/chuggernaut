@@ -12,6 +12,7 @@
 //! | --- | --- | --- |
 //! | container | `req.{work,eval}.submit`, `req.channel.*` | [`container`] |
 //! | worker | `req.worker.announce` | [`worker`] |
+//! | fleet | `req.fleet.capacity.set` | [`fleet`] |
 //! | status | `req.health`, `req.queue.list` | [`status`] |
 //! | projects | `req.projects.{create,link}` | [`projects`] |
 //! | origin | `req.origin.{release,status,sync}` | [`origin`] |
@@ -37,6 +38,7 @@
 
 mod access;
 mod container;
+mod fleet;
 mod graph;
 mod jobs;
 mod jobs_reply;
@@ -79,6 +81,7 @@ pub async fn spawn_api_handlers(
     backend: Arc<dyn ::container::ContainerBackend>,
 ) -> store::Result<()> {
     status::spawn_health_handler(store, handle.clone()).await?;
+    fleet::spawn_fleet_capacity_handler(store, handle.clone()).await?;
     status::spawn_queue_handler(store, handle.clone()).await?;
     projects::spawn_projects_create_handler(store, repos.clone(), hook_bin).await?;
     projects::spawn_projects_link_handler(store, handle.clone()).await?;

@@ -108,6 +108,31 @@ struct FakeBackendState {
     /// has to as well — otherwise a dispatcher test would read an announced slot
     /// count that no backend ever confirmed.
     observed: std::collections::HashMap<String, (u32, types::ObservedCapacity)>,
+    /// `set_slots` commands the backend received, in call order (design #293 §3/§4)
+    /// — how a test asserts what the reconciler pushed, and how often.
+    slot_commands: Vec<(String, u32)>,
+    /// How the fake answers `set_slots`, per node. Absent → the daemon adopts the
+    /// value and the observation lands (the converging case). A test scripts a
+    /// refusal, a silent ignore (an old build), or a transport failure.
+    slot_replies: std::collections::HashMap<String, SlotReply>,
+}
+
+/// How [`FakeBackend`] answers a `set_slots` push (design #293 §4). One variant
+/// per outcome the reconciler has to distinguish.
+#[derive(Debug, Clone)]
+pub enum SlotReply {
+    /// Adopt the value and report it back through `fleet_status`, as a daemon
+    /// that accepts and re-announces does.
+    Adopt,
+    /// Adopt the reply but never change what the node reports — a daemon that
+    /// acknowledges and reverts, or an old build that ignores the op. Must surface
+    /// as `unacknowledged`, never as converged.
+    AdoptWithoutObserving,
+    /// Refuse the value above the node's ceiling, with the reason the UI shows.
+    /// Terminal: the dispatcher must stop re-pushing it.
+    Refuse { slots_max: u32, note: String },
+    /// The RPC never reached the node.
+    Transport(String),
 }
 
 impl Default for FakeBackend {
@@ -343,6 +368,26 @@ impl FakeBackend {
     pub fn set_fleet_status(&self, statuses: impl IntoIterator<Item = NodeStatus>) {
         self.state.lock().unwrap().fleet_status = statuses.into_iter().collect();
     }
+
+    /// Script how a node answers a capacity push (design #293 §4): adopt, adopt
+    /// without ever reporting it, refuse, or fail in transport.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
+    pub fn script_slot_reply(&self, node: &str, reply: SlotReply) {
+        self.state
+            .lock()
+            .unwrap()
+            .slot_replies
+            .insert(node.to_string(), reply);
+    }
+
+    /// `set_slots` pushes the backend received, in call order — the way a test
+    /// asserts the one-push-per-node-per-tick bound and that a refusal is terminal.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
+    pub fn slot_commands(&self) -> Vec<(String, u32)> {
+        self.state.lock().unwrap().slot_commands.clone()
+    }
 }
 
 #[async_trait]
@@ -568,6 +613,54 @@ impl ContainerBackend for FakeBackend {
             }
         }
         out
+    }
+
+    /// Model a capacity push (design #293 §3/§4): record it, then answer per the
+    /// node's scripted reply — adopting also installs the observation, since a real
+    /// daemon re-announces the moment it adopts.
+    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
+    #[allow(clippy::unwrap_used)]
+    async fn set_node_slots(
+        &self,
+        node: &str,
+        slots: u32,
+    ) -> Result<types::worker::SetSlotsOk, BackendError> {
+        let mut st = self.state.lock().unwrap();
+        st.slot_commands.push((node.to_string(), slots));
+        let reply = st
+            .slot_replies
+            .get(node)
+            .cloned()
+            .unwrap_or(SlotReply::Adopt);
+        let adopts_observation = matches!(reply, SlotReply::Adopt);
+        let (accepted, in_force, slots_max, note) = match reply {
+            SlotReply::Adopt | SlotReply::AdoptWithoutObserving => (true, slots, 8, None),
+            SlotReply::Refuse { slots_max, note } => {
+                let held = st.observed.get(node).map_or(0, |(s, _)| *s);
+                (false, held, slots_max, Some(note))
+            }
+            SlotReply::Transport(message) => return Err(BackendError::Unavailable(message)),
+        };
+        if adopts_observation {
+            let entry = st.observed.entry(node.to_string()).or_default();
+            let observation = types::CapacityObservation {
+                slots,
+                slots_max: Some(slots_max),
+                mark: (entry.1.mark.0.max(1), entry.1.mark.1 + 1),
+                transport: types::CapacityTransport::Announce,
+            };
+            if entry.1.apply(&observation, chrono::Utc::now()) {
+                entry.0 = slots;
+            }
+        }
+        Ok(types::worker::SetSlotsOk {
+            accepted,
+            slots: in_force,
+            slots_max,
+            capacity_epoch: 1,
+            capacity_generation: 1,
+            note,
+        })
     }
 
     /// Model heartbeat loss (spec §3.1): record the deregistration and, as the

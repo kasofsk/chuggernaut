@@ -20,6 +20,13 @@
  */
 export type CapacitySource = "node" | "seed";
 /**
+ * How far a node's observed capacity is from the operator's intent (design #293
+ * §4/§10). Derived on read from intent + observation + the push ledger; never
+ * stored on the intent record, which holds only what the operator asked for.
+ */
+export type CapacityState =
+  "converged" | "pending" | "rejected" | "unacknowledged";
+/**
  * Status of one deploy leg. An unknown status fails to deserialize, so a
  * malformed leg line is dropped by the harvest rather than corrupting the
  * report.
@@ -541,6 +548,11 @@ export interface FleetNode {
    */
   available: boolean;
   /**
+   * The daemon's reason for refusing the desired value, when it refused one —
+   * shown beside the node's slot widget until the operator changes the request.
+   */
+  capacity_note?: string | null;
+  /**
    * When the node last reported its capacity; `None` when it never has.
    */
   capacity_observed_at?: string | null;
@@ -551,6 +563,11 @@ export interface FleetNode {
    * docker-endpoint node, whose capacity `DOCKER_NODES` still owns.
    */
   capacity_source?: CapacitySource | null;
+  /**
+   * How far intent and observation are apart (design #293 §4/§10). `None` when
+   * there is no intent to reconcile.
+   */
+  capacity_state?: CapacityState | null;
   name: string;
   /**
    * Busy slot count (`running.len()`), denormalized so the UI needn't count.
@@ -573,6 +590,13 @@ export interface FleetNode {
    * roster) — its cap is unknown from occupancy alone.
    */
   slots: number | null;
+  /**
+   * The operator's **desired** slot count for this node (design #293 §2), from
+   * the `fleet.capacity` intent record. `None` when no operator has ever set
+   * one. Display only: [`Self::slots`] stays the number the scheduler uses, and
+   * intent is structurally incapable of placing work.
+   */
+  slots_desired?: number | null;
   /**
    * Build version last reported by a worker node's ping, if any.
    */

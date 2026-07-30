@@ -307,6 +307,9 @@ async fn platform_fleet_endpoint() {
                     refresh_outcome: None,
                     capacity_source: Some(types::CapacitySource::Node),
                     capacity_observed_at: None,
+                    slots_desired: Some(2),
+                    capacity_state: Some(types::CapacityState::Pending),
+                    capacity_note: None,
                     running: vec![SlotOccupant {
                         project: "acme/api".into(),
                         job_seq: 42,
