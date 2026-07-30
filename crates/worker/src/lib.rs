@@ -10,6 +10,7 @@
 //! referenced by name; see `types::worker`.
 
 pub mod backend;
+pub mod capacity;
 pub mod config;
 pub mod daemon;
 

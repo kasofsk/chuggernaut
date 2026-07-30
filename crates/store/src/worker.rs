@@ -7,7 +7,7 @@ use std::time::Duration;
 use types::worker::{
     ContainerRef, CopyFileOk, CopyFileRequest, InspectOk, LaunchOk, ListExitedOk, ListRunningOk,
     LogsOk, LogsTailOk, LogsTailRequest, PingOk, RefreshCancelOk, RefreshCancelRequest, RefreshOk,
-    RefreshRequest, WorkerError, WorkerLaunchRequest, WorkerReply,
+    RefreshRequest, SetSlotsOk, SetSlotsRequest, WorkerError, WorkerLaunchRequest, WorkerReply,
 };
 
 /// Requests must fit NATS's default 1MB max_payload with headroom. Launch
@@ -22,6 +22,11 @@ const PING_TIMEOUT: Duration = Duration::from_secs(2);
 /// Self-refresh: the daemon accepts fast and builds/swaps in the background
 /// (spec §3.1), so this only covers the accept round-trip, not the build.
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
+/// Capacity command (spec §3.1 operator capacity control): the daemon validates
+/// against its ceiling and answers out of memory, so a slow reply means an
+/// unhealthy node rather than a busy one. Kept tighter than [`OP_TIMEOUT`] — the
+/// operator is waiting on the fleet view, and every wait is bounded.
+const CAPACITY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Typed request-reply to one worker node.
 #[derive(Clone)]
@@ -149,6 +154,18 @@ impl WorkerRpc {
     pub async fn ping(&self) -> std::result::Result<PingOk, WorkerRpcError> {
         self.call("ping", &serde_json::json!({}), PING_TIMEOUT)
             .await
+    }
+
+    /// Command the node's slot count (spec §3.1 operator capacity control). The
+    /// node is the authority: a value above its `slots_max` comes back as a
+    /// *rejection* (`accepted: false` with a reason), not an error, and the reply
+    /// reports the capacity in force afterwards either way. Never a placement
+    /// input — intent is only ever pushed here, never scheduled on.
+    pub async fn set_slots(
+        &self,
+        req: &SetSlotsRequest,
+    ) -> std::result::Result<SetSlotsOk, WorkerRpcError> {
+        self.call("set_slots", req, CAPACITY_TIMEOUT).await
     }
 
     /// Request a self-refresh (spec §3.1): the daemon rebuilds its images at

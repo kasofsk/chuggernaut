@@ -11,6 +11,11 @@ use test_utils::backend_suite as suite;
 use test_utils::nats::NatsTestServer;
 use worker::{FleetBackend, WorkerConfig};
 
+/// The `WORKER_SLOTS_MAX` every daemon spawned here boots with (spec §3.1): above
+/// the boot `slots: 4`, so the boot value is never clamped, and low enough that a
+/// request above the ceiling is easy to state.
+const DAEMON_SLOTS_MAX: u32 = 6;
+
 /// In-process daemon (node "w1", local Docker) + fleet backend over it, or
 /// None to skip (no Docker).
 async fn setup(
@@ -37,6 +42,7 @@ async fn setup(
     let config = WorkerConfig {
         node: "w1".into(),
         slots: 4,
+        slots_max: DAEMON_SLOTS_MAX,
         nats_url: server.url().to_string(),
         nats_creds: None,
         docker_endpoint: local_docker_endpoint(),
@@ -187,6 +193,11 @@ async fn mock_worker(store: &store::NatsStore, node: &str) -> tokio::task::JoinH
                         running: 0,
                         version: env!("CARGO_PKG_VERSION").to_string(),
                         artifacts: std::collections::HashMap::new(),
+                        // A stand-in daemon reports no capacity of its own.
+                        slots: None,
+                        slots_max: None,
+                        capacity_epoch: None,
+                        capacity_generation: None,
                         refresh_outcome: None,
                         refresh_progress: None,
                     },
@@ -220,6 +231,11 @@ async fn counting_worker(store: &store::NatsStore, node: &str) -> tokio::task::J
                         running: running.load(Ordering::SeqCst),
                         version: env!("CARGO_PKG_VERSION").to_string(),
                         artifacts: std::collections::HashMap::new(),
+                        // A stand-in daemon reports no capacity of its own.
+                        slots: None,
+                        slots_max: None,
+                        capacity_epoch: None,
+                        capacity_generation: None,
                         refresh_outcome: None,
                         refresh_progress: None,
                     },
@@ -425,6 +441,7 @@ fn spawn_daemon(
     let config = WorkerConfig {
         node: node.into(),
         slots: 4,
+        slots_max: DAEMON_SLOTS_MAX,
         nats_url: server.url().to_string(),
         nats_creds: None,
         docker_endpoint: local_docker_endpoint(),
@@ -772,6 +789,7 @@ async fn refresh_reports_skip_without_git_credential() {
     let config = WorkerConfig {
         node: "w1".into(),
         slots: 4,
+        slots_max: DAEMON_SLOTS_MAX,
         nats_url: server.url().to_string(),
         nats_creds: None,
         docker_endpoint: local_docker_endpoint(),
@@ -836,5 +854,114 @@ async fn payload_guard_rejects_bulk_inline_files() {
     }];
     let err = fleet.launch(config).await.unwrap_err();
     assert!(err.to_string().contains("node-local"), "unexpected: {err}");
+    daemon.abort();
+}
+
+/// Read announces off the subject until `node` reports `slots`, bounded well
+/// under [the daemon's ~15s heartbeat] so arriving at all proves the announce was
+/// triggered by the adoption rather than by the next tick.
+async fn await_announce(
+    sub: &mut store::RequestSubscription,
+    node: &str,
+    slots: u32,
+) -> types::worker::WorkerAnnounce {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let req = sub.next().await.expect("announce subject live");
+            let announce: types::worker::WorkerAnnounce =
+                serde_json::from_slice(&req.payload).unwrap();
+            if announce.node == node && announce.slots == slots {
+                return announce;
+            }
+        }
+    })
+    .await
+    .expect("an adopted slot count must not wait for the next announce tick")
+}
+
+/// The `set_slots` round trip (spec §3.1 operator capacity control): a real
+/// daemon over a real nats-server reports its capacity on `ping`, adopts a value
+/// within `slots_max` while bumping the capacity generation, **re-announces
+/// immediately** rather than waiting out the ~15s heartbeat, and REFUSES a value
+/// above the ceiling with a reason the caller can surface — leaving the adopted
+/// number in force. Tier 2 because the wire path is the contract: two transports
+/// of one source, and the ordering key they share.
+#[tokio::test]
+async fn set_slots_adopts_re_announces_and_refuses_above_the_ceiling() {
+    use store::worker::WorkerRpc;
+    use types::worker::SetSlotsRequest;
+
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    if !suite::docker_available() {
+        eprintln!("skipping: Docker daemon unavailable");
+        return;
+    }
+    let daemon = spawn_daemon(&server, "cap1", b"x", None);
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let rpc = WorkerRpc::new(store.clone(), "cap1");
+
+    // The pull transport carries the boot value, the ceiling, and the pair.
+    let ping = test_utils::wait::poll_async_default("worker cap1 to answer ping", || async {
+        rpc.ping().await.ok()
+    })
+    .await;
+    assert_eq!(ping.slots, Some(4), "the boot WORKER_SLOTS value");
+    assert_eq!(ping.slots_max, Some(DAEMON_SLOTS_MAX));
+    assert_eq!(ping.capacity_generation, Some(0), "nothing adopted yet");
+    let epoch = ping.capacity_epoch.unwrap();
+    // Milliseconds, not seconds — two restarts in one second must not collide.
+    assert!(epoch > 1_577_836_800_000, "epoch not in ms: {epoch}");
+
+    // Subscribe BEFORE commanding, so the immediate re-announce cannot be missed.
+    let mut announces = store
+        .subscribe_requests(&store::subjects::worker_announce())
+        .await
+        .unwrap();
+    store.client().flush().await.unwrap();
+
+    let adopted = rpc.set_slots(&SetSlotsRequest { slots: 2 }).await.unwrap();
+    assert!(adopted.accepted, "2 is under the ceiling: {adopted:?}");
+    assert_eq!(adopted.slots, 2);
+    assert_eq!(adopted.slots_max, DAEMON_SLOTS_MAX);
+    assert_eq!(
+        adopted.capacity_generation, 1,
+        "adoption bumps the generation"
+    );
+    assert_eq!(adopted.capacity_epoch, epoch, "the epoch is stamped once");
+    assert_eq!(adopted.note, None);
+
+    // Announced NOW: well inside the 15s heartbeat this would otherwise wait for.
+    let announce = await_announce(&mut announces, "cap1", 2).await;
+    assert_eq!(announce.slots_max, Some(DAEMON_SLOTS_MAX));
+    assert_eq!(announce.capacity_epoch, Some(epoch));
+    assert_eq!(
+        announce.capacity_generation,
+        Some(1),
+        "push and pull carry the same ordering key"
+    );
+
+    // Above the ceiling: refused with a reason, and nothing changes.
+    let refused = rpc
+        .set_slots(&SetSlotsRequest {
+            slots: DAEMON_SLOTS_MAX + 1,
+        })
+        .await
+        .unwrap();
+    assert!(!refused.accepted, "the node is the authority: {refused:?}");
+    assert!(
+        refused
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains(&DAEMON_SLOTS_MAX.to_string())),
+        "the reason must carry the max for the UI: {refused:?}"
+    );
+    assert_eq!(refused.slots, 2, "the adopted value stays in force");
+    assert_eq!(refused.capacity_generation, 1, "a refusal bumps nothing");
+
+    // And the pull transport agrees with the reply.
+    let ping = rpc.ping().await.unwrap();
+    assert_eq!((ping.slots, ping.capacity_generation), (Some(2), Some(1)));
     daemon.abort();
 }

@@ -8,11 +8,20 @@ pub struct WorkerConfig {
     /// Node name — must match the `DOCKER_NODES` entry on the dispatcher
     /// (`{name}|worker|{slots}`) and be subject-safe.
     pub node: String,
-    /// Concurrent-container capacity this node advertises for itself in its
-    /// announce heartbeat (`WORKER_SLOTS`, spec §3.1 dynamic registration).
-    /// Default 4. The dispatcher's live fleet uses it as the node's slot cap;
-    /// re-announcing with a new value changes capacity at runtime, no restart.
+    /// Concurrent-container capacity this node starts at (`WORKER_SLOTS`, spec
+    /// §3.1 dynamic registration). Default [`SLOTS_DEFAULT`]. It is the node's
+    /// **first-boot value only** — an operator changes capacity at runtime with
+    /// the `set_slots` op (spec §3.1 operator capacity control), never by
+    /// recreating the container. Kept so a fresh node, or one whose dispatcher is
+    /// down, boots at a sane number before any operator intent exists.
     pub slots: u32,
+    /// Ceiling on the slot count this node will adopt (`WORKER_SLOTS_MAX`, spec
+    /// §3.1). Defaults to the node's CPU count and is enforced **only here, at
+    /// the daemon** — the enforcement point is the only place that actually
+    /// knows what the node can serve. Below it the operator is trusted: no
+    /// memory or disk heuristics. Also clamps [`Self::slots`], so the node never
+    /// advertises capacity its own `set_slots` would refuse.
+    pub slots_max: u32,
     pub nats_url: String,
     /// `.creds` file minted by `chuggernaut admin worker-creds`; None connects
     /// plain (open dev server).
@@ -71,9 +80,11 @@ impl WorkerConfig {
                 default.exists().then_some(default)
             });
         let slots = parse_slots(std::env::var("WORKER_SLOTS").ok())?;
+        let slots_max = parse_slots_max(std::env::var("WORKER_SLOTS_MAX").ok(), node_cpu_count())?;
         Ok(Self {
             node,
             slots,
+            slots_max,
             nats_url,
             nats_creds,
             docker_endpoint: std::env::var("WORKER_DOCKER_ENDPOINT")
@@ -116,15 +127,57 @@ fn parse_cache_dir(raw: Option<String>) -> Option<PathBuf> {
     raw.filter(|s| !s.is_empty()).map(PathBuf::from)
 }
 
-/// Parse `WORKER_SLOTS` into the node's advertised capacity. Absent or empty ⇒
-/// the default 4; a non-numeric value is a hard config error. Pure over its
+/// The node's first-boot slot count when `WORKER_SLOTS` is unset — the value of
+/// last resort for a node brought up with no env at all, and the fallback
+/// ceiling when the platform cannot report a CPU count.
+pub const SLOTS_DEFAULT: u32 = 4;
+
+/// Parse `WORKER_SLOTS` into the node's first-boot capacity. Absent or empty ⇒
+/// [`SLOTS_DEFAULT`]; a non-numeric value is a hard config error. Pure over its
 /// input for unit testing without mutating the process environment.
 fn parse_slots(raw: Option<String>) -> Result<u32, ConfigError> {
     match raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
         Some(s) => s
             .parse()
             .map_err(|_| ConfigError(format!("WORKER_SLOTS must be a number, got {s:?}"))),
-        None => Ok(4),
+        None => Ok(SLOTS_DEFAULT),
+    }
+}
+
+/// Parse `WORKER_SLOTS_MAX` into the node's runtime ceiling. Absent or empty ⇒
+/// `cpus` (the node's CPU count). A value *above* the CPU count is allowed on
+/// purpose — the env exists for nodes that know better than their core count, in
+/// either direction (air's colima VM has 6 CPUs but serves 2 concurrent Rust
+/// builds; an IO-bound node may serve more than it has cores).
+///
+/// Zero is a hard config error: a node whose ceiling is zero is pinned at a full
+/// drain forever and could never be raised from the operator UI again — the
+/// unrecoverable state runtime capacity control exists to avoid (design #293
+/// §5a). Pure over its inputs for unit testing.
+fn parse_slots_max(raw: Option<String>, cpus: u32) -> Result<u32, ConfigError> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(cpus);
+    };
+    let value: u32 = raw
+        .parse()
+        .map_err(|_| ConfigError(format!("WORKER_SLOTS_MAX must be a number, got {raw:?}")))?;
+    if value == 0 {
+        return Err(ConfigError(
+            "WORKER_SLOTS_MAX must be at least 1 — a node with a zero ceiling can never be \
+             raised again from the operator UI"
+                .into(),
+        ));
+    }
+    Ok(value)
+}
+
+/// The node's own CPU count, the default ceiling (spec §3.1). A platform that
+/// cannot report one falls back to [`SLOTS_DEFAULT`], so an unknown CPU count
+/// never clamps the node's own default boot value.
+fn node_cpu_count() -> u32 {
+    match std::thread::available_parallelism() {
+        Ok(cpus) => u32::try_from(cpus.get()).unwrap_or(u32::MAX),
+        Err(_) => SLOTS_DEFAULT,
     }
 }
 
@@ -208,6 +261,27 @@ mod tests {
         assert_eq!(parse_slots(Some(" 2 ".into())).unwrap(), 2);
         // Non-numeric is a hard config error.
         assert!(parse_slots(Some("lots".into())).is_err());
+    }
+
+    /// The ceiling `set_slots` is validated against (spec §3.1): the node's CPU
+    /// count by default, overridable in either direction, and never zero.
+    #[test]
+    fn slots_max_parses_default_and_value() {
+        // Absent / empty ⇒ the node's CPU count.
+        assert_eq!(parse_slots_max(None, 6).unwrap(), 6);
+        assert_eq!(parse_slots_max(Some(String::new()), 6).unwrap(), 6);
+        assert_eq!(parse_slots_max(Some(" \t".into()), 6).unwrap(), 6);
+        // Lowered below the core count — the air/colima case the env exists for.
+        assert_eq!(parse_slots_max(Some(" 2 ".into()), 6).unwrap(), 2);
+        // Raised above it: a node that knows better is trusted either way.
+        assert_eq!(parse_slots_max(Some("12".into()), 6).unwrap(), 12);
+        // Zero would pin the node at a full drain with no way back up.
+        assert!(parse_slots_max(Some("0".into()), 6).is_err());
+        assert!(parse_slots_max(Some("some".into()), 6).is_err());
+        // No CPU count available ⇒ the boot default, so it never clamps.
+        assert_eq!(parse_slots_max(None, SLOTS_DEFAULT).unwrap(), SLOTS_DEFAULT);
+        // The real node always reports at least one CPU.
+        assert!(node_cpu_count() >= 1);
     }
 
     #[test]

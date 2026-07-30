@@ -254,15 +254,80 @@ pub const REFRESH_STAGE_CANCELLED: &str = "cancelled";
 /// next heartbeat, and losing the heartbeat stream is what marks the node
 /// unschedulable. The node advertises its *own* capacity (`slots`); the live
 /// announcement wins over any static `DOCKER_NODES` seed for the same name.
+///
+/// This is the **push** half of the one capacity source; [`PingOk`] is the pull
+/// half, carrying the same fields from the same owner (spec §3.1 slot source).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerAnnounce {
     /// Node name — subject-safe, and matches the `req.worker.{node}.>` the same
     /// daemon serves its RPCs on.
     pub node: String,
-    /// Concurrent-container capacity the node advertises for itself (`WORKER_SLOTS`).
+    /// Concurrent-container capacity the node advertises for itself. First-boot
+    /// value `WORKER_SLOTS`; changed at runtime by `set_slots`
+    /// ([`SetSlotsRequest`]), never by anything dispatcher-side.
     pub slots: u32,
+    /// The ceiling the node will adopt (`WORKER_SLOTS_MAX`, default the node's
+    /// CPU count): advisory to the UI, which bounds its stepper by it, and
+    /// enforced **only** at the daemon — the enforcement point is the only place
+    /// that knows what the node can serve. `#[serde(default)]` keeps a pre-field
+    /// daemon's announce decodable through the version-skew window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slots_max: Option<u32>,
+    /// Ordering key, first half: unix **milliseconds** stamped once at daemon
+    /// start, from the node's own clock. It advances on every daemon restart, so
+    /// a restarted daemon's generation-0 reports are accepted rather than
+    /// discarded against the dispatcher's watermark.
+    ///
+    /// Milliseconds, not seconds (a deliberate deviation from design #293 §1):
+    /// a crash-looping daemon under `--restart=always` can restart twice inside
+    /// one second, and an equal epoch with the generation back at 0 would have
+    /// its announces discarded until something pulled a ping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_epoch: Option<u64>,
+    /// Ordering key, second half: a counter from 0 the daemon bumps on every
+    /// adoption. The dispatcher compares the pair
+    /// `(capacity_epoch, capacity_generation)` lexicographically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_generation: Option<u64>,
     /// Worker build version (+ git SHA when baked), same string `ping` reports.
     pub version: String,
+}
+
+/// Payload for `set_slots` (spec §3.1 operator capacity control): the operator's
+/// desired slot count, relayed to the node by the dispatcher. The node is the
+/// authority — the value is a *request*, validated against the node's own
+/// `slots_max` — so this carries no ceiling and no override flag.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetSlotsRequest {
+    /// Desired concurrent-container capacity. `0` is a full drain (the node
+    /// finishes what it holds and takes nothing new), not an error.
+    pub slots: u32,
+}
+
+/// Reply for `set_slots`. A value above the node's ceiling is a **rejection**,
+/// not an error: the caller asked a legitimate question and the node answered
+/// it, so `note` carries the reason for the operator UI to show, and the
+/// dispatcher treats a rejection as terminal (it stops re-pushing a number the
+/// node refused). The capacity fields report the node's state **after** the
+/// decision, so the caller needs no follow-up ping to learn what is in force.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetSlotsOk {
+    /// The node adopted the requested value (and bumped its generation).
+    pub accepted: bool,
+    /// The slot count now in force — the requested one on an accept, the
+    /// unchanged previous one on a rejection.
+    pub slots: u32,
+    /// The node's ceiling, so a rejected caller can bound its next request.
+    pub slots_max: u32,
+    /// Ordering key as in [`WorkerAnnounce::capacity_epoch`].
+    pub capacity_epoch: u64,
+    /// Ordering key as in [`WorkerAnnounce::capacity_generation`]; unchanged by
+    /// a rejection, since nothing was adopted.
+    pub capacity_generation: u64,
+    /// Why the value was refused, when `accepted` is false. Short and meant for
+    /// display beside the node's slot widget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// How a worker's most recent self-refresh ended (spec §3.1, ticket #187). The
@@ -439,6 +504,23 @@ impl RefreshOutcome {
 pub struct PingOk {
     /// Running `chuggernaut.managed` containers on the node (slot accounting).
     pub running: u32,
+    /// The node's current capacity — the same field from the same owner as
+    /// [`WorkerAnnounce::slots`], delivered over the **pull** transport (spec
+    /// §3.1 slot source). A ping cannot be a stale in-flight message, so the
+    /// dispatcher applies it unconditionally; that is what stops any ordering
+    /// anomaly from permanently freezing a node's capacity. `None` on a
+    /// pre-field daemon, which supplies no capacity at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slots: Option<u32>,
+    /// The node's ceiling, as [`WorkerAnnounce::slots_max`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slots_max: Option<u32>,
+    /// Ordering key, as [`WorkerAnnounce::capacity_epoch`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_epoch: Option<u64>,
+    /// Ordering key, as [`WorkerAnnounce::capacity_generation`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_generation: Option<u64>,
     /// Worker build version (+ git SHA when baked) — the dispatcher warns on
     /// mismatch with its own; never refuses.
     pub version: String,
@@ -538,6 +620,10 @@ mod tests {
     fn ping_refresh_outcome_round_trip_and_back_compat() {
         let ping = PingOk {
             running: 2,
+            slots: Some(4),
+            slots_max: Some(8),
+            capacity_epoch: Some(1_769_000_000_123),
+            capacity_generation: Some(3),
             version: "0.1.0+abc123".into(),
             artifacts: HashMap::from([("channel".into(), "deadbeef".into())]),
             refresh_outcome: Some(RefreshOutcome {
@@ -565,6 +651,53 @@ mod tests {
         let back: PingOk = serde_json::from_str(old).unwrap();
         assert_eq!(back.refresh_outcome, None);
         assert_eq!(back.refresh_progress, None);
+    }
+
+    /// Both capacity transports carry the same fields (spec §3.1 slot source),
+    /// and a pre-field daemon's messages still decode — with the pair absent, so
+    /// the dispatcher reads it as `(0, 0)` and applies a seed only until the
+    /// node's first real observation.
+    #[test]
+    fn capacity_fields_round_trip_on_both_transports() {
+        let announce = WorkerAnnounce {
+            node: "air".into(),
+            slots: 2,
+            slots_max: Some(6),
+            capacity_epoch: Some(1_769_000_000_123),
+            capacity_generation: Some(1),
+            version: "0.1.0+abc123".into(),
+        };
+        let json = serde_json::to_string(&announce).unwrap();
+        assert_eq!(
+            serde_json::from_str::<WorkerAnnounce>(&json).unwrap(),
+            announce
+        );
+        // Millisecond epoch, not seconds: two restarts inside one second must
+        // not collide (see the field docs).
+        assert!(json.contains("1769000000123"), "{json}");
+
+        // Pre-field daemon: `slots` alone, no ceiling and no ordering pair.
+        let old: WorkerAnnounce =
+            serde_json::from_str(r#"{"node":"air","slots":2,"version":"0.1.0"}"#).unwrap();
+        assert_eq!(
+            (old.slots_max, old.capacity_epoch, old.capacity_generation),
+            (None, None, None)
+        );
+
+        // A rejection reports the ceiling and leaves the ordering pair alone.
+        let rejected = SetSlotsOk {
+            accepted: false,
+            slots: 2,
+            slots_max: 6,
+            capacity_epoch: 1_769_000_000_123,
+            capacity_generation: 1,
+            note: Some("node max is 6".into()),
+        };
+        let json = serde_json::to_string(&rejected).unwrap();
+        assert_eq!(serde_json::from_str::<SetSlotsOk>(&json).unwrap(), rejected);
+        let req = SetSlotsRequest { slots: 0 };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(serde_json::from_str::<SetSlotsRequest>(&json).unwrap(), req);
     }
 
     /// The relay cadence (ticket #253): a phase CHANGE always prints, an

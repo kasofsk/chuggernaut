@@ -10,6 +10,7 @@
 //! Containers survive daemon restarts: the dispatcher's poll-based `wait`
 //! (fleet backend) re-attaches via `inspect` on the existing container id.
 
+use crate::capacity::Capacity;
 use crate::config::WorkerConfig;
 use container::docker::{DockerBackend, DockerNodeConfig};
 use container::{
@@ -26,8 +27,9 @@ use store::{NatsStore, StoreError};
 use types::worker::{
     ContainerRef, CopyFileOk, CopyFileRequest, FileSource, InspectOk, LaunchOk, LogsOk, LogsTailOk,
     LogsTailRequest, PingOk, REFRESH_STAGE_CANCELLED, RefreshCancelOk, RefreshCancelRequest,
-    RefreshOk, RefreshOutcome, RefreshProgress, RefreshRequest, RefreshResult, WireStatus,
-    WorkerError, WorkerLaunchRequest, WorkerReply, b64_decode, b64_encode,
+    RefreshOk, RefreshOutcome, RefreshProgress, RefreshRequest, RefreshResult, SetSlotsOk,
+    SetSlotsRequest, WireStatus, WorkerError, WorkerLaunchRequest, WorkerReply, b64_decode,
+    b64_encode,
 };
 
 /// Logs are tailed to fit the reply under NATS's 1MB max_payload after
@@ -194,6 +196,14 @@ pub enum WorkerRunError {
 struct WorkerState {
     node: String,
     backend: DockerBackend,
+    /// The node's live capacity (spec §3.1 slot source): the one number reported
+    /// over both transports, and the ceiling `set_slots` is validated against.
+    /// Shared with the announce loop — one owner, two transports.
+    capacity: Arc<Capacity>,
+    /// Notified when an adopted `set_slots` must be announced NOW rather than at
+    /// the next [`ANNOUNCE_INTERVAL`] tick: an operator's capacity change belongs
+    /// in the fleet view immediately, not up to 15s later.
+    announce_now: Arc<tokio::sync::Notify>,
     /// name → bytes, loaded once at startup.
     artifacts: HashMap<String, Vec<u8>>,
     /// name → sha256 hex, reported in ping.
@@ -344,7 +354,9 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
     let mut backend = DockerBackend::new(vec![DockerNodeConfig {
         name: config.node.clone(),
         endpoint: config.docker_endpoint.clone(),
-        // The dispatcher owns slot policy; the worker only reports usage.
+        // The dispatcher owns slot *policy* (it schedules against the number
+        // this node reports, and lowering below occupancy drains rather than
+        // kills); the worker only reports usage and its own capacity ceiling.
         slots: u32::MAX,
     }])?;
     // Node-local build cache: a worker-side property, added here from the
@@ -376,9 +388,14 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         .map(|(k, v)| (k.clone(), format!("{:x}", Sha256::digest(v))))
         .collect();
 
+    let capacity = run_capacity(&config);
+    let announce_now = Arc::new(tokio::sync::Notify::new());
+
     let state = Arc::new(WorkerState {
         node: config.node.clone(),
         backend,
+        capacity: capacity.clone(),
+        announce_now: announce_now.clone(),
         artifacts,
         artifact_hashes,
         version: version_string(),
@@ -408,17 +425,19 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
     let mut sub = store
         .subscribe_requests(&store::subjects::worker_all(&config.node))
         .await?;
-    tracing::info!(node = %config.node, nats = %config.nats_url, version = %state.version, slots = config.slots, "worker up");
+    let report = capacity.report();
+    tracing::info!(node = %config.node, nats = %config.nats_url, version = %state.version, slots = report.slots, slots_max = report.slots_max, capacity_epoch = report.epoch_ms, "worker up");
 
     // Announce heartbeat (spec §3.1 dynamic registration): tell the dispatcher
-    // this node is live — name, self-advertised slots, build version — so it
+    // this node is live — name, self-advertised capacity, build version — so it
     // joins the live fleet with no dispatcher restart. Fire-and-forget on a
     // plain subject; a missed one is covered by the next tick, and losing the
     // stream is what marks the node unschedulable dispatcher-side.
     spawn_announce(
         store.clone(),
         config.node.clone(),
-        config.slots,
+        capacity,
+        announce_now,
         state.version.clone(),
     );
 
@@ -453,23 +472,56 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
     Ok(())
 }
 
+/// The node's own capacity cell, stamped with this process's epoch (spec §3.1):
+/// the boot value is `WORKER_SLOTS`, clamped to the ceiling. A boot value above
+/// the ceiling is a misconfigured node, so it is worth a line in the log rather
+/// than a silent clamp.
+fn run_capacity(config: &WorkerConfig) -> Arc<Capacity> {
+    if config.slots > config.slots_max {
+        tracing::warn!(
+            slots = config.slots,
+            slots_max = config.slots_max,
+            "WORKER_SLOTS exceeds WORKER_SLOTS_MAX — booting at the ceiling instead \
+             (raise WORKER_SLOTS_MAX if this node really can serve more)"
+        );
+    }
+    Arc::new(Capacity::new(
+        config.slots,
+        config.slots_max,
+        crate::capacity::now_epoch_ms(),
+    ))
+}
+
 /// How often the daemon re-announces itself (spec §3.1 dynamic registration).
 /// Comfortably shorter than the dispatcher's heartbeat timeout so an occasional
 /// dropped publish never trips a spurious deregistration.
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Publish the announce heartbeat immediately, then on every [`ANNOUNCE_INTERVAL`]
-/// tick, for the life of the daemon. Detached: the daemon keeps serving RPCs
-/// regardless, and a transient publish failure just logs and waits for the next
-/// tick.
-fn spawn_announce(store: NatsStore, node: String, slots: u32, version: String) {
+/// tick — or as soon as `announce_now` fires — for the life of the daemon.
+/// Detached: the daemon keeps serving RPCs regardless, and a transient publish
+/// failure just logs and waits for the next tick.
+///
+/// Every announce re-reads `capacity`, so an adopted `set_slots` is reported
+/// from the same owner as the ping reply, with the same ordering key.
+fn spawn_announce(
+    store: NatsStore,
+    node: String,
+    capacity: Arc<Capacity>,
+    announce_now: Arc<tokio::sync::Notify>,
+    version: String,
+) {
     tokio::spawn(async move {
         let subject = store::subjects::worker_announce();
         let mut interval = tokio::time::interval(ANNOUNCE_INTERVAL);
         loop {
+            let report = capacity.report();
             let announce = types::worker::WorkerAnnounce {
                 node: node.clone(),
-                slots,
+                slots: report.slots,
+                slots_max: Some(report.slots_max),
+                capacity_epoch: Some(report.epoch_ms),
+                capacity_generation: Some(report.generation),
                 version: version.clone(),
             };
             match serde_json::to_vec(&announce) {
@@ -480,7 +532,16 @@ fn spawn_announce(store: NatsStore, node: String, slots: u32, version: String) {
                 }
                 Err(e) => tracing::warn!(node = %node, "worker announce serialize failed: {e}"),
             }
-            interval.tick().await;
+            // An adopted capacity change re-announces immediately: waiting out
+            // the tick would leave the fleet view showing the old number for up
+            // to ANNOUNCE_INTERVAL after the operator's command was accepted.
+            // `Notify` holds a permit, so a change during the publish above is
+            // not lost. `Interval::tick` is cancel-safe, so the ~15s heartbeat
+            // cadence survives an interruption.
+            tokio::select! {
+                _ = interval.tick() => {}
+                () = announce_now.notified() => {}
+            }
         }
     });
 }
@@ -501,6 +562,7 @@ async fn handle(state: &Arc<WorkerState>, subject: &str, payload: &[u8]) -> Vec<
         Some("logs") => encode_reply(&logs(state, payload).await),
         Some("logs_tail") => encode_reply(&logs_tail(state, payload).await),
         Some("ping") => encode_reply(&ping(state).await),
+        Some("set_slots") => encode_reply(&set_slots(state, payload)),
         Some("remove") => encode_reply(&remove(state, payload).await),
         Some("list_exited") => encode_reply(&list_exited(state).await),
         Some("list_running") => encode_reply(&list_running(state).await),
@@ -756,8 +818,17 @@ async fn ping(state: &WorkerState) -> WorkerReply<PingOk> {
                 .managed_running_total()
                 .await
                 .map_err(backend_err)?;
+            let capacity = state.capacity.report();
             Ok(PingOk {
                 running,
+                // The pull half of the one capacity source (spec §3.1): the same
+                // fields the announce carries, from the same owner. A ping cannot
+                // be stale, so this is what makes any ordering anomaly
+                // self-healing dispatcher-side.
+                slots: Some(capacity.slots),
+                slots_max: Some(capacity.slots_max),
+                capacity_epoch: Some(capacity.epoch_ms),
+                capacity_generation: Some(capacity.generation),
                 version: state.version.clone(),
                 artifacts: state.artifact_hashes.clone(),
                 refresh_outcome: state.refresh_outcome.lock().unwrap().clone(),
@@ -771,6 +842,45 @@ async fn ping(state: &WorkerState) -> WorkerReply<PingOk> {
         }
         .await,
     )
+}
+
+/// `set_slots` (spec §3.1 operator capacity control): adopt the operator's
+/// desired slot count when this node can serve it, and refuse it — with a reason
+/// the caller surfaces — when it is above `slots_max`. The node is the authority
+/// on its own capacity, so this is the single enforcement point.
+///
+/// An adoption re-announces immediately rather than waiting out the ~15s
+/// heartbeat: the operator is watching the fleet view for their change to land.
+/// Nothing here touches running containers — lowering below occupancy drains
+/// (free slots go non-positive and placement skips the node), it never kills.
+fn set_slots(state: &WorkerState, payload: &[u8]) -> WorkerReply<SetSlotsOk> {
+    reply(set_slots_decide(state, payload))
+}
+
+/// The decision half of [`set_slots`]: parse, decide against the node's ceiling,
+/// and trigger the immediate re-announce on an adoption. Split out so the op
+/// keeps the file's `reply(..)` envelope shape.
+fn set_slots_decide(state: &WorkerState, payload: &[u8]) -> Result<SetSlotsOk, WorkerError> {
+    let req: SetSlotsRequest = parse(payload)?;
+    let outcome = state.capacity.set_slots(req.slots);
+    if outcome.accepted {
+        tracing::info!(
+            node = %state.node,
+            slots = outcome.slots,
+            capacity_generation = outcome.capacity_generation,
+            "capacity adopted — re-announcing now"
+        );
+        state.announce_now.notify_one();
+    } else {
+        tracing::warn!(
+            node = %state.node,
+            requested = req.slots,
+            slots_max = outcome.slots_max,
+            "capacity request REFUSED — node stays at {}",
+            outcome.slots
+        );
+    }
+    Ok(outcome)
 }
 
 /// Self-refresh (spec §3.1): accept fast, then rebuild and swap in the

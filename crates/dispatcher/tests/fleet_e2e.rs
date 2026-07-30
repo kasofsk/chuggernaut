@@ -67,6 +67,8 @@ async fn worker_fleet(
     let config = WorkerConfig {
         node: "w1".into(),
         slots: 4,
+        // Above the boot slot count, so the daemon boots at 4 (spec §3.1).
+        slots_max: 8,
         nats_url: server.url().to_string(),
         nats_creds: None,
         docker_endpoint: local_docker_endpoint(),
@@ -198,6 +200,10 @@ async fn stale_list_running_worker(store: &NatsStore, node: &str) -> tokio::task
                         running: 0,
                         version: "0.0.0+stale".into(),
                         artifacts: HashMap::new(),
+                        slots: None,
+                        slots_max: None,
+                        capacity_epoch: None,
+                        capacity_generation: None,
                         refresh_outcome: None,
                         refresh_progress: None,
                     },
