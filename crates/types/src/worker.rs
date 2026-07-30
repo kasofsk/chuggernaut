@@ -539,6 +539,158 @@ pub struct PingOk {
     pub refresh_progress: Option<RefreshProgress>,
 }
 
+/// Where the slot count the scheduler is using came from (design #293 §7/§8).
+/// Reported per node on the fleet roster and `fleet.status` so a node running
+/// on the boot seed is *visible* rather than indistinguishable from a healthy
+/// one — the representation whose absence hid the 2026-07-26 incident for
+/// weeks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum CapacitySource {
+    /// The node's own report, over either transport (spec §3.1 slot source).
+    Node,
+    /// The `DOCKER_NODES` boot seed: the node has never reported capacity, so
+    /// the number in force was never confirmed by the hardware serving it.
+    Seed,
+}
+
+/// Which transport carried a capacity observation (spec §3.1 slot source). The
+/// distinction *is* the ordering rule: an announce is a fire-and-forget publish
+/// that can arrive out of order behind a fresher one, while a `ping` reply is
+/// request-reply on a connection the dispatcher just opened and therefore
+/// cannot be stale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapacityTransport {
+    Announce,
+    Ping,
+}
+
+/// One capacity observation as it reaches the dispatcher, normalized across the
+/// two transports (spec §3.1 slot source). Both carry the same field from the
+/// same owner, so the dispatcher ingests one shape and orders it by one key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapacityObservation {
+    pub slots: u32,
+    /// The node's ceiling, when it reported one. Advisory to the UI; enforced
+    /// only at the daemon.
+    pub slots_max: Option<u32>,
+    /// `(capacity_epoch, capacity_generation)`, compared lexicographically. A
+    /// pre-field daemon supplies neither, which reads as `(0, 0)`.
+    pub mark: (u64, u64),
+    pub transport: CapacityTransport,
+}
+
+impl CapacityObservation {
+    /// The push half: a node's announce heartbeat.
+    pub fn from_announce(announce: &WorkerAnnounce) -> Self {
+        Self {
+            slots: announce.slots,
+            slots_max: announce.slots_max,
+            mark: (
+                announce.capacity_epoch.unwrap_or(0),
+                announce.capacity_generation.unwrap_or(0),
+            ),
+            transport: CapacityTransport::Announce,
+        }
+    }
+
+    /// The pull half: a `ping` reply. `None` for a pre-field daemon, which
+    /// reports no `slots` at all and so supplies no capacity — the silence the
+    /// design #293 §8 stale-capacity warning is there to surface, rather than a
+    /// zero the dispatcher would schedule on.
+    pub fn from_ping(ping: &PingOk) -> Option<Self> {
+        Some(Self {
+            slots: ping.slots?,
+            slots_max: ping.slots_max,
+            mark: (
+                ping.capacity_epoch.unwrap_or(0),
+                ping.capacity_generation.unwrap_or(0),
+            ),
+            transport: CapacityTransport::Ping,
+        })
+    }
+}
+
+/// The dispatcher's per-node record of what the node has reported (spec §3.1
+/// slot source): the `(epoch, generation)` watermark of the last applied
+/// observation, the ceiling it named, and when it arrived.
+///
+/// `Default` is "never observed": watermark `(0, 0)` and no
+/// `observed_at` — the state in which the `DOCKER_NODES` seed is still the
+/// number in force and the node reports `capacity_source: "seed"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ObservedCapacity {
+    /// Last applied ordering pair. `(0, 0)` before any observation, which is
+    /// also what a pre-field daemon's messages read as — so its unordered
+    /// reports apply until a real pair arrives, and never after.
+    pub mark: (u64, u64),
+    /// The node's ceiling as of the last observation that carried one.
+    pub slots_max: Option<u32>,
+    /// When the node last reported capacity; `None` ⇒ never observed.
+    pub observed_at: Option<DateTime<Utc>>,
+}
+
+/// The spec §3.1 ordering rule, pure over the node's watermark and the
+/// observation in hand.
+///
+/// An **announce** applies only when its pair is at least the watermark, so a
+/// stale in-flight heartbeat cannot undo a fresher observation; because the
+/// epoch advances on every daemon restart, a restarted daemon's generation-0
+/// reports still land. A **`ping` reply applies unconditionally** — it is
+/// request-reply on a live connection and so cannot be stale. That backstop is
+/// load-bearing: it is what stops any ordering anomaly (a backwards clock jump,
+/// a constant-epoch daemon, a bug in this rule) from *permanently* freezing a
+/// node's capacity, making the failure self-healing at the next placement probe
+/// rather than terminal.
+pub fn capacity_applies(watermark: (u64, u64), observation: &CapacityObservation) -> bool {
+    match observation.transport {
+        CapacityTransport::Ping => true,
+        CapacityTransport::Announce => observation.mark >= watermark,
+    }
+}
+
+impl ObservedCapacity {
+    /// Ingest one observation under [`capacity_applies`], returning whether it
+    /// won and so must be installed as the node's live slot count. An applied
+    /// `ping` **resets** the watermark to the pair it carries, even downwards;
+    /// an applied announce only ever moves it forward.
+    pub fn apply(&mut self, observation: &CapacityObservation, at: DateTime<Utc>) -> bool {
+        let before = self.mark;
+        if !capacity_applies(before, observation) {
+            debug_assert!(
+                observation.transport == CapacityTransport::Announce,
+                "only an announce may be discarded — a ping is the anti-freeze backstop"
+            );
+            return false;
+        }
+        self.mark = observation.mark;
+        // Keep the last ceiling the node named: a report that omits it says
+        // nothing about the ceiling, and forgetting it would un-bound the UI's
+        // stepper for no reason.
+        self.slots_max = observation.slots_max.or(self.slots_max);
+        self.observed_at = Some(at);
+        debug_assert!(
+            observation.transport == CapacityTransport::Ping || self.mark >= before,
+            "an applied announce may never move the watermark backwards"
+        );
+        debug_assert!(
+            self.observed_at.is_some(),
+            "an applied observation must leave the node observed"
+        );
+        true
+    }
+
+    /// Provenance for the fleet records (design #293 §7/§8): the node's own
+    /// report once it has ever made one, the boot seed until then.
+    pub fn source(&self) -> CapacitySource {
+        match self.observed_at {
+            Some(_) => CapacitySource::Node,
+            None => CapacitySource::Seed,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -698,6 +850,121 @@ mod tests {
         let req = SetSlotsRequest { slots: 0 };
         let json = serde_json::to_string(&req).unwrap();
         assert_eq!(serde_json::from_str::<SetSlotsRequest>(&json).unwrap(), req);
+    }
+
+    fn announce_at(slots: u32, epoch: u64, generation: u64) -> CapacityObservation {
+        CapacityObservation::from_announce(&WorkerAnnounce {
+            node: "air".into(),
+            slots,
+            slots_max: Some(6),
+            capacity_epoch: Some(epoch),
+            capacity_generation: Some(generation),
+            version: "0.1.0".into(),
+        })
+    }
+
+    fn ping_at(slots: u32, epoch: u64, generation: u64) -> CapacityObservation {
+        CapacityObservation::from_ping(&PingOk {
+            running: 0,
+            slots: Some(slots),
+            slots_max: Some(6),
+            capacity_epoch: Some(epoch),
+            capacity_generation: Some(generation),
+            version: "0.1.0".into(),
+            artifacts: HashMap::new(),
+            refresh_outcome: None,
+            refresh_progress: None,
+        })
+        .expect("a ping reporting slots is an observation")
+    }
+
+    /// The spec §3.1 ordering rule, case by case. Each of these is a failure
+    /// mode design #293 §1 names by hand, and the pair exists because a
+    /// generation counter alone fails the second one.
+    #[test]
+    fn capacity_ordering_rule() {
+        let now = chrono::Utc::now();
+        let mut observed = ObservedCapacity::default();
+        assert_eq!(observed.source(), CapacitySource::Seed);
+        assert_eq!(observed.observed_at, None);
+
+        // First ordered observation lands and raises the watermark.
+        assert!(observed.apply(&announce_at(4, 1_000, 3), now));
+        assert_eq!(observed.mark, (1_000, 3));
+        assert_eq!(observed.source(), CapacitySource::Node);
+        assert_eq!(observed.slots_max, Some(6));
+
+        // A stale announce — same epoch, LOWER generation — is discarded, so an
+        // in-flight heartbeat cannot undo a fresher observation.
+        assert!(!observed.apply(&announce_at(2, 1_000, 2), now));
+        assert_eq!(
+            observed.mark,
+            (1_000, 3),
+            "watermark untouched by a discard"
+        );
+        // The same pair re-arriving still applies: the rule is `>=`, so a
+        // re-announce of the number in force is never dropped.
+        assert!(observed.apply(&announce_at(4, 1_000, 3), now));
+
+        // The daemon restarts: its generation resets to 0, but the epoch
+        // advanced, so its observations still land. A counter-only key would
+        // have frozen this node's capacity at every deploy — `worker-refresh.sh`
+        // recreates the daemon container on each one.
+        assert!(observed.apply(&announce_at(2, 2_000, 0), now));
+        assert_eq!(observed.mark, (2_000, 0));
+
+        // The anti-freeze backstop: a ping applies even when its pair is LOWER
+        // than the last applied one, and RESETS the watermark to what it carries
+        // — so no ordering anomaly can permanently discard a node's reports.
+        assert!(observed.apply(&ping_at(5, 500, 0), now));
+        assert_eq!(observed.mark, (500, 0), "a ping resets, it does not merge");
+        // Having reset, an announce at the reset epoch is ordered normally again.
+        assert!(observed.apply(&announce_at(5, 500, 1), now));
+        assert_eq!(observed.mark, (500, 1));
+    }
+
+    /// A pre-field daemon supplies no pair, which reads as `(0, 0)`: its
+    /// announces apply while the node has no ordered observation, and never
+    /// once one has arrived. A rolled-back node therefore stops supplying
+    /// capacity rather than silently winning with an unordered number.
+    #[test]
+    fn no_epoch_observation_applies_only_before_the_first_ordered_one() {
+        let now = chrono::Utc::now();
+        let unordered = CapacityObservation::from_announce(&WorkerAnnounce {
+            node: "air".into(),
+            slots: 2,
+            slots_max: None,
+            capacity_epoch: None,
+            capacity_generation: None,
+            version: "0.1.0".into(),
+        });
+        assert_eq!(unordered.mark, (0, 0));
+
+        let mut observed = ObservedCapacity::default();
+        assert!(observed.apply(&unordered, now), "nothing ordered yet");
+        assert_eq!(observed.slots_max, None);
+        // Still nothing ordered: repeated pre-field announces keep applying.
+        assert!(observed.apply(&unordered, now));
+
+        // An ordered observation arrives; the pre-field one can never win again.
+        assert!(observed.apply(&announce_at(4, 1_000, 0), now));
+        assert!(!observed.apply(&unordered, now));
+        assert_eq!(observed.mark, (1_000, 0));
+
+        // A pre-field daemon's ping reports no `slots` at all — silence about
+        // capacity, not a zero to schedule on.
+        let silent = PingOk {
+            running: 0,
+            slots: None,
+            slots_max: None,
+            capacity_epoch: None,
+            capacity_generation: None,
+            version: "0.1.0".into(),
+            artifacts: HashMap::new(),
+            refresh_outcome: None,
+            refresh_progress: None,
+        };
+        assert_eq!(CapacityObservation::from_ping(&silent), None);
     }
 
     /// The relay cadence (ticket #253): a phase CHANGE always prints, an

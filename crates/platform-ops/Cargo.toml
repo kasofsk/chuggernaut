@@ -20,5 +20,12 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+# Tests only: the capacity-provenance cases need a concrete
+# `DateTime<Utc>` to stamp `ObservedCapacity::observed_at` with. Already a
+# workspace dependency (`types` exposes the type in its public API); nothing in
+# this crate's own code takes a clock.
+[dev-dependencies]
+chrono.workspace = true
+
 [lints]
 workspace = true

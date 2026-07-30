@@ -424,10 +424,13 @@ pub enum Msg {
     /// into the live fleet *inside the actor* — the fleet's single writer — so
     /// scheduling and the NoCapacity launch queue see the capacity immediately.
     /// One-way: a heartbeat carries no reply.
+    ///
+    /// Carries the whole announce, not its slot count alone, because the
+    /// capacity it reports is only applied when its
+    /// `(capacity_epoch, capacity_generation)` pair clears the node's watermark
+    /// (spec §3.1 slot source) — a decision the pair has to travel for.
     WorkerAnnounce {
-        node: String,
-        slots: u32,
-        version: String,
+        announce: types::worker::WorkerAnnounce,
     },
 }
 
@@ -510,13 +513,9 @@ impl CoreHandle {
     /// Forward a worker announce heartbeat into the actor (spec §3.1 dynamic
     /// registration). One-way — the announce subscriber does not wait for a
     /// reply; the actor merges the node into the live fleet on its own turn.
-    pub async fn announce_worker(&self, node: String, slots: u32, version: String) -> Result<()> {
+    pub async fn announce_worker(&self, announce: types::worker::WorkerAnnounce) -> Result<()> {
         self.tx
-            .send(Msg::WorkerAnnounce {
-                node,
-                slots,
-                version,
-            })
+            .send(Msg::WorkerAnnounce { announce })
             .await
             .map_err(|_| CoreError::Stopped)
     }
@@ -893,6 +892,14 @@ pub struct Core {
     /// seed that also re-announces (e.g. to change its slot count) is not removed
     /// from scheduling just because it stops announcing.
     pub(crate) seed_node_names: HashSet<String>,
+    /// When this dispatcher started, for the design #293 §8 grace period: a
+    /// worker is only accused of never reporting capacity once it has had a few
+    /// minutes past OUR start to do so.
+    pub(crate) started_at: DateTime<Utc>,
+    /// Node → when the §8 never-observed warning last fired for it, so the
+    /// warning stays at a bounded cadence. Pruned each scan to nodes still in
+    /// that state, so it can never outgrow the roster.
+    pub(crate) capacity_warned_at: HashMap<String, DateTime<Utc>>,
     /// Golden-trace recorder (refactor-plan B3, [`crate::trace`]). `None` in
     /// production — a test attaches a [`crate::trace::TraceSink`] via
     /// [`Core::attach_trace`] to capture every transition and effect. Inert
@@ -1017,6 +1024,8 @@ impl Core {
             last_fleet_status: None,
             announced_workers: HashMap::new(),
             seed_node_names: HashSet::new(),
+            started_at: Utc::now(),
+            capacity_warned_at: HashMap::new(),
             trace: None,
             invariant_sink: None,
         };
@@ -1090,11 +1099,20 @@ impl Core {
     /// Merge a worker announce into the live fleet (spec §3.1 dynamic
     /// registration). Runs on the single-writer actor, so it is the fleet's sole
     /// writer. Records the heartbeat for the timeout scan, hands the node to the
-    /// backend (which applies the announce-wins precedence), and reflects the
-    /// membership/capacity in the roster the UI reads (`fleet.status` / the
-    /// config snapshot). The `Core::run` loop then re-drains the launch queue and
-    /// republishes fleet status, so newly-announced capacity is used at once.
-    pub(crate) fn on_worker_announce(&mut self, node: String, slots: u32, version: String) {
+    /// backend (which applies the precedence and the `(epoch, generation)`
+    /// ordering), and reflects the membership in the roster the UI reads
+    /// (`fleet.status` / the config snapshot). The `Core::run` loop then
+    /// re-drains the launch queue and republishes fleet status, so
+    /// newly-announced capacity is used at once.
+    ///
+    /// The roster deliberately does **not** take the announce's slot count for a
+    /// node it already knows: the backend owns observed capacity across both
+    /// transports and reports it back through `fleet_status`, so a stale
+    /// announce that lost the ordering race cannot smuggle its number into the
+    /// snapshot by the side door (design #293 §1/§7).
+    pub(crate) fn on_worker_announce(&mut self, announce: types::worker::WorkerAnnounce) {
+        let (node, version) = (announce.node.clone(), announce.version.clone());
+        let capacity = types::CapacityObservation::from_announce(&announce);
         // Only a fleet-capable backend can route to an announced node. On a
         // single-node Docker deployment (no announcing workers by design) a stray
         // or misconfigured announce would otherwise insert a phantom worker into
@@ -1108,28 +1126,39 @@ impl Core {
         self.announced_workers.insert(node.clone(), Utc::now());
         let joined = self
             .backend
-            .register_worker(&node, slots, Some(version.clone()));
+            .register_worker(&node, capacity, Some(version.clone()));
         if joined {
-            tracing::info!(node = %node, slots, version = %version, "worker joined the live fleet");
+            tracing::info!(
+                node = %node,
+                slots = capacity.slots,
+                version = %version,
+                "worker joined the live fleet"
+            );
         }
         match self.fleet_roster.iter_mut().find(|n| n.name == node) {
             // A worker (seed or previously-announced) of this name: the live
-            // announcement wins on slots/version and re-admits it.
+            // announcement re-admits it and refreshes its version. Its slots stay
+            // the boot seed here — the pre-observation fallback the backend's
+            // observed number supersedes (design #293 §7).
             Some(n) if n.endpoint == worker::backend::WORKER_ENDPOINT => {
-                n.slots = slots;
                 n.available = true;
                 n.version = Some(version);
             }
             // The name is held by a docker-endpoint node — the backend already
             // refused it; leave the roster untouched.
             Some(_) => {}
+            // A node that was never seeded has no seed to fall back to, so its
+            // roster entry starts at what it just reported; provenance is filled
+            // from the backend when the snapshot is composed.
             None => self.fleet_roster.push(types::WorkerNode {
                 name: node,
                 endpoint: worker::backend::WORKER_ENDPOINT.to_string(),
-                slots,
+                slots: capacity.slots,
                 available: true,
                 version: Some(version),
                 refresh_outcome: None,
+                capacity_source: None,
+                capacity_observed_at: None,
             }),
         }
     }
@@ -1488,12 +1517,8 @@ impl Core {
                     tracing::error!("deferring launch for {owner}/{project}#{seq}: {e}");
                 }
             }
-            Msg::WorkerAnnounce {
-                node,
-                slots,
-                version,
-            } => {
-                self.on_worker_announce(node, slots, version);
+            Msg::WorkerAnnounce { announce } => {
+                self.on_worker_announce(announce);
             }
         }
     }

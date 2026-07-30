@@ -26,7 +26,7 @@ pub async fn spawn_worker_announce_handler(
         while let Some(req) = sub.next().await {
             match serde_json::from_slice::<types::worker::WorkerAnnounce>(&req.payload) {
                 Ok(a) => {
-                    if let Err(e) = handle.announce_worker(a.node, a.slots, a.version).await {
+                    if let Err(e) = handle.announce_worker(a).await {
                         tracing::warn!("worker announce forward failed: {e}");
                     }
                 }

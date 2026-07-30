@@ -280,6 +280,8 @@ async fn worker_that_cannot_list_shows_out_of_service_not_idle() {
         available: true,
         version: None,
         refresh_outcome: None,
+        capacity_source: None,
+        capacity_observed_at: None,
     }]);
     let (_handle, sink) = spawn_checked(core);
 
@@ -397,6 +399,8 @@ async fn occupancy_reflects_worker_rpc_launch_and_exit_through_the_store() {
         available: true,
         version: None,
         refresh_outcome: None,
+        capacity_source: None,
+        capacity_observed_at: None,
     }]);
     let (handle, sink) = spawn_checked(core);
 

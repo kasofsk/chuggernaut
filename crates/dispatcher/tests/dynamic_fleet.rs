@@ -94,6 +94,30 @@ fn seeded_work_task(id: u64, job_seq: u64, container_id: &str) -> Task {
     }
 }
 
+/// A node's announce heartbeat, ordered at `(epoch, generation)` — the pair the
+/// dispatcher sequences observations by (spec §3.1 slot source). The default
+/// pair here is a fresh epoch at generation 0, i.e. what a just-started daemon
+/// publishes; tests that care about ordering set it explicitly.
+fn announce(node: &str, slots: u32, version: &str) -> types::worker::WorkerAnnounce {
+    announce_at(node, slots, version, (1_000, 0))
+}
+
+fn announce_at(
+    node: &str,
+    slots: u32,
+    version: &str,
+    (epoch, generation): (u64, u64),
+) -> types::worker::WorkerAnnounce {
+    types::worker::WorkerAnnounce {
+        node: node.into(),
+        slots,
+        slots_max: Some(8),
+        capacity_epoch: Some(epoch),
+        capacity_generation: Some(generation),
+        version: version.into(),
+    }
+}
+
 fn worker_node(name: &str, slots: u32, version: Option<&str>) -> WorkerNode {
     WorkerNode {
         name: name.into(),
@@ -102,6 +126,8 @@ fn worker_node(name: &str, slots: u32, version: Option<&str>) -> WorkerNode {
         available: true,
         version: version.map(Into::into),
         refresh_outcome: None,
+        capacity_source: None,
+        capacity_observed_at: None,
     }
 }
 
@@ -250,7 +276,7 @@ async fn announce_adds_capacity_and_drains_launch_queue() {
     // A new worker announces: capacity appears, and the actor re-drains the
     // launch queue on the same turn — the queued launch fires onto the fleet.
     handle
-        .announce_worker("nuc".into(), 2, "0.1.0+nuc".into())
+        .announce_worker(announce("nuc", 2, "0.1.0+nuc"))
         .await
         .unwrap();
     assert_invariants_of(&sink);
@@ -318,7 +344,7 @@ async fn heartbeat_loss_stops_placement_but_preserves_running() {
 
     // `nuc` announces: it joins the fleet and supplies capacity.
     handle
-        .announce_worker("nuc".into(), 2, "0.1.0+nuc".into())
+        .announce_worker(announce("nuc", 2, "0.1.0+nuc"))
         .await
         .unwrap();
     assert_invariants_of(&sink);
@@ -375,13 +401,13 @@ async fn static_and_dynamic_merge_precedence() {
 
     // Re-announce `air` at 5 slots (the air 4→5 case): the live value wins.
     handle
-        .announce_worker("air".into(), 5, "0.2.0+air".into())
+        .announce_worker(announce("air", 5, "0.2.0+air"))
         .await
         .unwrap();
     assert_invariants_of(&sink);
     // And a brand-new node joins.
     handle
-        .announce_worker("nuc".into(), 2, "0.1.0+nuc".into())
+        .announce_worker(announce("nuc", 2, "0.1.0+nuc"))
         .await
         .unwrap();
     assert_invariants_of(&sink);
@@ -399,6 +425,78 @@ async fn static_and_dynamic_merge_precedence() {
     assert!(reg.iter().any(|(n, s, _)| n == "air" && *s == 5));
     assert!(reg.iter().any(|(n, s, _)| n == "nuc" && *s == 2));
     assert_invariants_of(&sink);
+}
+
+/// The ordering pair survives the whole announce path — subscriber → `Msg` →
+/// actor → backend — and the fleet snapshot carries the provenance (spec §3.1
+/// slot source, design #293 §7/§8). A seeded node reads `seed` until it reports;
+/// a stale re-announce (same epoch, lower generation) is discarded rather than
+/// lowering the number the fleet is placing on.
+#[tokio::test]
+async fn announce_ordering_and_provenance_reach_the_snapshot() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let backend = Arc::new(FakeBackend::new());
+    // What a real `FleetBackend` reports for a seeded worker node that has never
+    // observed capacity: the seed slot cell, and a default (never-observed)
+    // `ObservedCapacity` whose provenance is therefore `seed`. The announce below
+    // updates this same entry in place.
+    backend.set_fleet_status([container::NodeStatus {
+        name: "air".into(),
+        available: true,
+        version: Some("0.1.0+air".into()),
+        refresh_outcome: None,
+        slots: Some(2),
+        capacity: Some(types::worker::ObservedCapacity::default()),
+    }]);
+    let (handle, _repo, sink) = spawn_core(
+        server,
+        &store,
+        vec![worker_node("air", 2, Some("0.1.0+air"))],
+        None,
+        backend.clone(),
+    )
+    .await;
+
+    // Before any announce: the boot seed is what we place on, and it says so.
+    let seeded = wait_for_fleet(&store, |f| f.nodes.iter().any(|n| n.name == "air")).await;
+    let air = node(&seeded, "air");
+    assert_eq!(air.slots, Some(2));
+    assert_eq!(air.capacity_source, Some(types::CapacitySource::Seed));
+    assert_eq!(air.capacity_observed_at, None);
+
+    // The node reports 4 at (1000, 3): provenance flips to `node`.
+    handle
+        .announce_worker(announce_at("air", 4, "0.2.0+air", (1_000, 3)))
+        .await
+        .unwrap();
+    assert_invariants_of(&sink);
+    let observed = wait_for_fleet(&store, |f| node_slots(f, "air") == Some(Some(4))).await;
+    let air = node(&observed, "air");
+    assert_eq!(air.capacity_source, Some(types::CapacitySource::Node));
+    assert!(air.capacity_observed_at.is_some());
+
+    // A stale in-flight heartbeat (same epoch, LOWER generation) must not undo
+    // it. Round-trip the actor so the snapshot has certainly been recomputed.
+    handle
+        .announce_worker(announce_at("air", 1, "0.2.0+air", (1_000, 2)))
+        .await
+        .unwrap();
+    handle.ping().await.unwrap();
+    handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&sink);
+    let after = wait_for_fleet(&store, |_| true).await;
+    assert_eq!(
+        node(&after, "air").slots,
+        Some(4),
+        "a stale announce lowered the fleet's capacity"
+    );
 }
 
 /// The #60 interaction: the dispatcher boots with zero configured nodes and
@@ -426,7 +524,7 @@ async fn zero_seed_boot_then_announce() {
     // The first worker announces: it becomes live fleet membership and its
     // capacity drains the queued launch.
     handle
-        .announce_worker("air".into(), 4, "0.1.0+air".into())
+        .announce_worker(announce("air", 4, "0.1.0+air"))
         .await
         .unwrap();
     assert_invariants_of(&sink);
@@ -461,7 +559,7 @@ async fn non_fleet_backend_drops_stray_announce() {
 
     // A misconfigured worker announces — the dispatcher must drop it.
     handle
-        .announce_worker("ghost".into(), 2, "0.1.0+ghost".into())
+        .announce_worker(announce("ghost", 2, "0.1.0+ghost"))
         .await
         .unwrap();
     assert_invariants_of(&sink);
@@ -514,12 +612,24 @@ async fn ping_refresh_outcome_lands_in_fleet_status() {
                 from_sha: "old".into(),
                 to_sha: "target".into(),
             }),
+            slots: Some(4),
+            capacity: Some(types::worker::ObservedCapacity {
+                mark: (1_000, 0),
+                slots_max: Some(8),
+                observed_at: Some(chrono::Utc::now()),
+            }),
         },
         container::NodeStatus {
             name: "nuc".into(),
             available: true,
             version: Some("0.1.0+old".into()),
             refresh_outcome: None,
+            slots: Some(2),
+            capacity: Some(types::worker::ObservedCapacity {
+                mark: (1_000, 0),
+                slots_max: Some(8),
+                observed_at: Some(chrono::Utc::now()),
+            }),
         },
     ]);
     let (handle, _repo, sink) = spawn_core(server, &store, vec![], None, backend.clone()).await;

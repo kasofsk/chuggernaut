@@ -8,6 +8,10 @@ license.workspace = true
 types.workspace = true
 store.workspace = true
 container.workspace = true
+# The fake backend stamps `ObservedCapacity::observed_at` when it applies an
+# announce, mirroring the real fleet backend (spec §3.1 slot source); already a
+# workspace dependency, and this crate is test-harness code only.
+chrono.workspace = true
 agent.workspace = true
 vcs.workspace = true
 async-trait.workspace = true

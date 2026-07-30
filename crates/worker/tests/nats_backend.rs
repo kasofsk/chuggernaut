@@ -208,6 +208,42 @@ async fn mock_worker(store: &store::NatsStore, node: &str) -> tokio::task::JoinH
     })
 }
 
+/// A stand-in worker on the job-2 build: its `ping` reply carries the node's
+/// capacity and the `(epoch, generation)` pair that orders it (spec §3.1 slot
+/// source). Used to exercise the pull transport — the half that makes the
+/// 2026-07-26 denied-publish failure self-correcting.
+async fn capacity_worker(
+    store: &store::NatsStore,
+    node: &str,
+    slots: u32,
+) -> tokio::task::JoinHandle<()> {
+    let mut sub = store
+        .subscribe_requests(&store::subjects::worker_all(node))
+        .await
+        .expect("subscribe capacity worker");
+    store.client().flush().await.expect("flush sub");
+    tokio::spawn(async move {
+        while let Some(req) = sub.next().await {
+            if req.subject.ends_with(".ping") {
+                let reply = types::worker::WorkerReply::Ok {
+                    value: types::worker::PingOk {
+                        running: 0,
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        artifacts: std::collections::HashMap::new(),
+                        slots: Some(slots),
+                        slots_max: Some(8),
+                        capacity_epoch: Some(1_769_000_000_123),
+                        capacity_generation: Some(0),
+                        refresh_outcome: None,
+                        refresh_progress: None,
+                    },
+                };
+                req.respond(serde_json::to_vec(&reply).unwrap()).await;
+            }
+        }
+    })
+}
+
 /// A stand-in worker that models a real node's live count: it answers `launch`
 /// (bumping an internal counter and returning a synthetic id) and reports that
 /// counter as `ping.running`. No Docker — but the ping accounting placement
@@ -406,6 +442,90 @@ async fn no_reachable_capacity_fails_startup() {
     )
     .unwrap();
     assert!(fleet.startup_check().await.is_err());
+}
+
+/// The ordering `startup_check` depends on and design #293 §1 calls load-bearing:
+/// `probe_worker` applies ping-reported capacity to the slot cell on the reply
+/// path, and only THEN does the gate read that cell. The seed here is
+/// `|worker|0` — the §7 recommendation — so the number the fleet ends up serving
+/// can ONLY have come from the ping. Read it back the way the gate does, before
+/// any placement has run.
+#[tokio::test]
+async fn ping_reported_slots_reach_the_startup_gate() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let mock = capacity_worker(&store, "air", 2).await;
+    let fleet = FleetBackend::new(
+        vec![DockerNodeConfig {
+            name: "air".into(),
+            endpoint: "worker".into(),
+            slots: 0,
+        }],
+        store,
+        PlacementPolicy::default(),
+    )
+    .unwrap();
+
+    fleet.startup_check().await.unwrap();
+
+    let air = fleet
+        .fleet_status()
+        .into_iter()
+        .find(|n| n.name == "air")
+        .expect("air is in the fleet");
+    assert_eq!(
+        air.slots,
+        Some(2),
+        "the gate's slot cell must hold the ping-reported number, not the 0 seed"
+    );
+    let capacity = air.capacity.expect("a worker node carries provenance");
+    assert_eq!(capacity.source(), types::worker::CapacitySource::Node);
+    assert!(capacity.observed_at.is_some());
+    assert_eq!(capacity.mark, (1_769_000_000_123, 0));
+    assert_eq!(capacity.slots_max, Some(8));
+    mock.abort();
+}
+
+/// The incident's representation (design #293 §7/§8): a node that answers pings
+/// on a pre-field build reports no capacity at all, so the `DOCKER_NODES` seed
+/// keeps standing in — and the fleet snapshot says `seed`, never confirmed,
+/// instead of being indistinguishable from a healthy node.
+#[tokio::test]
+async fn never_reporting_worker_is_visible_as_seed_sourced() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let mock = mock_worker(&store, "air").await; // reports no capacity
+    let fleet = FleetBackend::new(
+        vec![DockerNodeConfig {
+            name: "air".into(),
+            endpoint: "worker".into(),
+            slots: 2,
+        }],
+        store,
+        PlacementPolicy::default(),
+    )
+    .unwrap();
+
+    fleet.startup_check().await.unwrap();
+
+    let air = fleet
+        .fleet_status()
+        .into_iter()
+        .find(|n| n.name == "air")
+        .expect("air is in the fleet");
+    assert!(
+        air.available,
+        "it answers its pings — that is the signature"
+    );
+    assert_eq!(air.slots, Some(2), "the seed is still what we place on");
+    let capacity = air.capacity.expect("a worker node carries provenance");
+    assert_eq!(capacity.source(), types::worker::CapacitySource::Seed);
+    assert_eq!(capacity.observed_at, None);
+    mock.abort();
 }
 
 /// Spawn a worker daemon (node `node`, local Docker) with an optional

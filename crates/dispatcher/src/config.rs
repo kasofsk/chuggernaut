@@ -239,12 +239,21 @@ impl DispatcherConfig {
                     types::WorkerNode {
                         name: n.name.clone(),
                         endpoint: n.endpoint.clone(),
-                        slots: n.slots,
+                        // The number the fleet actually places on: observed if
+                        // the boot probe pulled capacity from the node, the
+                        // `DOCKER_NODES` seed as the fallback until then (design
+                        // #293 §7). A docker-endpoint node reports no live slots,
+                        // so its seed stands outright — and `capacity_source`
+                        // below always describes *this* number, never the other.
+                        slots: status.and_then(|s| s.slots).unwrap_or(n.slots),
                         // Absent from the probe ⇒ assume up (same node set, so
                         // this is belt-and-suspenders).
                         available: status.map(|s| s.available).unwrap_or(true),
                         version: status.and_then(|s| s.version.clone()),
                         refresh_outcome: status.and_then(|s| s.refresh_outcome.clone()),
+                        capacity_source: status.and_then(|s| s.capacity.map(|c| c.source())),
+                        capacity_observed_at: status
+                            .and_then(|s| s.capacity.and_then(|c| c.observed_at)),
                     }
                 })
                 .collect(),
@@ -377,6 +386,8 @@ mod tests {
             available: false,
             version: Some("0.1.0+abc".into()),
             refresh_outcome: None,
+            slots: None,
+            capacity: None,
         }];
         let snap = snapshot_config().base_snapshot(&fleet, Some("abc".into()), true);
         assert_eq!(snap.nodes.len(), 1);
@@ -385,6 +396,67 @@ mod tests {
         assert_eq!(snap.dispatcher_sha.as_deref(), Some("abc"));
         assert_eq!(snap.main_tip_sha, None);
         assert_eq!(snap.commits_behind, None);
+    }
+
+    /// The boot snapshot's slot count and its provenance always describe the
+    /// same number (design #293 §7): a worker node whose startup probe pulled
+    /// capacity publishes the *observed* count as `node`, while a docker-endpoint
+    /// node — which reports no live slots — keeps its `DOCKER_NODES` seed and no
+    /// provenance at all. Publishing a seed labelled `node` would make the §8
+    /// never-observed warning read against a number it doesn't describe.
+    #[test]
+    fn base_snapshot_publishes_observed_capacity_with_its_provenance() {
+        let observed_at = chrono::Utc::now();
+        // The startup probe applied a ping-reported 2 (the seed says 4).
+        let fleet = vec![container::NodeStatus {
+            name: "nuc".into(),
+            available: true,
+            version: None,
+            refresh_outcome: None,
+            slots: Some(2),
+            capacity: Some(types::worker::ObservedCapacity {
+                mark: (1_000, 0),
+                slots_max: Some(8),
+                observed_at: Some(observed_at),
+            }),
+        }];
+        let snap = snapshot_config().base_snapshot(&fleet, None, true);
+        assert_eq!(snap.nodes[0].slots, 2, "the seed outlived its observation");
+        assert_eq!(
+            snap.nodes[0].capacity_source,
+            Some(types::worker::CapacitySource::Node)
+        );
+        assert_eq!(snap.nodes[0].capacity_observed_at, Some(observed_at));
+
+        // A never-observed worker node: the seed, said to be the seed.
+        let unobserved = vec![container::NodeStatus {
+            name: "nuc".into(),
+            available: true,
+            version: None,
+            refresh_outcome: None,
+            slots: Some(4),
+            capacity: Some(types::worker::ObservedCapacity::default()),
+        }];
+        let snap = snapshot_config().base_snapshot(&unobserved, None, true);
+        assert_eq!(snap.nodes[0].slots, 4);
+        assert_eq!(
+            snap.nodes[0].capacity_source,
+            Some(types::worker::CapacitySource::Seed)
+        );
+        assert_eq!(snap.nodes[0].capacity_observed_at, None);
+
+        // A docker-endpoint node reports neither, so `DOCKER_NODES` owns it.
+        let docker = vec![container::NodeStatus {
+            name: "nuc".into(),
+            available: true,
+            version: None,
+            refresh_outcome: None,
+            slots: None,
+            capacity: None,
+        }];
+        let snap = snapshot_config().base_snapshot(&docker, None, true);
+        assert_eq!(snap.nodes[0].slots, 4);
+        assert_eq!(snap.nodes[0].capacity_source, None);
     }
 
     /// The republish decision `platform_ops::cd::refresh` makes compares
@@ -397,6 +469,8 @@ mod tests {
             available: true,
             version: Some("0.1.0+abc".into()),
             refresh_outcome: None,
+            slots: None,
+            capacity: None,
         }];
         let base = snapshot_config().base_snapshot(&fleet, Some("abc".into()), true);
         let published = serde_json::to_vec(&base).unwrap();

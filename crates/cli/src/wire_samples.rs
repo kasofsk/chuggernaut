@@ -211,6 +211,8 @@ fn sample_fleet() -> types::FleetStatus {
             available: true,
             version: Some("chuggernaut 0.1.0 (2222222)".into()),
             refresh_outcome: Some(sample_refresh_outcome()),
+            capacity_source: Some(types::CapacitySource::Node),
+            capacity_observed_at: Some(at("2026-07-24T17:07:00Z")),
             running: vec![types::SlotOccupant {
                 project: "acme/api".into(),
                 job_seq: 42,
@@ -234,6 +236,8 @@ fn sample_dispatcher_snapshot() -> types::DispatcherConfigSnapshot {
             available: true,
             version: Some("chuggernaut 0.1.0 (2222222)".into()),
             refresh_outcome: Some(sample_refresh_outcome()),
+            capacity_source: Some(types::CapacitySource::Node),
+            capacity_observed_at: Some(at("2026-07-24T17:07:00Z")),
         }],
         agent_provider_default: "claude".into(),
         agent_model_default: Some("claude-opus-5".into()),

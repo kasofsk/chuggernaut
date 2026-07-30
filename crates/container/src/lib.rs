@@ -230,16 +230,25 @@ pub trait ContainerBackend: Send + Sync {
 
     /// Apply a worker's announce heartbeat (spec §3.1 dynamic registration):
     /// add it to the live fleet, or update the slot count / build version of an
-    /// existing entry. The live announcement wins over a static `DOCKER_NODES`
-    /// seed of the same name. Returns whether this *changed* fleet membership
-    /// or capacity (a new node, or a slot-count change) — so the caller can log
-    /// a join and only re-drain the launch queue when new capacity appeared.
+    /// existing entry. The node's own report wins over a static `DOCKER_NODES`
+    /// seed of the same name — but only when the observation's
+    /// `(capacity_epoch, capacity_generation)` pair is at least the node's
+    /// watermark, so a stale in-flight announce cannot undo a fresher
+    /// observation (`types::capacity_applies`). Returns whether this *changed*
+    /// fleet membership or capacity (a new node, or a slot-count change) — so
+    /// the caller can log a join and only re-drain the launch queue when new
+    /// capacity appeared.
     ///
     /// Default no-op returning `false`: only the worker fleet backend acts on
     /// announcements; single-node Docker, k8s, and the test fake ignore them.
     /// Called only from the dispatcher's single-writer actor, so implementations
     /// are the fleet's sole writer even though the method takes `&self`.
-    fn register_worker(&self, _name: &str, _slots: u32, _version: Option<String>) -> bool {
+    fn register_worker(
+        &self,
+        _name: &str,
+        _capacity: types::CapacityObservation,
+        _version: Option<String>,
+    ) -> bool {
         false
     }
 
@@ -288,6 +297,20 @@ pub struct NodeStatus {
     /// refreshed. Carried through to the platform snapshot so a failed refresh
     /// is durable, queryable fleet state.
     pub refresh_outcome: Option<types::worker::RefreshOutcome>,
+    /// The slot count the scheduler is actually using for this node (spec §3.1
+    /// slot source). `None` for a docker-endpoint node, whose capacity is static
+    /// `DOCKER_NODES` config the roster already carries. For a worker node this
+    /// is the observed number once the node has reported over either transport,
+    /// and the boot seed until then — which is exactly what
+    /// [`Self::capacity_source`] distinguishes.
+    pub slots: Option<u32>,
+    /// Provenance of [`Self::slots`] (design #293 §7/§8): the observation
+    /// watermark, the ceiling the node named, and when it last reported —
+    /// `ObservedCapacity::source()` turns the last of those into the
+    /// `node` | `seed` chip the fleet view shows. `None` for a docker-endpoint
+    /// node. A reachable worker whose `observed_at` is `None` is the
+    /// denied-publish signature of the 2026-07-26 incident.
+    pub capacity: Option<types::worker::ObservedCapacity>,
 }
 
 /// A running managed container tagged with the task it serves (spec §3.6 fleet

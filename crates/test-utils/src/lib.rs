@@ -102,6 +102,12 @@ struct FakeBackendState {
     /// real backend fills from worker pings (spec §3.1, ticket #187). Empty by
     /// default (the fake tracks capacity via `register_worker`, not health).
     fleet_status: Vec<NodeStatus>,
+    /// Per-node observed capacity, applied through the same ordering rule the
+    /// real fleet backend uses (spec §3.1 slot source). The real backend owns
+    /// observed capacity and reports it back through `fleet_status`, so the fake
+    /// has to as well — otherwise a dispatcher test would read an announced slot
+    /// count that no backend ever confirmed.
+    observed: std::collections::HashMap<String, (u32, types::ObservedCapacity)>,
 }
 
 impl Default for FakeBackend {
@@ -503,9 +509,22 @@ impl ContainerBackend for FakeBackend {
     /// `true` (membership/capacity changed) so the caller re-drains the queue.
     // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
     #[allow(clippy::unwrap_used)]
-    fn register_worker(&self, name: &str, slots: u32, version: Option<String>) -> bool {
+    fn register_worker(
+        &self,
+        name: &str,
+        capacity: types::CapacityObservation,
+        version: Option<String>,
+    ) -> bool {
         let mut st = self.state.lock().unwrap();
-        st.registered.push((name.to_string(), slots, version));
+        st.registered
+            .push((name.to_string(), capacity.slots, version));
+        // Order the observation exactly as the real backend does, so a stale
+        // announce is discarded here too and dispatcher tests see the same
+        // capacity the fleet would actually place on.
+        let entry = st.observed.entry(name.to_string()).or_default();
+        if entry.1.apply(&capacity, chrono::Utc::now()) {
+            entry.0 = capacity.slots;
+        }
         st.launch_fail = None;
         true
     }
@@ -521,10 +540,34 @@ impl ContainerBackend for FakeBackend {
         !self.state.lock().unwrap().no_dynamic_workers
     }
 
+    /// Explicitly-set health entries, with observed capacity folded in for every
+    /// node that has announced — the shape a real fleet backend reports (spec
+    /// §3.1 slot source). A node known only through an announce gets its own
+    /// entry, available unless it has since been deregistered, so the
+    /// dispatcher's snapshot sees capacity from the backend rather than from the
+    /// roster's boot seed.
     // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
     #[allow(clippy::unwrap_used)]
     fn fleet_status(&self) -> Vec<NodeStatus> {
-        self.state.lock().unwrap().fleet_status.clone()
+        let st = self.state.lock().unwrap();
+        let mut out = st.fleet_status.clone();
+        for (name, (slots, observed)) in &st.observed {
+            match out.iter_mut().find(|s| &s.name == name) {
+                Some(entry) => {
+                    entry.slots = Some(*slots);
+                    entry.capacity = Some(*observed);
+                }
+                None => out.push(NodeStatus {
+                    name: name.clone(),
+                    available: !st.unschedulable.contains(name),
+                    version: None,
+                    refresh_outcome: None,
+                    slots: Some(*slots),
+                    capacity: Some(*observed),
+                }),
+            }
+        }
+        out
     }
 
     /// Model heartbeat loss (spec §3.1): record the deregistration and, as the

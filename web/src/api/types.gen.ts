@@ -12,6 +12,14 @@
  */
 
 /**
+ * Where the slot count the scheduler is using came from (design #293 §7/§8).
+ * Reported per node on the fleet roster and `fleet.status` so a node running
+ * on the boot seed is *visible* rather than indistinguishable from a healthy
+ * one — the representation whose absence hid the 2026-07-26 incident for
+ * weeks.
+ */
+export type CapacitySource = "node" | "seed";
+/**
  * Status of one deploy leg. An unknown status fails to deserialize, so a
  * malformed leg line is dropped by the harvest rather than corrupting the
  * report.
@@ -407,6 +415,18 @@ export interface WorkerNode {
    */
   available: boolean;
   /**
+   * When the node last reported its capacity; `None` when it never has.
+   * Together with [`Self::capacity_source`] this is the representation whose
+   * absence let a fleet run for weeks on a boot seed nothing had confirmed.
+   */
+  capacity_observed_at?: string | null;
+  /**
+   * Where [`Self::slots`] came from (design #293 §7): the node's own report
+   * over either transport, or the `DOCKER_NODES` boot seed. `None` for a
+   * docker-endpoint node, whose capacity `DOCKER_NODES` still owns outright.
+   */
+  capacity_source?: CapacitySource | null;
+  /**
    * `unix:///var/run/docker.sock` or `tcp://host:2375`.
    */
   endpoint: string;
@@ -520,6 +540,17 @@ export interface FleetNode {
    * Node health at snapshot time (spec §3.1): `false` when out of service.
    */
   available: boolean;
+  /**
+   * When the node last reported its capacity; `None` when it never has.
+   */
+  capacity_observed_at?: string | null;
+  /**
+   * Where [`Self::slots`] came from (design #293 §7/§8): `node` once the node
+   * has reported over either transport, `seed` while the `DOCKER_NODES` boot
+   * value is still standing in for a report that never arrived. `None` for a
+   * docker-endpoint node, whose capacity `DOCKER_NODES` still owns.
+   */
+  capacity_source?: CapacitySource | null;
   name: string;
   /**
    * Busy slot count (`running.len()`), denormalized so the UI needn't count.

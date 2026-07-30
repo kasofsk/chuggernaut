@@ -585,6 +585,12 @@ impl ContainerBackend for DockerBackend {
                 available,
                 version: None,
                 refresh_outcome: None,
+                // A docker-endpoint node's capacity is static `DOCKER_NODES`
+                // config, not an observation: `DOCKER_NODES` remains its owner
+                // (design #293 §7), so it reports no capacity and no provenance
+                // and the roster's number stands.
+                slots: None,
+                capacity: None,
             })
             .collect()
     }

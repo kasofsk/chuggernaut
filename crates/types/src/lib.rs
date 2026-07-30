@@ -53,3 +53,6 @@ pub use user::{Identity, IdentityKind, ProjectRole, User};
 pub use version::{
     CHANNEL_PROTOCOL_VERSION, CONFIG_SCHEMA_EPOCH, INPUTS_SCHEMA_EPOCH, WORKER_RPC_VERSION,
 };
+pub use worker::{
+    CapacityObservation, CapacitySource, CapacityTransport, ObservedCapacity, capacity_applies,
+};

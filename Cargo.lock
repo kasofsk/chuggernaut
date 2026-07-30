@@ -717,6 +717,7 @@ name = "chuggernaut-platform-ops"
 version = "0.1.0"
 dependencies = [
  "agent",
+ "chrono",
  "container",
  "serde_json",
  "store",
@@ -3378,6 +3379,7 @@ version = "0.1.0"
 dependencies = [
  "agent",
  "async-trait",
+ "chrono",
  "container",
  "futures",
  "serde",

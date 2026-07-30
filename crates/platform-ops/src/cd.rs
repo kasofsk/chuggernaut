@@ -31,22 +31,30 @@ use vcs::RepoManager;
 /// Reconcile the config snapshot's node list with live fleet state, in place.
 ///
 /// For each existing node, refresh health/version from the backend probe
-/// (`fleet`). Slots and membership come from the announce roster (spec §3.1
-/// dynamic registration): a seeded worker that re-announced with a changed slot
-/// count (the "air 4→5" case) has its live count in the roster, so the snapshot
-/// tracks `fleet.status` rather than the boot `DOCKER_NODES` value; and workers
-/// announced after boot that aren't in the static seed are appended so the
-/// settings page reflects live membership.
+/// (`fleet`). Membership comes from the announce roster (spec §3.1 dynamic
+/// registration): workers announced after boot that aren't in the static seed
+/// are appended so the settings page reflects live membership.
+///
+/// Slots come from the node's own observation when it has made one (design #293
+/// §7): the backend reports the number it actually places on, over whichever
+/// transport carried it, so a re-announce at a new count (the "air 4→5" case)
+/// and a ping-pulled count both land here. The `DOCKER_NODES` roster value is
+/// the pre-observation fallback, and stays the owner for docker-endpoint nodes,
+/// which report no live slots at all.
 pub fn merge_live_fleet(nodes: &mut Vec<WorkerNode>, fleet: &[NodeStatus], roster: &[WorkerNode]) {
     for node in nodes.iter_mut() {
+        if let Some(r) = roster.iter().find(|r| r.name == node.name) {
+            node.slots = r.slots;
+        }
         if let Some(status) = fleet.iter().find(|s| s.name == node.name) {
             node.available = status.available;
             node.version = status.version.clone();
             node.refresh_outcome = status.refresh_outcome.clone();
-        }
-        // The live announcement wins on slots for a seeded worker.
-        if let Some(r) = roster.iter().find(|r| r.name == node.name) {
-            node.slots = r.slots;
+            node.capacity_source = status.capacity.map(|c| c.source());
+            node.capacity_observed_at = status.capacity.and_then(|c| c.observed_at);
+            if let Some(observed) = status.slots {
+                node.slots = observed;
+            }
         }
     }
     for r in roster {
@@ -181,33 +189,73 @@ mod tests {
             available: true,
             version: Some("0.1.0".into()),
             refresh_outcome: None,
+            capacity_source: None,
+            capacity_observed_at: None,
         }
     }
 
-    /// A seeded worker that re-announces with a changed slot count (air 4→5):
-    /// `merge_live_fleet` takes the live roster's slots, so the config snapshot
-    /// matches `fleet.status` instead of keeping the boot `DOCKER_NODES` count.
+    /// A seeded worker that reports a changed slot count (air 4→5):
+    /// `merge_live_fleet` takes the live observed count, so the config snapshot
+    /// matches `fleet.status` instead of keeping the boot `DOCKER_NODES` count —
+    /// and carries the provenance that says which of the two it is showing.
     #[test]
-    fn seed_worker_reannounce_updates_snapshot_slots() {
+    fn observed_capacity_updates_snapshot_slots() {
         // Snapshot node still carries the boot slot count of 4.
         let mut nodes = vec![worker("air", 4)];
-        // Backend probe reports it healthy with a live version.
+        // Backend probe reports it healthy at 5 slots, observed from the node.
+        let observed_at = chrono::Utc::now();
         let fleet = vec![NodeStatus {
             name: "air".into(),
             available: true,
             version: Some("0.2.0+air".into()),
             refresh_outcome: None,
+            slots: Some(5),
+            capacity: Some(types::worker::ObservedCapacity {
+                mark: (1_000, 1),
+                slots_max: Some(6),
+                observed_at: Some(observed_at),
+            }),
         }];
-        // Roster reflects the re-announce at 5 slots (announce wins).
-        let roster = vec![WorkerNode {
-            version: Some("0.2.0+air".into()),
-            ..worker("air", 5)
-        }];
+        // The roster still holds the boot seed — it is the fallback, not truth.
+        let roster = vec![worker("air", 4)];
         merge_live_fleet(&mut nodes, &fleet, &roster);
 
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].slots, 5, "roster slot count wins over the seed");
+        assert_eq!(
+            nodes[0].slots, 5,
+            "the node's own report wins over the seed"
+        );
         assert_eq!(nodes[0].version.as_deref(), Some("0.2.0+air"));
+        assert_eq!(
+            nodes[0].capacity_source,
+            Some(types::worker::CapacitySource::Node)
+        );
+        assert_eq!(nodes[0].capacity_observed_at, Some(observed_at));
+    }
+
+    /// A worker that has never reported keeps the seed's number, and says so.
+    /// That chip is the whole point of §7's demotion: a node running on a boot
+    /// value nothing confirmed must not look like a healthy one.
+    #[test]
+    fn never_observed_worker_shows_the_seed_as_its_source() {
+        let mut nodes = vec![worker("air", 2)];
+        let fleet = vec![NodeStatus {
+            name: "air".into(),
+            available: true,
+            version: Some("0.1.0+air".into()),
+            refresh_outcome: None,
+            // Reachable, answering pings — and never once reported capacity.
+            slots: Some(2),
+            capacity: Some(types::worker::ObservedCapacity::default()),
+        }];
+        merge_live_fleet(&mut nodes, &fleet, &[worker("air", 2)]);
+
+        assert_eq!(nodes[0].slots, 2);
+        assert_eq!(
+            nodes[0].capacity_source,
+            Some(types::worker::CapacitySource::Seed)
+        );
+        assert_eq!(nodes[0].capacity_observed_at, None);
     }
 
     /// A worker announced after boot (not in the static seed) is appended so the

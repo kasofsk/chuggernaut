@@ -133,6 +133,8 @@ async fn config_endpoints() {
                     available: true,
                     version: None,
                     refresh_outcome: None,
+                    capacity_source: None,
+                    capacity_observed_at: None,
                 }],
                 agent_provider_default: "claude".into(),
                 agent_model_default: Some("claude-sonnet-5".into()),
@@ -303,6 +305,8 @@ async fn platform_fleet_endpoint() {
                     available: true,
                     version: Some("0.1.0+air".into()),
                     refresh_outcome: None,
+                    capacity_source: Some(types::CapacitySource::Node),
+                    capacity_observed_at: None,
                     running: vec![SlotOccupant {
                         project: "acme/api".into(),
                         job_seq: 42,

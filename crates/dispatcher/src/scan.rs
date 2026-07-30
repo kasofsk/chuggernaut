@@ -13,7 +13,7 @@
 use crate::core::{Core, Result, TaskExit};
 use crate::exec::task_timeout;
 use crate::release;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use types::{JobState, TaskKind, TaskPhase, TaskResult, TaskState, parse_duration};
 
 /// Prompt marker identifying deadline escalation tasks — the one-shot rule
@@ -26,6 +26,54 @@ pub(crate) const DEADLINE_MARKER: &str = "[deadline]";
 /// dropped heartbeats never trip a spurious deregistration.
 pub(crate) const WORKER_HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How long after the dispatcher starts a reachable worker may go without ever
+/// reporting its capacity before the §8 never-observed warning fires. A few
+/// minutes: long enough that a daemon coming up behind the dispatcher, or a
+/// fleet mid-refresh, is not warned about, short enough that the operator hears
+/// about it in the same sitting as the deploy.
+pub(crate) const CAPACITY_OBSERVE_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(3 * 60);
+
+/// Bounded cadence for the §8 warning (STYLE.md Tier 2 principle 3: everything
+/// is bounded). One line per node per interval — loud enough to be seen in the
+/// logs of an idle night, quiet enough that a fleet left in this state does not
+/// bury everything else.
+pub(crate) const CAPACITY_WARN_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(15 * 60);
+
+/// Is the §8 never-observed warning due for this node on this tick? Pure over
+/// its inputs so the cadence is unit-tested without a fleet, a backend, or a
+/// fifteen-minute wait.
+///
+/// Three conditions, all necessary. The node must be a *worker* — a
+/// docker-endpoint node carries no capacity observation and `DOCKER_NODES`
+/// legitimately owns its number. It must be **reachable**: an unreachable node
+/// is already loud through the ping path, and the signature this warning names
+/// is specifically "RPC works, announce does not". And it must never have
+/// reported — once it has, provenance reads `node` and there is nothing to warn
+/// about.
+fn capacity_warning_due(
+    node: &container::NodeStatus,
+    now: DateTime<Utc>,
+    started_at: DateTime<Utc>,
+    last_warned: Option<DateTime<Utc>>,
+) -> bool {
+    let Some(capacity) = node.capacity else {
+        return false;
+    };
+    if !node.available || capacity.observed_at.is_some() {
+        return false;
+    }
+    let elapsed = |from: DateTime<Utc>| (now - from).to_std().unwrap_or_default();
+    if elapsed(started_at) < CAPACITY_OBSERVE_GRACE {
+        return false;
+    }
+    match last_warned {
+        None => true,
+        Some(at) => elapsed(at) >= CAPACITY_WARN_INTERVAL,
+    }
+}
+
 impl Core {
     pub(crate) async fn run_scans(&mut self) -> Result<()> {
         self.scan_task_timeouts().await?;
@@ -37,6 +85,10 @@ impl Core {
         // placing on them. Runs before the deadline scan so a lost node's queued
         // launches simply wait for other capacity this same tick.
         self.scan_worker_heartbeats();
+        // Workers that answer RPCs but have never reported capacity (§8): the
+        // exact signature of the denied-publish bug, and the reason §5a's
+        // narrowed startup gate is a correct trade rather than a regression.
+        self.scan_never_observed_capacity();
         self.scan_job_deadlines().await?;
         // Keep the platform config snapshot fresh: republish only when live
         // fleet state or deploy drift moved (spec §3.1, CD plan C). Best-effort
@@ -81,6 +133,52 @@ impl Core {
                 n.available = false;
             }
         }
+    }
+
+    /// Warn about worker nodes that answer their RPCs but have never reported
+    /// capacity (design #293 §8). That pairing — ping works, announce does not —
+    /// *is* the denied-publish bug of 2026-07-26, under which both prod nodes
+    /// ran for weeks on a `DOCKER_NODES` seed nothing had confirmed while
+    /// looking perfectly healthy.
+    ///
+    /// This is the loud half of the §5a trade: narrowing the startup gate turns
+    /// a crash into a warning, which is only the right trade while the warning
+    /// is real. Bounded on both axes — one line per node per
+    /// [`CAPACITY_WARN_INTERVAL`], and nothing at all until
+    /// [`CAPACITY_OBSERVE_GRACE`] after the dispatcher started, so a daemon that
+    /// simply came up second is never accused.
+    fn scan_never_observed_capacity(&mut self) {
+        let now = Utc::now();
+        let live = self.backend.fleet_status();
+        for node in &live {
+            if !capacity_warning_due(
+                node,
+                now,
+                self.started_at,
+                self.capacity_warned_at.get(&node.name).copied(),
+            ) {
+                continue;
+            }
+            tracing::warn!(
+                node = %node.name,
+                slots = node.slots.unwrap_or(0),
+                "worker node answers its RPCs but has NEVER reported capacity — the slot \
+                 count in force is the DOCKER_NODES boot seed, unconfirmed by the node \
+                 (spec §3.1 slot source). Check the daemon's event.worker.announce publish \
+                 grant and that it is on a build that reports slots"
+            );
+            self.capacity_warned_at.insert(node.name.clone(), now);
+        }
+        // Bounded: forget nodes that have since reported (or left the fleet), so
+        // the table can never outgrow the roster and a node that lapses again
+        // warns promptly rather than waiting out a stale interval.
+        let warned: std::collections::HashSet<&str> = live
+            .iter()
+            .filter(|n| n.capacity.is_some_and(|c| c.observed_at.is_none()))
+            .map(|n| n.name.as_str())
+            .collect();
+        self.capacity_warned_at
+            .retain(|name, _| warned.contains(name.as_str()));
     }
 
     /// Running non-Human tasks past `task_timeout`: kill the container and
@@ -283,5 +381,99 @@ impl Core {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    fn node(
+        available: bool,
+        capacity: Option<types::worker::ObservedCapacity>,
+    ) -> container::NodeStatus {
+        container::NodeStatus {
+            name: "air".into(),
+            available,
+            version: Some("0.1.0+air".into()),
+            refresh_outcome: None,
+            slots: Some(2),
+            capacity,
+        }
+    }
+
+    /// The §8 never-observed warning fires for exactly one signature — a worker
+    /// that answers its RPCs and has never reported capacity — and only at a
+    /// bounded cadence. This is the mechanism that makes §5a's narrowed startup
+    /// gate a correct trade instead of a regression, so its silence has to be
+    /// as precise as its noise.
+    #[test]
+    fn never_observed_capacity_warning_cadence() {
+        let started = Utc::now();
+        let past_grace = started + chrono::Duration::from_std(CAPACITY_OBSERVE_GRACE).unwrap();
+        let never = Some(types::worker::ObservedCapacity::default());
+
+        // Inside the grace window: a daemon that simply came up second is not
+        // accused.
+        assert!(!capacity_warning_due(
+            &node(true, never),
+            started,
+            started,
+            None
+        ));
+        // Past it, with no report: warn.
+        assert!(capacity_warning_due(
+            &node(true, never),
+            past_grace,
+            started,
+            None
+        ));
+
+        // Bounded cadence: silent until the interval elapses, then loud again.
+        let just_warned = past_grace;
+        assert!(!capacity_warning_due(
+            &node(true, never),
+            past_grace + chrono::Duration::minutes(1),
+            started,
+            Some(just_warned)
+        ));
+        assert!(capacity_warning_due(
+            &node(true, never),
+            past_grace + chrono::Duration::from_std(CAPACITY_WARN_INTERVAL).unwrap(),
+            started,
+            Some(just_warned)
+        ));
+
+        // An unreachable node is already loud through the ping path; this
+        // warning names the RPC-works-announce-does-not signature only.
+        assert!(!capacity_warning_due(
+            &node(false, never),
+            past_grace,
+            started,
+            None
+        ));
+
+        // A node that HAS reported has nothing to warn about.
+        let reported = Some(types::worker::ObservedCapacity {
+            mark: (1_000, 1),
+            slots_max: Some(6),
+            observed_at: Some(started),
+        });
+        assert!(!capacity_warning_due(
+            &node(true, reported),
+            past_grace,
+            started,
+            None
+        ));
+
+        // A docker-endpoint node carries no observation at all — `DOCKER_NODES`
+        // legitimately owns its number, so it is never a §8 case.
+        assert!(!capacity_warning_due(
+            &node(true, None),
+            past_grace,
+            started,
+            None
+        ));
     }
 }

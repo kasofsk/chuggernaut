@@ -45,6 +45,8 @@ fn roster() -> Vec<WorkerNode> {
             available: true,
             version: Some("0.1.0+air".into()),
             refresh_outcome: None,
+            capacity_source: None,
+            capacity_observed_at: None,
         },
         WorkerNode {
             name: "nuc".into(),
@@ -53,6 +55,8 @@ fn roster() -> Vec<WorkerNode> {
             available: true,
             version: None,
             refresh_outcome: None,
+            capacity_source: None,
+            capacity_observed_at: None,
         },
     ]
 }

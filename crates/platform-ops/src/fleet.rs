@@ -115,24 +115,38 @@ fn node_of(container_id: &str) -> &str {
 /// the silent all-zero that hid the job/181 outage. It ANDs with the health
 /// `base_available`, so a listed node keeps its true (possibly idle) health and
 /// only an unlistable one is forced down.
-fn fleet_node(
-    name: String,
-    slots: Option<u32>,
-    running: Vec<SlotOccupant>,
-    base_available: bool,
-    version: Option<String>,
-    refresh_outcome: Option<types::worker::RefreshOutcome>,
-    occupancy_listed: bool,
-) -> FleetNode {
+fn fleet_node(name: String, running: Vec<SlotOccupant>, facts: NodeFacts) -> FleetNode {
     FleetNode {
-        slots,
+        slots: facts.slots,
         occupied: running.len() as u32,
-        available: base_available && occupancy_listed,
-        version,
-        refresh_outcome,
+        available: facts.base_available && facts.occupancy_listed,
+        version: facts.version,
+        refresh_outcome: facts.refresh_outcome,
+        // Provenance travels with the number (design #293 §7/§8): a node still
+        // serving a boot seed reads as such in the fleet view instead of being
+        // indistinguishable from one whose daemon confirmed it.
+        capacity_source: facts.capacity.map(|c| c.source()),
+        capacity_observed_at: facts.capacity.and_then(|c| c.observed_at),
         name,
         running,
     }
+}
+
+/// One node's roster/live-probe merge, before the availability rule is applied
+/// to it. A struct rather than seven positional arguments so the merge that
+/// produces it ([`compose_node`]) and the rule that consumes it
+/// ([`fleet_node`]) each read as one decision.
+struct NodeFacts {
+    /// The node's capacity: observed if the node has reported over either
+    /// transport, the roster's boot seed until then (design #293 §7).
+    slots: Option<u32>,
+    version: Option<String>,
+    refresh_outcome: Option<types::worker::RefreshOutcome>,
+    /// Provenance of `slots`; `None` for a docker-endpoint node, whose capacity
+    /// `DOCKER_NODES` still owns.
+    capacity: Option<types::worker::ObservedCapacity>,
+    base_available: bool,
+    occupancy_listed: bool,
 }
 
 /// Republish a freshly [`compute`]d occupancy snapshot to the `platform`
@@ -244,7 +258,13 @@ fn compose_node(
     let roster = view.roster.iter().find(|n| n.name == name);
     let status = live.iter().find(|s| s.name == name);
     let running = by_node.remove(&name).unwrap_or_default();
-    let slots = roster.map(|n| n.slots);
+    // Observed capacity wins over the boot seed (design #293 §7): the backend
+    // reports the number it actually places on — announced or ping-pulled —
+    // and the `DOCKER_NODES` roster value is only the pre-observation fallback.
+    // A docker-endpoint node reports no live slots, so its roster number stands.
+    let slots = status
+        .and_then(|s| s.slots)
+        .or_else(|| roster.map(|n| n.slots));
     let base_available = status
         .map(|s| s.available)
         .or_else(|| roster.map(|n| n.available))
@@ -258,15 +278,17 @@ fn compose_node(
     let refresh_outcome = status
         .and_then(|s| s.refresh_outcome.clone())
         .or_else(|| roster.and_then(|n| n.refresh_outcome.clone()));
-    let listed = !unlisted.contains(&name);
     fleet_node(
-        name,
-        slots,
+        name.clone(),
         running,
-        base_available,
-        version,
-        refresh_outcome,
-        listed,
+        NodeFacts {
+            slots,
+            version,
+            refresh_outcome,
+            capacity: status.and_then(|s| s.capacity),
+            base_available,
+            occupancy_listed: !unlisted.contains(&name),
+        },
     )
 }
 
@@ -305,7 +327,18 @@ async fn resolve_occupant(view: &FleetView<'_>, rc: &container::RunningContainer
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use super::fleet_node;
+    use super::{NodeFacts, fleet_node};
+
+    fn facts(base_available: bool, occupancy_listed: bool) -> NodeFacts {
+        NodeFacts {
+            slots: Some(4),
+            version: None,
+            refresh_outcome: None,
+            capacity: None,
+            base_available,
+            occupancy_listed,
+        }
+    }
 
     /// The occupancy availability rule (spec §3.1), the pure core of
     /// `compute_fleet_status`'s node assembly. A node whose containers could not
@@ -317,7 +350,7 @@ mod tests {
     fn unlisted_node_shows_out_of_service_not_idle() {
         // Healthy (ping-reachable) but its `list_running` failed → occupancy is
         // unknown, so it must NOT read as an available idle node.
-        let unlisted = fleet_node("air".into(), Some(4), vec![], true, None, None, false);
+        let unlisted = fleet_node("air".into(), vec![], facts(true, false));
         assert_eq!(unlisted.occupied, 0);
         assert!(
             !unlisted.available,
@@ -325,12 +358,57 @@ mod tests {
         );
 
         // A genuinely idle node whose listing succeeded stays available.
-        let idle = fleet_node("nuc".into(), Some(4), vec![], true, None, None, true);
+        let idle = fleet_node("nuc".into(), vec![], facts(true, true));
         assert!(idle.available);
         assert_eq!(idle.occupied, 0);
 
         // An already-down node stays down whether or not it was listed.
-        let down = fleet_node("old".into(), Some(4), vec![], false, None, None, true);
+        let down = fleet_node("old".into(), vec![], facts(false, true));
         assert!(!down.available);
+    }
+
+    /// Provenance rides every node entry (design #293 §7/§8). A worker that has
+    /// never reported carries `seed` with no observed-at — the chip that would
+    /// have read "air — 2 slots from boot seed, node never reported" from the
+    /// first minute of the 2026-07-26 incident. A docker-endpoint node carries
+    /// no provenance at all, because `DOCKER_NODES` still owns its capacity.
+    #[test]
+    fn capacity_provenance_rides_the_snapshot() {
+        let at = chrono::Utc::now();
+        let never_reported = fleet_node(
+            "air".into(),
+            vec![],
+            NodeFacts {
+                capacity: Some(types::worker::ObservedCapacity::default()),
+                ..facts(true, true)
+            },
+        );
+        assert_eq!(
+            never_reported.capacity_source,
+            Some(types::worker::CapacitySource::Seed)
+        );
+        assert_eq!(never_reported.capacity_observed_at, None);
+
+        let reported = fleet_node(
+            "nuc".into(),
+            vec![],
+            NodeFacts {
+                capacity: Some(types::worker::ObservedCapacity {
+                    mark: (1_000, 2),
+                    slots_max: Some(6),
+                    observed_at: Some(at),
+                }),
+                ..facts(true, true)
+            },
+        );
+        assert_eq!(
+            reported.capacity_source,
+            Some(types::worker::CapacitySource::Node)
+        );
+        assert_eq!(reported.capacity_observed_at, Some(at));
+
+        // Docker endpoint: no observation, so no provenance to claim.
+        let docker = fleet_node("local".into(), vec![], facts(true, true));
+        assert_eq!(docker.capacity_source, None);
     }
 }

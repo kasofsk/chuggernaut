@@ -38,6 +38,16 @@ pub struct WorkerNode {
     /// written before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_outcome: Option<crate::worker::RefreshOutcome>,
+    /// Where [`Self::slots`] came from (design #293 §7): the node's own report
+    /// over either transport, or the `DOCKER_NODES` boot seed. `None` for a
+    /// docker-endpoint node, whose capacity `DOCKER_NODES` still owns outright.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_source: Option<crate::worker::CapacitySource>,
+    /// When the node last reported its capacity; `None` when it never has.
+    /// Together with [`Self::capacity_source`] this is the representation whose
+    /// absence let a fleet run for weeks on a boot seed nothing had confirmed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_observed_at: Option<DateTime<Utc>>,
 }
 
 fn default_available() -> bool {
@@ -58,6 +68,8 @@ mod tests {
                 available: true,
                 version: Some("0.1.0+abc123".into()),
                 refresh_outcome: None,
+                capacity_source: None,
+                capacity_observed_at: None,
             }],
             agent_provider_default: "claude".into(),
             agent_model_default: None,
@@ -253,6 +265,15 @@ pub struct FleetNode {
     /// docker-endpoint node).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_outcome: Option<crate::worker::RefreshOutcome>,
+    /// Where [`Self::slots`] came from (design #293 §7/§8): `node` once the node
+    /// has reported over either transport, `seed` while the `DOCKER_NODES` boot
+    /// value is still standing in for a report that never arrived. `None` for a
+    /// docker-endpoint node, whose capacity `DOCKER_NODES` still owns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_source: Option<crate::worker::CapacitySource>,
+    /// When the node last reported its capacity; `None` when it never has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_observed_at: Option<DateTime<Utc>>,
     /// The occupied slots on this node.
     pub running: Vec<SlotOccupant>,
 }
@@ -305,6 +326,8 @@ mod fleet_tests {
                         from_sha: "old".into(),
                         to_sha: "new".into(),
                     }),
+                    capacity_source: Some(crate::worker::CapacitySource::Node),
+                    capacity_observed_at: Some(Utc::now()),
                     running: vec![SlotOccupant {
                         project: "acme/api".into(),
                         job_seq: 42,
@@ -322,12 +345,17 @@ mod fleet_tests {
                     available: false,
                     version: None,
                     refresh_outcome: None,
+                    // Never reported: the boot seed is standing in, and the
+                    // snapshot says so rather than looking healthy (§293 §8).
+                    capacity_source: Some(crate::worker::CapacitySource::Seed),
+                    capacity_observed_at: None,
                     running: vec![],
                 },
             ],
             queue_depth: 2,
         };
         let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains(r#""capacity_source":"seed""#), "{json}");
         let back: FleetStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(status, back);
     }

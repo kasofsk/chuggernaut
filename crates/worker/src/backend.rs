@@ -11,7 +11,17 @@
 //! fleet-level property (§3.6): every node (docker or worker) is probed and
 //! marked in/out-of-service, and the "no live capacity" hard-fail is applied
 //! once across the whole fleet — a placement-inert 0-slot node never vetoes a
-//! fleet that has slots elsewhere.
+//! fleet that has slots elsewhere. That hard-fail is narrowed to *capacity*
+//! (design #293 §5a): worker capacity is observed and operator-changeable, so
+//! zero there warns rather than refusing the boot, while reachability stays
+//! fatal — see [`evaluate_startup`].
+//!
+//! A worker node's capacity arrives over two transports of the same source
+//! (spec §3.1 slot source): the `WorkerAnnounce` push and the `ping` reply.
+//! Both land through [`ingest_capacity`], which orders them by
+//! `(capacity_epoch, capacity_generation)`, so the `DOCKER_NODES` slot field is
+//! a pre-observation fallback for worker nodes rather than a competing source —
+//! and `fleet_status` reports which of the two each node is running on.
 
 use async_trait::async_trait;
 use container::docker::{DockerBackend, DockerNodeConfig};
@@ -44,9 +54,20 @@ enum NodeHandle {
     },
     Worker {
         rpc: Box<WorkerRpc>,
-        /// Slot cap. `Atomic` because a runtime re-announce (spec §3.1 dynamic
-        /// registration) can change it (e.g. air 4→5) without replacing the node.
+        /// Slot cap — the ONE number placement reads (spec §3.1 slot source).
+        /// `Atomic` because an observation over either transport can change it
+        /// (e.g. air 4→5) without replacing the node. Seeded from `DOCKER_NODES`
+        /// as a pre-observation fallback that no longer wins once the node has
+        /// reported (design #293 §7); [`FleetNode::capacity`] records which.
         slots: AtomicU32,
+        /// The node's observation watermark and provenance (spec §3.1 slot
+        /// source). Every write of `slots` goes through it, so one ordering rule
+        /// governs both transports. `Mutex` rather than atomics because the pair
+        /// and the observed-at stamp move together — the same reason the daemon
+        /// side takes one lock. Boxed for the same reason `backend` above is:
+        /// it is what tips this variant past `clippy::large_enum_variant`, and
+        /// nodes are few and long-lived so the indirection costs nothing.
+        capacity: Box<Mutex<types::ObservedCapacity>>,
         /// Cleared on ping failure, restored on success; placement skips
         /// out-of-service nodes but always re-probes them.
         in_service: AtomicBool,
@@ -152,10 +173,11 @@ fn plan_register(nodes: &[(&str, bool)], name: &str) -> RegisterAction {
 /// Build a fresh NATS-proxied worker node handle for the fleet — used both by
 /// the static seed (`DOCKER_NODES` `worker` entries) and by a first-time
 /// announce (spec §3.1 dynamic registration).
-fn worker_handle(store: NatsStore, name: &str, slots: u32) -> NodeHandle {
+fn worker_handle(store: NatsStore, name: &str, seed_slots: u32) -> NodeHandle {
     NodeHandle::Worker {
         rpc: Box::new(WorkerRpc::new(store, name.to_string())),
-        slots: AtomicU32::new(slots),
+        slots: AtomicU32::new(seed_slots),
+        capacity: Box::new(Mutex::new(types::ObservedCapacity::default())),
         in_service: AtomicBool::new(true),
         schedulable: AtomicBool::new(true),
         version_warned: AtomicBool::new(false),
@@ -164,21 +186,79 @@ fn worker_handle(store: NatsStore, name: &str, slots: u32) -> NodeHandle {
     }
 }
 
-/// One fleet node's boot-time capacity, transport-agnostic: its configured
-/// slots and whether it answered its startup probe. Feeds [`evaluate_startup`].
+/// Ingest one capacity observation for a worker node (spec §3.1 slot source):
+/// order it against the node's watermark and, when it wins, install its slot
+/// count as the one number placement reads. The single place either transport
+/// writes the slot cell, so the ordering rule cannot be bypassed by adding a
+/// third caller. Returns whether the live slot count actually MOVED — a
+/// re-report of the number already in force is applied but changes nothing, and
+/// the caller must not treat it as new capacity.
+fn ingest_capacity(
+    slot_cell: &AtomicU32,
+    capacity: &Mutex<types::ObservedCapacity>,
+    observation: &types::CapacityObservation,
+) -> bool {
+    // Poisoning cannot corrupt the record — nothing between the lock and the
+    // unlock can panic — so recover rather than propagate and keep the fleet
+    // ingesting capacity.
+    let mut observed = capacity
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !observed.apply(observation, chrono::Utc::now()) {
+        return false;
+    }
+    debug_assert!(
+        observed.observed_at.is_some(),
+        "an applied observation must demote the seed"
+    );
+    let moved = slot_cell.swap(observation.slots, Ordering::Relaxed) != observation.slots;
+    debug_assert_eq!(
+        slot_cell.load(Ordering::Relaxed),
+        observation.slots,
+        "the slot cell placement reads must hold the number just applied"
+    );
+    moved
+}
+
+/// One fleet node's boot-time capacity: its slots as of its startup probe,
+/// whether it answered, and which transport it is — the §5a rule turns on the
+/// last, so [`evaluate_startup`] cannot be expressed without it.
 struct NodeCapacity {
     slots: u32,
     reachable: bool,
+    /// A NATS-proxied worker node (as opposed to a docker-endpoint node).
+    worker: bool,
 }
 
 /// The §3.6 startup rule as a fleet-level property (spec §3.1), evaluated ONCE
-/// across every transport: the fleet may start iff at least one reachable node
-/// has slots > 0. A 0-slot node is placement-inert and never blocks startup,
-/// whatever its transport; an unreachable node is out of service, not fatal —
-/// unless it was the fleet's only capacity.
-fn evaluate_startup(nodes: &[NodeCapacity]) -> Result<(), BackendError> {
+/// across every transport and **narrowed so that worker capacity never vetoes a
+/// boot** (design #293 §5a).
+///
+/// The dispatcher refuses to start only if no worker-endpoint node is reachable
+/// AND no reachable docker-endpoint node has `slots > 0`. The asymmetry follows
+/// ownership: a docker-endpoint node's slot count is static config that only a
+/// restart can change, so zero there is a fatal misconfiguration and the
+/// crash-loop guard should keep catching it; a worker node's capacity is
+/// *observed*, arrives after boot, and is operator-changeable at runtime, so
+/// zero there means "not yet reported, or deliberately drained" — and refusing
+/// to boot on it would make a drain unrecoverable from the UI that caused it.
+///
+/// **Only capacity is narrowed; reachability is not.** A fleet with no reachable
+/// node of either transport still fails fast: whole-fleet-unreachable is the one
+/// condition §3.6 reserves for fail-fast and the deploy-time catcher for bad
+/// credentials or a wrong `NATS_URL` — the very failure class behind the
+/// incident this rule comes from. Widening the rule to the mere *presence* of a
+/// worker node would spend that signal; the tests that pin the difference are
+/// `zero_slot_docker_plus_dead_worker_fails` here and
+/// `no_reachable_capacity_fails_startup` at tier 2.
+fn evaluate_startup(nodes: &[NodeCapacity]) -> Result<StartupCapacity, BackendError> {
     if nodes.iter().any(|n| n.reachable && n.slots > 0) {
-        return Ok(());
+        return Ok(StartupCapacity::Live);
+    }
+    // Zero live capacity, but a reachable worker means it is observed state
+    // that can still arrive or be commanded, so the fleet starts.
+    if nodes.iter().any(|n| n.worker && n.reachable) {
+        return Ok(StartupCapacity::ZeroWithReachableWorker);
     }
     let detail = if nodes.iter().any(|n| n.slots > 0) {
         "no node with slots > 0 is reachable"
@@ -186,6 +266,21 @@ fn evaluate_startup(nodes: &[NodeCapacity]) -> Result<(), BackendError> {
         "no node has slots > 0"
     };
     Err(BackendError::Unavailable(detail.into()))
+}
+
+/// What [`evaluate_startup`] concluded about the fleet's live capacity. The
+/// zero-capacity start is a distinct outcome rather than a bare `Ok(())`
+/// because it must be *loud*: §5a's trade of a crash-loop for a warning is only
+/// correct while the warning actually happens. The decision stays pure and the
+/// caller performs the log (STYLE.md Tier 2: deciders return, they don't do).
+#[derive(Debug, PartialEq, Eq)]
+enum StartupCapacity {
+    /// At least one reachable node has `slots > 0`.
+    Live,
+    /// Every reachable node reports 0 slots — drained, or nothing has reported
+    /// yet — and a reachable worker node makes that recoverable without a
+    /// restart.
+    ZeroWithReachableWorker,
 }
 
 impl FleetBackend {
@@ -265,10 +360,17 @@ impl FleetBackend {
                         caps.push(NodeCapacity {
                             slots: probe.slots,
                             reachable: probe.error.is_none(),
+                            worker: false,
                         });
                     }
                 }
                 NodeHandle::Worker { slots, .. } => {
+                    // ORDER IS LOAD-BEARING (design #293 §1): the probe applies
+                    // any ping-reported capacity to the slot cell on its reply
+                    // path, and only THEN is the cell read into the gate. Read
+                    // first and the gate would see the boot seed — which, with
+                    // the seed demoted to a pre-observation fallback (§7), turns
+                    // the startup capacity check into a seed-only check.
                     let reachable = self.probe_worker(node).await.is_some();
                     if !reachable {
                         tracing::warn!(
@@ -279,21 +381,42 @@ impl FleetBackend {
                     caps.push(NodeCapacity {
                         slots: slots.load(Ordering::Relaxed),
                         reachable,
+                        worker: true,
                     });
                 }
             }
         }
-        evaluate_startup(&caps)
+        // The §5a trade — a warning where there used to be a crash — is only
+        // correct because the warning happens. The dispatcher's §8 scan then
+        // keeps naming the nodes responsible at a bounded cadence.
+        if evaluate_startup(&caps)? == StartupCapacity::ZeroWithReachableWorker {
+            tracing::warn!(
+                "fleet starting with ZERO capacity: every reachable node reports 0 slots \
+                 (drained, or no worker has reported one yet). Nothing will be placed — \
+                 launches queue via the §3.5 NoCapacity path until capacity is observed \
+                 or commanded (spec §3.1)"
+            );
+        }
+        Ok(())
     }
 
     /// Ping a worker node; updates in_service and returns its live load
     /// (running + free slots) when live.
+    ///
+    /// This is also the **pull** half of the one capacity source (spec §3.1 slot
+    /// source): a `ping` reply carrying `slots` is applied to the node's slot
+    /// cell here, on the reply path, BEFORE the load is computed and before
+    /// [`Self::startup_check`] reads the cell into the startup gate. A ping
+    /// cannot be a stale in-flight message, so it applies unconditionally and
+    /// resets the watermark — the backstop that keeps any ordering anomaly
+    /// self-healing at the next placement probe rather than terminal.
     // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
     #[allow(clippy::unwrap_used)]
     async fn probe_worker(&self, node: &FleetNode) -> Option<NodeLoad> {
         let NodeHandle::Worker {
             rpc,
             slots,
+            capacity,
             in_service,
             schedulable,
             version_warned,
@@ -333,6 +456,19 @@ impl FleetBackend {
                 // outcome until it does.
                 if let Some(outcome) = &ping.refresh_outcome {
                     *last_refresh.lock().unwrap() = Some(outcome.clone());
+                }
+                // The pull half of the capacity source, applied before the load
+                // below reads `slots` — and before the startup gate does. A
+                // pre-field daemon reports no `slots` and so supplies nothing;
+                // the seed keeps standing in and §8's warning surfaces it.
+                if let Some(observation) = types::CapacityObservation::from_ping(&ping)
+                    && ingest_capacity(slots, capacity, &observation)
+                {
+                    tracing::info!(
+                        node = %node.name,
+                        slots = observation.slots,
+                        "worker capacity updated from ping (spec §3.1 slot source)"
+                    );
                 }
                 let own = env!("CARGO_PKG_VERSION");
                 if !ping.version.starts_with(own) && !version_warned.swap(true, Ordering::Relaxed) {
@@ -476,6 +612,29 @@ impl FleetBackend {
                     NodeHandle::Docker { .. } => None,
                 };
                 (n.name.clone(), outcome)
+            })
+            .collect()
+    }
+
+    /// Per-worker-node live capacity and its provenance for the platform
+    /// snapshot (spec §3.1 slot source): `(name, (slots, observed))`, one entry
+    /// per *worker* node — docker-endpoint nodes are omitted because
+    /// `DOCKER_NODES` remains their capacity's owner (design #293 §7). `slots`
+    /// is the one number placement reads; `observed` says whether it came from
+    /// the node or is still the boot seed standing in.
+    fn node_capacities(&self) -> Vec<(String, (u32, types::ObservedCapacity))> {
+        self.snapshot()
+            .iter()
+            .filter_map(|n| match &n.handle {
+                NodeHandle::Worker {
+                    slots, capacity, ..
+                } => {
+                    let observed = *capacity
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    Some((n.name.clone(), (slots.load(Ordering::Relaxed), observed)))
+                }
+                NodeHandle::Docker { .. } => None,
             })
             .collect()
     }
@@ -716,6 +875,7 @@ impl ContainerBackend for FleetBackend {
     fn fleet_status(&self) -> Vec<NodeStatus> {
         let versions = self.node_versions();
         let refreshes = self.node_refreshes();
+        let capacities = self.node_capacities();
         self.availability()
             .into_iter()
             .map(|(name, available)| {
@@ -727,27 +887,44 @@ impl ContainerBackend for FleetBackend {
                     .iter()
                     .find(|(n, _)| n == &name)
                     .and_then(|(_, o)| o.clone());
+                // `None` here means a docker-endpoint node: `DOCKER_NODES` still
+                // owns its capacity outright, so it reports no provenance and
+                // the roster's static number stands (design #293 §7).
+                let capacity = capacities.iter().find(|(n, _)| n == &name).map(|(_, c)| *c);
                 NodeStatus {
                     name,
                     available,
                     version,
                     refresh_outcome,
+                    slots: capacity.map(|(slots, _)| slots),
+                    capacity: capacity.map(|(_, observed)| observed),
                 }
             })
             .collect()
     }
 
-    /// Apply a worker announce (spec §3.1 dynamic registration). The live
-    /// announcement wins: an existing worker of the same name has its slot cap,
-    /// build version, schedulability, and reachability refreshed; a new name is
-    /// added with its own [`WorkerRpc`]; a name already held by a docker-endpoint
-    /// node is refused (an announce can't repurpose a directly-driven daemon).
-    /// Returns whether fleet membership or capacity changed (a join, or a slot
-    /// change) so the caller logs a join and re-drains the launch queue only when
-    /// it matters. Runs on the single-writer actor — the fleet's only writer.
+    /// Apply a worker announce (spec §3.1 dynamic registration). An existing
+    /// worker of the same name has its build version, schedulability and
+    /// reachability refreshed; a new name is added with its own [`WorkerRpc`]; a
+    /// name already held by a docker-endpoint node is refused (an announce can't
+    /// repurpose a directly-driven daemon).
+    ///
+    /// Its **capacity**, unlike the rest, is ordered: it is applied through
+    /// [`ingest_capacity`] and so lands only when its
+    /// `(capacity_epoch, capacity_generation)` pair is at least the node's
+    /// watermark. A stale in-flight heartbeat therefore refreshes liveness while
+    /// leaving the fresher slot count alone. Returns whether fleet membership or
+    /// capacity changed (a join, or a slot change) so the caller logs a join and
+    /// re-drains the launch queue only when it matters. Runs on the single-writer
+    /// actor — the fleet's only writer.
     // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
     #[allow(clippy::unwrap_used)]
-    fn register_worker(&self, name: &str, slots: u32, version: Option<String>) -> bool {
+    fn register_worker(
+        &self,
+        name: &str,
+        capacity: types::CapacityObservation,
+        version: Option<String>,
+    ) -> bool {
         let mut nodes = self.nodes.write().unwrap();
         let shape: Vec<(&str, bool)> = nodes
             .iter()
@@ -769,6 +946,7 @@ impl ContainerBackend for FleetBackend {
             RegisterAction::Update(i) => {
                 let NodeHandle::Worker {
                     slots: slot_cell,
+                    capacity: observed,
                     in_service,
                     schedulable,
                     last_version,
@@ -777,11 +955,11 @@ impl ContainerBackend for FleetBackend {
                 else {
                     return false;
                 };
-                // A live announcement re-admits the node to scheduling and marks
-                // it reachable; the next placement ping refines load. Only a slot
-                // change (or re-admitting a heartbeat-dropped node) is "capacity
-                // moved" for the caller's drain.
-                let changed = slot_cell.swap(slots, Ordering::Relaxed) != slots
+                // Liveness is unconditional — an announce that lost the ordering
+                // race still proves the node is up — while its slot count goes
+                // through the watermark. Only a slot change (or re-admitting a
+                // heartbeat-dropped node) is "capacity moved" for the drain.
+                let changed = ingest_capacity(slot_cell, observed, &capacity)
                     || !schedulable.swap(true, Ordering::Relaxed);
                 in_service.store(true, Ordering::Relaxed);
                 if let Some(v) = version {
@@ -790,11 +968,20 @@ impl ContainerBackend for FleetBackend {
                 changed
             }
             RegisterAction::Add => {
-                let handle = worker_handle(self.store.clone(), name, slots);
-                if let NodeHandle::Worker { last_version, .. } = &handle
-                    && let Some(v) = version
+                // A joining node has no watermark yet, so its announce is its
+                // first observation and lands by the same rule.
+                let handle = worker_handle(self.store.clone(), name, capacity.slots);
+                if let NodeHandle::Worker {
+                    slots: slot_cell,
+                    capacity: observed,
+                    last_version,
+                    ..
+                } = &handle
                 {
-                    *last_version.lock().unwrap() = Some(v);
+                    ingest_capacity(slot_cell, observed, &capacity);
+                    if let Some(v) = version {
+                        *last_version.lock().unwrap() = Some(v);
+                    }
                 }
                 nodes.push(Arc::new(FleetNode {
                     name: name.to_string(),
@@ -859,10 +1046,26 @@ mod tests {
     //! Fleet-level startup capacity (spec §3.1/§3.6) — the pure decision, no
     //! docker daemon or NATS needed. `(reachable, slots)` faithfully models each
     //! node's boot probe regardless of transport (docker or worker).
-    use super::{NodeCapacity, RegisterAction, evaluate_startup, plan_register};
+    use super::{NodeCapacity, RegisterAction, StartupCapacity, evaluate_startup, plan_register};
 
+    /// A docker-endpoint node: its slot count is static `DOCKER_NODES` config
+    /// that only a restart can change, so zero there stays fatal.
     fn node(reachable: bool, slots: u32) -> NodeCapacity {
-        NodeCapacity { slots, reachable }
+        NodeCapacity {
+            slots,
+            reachable,
+            worker: false,
+        }
+    }
+
+    /// A worker-endpoint node: its capacity is observed after boot and
+    /// operator-changeable at runtime (design #293 §5a).
+    fn worker(reachable: bool, slots: u32) -> NodeCapacity {
+        NodeCapacity {
+            slots,
+            reachable,
+            worker: true,
+        }
     }
 
     /// The announce precedence decision (spec §3.1 dynamic registration), the
@@ -891,14 +1094,23 @@ mod tests {
     /// 4-slot worker starts fine. The 0-slot node must not veto the fleet.
     #[test]
     fn zero_slot_docker_does_not_veto_worker_capacity() {
-        assert!(evaluate_startup(&[node(true, 0), node(true, 4)]).is_ok());
+        assert_eq!(
+            evaluate_startup(&[node(true, 0), worker(true, 4)]).unwrap(),
+            StartupCapacity::Live
+        );
     }
 
     /// A reachable 0-slot docker node with the only worker unreachable ⇒ no live
     /// capacity anywhere ⇒ refuse to start.
+    ///
+    /// **Re-asserted unchanged after the §5a narrowing, deliberately.** This case
+    /// and its tier-2 twin `no_reachable_capacity_fails_startup` are what pin the
+    /// narrowing to *capacity* rather than to *transport*: had the rule been keyed
+    /// on the mere presence of a worker node, this would have inverted. If it ever
+    /// turns green, the rule was widened too far.
     #[test]
     fn zero_slot_docker_plus_dead_worker_fails() {
-        let err = evaluate_startup(&[node(true, 0), node(false, 4)]).unwrap_err();
+        let err = evaluate_startup(&[node(true, 0), worker(false, 4)]).unwrap_err();
         assert!(err.to_string().contains("reachable"), "{err}");
     }
 
@@ -906,20 +1118,63 @@ mod tests {
     /// worker carries the fleet's capacity.
     #[test]
     fn unreachable_docker_starts_when_worker_responds() {
-        assert!(evaluate_startup(&[node(false, 2), node(true, 4)]).is_ok());
+        assert_eq!(
+            evaluate_startup(&[node(false, 2), worker(true, 4)]).unwrap(),
+            StartupCapacity::Live
+        );
     }
 
     /// A single reachable node with slots is the all-docker single-node path —
     /// unchanged: it starts.
     #[test]
     fn single_reachable_node_with_slots_starts() {
-        assert!(evaluate_startup(&[node(true, 4)]).is_ok());
+        assert_eq!(
+            evaluate_startup(&[node(true, 4)]).unwrap(),
+            StartupCapacity::Live
+        );
     }
 
-    /// Every node reachable but all 0-slot ⇒ nothing can ever be placed ⇒ refuse.
+    /// All-docker and all 0-slot ⇒ static config that only a restart can change
+    /// says nothing can ever be placed ⇒ refuse. This is the half of the old
+    /// `all_zero_slot_reachable_fails` that survives the §5a narrowing.
     #[test]
-    fn all_zero_slot_reachable_fails() {
+    fn all_zero_slot_reachable_docker_fails() {
         let err = evaluate_startup(&[node(true, 0), node(true, 0)]).unwrap_err();
         assert!(err.to_string().contains("slots > 0"), "{err}");
+    }
+
+    /// The half that INVERTS under §5a: the same all-zero fleet with a reachable
+    /// *worker* in it now starts (with a loud warning) instead of crash-looping.
+    /// Without this, an operator who drains every node to 0 from the UI leaves a
+    /// dispatcher that cannot restart — and the dispatcher is the only thing that
+    /// could raise the number back.
+    #[test]
+    fn all_zero_slot_reachable_with_worker_starts() {
+        assert_eq!(
+            evaluate_startup(&[node(true, 0), worker(true, 0)]).unwrap(),
+            StartupCapacity::ZeroWithReachableWorker,
+            "a zero-capacity start must be reported as such so the caller can be loud"
+        );
+    }
+
+    /// The drain-and-restart case §5a turns on, in its simplest form: a lone
+    /// reachable worker reporting 0 slots boots. Placement is inert until
+    /// capacity is observed or commanded, and launches queue via §3.5.
+    #[test]
+    fn reachable_worker_reporting_zero_slots_starts() {
+        assert_eq!(
+            evaluate_startup(&[worker(true, 0)]).unwrap(),
+            StartupCapacity::ZeroWithReachableWorker
+        );
+    }
+
+    /// Reachability is NOT narrowed: a fleet whose every node is down still
+    /// fails fast, whatever the transport. This is the deploy-time catcher for
+    /// bad credentials or a wrong `NATS_URL` — the failure class behind the
+    /// incident — and §5a deliberately does not spend it.
+    #[test]
+    fn wholly_unreachable_worker_fleet_still_fails() {
+        let err = evaluate_startup(&[worker(false, 2), worker(false, 4)]).unwrap_err();
+        assert!(err.to_string().contains("reachable"), "{err}");
     }
 }

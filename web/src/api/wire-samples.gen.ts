@@ -58,6 +58,8 @@ export const wireSamples = {
     nodes: [
       {
         available: true,
+        capacity_observed_at: "2026-07-24T17:07:00Z",
+        capacity_source: "node",
         endpoint: "nats",
         name: "gumbo-mini-0",
         refresh_outcome: {
@@ -86,6 +88,8 @@ export const wireSamples = {
     nodes: [
       {
         available: true,
+        capacity_observed_at: "2026-07-24T17:07:00Z",
+        capacity_source: "node",
         name: "gumbo-mini-0",
         occupied: 1,
         refresh_outcome: {
