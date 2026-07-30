@@ -109,6 +109,7 @@ fn create(draft: bool, deps: &[u64], description: &str) -> CreateSpec {
         factory: None,
         members: vec![],
         inputs: Default::default(),
+        groups: vec![],
         draft,
     }
 }
@@ -128,6 +129,7 @@ fn update(seq: u64, deps: &[u64], description: &str) -> UpdateJobRequest {
         timeout: None,
         model: None,
         inputs: Default::default(),
+        groups: vec![],
     }
 }
 

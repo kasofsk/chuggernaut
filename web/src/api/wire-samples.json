@@ -132,6 +132,10 @@
       }
     ],
     "factory": null,
+    "groups": [
+      "design/321-job-groups",
+      "beacon-import"
+    ],
     "id": 42,
     "inputs": {
       "service": "web",
@@ -182,6 +186,10 @@
       }
     ],
     "factory": null,
+    "groups": [
+      "design/321-job-groups",
+      "beacon-import"
+    ],
     "id": 42,
     "inputs": {
       "service": "web",

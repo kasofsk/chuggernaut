@@ -58,6 +58,7 @@ fn seeded_job(id: u64) -> Job {
         ready_at: Some(Utc::now()),
         completed_at: None,
         inputs: Default::default(),
+        groups: vec![],
         task_time_ms: None,
     }
 }
@@ -198,6 +199,7 @@ async fn release_cmd_work(handle: &CoreHandle, sink: &InvariantSink) -> u64 {
             model: None,
             factory: None,
             inputs: Default::default(),
+            groups: vec![],
             draft: false,
         })
         .await

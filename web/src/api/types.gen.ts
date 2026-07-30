@@ -806,6 +806,30 @@ export interface Job {
    */
   factory: string | null;
   /**
+   * What this job is **part of** (spec §1.1 `groups:`, design #321): the
+   * operator's own labels — `design/311-job-inputs`, `beacon-import` — so a
+   * group of jobs can be enumerated and rolled up. Many per job; shape-checked
+   * by [`crate::groups::check_groups`] and nothing else. Empty for every job
+   * nobody grouped, which is every job that predates the field — defaulted so
+   * old records deserialize, skipped on the wire when empty so such a record
+   * is byte-identical to what it is today.
+   *
+   * **Inert to execution** (design #321 Decision 3), and that is a property
+   * rather than an intention: no container env, no agent prompt, no job-type
+   * resolution and no state transition reads it, pinned by
+   * `groups_never_reach_the_job_brief` (`dispatcher::exec`) and the tier-2
+   * byte-identical-env trace. That is what makes the third write path safe —
+   * unlike every other field here, `groups` is **mutable in every state,
+   * including `Done` and `Revoked`** (`req.jobs.groups.*`): annotating a
+   * finished ticket with what it was part of does not change what it did.
+   *
+   * Deliberately *not* a knowledge tag, whose resolution at `base_ref` changes
+   * what the agent is told; deliberately not a dep, which is ordering; and
+   * deliberately carrying no aggregate — every count and every enumeration is
+   * derived from the job records at read time (Decision 4).
+   */
+  groups?: string[];
+  /**
    * Sequential per project; maintained via counter in NATS KV.
    */
   id: number;
@@ -937,6 +961,20 @@ export interface JobSummary {
   escalation?: Escalation | null;
   eval: Evaluator[];
   factory: string | null;
+  /**
+   * What the job is part of ([`Job::groups`]). Carried by the list because
+   * the list is where filtering and the group chips happen (design #321
+   * Decision 7), and bounded small by construction (at most
+   * `GROUPS_COUNT_MAX` × `GROUP_NAME_LEN_MAX` bytes), unlike the prose fields
+   * the projection drops.
+   *
+   * Skipped when empty, matching the record rather than the projection's
+   * other list fields: the two shapes must stay *assignable* in the generated
+   * client (`web/src/api/types.gen.ts`), where the job page hands a full
+   * `Job` to code typed on `JobSummary`. A required field here against an
+   * optional one there is exactly the mismatch that breaks.
+   */
+  groups?: string[];
   id: number;
   /**
    * The job's effective inputs ([`Job::inputs`]). Carried by the list because

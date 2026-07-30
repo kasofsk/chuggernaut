@@ -104,6 +104,10 @@ pub struct UpdateJobRequest {
     /// Draft, [`Job::inputs`] is written only by the Ready-transition default
     /// fill, and never again after that.
     pub inputs: BTreeMap<String, String>,
+    /// The job's groups, replaced wholesale like every other field here
+    /// (design #321). This is the *definition* write path; the add/remove verb
+    /// ([`Core::edit_groups`]) is the one that stays available after release.
+    pub groups: Vec<String>,
 }
 
 /// `req.work.submit.*` payload (spec §4.2).
@@ -270,6 +274,17 @@ pub enum Msg {
         seq: u64,
         add: Vec<u64>,
         remove: Vec<u64>,
+        reply: Reply<Job>,
+    },
+    /// `req.jobs.groups.*` (spec §6.2, design #321): add/remove a job's group
+    /// labels. Accepted in **every** state, terminal included — `groups` is an
+    /// annotation, inert to execution.
+    EditGroups {
+        owner: String,
+        project: String,
+        seq: u64,
+        add: Vec<String>,
+        remove: Vec<String>,
         reply: Reply<Job>,
     },
     /// `req.jobs.claim.*` (spec §1.2 claims): a human claims the job's next
@@ -469,6 +484,7 @@ impl Msg {
             Msg::DraftJob { .. } => "DraftJob",
             Msg::FinalizeJob { .. } => "FinalizeJob",
             Msg::EditMembers { .. } => "EditMembers",
+            Msg::EditGroups { .. } => "EditGroups",
             Msg::ClaimJob { .. } => "ClaimJob",
             Msg::UnclaimJob { .. } => "UnclaimJob",
             Msg::TriageJob { .. } => "TriageJob",
@@ -622,6 +638,29 @@ impl CoreHandle {
     ) -> Result<Job> {
         let (owner, project) = (owner.to_string(), project.to_string());
         self.call(|reply| Msg::EditMembers {
+            owner,
+            project,
+            seq,
+            add,
+            remove,
+            reply,
+        })
+        .await
+    }
+
+    /// Add/remove a job's group labels (design #321 Decision 5). Accepted in
+    /// every state, including terminal ones; the resulting list is re-checked
+    /// against the §1.1 bounds (422).
+    pub async fn edit_groups(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        add: Vec<String>,
+        remove: Vec<String>,
+    ) -> Result<Job> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::EditGroups {
             owner,
             project,
             seq,
@@ -1441,6 +1480,16 @@ impl Core {
             } => {
                 let _ = reply.send(self.edit_members(&owner, &project, seq, add, remove).await);
             }
+            Msg::EditGroups {
+                owner,
+                project,
+                seq,
+                add,
+                remove,
+                reply,
+            } => {
+                let _ = reply.send(self.edit_groups(&owner, &project, seq, add, remove).await);
+            }
             Msg::ClaimJob {
                 owner,
                 project,
@@ -1722,6 +1771,9 @@ impl Core {
             // Supply path 1 of the two that ever write this field (§1.1, design
             // #311 Decision 6); the other is the Ready-transition default fill.
             inputs: req.inputs,
+            // Shape-checked at the wire edge (422); nothing here re-decides it,
+            // and nothing downstream reads it (design #321 Decision 3).
+            groups: req.groups,
             claim_next: false,
             escalation: None,
             factory: req.factory,
@@ -1819,6 +1871,9 @@ impl Core {
             // A batch supplies its own inputs like any job of its type; what it
             // will not do is union its *members'* — see `validate_member`.
             inputs: req.inputs,
+            // A batch is a job with its own seq, so it carries its own groups
+            // (design #321 Decision 3, "not a batch"); members keep theirs.
+            groups: req.groups,
             claim_next: false,
             escalation: None,
             factory: req.factory,
@@ -2159,9 +2214,15 @@ impl Core {
     /// 409 (`Conflict`), so a released job is never mutated. Validation is
     /// identical to create (deferred to release), so the edit just rewrites the
     /// record and publishes `job-updated` naming the fields that changed.
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::too_many_lines)]
     pub async fn update_job(&mut self, req: UpdateJobRequest) -> Result<Job> {
+        let mut job = self.must_get(&req.owner, &req.project, req.seq)?.clone();
+        if job.state != JobState::Draft {
+            return Err(CoreError::Conflict(format!(
+                "job {} is {:?}; only a Draft job can be edited",
+                req.seq, job.state
+            )));
+        }
+        let changed = Self::update_job_changed_fields(&job, &req);
         let UpdateJobRequest {
             owner,
             project,
@@ -2176,48 +2237,8 @@ impl Core {
             timeout,
             model,
             inputs,
+            groups,
         } = req;
-        let mut job = self.must_get(&owner, &project, seq)?.clone();
-        if job.state != JobState::Draft {
-            return Err(CoreError::Conflict(format!(
-                "job {seq} is {:?}; only a Draft job can be edited",
-                job.state
-            )));
-        }
-
-        // Name every field whose new value differs from the old, so the event
-        // carries changed field names rather than a full payload (§2.1 events).
-        let mut changed: Vec<&str> = Vec::new();
-        if job.r#type != r#type {
-            changed.push("type");
-        }
-        if job.title != title {
-            changed.push("title");
-        }
-        if job.description != description {
-            changed.push("description");
-        }
-        if job.cover_html != cover_html {
-            changed.push("cover_html");
-        }
-        if job.deps != deps {
-            changed.push("deps");
-        }
-        if job.knowledge_tags != knowledge_tags {
-            changed.push("knowledge_tags");
-        }
-        if job.eval != eval {
-            changed.push("eval");
-        }
-        if job.timeout != timeout {
-            changed.push("timeout");
-        }
-        if job.model != model {
-            changed.push("model");
-        }
-        if job.inputs != inputs {
-            changed.push("inputs");
-        }
 
         // Upstreams this edit drops — used to prune both the KV rdeps index
         // (below) and, implicitly, the in-memory reverse edges when the graph
@@ -2241,6 +2262,7 @@ impl Core {
         // supplied, and no default has been materialized yet (that happens at the
         // Ready transition, which a Draft has not reached).
         job.inputs = inputs;
+        job.groups = groups;
 
         self.jobs.put(&job).await?;
         for &upstream in &job.deps {
@@ -2267,6 +2289,32 @@ impl Core {
         )
         .await?;
         Ok(job)
+    }
+
+    /// Name every field of a Draft edit whose new value differs from the old, so
+    /// the `job-updated` event carries changed field names rather than a full
+    /// payload (§2.1 events). Every field [`Core::update_job`] replaces has a row
+    /// here — a field with no row would be edited invisibly.
+    fn update_job_changed_fields(job: &Job, req: &UpdateJobRequest) -> Vec<&'static str> {
+        let mut changed: Vec<&'static str> = Vec::new();
+        for (differs, field) in [
+            (job.r#type != req.r#type, "type"),
+            (job.title != req.title, "title"),
+            (job.description != req.description, "description"),
+            (job.cover_html != req.cover_html, "cover_html"),
+            (job.deps != req.deps, "deps"),
+            (job.knowledge_tags != req.knowledge_tags, "knowledge_tags"),
+            (job.eval != req.eval, "eval"),
+            (job.timeout != req.timeout, "timeout"),
+            (job.model != req.model, "model"),
+            (job.inputs != req.inputs, "inputs"),
+            (job.groups != req.groups, "groups"),
+        ] {
+            if differs {
+                changed.push(field);
+            }
+        }
+        changed
     }
 
     /// Handle `req.jobs.draft.*` (spec §2.1): move a Frozen (never-released)
@@ -2363,6 +2411,75 @@ impl Core {
             seq,
             "job-updated",
             serde_json::json!({ "fields": ["members"] }),
+        )
+        .await?;
+        Ok(job)
+    }
+
+    /// Handle `req.jobs.groups.*` (spec §6.2, design #321 Decision 5): add and
+    /// remove the operator's group labels on a job.
+    ///
+    /// **Accepted in every state, including `Done` and `Revoked`** — there is no
+    /// state guard here and that is the design, not an omission. What "terminal
+    /// jobs are immutable" protects is the *execution* record (what ran, against
+    /// which `base_ref`, judged how); [`Job::groups`] is inert to all of it, so
+    /// annotating a finished ticket with what it was part of changes nothing it
+    /// did. Retroactive grouping is the requirement, not a nicety: the jobs of
+    /// the group that motivated #321 are all Done.
+    ///
+    /// **Add/remove rather than a whole-list replace**, so it is idempotent and
+    /// two operators grouping the same job from two tabs both succeed where a
+    /// replace would lose one. Removes apply first, so a name in both lists ends
+    /// up present. The resulting list is re-checked whole ([`types::check_groups`])
+    /// — the bounds are on the *result*, not on the delta. Emits `job-updated`
+    /// with `{"fields": ["groups"]}`; a request that changes nothing writes
+    /// nothing and announces nothing.
+    pub async fn edit_groups(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        add: Vec<String>,
+        remove: Vec<String>,
+    ) -> Result<Job> {
+        let mut job = self.must_get(owner, project, seq)?.clone();
+        let state_before = job.state;
+
+        let mut groups = job.groups.clone();
+        groups.retain(|g| !remove.contains(g));
+        for name in &add {
+            if !groups.contains(name) {
+                groups.push(name.clone());
+            }
+        }
+        types::check_groups(&groups).map_err(|e| {
+            CoreError::Validation(vec![ValidationError::new(
+                Some(seq),
+                "groups",
+                e.to_string(),
+            )])
+        })?;
+        if groups == job.groups {
+            // Idempotent: re-adding a label the job already carries is a no-op,
+            // not a redundant write and a `job-updated` the UI would re-render on.
+            return Ok(job);
+        }
+
+        job.groups = groups;
+        self.jobs.put(&job).await?;
+        self.graphs
+            .entry(job.project.clone())
+            .or_default()
+            .insert(job.clone());
+        // Negative space (STYLE.md Tier 2 #2): this verb annotates and nothing
+        // else — no transition, no scheduling, no second writer of job state.
+        debug_assert_eq!(job.state, state_before, "a group edit never moves a job");
+        self.publish(
+            owner,
+            project,
+            seq,
+            "job-updated",
+            serde_json::json!({ "fields": ["groups"] }),
         )
         .await?;
         Ok(job)

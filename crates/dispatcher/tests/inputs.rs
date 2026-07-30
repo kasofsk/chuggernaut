@@ -216,6 +216,7 @@ fn req(r#type: &str, deps: &[u64], inputs: &[(&str, &str)]) -> CreateSpec {
         factory: None,
         members: vec![],
         inputs: pairs(inputs),
+        groups: vec![],
         draft: false,
     }
 }

@@ -1033,6 +1033,27 @@ pub async fn jobs_members(
     .await
 }
 
+/// Add/remove a job's group labels (§1.1 `groups`, design #321 Decision 5).
+/// Body `{ add?: [name], remove?: [name] }`. Member+; accepted in **every**
+/// state, terminal included — a group is an operator annotation, inert to
+/// execution, so it can be set long after the job finished. The dispatcher
+/// re-checks the resulting list against the §1.1 bounds (422).
+pub async fn jobs_groups(
+    State(state): State<SharedState>,
+    Path((owner, project, seq)): Path<(String, String, u64)>,
+    Auth(identity): Auth,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<Response> {
+    member_on(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::jobs_groups(&owner, &project, seq),
+        body,
+        StatusCode::OK,
+    )
+    .await
+}
+
 /// Claim the job's next work attempt for a human (§1.2 claims): the attempt
 /// parks as a Pending task with the declared kind instead of launching.
 /// Member+; the dispatcher enforces the in-flight guard (409).

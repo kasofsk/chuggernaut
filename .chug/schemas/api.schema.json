@@ -791,6 +791,13 @@
             "null"
           ]
         },
+        "groups": {
+          "description": "What this job is **part of** (spec §1.1 `groups:`, design #321): the\noperator's own labels — `design/311-job-inputs`, `beacon-import` — so a\ngroup of jobs can be enumerated and rolled up. Many per job; shape-checked\nby [`crate::groups::check_groups`] and nothing else. Empty for every job\nnobody grouped, which is every job that predates the field — defaulted so\nold records deserialize, skipped on the wire when empty so such a record\nis byte-identical to what it is today.\n\n**Inert to execution** (design #321 Decision 3), and that is a property\nrather than an intention: no container env, no agent prompt, no job-type\nresolution and no state transition reads it, pinned by\n`groups_never_reach_the_job_brief` (`dispatcher::exec`) and the tier-2\nbyte-identical-env trace. That is what makes the third write path safe —\nunlike every other field here, `groups` is **mutable in every state,\nincluding `Done` and `Revoked`** (`req.jobs.groups.*`): annotating a\nfinished ticket with what it was part of does not change what it did.\n\nDeliberately *not* a knowledge tag, whose resolution at `base_ref` changes\nwhat the agent is told; deliberately not a dep, which is ordering; and\ndeliberately carrying no aggregate — every count and every enumeration is\nderived from the job records at read time (Decision 4).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "id": {
           "description": "Sequential per project; maintained via counter in NATS KV.",
           "type": "integer",
@@ -1008,6 +1015,13 @@
             "string",
             "null"
           ]
+        },
+        "groups": {
+          "description": "What the job is part of ([`Job::groups`]). Carried by the list because\nthe list is where filtering and the group chips happen (design #321\nDecision 7), and bounded small by construction (at most\n`GROUPS_COUNT_MAX` × `GROUP_NAME_LEN_MAX` bytes), unlike the prose fields\nthe projection drops.\n\nSkipped when empty, matching the record rather than the projection's\nother list fields: the two shapes must stay *assignable* in the generated\nclient (`web/src/api/types.gen.ts`), where the job page hands a full\n`Job` to code typed on `JobSummary`. A required field here against an\noptional one there is exactly the mismatch that breaks.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "id": {
           "type": "integer",

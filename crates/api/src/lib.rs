@@ -147,6 +147,10 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
             post(routes::jobs_members),
         )
         .route(
+            "/api/v1/projects/{owner}/{project}/jobs/{seq}/groups",
+            axum::routing::put(routes::jobs_groups),
+        )
+        .route(
             "/api/v1/projects/{owner}/{project}/jobs/{seq}/triage",
             post(routes::jobs_triage),
         )

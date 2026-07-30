@@ -86,6 +86,7 @@ fn job(id: u64, r#type: &str, state: JobState, base_ref: Option<String>) -> Job 
         ready_at: Some(Utc::now()),
         completed_at: None,
         inputs: Default::default(),
+        groups: vec![],
         task_time_ms: None,
     }
 }
@@ -408,6 +409,7 @@ async fn queue_depth_included() {
             model: None,
             factory: None,
             inputs: Default::default(),
+            groups: vec![],
             draft: false,
         })
         .await

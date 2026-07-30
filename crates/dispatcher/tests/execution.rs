@@ -295,6 +295,7 @@ fn req(r#type: &str) -> CreateSpec {
         factory: None,
         members: vec![],
         inputs: Default::default(),
+        groups: vec![],
         draft: false,
     }
 }

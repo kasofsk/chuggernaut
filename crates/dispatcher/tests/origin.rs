@@ -524,6 +524,7 @@ async fn held_job_lands_after_merged_release_sync() {
             factory: None,
             members: vec![],
             inputs: Default::default(),
+            groups: vec![],
             draft: false,
         })
         .await
@@ -639,6 +640,7 @@ async fn reserved_chug_secrets_never_reach_containers() {
             factory: None,
             members: vec![],
             inputs: Default::default(),
+            groups: vec![],
             draft: false,
         })
         .await

@@ -303,30 +303,10 @@ mod tests {
 
     fn job(slug: &str, id: u64, deps: &[u64], state: JobState) -> Job {
         Job {
-            id,
-            project: slug.to_string(),
             r#type: "build".into(),
-            title: String::new(),
-            description: String::new(),
-            members: vec![],
-            batch_id: None,
-            cover_html: None,
             deps: deps.to_vec(),
             state,
-            branch: format!("job/{id}"),
-            base_ref: None,
-            knowledge_tags: vec![],
-            eval: vec![],
-            timeout: None,
-            model: None,
-            claim_next: false,
-            escalation: None,
-            factory: None,
-            created_at: chrono::Utc::now(),
-            ready_at: None,
-            completed_at: None,
-            inputs: Default::default(),
-            task_time_ms: None,
+            ..test_utils::fixture::job(slug, id)
         }
     }
 

@@ -6,6 +6,7 @@ pub mod channel;
 pub mod config_paths;
 pub mod deploy;
 pub mod duration;
+pub mod groups;
 pub mod ingest;
 pub mod inputs;
 pub mod job;
@@ -27,6 +28,10 @@ pub use channel::{
 pub use config_paths::{CONFIG_DIR, config_entry_name, config_path, config_path_candidates};
 pub use deploy::{DeployLeg, DeployReport, LegStatus};
 pub use duration::{DurationParseError, parse_duration};
+pub use groups::{
+    DESIGN_DOC_DIR, DESIGN_GROUP_PREFIX, GROUP_NAME_LEN_MAX, GROUP_NAME_PATTERN, GROUPS_COUNT_MAX,
+    GroupsError, check_groups, design_doc_path,
+};
 pub use ingest::IngestEvent;
 pub use inputs::{
     INPUT_ENV_PREFIX, INPUT_NAME_PATTERN, INPUT_VALUE_LEN_MAX, INPUT_VALUE_PATTERN,

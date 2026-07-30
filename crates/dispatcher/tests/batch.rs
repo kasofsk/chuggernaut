@@ -144,6 +144,7 @@ fn member(r#type: &str, deps: &[u64], title: &str, description: &str) -> CreateS
         model: None,
         factory: None,
         inputs: Default::default(),
+        groups: vec![],
         draft: false,
     }
 }

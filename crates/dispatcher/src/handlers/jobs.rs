@@ -64,6 +64,20 @@ fn inputs_shape_error(inputs: &BTreeMap<String, String>) -> Option<String> {
         .map(|e| format!("inputs: {e}"))
 }
 
+/// The 422 body for a supplied `groups` list that fails the §1.1 bounds — count,
+/// name shape, name length, duplicates (`types::groups::check_groups`). `None`
+/// when the list is well-shaped.
+///
+/// Unlike `inputs`, this is the **only** pass there is: a group has no
+/// declaration to be checked against and no registry to exist in (design #321
+/// Decision 2), so nothing is deferred to release. The add/remove endpoint runs
+/// the same check over its *result*, which is why the rule lives in `types`.
+fn groups_shape_error(groups: &[String]) -> Option<String> {
+    types::check_groups(groups)
+        .err()
+        .map(|e| format!("groups: {e}"))
+}
+
 /// Wire body for `req.jobs.create` (spec §6.2 POST .../jobs).
 #[derive(serde::Deserialize)]
 struct CreateJobBody {
@@ -103,6 +117,12 @@ struct CreateJobBody {
     /// is what every job of a type declaring no inputs sends.
     #[serde(default)]
     inputs: BTreeMap<String, String>,
+    /// What this job is part of (§1.1 `groups`, design #321). Shape-checked here
+    /// (422 via [`groups_shape_error`]) and nowhere else — there is no
+    /// release-time pass. Absent → ungrouped, and a label can be added later in
+    /// any state via `req.jobs.groups.*`.
+    #[serde(default)]
+    groups: Vec<String>,
     /// Land the job in Draft instead of Frozen (§2.1) so it can be edited
     /// before release. Absent/false preserves today's create-lands-Frozen path.
     #[serde(default)]
@@ -134,6 +154,22 @@ struct UpdateJobBody {
     /// `Job::inputs` is immutable (§2.1, design #311 Decision 6).
     #[serde(default)]
     inputs: BTreeMap<String, String>,
+    /// Full-field replace like every other field here. Unlike the rest, the
+    /// field stays writable after release — through `req.jobs.groups.*`, which
+    /// is add/remove rather than a replace (design #321 Decision 5).
+    #[serde(default)]
+    groups: Vec<String>,
+}
+
+/// Wire body for `req.jobs.groups` (design #321 Decision 5): the group labels to
+/// add to / remove from a job, in any state. Both default empty so a caller can
+/// add-only or remove-only.
+#[derive(serde::Deserialize)]
+struct GroupsBody {
+    #[serde(default)]
+    add: Vec<String>,
+    #[serde(default)]
+    remove: Vec<String>,
 }
 
 /// Wire body for `req.jobs.members` (spec §2.1 draft batches): the seqs to
@@ -197,6 +233,7 @@ async fn jobs_dispatch(
         ("get", Some(seq)) => fetch_job(&ctx.store, owner, project, seq).await,
         ("list", None) => jobs_list(&ctx.store, owner, project).await,
         ("members", Some(seq)) => jobs_members(ctx, owner, project, seq, payload).await,
+        ("groups", Some(seq)) => jobs_groups(ctx, owner, project, seq, payload).await,
         ("criteria", Some(seq)) => job_criteria(&ctx.store, &ctx.repos, owner, project, seq).await,
         (verb, Some(seq)) => jobs_transition(ctx, verb, owner, project, seq)
             .await
@@ -247,7 +284,7 @@ async fn jobs_create(ctx: &JobsCtx, owner: &str, project: &str, payload: &[u8]) 
         Ok(b) if cover_too_large(&b.cover_html) => unprocessable(&format!(
             "cover_html exceeds the {COVER_HTML_MAX_BYTES}-byte limit"
         )),
-        Ok(b) => match inputs_shape_error(&b.inputs) {
+        Ok(b) => match inputs_shape_error(&b.inputs).or_else(|| groups_shape_error(&b.groups)) {
             Some(message) => unprocessable(&message),
             None => {
                 let create = CreateSpec {
@@ -264,6 +301,7 @@ async fn jobs_create(ctx: &JobsCtx, owner: &str, project: &str, payload: &[u8]) 
                     timeout: b.timeout,
                     model: b.model,
                     inputs: b.inputs,
+                    groups: b.groups,
                     factory: None,
                     draft: b.draft,
                 };
@@ -290,7 +328,7 @@ async fn jobs_update(
         Ok(b) if cover_too_large(&b.cover_html) => unprocessable(&format!(
             "cover_html exceeds the {COVER_HTML_MAX_BYTES}-byte limit"
         )),
-        Ok(b) => match inputs_shape_error(&b.inputs) {
+        Ok(b) => match inputs_shape_error(&b.inputs).or_else(|| groups_shape_error(&b.groups)) {
             Some(message) => unprocessable(&message),
             None => {
                 let update = UpdateJobRequest {
@@ -307,6 +345,7 @@ async fn jobs_update(
                     timeout: b.timeout,
                     model: b.model,
                     inputs: b.inputs,
+                    groups: b.groups,
                 };
                 match ctx.handle.update_job(update).await {
                     Err(e) => error_reply(&e),
@@ -339,6 +378,30 @@ async fn jobs_members(
     }
 }
 
+/// `req.jobs.groups` — design #321 Decision 5: add/remove a job's group labels.
+/// Accepted in **every** state, terminal included; the actor re-checks the
+/// resulting list and answers 422 with the rule it broke. Reply is the updated
+/// job.
+async fn jobs_groups(
+    ctx: &JobsCtx,
+    owner: &str,
+    project: &str,
+    seq: u64,
+    payload: &[u8],
+) -> Vec<u8> {
+    match serde_json::from_slice::<GroupsBody>(payload) {
+        Err(e) => bad_request(&e.to_string()),
+        Ok(b) => match ctx
+            .handle
+            .edit_groups(owner, project, seq, b.add, b.remove)
+            .await
+        {
+            Err(e) => error_reply(&e),
+            Ok(_) => fetch_job(&ctx.store, owner, project, seq).await,
+        },
+    }
+}
+
 /// `req.jobs.list` — the project's jobs as summaries, each carrying its latest
 /// channel post so the UI can show a live progress line without an SSE replay.
 async fn jobs_list(store: &NatsStore, owner: &str, project: &str) -> Vec<u8> {
@@ -363,7 +426,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::super::reply::unprocessable;
     use super::{
-        COVER_HTML_MAX_BYTES, CreateJobBody, UpdateJobBody, cover_too_large, inputs_shape_error,
+        COVER_HTML_MAX_BYTES, CreateJobBody, GroupsBody, UpdateJobBody, cover_too_large,
+        groups_shape_error, inputs_shape_error,
     };
 
     fn status(body: &[u8]) -> i64 {
@@ -447,5 +511,62 @@ mod tests {
         let undeclared: CreateJobBody =
             serde_json::from_str(r#"{"type":"code","inputs":{"nobody_declared_me":"x"}}"#).unwrap();
         assert_eq!(inputs_shape_error(&undeclared.inputs), None);
+    }
+
+    /// The §1.1 bounds over a supplied `groups` list (design #321): a well-shaped
+    /// list is accepted, and every violation is a **422** naming the rule it
+    /// broke — the body parsed fine, so this is a semantic bound, not a 400.
+    /// Unlike `inputs`, nothing is deferred: there is no release-time pass.
+    #[test]
+    fn supplied_groups_shape_is_checked_at_the_wire_edge_with_422() {
+        // Absent → empty, which is what every ungrouped job sends. Both bodies
+        // carry the field, and both run the same check.
+        let bare: CreateJobBody = serde_json::from_str(r#"{"type":"code"}"#).unwrap();
+        assert!(bare.groups.is_empty());
+        assert_eq!(groups_shape_error(&bare.groups), None);
+        let bare: UpdateJobBody = serde_json::from_str(r#"{"type":"code"}"#).unwrap();
+        assert!(bare.groups.is_empty());
+        assert_eq!(groups_shape_error(&bare.groups), None);
+
+        let ok: CreateJobBody = serde_json::from_str(
+            r#"{"type":"code","groups":["design/321-job-groups","beacon-import"]}"#,
+        )
+        .unwrap();
+        assert_eq!(ok.groups.len(), 2);
+        assert_eq!(groups_shape_error(&ok.groups), None);
+
+        // One body per rule: shape, length, duplicate, count.
+        let long = "x".repeat(types::GROUP_NAME_LEN_MAX + 1);
+        let many: Vec<String> = (0..=types::GROUPS_COUNT_MAX)
+            .map(|i| format!("\"g-{i}\""))
+            .collect();
+        for body in [
+            r#"{"type":"code","groups":["NOT A GROUP"]}"#.to_string(),
+            format!(r#"{{"type":"code","groups":["{long}"]}}"#),
+            r#"{"type":"code","groups":["dup","dup"]}"#.to_string(),
+            format!(r#"{{"type":"code","groups":[{}]}}"#, many.join(",")),
+        ] {
+            let parsed: CreateJobBody = serde_json::from_str(&body).unwrap();
+            let message = groups_shape_error(&parsed.groups).expect("must be refused");
+            assert!(message.starts_with("groups: "), "{message}");
+            assert_eq!(status(&unprocessable(&message)), 422);
+            // The Draft edit refuses the same body for the same reason.
+            let update: UpdateJobBody = serde_json::from_str(&body).unwrap();
+            assert!(groups_shape_error(&update.groups).is_some());
+        }
+    }
+
+    /// The add/remove body (design #321 Decision 5): both sides default empty, so
+    /// a caller can add-only or remove-only, and an empty body is a legal no-op.
+    #[test]
+    fn groups_body_defaults_both_sides() {
+        let empty: GroupsBody = serde_json::from_str("{}").unwrap();
+        assert!(empty.add.is_empty() && empty.remove.is_empty());
+        let add_only: GroupsBody = serde_json::from_str(r#"{"add":["beacon-import"]}"#).unwrap();
+        assert_eq!(add_only.add, vec!["beacon-import".to_string()]);
+        assert!(add_only.remove.is_empty());
+        let remove_only: GroupsBody = serde_json::from_str(r#"{"remove":["x"]}"#).unwrap();
+        assert!(remove_only.add.is_empty());
+        assert_eq!(remove_only.remove, vec!["x".to_string()]);
     }
 }

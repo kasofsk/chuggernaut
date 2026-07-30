@@ -160,6 +160,7 @@ export const wireSamples = {
       },
     ],
     factory: null,
+    groups: ["design/321-job-groups", "beacon-import"],
     id: 42,
     inputs: {
       service: "web",
@@ -204,6 +205,7 @@ export const wireSamples = {
       },
     ],
     factory: null,
+    groups: ["design/321-job-groups", "beacon-import"],
     id: 42,
     inputs: {
       service: "web",

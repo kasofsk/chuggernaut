@@ -134,6 +134,7 @@ fn req(r#type: &str, deps: &[u64]) -> CreateSpec {
         factory: None,
         members: vec![],
         inputs: Default::default(),
+        groups: vec![],
         draft: false,
     }
 }

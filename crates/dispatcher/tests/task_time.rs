@@ -76,6 +76,7 @@ async fn setup() -> Option<(NatsStore, Core, u64)> {
             factory: None,
             members: vec![],
             inputs: Default::default(),
+            groups: vec![],
             draft: false,
         })
         .await

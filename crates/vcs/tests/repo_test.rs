@@ -45,6 +45,7 @@ fn job(repo: &TempRepo, id: u64, state: JobState, base_ref: Option<String>) -> J
         ready_at: None,
         completed_at: None,
         inputs: Default::default(),
+        groups: vec![],
         task_time_ms: None,
     }
 }

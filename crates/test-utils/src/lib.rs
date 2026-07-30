@@ -2,6 +2,7 @@
 //! temp-repo builder, fixture seeding (testing.md tiers 1–2).
 
 pub mod backend_suite;
+pub mod fixture;
 pub mod nats;
 pub mod repo;
 pub mod wait;

@@ -2458,6 +2458,17 @@ mod tests {
         assert_ne!(tip(&repo, "job/1").await, new_main);
     }
 
+    /// A plain ticket carrying neither of the two fields that must never reach an
+    /// agent prompt, so each test below adds exactly one and compares.
+    fn briefed_job() -> types::Job {
+        types::Job {
+            title: "Ship the thing".into(),
+            description: "Do the work described here.".into(),
+            state: types::JobState::Ready,
+            ..test_utils::fixture::job("acme/api", 1)
+        }
+    }
+
     /// §4.3 prompt-cleanliness: `cover_html` is presentational and must NEVER
     /// leak into any agent prompt. `job_brief_block` is the single choke point
     /// where the brief is injected (work, eval, triage), so asserting its output
@@ -2466,32 +2477,7 @@ mod tests {
     #[test]
     fn cover_html_never_reaches_the_job_brief() {
         use super::job_brief_block;
-        let base = types::Job {
-            id: 1,
-            project: "acme/api".into(),
-            r#type: "code".into(),
-            title: "Ship the thing".into(),
-            description: "Do the work described here.".into(),
-            cover_html: None,
-            members: vec![],
-            batch_id: None,
-            deps: vec![],
-            state: types::JobState::Ready,
-            branch: "job/1".into(),
-            base_ref: None,
-            knowledge_tags: vec![],
-            eval: vec![],
-            timeout: None,
-            model: None,
-            claim_next: false,
-            escalation: None,
-            factory: None,
-            created_at: chrono::Utc::now(),
-            ready_at: None,
-            completed_at: None,
-            inputs: Default::default(),
-            task_time_ms: None,
-        };
+        let base = briefed_job();
         let with_cover = types::Job {
             cover_html: Some(
                 "<html><body><h1>Splashy cover</h1><script>alert(1)</script></body></html>".into(),
@@ -2507,6 +2493,53 @@ mod tests {
         assert!(
             !brief.contains("Splashy cover") && !brief.contains("<script>"),
             "no cover markup may appear in the brief"
+        );
+    }
+
+    /// **The inertness assert** (design #321 Decision 3, STYLE.md Tier 2 #2 —
+    /// negative space): `Job::groups` is an operator annotation, so the brief a
+    /// job's agents read must be byte-identical with and without it. This is the
+    /// property that makes editing a **terminal** job's record defensible — a
+    /// group cannot change what any job did, because it cannot reach anything a
+    /// job runs. `job_brief_block` is the single choke point where the brief is
+    /// injected (work, eval, triage), and `batch_brief_block` is its batch twin,
+    /// so both are pinned here; the container-env half of the property is pinned
+    /// by `groups_never_reach_the_container_env` (tier 2), which needs a real
+    /// launch.
+    #[test]
+    fn groups_never_reach_the_job_brief() {
+        use super::{batch_brief_block, job_brief_block};
+        let base = briefed_job();
+        let grouped = types::Job {
+            groups: vec!["design/321-job-groups".into(), "beacon-import".into()],
+            ..base.clone()
+        };
+        assert_eq!(
+            job_brief_block(&base),
+            job_brief_block(&grouped),
+            "groups must not change the injected job brief"
+        );
+        assert!(
+            !job_brief_block(&grouped).contains("321-job-groups"),
+            "no group name may appear in the brief"
+        );
+
+        // A batch is a job with its own record, so it carries its own groups —
+        // and its brief, which is composed from the batch AND its members, must
+        // ignore every one of them.
+        let member = types::Job {
+            id: 2,
+            groups: vec!["beacon-import".into()],
+            ..base.clone()
+        };
+        let ungrouped_member = types::Job {
+            groups: vec![],
+            ..member.clone()
+        };
+        assert_eq!(
+            batch_brief_block(&base, &[ungrouped_member]),
+            batch_brief_block(&grouped, &[member]),
+            "groups must not change a batch's brief either"
         );
     }
 }

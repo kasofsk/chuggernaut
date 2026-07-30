@@ -177,6 +177,7 @@ fn req(r#type: &str) -> CreateSpec {
         factory: None,
         members: vec![],
         inputs: Default::default(),
+        groups: vec![],
         draft: false,
     }
 }
@@ -257,6 +258,7 @@ async fn restart_recovers_orphaned_running_work_task() {
             ready_at: Some(Utc::now()),
             completed_at: None,
             inputs: Default::default(),
+            groups: vec![],
             task_time_ms: None,
         })
         .await
@@ -420,6 +422,7 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
         ready_at: Some(Utc::now()),
         completed_at: None,
         inputs: Default::default(),
+        groups: vec![],
         task_time_ms: None,
     })
     .await
@@ -624,6 +627,7 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
             ready_at: Some(Utc::now()),
             completed_at: None,
             inputs: Default::default(),
+            groups: vec![],
             task_time_ms: None,
         })
         .await
@@ -773,6 +777,7 @@ async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
             ready_at: Some(Utc::now()),
             completed_at: None,
             inputs: Default::default(),
+            groups: vec![],
             task_time_ms: None,
         })
         .await
@@ -922,6 +927,7 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
             ready_at: Some(Utc::now()),
             completed_at: None,
             inputs: Default::default(),
+            groups: vec![],
             task_time_ms: None,
         })
         .await
@@ -1064,6 +1070,7 @@ async fn restart_requeues_queued_pending_work_task() {
             ready_at: Some(Utc::now()),
             completed_at: None,
             inputs: Default::default(),
+            groups: vec![],
             task_time_ms: None,
         })
         .await
@@ -1196,6 +1203,7 @@ async fn seed_queued_command_work(
             ready_at: Some(queued_at),
             completed_at: None,
             inputs: Default::default(),
+            groups: vec![],
             task_time_ms: None,
         })
         .await
@@ -1445,6 +1453,7 @@ async fn restart_requeues_queued_pending_agent_eval() {
             ready_at: Some(Utc::now()),
             completed_at: None,
             inputs: Default::default(),
+            groups: vec![],
             task_time_ms: None,
             cover_html: None,
         })
@@ -1664,6 +1673,7 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
             ready_at: Some(Utc::now()),
             completed_at: None,
             inputs: Default::default(),
+            groups: vec![],
             task_time_ms: None,
         })
         .await
@@ -1820,6 +1830,7 @@ async fn fleet_sweep_core(
             ready_at: Some(Utc::now()),
             completed_at: None,
             inputs: Default::default(),
+            groups: vec![],
             task_time_ms: None,
         })
         .await
@@ -2127,6 +2138,7 @@ async fn restart_lands_job_orphaned_in_wrapup() {
             ready_at: Some(Utc::now()),
             completed_at: None,
             inputs: Default::default(),
+            groups: vec![],
             task_time_ms: None,
         })
         .await
@@ -2274,6 +2286,7 @@ wrap_up:
             ready_at: Some(Utc::now()),
             completed_at: None,
             inputs: Default::default(),
+            groups: vec![],
             task_time_ms: None,
         })
         .await
@@ -2642,6 +2655,7 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
             ready_at: Some(Utc::now()),
             completed_at: None,
             inputs: Default::default(),
+            groups: vec![],
             task_time_ms: None,
         })
         .await
@@ -2965,6 +2979,7 @@ async fn restart_reattach_harvests_command_work_deploy_report() {
             ready_at: Some(Utc::now()),
             completed_at: None,
             inputs: Default::default(),
+            groups: vec![],
             task_time_ms: None,
         })
         .await
@@ -3152,6 +3167,7 @@ fn crash_state_job(job_type: &str, head: String) -> Job {
         ready_at: Some(Utc::now()),
         completed_at: None,
         inputs: Default::default(),
+        groups: vec![],
         task_time_ms: None,
     }
 }

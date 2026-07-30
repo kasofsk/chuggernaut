@@ -222,6 +222,7 @@ mod tests {
             timeout: None,
             model: None,
             inputs: Default::default(),
+            groups: vec![],
             claim_next: false,
             escalation: None,
             factory: None,

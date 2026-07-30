@@ -148,6 +148,7 @@ fn job(id: u64, state: JobState, base_ref: &str) -> Job {
         ready_at: Some(Utc::now()),
         completed_at: None,
         inputs: Default::default(),
+        groups: vec![],
         task_time_ms: None,
     }
 }

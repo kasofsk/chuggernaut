@@ -131,6 +131,12 @@ pub fn jobs_members(owner: &str, project: &str, seq: u64) -> String {
     format!("req.jobs.members.{owner}.{project}.{seq}")
 }
 
+/// Add/remove a job's group labels (spec §6.2, design #321). Accepted in every
+/// state, terminal included — `groups` is an annotation, inert to execution.
+pub fn jobs_groups(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.jobs.groups.{owner}.{project}.{seq}")
+}
+
 /// Claim the job's next work attempt for a human (spec §1.2 claims).
 pub fn jobs_claim(owner: &str, project: &str, seq: u64) -> String {
     format!("req.jobs.claim.{owner}.{project}.{seq}")

@@ -107,6 +107,29 @@ pub struct Job {
     /// target is getting a different job.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub inputs: BTreeMap<String, String>,
+    /// What this job is **part of** (spec §1.1 `groups:`, design #321): the
+    /// operator's own labels — `design/311-job-inputs`, `beacon-import` — so a
+    /// group of jobs can be enumerated and rolled up. Many per job; shape-checked
+    /// by [`crate::groups::check_groups`] and nothing else. Empty for every job
+    /// nobody grouped, which is every job that predates the field — defaulted so
+    /// old records deserialize, skipped on the wire when empty so such a record
+    /// is byte-identical to what it is today.
+    ///
+    /// **Inert to execution** (design #321 Decision 3), and that is a property
+    /// rather than an intention: no container env, no agent prompt, no job-type
+    /// resolution and no state transition reads it, pinned by
+    /// `groups_never_reach_the_job_brief` (`dispatcher::exec`) and the tier-2
+    /// byte-identical-env trace. That is what makes the third write path safe —
+    /// unlike every other field here, `groups` is **mutable in every state,
+    /// including `Done` and `Revoked`** (`req.jobs.groups.*`): annotating a
+    /// finished ticket with what it was part of does not change what it did.
+    ///
+    /// Deliberately *not* a knowledge tag, whose resolution at `base_ref` changes
+    /// what the agent is told; deliberately not a dep, which is ordering; and
+    /// deliberately carrying no aggregate — every count and every enumeration is
+    /// derived from the job records at read time (Decision 4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
     /// A human has claimed the job's NEXT work attempt (spec §1.2 claims):
     /// instead of launching a container, the dispatcher parks that attempt as
     /// a Pending task with the declared kind and `performed_by: human`, then
@@ -188,6 +211,19 @@ pub struct JobSummary<'a> {
     /// fields the projection drops.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub inputs: &'a BTreeMap<String, String>,
+    /// What the job is part of ([`Job::groups`]). Carried by the list because
+    /// the list is where filtering and the group chips happen (design #321
+    /// Decision 7), and bounded small by construction (at most
+    /// `GROUPS_COUNT_MAX` × `GROUP_NAME_LEN_MAX` bytes), unlike the prose fields
+    /// the projection drops.
+    ///
+    /// Skipped when empty, matching the record rather than the projection's
+    /// other list fields: the two shapes must stay *assignable* in the generated
+    /// client (`web/src/api/types.gen.ts`), where the job page hands a full
+    /// `Job` to code typed on `JobSummary`. A required field here against an
+    /// optional one there is exactly the mismatch that breaks.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    pub groups: &'a [String],
     pub claim_next: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub escalation: Option<&'a Escalation>,
@@ -233,6 +269,7 @@ impl<'a> From<&'a Job> for JobSummary<'a> {
             timeout: job.timeout.as_deref(),
             model: job.model.as_deref(),
             inputs: &job.inputs,
+            groups: &job.groups,
             claim_next: job.claim_next,
             escalation: job.escalation.as_ref(),
             factory: job.factory.as_deref(),
@@ -350,6 +387,12 @@ pub struct CreateSpec {
     /// release-time, like every other wiring question. Empty for every job type
     /// that declares no inputs.
     pub inputs: BTreeMap<String, String>,
+    /// What this job is part of ([`Job::groups`], design #321). Shape-checked
+    /// before it gets here (the 422 at the wire edge); there is no release-time
+    /// pass, because a group has no declaration to be checked against. Empty for
+    /// every job the creator did not group — most of them, and the label can be
+    /// added later in any state.
+    pub groups: Vec<String>,
     pub factory: Option<String>,
     /// Land the job in [`JobState::Draft`] instead of Frozen (spec §2.1): its
     /// definition can be edited (the dispatcher's `update_job`) before release.
@@ -726,6 +769,43 @@ mod tests {
         assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), parameterized);
     }
 
+    /// The §1.1 `groups` field is additive in both directions (design #321
+    /// Skew surface 1): a record written before it deserializes to an empty list
+    /// and stays keyless on the wire, so no old job's bytes change and no epoch
+    /// moves. The populated case round-trips in the operator's own order —
+    /// `groups` is a set the write paths keep unique, not a sorted list.
+    #[test]
+    fn job_round_trips_with_groups_and_stays_backward_compat() {
+        let json = r#"{
+          "id": 14,
+          "project": "acme/api",
+          "type": "code",
+          "deps": [],
+          "state": "Done",
+          "branch": "job/14",
+          "base_ref": null,
+          "knowledge_tags": [],
+          "factory": null,
+          "created_at": "2026-07-30T10:00:00Z",
+          "ready_at": null
+        }"#;
+        let job: Job = serde_json::from_str(json).unwrap();
+        assert!(job.groups.is_empty());
+        assert!(!serde_json::to_string(&job).unwrap().contains("groups"));
+
+        let mut grouped = job.clone();
+        grouped.groups = vec!["design/311-job-inputs".into(), "beacon-import".into()];
+        let back = serde_json::to_string(&grouped).unwrap();
+        assert!(
+            back.contains(r#""groups":["design/311-job-inputs","beacon-import"]"#),
+            "{back}"
+        );
+        assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), grouped);
+        // Terminal is not a special case on the wire: the record that carries a
+        // group is most often a finished one (design #321 Decision 5).
+        assert!(grouped.state.is_terminal());
+    }
+
     #[test]
     fn job_round_trips_with_model_override() {
         let json = r#"{
@@ -771,6 +851,7 @@ mod tests {
             timeout: Some("30m".into()),
             model: Some("claude-opus-5".into()),
             inputs: BTreeMap::from([("service".to_string(), "web".to_string())]),
+            groups: vec!["design/321-job-groups".into()],
             claim_next: true,
             escalation: Some(Escalation {
                 reason: "work_retries_exhausted".into(),

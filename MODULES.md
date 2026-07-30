@@ -124,3 +124,18 @@ through the actor, so its interface is not yet free of `&mut Core`
 | `forge_ingest/triage` | Operator-dispatched advisory triage runs; purely advisory — never drives a transition. | §1.2 |
 | `forge_ingest/origin` | Linked-origin projects: the link flow and the origin-release PR surface; credentials never enter containers. | §5.3 |
 | `forge_ingest/github` | Minimal GitHub REST client (create/read PRs) behind a trait; PAT resolved per call, never held. | §5.3 |
+
+## `types` — `crates/types/src/`
+
+Pure data (CLAUDE.md): no async, no I/O, no interior state. Its **rule
+modules** — the ones that decide what an operator-supplied value may be, so
+that every consumer shares one implementation — carry contract headers and
+register here as they are written. The plain record modules (`job`, `task`,
+`platform`, …) are shapes rather than units of work and are not scoping
+targets, which is why the registry gate (`.chug/tasks/ci.sh`) covers the
+dispatcher, domain and context trees and not this one.
+
+| Module | Contract | Spec |
+| --- | --- | --- |
+| `inputs` | What a job-*input value* may be: the charset floor a declared `pattern` can only narrow, shared by release validation, the Blocked→Ready re-check and the launch-time re-check. | §1.1, §2.2, §5.3 |
+| `groups` | What a *group name* may be, and the `docs/design/` path a `design/`-namespaced one refers to; hard bounds, never truncation, shared by all three write paths into `Job.groups`. | §1.1, §6.2 |
