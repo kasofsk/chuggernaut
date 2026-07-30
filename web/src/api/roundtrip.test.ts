@@ -25,8 +25,10 @@ import { wireSamples } from './wire-samples.gen'
  *  so the covered set is pinned here rather than inferred from the file. */
 const COVERED = [
   'DeployReport',
+  'DesignEntry',
   'DispatcherConfigSnapshot',
   'FleetStatus',
+  'GroupEntry',
   'Identity',
   'Job',
   'JobSummary',

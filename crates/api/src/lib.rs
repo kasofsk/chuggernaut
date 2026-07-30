@@ -93,6 +93,15 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
             "/api/v1/projects/{owner}/{project}/queue",
             get(routes::queue_get),
         )
+        // The derived group reads (design #321 slice B; read-only, Viewer+)
+        .route(
+            "/api/v1/projects/{owner}/{project}/groups",
+            get(routes::groups_list),
+        )
+        .route(
+            "/api/v1/projects/{owner}/{project}/designs",
+            get(routes::designs_list),
+        )
         // Jobs
         .route(
             "/api/v1/projects/{owner}/{project}/jobs",

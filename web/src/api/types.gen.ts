@@ -32,6 +32,21 @@ export type CapacityState =
  * report.
  */
 export type LegStatus = "ok" | "failed" | "skipped";
+export type JobState =
+  | (
+      | "Frozen"
+      | "Blocked"
+      | "Ready"
+      | "Work"
+      | "Evaluation"
+      | "Done"
+      | "Revoked"
+    )
+  | "Draft"
+  | "Batched"
+  | "WrapUp"
+  | "Escalated"
+  | "Stalled";
 /**
  * How a worker's most recent self-refresh ended (spec §3.1, ticket #187). The
  * daemon records this when a refresh completes and reports it in `ping` so a
@@ -67,21 +82,6 @@ export type ProjectRole = "viewer" | "member" | "admin";
  * What kind of value an [`Input`] accepts (spec §1.1, design #311 Decision 2).
  */
 export type InputKind = "string" | "enum";
-export type JobState =
-  | (
-      | "Frozen"
-      | "Blocked"
-      | "Ready"
-      | "Work"
-      | "Evaluation"
-      | "Done"
-      | "Revoked"
-    )
-  | "Draft"
-  | "Batched"
-  | "WrapUp"
-  | "Escalated"
-  | "Stalled";
 export type WorkType = "agent" | "command" | "human";
 /**
  * Wrap-up mode after eval-pass (design-lifecycle.md).
@@ -318,6 +318,82 @@ export interface DeployReport {
    * SHA the deploy targeted, if reported.
    */
   to_sha?: string | null;
+}
+/**
+ * A row of `GET .../designs`: a document under `docs/design/`, joined to the
+ * group its jobs carry. Repo-derived, so a design with **no** jobs is a row —
+ * which is exactly the row `GET .../groups` cannot represent, and the one the
+ * operator most needs to see.
+ */
+export interface DesignEntry {
+  /**
+   * Per-state histogram keyed by the state name serde writes, zero states
+   * omitted. Not a percentage: "5 Done, 1 Frozen" is the operator's actual
+   * question, and a percentage discards *which* one is not done.
+   */
+  counts: {
+    [k: string]: number;
+  };
+  /**
+   * The members, in ascending job seq.
+   */
+  jobs: GroupJob[];
+  /**
+   * The label the members carry, verbatim.
+   */
+  name: string;
+  /**
+   * Members that are not terminal, via [`JobState::is_terminal`] — the same
+   * definition batches and the roll-up's staleness flag already use.
+   */
+  open: number;
+  /**
+   * Repo-relative path at default-branch HEAD, e.g.
+   * `docs/design/321-job-groups.md`.
+   */
+  path: string;
+  /**
+   * The leading `<seq>-` of the slug when the document follows the naming
+   * convention, `None` when it does not. A convention, not a rule: the path
+   * is the identity (design #321 Decision 2, correction 4).
+   */
+  seq?: number | null;
+  /**
+   * The basename without `.md` — the stem a `design/` group name embeds.
+   */
+  slug: string;
+  /**
+   * The document's status line, verbatim and unparsed. Absent when the
+   * document has none — six of the eight in the tree read `PROPOSED`, one
+   * `DRAFT`, one `FINDING`, under no schema and no enforcement.
+   */
+  status?: string | null;
+  /**
+   * The design has members, **every** member is terminal, and the status
+   * line is non-empty — so the text beside this flag may no longer describe
+   * the design. Reported, never acted on: the repo stays the source of truth
+   * for a design's status and the operator resolves a discrepancy with an
+   * ordinary `design` amendment job (design #321 Decision 8). Deliberately
+   * not a machine-checked `implemented` — that needs the front-matter
+   * vocabulary, which is #86's to define.
+   */
+  status_stale: boolean;
+  /**
+   * The `# …` heading, falling back to the slug.
+   */
+  title: string;
+}
+/**
+ * One member of a group, as the group views render it: a state badge and a
+ * title, with the job page one click away. The same four fields the jobs list
+ * projection leads with — deliberately not the whole record, which the roll-up
+ * has no use for.
+ */
+export interface GroupJob {
+  id: number;
+  state: JobState;
+  title: string;
+  type: string;
 }
 /**
  * A snapshot of the dispatcher's runtime configuration for display. Contains
@@ -664,6 +740,78 @@ export interface FleetStatus {
    * waits.
    */
   queue_depth: number;
+}
+/**
+ * A row of `GET .../groups`: the roll-up, plus the design document the name
+ * conventionally refers to when one is there.
+ *
+ * `doc_path`/`doc_status` are best-effort and present only for a
+ * `design/`-namespaced name that resolves to a document at default-branch
+ * HEAD — the knowledge-tag posture (spec §4.4: a tag with no file is skipped).
+ * A group whose document is absent still lists; it just renders without a
+ * status.
+ */
+export interface GroupEntry {
+  /**
+   * Per-state histogram keyed by the state name serde writes, zero states
+   * omitted. Not a percentage: "5 Done, 1 Frozen" is the operator's actual
+   * question, and a percentage discards *which* one is not done.
+   */
+  counts: {
+    [k: string]: number;
+  };
+  /**
+   * Where the document was found, so a reader fetching it back through
+   * `GET .../file` never re-derives the path (the `req.tags.list` posture).
+   */
+  doc_path?: string | null;
+  /**
+   * The document's status line, verbatim and unparsed (design #321
+   * Decision 8). The platform compares it to nothing and infers nothing
+   * from it.
+   */
+  doc_status?: string | null;
+  /**
+   * The members, in ascending job seq.
+   */
+  jobs: GroupJob[];
+  /**
+   * The label the members carry, verbatim.
+   */
+  name: string;
+  /**
+   * Members that are not terminal, via [`JobState::is_terminal`] — the same
+   * definition batches and the roll-up's staleness flag already use.
+   */
+  open: number;
+}
+/**
+ * A group and how its members are doing — the shape both derived reads carry,
+ * so a design's roll-up and a group's roll-up are the same thing rendered
+ * twice rather than two shapes to keep in step.
+ */
+export interface GroupRollup {
+  /**
+   * Per-state histogram keyed by the state name serde writes, zero states
+   * omitted. Not a percentage: "5 Done, 1 Frozen" is the operator's actual
+   * question, and a percentage discards *which* one is not done.
+   */
+  counts: {
+    [k: string]: number;
+  };
+  /**
+   * The members, in ascending job seq.
+   */
+  jobs: GroupJob[];
+  /**
+   * The label the members carry, verbatim.
+   */
+  name: string;
+  /**
+   * Members that are not terminal, via [`JobState::is_terminal`] — the same
+   * definition batches and the roll-up's staleness flag already use.
+   */
+  open: number;
 }
 export interface Identity {
   kind: IdentityKind;

@@ -84,6 +84,7 @@ one surface.
 | `handlers/jobs` | The `req.jobs.*` family: wire bodies, the `cover_html` cap, and one handler per verb — create, the Draft edits, release/revoke, claims, triage, criteria. | §6.2, §2.1, §1.2 |
 | `handlers/jobs_reply` | The jobs family's reply bodies: the derived `awaiting_human` view, the resolved criteria, and the channel-progress join — all derived on read, never stored. | §1.1, §4.2 |
 | `handlers/graph` | `req.graph.get`: every job record in the project, unsummarized; a pure store read. | §6.1, §1.4 |
+| `handlers/groups` | `req.groups.list` and `req.designs.list`: the group roll-up derived from the job records, and the `docs/design/` registry joined to it. Nothing stored, never through the core actor. | §1.1, §6.1, §6.2 |
 | `handlers/tasks` | The `req.tasks.*` family: the human inbox, a job's task log, operator resolutions, and the live container tail served off the core actor. | §6.1, §4.2 |
 | `handlers/jobtypes` | `req.jobtypes.{list,get}`: the job-type library at default-branch HEAD; a broken type still lists, with its errors. | §1.1, §6.1 |
 | `handlers/repo` | `req.vcs.{file,tree,diff}` and `req.tags.list`: repo-backed reads, each pinned to one resolved ref. | §6.1, §5.2 |

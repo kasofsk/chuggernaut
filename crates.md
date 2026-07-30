@@ -189,7 +189,7 @@ dispatcher/
   handlers/      — NATS req.* subject handlers, one module per subject family (§6.1, §6.5):
                    mod.rs (wiring + the three spawn entry points), reply.rs (§6.5 envelope),
                    container.rs, worker.rs, status.rs, projects.rs, origin.rs, access.rs,
-                   jobs.rs + jobs_reply.rs, graph.rs, tasks.rs, jobtypes.rs, repo.rs
+                   jobs.rs + jobs_reply.rs, graph.rs, groups.rs, tasks.rs, jobtypes.rs, repo.rs
   config.rs      — dispatcher config (AGENT_PROVIDER_DEFAULT etc., §12.4)
 ```
 

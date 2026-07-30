@@ -201,6 +201,13 @@ fn api_bundle_job_records(generator: &mut schemars::SchemaGenerator) {
         types::EscalationAction,
         types::QueueSnapshot,
         types::QueueEntry,
+        // The two derived group reads (design #321 slice B): real types rather
+        // than `json!` envelopes precisely so they generate, like every other
+        // §6.2 response the UI is built on.
+        types::GroupEntry,
+        types::DesignEntry,
+        types::GroupRollup,
+        types::GroupJob,
         types::ChannelUpdate,
         types::ChannelOrigin,
     );

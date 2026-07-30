@@ -41,6 +41,14 @@ pub fn bundle() -> anyhow::Result<serde_json::Value> {
         "QueueSnapshot".into(),
         serde_json::to_value(sample_queue())?,
     );
+    samples.insert(
+        "GroupEntry".into(),
+        serde_json::to_value(sample_group_entry())?,
+    );
+    samples.insert(
+        "DesignEntry".into(),
+        serde_json::to_value(sample_design_entry())?,
+    );
     samples.insert("FleetStatus".into(), serde_json::to_value(sample_fleet())?);
     samples.insert(
         "DispatcherConfigSnapshot".into(),
@@ -191,6 +199,43 @@ fn sample_queue() -> types::QueueSnapshot {
             queued_at: at("2026-07-24T17:06:00Z"),
         }],
     }
+}
+
+/// One member's worth of group roll-up, shared by both derived reads so the
+/// two samples differ where the endpoints differ and nowhere else.
+fn sample_group_rollup() -> types::GroupRollup {
+    let mut group = types::GroupRollup::empty("design/321-job-groups".into());
+    group.jobs.push(types::GroupJob {
+        id: 42,
+        r#type: "code".into(),
+        title: "slice B: the derived reads".into(),
+        state: types::JobState::Done,
+    });
+    group.counts.insert("Done".into(), 1);
+    group
+}
+
+/// A `GET .../groups` row with its optional document fields SET — an absent
+/// field proves nothing about the shape it would have had.
+fn sample_group_entry() -> types::GroupEntry {
+    types::GroupEntry {
+        group: sample_group_rollup(),
+        doc_path: Some("docs/design/321-job-groups.md".into()),
+        doc_status: Some("PROPOSED".into()),
+    }
+}
+
+/// A `GET .../designs` row: the same roll-up, reached from the repo side.
+fn sample_design_entry() -> types::DesignEntry {
+    types::DesignEntry::new(
+        "docs/design/321-job-groups.md".into(),
+        "321-job-groups",
+        types::DesignDocHead {
+            title: Some("Design #321 — Job groups".into()),
+            status: Some("PROPOSED".into()),
+        },
+        sample_group_rollup(),
+    )
 }
 
 fn sample_refresh_outcome() -> types::worker::RefreshOutcome {

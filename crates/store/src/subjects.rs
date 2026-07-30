@@ -198,6 +198,21 @@ pub fn graph_get(owner: &str, project: &str) -> String {
     format!("req.graph.get.{owner}.{project}")
 }
 
+/// Every group the project's jobs name, with its members and per-state counts
+/// (design #321 slice B). Derived at read time from the job records — a group
+/// exists because a job says so, so there is no aggregate to read and an empty
+/// group does not exist.
+pub fn groups_list(owner: &str, project: &str) -> String {
+    format!("req.groups.list.{owner}.{project}")
+}
+
+/// The design registry: `docs/design/*.md` at default HEAD, each joined to its
+/// group's roll-up. The complement of [`groups_list`] — repo-derived rather
+/// than member-derived, so a design with no jobs is a row.
+pub fn designs_list(owner: &str, project: &str) -> String {
+    format!("req.designs.list.{owner}.{project}")
+}
+
 pub fn tasks_list_pending(owner: &str, project: &str) -> String {
     format!("req.tasks.list.pending.{owner}.{project}")
 }

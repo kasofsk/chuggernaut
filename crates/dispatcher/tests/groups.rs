@@ -1,7 +1,8 @@
 //! Tier-2 tests for job **groups** (spec §1.1 `groups:`, §6.2; design #321
-//! slice A): the three write paths into `Job.groups`, the mutate-anywhere verb
-//! that is accepted on a terminal job, and — the load-bearing one — the assert
-//! that a group changes **nothing** about what a job runs.
+//! slices A and B): the three write paths into `Job.groups`, the mutate-anywhere
+//! verb that is accepted on a terminal job, the assert that a group changes
+//! **nothing** about what a job runs, and — at the end of the file — the two
+//! derived reads that roll those labels back up.
 //!
 //! The shape rules themselves are pinned pure in `types::groups`, and the job
 //! brief's half of the inertness property in `dispatcher::exec`
@@ -551,4 +552,243 @@ async fn a_bad_group_is_refused_by_the_rule_it_broke() {
         stored(&rig.store, job.id).await.groups.len(),
         types::GROUPS_COUNT_MAX
     );
+}
+
+// ── Slice B: the derived reads ─────────────────────────────────────────────
+
+/// The four design documents the registry read enumerates: one with jobs still
+/// in flight, one nobody has ticketed, one whose members are all terminal, and
+/// one with neither a `Status:` line nor a seq in its name.
+async fn seed_design_docs(rig: &Rig) {
+    let clone = rig.repo.clone_branch("main").await;
+    for (path, body) in [
+        (
+            "docs/design/311-job-inputs.md",
+            "# Design #311 — Job inputs\n\nStatus: PROPOSED. Written against the tree.\n",
+        ),
+        (
+            "docs/design/313-workload-identity.md",
+            "# Design #313 — Workload identity\n\nStatus: PROPOSED\n",
+        ),
+        (
+            "docs/design/238-finding.md",
+            "# Design #238 — A finding\n\nStatus: FINDING\n",
+        ),
+        ("docs/design/scratch.md", "# Scratch\n\nJust notes.\n"),
+    ] {
+        clone.commit_file(path, body.as_bytes(), "design doc").await;
+    }
+    clone.push("main").await;
+}
+
+/// Two jobs in `design/311-job-inputs` (one of them also in `beacon-import`), a
+/// revoked member of `beacon-import`, a fully terminal design group, and a
+/// group whose name resolves to no document. Returns the seqs in filing order.
+async fn seed_grouped_jobs(rig: &mut Rig) -> Vec<u64> {
+    let mut seqs = Vec::new();
+    for groups in [
+        &["design/311-job-inputs"][..],
+        &["design/311-job-inputs", "beacon-import"][..],
+        &["beacon-import"][..],
+        &["design/238-finding"][..],
+        &["ops/fleet-refresh"][..],
+    ] {
+        seqs.push(rig.core.create_job(req(groups)).await.unwrap().id);
+    }
+    // The last three are revoked, which is what makes two of the groups fully
+    // terminal — and what proves a revoked member still lists (Decision 5).
+    for seq in &seqs[2..] {
+        rig.core.revoke_job("acme", "api", *seq).await.unwrap();
+    }
+    assert_invariants(&rig.core);
+    seqs
+}
+
+/// Request one derived read and parse its rows. Both subjects answer a JSON
+/// array with no payload, so the two calls differ only in the subject.
+async fn derived_read(store: &NatsStore, subject: &str) -> Vec<serde_json::Value> {
+    let reply = store
+        .request_timeout(subject, b"{}", std::time::Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|e| panic!("{subject}: {e}"));
+    serde_json::from_slice(&reply.payload).unwrap_or_else(|e| {
+        panic!(
+            "{subject}: {e}: {}",
+            String::from_utf8_lossy(&reply.payload)
+        )
+    })
+}
+
+/// The one row whose `key` is `value`.
+fn row<'a>(rows: &'a [serde_json::Value], key: &str, value: &str) -> &'a serde_json::Value {
+    rows.iter()
+        .find(|r| r[key] == serde_json::json!(value))
+        .unwrap_or_else(|| panic!("no row with {key} = {value}: {rows:?}"))
+}
+
+/// `GET .../groups`: the group set is `distinct(job.groups)` and nothing else,
+/// each group carrying its members, its histogram, its open count and — for a
+/// `design/` name only — the document it resolves to at default HEAD.
+fn assert_groups_rollup(groups: &[serde_json::Value], seqs: &[u64]) {
+    assert_eq!(
+        groups
+            .iter()
+            .map(|g| g["name"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec![
+            "beacon-import",
+            "design/238-finding",
+            "design/311-job-inputs",
+            "ops/fleet-refresh"
+        ],
+        "distinct(job.groups), and no group nobody is in: {groups:?}"
+    );
+
+    let inputs = row(groups, "name", "design/311-job-inputs");
+    assert_eq!(
+        inputs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|j| j["id"].as_u64().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec![seqs[0], seqs[1]],
+        "the two-group job is a full member here too"
+    );
+    assert_eq!(inputs["counts"]["Frozen"], serde_json::json!(2));
+    assert_eq!(inputs["open"], serde_json::json!(2));
+    assert_eq!(
+        inputs["doc_path"],
+        serde_json::json!("docs/design/311-job-inputs.md")
+    );
+    assert_eq!(
+        inputs["doc_status"],
+        serde_json::json!("PROPOSED. Written against the tree."),
+        "the status line is surfaced verbatim and unparsed"
+    );
+
+    // A revoked member still lists and is still counted (Decision 5: no
+    // cascade, no cleanup) — it is simply not open.
+    let beacon = row(groups, "name", "beacon-import");
+    assert_eq!(beacon["jobs"].as_array().unwrap().len(), 2);
+    assert_eq!(beacon["counts"]["Revoked"], serde_json::json!(1));
+    assert_eq!(beacon["counts"]["Frozen"], serde_json::json!(1));
+    assert_eq!(beacon["open"], serde_json::json!(1));
+
+    // A name that resolves to no document is an ordinary group.
+    let ops = row(groups, "name", "ops/fleet-refresh");
+    assert_eq!(ops["open"], serde_json::json!(0), "its member is Revoked");
+    assert!(
+        ops.get("doc_path").is_none(),
+        "no document, no path: {ops:?}"
+    );
+    assert!(ops.get("doc_status").is_none());
+    // …and the design nobody has ticketed is no group at all.
+    assert!(
+        !groups
+            .iter()
+            .any(|g| g["name"] == serde_json::json!("design/313-workload-identity")),
+        "an empty group is unrepresentable: {groups:?}"
+    );
+}
+
+/// `GET .../designs`: every document under `docs/design/` in path order,
+/// including the one with no jobs, each with its verbatim status line, its
+/// staleness flag and the same roll-up shape `/groups` serves.
+fn assert_designs_registry(designs: &[serde_json::Value]) {
+    assert_eq!(
+        designs
+            .iter()
+            .map(|d| d["path"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec![
+            "docs/design/238-finding.md",
+            "docs/design/311-job-inputs.md",
+            "docs/design/313-workload-identity.md",
+            "docs/design/scratch.md",
+        ],
+        "every doc at default HEAD, jobs or no jobs: {designs:?}"
+    );
+
+    let unticketed = row(designs, "slug", "313-workload-identity");
+    assert_eq!(unticketed["seq"], serde_json::json!(313));
+    assert_eq!(
+        unticketed["title"],
+        serde_json::json!("Design #313 — Workload identity")
+    );
+    assert_eq!(
+        unticketed["name"],
+        serde_json::json!("design/313-workload-identity")
+    );
+    assert_eq!(
+        unticketed["jobs"],
+        serde_json::json!([]),
+        "no jobs, still a row"
+    );
+    assert_eq!(unticketed["counts"], serde_json::json!({}));
+    assert_eq!(unticketed["open"], serde_json::json!(0));
+    assert_eq!(
+        unticketed["status_stale"],
+        serde_json::json!(false),
+        "with no members, 'every member is terminal' is vacuous"
+    );
+
+    // The discrepancy the platform reports and never resolves: every member
+    // terminal, and the document still says FINDING.
+    let stale = row(designs, "slug", "238-finding");
+    assert_eq!(stale["jobs"].as_array().unwrap().len(), 1);
+    assert_eq!(stale["open"], serde_json::json!(0));
+    assert_eq!(stale["status"], serde_json::json!("FINDING"));
+    assert_eq!(stale["status_stale"], serde_json::json!(true));
+
+    // Work still in flight is not stale, whatever the line says.
+    let live = row(designs, "slug", "311-job-inputs");
+    assert_eq!(live["status_stale"], serde_json::json!(false));
+    assert_eq!(live["jobs"].as_array().unwrap().len(), 2);
+
+    // No `Status:` line and no seq in the name: both absent, neither an error.
+    let scratch = row(designs, "slug", "scratch");
+    assert!(scratch.get("status").is_none(), "{scratch:?}");
+    assert!(scratch.get("seq").is_none(), "{scratch:?}");
+    assert_eq!(scratch["title"], serde_json::json!("Scratch"));
+    assert_eq!(scratch["status_stale"], serde_json::json!(false));
+}
+
+/// **Slice B end to end** (design #321 Decisions 4, 7 and 8): both derived reads
+/// over real NATS, against real job records and a real repo.
+///
+/// The derivation matrix itself is pinned pure in `types::rollup`; what needs
+/// this tier is the wiring — that the two subjects answer, that the roll-up is
+/// computed from the records the dispatcher actually wrote (there being no
+/// stored aggregate to compute it from), and that the `docs/design/` join
+/// resolves at default-branch HEAD. It carries the two cases that exist only
+/// where the repo and the records meet: a design with **no** jobs, which
+/// `/groups` cannot represent, and a document with no `Status:` line.
+#[tokio::test]
+async fn the_derived_reads_roll_up_groups_and_the_design_registry() {
+    let Some(mut rig) = rig().await else { return };
+    seed_design_docs(&rig).await;
+    let seqs = seed_grouped_jobs(&mut rig).await;
+
+    let store = rig.store.clone();
+    let repos = Arc::new(vcs::RepoManager::new(
+        rig.repo
+            .bare_path()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf(),
+    ));
+    let backend = rig.backend.clone();
+    let (handle, sink) = spawn_checked(rig.core);
+    dispatcher::handlers::spawn_api_handlers(&store, handle, repos, None, None, backend)
+        .await
+        .unwrap();
+
+    let groups = derived_read(&store, &store::subjects::groups_list("acme", "api")).await;
+    assert_groups_rollup(&groups, &seqs);
+    let designs = derived_read(&store, &store::subjects::designs_list("acme", "api")).await;
+    assert_designs_registry(&designs);
+    assert_invariants_of(&sink);
 }

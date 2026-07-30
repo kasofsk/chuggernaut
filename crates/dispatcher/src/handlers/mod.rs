@@ -19,6 +19,7 @@
 //! | access | `req.ssh.sign-user-cert`, `req.members.*` | [`access`] |
 //! | jobs | `req.jobs.*` | [`jobs`], [`jobs_reply`] |
 //! | graph | `req.graph.get` | [`graph`] |
+//! | groups | `req.groups.list`, `req.designs.list` | [`groups`] |
 //! | tasks | `req.tasks.*` | [`tasks`] |
 //! | job types | `req.jobtypes.{list,get}` | [`jobtypes`] |
 //! | repo | `req.vcs.{file,tree,diff}`, `req.tags.list` | [`repo`] |
@@ -40,6 +41,7 @@ mod access;
 mod container;
 mod fleet;
 mod graph;
+mod groups;
 mod jobs;
 mod jobs_reply;
 mod jobtypes;
@@ -90,6 +92,7 @@ pub async fn spawn_api_handlers(
     access::spawn_members_handler(store).await?;
     jobs::spawn_jobs_handler(store, handle.clone(), repos.clone()).await?;
     graph::spawn_graph_handler(store).await?;
+    groups::spawn_groups_handlers(store, repos.clone()).await?;
     tasks::spawn_tasks_handler(store, handle, backend).await?;
     jobtypes::spawn_jobtypes_handlers(store, repos.clone()).await?;
     repo::spawn_repo_handlers(store, repos).await

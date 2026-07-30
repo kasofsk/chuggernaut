@@ -334,6 +334,28 @@ impl JobState {
     pub fn is_terminal(self) -> bool {
         matches!(self, JobState::Done | JobState::Revoked)
     }
+
+    /// The state's name on the wire — the same string serde writes, pinned to
+    /// it by `state_names_match_serde`. For the places a state is a *key*
+    /// rather than a value (the group roll-up's histogram, `crate::rollup`),
+    /// where a second spelling would be a second vocabulary.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JobState::Draft => "Draft",
+            JobState::Frozen => "Frozen",
+            JobState::Batched => "Batched",
+            JobState::Blocked => "Blocked",
+            JobState::Ready => "Ready",
+            JobState::Work => "Work",
+            JobState::Evaluation => "Evaluation",
+            JobState::WrapUp => "WrapUp",
+            JobState::Escalated => "Escalated",
+            JobState::Stalled => "Stalled",
+            JobState::Done => "Done",
+            JobState::Revoked => "Revoked",
+        }
+    }
 }
 
 impl Job {
@@ -467,6 +489,38 @@ mod tests {
         let back = serde_json::to_string(&job).unwrap();
         let again: Job = serde_json::from_str(&back).unwrap();
         assert_eq!(job, again);
+    }
+
+    /// [`JobState::as_str`] and serde are two statements of one vocabulary;
+    /// this is what keeps them one. A histogram key that drifted from the
+    /// `state` field beside it would have the UI render a state twice under two
+    /// spellings.
+    #[test]
+    fn state_names_match_serde() {
+        for state in [
+            JobState::Draft,
+            JobState::Frozen,
+            JobState::Batched,
+            JobState::Blocked,
+            JobState::Ready,
+            JobState::Work,
+            JobState::Evaluation,
+            JobState::WrapUp,
+            JobState::Escalated,
+            JobState::Stalled,
+            JobState::Done,
+            JobState::Revoked,
+        ] {
+            assert_eq!(
+                serde_json::to_value(state).unwrap(),
+                serde_json::json!(state.as_str()),
+                "{state:?} spells itself two ways"
+            );
+            assert_eq!(
+                serde_json::from_value::<JobState>(serde_json::json!(state.as_str())).unwrap(),
+                state
+            );
+        }
     }
 
     #[test]

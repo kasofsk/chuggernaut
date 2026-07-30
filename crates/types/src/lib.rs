@@ -16,6 +16,7 @@ pub mod platform;
 pub mod project;
 pub mod queue;
 pub mod resources;
+pub mod rollup;
 pub mod step;
 pub mod task;
 pub mod user;
@@ -52,6 +53,11 @@ pub use platform::{
 pub use project::{OriginLink, ProjectRecord, ReleaseState, ReleaseStatus, github_repo_from_url};
 pub use queue::{QueueEntry, QueueSnapshot};
 pub use resources::{MEMORY_PATTERN, MemoryParseError, parse_memory};
+pub use rollup::{
+    DESIGNS_MAX, DOC_HEAD_LINES_MAX, DOC_STATUS_LEN_MAX, DesignDocHead, DesignEntry, GroupEntry,
+    GroupJob, GroupRollup, design_doc_head, design_group_name, design_seq, design_slug,
+    group_rollups,
+};
 pub use step::{StepKind, StepRecord, StepStatus};
 pub use task::{
     EscalationAction, EvalResult, PendingReason, Performer, ReworkReason, Task, TaskKind,

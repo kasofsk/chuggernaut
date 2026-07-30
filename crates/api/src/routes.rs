@@ -874,6 +874,44 @@ pub async fn job_type_get(
     .await
 }
 
+/// Every group the project's jobs name, with each group's members, per-state
+/// counts and open count, plus the design document a `design/`-namespaced name
+/// resolves to (spec §1.1 `groups`, design #321). Derived at read time: no
+/// aggregate is stored anywhere, and a group with no members does not exist.
+pub async fn groups_list(
+    State(state): State<SharedState>,
+    Path((owner, project)): Path<(String, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::groups_list(&owner, &project),
+        serde_json::json!({}),
+        StatusCode::OK,
+    )
+    .await
+}
+
+/// The design registry: every `docs/design/*.md` at default HEAD with its
+/// verbatim `Status:` line and the roll-up of the jobs grouped under it. The
+/// complement of [`groups_list`] — a design nobody has filed a job against is a
+/// row here and cannot be one there.
+pub async fn designs_list(
+    State(state): State<SharedState>,
+    Path((owner, project)): Path<(String, String)>,
+    Auth(identity): Auth,
+) -> ApiResult<Response> {
+    read_project(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::designs_list(&owner, &project),
+        serde_json::json!({}),
+        StatusCode::OK,
+    )
+    .await
+}
+
 /// Available knowledge tags at default HEAD, as `{ name, path }` — the path each
 /// `.chug/tags/*.md` resolved to (spec §1.1).
 pub async fn tags_list(

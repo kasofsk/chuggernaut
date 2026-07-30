@@ -206,6 +206,80 @@
         "legs"
       ]
     },
+    "DesignEntry": {
+      "description": "A row of `GET .../designs`: a document under `docs/design/`, joined to the\ngroup its jobs carry. Repo-derived, so a design with **no** jobs is a row —\nwhich is exactly the row `GET .../groups` cannot represent, and the one the\noperator most needs to see.",
+      "type": "object",
+      "properties": {
+        "counts": {
+          "description": "Per-state histogram keyed by the state name serde writes, zero states\nomitted. Not a percentage: \"5 Done, 1 Frozen\" is the operator's actual\nquestion, and a percentage discards *which* one is not done.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "jobs": {
+          "description": "The members, in ascending job seq.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GroupJob"
+          }
+        },
+        "name": {
+          "description": "The label the members carry, verbatim.",
+          "type": "string"
+        },
+        "open": {
+          "description": "Members that are not terminal, via [`JobState::is_terminal`] — the same\ndefinition batches and the roll-up's staleness flag already use.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "path": {
+          "description": "Repo-relative path at default-branch HEAD, e.g.\n`docs/design/321-job-groups.md`.",
+          "type": "string"
+        },
+        "seq": {
+          "description": "The leading `<seq>-` of the slug when the document follows the naming\nconvention, `None` when it does not. A convention, not a rule: the path\nis the identity (design #321 Decision 2, correction 4).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "slug": {
+          "description": "The basename without `.md` — the stem a `design/` group name embeds.",
+          "type": "string"
+        },
+        "status": {
+          "description": "The document's status line, verbatim and unparsed. Absent when the\ndocument has none — six of the eight in the tree read `PROPOSED`, one\n`DRAFT`, one `FINDING`, under no schema and no enforcement.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status_stale": {
+          "description": "The design has members, **every** member is terminal, and the status\nline is non-empty — so the text beside this flag may no longer describe\nthe design. Reported, never acted on: the repo stays the source of truth\nfor a design's status and the operator resolves a discrepancy with an\nordinary `design` amendment job (design #321 Decision 8). Deliberately\nnot a machine-checked `implemented` — that needs the front-matter\nvocabulary, which is #86's to define.",
+          "type": "boolean"
+        },
+        "title": {
+          "description": "The `# …` heading, falling back to the slug.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "slug",
+        "title",
+        "status_stale",
+        "name",
+        "jobs",
+        "counts",
+        "open"
+      ]
+    },
     "DispatcherConfigSnapshot": {
       "description": "A snapshot of the dispatcher's runtime configuration for display. Contains\nno secrets — only names, endpoints, and resolved paths an operator needs to\nsee. Written by the dispatcher at startup, read by the api.",
       "type": "object",
@@ -599,6 +673,122 @@
       "required": [
         "nodes",
         "queue_depth"
+      ]
+    },
+    "GroupEntry": {
+      "description": "A row of `GET .../groups`: the roll-up, plus the design document the name\nconventionally refers to when one is there.\n\n`doc_path`/`doc_status` are best-effort and present only for a\n`design/`-namespaced name that resolves to a document at default-branch\nHEAD — the knowledge-tag posture (spec §4.4: a tag with no file is skipped).\nA group whose document is absent still lists; it just renders without a\nstatus.",
+      "type": "object",
+      "properties": {
+        "counts": {
+          "description": "Per-state histogram keyed by the state name serde writes, zero states\nomitted. Not a percentage: \"5 Done, 1 Frozen\" is the operator's actual\nquestion, and a percentage discards *which* one is not done.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "doc_path": {
+          "description": "Where the document was found, so a reader fetching it back through\n`GET .../file` never re-derives the path (the `req.tags.list` posture).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "doc_status": {
+          "description": "The document's status line, verbatim and unparsed (design #321\nDecision 8). The platform compares it to nothing and infers nothing\nfrom it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "jobs": {
+          "description": "The members, in ascending job seq.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GroupJob"
+          }
+        },
+        "name": {
+          "description": "The label the members carry, verbatim.",
+          "type": "string"
+        },
+        "open": {
+          "description": "Members that are not terminal, via [`JobState::is_terminal`] — the same\ndefinition batches and the roll-up's staleness flag already use.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "jobs",
+        "counts",
+        "open"
+      ]
+    },
+    "GroupJob": {
+      "description": "One member of a group, as the group views render it: a state badge and a\ntitle, with the job page one click away. The same four fields the jobs list\nprojection leads with — deliberately not the whole record, which the roll-up\nhas no use for.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "state": {
+          "$ref": "#/$defs/JobState"
+        },
+        "title": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "title",
+        "state"
+      ]
+    },
+    "GroupRollup": {
+      "description": "A group and how its members are doing — the shape both derived reads carry,\nso a design's roll-up and a group's roll-up are the same thing rendered\ntwice rather than two shapes to keep in step.",
+      "type": "object",
+      "properties": {
+        "counts": {
+          "description": "Per-state histogram keyed by the state name serde writes, zero states\nomitted. Not a percentage: \"5 Done, 1 Frozen\" is the operator's actual\nquestion, and a percentage discards *which* one is not done.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "jobs": {
+          "description": "The members, in ascending job seq.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GroupJob"
+          }
+        },
+        "name": {
+          "description": "The label the members carry, verbatim.",
+          "type": "string"
+        },
+        "open": {
+          "description": "Members that are not terminal, via [`JobState::is_terminal`] — the same\ndefinition batches and the roll-up's staleness flag already use.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "jobs",
+        "counts",
+        "open"
       ]
     },
     "Identity": {

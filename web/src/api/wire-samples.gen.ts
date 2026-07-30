@@ -18,8 +18,10 @@
 
 import type {
   DeployReport,
+  DesignEntry,
   DispatcherConfigSnapshot,
   FleetStatus,
+  GroupEntry,
   Identity,
   Job,
   JobSummary,
@@ -45,6 +47,27 @@ export const wireSamples = {
     rollback: false,
     to_sha: "2222222",
   } satisfies DeployReport,
+  DesignEntry: {
+    counts: {
+      Done: 1,
+    },
+    jobs: [
+      {
+        id: 42,
+        state: "Done",
+        title: "slice B: the derived reads",
+        type: "code",
+      },
+    ],
+    name: "design/321-job-groups",
+    open: 0,
+    path: "docs/design/321-job-groups.md",
+    seq: 321,
+    slug: "321-job-groups",
+    status: "PROPOSED",
+    status_stale: true,
+    title: "Design #321 — Job groups",
+  } satisfies DesignEntry,
   DispatcherConfigSnapshot: {
     agent_model_default: "claude-opus-5",
     agent_provider_default: "claude",
@@ -122,6 +145,23 @@ export const wireSamples = {
     ],
     queue_depth: 3,
   } satisfies FleetStatus,
+  GroupEntry: {
+    counts: {
+      Done: 1,
+    },
+    doc_path: "docs/design/321-job-groups.md",
+    doc_status: "PROPOSED",
+    jobs: [
+      {
+        id: 42,
+        state: "Done",
+        title: "slice B: the derived reads",
+        type: "code",
+      },
+    ],
+    name: "design/321-job-groups",
+    open: 0,
+  } satisfies GroupEntry,
   Identity: {
     kind: "user",
     platform_admin: true,

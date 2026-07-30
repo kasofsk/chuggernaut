@@ -147,13 +147,16 @@ pub fn check_groups(groups: &[String]) -> Result<(), GroupsError> {
 /// `design/311-job-inputs` → `docs/design/311-job-inputs.md`. `None` for every
 /// other namespace, which is every group that names no document.
 ///
-/// One implementation, because the naming convention is a joint fact: the group
-/// endpoint writes names by it and the group *read* (slice B) resolves them by
-/// it against the repo. That read is why the accepted stem is a single flat
-/// segment: `.` and `/` are both inside [`GROUP_NAME_PATTERN`], so
-/// `design/../../etc/passwd` is a shape-legal name, and a path built from it
-/// would escape `docs/design/`. Refusing it here means no caller has to
-/// remember to.
+/// One implementation, because the convention is read from both ends: the group
+/// read (`req.groups.list`) resolves each name it holds to a document by this,
+/// and [`crate::rollup::design_slug`] is the inverse the registry read needs,
+/// starting from the path — `slug_and_path_round_trip` is what keeps them one
+/// convention rather than two.
+///
+/// That read is why the accepted stem is a single flat segment: `.` and `/` are
+/// both inside [`GROUP_NAME_PATTERN`], so `design/../../etc/passwd` is a
+/// shape-legal *name*, and a path built from it would escape `docs/design/`.
+/// Refusing it here means no caller has to remember to.
 #[must_use]
 pub fn design_doc_path(name: &str) -> Option<String> {
     let stem = name.strip_prefix(DESIGN_GROUP_PREFIX)?;
