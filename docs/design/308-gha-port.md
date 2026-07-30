@@ -1,10 +1,23 @@
 # Design #308 — Porting beacon's GitHub Actions onto Chuggernaut
 
-Status: PROPOSED. Written against the tree at `0346a80`. Every claim about
-*Chuggernaut's* current behavior was read out of `spec.md` and the source in
-this repo, not inferred from the docs; the corrections in
-[What the brief got wrong](#what-the-brief-got-wrong) are the ones that survey
-found.
+Status: PROPOSED, **amended 2026-07-30** (job #320). The original was written
+against the tree at `0346a80`; the amendment against `00dd0dc`. **Four
+corrections to this doc's own claims** — one retraction, one overstatement, one
+finding it was missing entirely, one made stale by shipped code — **plus one
+added phase**: see [What #308 got wrong](#what-308-got-wrong), which is where a
+downstream reader should look first. Every claim about *Chuggernaut's* current
+behavior, at both dates, was read out of `spec.md` and the source in this repo,
+not inferred from the docs; the corrections in
+[What the brief got wrong](#what-the-brief-got-wrong) are the ones the original
+survey found.
+
+Children (the implementable specs extracted from this survey):
+[#309 host-native execution](309-host-native-execution.md),
+[#310 scheduled jobs](310-scheduled-jobs.md),
+[#311 job inputs](311-job-inputs.md),
+[#313 workload identity and image builds](313-workload-identity-image-builds.md).
+Where a claim of this doc now lives in a child, the child is cited rather than
+restated.
 
 Related: [spec.md](../../spec.md) §1.1 (job-type config), §3.1 (dispatcher
 backends, fleet, node-local build cache), §3.3 (staged evaluation, merge gate),
@@ -21,12 +34,24 @@ to the same announce payload this doc wants to extend).
 Two halves, with different evidentiary weight, and the doc marks which is which:
 
 - **The beacon half** — 41 workflows and 14 composite actions in `beacon`'s
-  `.github/`, plus the quilbert/scrybert agent protocol — comes from the survey
-  in the job brief. That repo is not checked out in this workspace, so nothing
-  here re-verifies it. Where a decision hangs on a beacon detail, the doc says
-  so, and that detail should be re-read before the corresponding phase starts.
-- **The Chuggernaut half** is verified against this tree. Paths and spec
-  sections are citations, not illustrations.
+  `.github/`, plus the quilbert/scrybert agent protocol — came from the survey
+  in the job brief. That repo is still not checked out in this workspace, so
+  nothing written here re-derives it. Where a decision hangs on a beacon detail,
+  the doc says so, and that detail should be re-read before the corresponding
+  phase starts.
+
+  **It has now been verified once.** On **2026-07-30** the operator inspected
+  `~/beacon/.github` directly and re-checked the claims this amendment turns on.
+  The two findings recorded in [A2](#a2-the-keyed-caching-gap-was-overstated) and
+  [A3](#a3-beacon-already-parameterizes-placement-per-run) — that exactly one
+  workflow uses `actions/cache`, and that thirteen jobs select their runner from
+  a dispatch input — are **verified fact with that provenance and date**, not
+  survey inference, and are stated as such below. Beacon claims *not* re-read on
+  that pass (the 41/14 counts, the quilbert/scrybert protocol, the emulator
+  workarounds, the two `:latest`-only pushes) keep their original weight; and
+  anything that changed in `.github/` after 2026-07-30 is unverified again.
+- **The Chuggernaut half** is verified against this tree, at both dates. Paths
+  and spec sections are citations, not illustrations.
 
 ## Problem
 
@@ -52,10 +77,16 @@ machine-level execution.
 **GHA's isolation unit is a machine; Chuggernaut's is a container.** GHA never
 solved docker-in-docker — it sidesteps it by running jobs *on* the host, which
 is why beacon's `gumbo` runner is a persistent NixOS box with a host docker
-daemon and a `/var/lib/github-runner/.buildx-cache-*` directory. Every hard
-problem below (image builds, keyed caches, emulators, Xcode) is a restatement of
+daemon and a `/var/lib/github-runner/.buildx-cache-*` directory. Most of the hard
+problems below (persistent build state, emulators, Xcode) are a restatement of
 that one difference. Section [H](#h-host-native-workers) is the proposal that
 addresses it directly; everything before H is what can be ported without it.
+
+**Amended:** image builds are *not* a restatement of it. That was this doc's
+[§D](#d-image-build-and-push-5-workflows--open) claim and it is retracted — see
+[A1](#a1-image-builds-do-not-dissolve-into-host-mode). And "keyed caches" was
+the wrong name for the cache problem: what gumbo has is implicit host state, not
+a configured cache ([A2](#a2-the-keyed-caching-gap-was-overstated)).
 
 ## What is true today (verified)
 
@@ -77,9 +108,12 @@ addresses it directly; everything before H is what can be ported without it.
 | Runtime capacity control / richer announce | `spec.md` §3.1; [design #293](293-worker-capacity.md) | Specced + designed, not in the tree |
 | Outbound webhooks | `crates/webhooks/src/lib.rs` | Two-line `TODO` stub |
 | Binary artifact store | `spec.md` Appendix: Deferred | Deferred |
-| Cron / schedules | — | Absent and unspecced |
-| Job inputs / matrix / parameters | — | Absent and unspecced |
-| OIDC issuance / JWKS endpoint | — | Absent (RS256 keypair exists, §12.1) |
+| Cron / schedules | — | Absent from the tree and from `spec.md`; designed as [#310](./310-scheduled-jobs.md) |
+| Job inputs (`CHUG_INPUT_*`) | `spec.md` §1.1, §6.3, §14.2; `crates/types/src/inputs.rs`, `crates/domain/src/inputs.rs` | **Shipped and deployed** (amendment [A4](#a4-job-inputs-shipped-so-gap-1-is-retired)) — `CONFIG_SCHEMA_EPOCH` = 2 (`crates/types/src/version.rs`); first consumer `.chug/jobs/rollback.yaml` |
+| Matrix / fan-out over inputs | — | Absent **by decision** ([#311](./311-job-inputs.md) Decision 7), not by omission |
+| Per-run placement (a runner chosen at launch) | — | Absent, and forbidden in the obvious shape — see [A3](#a3-beacon-already-parameterizes-placement-per-run) |
+| Linked-origin projects (external host owns `main`) | `spec.md` §5.3; `crates/dispatcher/src/handlers/origin.rs`, `crates/dispatcher/tests/origin.rs` | Shipped — the mode beacon needs ([A5](#a5-the-missing-phase-onboarding-beacon-as-a-project)) |
+| OIDC issuance / JWKS endpoint | — | Absent (RS256 keypair exists, §12.1); designed as [#313](./313-workload-identity-image-builds.md) half A |
 
 ## What the brief got wrong
 
@@ -149,6 +183,218 @@ brief assumes and four make it *more expensive* or re-sequence it.
 
 Three of these (1, 2, 3) delete or shrink work the brief scheduled. Four
 (4, 5, 6, 7) add work or re-sequence it.
+
+## What #308 got wrong
+
+The same treatment, applied to this doc. **Four corrections**: one claim
+retracted outright ([A1](#a1-image-builds-do-not-dissolve-into-host-mode)), one
+materially overstated ([A2](#a2-the-keyed-caching-gap-was-overstated)), one
+significant finding missing entirely
+([A3](#a3-beacon-already-parameterizes-placement-per-run)), and one made stale by
+shipped code ([A4](#a4-job-inputs-shipped-so-gap-1-is-retired)). Plus **one
+addition** ([A5](#a5-the-missing-phase-onboarding-beacon-as-a-project)): a phase
+the ordering never had, which every category-B and category-C port assumes.
+
+Corrections are recorded here rather than by rewriting the sections they touch,
+so a reader who cited a section can see what moved; each affected section carries
+a pointer into this list.
+
+**Numbers are stable identifiers.** Sibling docs cite "Gap 1 of #308"
+([#311](./311-job-inputs.md)) and "#308's ordering … phase 6"
+([#313](./313-workload-identity-image-builds.md)), so gap and phase numbers are
+never reassigned. Where a ranking changed, the row *order* changed and the number
+did not; where something new was added it took the next free number, wherever it
+sorts.
+
+### A1. Image builds do not dissolve into host mode
+
+§D closed with "**Both options dissolve if host-native nodes land** (section H):
+a host node has a real docker daemon the way gumbo does, and the question stops
+being interesting." **Retracted.**
+[#313](./313-workload-identity-image-builds.md) Decision 0 retracts it on three
+counts — the gumbo analogy does not transfer, "may I push" is an authentication
+question host mode does not touch, and there is nothing to push to without a
+registry. The reasoning lives there and is not restated here; §D now points at
+it, and #313 B1 is the mechanism that replaced both of §D's options.
+
+**Consequence for the [ordering](#ordering).** Phase 6 (image build and push)
+read "depends on 2 or 4". It depends on **phase 4 plus an
+operator-provisioned registry**, and **not on phase 2 at all** — #313's build
+service runs on a pinned builder node in container mode, independent of
+whether #309 ever lands. The registry is now [gap 11](#gaps-ranked).
+
+### A2. The keyed-caching gap was overstated
+
+Category B called the loss of `actions/cache` "the biggest container-path
+regression in the whole port" and named gradle, pub, `node_modules` and buildx.
+Gap 4 was ranked on that basis. Both were wrong about beacon.
+
+**Verified by direct inspection of `~/beacon/.github` on 2026-07-30:** exactly
+**one** of the 41 workflows uses `actions/cache` — `creator-tests.yml`, caching
+one path (`creator/node_modules`), keyed on
+`hashFiles('creator/package-lock.json')`. **Nothing caches gradle, pub or buildx
+by key anywhere in the 41 workflows.**
+
+So the sentence named three things beacon never configured. What makes those
+builds fast on `gumbo` is not a cache *feature* at all: it is **implicit host
+state on a persistent NixOS box** — a `~/.gradle`, a `~/.pub-cache`, a
+`.buildx-cache-*` directory that is simply still there from last night, with no
+key, no restore step and no declaration.
+
+**This sharpens the case for [#309](./309-host-native-execution.md) rather than
+weakening it.** The thing to build is **host execution with declared persistent
+state** (#309 §9 / P5), not a cache-keying subsystem. Nobody is asking the
+platform to compute a cache key; they are asking it to let a directory survive.
+That is a different, smaller, and much better-specified piece of work.
+
+Two consequences, both reflected in the tables below:
+
+- **Gap 4 largely collapses into gap 3** (host-native execution), which is why
+  gap 3 now heads the ranking and gap 4 sits at the bottom as a remnant.
+- **The one real keyed cache is the small case.** A single `node_modules`
+  directory is the node-local shape [correction 3](#what-the-brief-got-wrong)
+  already identified — worker-daemon-local, no launch field, no wire field, no
+  schema change. Read #309 §9 for the refinement that correction needs:
+  `node_modules` (like `~/.gradle` and `~/.pub-cache`) is neither
+  content-addressed nor free of job state, which are the two properties §3.1
+  uses to justify `WORKER_CACHE_DIR` as the one permitted host bind. So it is a
+  **second, namespaced mechanism** (#309's `WORKER_HOST_CACHE_ROOT`), not a
+  widening of the sccache hole. Still worker-local; still not a platform change.
+
+### A3. Beacon already parameterizes placement per run
+
+Missing from #308 entirely.
+
+**Verified by direct inspection of `~/beacon/.github` on 2026-07-30:** eleven
+jobs choose their runner from a dispatch input —
+
+```yaml
+runs-on: ${{ inputs.runner == 'cloud' && 'ubuntu-latest' || fromJSON('["self-hosted", "linux", "x64", "gumbo"]') }}
+```
+
+— and two more do the same for macOS. **Thirteen jobs in total.** This is not
+cosmetic: "run this one on the cloud runner today, gumbo is busy" is a per-run
+operational lever, and the category-B and category-C ports inherit the habit.
+
+It collides head-on with something the platform has since **shipped**, and the
+collision is verifiable in this tree:
+
+- `placement` is a field on the **job type**
+  (`crates/types/src/job_type.rs`: `pub placement: Option<Placement>`, read at
+  launch through `placement_node()`), and a job type is a repo-versioned file
+  resolved at `base_ref`.
+- [#311](./311-job-inputs.md) Decision 1 classifies `placement.node` as
+  **never** selectable by an input: "placement is a fleet fact; an input naming a
+  node lets a job creator pick which host runs project code."
+- That is not merely a documented intention. It is an **enforced property**: the
+  tier-1 test `resolved_job_type_is_equal_for_any_two_input_maps`
+  (`crates/domain/src/release.rs`) asserts that for any job type, any job, and
+  any two input maps, the `JobType` the release path resolves is *equal* — with
+  cases deliberately containing the input names a substitution engine would
+  notice. Threading `Job.inputs` into config resolution fails that test.
+
+**So "make the runner an input" is not available under the current contract**,
+and this amendment does not invent a way around it. The likely shape is that
+per-run placement is resolved **at launch from a mechanism other than inputs**.
+The nearest precedent in the tree is `Job.timeout` / `Job.model`
+(`crates/types/src/job.rs`; §1.1) — per-job fields that override a type field,
+scoped so that evaluators keep the type's resolution — which is the door #311
+Decision 1 itself points at for its "never (by inputs)" rows.
+[#309](./309-host-native-execution.md) §5a's capability-aware `choose_placement`
+is a different thing again: placement by *requirement* ("this needs host mode"),
+not placement by *choice* ("this run, on the cloud").
+
+**Recorded as [gap 10](#gaps-ranked) and left OPEN.** Deciding it here would be
+the per-job-override re-litigation the gap-1 discussion below warns against, and
+it is a contract change (`Job` grows a field; §3.1's "the pin is the only
+affinity control") that deserves its own doc.
+
+### A4. Job inputs shipped, so gap 1 is retired
+
+Job inputs are in the tree and deployed. `CONFIG_SCHEMA_EPOCH` is **2**
+(`crates/types/src/version.rs`, with `INPUTS_SCHEMA_EPOCH` as its own constant);
+the declaration is a typed schema on the job type (`spec.md` §1.1 `inputs:`); the
+effective set lives on the job record and is immutable once `base_ref` is pinned
+(§1.1 `Job.inputs`); delivery is one reserved env namespace, `CHUG_INPUT_*`
+(§6.3); and `.chug/jobs/rollback.yaml` (`min_dispatcher: 2`) is the first
+consumer, with `.chug/tasks/rollback.sh` reading `$CHUG_INPUT_SHA`. Jobs #314–#317
+landed the platform half and #319 landed the UI (the create form and Draft editor
+render declared inputs, so `rollback` no longer needs the API).
+
+Job #317 already corrected this file: category C's "**Blocked:** rollback does
+not port" became "was blocked, now unblocked", the gap-1 row and ordering row 9
+were updated, and the gap-1 prose gained #311 Decision 1's tightening (nothing is
+substituted anywhere — the value reaches the container as `$CHUG_INPUT_*`). That
+work is not redone here.
+
+What this amendment finishes: the **ranking**. Gap 1 is retired and its row moves
+to the bottom of the table (keeping its number, per the note above), and the
+forecast of twelve near-identical deploy job types is corrected in place — one
+`deploy.sh` reading `$CHUG_INPUT_SERVICE` is the shape now. Anything left in this
+doc that reads as "inputs are absent" is stale, not a live constraint.
+
+### A5. The missing phase: onboarding beacon as a project
+
+No phase in the [ordering](#ordering) covers the prerequisite every category-B
+and category-C port silently assumes: **beacon has to be a Chuggernaut project
+first.** It is not one yet (per the operator, 2026-07-30 — the platform's project
+list is not a fact this tree records), and it cannot be the same *kind* of
+project this repo is.
+
+`kasofsk/chuggernaut` is **platform-owned**: the bare repo on the Mini owns
+`main` and GitHub is a read-only mirror, force-pushed every five minutes by a
+launchd agent — which is why `deploy/prod/README.md` §3 records the linked-origin
+flow as no longer applying to this project and warns that direct pushes to GitHub
+`main` are overwritten.
+
+beacon must be the other kind: a **linked-origin** project (`spec.md` §5.3;
+implemented in `crates/dispatcher/src/handlers/origin.rs`, tier-2 coverage in
+`crates/dispatcher/tests/origin.rs`). GitHub keeps owning `main` and chuggernaut
+never pushes it; the local bare repo's `HEAD` points at a chuggernaut-owned
+`integration` branch, so the entire §3.2/§3.3 merge machinery — job branches,
+merge queue, merge gate, SSH branch protection — operates unchanged with
+`integration` as "the default branch"; and shipping is an explicit
+`req.origin.release` that pushes `integration` to the origin as
+`chug/release-{n}` and opens a PR into `main`, holding the merge queue until that
+PR is merged or closed.
+
+That is a real phase with real prerequisites, none of which are invention:
+
+- The `CHUG_ORIGIN_DEPLOY_KEY` (write deploy key) and `CHUG_ORIGIN_PAT` (PR API)
+  project secrets, set with `admin secret set` **before** linking; the `CHUG_`
+  prefix is reserved, so neither can be declared in a job type or reach a
+  container (§5.3).
+- `chuggernaut admin project link --owner … --name … --origin-url …`
+  (`crates/cli/src/admin.rs`), which fetches the origin, creates `integration` at
+  origin main, installs the pre-receive hook, and seeds the `.chug/` config
+  subset **skip-existing** — reaching GitHub through the first release PR.
+- beacon's own `.chug/jobs/`, `.chug/prompts/` and `.chug/tasks/`, authored as
+  project-owned config (CLAUDE.md: "factories and job-type config are
+  project-owned and repo-versioned — a per-consumer forge"). Category B's CI
+  script and category C's deploy types *are* this work; the phase is where it has
+  somewhere to live.
+- Fleet capacity for a second project on the existing worker nodes, which is the
+  first time the fleet is genuinely multi-tenant — and, per
+  [#309](./309-host-native-execution.md) §10, the reason host work is
+  single-tenant by node policy.
+
+It lands as **phase 0b** — before phase 1, and a precondition of phases 1, 5, 6
+and 8. It is 0b rather than a renumbering because the existing numbers are cited
+elsewhere.
+
+**It also bears on [D2](#open-decisions)** (auto-merge vs human-merge), and the
+bearing is substantial. For a linked-origin project the merge that reaches
+GitHub's `main` **is a PR a human merges**, and `req.origin.release` is
+explicit-trigger-only — so the release step is already an operator-controlled
+checkpoint between a squash-merged job branch and the repo of record. What
+auto-merge decides for beacon is therefore whether a human gates each job onto
+`integration`, not whether a human gates code into GitHub.
+
+That defuses D2; it does not close it, and this doc does not close it
+unilaterally. The checkpoint is per *release*, not per *job*: a project that
+wants each change reviewed before it joins `integration` still needs the `human`
+evaluator at the highest stage (correction 2), and a release that batches twenty
+squashes into one PR is a different review than twenty gates.
 
 ## Category map: the 41 workflows
 
@@ -226,15 +472,28 @@ Mechanical translations:
 expensive gate is spent only on changes a reviewer accepts — plus a rework loop
 that GHA has no concept of.
 
-**Loss:** `actions/cache` — gradle, pub, `node_modules`, buildx. Per correction
-3, the mitigation is better than the brief suggests (the `WORKER_CACHE_DIR`
-mechanism generalizes without a schema change), but it is still node-scoped and
-still uncovered for anything that is not sccache today. The spec's own
-mitigation — bake toolchains into the image (Appendix: Deferred) — is proven for
-Rust (`deploy/prod/Dockerfile.agent-rust` bakes sccache, a `nats-server`, and a
-warm dep graph) and **untested for flutter/gradle/npm**. This is the biggest
-container-path regression in the whole port, and it is the gap section H
-dissolves rather than narrows.
+**Loss — restated by [A2](#a2-the-keyed-caching-gap-was-overstated); the
+original claim here was overstated.** What this paragraph said was: "`actions/cache`
+— gradle, pub, `node_modules`, buildx … the biggest container-path regression in
+the whole port." Verified on 2026-07-30, beacon keys **one** cache
+(`creator/node_modules` in `creator-tests.yml`) and keys nothing for gradle, pub
+or buildx. The real loss is therefore not a cache feature but **implicit host
+state on a persistent runner**: gradle/pub/buildx directories that survive
+between runs because the box does.
+
+That splits the loss in two, and both halves are smaller than one big one:
+
+- **The persistent-state half** is [gap 3](#gaps-ranked) — host execution with
+  *declared* persistent state ([#309](./309-host-native-execution.md) §9 / P5),
+  not a cache-keying subsystem.
+- **The one keyed cache** is the node-local shape of correction 3, i.e. a
+  worker-daemon-local change with no schema or wire impact — though per #309 §9 a
+  second, namespaced mechanism rather than a widening of `WORKER_CACHE_DIR`.
+
+The spec's own mitigation — bake toolchains into the image (Appendix: Deferred) —
+is proven for Rust (`deploy/prod/Dockerfile.agent-rust` bakes sccache, a
+`nats-server`, and a warm dep graph) and remains **untested for
+flutter/gradle/npm**, which is the part of this that is still genuinely unknown.
 
 ### C. Deploys (16 workflows)
 
@@ -295,9 +554,18 @@ SHA tag — so there is no rollback handle, which is also why category C's
 rollback workflows are fragile. Fix at port time (tag by SHA, move `:latest` to
 an alias) rather than faithfully reproducing the defect.
 
-**Both options dissolve if host-native nodes land** (section H): a host node has
-a real docker daemon the way gumbo does, and the question stops being
-interesting.
+~~**Both options dissolve if host-native nodes land** (section H): a host node
+has a real docker daemon the way gumbo does, and the question stops being
+interesting.~~
+
+**RETRACTED** — see [A1](#a1-image-builds-do-not-dissolve-into-host-mode) and
+[#313](./313-workload-identity-image-builds.md) Decision 0, which refutes the
+premise on three counts and supersedes both D1 and D2 above with a third shape:
+a **node-provided build service** on a pinned builder node (#313 B1), reached
+through a narrowed daemon API, available in container mode today and independent
+of whether #309 lands. Read the options above as history, and #313 for the
+decision. The retraction also re-sequences phase 6 in the
+[ordering](#ordering): it depends on phase 4 plus a registry, not on phase 2.
 
 ### E. Cron (1 live, 2 dormant)
 
@@ -406,11 +674,17 @@ rather than burying it.
 ### H.2 What it buys
 
 - **Unblocks mobile entirely** (category F). Nothing else does.
-- **Dissolves the cache gap** (category B's biggest loss): persistent gradle,
-  pub, `node_modules`, sccache, buildx caches — which is exactly how gumbo
-  works today.
-- **Dissolves the image-build question** (category D): a host node has a real
-  docker daemon, the same way gumbo does.
+- **Answers the persistent-state gap**: gradle, pub, `node_modules`, sccache and
+  buildx directories that survive between runs — which is exactly how gumbo works
+  today, and per [A2](#a2-the-keyed-caching-gap-was-overstated) is *all* gumbo is
+  doing (no keys, no restore steps). The state must be **declared** rather than
+  merely ambient — #309 §9 — which is the difference between porting the property
+  and inheriting the mess.
+- ~~**Dissolves the image-build question** (category D)~~ — **retracted**, see
+  [A1](#a1-image-builds-do-not-dissolve-into-host-mode). Host mode changes where
+  a build may run, not who may push, and #309 §10 forbids the docker socket to
+  host tasks precisely because the daemon it would reach is the node's container
+  fleet's.
 - **`/dev/kvm`** for the Android emulator.
 - **A nix flake replaces `image:`** with comparable reproducibility — both are
   pinned, content-addressed environment references. That equivalence is why the
@@ -587,21 +861,31 @@ Consequences:
 
 ## Gaps, ranked
 
+Re-ranked in the 2026-07-30 amendment. **Row order is the ranking; the `#`
+column is a stable identifier and is never reassigned** (siblings cite these
+numbers — see [What #308 got wrong](#what-308-got-wrong)). Two rows are new (10,
+11); one is retired (1) and one is mostly absorbed (4).
+
 | # | Gap | Why it ranks here |
 | --- | --- | --- |
-| 1 | **Job inputs / parameterization** | ~~Blocks rollback~~ — inputs landed ([#311](./311-job-inputs.md) slice A; `.chug/jobs/rollback.yaml` is the first consumer), so the deploy-file collapse is available too. Matrix / fan-out stays excluded, with reasons (#311 Decision 7). Still ranked first for what it unlocked: not in the spec at all, most structural, most underestimated |
-| 2 | **Cron** | One live workflow, but the trigger class the whole category-E port depends on |
-| 3 | **Host-native execution** | New backend + daemon polymorphism + schema epoch bump |
-| 4 | **Keyed caching** | Narrower than the brief assumed (correction 3), still real for gradle/pub/npm/buildx |
+| 3 | **Host-native execution** | Now first. It carries mobile (category F, which nothing else unblocks) *and* the persistent-build-state story gap 4 was standing in for ([A2](#a2-the-keyed-caching-gap-was-overstated)). New backend + daemon polymorphism + schema epoch bump; specced as [#309](./309-host-native-execution.md), P0 (prototype) first |
+| 2 | **Cron** | One live workflow, but the trigger class the whole category-E port depends on; specced as [#310](./310-scheduled-jobs.md) |
+| 10 | **Per-run placement** *(new, open)* | Thirteen beacon jobs pick their runner from a dispatch input, and the obvious port is forbidden: inputs may never influence config resolution, enforced by a tier-1 property test. No mechanism, no design — [A3](#a3-beacon-already-parameterizes-placement-per-run) |
+| 11 | **No image registry** *(new)* | Surfaced by the [A1](#a1-image-builds-do-not-dissolve-into-host-mode) retraction: a build with nowhere to push produces an image that exists on one machine ([#313](./313-workload-identity-image-builds.md) correction 2). Operator infrastructure, not code — and phase 6's second dependency |
+| 6 | **OIDC issuer prerequisite** | Needs a *publicly reachable* JWKS endpoint; infra, not just code. Specced as #313 half A, which also prices the fallback |
 | 5 | **Artifacts** | `crates/store/src/artifacts.rs` holds transcripts, stdout and attachments; there is no inter-job binary handoff (Appendix: Deferred, "Binary artifact store") |
-| 6 | **OIDC issuer prerequisite** | Needs a *publicly reachable* JWKS endpoint; infra, not just code |
 | 7 | **Outbound webhooks** | `crates/webhooks/src/lib.rs` is a stub; blocks `sentry-resolve` |
-| 8 | **Auto-merge vs human-merge default** | A policy choice, not a mechanism gap (correction 2) |
-| 9 | **Node-level exclusive resources** | Only bites once host nodes run device-bound work (H.5) |
+| 9 | **Node-level exclusive resources** | Only bites once host nodes run device-bound work (H.5); specced as #309 §5b / P4, where `placement.leases` is shown to force the epoch bump on its own |
+| 8 | **Auto-merge vs human-merge default** | A policy choice, not a mechanism gap (correction 2) — and narrower again for a linked-origin project, whose release PR is already a human checkpoint ([A5](#a5-the-missing-phase-onboarding-beacon-as-a-project)) |
+| 4 | **Keyed caching** | **Mostly folded into gap 3.** Exactly one beacon workflow keys a cache (`creator/node_modules`); gradle/pub/buildx warmth is implicit host state, not a configured cache ([A2](#a2-the-keyed-caching-gap-was-overstated)). The remnant is one namespaced persistent directory in the worker — #309 §9, no platform change |
+| 1 | **Job inputs / parameterization** | **Retired — landed and deployed** ([A4](#a4-job-inputs-shipped-so-gap-1-is-retired)): epoch 2, `.chug/jobs/rollback.yaml` is the first consumer, the UI renders declared inputs. Kept at its number because siblings cite "Gap 1 of #308"; matrix / fan-out stays excluded by decision (#311 Decision 7) |
 
-Gap 1 deserves its rank. Twelve deploy workflows differ by two strings. Every
-one of them becomes a job-type file that differs by two strings, because a job
-type is a static file and a job carries no parameters.
+**Gap 1 deserved its rank — and it is now closed, so this reads as history.**
+Twelve deploy workflows differ by two strings, and before inputs every one of
+them would have become a job-type file differing by two strings, because a job
+type is a static file and a job carried no parameters. Per
+[A4](#a4-job-inputs-shipped-so-gap-1-is-retired) that collapse is available
+today: one `.chug/tasks/deploy.sh` reading `$CHUG_INPUT_SERVICE`, one job type.
 
 The mechanism one would reach for first — a job-level override — is already
 ruled out, and for a good reason:
@@ -656,46 +940,72 @@ validation happens on the way *in*, not after the fact.
 
 Both are presented without a recommendation, deliberately.
 
-**D1 — image builds: scoped socket vs rootless builder.** See category D. The
-tiebreaker is phase 2: if host-native nodes land, the question dissolves, and
-choosing now risks building the wrong thing twice. Recommend deciding *after*
-the phase-2 prototype reports, not before.
+**D1 — image builds: scoped socket vs rootless builder.** ~~The tiebreaker is
+phase 2: if host-native nodes land, the question dissolves.~~ **CLOSED, and on
+different grounds than this doc expected.** Per
+[A1](#a1-image-builds-do-not-dissolve-into-host-mode) the tiebreaker was a
+mistake — the question does not dissolve — and
+[#313](./313-workload-identity-image-builds.md) B1 rejects *both* of D1's
+options in favour of a node-provided build service. Nothing here is waiting on
+the phase-2 prototype.
 
-**D2 — auto-merge vs human-merge default.** Chuggernaut auto-squash-merges on
-eval pass; beacon requires a human to merge. Per correction 2 this is a default,
-not a capability: a `human` evaluator at the highest stage expresses beacon's
-policy today. The real question is which default a *project* gets, and it is
-genuinely a values question — throughput versus a human checkpoint — not a
-technical one. It should be decided by whoever owns the risk, per job type,
-rather than argued here.
+**D2 — auto-merge vs human-merge default.** Still open. Chuggernaut
+auto-squash-merges on eval pass; beacon requires a human to merge. Per correction
+2 this is a default, not a capability: a `human` evaluator at the highest stage
+expresses beacon's policy today. The real question is which default a *project*
+gets, and it is genuinely a values question — throughput versus a human
+checkpoint — not a technical one. It should be decided by whoever owns the risk,
+per job type, rather than argued here.
+
+**Narrower after [A5](#a5-the-missing-phase-onboarding-beacon-as-a-project),
+though not closed.** As a linked-origin project beacon gets an operator-controlled
+checkpoint for free: `req.origin.release` is explicit-trigger-only and lands on
+GitHub as a PR into `main` that a human merges (§5.3). So for beacon, D2 is about
+gating each job onto `integration`, not about gating code into the repo of record
+— a smaller decision than the original framing, and one that can be taken per job
+type after phase 0b rather than before it.
 
 ## Ordering
 
-Not a commitment — a dependency reading.
+Not a commitment — a dependency reading. Amended 2026-07-30; **phase numbers are
+not reassigned** (children cite them), so the new project-onboarding phase is
+**0b** and the new open question is 10.
 
 | Phase | Work | Depends on |
 | --- | --- | --- |
 | 0 | Land this doc | — |
-| 1 | CI as evaluators (category B) | — |
-| 2 | Host-exec backend prototype on one node (H) | — |
-| 3 | Cron (category E) | — |
-| 4 | OIDC issuer + JWKS + WIF provider | infra exposure |
-| 5 | Deploys, forward-only (category C) | 4 |
-| 6 | Image build and push (category D) | 2 or 4 |
-| 7 | Node-level exclusive resources (H.5) | 2 |
-| 8 | Mobile and simulator jobs on host nodes (F) | 2, 3, 7 |
-| 9 | Job inputs → unblocks rollback (**landed**, [#311](./311-job-inputs.md) slice A) | — |
+| 0b | **Onboard beacon as a linked-origin project** (§5.3) — origin secrets, `admin project link`, seeded `.chug/` config ([A5](#a5-the-missing-phase-onboarding-beacon-as-a-project)) | — |
+| 1 | CI as evaluators (category B) | 0b |
+| 2 | Host-exec backend prototype on one node (H; [#309](./309-host-native-execution.md) P0) | — |
+| 3 | Cron (category E; [#310](./310-scheduled-jobs.md)) | — |
+| 4 | OIDC issuer + JWKS + WIF provider ([#313](./313-workload-identity-image-builds.md) half A) | infra exposure |
+| 5 | Deploys, forward-only (category C) | 0b, 4 |
+| 6 | Image build and push (category D; #313 half B) | 0b, 4, **plus an operator-provisioned registry** — **not 2**, per [A1](#a1-image-builds-do-not-dissolve-into-host-mode) |
+| 7 | Node-level exclusive resources (H.5; #309 §5b / P4) | 2 |
+| 8 | Mobile and simulator jobs on host nodes (F) | 0b, 2, 3, 7 |
+| 9 | Job inputs → unblocks rollback (**landed**, [#311](./311-job-inputs.md) slice A; jobs #314–#317, #319) | — |
+| 10 | Per-run placement — **design first**, an open question, not scheduled work ([A3](#a3-beacon-already-parameterizes-placement-per-run)) | — |
 
-Phases 1, 2, 3 and 9 are mutually independent.
+Phases 0b, 2 and 3 are mutually independent, and 9 is done. Phase 1 and every
+category-B/C port now hang off 0b, which is the one thing in this table that
+cannot be prototyped around: without a project there is nowhere for beacon's
+`.chug/` config to live.
+
+**Phase 0b is the cheapest and the most blocking** — it invents nothing (§5.3
+ships) and unblocks the two largest categories.
 
 **Phase 1 is the highest value for zero new capability** — it uses only
 mechanisms that already ship.
 
-**Phase 2 is the highest leverage**: it feeds 6, 7 and 8, and retires gap 4
-outright. Start it early, and start it as a *prototype on one node* rather than
-a design carried to completion. H.3's cost 1 is exactly the kind that resolves
-faster by contact than by argument: the ten host analogues are enumerable from
-the trait today, but nothing in the tree tells you which of them is hard.
+**Phase 2 is the highest leverage**: it feeds 7 and 8, and it absorbs gap 4 —
+per [A2](#a2-the-keyed-caching-gap-was-overstated) the caching problem is a
+persistent-state problem, which is what host mode is for. It **no longer feeds
+6** ([A1](#a1-image-builds-do-not-dissolve-into-host-mode)), so the leverage claim
+is one dependant smaller than originally written. Start it early, and start it as
+a *prototype on one node* rather than a design carried to completion. H.3's cost 1
+is exactly the kind that resolves faster by contact than by argument: the ten host
+analogues are enumerable from the trait today, but nothing in the tree tells you
+which of them is hard.
 
 **`flutter-integration-tests` is a good north star and a bad first target.** It
 sits at the confluence of 2, 3, 7 and 8, which makes it a useful thing to
@@ -705,11 +1015,21 @@ boring, cache-heavy build instead.
 ## What this doc does not decide
 
 - The schema *syntax* for a host-mode selector (H.3 fixes only that it needs an
-  epoch bump and a `min_dispatcher` gate in the same commit).
+  epoch bump and a `min_dispatcher` gate in the same commit) — **decided since**,
+  in [#309](./309-host-native-execution.md) §3.
 - The schedule file format (E fixes only the location and the two semantics
-  questions).
-- Anything in gap 1. Job parameterization is the largest gap here and it
-  deserves its own design doc, starting from `design-lifecycle.md`'s existing
-  constraints on per-job overrides rather than from this one.
+  questions) — **decided since**, in [#310](./310-scheduled-jobs.md).
+- ~~Anything in gap 1~~ — **decided since and shipped**:
+  [#311](./311-job-inputs.md) took the frame, and
+  [A4](#a4-job-inputs-shipped-so-gap-1-is-retired) records what landed.
+- **How a run picks its node** ([gap 10](#gaps-ranked) /
+  [A3](#a3-beacon-already-parameterizes-placement-per-run)). This amendment
+  states the collision with #311 Decision 1 and the shipped property test, and
+  deliberately stops there: it is a `Job`-record contract change and wants its own
+  doc.
+- The concrete phase-0b sequence for beacon (which job types first, what beacon's
+  `.chug/tasks/ci.sh` legs are, what `origin/release` cadence the project wants).
+  [A5](#a5-the-missing-phase-onboarding-beacon-as-a-project) fixes only that the
+  project must be linked-origin and that the phase exists.
 - Whether beacon's non-CI GHA usage (release notes, label automation, anything
   the survey classified into A) is worth reproducing at all, versus dropping.
