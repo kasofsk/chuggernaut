@@ -541,15 +541,18 @@ chug admin --keys-dir "$KEYS_DIR" worker-creds --node nuc
 # 2. copy to the node (the worker container mounts this dir read-only)
 ssh worksalot@gumbo-nuc-0 mkdir -p chuggernaut-worker/keys
 scp "$KEYS_DIR/worker-nuc.creds" worksalot@gumbo-nuc-0:chuggernaut-worker/keys/worker.creds
-# 3. env (chuggernaut.env): see env.example — worker fleet form
-#    DOCKER_NODES="local|unix:///…/docker.sock|0, nuc|worker|4"
+# 3. env (chuggernaut.env): see env.example — worker fleet form. The worker
+#    entry's slot field is a pre-observation fallback, not the node's capacity.
+#    DOCKER_NODES="local|unix:///…/docker.sock|0, nuc|worker|0"
 #    WORKER_SSH=worksalot@gumbo-nuc-0
 #    WORKER_NATS_URL=nats://100.116.243.42:4222     # Mini's tailnet IP
+#    WORKER_SLOTS=2                                 # the node's FIRST-BOOT value
 # 4. build + start the daemon on the node (also runs on every CD deploy)
 set -a; . deploy/prod/chuggernaut.env; set +a
 deploy/prod/build-worker.sh
-# 5. restart the dispatcher to pick up the fleet
-launchctl kickstart -k gui/$(id -u)/com.chuggernaut.dispatcher
+# 5. no dispatcher restart needed: the daemon announces itself and the
+#    dispatcher merges it into the live fleet (spec §3.1). Confirm on the
+#    Cluster page, or GET /api/v1/platform/fleet.
 ```
 
 Notes:
@@ -566,16 +569,22 @@ Notes:
 - **Verify placement** — during a job: `ssh worksalot@gumbo-nuc-0 docker ps`
   shows the work/eval containers; the Mini's colima shows none
   (`docker ps --filter label=chuggernaut.managed`).
-- **Capacity is set on the node, not in `DOCKER_NODES`.** The daemon announces
-  its own slot count (`WORKER_SLOTS`, default 4) every heartbeat and the live
-  announcement **wins** over the `DOCKER_NODES` seed (spec §3.1), so lowering the
-  seed alone changes nothing. Set `WORKER_SLOTS` in the env `build-worker.sh`
-  reads (`chuggernaut.env`, or inline for a hand-run rebuild) and the swap phase
-  carries it forward across every self-refresh. Prod: **air runs 2**
-  (6cpu/12GiB colima — 4 concurrent job containers oversubscribed it), nuc 4.
-  Prod reaches air over the no-ssh self-refresh path, whose swap inherits the
-  *live daemon's* env, so a node's capacity is set once at (re)creation and then
-  survives every deploy:
+- **Capacity is changed from the UI, not here** —
+  [`docs/runbooks/worker-capacity.md`](../../docs/runbooks/worker-capacity.md) is
+  the reference for all of it. The node owns its capacity and the scheduler reads
+  exactly one number per node: the one the node reported (spec §3.1). To change
+  it, use the Cluster page's per-node stepper (or
+  `PUT /api/v1/platform/fleet/{node}/capacity`) — **no ssh, no rebuild, no
+  dispatcher restart**. Editing the `DOCKER_NODES` seed still does nothing to a
+  node that has reported. Prod runs **air 2 / nuc 2** (verified 2026-07-26);
+  confirm from the fleet snapshot (`GET /api/v1/platform/fleet` → `nodes`), never
+  from `DOCKER_NODES`, and read `capacity_source` while you are there — `seed`
+  means the node has never reported its own number.
+
+  What follows is the **bootstrap** story only: `WORKER_SLOTS` is the value a
+  node *starts* at before any operator intent exists. Set it at (re)creation —
+  prod reaches air over the no-ssh self-refresh path, whose swap inherits the
+  *live daemon's* env, so it survives every deploy:
 
   ```sh
   WORKER_SSH=worksalot@dev-air.tail20c474.ts.net CHUG_WORKER_NODE=air \
@@ -583,8 +592,16 @@ Notes:
     deploy/prod/build-worker.sh
   ```
 
-  Confirm from the fleet snapshot (`GET /api/v1/config` → `nodes`), not from
-  `DOCKER_NODES`: the node's announced `slots` is the number placement uses.
+  After a swap the node reports that boot value until the dispatcher reconciles
+  its recorded intent back onto it — one scan tick, seconds of small over- or
+  under-cap. `WORKER_SLOTS_MAX` (default: the node's CPU count) is the ceiling a
+  capacity command is validated against.
+
+  A **fresh** install writes `|worker|0` above because its dispatcher and its
+  daemons are built from the same SHA, so observed capacity is arriving from the
+  first probe. Zeroing the seed on an **existing** deployment is a sequenced
+  change with a precondition — do not do it from memory; follow
+  [the runbook §6](../../docs/runbooks/worker-capacity.md).
 - The daemon's version is reported in its ping; the dispatcher logs a warning
   when it drifts from the dispatcher's own (stale node artifacts).
 - **Watch a refresh from the deploy job, not the node.** `worker-refresh.sh`

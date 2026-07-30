@@ -27,7 +27,8 @@ existing pieces (never reinvent them):
   (`chug-mirror-install.sh`), and verify.
 - `chug-install.sh worker-join [--node NAME --project O/N]` — mint the worker's
   NATS creds + read-only git key, build/start its images (`build-worker.sh`),
-  and print the `DOCKER_NODES` line to add.
+  and print the `DOCKER_NODES` membership seed to add (its slot field is a
+  pre-observation fallback, not the node's capacity — spec §3.1).
 
 ## Detect what already exists (don't clobber)
 
@@ -73,7 +74,10 @@ platform-owned unless they choose linked-origin.
    mirror within ~5 min (or force the mirror agent once). Report the result.
 5. **Worker (optional).** If the user wants a worker node, run `worker-join`,
    copy the creds to the node, and add the printed `DOCKER_NODES` entry on the
-   dispatcher; restart the dispatcher.
+   dispatcher so the node survives a dispatcher restart. **No restart is
+   needed to pick the node up** — the daemon announces itself and the
+   dispatcher merges it into the live fleet. Its capacity comes from the node,
+   not that entry (`docs/runbooks/worker-capacity.md`).
 
 ## Guardrails
 

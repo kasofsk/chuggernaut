@@ -321,13 +321,17 @@ swap)
     DISK_ARGS="$DISK_ARGS -e WORKER_REFRESH_DISK_PATH=$WORKER_REFRESH_DISK_PATH"
   fi
 
-  # The node's advertised capacity (`WORKER_SLOTS`, spec §3.1). Same silent-revert
-  # class as the two above, and the most visible one: the daemon announces this
-  # number every heartbeat and the announcement wins over the dispatcher's
-  # DOCKER_NODES seed, so a swap that dropped it would quietly restore a node
-  # deliberately capped at 2 back to the default 4 — more concurrent job
-  # containers than the node was sized for, with no fleet-side change to explain
-  # it. Unset adds nothing, so a stock node keeps the default.
+  # The node's FIRST-BOOT capacity (`WORKER_SLOTS`, spec §3.1). Same silent-revert
+  # class as the two above: this is the number the replacement daemon comes back
+  # reporting, so a swap that dropped it would restore a node deliberately sized
+  # at 2 to the default 4 — more concurrent job containers than the node was
+  # sized for. The dispatcher does reconcile its recorded intent back onto the
+  # node within a scan tick, but that is a repair after the fact and it only
+  # happens where an operator has ever set a number; carrying the boot value
+  # forward is what keeps the node correct in the gap, and correct at all on a
+  # node whose dispatcher is down. Capacity is CHANGED from the operator UI, not
+  # here (docs/runbooks/worker-capacity.md). Unset adds nothing, so a stock node
+  # keeps the default.
   SLOTS_ARGS=""
   if [ -n "${WORKER_SLOTS:-}" ]; then
     SLOTS_ARGS="-e WORKER_SLOTS=$WORKER_SLOTS"

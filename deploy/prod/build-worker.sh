@@ -104,13 +104,18 @@ fi
 if [ -n "${WORKER_REFRESH_DISK_PATH:-}" ]; then
   DISK_ENV="$DISK_ENV -e WORKER_REFRESH_DISK_PATH=$WORKER_REFRESH_DISK_PATH"
 fi
-# The node's advertised capacity (`WORKER_SLOTS`, spec §3.1 dynamic registration).
-# This — not the dispatcher's `DOCKER_NODES` seed — is where a node's concurrency
-# is actually set: the daemon announces its own slot count every heartbeat and the
-# live announcement WINS over the seed, so editing DOCKER_NODES alone cannot lower
-# a node below what its daemon advertises. Set it at creation (air runs 2 on a
-# 6cpu/12GiB colima; nuc, 12c/31GB, runs more) and worker-refresh.sh's swap carries
-# it forward. Empty when unset ⇒ the daemon's documented default of 4.
+# The node's FIRST-BOOT capacity (`WORKER_SLOTS`, spec §3.1 dynamic registration):
+# the number it starts at before any operator intent exists, and the last resort
+# when the dispatcher is down. It is NOT how a node's concurrency is changed —
+# that is a runtime command from the operator UI (`req.worker.{node}.set_slots`),
+# which needs no ssh, no rebuild and no restart (docs/runbooks/worker-capacity.md).
+# The passthrough stays deliberately: worker-refresh.sh's swap carries it forward,
+# so after a swap the node reports this boot value until the dispatcher reconciles
+# the recorded intent back onto it (one scan tick). Set it to something the node
+# can serve (prod runs air and nuc at 2 each); empty when unset ⇒ the daemon's
+# documented default of 4. The ceiling is a separate knob, `WORKER_SLOTS_MAX`,
+# which this script does not pass — add it to the `docker run` below by hand on a
+# node whose CPU count overstates what it can serve.
 SLOTS_ENV=""
 if [ -n "${WORKER_SLOTS:-}" ]; then
   SLOTS_ENV="-e WORKER_SLOTS=$WORKER_SLOTS"

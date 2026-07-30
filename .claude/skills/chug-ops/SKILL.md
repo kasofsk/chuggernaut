@@ -6,7 +6,7 @@ allowed-tools: [Bash, Read, Grep, Glob]
 ---
 
 Operational knowledge for the **prod Chuggernaut deployment**. These are
-point-in-time facts (last verified 2026-07-24) — for anything load-bearing,
+point-in-time facts (last verified 2026-07-30) — for anything load-bearing,
 cross-check `deploy/prod/README.md` and the live system before acting.
 
 **Safety first:** never run destructive or state-changing ops (restarts,
@@ -23,13 +23,22 @@ will run and wait.
   native api on 127.0.0.1:8080). `GET /api/v1/health` returns
   `{"dispatcher":"ok",...}` end-to-end, 503 when the dispatcher is down —
   trust it; the old SPA-fallback-200 trap is fixed (#81).
-- **Worker fleet**: `DOCKER_NODES="air|worker|4, nuc|worker|2"`.
+- **Worker fleet**: **air 2 slots / nuc 2** (verified 2026-07-26). Read the live
+  numbers from `GET /api/v1/platform/fleet`, **never** from `DOCKER_NODES` — for
+  a `worker` endpoint that seed is a membership entry plus a pre-observation
+  fallback, and it can never override what the node reports (spec §3.1).
   - **air** = dev-air.tail20c474.ts.net, arm64 mac, colima 6cpu/12GiB,
     daemon container `chug-worker` dials NATS at `100.116.243.42:4222`.
   - **nuc** = gumbo-nuc-0, Linux x86_64 12c/31GB, sccache hand-wired via
     `WORKER_CACHE_DIR` env + bind mount (until #122).
-  - Changing the fleet requires a dispatcher restart until #137 (dynamic
-    registration) lands.
+  - **Changing capacity needs no restart, no ssh, no rebuild**: the Cluster
+    page's per-node stepper, or `PUT /api/v1/platform/fleet/{node}/capacity`
+    (202, platform admin). Adding a node needs no restart either — the daemon
+    announces itself and the dispatcher merges it live (#137, landed).
+  - `capacity_source` in the fleet snapshot is the field to check first: `seed`
+    means the node has **never reported its own capacity**, which is the
+    signature of the 2026-07-26 denied-announce incident. Full reference:
+    `docs/runbooks/worker-capacity.md`.
 - **Networking gotcha**: worker containers on macOS hosts **cannot reach the
   LAN** (colima user-mode NAT). Publish/deploy jobs therefore ssh the Mini
   over the **tailnet** on port **2200** (dedicated key-only sshd,

@@ -297,7 +297,14 @@ cmd_worker_join() {
 	fi
 
 	log "worker-join complete (or previewed)."
-	log "Add the node to the dispatcher's DOCKER_NODES: \"$NODE|worker|<slots>\", then restart the dispatcher."
+	# No restart instruction: the daemon announces itself and the dispatcher
+	# merges it into the live fleet (spec §3.1). The DOCKER_NODES entry is a
+	# boot-time membership seed, and its slot field is a pre-observation
+	# fallback — the node's own report is what placement uses, so the seed is
+	# written as 0 rather than a number that would only ever be wrong.
+	log "Node '$NODE' announces itself — no dispatcher restart needed. Confirm on the Cluster page (GET /api/v1/platform/fleet)."
+	log "For membership across a dispatcher restart, seed it: DOCKER_NODES=\"…, $NODE|worker|0\" (capacity comes from the node, not this number)."
+	log "Its first-boot capacity is WORKER_SLOTS at creation; change it afterwards from the Cluster page (docs/runbooks/worker-capacity.md)."
 }
 
 # ── dispatch ────────────────────────────────────────────────────────────────
