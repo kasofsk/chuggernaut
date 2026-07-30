@@ -12,16 +12,31 @@ import { prefersReducedMotion, useTypewriter } from '../useTypewriter'
 import { Markdown } from './Markdown'
 import { RichSelect } from './RichSelect'
 import { JobAttachments } from './Attachments'
+import { JobInputFields, inputsOrUndefined, suppliedInputs, useJobTypeDetail } from './JobInputs'
 import { depCandidates } from '../jobFilters'
 
 // The editable fields, used as keys for focus/dirty/flash tracking. `eval` is
-// not edited here — it round-trips unchanged on the full-replace PATCH.
-type Field = 'title' | 'description' | 'type' | 'knowledge_tags' | 'deps' | 'timeout' | 'model'
+// not edited here — it round-trips unchanged on the full-replace PATCH. The
+// declared inputs track as one field: they are one map on the record, and the
+// operator edits one of them at a time.
+type Field =
+  | 'title'
+  | 'description'
+  | 'type'
+  | 'knowledge_tags'
+  | 'deps'
+  | 'timeout'
+  | 'model'
+  | 'inputs'
 
 const sameNums = (a: number[], b: number[]) =>
   a.length === b.length && a.every((x, i) => x === b[i])
 const sameStrs = (a: string[], b: string[]) =>
   a.length === b.length && a.every((x, i) => x === b[i])
+const sameMap = (a: Record<string, string>, b: Record<string, string>) => {
+  const keys = Object.keys(a)
+  return keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k])
+}
 
 /**
  * The Draft job editor (spec §72): the chat session and the operator edit the
@@ -61,6 +76,10 @@ export function DraftEditor({
   const [deps, setDeps] = useState<number[]>(job.deps)
   const [timeout, setTimeoutVal] = useState(job.timeout ?? '')
   const [model, setModel] = useState(job.model ?? '')
+  // A Draft's `inputs` is what its creator supplied — declared defaults are
+  // materialized at the Ready transition, not here (#311 Decision 6), so this
+  // is the operator's own set and it is editable while the job is a Draft.
+  const [inputs, setInputs] = useState<Record<string, string>>(job.inputs ?? {})
 
   const [preview, setPreview] = useState(false)
   const [depQuery, setDepQuery] = useState('')
@@ -71,6 +90,10 @@ export function DraftEditor({
   const [jobTypes, setJobTypes] = useState<JobTypeSummary[]>([])
   const [availTags, setAvailTags] = useState<string[]>([])
   const [allJobs, setAllJobs] = useState<Job[]>([])
+  // The selected type's declaration — refetched when the operator (or the chat
+  // side) changes `type`, since the inputs a draft may carry are the new type's.
+  const typeDetail = useJobTypeDetail(owner, project, type)
+  const declaredInputs = typeDetail?.job_type?.inputs ?? []
   useEffect(() => {
     api.jobTypes(owner, project).then(setJobTypes, () => {})
     // the picker names tags; the paths they resolved to are for readers
@@ -84,8 +107,8 @@ export function DraftEditor({
   // change. focus/dirty are refs — read inside the reconcile effect, no re-render.
   const focusedRef = useRef<Field | null>(null)
   const dirtyRef = useRef<Set<Field>>(new Set())
-  const localRef = useRef({ title, description, type, tags, deps, timeout, model })
-  localRef.current = { title, description, type, tags, deps, timeout, model }
+  const localRef = useRef({ title, description, type, tags, deps, timeout, model, inputs })
+  localRef.current = { title, description, type, tags, deps, timeout, model, inputs }
   const [flash, setFlash] = useState<Set<Field>>(new Set())
   const flashField = (f: Field) => {
     setFlash((s) => new Set(s).add(f))
@@ -170,6 +193,7 @@ export function DraftEditor({
       () => setDeps(job.deps),
       job.deps.filter((d) => !cur.deps.includes(d)).map((d) => `dep:${d}`),
     )
+    adoptChoice('inputs', sameMap(job.inputs ?? {}, cur.inputs), () => setInputs(job.inputs ?? {}), [])
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job])
 
@@ -185,6 +209,11 @@ export function DraftEditor({
     eval: job.eval,
     timeout: timeout.trim() || null,
     model: model.trim() || null,
+    // Until the declaration has loaded the stored map rides along unchanged:
+    // narrowing to an empty `declaredInputs` would wipe the draft's inputs on
+    // the first blur. Once loaded it narrows to what the type declares, so
+    // switching the draft's type drops values the new type doesn't accept.
+    inputs: typeDetail ? suppliedInputs(declaredInputs, inputs) : inputsOrUndefined(inputs),
   })
 
   function patchNow() {
@@ -318,6 +347,22 @@ export function DraftEditor({
           )}
         </div>
       </div>
+
+      {/* The type's declared inputs (spec §1.1): editable while the job is a
+          Draft and frozen the moment it leaves it (#311 Decision 6), so this is
+          the only place they are ever an editable control. Nothing renders for a
+          type that declares none. */}
+      <JobInputFields
+        declared={declaredInputs}
+        values={inputs}
+        fieldClassName={fieldClass('inputs')}
+        onFieldFocus={() => (focusedRef.current = 'inputs')}
+        onFieldBlur={blur}
+        onChange={(name, value) => {
+          setInputs((vs) => ({ ...vs, [name]: value }))
+          edit('inputs')
+        }}
+      />
 
       {!isBatch && (
       <div className={fieldClass('deps')}>

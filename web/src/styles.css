@@ -691,6 +691,18 @@ td.actions button {
 .create-job .field > button.link {
   align-self: flex-start;
 }
+/* One declared job input's validation message (#311), under its control. A
+   direct child span of `.field` would otherwise inherit the label's weight and
+   text color from the rule above, so the danger color is restated here rather
+   than relying on `.error`, which that rule outranks. Plain wrapping text —
+   `pattern` messages carry a regex, which must break rather than widen the
+   card on a phone. */
+.create-job .field > span.input-error {
+  color: var(--danger);
+  font-weight: 400;
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
 
 /* ── Draft editor ────────────────────────────────────────────────────────
    The live form a Draft job renders in place of the read-only info card. It

@@ -54,6 +54,8 @@ export type {
   FleetStatus,
   Identity,
   IdentityKind,
+  Input,
+  InputKind,
   JobState,
   JobType,
   LegStatus,
@@ -228,7 +230,10 @@ export const api = {
     req<Job[]>('GET', `/api/v1/projects/${owner}/${project}/jobs`),
   job: (owner: string, project: string, seq: number) =>
     req<JobFull>('GET', `/api/v1/projects/${owner}/${project}/jobs/${seq}`),
-  createJob: (owner: string, project: string, body: { type: string; title?: string; description?: string; deps?: number[]; knowledge_tags?: string[]; eval?: EvaluatorInput[]; timeout?: string; model?: string; draft?: boolean }) =>
+  /** `inputs` carries the values the job supplies for its type's declared
+   *  `inputs:` (spec §1.1). Send it only when non-empty — a type declaring no
+   *  inputs must produce the body it produces today, byte for byte. */
+  createJob: (owner: string, project: string, body: { type: string; title?: string; description?: string; deps?: number[]; knowledge_tags?: string[]; eval?: EvaluatorInput[]; timeout?: string; model?: string; inputs?: Record<string, string>; draft?: boolean }) =>
     req<JobFull>('POST', `/api/v1/projects/${owner}/${project}/jobs`, body),
   /** Full-field replace of an editable Draft job; 409 once it has left Draft. */
   patchJob: (owner: string, project: string, seq: number, body: JobPatch) =>

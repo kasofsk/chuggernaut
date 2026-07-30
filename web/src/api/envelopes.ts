@@ -159,6 +159,11 @@ export interface JobPatch {
   timeout: string | null
   /** work-model override, or null for the resolved default */
   model: string | null
+  /** values for the type's declared `inputs:` (spec §1.1). Part of the full
+   *  replace, so a Draft's inputs are whatever the last PATCH sent — omitted
+   *  when none are supplied, which the server reads as the empty map, so a
+   *  draft of an input-less type patches exactly as it does today. */
+  inputs?: Record<string, string>
 }
 
 /**

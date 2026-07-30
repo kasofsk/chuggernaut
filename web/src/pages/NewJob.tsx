@@ -6,13 +6,19 @@ import {
   type Evaluator,
   type EvaluatorInput,
   type Job,
-  type JobTypeDetail,
   type JobTypeSummary,
 } from '../api'
 import { ProjectHeader } from '../components/ProjectHeader'
 import { RichSelect } from '../components/RichSelect'
 import { SkeletonLines } from '../components/Skeleton'
 import { AttachmentComposer, uploadFiles } from '../components/Attachments'
+import {
+  JobInputFields,
+  inputFieldErrors,
+  inputValueErrors,
+  suppliedInputs,
+  useJobTypeDetail,
+} from '../components/JobInputs'
 import { depCandidates } from '../jobFilters'
 
 /**
@@ -109,14 +115,18 @@ function CreateJob({
     setType(pick.name)
   }, [jobTypes, type, initialType])
 
-  const [typeDetail, setTypeDetail] = useState<JobTypeDetail | null>(null)
+  const typeDetail = useJobTypeDetail(owner, project, type)
+  // Values for the type's declared inputs (spec §1.1), and the messages a
+  // rejected create keyed back onto their fields. Both are cleared when the
+  // type changes: a value for `sha` means nothing under a type that doesn't
+  // declare it, and the server would refuse it as undeclared at release.
+  const declaredInputs = typeDetail?.job_type?.inputs ?? []
+  const [inputValues, setInputValues] = useState<Record<string, string>>({})
+  const [inputErrors, setInputErrors] = useState<Record<string, string>>({})
   useEffect(() => {
-    if (!type) {
-      setTypeDetail(null)
-      return
-    }
-    api.jobType(owner, project, type).then(setTypeDetail, () => setTypeDetail(null))
-  }, [owner, project, type])
+    setInputValues({})
+    setInputErrors({})
+  }, [type])
 
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -178,6 +188,15 @@ function CreateJob({
       setError('pick a job type')
       return
     }
+    // Pre-validation is a courtesy, not the gate: it repeats exactly what the
+    // creation pass would 422 on (charset, length) plus the declaration's own
+    // narrowing, so the operator sees it here instead of after a round trip.
+    // The fields already render these messages — the banner only says where.
+    if (Object.keys(inputValueErrors(declaredInputs, inputValues)).length) {
+      setInputErrors({})
+      setError('fix the flagged inputs above')
+      return
+    }
     setError(null)
     setSubmitting(true)
     api
@@ -190,6 +209,7 @@ function CreateJob({
         eval: evals.length ? evals : undefined,
         timeout: timeout.trim() || undefined,
         model: model.trim() || undefined,
+        inputs: suppliedInputs(declaredInputs, inputValues),
         draft: draft || undefined,
       })
       .then(
@@ -209,6 +229,14 @@ function CreateJob({
         (e) => {
           setSubmitting(false)
           const msg = e instanceof Error ? e.message : 'create failed'
+          // A rejection naming `inputs.{name}` belongs on that field, not in one
+          // opaque banner — the operator has to know which value to fix.
+          const fields = inputFieldErrors(e)
+          setInputErrors(fields)
+          if (Object.keys(fields).length) {
+            setError('the dispatcher rejected these inputs')
+            return
+          }
           setError(msg)
           onError(msg)
         },
@@ -308,6 +336,20 @@ function CreateJob({
             </div>
           )}
         </div>
+
+        {/* The type's declared inputs (spec §1.1): nothing at all for a type
+            that declares none, which is most of them. */}
+        <JobInputFields
+          declared={declaredInputs}
+          values={inputValues}
+          serverErrors={inputErrors}
+          onChange={(name, value) => {
+            setInputValues((vs) => ({ ...vs, [name]: value }))
+            // The server spoke about the old value; editing it makes that stale,
+            // so the field falls back to the live client verdict.
+            setInputErrors(({ [name]: _dropped, ...rest }) => rest)
+          }}
+        />
 
         <div className="field">
           <span>Depends on <span className="dim">(jobs that must finish first — coupled cars)</span></span>

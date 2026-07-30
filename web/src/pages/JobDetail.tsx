@@ -220,6 +220,8 @@ export function JobDetail() {
   // (train of cars) rather than the plain deps picker. A non-empty members list
   // is the batch marker.
   const isDraftBatch = isDraft && (job.members ?? []).length > 0
+  // Already in the record's BTreeMap order (spec §1.1) — Object.entries keeps it.
+  const inputEntries = Object.entries(job.inputs ?? {})
 
   // Tasks banded with an escalation resolution: the resolving Human task and the
   // failed attempts in the same cycle above it. They share an amber left edge in
@@ -287,6 +289,25 @@ export function JobDetail() {
           <dd>{job.branch}</dd>
           <dt>base_ref</dt>
           <dd>{job.base_ref ?? '—'}</dd>
+          {/* The job's EFFECTIVE inputs (spec §1.1, #311 Decision 6): supplied
+              values plus the type's declared defaults, which the Ready
+              transition materializes onto the record. A released job can
+              therefore show a value its creator never typed — that is the audit
+              surface, so defaulted entries are shown, not hidden. Immutable
+              after that transition, hence read-only here. */}
+          {inputEntries.length > 0 && (
+            <>
+              <dt>inputs</dt>
+              <dd title="the values this run acted on — supplied at creation, completed with the type's declared defaults at the Ready transition, immutable thereafter">
+                {inputEntries.map(([name, value]) => (
+                  <div key={name}>
+                    <span className="dim">{name}=</span>
+                    {value}
+                  </div>
+                ))}
+              </dd>
+            </>
+          )}
           <dt>depends on</dt>
           <dd>
             {job.deps.length
