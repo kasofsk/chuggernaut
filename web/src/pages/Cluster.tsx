@@ -13,6 +13,7 @@ import { useFleet } from '../useFleet'
 import { fmtDuration, nodeStale, phaseToState, shortSha, shortVersion, versionHasSha } from '../format'
 import { StateBadge } from '../components/StateBadge'
 import { Skeleton } from '../components/Skeleton'
+import { NodeCapacity } from '../components/NodeCapacity'
 
 // Poll cadence for the occupancy snapshot. The top-level cluster view has no
 // per-project SSE to ride, so it polls; the running counters tick every second
@@ -25,11 +26,19 @@ const POLL_MS = 2500
  * worker carries a slot widget: one cell per slot, empty cells reading as free
  * capacity, occupied cells showing what that slot runs (job seq, task kind, job
  * type, a phase badge, a live running counter) and linking to the job. A pending
- * tray feeds the workers when the launch queue is non-empty. Display only.
+ * tray feeds the workers when the launch queue is non-empty.
+ *
+ * Read-only apart from one control: each worker card carries the capacity
+ * stepper and its display states (design #293 §10, `NodeCapacity`) — the only
+ * place an operator can change a node's slot count without ssh and a rebuild.
  */
 export function ClusterPage() {
   const navigate = useNavigate()
-  const { fleet, unavailable, loaded } = useFleet({ pollMs: POLL_MS })
+  // Bumped after a capacity command so convergence shows up immediately rather
+  // than on the next poll — the 202 means "recorded and converging", so the
+  // interesting snapshot is the next one, not the reply.
+  const [tick, setTick] = useState(0)
+  const { fleet, unavailable, loaded } = useFleet({ tick, pollMs: POLL_MS })
   const [cfg, setCfg] = useState<PlatformConfig | null>(null)
   const [cfgLoaded, setCfgLoaded] = useState(false)
   const [health, setHealth] = useState<HealthStatus | null>(null)
@@ -60,12 +69,19 @@ export function ClusterPage() {
   // config roster have answered once. Poll refreshes never re-skeleton.
   const loading = !loaded || !cfgLoaded
 
-  // A 1s clock so the running-duration counters advance while slots are busy.
+  // The clock behind every elapsed-time readout on this page. It ticks once a
+  // second while slots are busy so the running-duration counters advance, and
+  // keeps ticking coarsely when nothing runs — an idle fleet is exactly the shape
+  // a broken capacity path leaves behind, so that is when the staleness window
+  // (`capacity.ts`) most needs to keep moving. Gating the interval on occupancy
+  // instead pinned `now` at mount: no node could ever age into `stale`, and once
+  // a fresh `capacity_observed_at` overtook the frozen `now` the clamped
+  // difference rendered as "reported 0s ago" — asserting freshness precisely
+  // where there was none.
   const [now, setNow] = useState(() => Date.now())
   const anyRunning = (fleet?.nodes ?? []).some((n) => n.occupied > 0)
   useEffect(() => {
-    if (!anyRunning) return
-    const id = setInterval(() => setNow(Date.now()), 1000)
+    const id = setInterval(() => setNow(Date.now()), anyRunning ? 1000 : 5000)
     return () => clearInterval(id)
   }, [anyRunning])
 
@@ -81,9 +97,22 @@ export function ClusterPage() {
       occupied: 0,
       available: n.available,
       version: n.version ?? null,
+      // Provenance rides along from the static roster too, so a seed-sourced node
+      // reads as one before the dispatcher has published an occupancy snapshot.
+      capacity_source: n.capacity_source ?? null,
+      capacity_observed_at: n.capacity_observed_at ?? null,
       running: [],
     }))
   }, [fleet, cfg])
+
+  // Capacity is settable only on worker-endpoint nodes: `DOCKER_NODES` still owns
+  // a `unix://`/`tcp://` node's slot count and the command answers 409 for one
+  // (design #293 §7). A node absent from the static roster joined by announce,
+  // which only a worker does.
+  const isWorkerEndpoint = useMemo(() => {
+    const endpoints = new Map((cfg?.dispatcher?.nodes ?? []).map((n) => [n.name, n.endpoint]))
+    return (name: string) => (endpoints.get(name) ?? 'worker') === 'worker'
+  }, [cfg])
 
   // Version drift: if the workers report more than one distinct build, flag the
   // ones off the most common version with a subtle hint.
@@ -204,7 +233,15 @@ export function ClusterPage() {
             <div className="cl-fan">
               {workers.length === 0 && <div className="dim cl-empty">no worker nodes</div>}
               {workers.map((n) => (
-                <WorkerNode key={n.name} node={n} now={now} drift={isDrift(n)} />
+                <WorkerNode
+                  key={n.name}
+                  node={n}
+                  nodes={workers}
+                  now={now}
+                  drift={isDrift(n)}
+                  controllable={isWorkerEndpoint(n.name)}
+                  onChanged={() => setTick((t) => t + 1)}
+                />
               ))}
             </div>
           </div>
@@ -391,15 +428,36 @@ function PendingTray({ count }: { count: number }) {
   )
 }
 
-function WorkerNode({ node, now, drift }: { node: FleetNode; now: number; drift: boolean }) {
+function WorkerNode({
+  node,
+  nodes,
+  now,
+  drift,
+  controllable,
+  onChanged,
+}: {
+  node: FleetNode
+  nodes: FleetNode[]
+  now: number
+  drift: boolean
+  controllable: boolean
+  onChanged: () => void
+}) {
   const total = node.slots ?? node.running.length
   const cells = Array.from({ length: Math.max(total, node.running.length) }, (_, i) => node.running[i] ?? null)
+  // Running above the cap is a drain in progress, not a rendering bug: lowering
+  // a cap never kills a container (design #293 §5), so the node finishes what it
+  // holds and takes nothing new. The cells past the cap are marked as such.
+  const overCap = node.slots != null && node.occupied > node.slots
   return (
     <div className={`cl-node cl-worker${node.available ? '' : ' cl-dim cl-out'}${drift ? ' cl-drift' : ''}`}>
       <div className="cl-node-head">
         <span className={`cl-pulse${node.available ? '' : ' off'}`} aria-hidden="true" />
         <span className="cl-node-name">{node.name}</span>
-        <span className="cl-node-frac dim">
+        <span
+          className={`cl-node-frac dim${overCap ? ' cl-over' : ''}`}
+          title={overCap ? 'over cap — draining: finishing what it holds, taking nothing new' : undefined}
+        >
           {node.occupied}/{node.slots ?? '?'}
         </span>
       </div>
@@ -413,22 +471,36 @@ function WorkerNode({ node, now, drift }: { node: FleetNode; now: number; drift:
       </div>
       <div className="cl-slots">
         {cells.map((s, i) => (
-          <Slot key={s ? `${s.project}:${s.job_seq}:${s.task_id}` : `empty-${i}`} occ={s} now={now} />
+          <Slot
+            key={s ? `${s.project}:${s.job_seq}:${s.task_id}` : `empty-${i}`}
+            occ={s}
+            now={now}
+            over={node.slots != null && i >= node.slots}
+          />
         ))}
       </div>
+      <NodeCapacity
+        node={node}
+        nodes={nodes}
+        now={now}
+        controllable={controllable}
+        onChanged={onChanged}
+      />
     </div>
   )
 }
 
-function Slot({ occ, now }: { occ: SlotOccupant | null; now: number }) {
+function Slot({ occ, now, over }: { occ: SlotOccupant | null; now: number; over?: boolean }) {
   if (!occ) return <div className="cl-slot cl-slot-free" title="free" />
   const started = occ.started_at ? Date.parse(occ.started_at) : null
   const state = phaseToState(occ.phase)
   return (
     <Link
-      className="cl-slot cl-slot-busy"
+      className={`cl-slot cl-slot-busy${over ? ' cl-slot-over' : ''}`}
       to={`/p/${occ.project}/jobs/${occ.job_seq}`}
-      title={`${occ.project} · #${occ.job_seq} · ${occ.job_type} · ${occ.task_kind}`}
+      title={`${occ.project} · #${occ.job_seq} · ${occ.job_type} · ${occ.task_kind}${
+        over ? ' · over cap — draining' : ''
+      }`}
     >
       <div className="cl-slot-fill">
         <div className="cl-slot-top">

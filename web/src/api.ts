@@ -23,6 +23,7 @@ import type {
   JobPatch,
   JobTypeDetail,
   JobTypeSummary,
+  NodeCapacityAck,
   OriginStatus,
   PlatformConfig,
   ProjectConfig,
@@ -42,6 +43,8 @@ import type {
 } from './api/types.gen'
 
 export type {
+  CapacitySource,
+  CapacityState,
   ChannelOrigin,
   ChannelUpdate,
   DeployLeg,
@@ -101,6 +104,7 @@ export type {
   JobPatch,
   JobTypeDetail,
   JobTypeSummary,
+  NodeCapacityAck,
   OriginStatus,
   PlatformConfig,
   ProjectConfig,
@@ -207,6 +211,16 @@ export const api = {
   /** Live fleet occupancy snapshot (admins only): per-node slot usage + queue
    *  depth (spec §3.1). Empty before the dispatcher publishes; 403 for non-admins. */
   fleet: () => req<FleetStatus>('GET', '/api/v1/platform/fleet'),
+  /** Set one worker node's **desired** slot count (admins only; design #293 §3).
+   *  Answers 202, not 200 — the dispatcher records the intent and starts the
+   *  `set_slots` push without waiting on the node RPC, so convergence shows up in
+   *  the next fleet snapshot rather than in this reply. 404 unknown node, 409 a
+   *  docker-endpoint node (`DOCKER_NODES` owns those), 422 above the node's
+   *  reported maximum. */
+  setNodeCapacity: (node: string, slots: number) =>
+    req<NodeCapacityAck>('PUT', `/api/v1/platform/fleet/${encodeURIComponent(node)}/capacity`, {
+      slots,
+    }),
 
   jobTypes: (owner: string, project: string) =>
     req<JobTypeSummary[]>('GET', `/api/v1/projects/${owner}/${project}/job-types`),

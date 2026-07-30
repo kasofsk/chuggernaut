@@ -13,7 +13,14 @@
 // `JobTypeDetail.job_type` is the generated `JobType`, `OriginStatus.origin` is
 // the generated `OriginLink`.
 
-import type { DispatcherConfigSnapshot, Evaluator, JobType, OriginLink, ReleaseState } from './types.gen'
+import type {
+  CapacityState,
+  DispatcherConfigSnapshot,
+  Evaluator,
+  JobType,
+  OriginLink,
+  ReleaseState,
+} from './types.gen'
 
 /** Derived (never stored): the pending human task a job is waiting on, if any.
  *  `handlers::jobs_reply` inserts it into the serialized job rather than
@@ -139,6 +146,25 @@ export interface PlatformConfig {
   /** global/agents secret NAMES injected into every agent container */
   agent_secrets: string[]
   vapid_public: boolean
+}
+
+/**
+ * PUT /api/v1/platform/fleet/{node}/capacity — the **202** body of a capacity
+ * command (design #293 §3). Not 200: the dispatcher records the operator's
+ * number as intent and starts the `set_slots` push without waiting on the node
+ * RPC, so "recorded and converging" is the honest answer and `observed` is what
+ * the scheduler is still using at the moment of the reply.
+ *
+ * Rust names this (`types::NodeCapacityAck`) but `cli::schema::api_bundle` does
+ * not export it, so it is hand-mirrored here rather than generated — the fix is
+ * to add it to the bundle, which is a dispatcher-side change.
+ */
+export interface NodeCapacityAck {
+  node: string
+  desired: number
+  /** null when the node has never reported a slot count */
+  observed: number | null
+  state: CapacityState
 }
 
 /**

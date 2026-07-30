@@ -1691,6 +1691,11 @@ table.jobs tbody tr.row-draft td:first-child {
   overflow-x: auto;
 }
 
+/* Source order matters here: this block sits mid-file, so a rule for a selector
+   whose *base* declarations appear later in the file loses to them at equal
+   specificity and is silently dead. Only override selectors defined above this
+   point; for anything defined below it, use the second `@media (max-width: 640px)`
+   block near the end of the file. */
 @media (max-width: 640px) {
   /* Reclaim edge space on phones: drop the side padding so the central card
      goes full-bleed (its own padding still insets the content). Keep a small
@@ -2645,6 +2650,11 @@ table.jobs tbody tr.row-draft td:first-child {
   font-size: var(--fs-xs);
   align-self: flex-end;
 }
+/* Busy above the cap: a drain finishing (design #293 §5), never a bad number. */
+.cap-over {
+  color: var(--orange);
+  font-weight: 600;
+}
 
 /* ── Cluster view (#139): live fleet graph ───────────────────────────────── */
 .cluster-card {
@@ -2692,6 +2702,11 @@ table.jobs tbody tr.row-draft td:first-child {
 .cl-node-web {
   min-width: 190px;
   text-align: center;
+}
+/* Bounded so the capacity control's prose wraps inside the card instead of
+   stretching it across the fan — the workers should still read as a row. */
+.cl-worker {
+  max-width: 22rem;
 }
 .cl-dim {
   opacity: 0.45;
@@ -2847,6 +2862,132 @@ table.jobs tbody tr.row-draft td:first-child {
 }
 .cl-empty {
   padding: var(--sp-4);
+}
+/* Over cap (design #293 §5): running above the cap is a drain finishing, not a
+   rendering fault — mark it rather than clip it. The occupancy fraction turns
+   amber and the cells past the cap carry a dashed amber edge. */
+.cl-over {
+  color: var(--orange);
+  font-weight: 600;
+}
+.cl-slot-over {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--orange) 55%, var(--border));
+  background: color-mix(in srgb, var(--orange) 10%, var(--card));
+}
+
+/* ── Worker capacity control (#293 §10) ──────────────────────────────────────
+   Sits under a node card's slot widget: the display state on top, the desired-
+   slot stepper under it. The observed number (`.cap-now`) is what the scheduler
+   reads and stays visually primary; intent (`.cap-want`) is deliberately
+   secondary, because it never places work. */
+.cap-ctl {
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border-faint);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  font-size: var(--fs-xs);
+}
+.cap-line {
+  line-height: 1.4;
+}
+.cap-now {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.cap-arrow {
+  color: var(--dim);
+}
+.cap-want {
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+.cap-badge {
+  margin-left: 0.4rem;
+  font-size: 0.68rem;
+}
+/* The alarm head is a flex row with its own gap — the inline nudge would double it. */
+.cap-alarm-head .cap-badge {
+  margin-left: 0;
+}
+/* A capacity path that failed must not look like health: seed/stale/rejected/
+   unacknowledged each get a bordered strip rather than a footnote. */
+.cap-alarm {
+  --tone: var(--orange);
+  border: 1px solid color-mix(in srgb, var(--tone) 45%, var(--border));
+  border-left-width: 3px;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--tone) 8%, var(--card));
+  padding: var(--sp-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.cap-alarm[data-tone='bad'] {
+  --tone: var(--red);
+}
+.cap-alarm-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.cap-alarm-body {
+  color: var(--dim);
+  line-height: 1.45;
+}
+.cap-alarm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+}
+.cap-stepper {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.cap-step,
+.cap-set {
+  min-height: 32px;
+  padding: 0.2rem 0.7rem;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--btn-bg);
+  color: var(--text);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.cap-step {
+  min-width: 32px;
+  font-weight: 700;
+}
+.cap-step:disabled,
+.cap-set:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.cap-set.danger {
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
+  color: var(--danger);
+}
+.cap-step-value {
+  min-width: 1.6rem;
+  text-align: center;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.cap-max,
+.cap-since,
+.cap-audit {
+  font-size: var(--fs-xs);
+}
+.cap-error {
+  color: var(--danger);
 }
 
 /* ── Deploys page: drift banner, fleet freshness, deploy leg card ──────────── */
@@ -4536,6 +4677,20 @@ tr[data-state='Batched'] {
   }
   .switch {
     width: 100%;
+  }
+  /* Capacity control: the stepper keeps a full tap target and the max hint drops
+     to its own line rather than squeezing the buttons off the card. Lives in
+     *this* block, not the mid-file one, because `.cap-step`/`.cap-set` are
+     declared after it and would otherwise win at equal specificity. */
+  .cap-step,
+  .cap-set {
+    min-height: 38px;
+  }
+  .cap-step {
+    min-width: 38px;
+  }
+  .cap-max {
+    flex: 1 1 100%;
   }
 }
 

@@ -82,9 +82,13 @@ export function CapacityWidget({
   }
 
   // One dot per slot (capped so a big fleet can't overflow the card); the first
-  // `busy` read as filled.
+  // `busy` read as filled. `busy` can exceed `total` — lowering a node's cap
+  // below its live occupancy drains rather than kills (design #293 §5), so a
+  // fleet at 3/2 is a legitimate state — hence the clamp instead of a dot row
+  // that runs past its own length.
   const dotCount = Math.min(total, 16)
-  const filled = Math.round((busy / total) * dotCount)
+  const filled = Math.min(dotCount, Math.round((busy / total) * dotCount))
+  const overCap = busy > total
 
   return (
     <div className="capacity-widget" data-band={band}>
@@ -103,9 +107,13 @@ export function CapacityWidget({
             className="capacity-summary"
             onClick={() => setExpanded((v) => !v)}
             aria-expanded={expanded}
-            title="fleet slot usage — click for the per-node breakdown"
+            title={
+              overCap
+                ? 'fleet slot usage — over cap: a drain is finishing, nothing new is placed'
+                : 'fleet slot usage — click for the per-node breakdown'
+            }
           >
-            <span className="capacity-frac">
+            <span className={`capacity-frac${overCap ? ' cap-over' : ''}`}>
               {busy} <span className="capacity-slash">/</span> {total}
             </span>
             <span className="capacity-dots" aria-hidden="true">
@@ -130,7 +138,11 @@ export function CapacityWidget({
                 <div key={n.name} className={`cap-node${n.available ? '' : ' cap-out'}`}>
                   <div className="cap-node-head">
                     <span className="cap-node-name">{n.name}</span>
-                    <span className="cap-node-frac dim">
+                    <span
+                      className={`cap-node-frac dim${
+                        n.slots != null && n.occupied > n.slots ? ' cap-over' : ''
+                      }`}
+                    >
                       {n.occupied} / {n.slots ?? '?'}
                       {!n.available && ' · out'}
                     </span>
