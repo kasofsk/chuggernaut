@@ -39,6 +39,29 @@ pub const INPUT_VALUE_PATTERN: &str = r"^[A-Za-z0-9._:/@+-]{1,256}$";
 /// `CHUG_INPUT_IMAGE_TAG` env key.
 pub const INPUT_NAME_PATTERN: &str = r"^[a-z][a-z0-9_]*$";
 
+/// The one env namespace inputs are delivered under (spec §4.1, design #311
+/// Decision 4). It sits *inside* the `CHUG_` prefix §5.3 reserves for both
+/// secrets and vars, which is what makes the namespace collision-proof by
+/// construction rather than by precedence rule: no project-declared name can
+/// land here at all.
+pub const INPUT_ENV_PREFIX: &str = "CHUG_INPUT_";
+
+/// The env key one input is delivered as: `sha` → `CHUG_INPUT_SHA`.
+///
+/// Injective over well-formed names ([`INPUT_NAME_PATTERN`]) — uppercasing a
+/// lowercase-only alphabet cannot collapse two names — which is the whole
+/// reason the name rule excludes uppercase. The precondition is asserted rather
+/// than assumed: a malformed name reaching here would mean the creation pass
+/// (§2.2) was bypassed, and two inputs could then claim one key.
+#[must_use]
+pub fn input_env_key(name: &str) -> String {
+    debug_assert!(
+        name_is_well_formed(name),
+        "input name {name:?} is malformed; its env key would not be injective",
+    );
+    format!("{INPUT_ENV_PREFIX}{}", name.to_uppercase())
+}
+
 /// Longest accepted input value (design #311 Decision 2). Characters, which is
 /// also bytes: the charset is ASCII-only. A hard error, never a truncation —
 /// a silently shortened SHA is a wrong external action.
@@ -282,6 +305,33 @@ mod tests {
                 "name-shape disagreement on {name:?}"
             );
         }
+    }
+
+    /// The invariant delivery depends on (design #311 Decision 4): the
+    /// name → env-key mapping is injective over well-formed names, so no two
+    /// declared inputs can claim one `CHUG_INPUT_*` key.
+    #[test]
+    fn env_keys_are_injective_over_well_formed_names() {
+        let names = [
+            "sha",
+            "s",
+            "image_tag",
+            "imagetag",
+            "image_tag2",
+            "a1_b2",
+            "service",
+        ];
+        let keys: std::collections::BTreeSet<String> =
+            names.iter().map(|n| input_env_key(n)).collect();
+        assert_eq!(keys.len(), names.len(), "{keys:?} collapsed {names:?}");
+        assert_eq!(input_env_key("image_tag"), "CHUG_INPUT_IMAGE_TAG");
+        assert!(keys.iter().all(|k| k.starts_with(INPUT_ENV_PREFIX)));
+        // …and why the name rule excludes uppercase: without it these two
+        // distinct names would map to the one key. `name_is_well_formed` is what
+        // keeps the second out of any declaration, so `input_env_key` never sees
+        // it (hence the raw mapping here rather than the function).
+        assert!(!name_is_well_formed("IMAGE_TAG"));
+        assert_eq!("image_tag".to_uppercase(), "IMAGE_TAG".to_uppercase());
     }
 
     #[test]

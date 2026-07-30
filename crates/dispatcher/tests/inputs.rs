@@ -1,7 +1,8 @@
-//! Tier-2 tests for job **inputs** (spec §1.1 `inputs:`, §2.2; design #311
+//! Tier-2 tests for job **inputs** (spec §1.1 `inputs:`, §2.2, §4.1; design #311
 //! slice A): the create → release → Ready sequence a defaulted input travels,
-//! where a bad input fails, and the immutability of `Job::inputs` across a later
-//! `base_ref` update.
+//! where a bad input fails, the immutability of `Job::inputs` across a later
+//! `base_ref` update, and the launch round trip — the golden trace from
+//! `job-created` to the `CHUG_INPUT_*` keys a container actually sees.
 //!
 //! Everything here needs a real repo at a ref (the declaration is a file-derived
 //! fact) plus the single-writer actor, which is what makes it tier 2 rather than
@@ -36,9 +37,53 @@ inputs:
     type: enum
     values: [web, worker, bot]
     default: web
+  - name: note
+    type: string
+    description: Optional, and declares no default — so it never resolves.
 work:
   type: agent
   prompt: prompts/impl.md
+"#;
+
+/// The same declaration plus a command evaluator, so one run exercises both
+/// container kinds inputs are delivered to (#311 Decision 4: work, wrap-up and
+/// eval alike).
+const PARAMETERIZED_CI: &str = r#"
+name: parameterized-ci
+image: img:latest
+min_dispatcher: 2
+inputs:
+  - name: sha
+    type: string
+    required: true
+    pattern: '^[0-9a-f]{7,40}$'
+  - name: service
+    type: enum
+    values: [web, worker, bot]
+    default: web
+  - name: note
+    type: string
+work:
+  type: agent
+  prompt: prompts/impl.md
+eval:
+  - name: ci
+    type: command
+    run: ./ci.sh
+"#;
+
+/// A type declaring no inputs but running the same command evaluator — the
+/// byte-identical-env regression guard for every job type in the repo today.
+const PLAIN_CI: &str = r#"
+name: plain-ci
+image: img:latest
+work:
+  type: agent
+  prompt: prompts/impl.md
+eval:
+  - name: ci
+    type: command
+    run: ./ci.sh
 "#;
 
 /// The same type with the `service` default moved and a *new* defaulted input —
@@ -79,7 +124,7 @@ struct Rig {
     _server: &'static test_utils::nats::NatsTestServer,
     store: NatsStore,
     repo: TempRepo,
-    _backend: Arc<FakeBackend>,
+    backend: Arc<FakeBackend>,
     provider: Arc<FakeProvider>,
     core: Core,
 }
@@ -94,7 +139,9 @@ async fn rig() -> Option<Rig> {
     let clone = repo.clone_branch("main").await;
     for (path, content) in [
         ("jobs/parameterized.yaml", PARAMETERIZED),
+        ("jobs/parameterized-ci.yaml", PARAMETERIZED_CI),
         ("jobs/plain.yaml", PLAIN),
+        ("jobs/plain-ci.yaml", PLAIN_CI),
         ("prompts/impl.md", "implement it"),
     ] {
         clone.commit_file(path, content.as_bytes(), path).await;
@@ -102,8 +149,33 @@ async fn rig() -> Option<Rig> {
     clone.push("main").await;
 
     let backend = Arc::new(FakeBackend::new());
+    // The command evaluator reads its verdict from this file; the types that
+    // declare no evaluators never launch a container that looks for it.
+    backend.put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
     let provider = Arc::new(FakeProvider::new());
-    let core = Core::new(
+    let core = core_over(&store, &repo, &backend, &provider, server.url()).await;
+    Some(Rig {
+        _server: server,
+        store,
+        repo,
+        backend,
+        provider,
+        core,
+    })
+}
+
+/// A `Core` over an already-seeded store and repo. Shared by [`rig`] and by the
+/// launch-park test, which needs a **second** core: a fresh one enqueues every
+/// `Ready` job at construction, which is how a job whose record was rewritten
+/// underneath it gets re-launched.
+async fn core_over(
+    store: &NatsStore,
+    repo: &TempRepo,
+    backend: &Arc<FakeBackend>,
+    provider: &Arc<FakeProvider>,
+    nats_url: &str,
+) -> Core {
+    Core::new(
         store.clone(),
         vcs::RepoManager::new(
             repo.bare_path()
@@ -117,20 +189,12 @@ async fn rig() -> Option<Rig> {
         provider.clone(),
         CoreConfig {
             repo_url_base: "file:///repos".into(),
-            nats_url: server.url().into(),
+            nats_url: nats_url.into(),
             ..Default::default()
         },
     )
     .await
-    .unwrap();
-    Some(Rig {
-        _server: server,
-        store,
-        repo,
-        _backend: backend,
-        provider,
-        core,
-    })
+    .unwrap()
 }
 
 fn req(r#type: &str, deps: &[u64], inputs: &[(&str, &str)]) -> CreateJobRequest {
@@ -413,6 +477,219 @@ async fn inputs_are_immutable_across_the_pre_eval_rebase() {
         "the effective set is the one resolved at the FIRST pin: no 'region', and \
          'service' is still the default that was declared then"
     );
+}
+
+/// **The golden trace** (#311's contracts table): `job-created` carries the
+/// *supplied* inputs → `job-released` the *effective* ones, after the default
+/// fill on the write that pins `base_ref` → `job-started` → and the containers
+/// see exactly one `CHUG_INPUT_*` key per input with a resolved value.
+///
+/// The declared-but-unresolved `note` (optional, no `default`, nothing supplied)
+/// is the case that must produce **no key at all** — absent, never blank, which
+/// is what lets a `set -eu` script fail loudly. Both the work agent's env and the
+/// command evaluator's are checked: evaluators receive inputs too (#311 Decision
+/// 4 — an input supplies a value down a path a repo author already opened; it
+/// cannot open one).
+#[tokio::test]
+async fn golden_trace_inputs_reach_work_and_eval_container_envs() {
+    let Some(rig) = rig().await else { return };
+    let (store, backend, provider) = (rig.store.clone(), rig.backend.clone(), rig.provider.clone());
+    commit_on_work(&rig);
+
+    let handle = spawn(rig.core);
+    let job = handle
+        .create_job(req("parameterized-ci", &[], &[("sha", "4f9c1ab")]))
+        .await
+        .unwrap();
+    handle.release_job("acme", "api", job.id).await.unwrap();
+    test_utils::wait::job_state(&store, "acme", "api", job.id, JobState::Done).await;
+
+    // 1. The §10.3 event pair: what was asked for, then what actually ran.
+    let events = job_events(&store, job.id).await;
+    assert_eq!(
+        event(&events, "job-created")["inputs"],
+        serde_json::json!({ "sha": "4f9c1ab" }),
+        "job-created carries the SUPPLIED set"
+    );
+    assert_eq!(
+        event(&events, "job-released")["inputs"],
+        serde_json::json!({ "sha": "4f9c1ab", "service": "web" }),
+        "job-released carries the EFFECTIVE set — the default is the difference"
+    );
+    assert!(
+        !event(&events, "job-started").is_null(),
+        "the job started: {events:?}"
+    );
+
+    // 2. The work container's env: exactly the resolved inputs, and no `note`.
+    let expected = vec![
+        ("CHUG_INPUT_SERVICE".to_string(), "web".to_string()),
+        ("CHUG_INPUT_SHA".to_string(), "4f9c1ab".to_string()),
+    ];
+    let runs = provider.runs();
+    assert_eq!(injected(&runs[0].env), expected, "work container env");
+
+    // 3. …and the evaluator's, which is the same choke point (`container_env`).
+    let eval = backend
+        .launches()
+        .into_iter()
+        .find(|c| c.cmd.iter().any(|arg| arg.contains("./ci.sh")))
+        .expect("the ci evaluator ran in a container");
+    assert_eq!(injected(&eval.env), expected, "eval container env");
+}
+
+/// The regression guard for **every job type in this repo today** (#311's
+/// contracts table): a job whose type declares no inputs launches an eval
+/// container whose env is byte-identical to what it was before inputs existed —
+/// the feature is off, not merely unused. The key list is pinned rather than
+/// merely filtered for `CHUG_INPUT_*`, so *any* new env key has to be a
+/// deliberate edit here.
+#[tokio::test]
+async fn an_input_free_job_launches_a_byte_identical_eval_env() {
+    let Some(rig) = rig().await else { return };
+    let (store, backend) = (rig.store.clone(), rig.backend.clone());
+    commit_on_work(&rig);
+
+    let handle = spawn(rig.core);
+    let job = handle.create_job(req("plain-ci", &[], &[])).await.unwrap();
+    handle.release_job("acme", "api", job.id).await.unwrap();
+    test_utils::wait::job_state(&store, "acme", "api", job.id, JobState::Done).await;
+
+    let eval = backend
+        .launches()
+        .into_iter()
+        .find(|c| c.cmd.iter().any(|arg| arg.contains("./ci.sh")))
+        .expect("the ci evaluator ran in a container");
+    let mut keys: Vec<&str> = eval.env.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "BASE_BRANCH",
+            "CHANNEL_ROLE",
+            "CHUG_EVALUATOR",
+            "CHUG_PHASE",
+            "CHUG_TASK_ID",
+            "JOB_BRANCH",
+            "JOB_ID",
+            "JOB_PROJECT",
+            "JOB_TASK_ID",
+            "NATS_URL",
+            "REPO_URL",
+        ],
+        "an input-free job's eval env must not grow a key"
+    );
+    // The `job-released` event is likewise untouched — no empty `inputs` field.
+    let released = event(&job_events(&store, job.id).await, "job-released");
+    assert_eq!(released["state"], serde_json::json!("Ready"));
+    assert!(released["inputs"].is_null(), "{released}");
+}
+
+/// §2.2's **third and last pass** (#311 Decision 3): a value that no longer
+/// clears the charset is caught immediately before injection and parks the job
+/// like a missing secret — no container, no `CHUG_INPUT_*`. Reaching it means an
+/// earlier pass was bypassed, which is exactly what this test stages: the record
+/// is rewritten after the Ready transition, the way a record written before the
+/// rule existed would look.
+#[tokio::test]
+async fn a_value_outside_the_charset_parks_the_job_at_launch() {
+    let Some(mut rig) = rig().await else { return };
+
+    let job = rig
+        .core
+        .create_job(req("parameterized", &[], &[("sha", "4f9c1ab")]))
+        .await
+        .unwrap();
+    assert_eq!(
+        rig.core.release_job("acme", "api", job.id).await.unwrap(),
+        JobState::Ready
+    );
+
+    // A value no supply path could have produced — three passes reject it — on a
+    // job that is otherwise ready to launch.
+    let jobs = rig.store.jobs().await.unwrap();
+    let mut ready = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
+    ready.inputs.insert("sha".into(), "4f9c1ab;rm -rf /".into());
+    jobs.put(&ready).await.unwrap();
+
+    // A fresh core enqueues the Ready job at construction; spawning drains the
+    // queue, which is what reaches `enter_work` and its launch-time pass.
+    let core = core_over(
+        &rig.store,
+        &rig.repo,
+        &rig.backend,
+        &rig.provider,
+        rig._server.url(),
+    )
+    .await;
+    let _handle = spawn(core);
+
+    let parked = test_utils::wait::job_where(
+        &rig.store,
+        "acme",
+        "api",
+        job.id,
+        format!("job {} to park at launch on its bad input", job.id),
+        |rec| rec.state != JobState::Ready,
+    )
+    .await;
+    assert_eq!(parked.state, JobState::Escalated, "parks like a missing KV");
+    let escalation = parked.escalation.expect("the park records why");
+    assert_eq!(escalation.reason, "launch_validation_failed");
+    assert!(
+        escalation.detail.contains("input 'sha'"),
+        "the park names the offending input: {}",
+        escalation.detail
+    );
+    assert!(
+        rig.provider.runs().is_empty() && rig.backend.launches().is_empty(),
+        "a parked launch launches nothing"
+    );
+}
+
+/// The work-agent hook every launch-reaching test needs: commit on the job branch
+/// so the §3.2 finish-line guard sees output and the job proceeds to Done.
+fn commit_on_work(rig: &Rig) {
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let work = clone_branch_from(&bare, &branch).await;
+        work.commit_file("src/a.rs", b"job change", "implement")
+            .await;
+        work.push(&branch).await;
+    });
+}
+
+/// The `CHUG_INPUT_*` slice of a container env, sorted — what a script can read.
+fn injected(env: &std::collections::HashMap<String, String>) -> Vec<(String, String)> {
+    let mut keys: Vec<(String, String)> = env
+        .iter()
+        .filter(|(k, _)| k.starts_with(types::INPUT_ENV_PREFIX))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// Every `job-events` payload for one job, in stream order.
+async fn job_events(store: &NatsStore, seq: u64) -> Vec<serde_json::Value> {
+    store
+        .read_stream("job-events", 200)
+        .await
+        .unwrap()
+        .iter()
+        .map(|payload| serde_json::from_slice::<serde_json::Value>(payload).unwrap())
+        .filter(|v| v["job_seq"] == serde_json::json!(seq))
+        .collect()
+}
+
+/// The first event of a type, or `Value::Null` when the stream carries none.
+fn event(events: &[serde_json::Value], event_type: &str) -> serde_json::Value {
+    events
+        .iter()
+        .find(|v| v["event_type"] == serde_json::json!(event_type))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
 }
 
 /// Batch × inputs is excluded in v1 (#311 Decision 3): values do not union the

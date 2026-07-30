@@ -18,7 +18,7 @@ use crate::graph::JobGraph;
 use crate::queue::{QueuedJob, QueuedLaunch, ReadyQueue};
 use crate::release::{self, KvNames, ValidationError};
 use crate::state::{InvalidTransition, assert_transition};
-use crate::{escalation, exec, queue};
+use crate::{escalation, exec, inputs, queue};
 use agent::AgentProvider;
 use chrono::{DateTime, Utc};
 use container::ContainerBackend;
@@ -1612,14 +1612,15 @@ impl Core {
             .entry(job.project.clone())
             .or_default()
             .insert(job.clone());
-        self.publish(
-            &req.owner,
-            &req.project,
-            seq,
-            "job-created",
-            serde_json::json!({}),
-        )
-        .await?;
+        // §10.3 audit trail: creation records what the originator *asked for*.
+        // The effective set — this plus the defaults the Ready transition
+        // materializes — rides the transition event that pins `base_ref`, and
+        // the difference between the two events is exactly the defaults (design
+        // #311 Decision 6).
+        let mut extra = serde_json::json!({});
+        inputs::stamp_event_inputs(&mut extra, &job.inputs);
+        self.publish(&req.owner, &req.project, seq, "job-created", extra)
+            .await?;
         Ok(job)
     }
 
@@ -1704,7 +1705,9 @@ impl Core {
             .entry(batch.project.clone())
             .or_default()
             .insert(batch.clone());
-        self.publish(&owner, &project, seq, "job-created", serde_json::json!({}))
+        let mut extra = serde_json::json!({});
+        inputs::stamp_event_inputs(&mut extra, &batch.inputs);
+        self.publish(&owner, &project, seq, "job-created", extra)
             .await?;
 
         // A non-draft batch pulls each member Frozen→Batched now; a Draft batch

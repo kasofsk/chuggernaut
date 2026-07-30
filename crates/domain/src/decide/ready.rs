@@ -265,12 +265,21 @@ fn decide_released(
             extra: serde_json::json!({}),
         });
     }
+    // §10.3: the Ready transition's event carries the **effective** input set —
+    // the supplied values plus the defaults `admitted_record` just materialized
+    // — so "what actually ran" is in the event stream beside `job-created`'s
+    // "what was asked for" (design #311 Decision 6). A release that parks
+    // `Blocked` pinned nothing and so resolved nothing; its event carries the
+    // supplied set, and the `job-unblocked` that does pin carries the effective
+    // one.
+    let mut extra = serde_json::json!({ "state": to });
+    crate::inputs::stamp_event_inputs(&mut extra, &stamped.inputs);
     effects.push(Effect::PublishEvent {
         owner: owner.to_string(),
         project: project.to_string(),
         seq: job.id,
         event_type: "job-released".to_string(),
-        extra: serde_json::json!({ "state": to }),
+        extra,
     });
 
     let step = ReadyStep::Admitted {
@@ -343,12 +352,15 @@ fn decide_revalidated(
     }
 
     let stamped = admitted_record(job, JobState::Ready, &head, view.now, declared_inputs);
+    // The effective set, on the write that pins `base_ref` (§10.3, #311 D6).
+    let mut extra = serde_json::json!({});
+    crate::inputs::stamp_event_inputs(&mut extra, &stamped.inputs);
     let effects = vec![Effect::PublishEvent {
         owner: owner.to_string(),
         project: project.to_string(),
         seq: job.id,
         event_type: "job-unblocked".to_string(),
-        extra: serde_json::json!({}),
+        extra,
     }];
     (
         vec![Transition {

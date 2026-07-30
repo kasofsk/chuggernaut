@@ -230,6 +230,13 @@ pub enum EntryFailure {
     /// The §2.2 launch-time pass found declared secrets/vars missing from KV,
     /// re-checked immediately before injection.
     MissingKv(Vec<String>),
+    /// The §2.2 launch-time pass found a value on `Job::inputs` that no longer
+    /// clears the shape floor (charset, length, name form, count) — the third
+    /// and last pass, re-checked immediately before injection (design #311
+    /// Decision 3). Parks like [`EntryFailure::MissingKv`] rather than launching:
+    /// a value three passes rejected must not reach a `run:` script that crosses
+    /// further shells. Carries the violation as `types::inputs` reported it.
+    BadInput(String),
 }
 
 /// What drove this Work-phase decision. [`WorkEvent::OutputChecked`] carries the
@@ -471,6 +478,10 @@ fn decide_entered_park(
         EntryFailure::MissingKv(missing) => (
             "launch_validation_failed",
             format!("Job {seq}: missing at launch: {}", missing.join(", ")),
+        ),
+        EntryFailure::BadInput(violation) => (
+            "launch_validation_failed",
+            format!("Job {seq}: input rejected at launch: {violation}"),
         ),
     };
     Effect::Escalate {
@@ -1266,6 +1277,32 @@ mod tests {
             escalation(&effects).1,
             "Job 7: missing at launch: secret 'DEPLOY_KEY', var 'REGION'"
         );
+    }
+
+    /// The third launch-time pass (design #311 Decision 3): an input value that
+    /// no longer clears the charset parks the job exactly like a missing secret —
+    /// no container, and the violation named. Reaching this means an earlier pass
+    /// was bypassed, which is why it parks rather than sanitizing.
+    #[test]
+    fn entry_bad_input_escalates_naming_the_violation() {
+        let job = sample_job(JobState::Ready);
+        let (transitions, effects, step) = decide(
+            &WorkView::entry(&job, None, 1, Utc::now()),
+            WorkEvent::Entered {
+                failure: Some(EntryFailure::BadInput(
+                    "input 'sha': value contains ';'".into(),
+                )),
+            },
+        );
+        assert!(transitions.is_empty(), "a parked entry moves no record");
+        assert!(matches!(step, WorkStep::Idle), "and launches nothing");
+        let (reason, detail, failing) = escalation(&effects);
+        assert_eq!(reason, "launch_validation_failed");
+        assert_eq!(
+            detail,
+            "Job 7: input rejected at launch: input 'sha': value contains ';'"
+        );
+        assert_eq!(failing, None, "no task exists at launch time");
     }
 
     // --- Attempt launch and claim parking (§1.2) ---

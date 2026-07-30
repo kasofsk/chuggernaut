@@ -132,8 +132,10 @@ domain/ (chuggernaut-domain — pure: no tokio/async-nats/store/vcs/auth)
   release.rs     — release validation, pure half: error vocabulary, wiring rules,
                    additive-evaluator merge (§2.2, §2.3)
   inputs.rs      — job inputs vs their declaration: the `inputs.{name}` semantic verdict
-                   shared by release and the Ready-transition re-check, and the add-only
-                   default fill the first base_ref pin performs (§1.1, §2.2)
+                   shared by release and the Ready-transition re-check, the add-only
+                   default fill the first base_ref pin performs, and delivery —
+                   `CHUG_INPUT_*` env injection + the event audit fragment
+                   (§1.1, §2.2, §4.1, §10.3)
   effects.rs     — the Effect vocabulary: each port action as serde data (contracts.md §2)
   decide/        — the decider layer: pure `(view, event) -> (transitions, effects)`
     escalation.rs— the C1 template decider: the escalate/stall family (§1.2, §3.4)

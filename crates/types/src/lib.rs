@@ -29,8 +29,8 @@ pub use deploy::{DeployLeg, DeployReport, LegStatus};
 pub use duration::{DurationParseError, parse_duration};
 pub use ingest::IngestEvent;
 pub use inputs::{
-    INPUT_NAME_PATTERN, INPUT_VALUE_LEN_MAX, INPUT_VALUE_PATTERN, INPUTS_COUNT_MAX,
-    InputValueError, SuppliedInputError, check_supplied,
+    INPUT_ENV_PREFIX, INPUT_NAME_PATTERN, INPUT_VALUE_LEN_MAX, INPUT_VALUE_PATTERN,
+    INPUTS_COUNT_MAX, InputValueError, SuppliedInputError, check_supplied, input_env_key,
 };
 pub use job::{Escalation, JOB_SUMMARY_EXTRA_FIELDS, Job, JobState, JobSummary};
 pub use job_type::{

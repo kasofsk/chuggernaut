@@ -42,7 +42,7 @@ one surface.
 | `graph` | In-memory per-project DAG (petgraph): rdeps maintenance, dependency queries, revoke cascades; a working copy, KV stays truth. | §1.4, §2.3 |
 | `queue` | In-memory FIFO of Ready job IDs, plus the §3.5 launch queue's pure half (drain-priority class, max-wait budget arithmetic); lives in the actor, never persisted, rebuilt on restart. | §3.1, §3.5 |
 | `release` | Release validation, pure half: error vocabulary, graph wiring rules, additive-evaluator merge; the ref-reading half stays dispatcher-side. | §2.2, §2.3 |
-| `inputs` | Job inputs against their declaration: the semantic verdict (`inputs.{name}` errors) shared by release and the Ready-transition re-check, and the add-only default fill the first `base_ref` pin performs. | §1.1, §2.2 |
+| `inputs` | Job inputs against their declaration: the semantic verdict (`inputs.{name}` errors) shared by release and the Ready-transition re-check, the add-only default fill the first `base_ref` pin performs, and the delivery half — `CHUG_INPUT_*` injection under the collision assert, plus the audit fragment the create/Ready events carry. | §1.1, §2.2, §4.1, §10.3 |
 | `effects` | The effect vocabulary: an `Effect` enum naming each port action as `serde` data, with a variant→port-method table. Plain data, no I/O. | contracts.md §2 |
 | `decide` | The decider layer: `Transition` + one pure module per lifecycle phase, each `decide(view, event) -> (Vec<Transition>, Vec<Effect>)`; never performs an effect. | contracts.md §2 |
 | `decide/escalation` | The C1 template decider: the escalate/stall family — Human task + WHY stamp + Escalated/Stalled transition + announcement, as values. | §1.2, §3.4 |

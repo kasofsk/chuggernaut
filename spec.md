@@ -259,7 +259,9 @@ never a release error. Later `base_ref` movements do not re-resolve — defaults
 resolve exactly once. An optional input with neither a supplied value nor a
 `default` stays **absent**, never an empty string.
 
-How a value reaches a container is specified with the container environment.
+How a value reaches a container is specified with the container environment: one
+`CHUG_INPUT_{NAME}` key per resolved value, delivered to work, wrap-up and eval
+containers alike (§4.1).
 
 **`work.type: human`** — no container is launched. The dispatcher creates a `Human` task in `Pending` state in the Work phase; it surfaces in the operator task inbox. The operator performs the work manually, then resolves via `POST .../tasks/{task_id}/resolve`:
 - `TaskResolution::Pass` — work complete; proceeds to Evaluation (or Done if no evaluators). A `summary` on the Pass is both used as the squash-merge commit body *and* persisted on the stored `TaskResult::Human { summary }`, so the operator's report renders in the Reports thread like an agent's closing summary.
@@ -811,7 +813,7 @@ Validation runs in three passes, each at the right moment:
 
 1. **Release-time** — fast feedback before any execution is committed; checked against current HEAD. Not an execution guarantee.
 2. **Ready-transition** — static file existence re-checked at `base_ref` (the exact HEAD locked when the job enters Ready). Eliminates TOCTOU drift.
-3. **Launch-time** — secrets and vars re-checked immediately before injection. Catches anything deleted between release and launch.
+3. **Launch-time** — secrets, vars and the job's own input values re-checked immediately before injection. Catches anything deleted between release and launch.
 
 **Release-time checks (applied on every `release` request, per-job and graph-level):**
 
@@ -839,6 +841,8 @@ The dispatcher re-validates static configuration (job type file, all prompt path
 **Launch-time validation:**
 
 Secrets and vars declared in the job type are checked immediately before injection. If any are missing, the job transitions to Escalated.
+
+The job's own input values are re-checked in the same pass, against the shape floor only (charset, length, name form, count — §1.1) and consulting no declaration, since the declaration was judged at release and again at the Ready transition. A violation parks the job exactly like a missing secret. This is the belt to the earlier passes' braces — the defense-in-depth check for a record written before the rule existed — and reaching it means an earlier pass was bypassed.
 
 Any release request that fails validation is rejected with a list of offending job instances and the specific rule violated. A job with no dependencies skips wiring rules.
 
@@ -1175,6 +1179,8 @@ CHUG_PHASE      Work            # originating task phase, stamped onto channel p
 GITHUB_TOKEN    ...
 # vars (from NATS KV; named as declared in top-level vars:) — CHUG_* names are reserved (§5.3) and skipped
 RUST_EDITION    2021
+# inputs (from Job.inputs; one key per input with a resolved value) — injected LAST, see below
+CHUG_INPUT_SHA  4f9c1ab
 ```
 
 **Eval containers** (command + agent; not applicable to human evaluators):
@@ -1194,7 +1200,16 @@ CHUG_EVALUATOR  review          # evaluator name, stamped onto channel posts (§
 # secrets (only those declared in the evaluator's own secrets: field)
 # vars (from NATS KV; named as declared in top-level vars:) — CHUG_* names are reserved (§5.3) and skipped
 RUST_EDITION    2021
+# inputs (from Job.inputs) — evaluators receive them too, see below
+CHUG_INPUT_SHA  4f9c1ab
 ```
+
+**Job inputs (`CHUG_INPUT_*`).** An input declared as `sha` (§1.1) is delivered as `CHUG_INPUT_SHA` — `name.to_uppercase()` under one reserved namespace, which is injective because input names are lowercase-only. The namespace sits inside the `CHUG_` prefix §5.3 reserves for secrets *and* vars, so no project-declared name can collide with an input; inputs are therefore injected **last**, asserting at the insertion site that the namespace was empty. Delivery rules:
+
+- **One key per input with a resolved value**, and nothing else. `Job.inputs` is the effective set (supplied values plus materialized defaults, §1.1), so a declared *optional* input with neither a supplied value nor a `default` gets **no key at all** — never an empty string. That is what lets a `set -eu` script fail loudly instead of acting on a blank argument, and what makes `${CHUG_INPUT_X:-fallback}` mean what its author expects.
+- **Work, wrap-up and eval containers all receive them.** An evaluator is a gate, and a value in a gate's environment can only matter if a repo author first wrote a branch that reads it — a reviewed commit in the project repo, on the same path as the `eval:` declaration itself. Choosing *which* script runs is the capability an input may never have (§1.1: no job-type field is selectable by an input); supplying a value to a script someone already wrote is not. The eval floor holds because an input cannot open a path, only travel one, and both the declaration and the value are on the record (§10.3). A work-only narrowing was rejected because §4.3 sends the job brief to every agent evaluator by construction, so it would leave the *more* suggestible gate reading inputs.
+- **Values are re-checked immediately before injection** (§2.2 launch-time pass): a value outside the default charset parks the job rather than launching it.
+- A job whose `inputs` is empty — every job of every type that declares none — gets a container env byte-identical to one composed without the feature.
 
 **Workspace bootstrap:** the dispatcher wraps every work and eval container CMD with a standard bootstrap: `git clone --branch $JOB_BRANCH $REPO_URL /workspace && cd /workspace && exec {original CMD}`. Images must provide `git` and an SSH client but do not perform the clone themselves — the platform enforces the `/workspace` contract (command evaluators write `eval-result.json` there; eval agents inspect the diff there).
 
@@ -1707,15 +1722,15 @@ All events are published exclusively by the dispatcher to `job.events.{owner}.{p
 
 | Event type | Trigger |
 |---|---|
-| `job-created` | Dispatcher creates job in KV in response to `req.jobs.create.*` (Frozen, or Draft with `draft: true`) |
+| `job-created` | Dispatcher creates job in KV in response to `req.jobs.create.*` (Frozen, or Draft with `draft: true`); includes `inputs` (the **supplied** set) when the job carries any — omitted entirely when it does not |
 | `job-updated` | `PATCH .../jobs/{seq}` accepted (a Draft job's definition was edited), or `POST .../jobs/{seq}/members` accepted (a Draft batch's membership was edited, §2.1 draft batches); includes `fields` (the changed field names — `["members"]` for a membership edit — not the full payload) |
 | `job-drafted` | Frozen → Draft; a never-released job was reopened for editing (`POST .../draft`) |
 | `job-finalized` | The edited definition of a Draft was finalized — either Draft → Ready or Blocked as part of `POST .../release` (fires alongside `job-released`), or Draft → Frozen via `POST .../jobs/{seq}/finalize` (parked re-batchable, §2.1) |
 | `job-batched` | Frozen → Batched; a job was absorbed into a batch (`POST .../jobs` with `members`, or a Draft batch finalized/released, §2.1 draft batches); includes `batch_id` (§2.1 batches) |
 | `job-unbatched` | Batched → Frozen; the owning batch was revoked/failed or reopened to Draft, and the member was released (re-batchable); includes `batch_id` |
 | `job-completed-via-batch` | Batched → Done; the owning batch's merge completed the member; includes `batch_id` (§2.1 batches) |
-| `job-released` | `POST .../release` accepted; Frozen/Draft → Ready or Blocked |
-| `job-unblocked` | Blocked → Ready (last upstream dep reached Done) |
+| `job-released` | `POST .../release` accepted; Frozen/Draft → Ready or Blocked; includes `state`, and `inputs` when the job carries any — the **effective** set for a job admitted Ready (the write that pins `base_ref` materialized its defaults), the supplied set for one parked Blocked (which resolved nothing yet) |
+| `job-unblocked` | Blocked → Ready (last upstream dep reached Done), or a pre-Work escalation resolved with `Retry`; includes `inputs` (the **effective** set) when the job carries any. Read together with `job-created`, the two answer "what was asked for" and "what actually ran", and their difference is exactly the materialized defaults (§1.1) |
 | `job-started` | Ready → Work; includes `cycle` |
 | `job-evaluation-started` | Work → Evaluation; includes `cycle` |
 | `job-rework-started` | Evaluation → Work with cycle++; includes new `cycle`, `reason` (`eval_failure` \| `merge_conflict` \| `merge_gate_failure`), and `eval_context` (populated for `eval_failure` and `merge_gate_failure`; empty for `merge_conflict`) |

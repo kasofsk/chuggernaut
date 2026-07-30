@@ -232,6 +232,14 @@ impl Core {
             Ok(job_type) => job_type,
             Err(errors) => return Ok(Err(work::EntryFailure::Contract(errors))),
         };
+        // The third and last pass over the job's inputs (§2.2, design #311
+        // Decision 3): the shape floor only — charset, length, name form, count —
+        // re-checked immediately before injection and deliberately consulting no
+        // declaration, since the declaration was judged at release and at the
+        // Ready transition. Costs no I/O, so it decides before the KV round trip.
+        if let Err(violation) = types::inputs::check_supplied(&job.inputs) {
+            return Ok(Err(work::EntryFailure::BadInput(violation.to_string())));
+        }
         let kv = self.kv_names(owner, project).await?;
         let missing: Vec<String> = job_type
             .work
@@ -1465,7 +1473,11 @@ impl Core {
                     project: project.into(),
                     seq,
                 });
-                self.publish(owner, project, seq, "job-unblocked", serde_json::json!({}))
+                // Effective set on the transition that pins `base_ref` — the same
+                // audit rule the other two Ready transitions follow (§10.3).
+                let mut extra = serde_json::json!({});
+                inputs::stamp_event_inputs(&mut extra, &job.inputs);
+                self.publish(owner, project, seq, "job-unblocked", extra)
                     .await
             }
             Err(errs) => {
@@ -1803,7 +1815,37 @@ impl Core {
                 }
             }
         }
+        self.container_env_inputs(owner, project, seq, &mut env)?;
         Ok(env)
+    }
+
+    /// The last write into a container env: the job's §1.1 inputs, under the one
+    /// reserved `CHUG_INPUT_*` namespace (§4.1, design #311 Decision 4).
+    ///
+    /// Last is load-bearing — the collision assert inside
+    /// [`inputs::inject_input_env`] is about every other source having already
+    /// had its turn. The map comes off the job record, the single writer's own
+    /// state and immutable since the Ready transition that resolved it, which is
+    /// why the work, wrap-up and eval containers of one job all see the same
+    /// values without threading them through four launch paths.
+    fn container_env_inputs(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        env: &mut HashMap<String, String>,
+    ) -> Result<()> {
+        let refused = inputs::inject_input_env(env, &self.must_get(owner, project, seq)?.inputs);
+        if !refused.is_empty() {
+            // Unreachable for a job that cleared the §2.2 launch-time pass; loud
+            // in the log because reaching it means a record predates a rule.
+            tracing::warn!(
+                "{owner}/{project}#{seq}: inputs refused at injection (outside the \
+                 declared charset): {}",
+                refused.join(", ")
+            );
+        }
+        Ok(())
     }
 
     /// §4.4 upfront knowledge injection, repo-versioned form: the union of
