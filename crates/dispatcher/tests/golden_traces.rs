@@ -220,6 +220,7 @@ fn req(r#type: &str, deps: &[u64]) -> CreateJobRequest {
         model: None,
         factory: None,
         members: vec![],
+        inputs: Default::default(),
         draft: false,
     }
 }

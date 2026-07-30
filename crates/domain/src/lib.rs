@@ -39,6 +39,7 @@
 pub mod decide;
 pub mod effects;
 pub mod graph;
+pub mod inputs;
 pub mod queue;
 pub mod release;
 pub mod state;

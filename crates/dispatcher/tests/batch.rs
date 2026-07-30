@@ -128,6 +128,7 @@ fn member(r#type: &str, deps: &[u64], title: &str, description: &str) -> CreateJ
         timeout: None,
         model: None,
         factory: None,
+        inputs: Default::default(),
         draft: false,
     }
 }

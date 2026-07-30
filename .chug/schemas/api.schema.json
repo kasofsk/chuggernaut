@@ -711,6 +711,13 @@
           "format": "uint64",
           "minimum": 0
         },
+        "inputs": {
+          "description": "The job's **effective** input values (spec §1.1 `inputs:`, design #311).\nEmpty for every job whose type declares no inputs, which is every job\nthat predates the feature — defaulted so old records deserialize, and\nskipped on the wire when empty so such a record is byte-identical to what\nit is today.\n\nA `BTreeMap` for deterministic ordering (like [`crate::JobType::unknown`]):\nthe map is an audit surface, and a stable order is what makes two records\ncomparable.\n\n**Written by exactly two paths**, both on the single-writer dispatcher:\ncreation (and the Draft edit, which is the same act repeated), and the\nReady-transition that *first* records [`Job::base_ref`], which fills in a\ndeclared `default` for every input the creator did not supply — add-only,\nnever overwriting a supplied value. From that moment this is the complete\neffective set: what the run acted on, beside the config version it acted\nunder. **Immutable thereafter** — not on rework, not on a work retry, not\non a claim, and not across a later `base_ref` update (a re-resolved\ndefault would make the target mutable mid-flight). Getting a different\ntarget is getting a different job.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
         "knowledge_tags": {
           "description": "Union of job type defaults and operator-supplied tags at creation.",
           "type": "array",
@@ -920,6 +927,13 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "inputs": {
+          "description": "The job's effective inputs ([`Job::inputs`]). Carried by the list because\nthey are what a parameterized job *is* — a `deploy` row that does not say\nwhich service it deploys is unreadable — and bounded small by\nconstruction (at most `INPUTS_COUNT_MAX` short values), unlike the prose\nfields the projection drops.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "knowledge_tags": {
           "type": "array",

@@ -53,6 +53,7 @@ fn seeded_job(id: u64) -> Job {
         created_at: Utc::now(),
         ready_at: Some(Utc::now()),
         completed_at: None,
+        inputs: Default::default(),
         task_time_ms: None,
     }
 }
@@ -165,6 +166,7 @@ async fn release_cmd_work(handle: &CoreHandle) -> u64 {
             timeout: None,
             model: None,
             factory: None,
+            inputs: Default::default(),
             draft: false,
         })
         .await

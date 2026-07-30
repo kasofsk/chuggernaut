@@ -27,6 +27,7 @@ pub struct Job {
     pub claim_next: bool,                  // a human has claimed the job's NEXT work attempt (§1.2 claims): instead of launching, the dispatcher parks that attempt as a Pending task with the declared kind and performed_by: human, then clears the flag — a claim covers exactly one attempt. Defaults false on old records
     pub timeout: Option<String>,           // optional per-job work-task timeout override (duration string, e.g. "45m"), layering over the type's resources.task_timeout exactly like `eval` layers over the type's evaluators — but Work-phase tasks only; evaluators keep the type default. Any valid duration. Parseability validated at release. None → the type default applies
     pub model: Option<String>,             // optional per-job model override for the Work agent (§12.4). The most specific choice, so it wins over every other layer: the job type's work.model, the project default (.chug/jobs/_defaults.yaml), and the platform default. Work-phase agent tasks only — evaluators keep the type/project/platform resolution, exactly as `timeout` scopes to Work. None → the resolution chain applies. Defaults None on old records
+    pub inputs: BTreeMap<String, String>,  // the job's EFFECTIVE input values for the type's declared `inputs:` (§1.1 job type). Written by exactly two paths, both single-writer: creation (and the Draft PATCH, the same act repeated) supplies values, and the Ready-transition that FIRST records base_ref fills in a declared `default` for every input the creator did not supply — add-only, never overwriting a supplied value. From that moment it is the complete effective set, and IMMUTABLE: not on rework, not on a work retry, not on a claim, not across a later base_ref update (§3.2 rebase, conflict re-base, pre-work Retry), because a target that changed mid-flight would make the record a lie about at least one cycle. Getting a different target is getting a different job. Empty for every type that declares no inputs; defaults empty on old records and is omitted from the wire when empty
     pub escalation: Option<Escalation>,    // structured record of the job's most recent escalation/stall: reason code, human-readable detail, failing task (when one exists), and timestamp — written at every escalate/stall site so operators diagnose from the record the API serves, not from dispatcher logs. Advisory; no transition consults it. None until the job first escalates. Defaults None on old records
     pub factory: Option<String>,           // factory name when created by a factory triage agent (see §13); None for operator-created jobs
     pub created_at: DateTime<Utc>,
@@ -228,10 +229,37 @@ control. The kind set is deliberately two — `bool` is an `enum` over `["true",
 "false"]` and `int` is a `string` with `pattern: '^[0-9]+$'`, so a third kind
 would buy nothing but a second config language.
 
-How a job supplies inputs, how a declared `default` is materialized onto the job
-record, and how a value reaches a container are the job-record half of the
-feature and are specified with it; this section defines the declaration and its
-validation.
+**Supplying values.** A job supplies inputs at creation (`inputs` on
+`POST .../jobs`) and, while Draft, on the full-field `PATCH .../jobs/{seq}`;
+`Job.inputs` (§1.1) is the record. A **claim** and a **rework** cycle supply
+none — neither redefines the job — and a **batch** whose members carry inputs is
+rejected with a `members` field error, because a batch collapses N members into
+one run and values do not union the way `deps` and `eval` do.
+
+**Where a bad input fails** (§2.2's three passes, each deciding only what it can
+know):
+
+| Failure | Pass | Result |
+|---|---|---|
+| Malformed name, value outside the charset, value over the length cap, more than 16 entries | Creation | 422 on the create/PATCH — needs no job type file, so the operator gets it back on the form |
+| Undeclared input name; missing `required` input; `enum` value not in `values`; `string` value not matching `pattern` | Release-time (pass 1) | `ValidationError { field: "inputs.{name}" }`; the release is rejected and the job stays Frozen |
+| The type's `inputs:` declaration changed between release and Blocked→Ready | Ready-transition (pass 2) | Re-checked at `base_ref` with the rest of static config; a failure parks the job Stalled |
+
+**When a default becomes a value.** A declared `default` is *materialized*, not
+consulted at launch: the same single-writer write that **first** records
+`base_ref` fills every declared input the creator did not supply, so
+`Job.inputs` is the effective set every audit surface reads. That moment is the
+Ready-transition, not release-time — pass 1 checks against current HEAD and is
+explicitly not an execution guarantee, while `base_ref` is the ref the run uses.
+For a job released straight to Ready the two coincide; for one released into
+Blocked they do not, and resolving against anything else would let a job execute
+a script from `base_ref` with a default read from a different tree. A declared
+`default` satisfies pass 1's presence check, so a missing *optional* input is
+never a release error. Later `base_ref` movements do not re-resolve — defaults
+resolve exactly once. An optional input with neither a supplied value nor a
+`default` stays **absent**, never an empty string.
+
+How a value reaches a container is specified with the container environment.
 
 **`work.type: human`** — no container is launched. The dispatcher creates a `Human` task in `Pending` state in the Work phase; it surfaces in the operator task inbox. The operator performs the work manually, then resolves via `POST .../tasks/{task_id}/resolve`:
 - `TaskResolution::Pass` — work complete; proceeds to Evaluation (or Done if no evaluators). A `summary` on the Pass is both used as the squash-merge commit body *and* persisted on the stored `TaskResult::Human { summary }`, so the operator's report renders in the Reports thread like an agent's closing summary.
@@ -704,18 +732,18 @@ The authoritative definition of all valid job state transitions. No transition e
 |---|---|---|---|---|
 | _(creation)_ | `Frozen` | Dispatcher handles `req.jobs.create.*` | — | Write job record to KV; publish `job-created`; update `rdeps` index |
 | _(creation)_ | `Draft` | Dispatcher handles `req.jobs.create.*` with `draft: true` | — | Write job record to KV; publish `job-created`; update `rdeps` index |
-| `Draft` | `Draft` | `PATCH .../jobs/{seq}` accepted (full-field replace) | Job is Draft | Rewrite the creation-payload fields (type, title, description, deps, knowledge_tags, eval, timeout, model); validation identical to create (deferred to release); publish `job-updated` with the changed field names |
+| `Draft` | `Draft` | `PATCH .../jobs/{seq}` accepted (full-field replace) | Job is Draft | Rewrite the creation-payload fields (type, title, description, deps, knowledge_tags, eval, timeout, model, inputs); validation identical to create (deferred to release); publish `job-updated` with the changed field names |
 | `Draft` | `Draft` | `POST .../jobs/{seq}/members` accepted | Job is a Draft **batch** | Add/remove members (§2.1 draft batches); adds re-validated per-candidate (422); no absorption (members stay Frozen); keeps ≥1 member; publish `job-updated` with `members` |
-| `Draft` | `Ready` | `POST .../release` accepted | All deps Done | Finalize the edited definition; record `base_ref` = current default HEAD; set `ready_at`; publish `job-finalized` then `job-released`. **A Draft batch** first re-validates its members and absorbs them (see `Frozen→Batched`), computing the dep/eval unions + auto-description; a stale member (or <2) is a 422 and the batch stays Draft |
+| `Draft` | `Ready` | `POST .../release` accepted | All deps Done | Finalize the edited definition; record `base_ref` = current default HEAD; set `ready_at`; materialize declared input defaults onto `inputs` (§1.1); publish `job-finalized` then `job-released`. **A Draft batch** first re-validates its members and absorbs them (see `Frozen→Batched`), computing the dep/eval unions + auto-description; a stale member (or <2) is a 422 and the batch stays Draft |
 | `Draft` | `Blocked` | `POST .../release` accepted | At least one dep not Done | Finalize the edited definition; publish `job-finalized` then `job-released`. A Draft batch absorbs its members as in the `Ready` row |
 | `Draft` | `Frozen` | `POST .../jobs/{seq}/finalize` accepted | Job is Draft | Finalize the edited definition (validate field rules + evaluator collisions like release; wiring/static config deferred to release, as for a freshly-created Frozen job §2.1); park the job Frozen (re-batchable) instead of scheduling it; publish `job-finalized`. **A Draft batch** re-validates and absorbs its members (dep/eval unions + auto-description computed) exactly as an atomic create; a stale member (or <2) is a 422 and the batch stays Draft. Validation failure rejects (422) and the job stays Draft |
 | `Frozen` | `Draft` | `POST .../jobs/{seq}/draft` accepted | Job is Frozen (never released) | Reopen for editing; publish `job-drafted`. **A batch** reopened here un-absorbs its members (see `Batched→Frozen`) so membership can be edited before finalize re-absorbs |
-| `Frozen` | `Batched` | A batch that names this job as a member is created (`req.jobs.create.*` with `members`), or a Draft batch naming it is finalized/released (§2.1 draft batches) | Job is Frozen, matches the batch type, is not already batched, and is not itself a batch (§2.1 batches) | Set `batch_id` = the batch's seq; publish `job-batched` |
+| `Frozen` | `Batched` | A batch that names this job as a member is created (`req.jobs.create.*` with `members`), or a Draft batch naming it is finalized/released (§2.1 draft batches) | Job is Frozen, matches the batch type, is not already batched, is not itself a batch, and carries no inputs (§2.1 batches) | Set `batch_id` = the batch's seq; publish `job-batched` |
 | `Batched` | `Frozen` | The owning batch is revoked/fails (§2.1 batches) | — | Clear `batch_id`; publish `job-unbatched` (the member is re-batchable) |
 | `Batched` | `Done` | The owning batch reaches Done — its single merge completes every member | — | Stamp `completed_at`; publish `job-completed-via-batch` (with `batch_id`), then unblock the member's dependents exactly as an individual Done would |
-| `Frozen` | `Ready` | `POST .../release` accepted | All deps Done | Record `base_ref` = current default HEAD; set `ready_at`; publish `job-released` |
+| `Frozen` | `Ready` | `POST .../release` accepted | All deps Done | Record `base_ref` = current default HEAD; set `ready_at`; materialize declared input defaults onto `inputs` (add-only, only on this first pin — §1.1); publish `job-released` |
 | `Frozen` | `Blocked` | `POST .../release` accepted | At least one dep not Done | Publish `job-released` |
-| `Blocked` | `Ready` | Last upstream dep reaches Done | All deps Done; re-validation of static config at `base_ref` passes | Record `base_ref` = current default HEAD; set `ready_at`; publish `job-unblocked` |
+| `Blocked` | `Ready` | Last upstream dep reaches Done | All deps Done; re-validation of static config at `base_ref` passes | Record `base_ref` = current default HEAD; set `ready_at`; materialize declared input defaults onto `inputs` (add-only, only on this first pin — §1.1); publish `job-unblocked` |
 | `Blocked` | `Stalled` | Last upstream dep reaches Done | Re-validation of static config at `base_ref` fails (file deleted or renamed since release) | Create Human task describing the missing file; publish `job-stalled` |
 | `Ready` | `Work` | Dispatcher picks up job | — | Create work task (cycle=1, attempt=1); create branch `job/{seq}` from `base_ref`; launch container or surface Human task; publish `job-started` |
 | `Ready` | `Stalled` | `job_deadline` elapsed before work started (§3.5) | — | Create Human task noting the deadline; publish `job-stalled` |
@@ -766,7 +794,7 @@ The dispatcher is the sole writer of `jobs.*` KV — including creation. All tra
 
 **Batches.** Related small jobs of the same type accumulate (e.g. web-polish tickets); running them serially wastes agent cycles, gate runs, and publishes. A **batch** collapses that: a batch *is* a job that absorbs N members of the **same type**, produces **one branch** with all the changes, is evaluated under the **union** of the members' criteria, and whose **single completion** finishes every member.
 
-- **Creation** — `POST .../jobs` with a `members: [seq, …]` payload (plus `type`, optional `title`/`description`). Validated **at creation**: ≥2 members; each exists, is **Frozen**, matches `type`, is **not already batched**, and is **not itself a batch** (no nesting). Member-on-member deps *within* the batch are allowed — satisfied jointly, they drop out of the batch's deps; the batch depends on the **union of the members' external deps minus the members**. The members' additive `eval` lists are unioned **by name** onto the batch (identical duplicates dedup; a same-name-different-definition clash is a creation error, via the same collision primitive as per-job evaluators). The description defaults to an auto-index (`Batch of N {type} jobs: #a #b …`). Each member goes **Frozen→Batched** with `batch_id` set (`job-batched`).
+- **Creation** — `POST .../jobs` with a `members: [seq, …]` payload (plus `type`, optional `title`/`description`). Validated **at creation**: ≥2 members; each exists, is **Frozen**, matches `type`, is **not already batched**, is **not itself a batch** (no nesting), and **carries no inputs** — a batch is one run, and input values do not union the way `deps` and `eval` do (§1.1); a member with inputs is released on its own. Member-on-member deps *within* the batch are allowed — satisfied jointly, they drop out of the batch's deps; the batch depends on the **union of the members' external deps minus the members**. The members' additive `eval` lists are unioned **by name** onto the batch (identical duplicates dedup; a same-name-different-definition clash is a creation error, via the same collision primitive as per-job evaluators). The description defaults to an auto-index (`Batch of N {type} jobs: #a #b …`). Each member goes **Frozen→Batched** with `batch_id` set (`job-batched`).
 - **Draft batches** — composing a batch is naturally an editing session, so `POST .../jobs` with **`draft: true`** stages a **Draft batch** instead of committing one atomically. The member list is validated **per-candidate** (same rules as above) but members are **not absorbed** — they stay **Frozen** (still claimable / batchable elsewhere); the draft holds a non-binding list and computes **no** dep/eval union yet. Membership is edited while Draft via **`POST .../jobs/{seq}/members` `{ add?: [seq], remove?: [seq] }`** (Draft-only, 409 otherwise; adds re-validated per-candidate, 422; `job-updated` with `members`). `PATCH .../jobs/{seq}` continues to govern title/description; membership changes only through the members endpoint. A Draft batch keeps **at least one member** (a non-empty `members` list *is* the batch marker) — the finalize/release floor of ≥2 is enforced only when it **leaves Draft**. **Absorption happens at finalize or release**: the members are re-validated against *current* state (one may have been released/claimed/batched meanwhile — a clear field error names the offender and the batch stays Draft with nothing absorbed), then the dep/eval unions and auto-description are computed and each member goes **Frozen→Batched** exactly as an atomic create would. Reopening a batch with **`POST .../jobs/{seq}/draft`** (Frozen→Draft) **un-absorbs** its members (Batched→Frozen, `job-unbatched`) for editing; finalize re-absorbs. Revoking a Draft batch is trivial — nothing was absorbed, so its would-be members are left untouched.
 - **Lifecycle** — thereafter the batch is an ordinary job: release, claim/park, branch `job/{batchseq}`, reworks with branch preservation, merge gate, and the shared type's single `wrap_up` (a web batch publishes **once**). Budgets are per-job in `ExecState`, so the batch gets its own `work_retries`/`rework_budget` for the whole thing.
 - **Prompt** — the work agent and every evaluator receive a batch-aware §4.3 brief: a preamble (*"This is a job batch: implement all N tickets below in this one branch; address every ticket; your closing summary must cover each by number."*) followed by each member's ticket under a `### Ticket #{seq}: {title}` heading. The reviewer judges per-ticket completeness.
@@ -802,10 +830,11 @@ Static configuration (fail-fast check against current HEAD of default branch):
 - Every secret named in `secrets:` (`work.secrets` and per-evaluator) has an entry in the `secrets.*` KV bucket
 - Every var named in `vars:` has an entry in the `vars.*` KV bucket
 - No declared secret or var name uses the reserved `CHUG_` prefix (§5.3)
+- Every input the job supplies is declared by the type, every `required` input has a value, every `enum` value is in its `values` and every `string` value matches its `pattern` — reported per input as `field: "inputs.{name}"` (§1.1). A declared `default` satisfies the presence check; it is materialized at the Ready-transition, not here
 
 **Ready-transition re-validation** (Blocked→Ready only; Frozen→Ready already had the check at release):
 
-The dispatcher re-validates static configuration (job type file and all prompt paths for agent and human evaluators) at `base_ref`. If re-validation fails, the job transitions to Escalated with a Human task describing the missing file. Secrets and vars are not re-checked at this point — their values are live KV entries, not pinned to `base_ref`.
+The dispatcher re-validates static configuration (job type file, all prompt paths for agent and human evaluators, and the job's supplied inputs against the type's `inputs:` declaration) at `base_ref`. If re-validation fails, the job transitions to Escalated with a Human task describing the missing file. The inputs re-check is there because the declaration is a file-derived fact pinned to `base_ref` — a type that grew a `required` input between release and unblock must fail here. Secrets and vars are not re-checked at this point — their values are live KV entries, not pinned to `base_ref`. The same write that pins `base_ref` materializes declared input defaults, exactly once (§1.1).
 
 **Launch-time validation:**
 
@@ -1561,8 +1590,9 @@ POST   /api/v1/projects/{owner}/{project}/jobs
        cover_html optional; a rich presentational cover page (§1.1) rendered above the description in the UI, never injected into any prompt; size-capped at ~256 KiB (a larger value → 422)
        knowledge_tags optional; merged with job type's default tags
        eval optional; additive per-job evaluators layered on top of the type's list (§1.1 evaluator schema); validated at release — name collisions with the type's evaluators are a 422
+       inputs optional; { name: value } for the type's declared inputs: (§1.1). Shape-checked here (name form, charset, length, count → 422); whether each name is declared and each value satisfies its declaration is release-time, reported as inputs.{name}. Declared defaults are materialized at the Ready-transition, not echoed back on this reply
        draft optional (default false); with draft:true the job lands in Draft (§2.1) so its definition can be edited before release, instead of Frozen
-       members optional; with a non-empty members:[seq,…] the request creates a BATCH (§2.1 batches) instead of an ordinary job — it absorbs those existing Frozen same-type jobs (→ Batched) and lands one branch for all of them. Validated at creation (≥2 members, each Frozen/same-type/not-already-batched/not-a-batch); 422 otherwise. With draft:true the batch lands in Draft and members are NOT absorbed (they stay Frozen) — a DRAFT batch composed via the members endpoint below and absorbed only at finalize/release (§2.1 draft batches)
+       members optional; with a non-empty members:[seq,…] the request creates a BATCH (§2.1 batches) instead of an ordinary job — it absorbs those existing Frozen same-type jobs (→ Batched) and lands one branch for all of them. Validated at creation (≥2 members, each Frozen/same-type/not-already-batched/not-a-batch/no-inputs); 422 otherwise. With draft:true the batch lands in Draft and members are NOT absorbed (they stay Frozen) — a DRAFT batch composed via the members endpoint below and absorbed only at finalize/release (§2.1 draft batches)
        → 201 Created; body: Job record (a batch carries members; each absorbed member carries batch_id)
 GET    /api/v1/projects/{owner}/{project}/jobs                      → 200 OK; body: Job[]
 PATCH  /api/v1/projects/{owner}/{project}/jobs/{seq}                → 200 OK; body: Job; Member+. Full-field replace of a Draft job's definition (same body shape as create, minus draft); 409 unless the job is Draft (§2.1). Validation identical to create (deferred to release)

@@ -142,6 +142,7 @@ fn job(id: u64, state: JobState, base_ref: &str) -> Job {
         created_at: Utc::now(),
         ready_at: Some(Utc::now()),
         completed_at: None,
+        inputs: Default::default(),
         task_time_ms: None,
     }
 }

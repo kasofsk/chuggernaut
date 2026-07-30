@@ -102,6 +102,7 @@ fn create(draft: bool, deps: &[u64], description: &str) -> CreateJobRequest {
         model: None,
         factory: None,
         members: vec![],
+        inputs: Default::default(),
         draft,
     }
 }
@@ -120,6 +121,7 @@ fn update(seq: u64, deps: &[u64], description: &str) -> UpdateJobRequest {
         eval: vec![],
         timeout: None,
         model: None,
+        inputs: Default::default(),
     }
 }
 

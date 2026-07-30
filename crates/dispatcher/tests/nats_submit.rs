@@ -137,6 +137,7 @@ async fn submits_flow_over_nats_to_the_core() {
             model: None,
             factory: None,
             members: vec![],
+            inputs: Default::default(),
             draft: false,
         })
         .await
@@ -308,6 +309,7 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
             model: None,
             factory: None,
             members: vec![],
+            inputs: Default::default(),
             draft: false,
         })
         .await
@@ -493,6 +495,7 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
             model: None,
             factory: None,
             members: vec![],
+            inputs: Default::default(),
             draft: false,
         })
         .await

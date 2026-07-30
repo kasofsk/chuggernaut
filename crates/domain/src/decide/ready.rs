@@ -72,9 +72,10 @@
 
 use crate::decide::Transition;
 use crate::effects::Effect;
+use crate::inputs::fill_input_defaults;
 use crate::release::ValidationError;
 use chrono::{DateTime, Utc};
-use types::{Job, JobState};
+use types::{Input, Job, JobState};
 
 /// The read-only inputs one Ready-phase decision consumes. The shim re-gathers
 /// it before every [`decide`] call — including the re-entry after a
@@ -106,6 +107,11 @@ pub enum ReadyEvent {
         /// A Draft batch's member seqs, to absorb `Frozen`→`Batched` once the
         /// release commits (§2.1 batches); empty for every other release.
         absorb: Vec<u64>,
+        /// The `inputs:` block of the job type loaded at `head`, so an admission
+        /// can materialize declared defaults against the *same* ref it records as
+        /// `base_ref` (design #311 Decision 3). Empty for every type that
+        /// declares none.
+        declared_inputs: Vec<Input>,
     },
     /// A dependency reached `Done`, or restart reconciliation is re-checking a
     /// parked job (§3.1 step 2, §3.6 step 3).
@@ -117,6 +123,11 @@ pub enum ReadyEvent {
         head: String,
         /// The verdict: empty is a pass, anything else parks the job `Stalled`.
         errors: Vec<ValidationError>,
+        /// The `inputs:` block of the job type as it stands at `head` — the type
+        /// may have changed since release, and this is the ref the run will use.
+        /// Empty when the re-validation could not load a type (then `errors` is
+        /// non-empty and nothing is admitted).
+        declared_inputs: Vec<Input>,
     },
     /// The ready queue handed this job a launch slot (§3.1 step 5).
     Dequeued,
@@ -179,11 +190,22 @@ pub fn decide(
             head,
             from_draft,
             absorb,
-        } => decide_released(view, owner, project, head, from_draft, absorb),
+            declared_inputs,
+        } => decide_released(
+            view,
+            owner,
+            project,
+            head,
+            from_draft,
+            absorb,
+            &declared_inputs,
+        ),
         ReadyEvent::DepsChanged => decide_deps_changed(view),
-        ReadyEvent::Revalidated { head, errors } => {
-            decide_revalidated(view, owner, project, head, errors)
-        }
+        ReadyEvent::Revalidated {
+            head,
+            errors,
+            declared_inputs,
+        } => decide_revalidated(view, owner, project, head, errors, &declared_inputs),
         ReadyEvent::Dequeued => decide_dequeued(view),
     }
 }
@@ -200,6 +222,7 @@ fn decide_released(
     head: String,
     from_draft: bool,
     absorb: Vec<u64>,
+    declared_inputs: &[Input],
 ) -> (Vec<Transition>, Vec<Effect>, ReadyStep) {
     let job = view.job;
     // Negative space (§2.1): terminal states are absorbing — releasing a
@@ -222,7 +245,7 @@ fn decide_released(
     } else {
         JobState::Blocked
     };
-    let stamped = admitted_record(job, to, &head, view.now);
+    let stamped = admitted_record(job, to, &head, view.now, declared_inputs);
     // Postcondition: exactly the admitted job carries a pinned base (§2.2).
     debug_assert!(
         stamped.base_ref.is_some() == (to == JobState::Ready || job.base_ref.is_some()),
@@ -289,6 +312,7 @@ fn decide_revalidated(
     project: &str,
     head: String,
     errors: Vec<ValidationError>,
+    declared_inputs: &[Input],
 ) -> (Vec<Transition>, Vec<Effect>, ReadyStep) {
     let job = view.job;
     debug_assert_eq!(
@@ -318,7 +342,7 @@ fn decide_revalidated(
         return (Vec::new(), effects, ReadyStep::Idle);
     }
 
-    let stamped = admitted_record(job, JobState::Ready, &head, view.now);
+    let stamped = admitted_record(job, JobState::Ready, &head, view.now, declared_inputs);
     let effects = vec![Effect::PublishEvent {
         owner: owner.to_string(),
         project: project.to_string(),
@@ -353,16 +377,42 @@ fn decide_dequeued(view: &ReadyView<'_>) -> (Vec<Transition>, Vec<Effect>, Ready
     (Vec::new(), Vec::new(), step)
 }
 
-/// The record an admission persists: the §2.2 `base_ref` pin and the §1.1
-/// `ready_at` stamp, both applied only on the way to `Ready`. `ready_at` records
-/// when the job *first* became runnable, so a re-entry through Blocked never
-/// overwrites it — the queue-wait and lead-time views read it as an origin.
-fn admitted_record(job: &Job, to: JobState, head: &str, now: DateTime<Utc>) -> Job {
+/// The record an admission persists: the §2.2 `base_ref` pin, the §1.1
+/// `ready_at` stamp, and the §1.1 `inputs` default fill — all three applied only
+/// on the way to `Ready`. `ready_at` records when the job *first* became
+/// runnable, so a re-entry through Blocked never overwrites it — the queue-wait
+/// and lead-time views read it as an origin.
+///
+/// The default fill is the **write site** of the second (and last) writer of
+/// `Job::inputs` (design #311 Decisions 3 and 6), and it runs only when this
+/// write is the one that *first* records `base_ref`: declared defaults resolve
+/// exactly once, against the ref the run will actually use. A later `base_ref`
+/// movement — the §3.2 pre-eval rebase, a merge-conflict re-base, a pre-work
+/// Retry that re-pins — must not re-resolve, or the job's target would be mutable
+/// mid-flight and the record would be a lie about at least one cycle.
+fn admitted_record(
+    job: &Job,
+    to: JobState,
+    head: &str,
+    now: DateTime<Utc>,
+    declared_inputs: &[Input],
+) -> Job {
     let mut stamped = job.clone();
     if to == JobState::Ready {
+        let first_pin = stamped.base_ref.is_none();
         stamped.base_ref = Some(head.to_string());
         stamped.ready_at.get_or_insert(now);
+        if first_pin {
+            fill_input_defaults(declared_inputs, &mut stamped.inputs);
+        }
     }
+    // Negative space: a job that already carried a pinned base keeps the exact
+    // input map it entered with — the immutability half of the contract.
+    debug_assert!(
+        job.base_ref.is_none() || stamped.inputs == job.inputs,
+        "job #{} had its inputs re-resolved on a later base_ref update",
+        job.id,
+    );
     stamped
 }
 
@@ -374,6 +424,7 @@ mod tests {
     //! pin the same decisions end-to-end (`release_block_unblock.yaml`,
     //! `stall_on_revalidation_failure.yaml`).
     use super::*;
+    use std::collections::BTreeMap;
 
     fn sample_job(state: JobState) -> Job {
         let mut job: Job = serde_json::from_str(
@@ -396,11 +447,35 @@ mod tests {
     }
 
     fn released(from_draft: bool, absorb: Vec<u64>) -> ReadyEvent {
+        released_declaring(from_draft, absorb, vec![])
+    }
+
+    /// A release whose job type declares `declared_inputs` at the validated HEAD.
+    fn released_declaring(
+        from_draft: bool,
+        absorb: Vec<u64>,
+        declared_inputs: Vec<Input>,
+    ) -> ReadyEvent {
         ReadyEvent::Released {
             head: "abc123".into(),
             from_draft,
             absorb,
+            declared_inputs,
         }
+    }
+
+    /// A `service` enum defaulting to `web` — the smallest declaration with a
+    /// materializable default (design #311's twelve-deploys case).
+    fn service_with_default(default: &str) -> Vec<Input> {
+        vec![Input {
+            name: "service".into(),
+            r#type: types::InputKind::Enum,
+            required: false,
+            default: Some(default.to_string()),
+            values: vec!["web".into(), "worker".into(), "bot".into()],
+            pattern: None,
+            description: None,
+        }]
     }
 
     fn event_types(effects: &[Effect]) -> Vec<String> {
@@ -504,6 +579,122 @@ mod tests {
         assert_eq!(transitions[0].job.ready_at, Some(first));
     }
 
+    /// The Ready-transition write that first records `base_ref` is also the one
+    /// that materializes declared defaults (#311 Decision 3): the supplied value
+    /// survives untouched, the absent one is filled from the type at that ref.
+    #[test]
+    fn the_ready_pin_materializes_declared_defaults_add_only() {
+        let mut job = sample_job(JobState::Frozen);
+        job.inputs = BTreeMap::from([("sha".to_string(), "4f9c1ab".to_string())]);
+        let declared = [
+            service_with_default("web"),
+            vec![Input {
+                name: "sha".into(),
+                r#type: types::InputKind::String,
+                required: true,
+                // A default the creator's value must win over.
+                default: Some("deadbee".into()),
+                values: vec![],
+                pattern: None,
+                description: None,
+            }],
+        ]
+        .concat();
+        let (transitions, _, _) = decide(
+            &view(&job, true),
+            released_declaring(false, vec![], declared),
+        );
+
+        assert_eq!(transitions[0].to, JobState::Ready);
+        assert_eq!(
+            transitions[0].job.inputs,
+            BTreeMap::from([
+                ("service".to_string(), "web".to_string()),
+                ("sha".to_string(), "4f9c1ab".to_string()),
+            ]),
+            "the fill adds 'service' and leaves the supplied 'sha' alone"
+        );
+    }
+
+    /// A job parked `Blocked` pins no `base_ref`, so it materializes nothing: the
+    /// defaults resolve at the unblock, against the ref the run will use.
+    #[test]
+    fn a_blocked_release_materializes_nothing() {
+        let job = sample_job(JobState::Frozen);
+        let (transitions, _, _) = decide(
+            &view(&job, false),
+            released_declaring(false, vec![], service_with_default("web")),
+        );
+        assert_eq!(transitions[0].to, JobState::Blocked);
+        assert!(
+            transitions[0].job.inputs.is_empty(),
+            "no fill without a pin — the type at unblock is the one that counts"
+        );
+    }
+
+    /// …and the unblock is where that job's defaults land, from the type as it
+    /// stands at the fresh HEAD (the type may have changed since release).
+    #[test]
+    fn the_unblock_pin_materializes_defaults_from_the_fresh_head() {
+        let job = sample_job(JobState::Blocked);
+        let (transitions, _, _) = decide(
+            &view(&job, true),
+            ReadyEvent::Revalidated {
+                head: "def456".into(),
+                errors: vec![],
+                declared_inputs: service_with_default("worker"),
+            },
+        );
+        assert_eq!(transitions[0].job.base_ref.as_deref(), Some("def456"));
+        assert_eq!(
+            transitions[0].job.inputs,
+            BTreeMap::from([("service".to_string(), "worker".to_string())])
+        );
+    }
+
+    /// The immutability half (#311 Decision 6): a job that already carries a
+    /// pinned base keeps the input map it entered with, even if the type's
+    /// declared default has moved since. Defaults resolve exactly once.
+    #[test]
+    fn a_later_base_ref_pin_never_re_resolves_defaults() {
+        let mut job = sample_job(JobState::Frozen);
+        job.base_ref = Some("older".into());
+        job.inputs = BTreeMap::from([("service".to_string(), "web".to_string())]);
+        let (transitions, _, _) = decide(
+            &view(&job, true),
+            released_declaring(false, vec![], service_with_default("bot")),
+        );
+        assert_eq!(
+            transitions[0].job.base_ref.as_deref(),
+            Some("abc123"),
+            "the base still moves"
+        );
+        assert_eq!(
+            transitions[0].job.inputs,
+            BTreeMap::from([("service".to_string(), "web".to_string())]),
+            "…but the inputs do not"
+        );
+    }
+
+    /// A stalled re-validation writes no record at all, so it cannot fill either.
+    #[test]
+    fn a_failed_revalidation_materializes_nothing() {
+        let job = sample_job(JobState::Blocked);
+        let (transitions, _, _) = decide(
+            &view(&job, true),
+            ReadyEvent::Revalidated {
+                head: "def456".into(),
+                errors: vec![ValidationError::new(
+                    Some(7),
+                    "inputs.sha",
+                    "input 'sha' is required but no value was supplied",
+                )],
+                declared_inputs: service_with_default("web"),
+            },
+        );
+        assert!(transitions.is_empty(), "the Stall composite owns the flip");
+    }
+
     /// The one shape that earns the re-validation: Blocked with every dep Done.
     #[test]
     fn deps_changed_on_a_satisfied_blocked_job_revalidates() {
@@ -548,6 +739,7 @@ mod tests {
             &v,
             ReadyEvent::Revalidated {
                 head: "def456".into(),
+                declared_inputs: vec![],
                 errors: vec![],
             },
         );
@@ -575,6 +767,7 @@ mod tests {
             &view(&job, true),
             ReadyEvent::Revalidated {
                 head: "def456".into(),
+                declared_inputs: vec![],
                 errors: vec![
                     ValidationError::new(Some(7), "work.prompt", "prompt file missing"),
                     ValidationError::new(Some(7), "secrets", "secret 'X' is not set"),
@@ -651,6 +844,7 @@ mod tests {
             &view(&job, true),
             ReadyEvent::Revalidated {
                 head: "def456".into(),
+                declared_inputs: vec![],
                 errors: vec![],
             },
         );

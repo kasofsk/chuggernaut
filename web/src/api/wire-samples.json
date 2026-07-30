@@ -127,6 +127,10 @@
     ],
     "factory": null,
     "id": 42,
+    "inputs": {
+      "service": "web",
+      "sha": "4f9c1ab"
+    },
     "knowledge_tags": [
       "web"
     ],
@@ -173,6 +177,10 @@
     ],
     "factory": null,
     "id": 42,
+    "inputs": {
+      "service": "web",
+      "sha": "4f9c1ab"
+    },
     "knowledge_tags": [
       "web"
     ],

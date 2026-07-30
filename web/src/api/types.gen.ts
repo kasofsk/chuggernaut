@@ -755,6 +755,31 @@ export interface Job {
    */
   id: number;
   /**
+   * The job's **effective** input values (spec §1.1 `inputs:`, design #311).
+   * Empty for every job whose type declares no inputs, which is every job
+   * that predates the feature — defaulted so old records deserialize, and
+   * skipped on the wire when empty so such a record is byte-identical to what
+   * it is today.
+   *
+   * A `BTreeMap` for deterministic ordering (like [`crate::JobType::unknown`]):
+   * the map is an audit surface, and a stable order is what makes two records
+   * comparable.
+   *
+   * **Written by exactly two paths**, both on the single-writer dispatcher:
+   * creation (and the Draft edit, which is the same act repeated), and the
+   * Ready-transition that *first* records [`Job::base_ref`], which fills in a
+   * declared `default` for every input the creator did not supply — add-only,
+   * never overwriting a supplied value. From that moment this is the complete
+   * effective set: what the run acted on, beside the config version it acted
+   * under. **Immutable thereafter** — not on rework, not on a work retry, not
+   * on a claim, and not across a later `base_ref` update (a re-resolved
+   * default would make the target mutable mid-flight). Getting a different
+   * target is getting a different job.
+   */
+  inputs?: {
+    [k: string]: string;
+  };
+  /**
    * Union of job type defaults and operator-supplied tags at creation.
    */
   knowledge_tags: string[];
@@ -858,6 +883,16 @@ export interface JobSummary {
   eval: Evaluator[];
   factory: string | null;
   id: number;
+  /**
+   * The job's effective inputs ([`Job::inputs`]). Carried by the list because
+   * they are what a parameterized job *is* — a `deploy` row that does not say
+   * which service it deploys is unreadable — and bounded small by
+   * construction (at most `INPUTS_COUNT_MAX` short values), unlike the prose
+   * fields the projection drops.
+   */
+  inputs?: {
+    [k: string]: string;
+  };
   knowledge_tags: string[];
   members: number[];
   model: string | null;

@@ -23,7 +23,7 @@ use agent::AgentProvider;
 use chrono::{DateTime, Utc};
 use container::ContainerBackend;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use store::{
     CounterStore, JobStore, NatsStore, ProjectStore, RdepsStore, TaskStore, split_project, subjects,
@@ -105,6 +105,12 @@ pub struct CreateJobRequest {
     /// Optional per-job Work agent model override (§12.4); wins over the job
     /// type, project, and platform defaults. None → the resolution chain applies.
     pub model: Option<String>,
+    /// The values this job supplies for its type's declared `inputs:` (spec §1.1,
+    /// design #311). Shape-checked before it gets here (the 422 at the wire edge);
+    /// whether each name is *declared* and each value satisfies its declaration is
+    /// release-time, like every other wiring question. Empty for every job type
+    /// that declares no inputs.
+    pub inputs: BTreeMap<String, String>,
     pub factory: Option<String>,
     /// Land the job in [`JobState::Draft`] instead of Frozen (spec §2.1): its
     /// definition can be edited (via [`Core::update_job`]) before release.
@@ -129,6 +135,11 @@ pub struct UpdateJobRequest {
     pub eval: Vec<types::Evaluator>,
     pub timeout: Option<String>,
     pub model: Option<String>,
+    /// The supplied inputs, replaced wholesale like every other field. A Draft
+    /// edit is the *same* writer as creation (spec §2.1) — once the job leaves
+    /// Draft, [`Job::inputs`] is written only by the Ready-transition default
+    /// fill, and never again after that.
+    pub inputs: BTreeMap<String, String>,
 }
 
 /// The composition of a batch derived from its member list (spec §2.1): the
@@ -1578,6 +1589,9 @@ impl Core {
             eval: req.eval,
             timeout: req.timeout,
             model: req.model,
+            // Supply path 1 of the two that ever write this field (§1.1, design
+            // #311 Decision 6); the other is the Ready-transition default fill.
+            inputs: req.inputs,
             claim_next: false,
             escalation: None,
             factory: req.factory,
@@ -1671,6 +1685,9 @@ impl Core {
             eval,
             timeout: req.timeout,
             model: req.model,
+            // A batch supplies its own inputs like any job of its type; what it
+            // will not do is union its *members'* — see `validate_member`.
+            inputs: req.inputs,
             claim_next: false,
             escalation: None,
             factory: req.factory,
@@ -1758,6 +1775,26 @@ impl Core {
                 Some(m),
                 "members",
                 format!("member #{m} is itself a batch; batches do not nest"),
+            ));
+        }
+        // Batch × inputs is excluded in v1 (design #311 Decision 3): a batch
+        // collapses N members into ONE branch and one run, and values do not
+        // union the way `deps` and `eval` do — two members asking for different
+        // services have no defensible single answer. Reject with a clear field
+        // error rather than inventing one, or silently dropping a member's target.
+        if !job.inputs.is_empty() {
+            errs.push(ValidationError::new(
+                Some(m),
+                "members",
+                format!(
+                    "member #{m} carries inputs ({}); a batch cannot union input values — \
+                     release it on its own",
+                    job.inputs
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
             ));
         }
         Some(job)
@@ -1965,12 +2002,12 @@ impl Core {
             Vec::new()
         };
 
-        let head = self.release_validation(owner, project, &job).await?;
+        let (head, declared_inputs) = self.release_validation(owner, project, &job).await?;
 
         // The validated release is the C4 decider's `Released` event: dependency
-        // satisfaction, the `base_ref` pin, queue admission, the batch's
-        // membership commit, and both announcements are its decision (§2.1,
-        // §2.2, §3.1).
+        // satisfaction, the `base_ref` pin, the declared-default fill, queue
+        // admission, the batch's membership commit, and both announcements are its
+        // decision (§2.1, §2.2, §3.1).
         self.run_ready(
             owner,
             project,
@@ -1979,6 +2016,7 @@ impl Core {
                 head,
                 from_draft,
                 absorb: batch_members,
+                declared_inputs,
             },
         )
         .await?;
@@ -1988,15 +2026,17 @@ impl Core {
     /// The §2.2 release-time pass: resolve the default branch HEAD and run the
     /// wiring and static checks against the job exactly as it will be committed
     /// (a Draft batch's unions are already folded in). Returns the validated
-    /// HEAD — the commit an admitted job pins as its `base_ref`. Unlike the
-    /// Blocked→Ready re-validation this one checks KV names too, since a release
-    /// is where an operator learns a declared secret is missing.
+    /// HEAD — the commit an admitted job pins as its `base_ref` — and that HEAD's
+    /// declared `inputs:`, so an admission materializes defaults from the very
+    /// tree it validated (design #311 Decision 3). Unlike the Blocked→Ready
+    /// re-validation this one checks KV names too, since a release is where an
+    /// operator learns a declared secret is missing.
     async fn release_validation(
         &mut self,
         owner: &str,
         project: &str,
         job: &Job,
-    ) -> Result<String> {
+    ) -> Result<(String, Vec<types::Input>)> {
         let default_branch = self.repos.default_branch(owner, project).await?;
         let head = self
             .repos
@@ -2026,7 +2066,7 @@ impl Core {
         if !errs.is_empty() {
             return Err(errs.into());
         }
-        Ok(head)
+        Ok((head, job_type.inputs))
     }
 
     /// Handle a job reaching Done (spec §3.1 step 2): unblock dependents whose
@@ -2133,6 +2173,7 @@ impl Core {
             eval,
             timeout,
             model,
+            inputs,
         } = req;
         let mut job = self.must_get(&owner, &project, seq)?.clone();
         if job.state != JobState::Draft {
@@ -2172,6 +2213,9 @@ impl Core {
         if job.model != model {
             changed.push("model");
         }
+        if job.inputs != inputs {
+            changed.push("inputs");
+        }
 
         // Upstreams this edit drops — used to prune both the KV rdeps index
         // (below) and, implicitly, the in-memory reverse edges when the graph
@@ -2191,6 +2235,10 @@ impl Core {
         job.eval = eval;
         job.timeout = timeout;
         job.model = model;
+        // Still the creation-time writer: a Draft edit re-states what was
+        // supplied, and no default has been materialized yet (that happens at the
+        // Ready transition, which a Draft has not reached).
+        job.inputs = inputs;
 
         self.jobs.put(&job).await?;
         for &upstream in &job.deps {

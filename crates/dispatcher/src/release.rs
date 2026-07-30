@@ -112,9 +112,15 @@ pub async fn load_job_type(
     }
 }
 
-/// Static configuration checks (§2.2): prompt paths exist at `reference`;
-/// declared secrets and vars exist in KV. Pass `check_kv: false` for the
-/// Blocked→Ready re-validation, which re-checks files only.
+/// Static configuration checks (§2.2): prompt paths exist at `reference`; the
+/// job's supplied inputs satisfy the declaration at `reference`; declared secrets
+/// and vars exist in KV. Pass `kv: None` for the Blocked→Ready re-validation,
+/// which re-checks files only.
+///
+/// The input check runs on **every** pass through here, unlike the KV one: the
+/// declaration is a file-derived fact pinned to `reference`, so a type that grew
+/// a `required` input between release and Blocked→Ready must fail the second pass
+/// too (design #311 Decision 3).
 pub async fn static_errors(
     repo: &RepoManager,
     owner: &str,
@@ -164,6 +170,12 @@ pub async fn static_errors(
             ));
         }
     }
+
+    errs.extend(crate::inputs::input_errors(
+        seq,
+        &job_type.inputs,
+        &job.inputs,
+    ));
 
     if let Some(kv) = kv {
         errs.extend(static_errors_kv(seq, job_type, kv));

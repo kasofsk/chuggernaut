@@ -44,6 +44,7 @@ fn job(repo: &TempRepo, id: u64, state: JobState, base_ref: Option<String>) -> J
         created_at: chrono::Utc::now(),
         ready_at: None,
         completed_at: None,
+        inputs: Default::default(),
         task_time_ms: None,
     }
 }

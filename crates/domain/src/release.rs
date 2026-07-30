@@ -151,6 +151,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use chrono::Utc;
+    use std::collections::BTreeMap;
     use types::{Evaluator, EvaluatorType};
 
     fn agent_type_with_memory(mem: &str) -> JobType {
@@ -203,6 +204,7 @@ resources:
             created_at: Utc::now(),
             ready_at: None,
             completed_at: None,
+            inputs: Default::default(),
             task_time_ms: None,
         }
     }
@@ -224,5 +226,56 @@ resources:
             with_job_evaluators(agent_type_with_memory("5Gi"), &job_with_extra_eval()).is_ok(),
             "5Gi must pass release validation"
         );
+    }
+
+    /// **Inputs never influence config resolution** (design #311 Decision 1, the
+    /// invariant that keeps design-lifecycle.md's eval floor intact): for any job
+    /// type, any job, and any two input maps, the `JobType` the release path
+    /// resolves is *equal*. An input is a value delivered to a container, never a
+    /// substitution into the file that decides which gates run — so this fails the
+    /// moment anyone threads `Job::inputs` into `with_job_evaluators` or the
+    /// merge below it, which is the closest thing to unrepresentable available
+    /// without a newtype ceremony `types` should not carry.
+    #[test]
+    fn resolved_job_type_is_equal_for_any_two_input_maps() {
+        let cases = [
+            BTreeMap::new(),
+            BTreeMap::from([("service".to_string(), "web".to_string())]),
+            BTreeMap::from([
+                ("service".to_string(), "worker".to_string()),
+                ("sha".to_string(), "4f9c1ab".to_string()),
+            ]),
+            // Values a substitution engine would notice: an image, an evaluator
+            // name, a secret name, a path. None of them may reach resolution.
+            BTreeMap::from([
+                ("image".to_string(), "attacker/img:latest".to_string()),
+                ("eval".to_string(), "ci".to_string()),
+                ("secrets".to_string(), "DEPLOY_KEY".to_string()),
+                ("prompt".to_string(), "prompts/other.md".to_string()),
+            ]),
+        ];
+        // Both a type-only job and one carrying an additive evaluator, so the
+        // property covers the merge path as well as the pass-through.
+        for base in [job_with_extra_eval(), {
+            let mut plain = job_with_extra_eval();
+            plain.eval.clear();
+            plain
+        }] {
+            let resolutions: Vec<_> = cases
+                .iter()
+                .map(|inputs| {
+                    let mut job = base.clone();
+                    job.inputs = inputs.clone();
+                    with_job_evaluators(agent_type_with_memory("5Gi"), &job)
+                })
+                .collect();
+            for (i, resolved) in resolutions.iter().enumerate() {
+                assert_eq!(
+                    resolved, &resolutions[0],
+                    "input map #{i} changed the resolved job type — inputs must never \
+                     reach config resolution (#311 Decision 1)"
+                );
+            }
+        }
     }
 }

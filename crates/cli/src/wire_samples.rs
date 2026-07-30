@@ -93,6 +93,13 @@ fn sample_job() -> types::Job {
         eval: vec![sample_evaluator()],
         timeout: Some("45m".into()),
         model: Some("claude-opus-5".into()),
+        // The effective set after the Ready-transition fill (§1.1, #311): a
+        // supplied value beside a materialized default, so the generated client's
+        // round-trip test sees a populated map rather than the empty common case.
+        inputs: std::collections::BTreeMap::from([
+            ("service".to_string(), "web".to_string()),
+            ("sha".to_string(), "4f9c1ab".to_string()),
+        ]),
         claim_next: false,
         escalation: Some(types::Escalation {
             reason: "work_retries_exhausted".into(),

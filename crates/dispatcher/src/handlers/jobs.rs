@@ -21,6 +21,7 @@
 use super::jobs_reply::{fetch_job, job_criteria, latest_channel_updates};
 use super::reply::{bad_request, error_reply, ok_reply, unprocessable};
 use crate::core::{CoreHandle, CreateJobRequest, UpdateJobRequest};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use store::NatsStore;
 use vcs::RepoManager;
@@ -46,6 +47,21 @@ fn cover_too_large(cover_html: &Option<String>) -> bool {
     cover_html
         .as_ref()
         .is_some_and(|h| h.len() > COVER_HTML_MAX_BYTES)
+}
+
+/// The 422 body for a supplied `inputs` map that fails the §2.2 creation pass —
+/// count, name shape, charset, length (`types::inputs::check_supplied`). `None`
+/// when the map is well-shaped.
+///
+/// These are exactly the rules that need no job type file, which is why they are
+/// answered here: the operator gets them back on the form immediately, and they
+/// are the injection-relevant ones (design #311 Decision 3). Whether a name is
+/// *declared*, a `required` input is present, or a value matches its
+/// `pattern`/`values` is release-time — the type is read at a ref, not at create.
+fn inputs_shape_error(inputs: &BTreeMap<String, String>) -> Option<String> {
+    types::check_supplied(inputs)
+        .err()
+        .map(|e| format!("inputs: {e}"))
 }
 
 /// Wire body for `req.jobs.create` (spec §6.2 POST .../jobs).
@@ -81,6 +97,12 @@ struct CreateJobBody {
     /// type, project, and platform defaults. Absent → the resolution chain applies.
     #[serde(default)]
     model: Option<String>,
+    /// The values this job supplies for its type's declared `inputs:` (§1.1).
+    /// Shape-checked here (422 via [`inputs_shape_error`]); the semantic check
+    /// against the declaration happens at release. Absent → none supplied, which
+    /// is what every job of a type declaring no inputs sends.
+    #[serde(default)]
+    inputs: BTreeMap<String, String>,
     /// Land the job in Draft instead of Frozen (§2.1) so it can be edited
     /// before release. Absent/false preserves today's create-lands-Frozen path.
     #[serde(default)]
@@ -108,6 +130,10 @@ struct UpdateJobBody {
     timeout: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    /// Full-field replace like every other field, and Draft-only: after release
+    /// `Job::inputs` is immutable (§2.1, design #311 Decision 6).
+    #[serde(default)]
+    inputs: BTreeMap<String, String>,
 }
 
 /// Wire body for `req.jobs.members` (spec §2.1 draft batches): the seqs to
@@ -214,35 +240,39 @@ async fn jobs_transition(
     })
 }
 
-/// `req.jobs.create` — the §6.2 POST body, cover cap, then the actor.
+/// `req.jobs.create` — the §6.2 POST body, cover cap, input shape, then the actor.
 async fn jobs_create(ctx: &JobsCtx, owner: &str, project: &str, payload: &[u8]) -> Vec<u8> {
     match serde_json::from_slice::<CreateJobBody>(payload) {
         Err(e) => bad_request(&e.to_string()),
         Ok(b) if cover_too_large(&b.cover_html) => unprocessable(&format!(
             "cover_html exceeds the {COVER_HTML_MAX_BYTES}-byte limit"
         )),
-        Ok(b) => {
-            let create = CreateJobRequest {
-                owner: owner.to_string(),
-                project: project.to_string(),
-                r#type: b.r#type,
-                title: b.title,
-                description: b.description,
-                cover_html: b.cover_html,
-                deps: b.deps,
-                members: b.members,
-                knowledge_tags: b.knowledge_tags,
-                eval: b.eval,
-                timeout: b.timeout,
-                model: b.model,
-                factory: None,
-                draft: b.draft,
-            };
-            match ctx.handle.create_job(create).await {
-                Ok(job) => ok_reply(&job),
-                Err(e) => error_reply(&e),
+        Ok(b) => match inputs_shape_error(&b.inputs) {
+            Some(message) => unprocessable(&message),
+            None => {
+                let create = CreateJobRequest {
+                    owner: owner.to_string(),
+                    project: project.to_string(),
+                    r#type: b.r#type,
+                    title: b.title,
+                    description: b.description,
+                    cover_html: b.cover_html,
+                    deps: b.deps,
+                    members: b.members,
+                    knowledge_tags: b.knowledge_tags,
+                    eval: b.eval,
+                    timeout: b.timeout,
+                    model: b.model,
+                    inputs: b.inputs,
+                    factory: None,
+                    draft: b.draft,
+                };
+                match ctx.handle.create_job(create).await {
+                    Ok(job) => ok_reply(&job),
+                    Err(e) => error_reply(&e),
+                }
             }
-        }
+        },
     }
 }
 
@@ -260,26 +290,30 @@ async fn jobs_update(
         Ok(b) if cover_too_large(&b.cover_html) => unprocessable(&format!(
             "cover_html exceeds the {COVER_HTML_MAX_BYTES}-byte limit"
         )),
-        Ok(b) => {
-            let update = UpdateJobRequest {
-                owner: owner.to_string(),
-                project: project.to_string(),
-                seq,
-                r#type: b.r#type,
-                title: b.title,
-                description: b.description,
-                cover_html: b.cover_html,
-                deps: b.deps,
-                knowledge_tags: b.knowledge_tags,
-                eval: b.eval,
-                timeout: b.timeout,
-                model: b.model,
-            };
-            match ctx.handle.update_job(update).await {
-                Err(e) => error_reply(&e),
-                Ok(_) => fetch_job(&ctx.store, owner, project, seq).await,
+        Ok(b) => match inputs_shape_error(&b.inputs) {
+            Some(message) => unprocessable(&message),
+            None => {
+                let update = UpdateJobRequest {
+                    owner: owner.to_string(),
+                    project: project.to_string(),
+                    seq,
+                    r#type: b.r#type,
+                    title: b.title,
+                    description: b.description,
+                    cover_html: b.cover_html,
+                    deps: b.deps,
+                    knowledge_tags: b.knowledge_tags,
+                    eval: b.eval,
+                    timeout: b.timeout,
+                    model: b.model,
+                    inputs: b.inputs,
+                };
+                match ctx.handle.update_job(update).await {
+                    Err(e) => error_reply(&e),
+                    Ok(_) => fetch_job(&ctx.store, owner, project, seq).await,
+                }
             }
-        }
+        },
     }
 }
 
@@ -328,7 +362,9 @@ async fn jobs_list(store: &NatsStore, owner: &str, project: &str) -> Vec<u8> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::super::reply::unprocessable;
-    use super::{COVER_HTML_MAX_BYTES, CreateJobBody, UpdateJobBody, cover_too_large};
+    use super::{
+        COVER_HTML_MAX_BYTES, CreateJobBody, UpdateJobBody, cover_too_large, inputs_shape_error,
+    };
 
     fn status(body: &[u8]) -> i64 {
         serde_json::from_slice::<serde_json::Value>(body).unwrap()["error"]["status"]
@@ -368,5 +404,48 @@ mod tests {
         // Absent cover parses to None (back-compat with pre-cover clients).
         let bare: CreateJobBody = serde_json::from_str(r#"{"type":"code"}"#).unwrap();
         assert!(bare.cover_html.is_none());
+    }
+
+    /// The §2.2 creation pass over `inputs` (design #311 Decision 3): a
+    /// well-shaped map is accepted, a malformed name or an out-of-charset value is
+    /// a **422** (the body parsed fine — this is a semantic bound), and a
+    /// *semantic* violation is deliberately NOT decided here.
+    #[test]
+    fn supplied_inputs_shape_is_checked_at_create_with_422() {
+        // Absent → empty, which is what every job of a type declaring no inputs
+        // sends. Both bodies carry the field.
+        let bare: CreateJobBody = serde_json::from_str(r#"{"type":"code"}"#).unwrap();
+        assert!(bare.inputs.is_empty());
+        assert_eq!(inputs_shape_error(&bare.inputs), None);
+        let bare: UpdateJobBody = serde_json::from_str(r#"{"type":"code"}"#).unwrap();
+        assert!(bare.inputs.is_empty());
+
+        let ok: CreateJobBody =
+            serde_json::from_str(r#"{"type":"rollback","inputs":{"sha":"4f9c1ab"}}"#).unwrap();
+        assert_eq!(ok.inputs.get("sha").map(String::as_str), Some("4f9c1ab"));
+        assert_eq!(inputs_shape_error(&ok.inputs), None);
+
+        // A shell metacharacter in a value, and an uppercase name no declaration
+        // could carry — both refused, both naming the input.
+        for body in [
+            r#"{"type":"rollback","inputs":{"sha":"4f9c1ab; rm -rf /"}}"#,
+            r#"{"type":"rollback","inputs":{"SHA":"4f9c1ab"}}"#,
+        ] {
+            let parsed: CreateJobBody = serde_json::from_str(body).unwrap();
+            let message = inputs_shape_error(&parsed.inputs).expect("must be refused");
+            assert!(message.starts_with("inputs: "), "{message}");
+            assert_eq!(status(&unprocessable(&message)), 422);
+        }
+
+        // The Draft edit runs the same check.
+        let update: UpdateJobBody =
+            serde_json::from_str(r#"{"type":"rollback","inputs":{"sha":"a b"}}"#).unwrap();
+        assert!(inputs_shape_error(&update.inputs).is_some());
+
+        // Undeclared-but-well-shaped passes here; release rejects it with
+        // `inputs.{name}` (chuggernaut_domain::inputs::input_errors).
+        let undeclared: CreateJobBody =
+            serde_json::from_str(r#"{"type":"code","inputs":{"nobody_declared_me":"x"}}"#).unwrap();
+        assert_eq!(inputs_shape_error(&undeclared.inputs), None);
     }
 }

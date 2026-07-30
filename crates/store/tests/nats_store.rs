@@ -34,6 +34,7 @@ fn job(seq: u64) -> Job {
         created_at: Utc::now(),
         ready_at: None,
         completed_at: None,
+        inputs: Default::default(),
         task_time_ms: None,
     }
 }

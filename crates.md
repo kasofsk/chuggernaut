@@ -131,6 +131,9 @@ domain/ (chuggernaut-domain — pure: no tokio/async-nats/store/vcs/auth)
   queue.rs       — in-memory FIFO of Ready job IDs (§3.1 step 5)
   release.rs     — release validation, pure half: error vocabulary, wiring rules,
                    additive-evaluator merge (§2.2, §2.3)
+  inputs.rs      — job inputs vs their declaration: the `inputs.{name}` semantic verdict
+                   shared by release and the Ready-transition re-check, and the add-only
+                   default fill the first base_ref pin performs (§1.1, §2.2)
   effects.rs     — the Effect vocabulary: each port action as serde data (contracts.md §2)
   decide/        — the decider layer: pure `(view, event) -> (transitions, effects)`
     escalation.rs— the C1 template decider: the escalate/stall family (§1.2, §3.4)
@@ -138,7 +141,8 @@ domain/ (chuggernaut-domain — pure: no tokio/async-nats/store/vcs/auth)
                    value, continuation events for effect results (§3.3)
     wrapup.rs    — the C3 wrap-up decider: the post-merge publish fork and terminal
                    stamping, incl. a batch's Done fan-out (§3.2 step 12, §2.1)
-    ready.rs     — the C4 Ready-phase decider: dep satisfaction, the base_ref pin,
+    ready.rs     — the C4 Ready-phase decider: dep satisfaction, the base_ref pin (and
+                   the declared-input default fill that rides on the first one),
                    queue admission both ends, the Blocked→Ready re-validation fork
                    (§2.1, §2.2, §3.1)
     eval.rs      — the C5 evaluation decider: the staged fan-out, each evaluator type's

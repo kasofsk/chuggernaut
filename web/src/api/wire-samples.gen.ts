@@ -155,6 +155,10 @@ export const wireSamples = {
     ],
     factory: null,
     id: 42,
+    inputs: {
+      service: "web",
+      sha: "4f9c1ab",
+    },
     knowledge_tags: ["web"],
     members: [],
     model: "claude-opus-5",
@@ -195,6 +199,10 @@ export const wireSamples = {
     ],
     factory: null,
     id: 42,
+    inputs: {
+      service: "web",
+      sha: "4f9c1ab",
+    },
     knowledge_tags: ["web"],
     members: [],
     model: "claude-opus-5",

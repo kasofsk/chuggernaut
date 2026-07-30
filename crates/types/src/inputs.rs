@@ -12,14 +12,17 @@
 //! `pattern` may only *narrow* that floor — the effective check is
 //! `charset AND pattern`, and that is a rule, not a convention.
 //!
-//! - **Accepts:** a declared [`Input`] and a candidate value.
-//! - **Emits:** [`InputValueError`], naming the rule the value broke.
+//! - **Accepts:** a declared [`Input`] and a candidate value, or a whole
+//!   supplied map at creation.
+//! - **Emits:** [`InputValueError`] / [`SuppliedInputError`], naming the rule
+//!   the value broke.
 //! - **Guarantees:** pure and total — no I/O, no async, no interior state, no
 //!   panics; the charset is checked first and unconditionally, so no
 //!   declaration can widen it.
 //! - **Spec:** §1.1 (field rules), §2.2 (the three validation passes), §5.3.
 
 use crate::job_type::{Input, InputKind};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 /// The default charset, as a regex over the whole value. Kept beside the
@@ -156,6 +159,54 @@ fn pattern_compile(pattern: &str) -> Result<regex::Regex, InputValueError> {
             pattern: pattern.to_string(),
             reason: e.to_string(),
         })
+}
+
+/// Why a *supplied* input map was refused at creation (spec §2.2, design #311
+/// Decision 3). One variant per rule the creation pass can decide **without the
+/// job type file** — which is exactly why these are the checks that run there.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SuppliedInputError {
+    #[error("{count} supplied inputs exceeds the limit of {max}", max = INPUTS_COUNT_MAX)]
+    TooMany { count: usize },
+    #[error(
+        "input name {name:?} is malformed (names must match {pattern})",
+        pattern = INPUT_NAME_PATTERN
+    )]
+    Name { name: String },
+    #[error("input '{name}': {source}")]
+    Value {
+        name: String,
+        #[source]
+        source: InputValueError,
+    },
+}
+
+/// The creation-time shape check (spec §2.2 creation pass): every supplied name
+/// is well-formed, every value clears the charset floor and the length bound,
+/// and the map is no larger than a job type may declare.
+///
+/// **Shape only.** Whether a name is *declared* by the job type, whether a
+/// `required` input has a value, and whether a value satisfies its declaration's
+/// `values`/`pattern` are release-time questions — they need the type file at a
+/// ref, which creation deliberately does not read ("wiring validated at release,
+/// not creation"). Reports the first violation: the create reply carries one
+/// message, and a malformed map is fixed one field at a time on the form.
+pub fn check_supplied(inputs: &BTreeMap<String, String>) -> Result<(), SuppliedInputError> {
+    if inputs.len() > INPUTS_COUNT_MAX {
+        return Err(SuppliedInputError::TooMany {
+            count: inputs.len(),
+        });
+    }
+    for (name, value) in inputs {
+        if !name_is_well_formed(name) {
+            return Err(SuppliedInputError::Name { name: name.clone() });
+        }
+        check_value_charset(value).map_err(|source| SuppliedInputError::Value {
+            name: name.clone(),
+            source,
+        })?;
+    }
+    Ok(())
 }
 
 /// Whether a declared input name is well-formed ([`INPUT_NAME_PATTERN`]).
@@ -330,6 +381,72 @@ mod tests {
             Err(InputValueError::PatternInvalid { .. })
         ));
         assert_eq!(check_pattern("^[0-9a-f]{7,40}$"), Ok(()));
+    }
+
+    /// The creation pass (422) decides exactly the rules that need no job type
+    /// file: count, name shape, charset, length. A supplied map that is only
+    /// *semantically* wrong — an undeclared name, an out-of-list enum value —
+    /// passes here and is caught at release, where the declaration is readable.
+    #[test]
+    fn creation_shape_check_covers_the_declaration_free_rules() {
+        let ok = BTreeMap::from([
+            ("sha".to_string(), "4f9c1ab".to_string()),
+            ("image_tag".to_string(), "ghcr.io/org/img:sha".to_string()),
+        ]);
+        assert_eq!(check_supplied(&ok), Ok(()));
+        assert_eq!(check_supplied(&BTreeMap::new()), Ok(()));
+
+        // A name no declaration could ever have (uppercase, leading digit, dash).
+        for bad_name in ["SHA", "1sha", "image-tag", ""] {
+            assert_eq!(
+                check_supplied(&BTreeMap::from([(bad_name.to_string(), "x".to_string())])),
+                Err(SuppliedInputError::Name {
+                    name: bad_name.to_string()
+                })
+            );
+        }
+
+        // A metacharacter and an over-long value are both refused, naming the
+        // input so the operator knows which field to fix.
+        assert_eq!(
+            check_supplied(&BTreeMap::from([("sha".into(), "a;rm -rf".into())])),
+            Err(SuppliedInputError::Value {
+                name: "sha".into(),
+                source: InputValueError::Charset { ch: ';' },
+            })
+        );
+        let over = "a".repeat(INPUT_VALUE_LEN_MAX + 1);
+        assert_eq!(
+            check_supplied(&BTreeMap::from([("sha".into(), over)])),
+            Err(SuppliedInputError::Value {
+                name: "sha".into(),
+                source: InputValueError::TooLong {
+                    len: INPUT_VALUE_LEN_MAX + 1
+                },
+            })
+        );
+
+        // The count bound is a hard error at the boundary, not a truncation.
+        let at_limit: BTreeMap<String, String> = (0..INPUTS_COUNT_MAX)
+            .map(|i| (format!("input_{i}"), "v".to_string()))
+            .collect();
+        assert_eq!(check_supplied(&at_limit), Ok(()));
+        let over_limit: BTreeMap<String, String> = (0..=INPUTS_COUNT_MAX)
+            .map(|i| (format!("input_{i}"), "v".to_string()))
+            .collect();
+        assert_eq!(
+            check_supplied(&over_limit),
+            Err(SuppliedInputError::TooMany {
+                count: INPUTS_COUNT_MAX + 1
+            })
+        );
+
+        // Semantics are NOT this pass's job: an undeclared name of legal shape
+        // is accepted here and rejected at release.
+        assert_eq!(
+            check_supplied(&BTreeMap::from([("nobody_declared_me".into(), "x".into())])),
+            Ok(())
+        );
     }
 
     #[test]

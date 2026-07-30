@@ -25,6 +25,7 @@
 use crate::core::{Core, CoreError, Msg, Result, TaskExit, WorkSubmission};
 use crate::decide::{work, wrapup};
 use crate::escalation;
+use crate::inputs;
 use crate::queue::QueuedJob;
 use crate::release;
 use agent::{AgentRunConfig, McpServerConfig};
@@ -1436,11 +1437,26 @@ impl Core {
         {
             Ok(jt) => release::static_errors(&self.repos, owner, project, &head, &job, &jt, None)
                 .await
-                .and_then(|errs| if errs.is_empty() { Ok(()) } else { Err(errs) }),
+                .and_then(|errs| {
+                    if errs.is_empty() {
+                        Ok(jt.inputs)
+                    } else {
+                        Err(errs)
+                    }
+                }),
             Err(errs) => Err(errs),
         };
         match revalidation {
-            Ok(()) => {
+            Ok(declared_inputs) => {
+                // A pre-work Retry is a Ready transition (§2.1), so it obeys the
+                // same input rule: declared defaults materialize only if THIS is
+                // the write that first pins `base_ref` — a job that stalled from
+                // Blocked. One that already ran (a `job_deadline` stall) keeps the
+                // map it entered with; re-resolving would make its target mutable
+                // (design #311 Decision 6).
+                if job.base_ref.is_none() {
+                    inputs::fill_input_defaults(&declared_inputs, &mut job.inputs);
+                }
                 job.base_ref = Some(head);
                 job.ready_at.get_or_insert_with(Utc::now);
                 self.set_state(&mut job, JobState::Ready).await?;
@@ -2422,6 +2438,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             ready_at: None,
             completed_at: None,
+            inputs: Default::default(),
             task_time_ms: None,
         };
         let with_cover = types::Job {

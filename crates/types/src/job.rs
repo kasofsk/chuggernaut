@@ -4,6 +4,7 @@ use crate::channel::ChannelUpdate;
 use crate::job_type::Evaluator;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// A node in the project DAG. Stored in NATS KV at `jobs.{owner}.{project}.{seq}`;
 /// the dispatcher is its sole writer.
@@ -84,6 +85,28 @@ pub struct Job {
     /// before per-job model selection existed.
     #[serde(default)]
     pub model: Option<String>,
+    /// The job's **effective** input values (spec §1.1 `inputs:`, design #311).
+    /// Empty for every job whose type declares no inputs, which is every job
+    /// that predates the feature — defaulted so old records deserialize, and
+    /// skipped on the wire when empty so such a record is byte-identical to what
+    /// it is today.
+    ///
+    /// A `BTreeMap` for deterministic ordering (like [`crate::JobType::unknown`]):
+    /// the map is an audit surface, and a stable order is what makes two records
+    /// comparable.
+    ///
+    /// **Written by exactly two paths**, both on the single-writer dispatcher:
+    /// creation (and the Draft edit, which is the same act repeated), and the
+    /// Ready-transition that *first* records [`Job::base_ref`], which fills in a
+    /// declared `default` for every input the creator did not supply — add-only,
+    /// never overwriting a supplied value. From that moment this is the complete
+    /// effective set: what the run acted on, beside the config version it acted
+    /// under. **Immutable thereafter** — not on rework, not on a work retry, not
+    /// on a claim, and not across a later `base_ref` update (a re-resolved
+    /// default would make the target mutable mid-flight). Getting a different
+    /// target is getting a different job.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, String>,
     /// A human has claimed the job's NEXT work attempt (spec §1.2 claims):
     /// instead of launching a container, the dispatcher parks that attempt as
     /// a Pending task with the declared kind and `performed_by: human`, then
@@ -158,6 +181,13 @@ pub struct JobSummary<'a> {
     pub eval: &'a [Evaluator],
     pub timeout: Option<&'a str>,
     pub model: Option<&'a str>,
+    /// The job's effective inputs ([`Job::inputs`]). Carried by the list because
+    /// they are what a parameterized job *is* — a `deploy` row that does not say
+    /// which service it deploys is unreadable — and bounded small by
+    /// construction (at most `INPUTS_COUNT_MAX` short values), unlike the prose
+    /// fields the projection drops.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: &'a BTreeMap<String, String>,
     pub claim_next: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub escalation: Option<&'a Escalation>,
@@ -202,6 +232,7 @@ impl<'a> From<&'a Job> for JobSummary<'a> {
             eval: &job.eval,
             timeout: job.timeout.as_deref(),
             model: job.model.as_deref(),
+            inputs: &job.inputs,
             claim_next: job.claim_next,
             escalation: job.escalation.as_ref(),
             factory: job.factory.as_deref(),
@@ -599,6 +630,42 @@ mod tests {
         assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), rich);
     }
 
+    /// The §1.1 `inputs` field is additive (design #311 Skew surface 2): a record
+    /// written before it deserializes to an empty map and stays keyless on the
+    /// wire, so no epoch moves for the *record* and no old job's bytes change.
+    #[test]
+    fn job_round_trips_with_inputs_and_stays_backward_compat() {
+        let json = r#"{
+          "id": 12,
+          "project": "acme/api",
+          "type": "rollback",
+          "deps": [],
+          "state": "Frozen",
+          "branch": "job/12",
+          "base_ref": null,
+          "knowledge_tags": [],
+          "factory": null,
+          "created_at": "2026-07-29T10:00:00Z",
+          "ready_at": null
+        }"#;
+        let job: Job = serde_json::from_str(json).unwrap();
+        assert!(job.inputs.is_empty());
+        assert!(!serde_json::to_string(&job).unwrap().contains("inputs"));
+
+        // A populated map round-trips, in the map's own (sorted) order.
+        let mut parameterized = job.clone();
+        parameterized.inputs = BTreeMap::from([
+            ("sha".to_string(), "4f9c1ab".to_string()),
+            ("service".to_string(), "web".to_string()),
+        ]);
+        let back = serde_json::to_string(&parameterized).unwrap();
+        assert!(
+            back.contains(r#""inputs":{"service":"web","sha":"4f9c1ab"}"#),
+            "{back}"
+        );
+        assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), parameterized);
+    }
+
     #[test]
     fn job_round_trips_with_model_override() {
         let json = r#"{
@@ -643,6 +710,7 @@ mod tests {
             eval: Vec::new(),
             timeout: Some("30m".into()),
             model: Some("claude-opus-5".into()),
+            inputs: BTreeMap::from([("service".to_string(), "web".to_string())]),
             claim_next: true,
             escalation: Some(Escalation {
                 reason: "work_retries_exhausted".into(),

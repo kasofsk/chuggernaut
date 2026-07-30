@@ -18,7 +18,10 @@
 //! - **Emits:** the §2.1 transitions Frozen|Draft→Ready|Blocked and
 //!   Blocked→Ready|Stalled through the `set_state` funnel; the decider's
 //!   effects through `Core::interpret`; queue admission, a Draft batch's
-//!   membership commit, and the Ready→Work hand-off.
+//!   membership commit, and the Ready→Work hand-off. The write that first pins
+//!   `base_ref` also carries the declared-input default fill, so this shim hands
+//!   the decider the `inputs:` block of the type it loaded at that same ref
+//!   (§1.1, design #311 Decision 3).
 //! - **Guarantees:** no decision of its own — every branch here is a `match` on
 //!   a value the decider returned. Queue admission and the membership commit
 //!   land between the transitions and the effects (admission is part of
@@ -153,7 +156,12 @@ impl Core {
             .repos
             .resolve_ref(owner, project, &default_branch)
             .await?;
-        let errors = match release::load_job_type(
+        // The declaration travels with the verdict: the type may have grown or
+        // dropped an input since release, and this HEAD is the one the run will
+        // use — so it is also the one whose defaults get materialized (§2.2 pass
+        // 2, design #311 Decision 3). A type that failed to load declares nothing,
+        // and the errors beside it mean nothing is admitted anyway.
+        let (errors, declared_inputs) = match release::load_job_type(
             &self.repos,
             owner,
             project,
@@ -166,12 +174,20 @@ impl Core {
         {
             // KV names are re-checked at launch, not here (§2.2): a secret set
             // after release must not strand a job that is otherwise ready.
-            Ok(jt) => release::static_errors(&self.repos, owner, project, &head, job, &jt, None)
-                .await
-                .unwrap_or_else(|errs| errs),
-            Err(errs) => errs,
+            Ok(jt) => {
+                let errors =
+                    release::static_errors(&self.repos, owner, project, &head, job, &jt, None)
+                        .await
+                        .unwrap_or_else(|errs| errs);
+                (errors, jt.inputs)
+            }
+            Err(errs) => (errs, Vec::new()),
         };
-        Ok(ready::ReadyEvent::Revalidated { head, errors })
+        Ok(ready::ReadyEvent::Revalidated {
+            head,
+            errors,
+            declared_inputs,
+        })
     }
 
     /// Ready→Work entry (§3.2 steps 1–6): the queue handed this job a launch
