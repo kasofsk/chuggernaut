@@ -20,7 +20,7 @@
 
 use super::jobs_reply::{fetch_job, job_criteria, latest_channel_updates};
 use super::reply::{bad_request, error_reply, ok_reply, unprocessable};
-use crate::core::{CoreHandle, CreateJobRequest, UpdateJobRequest};
+use crate::core::{CoreHandle, CreateSpec, UpdateJobRequest};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use store::NatsStore;
@@ -250,7 +250,7 @@ async fn jobs_create(ctx: &JobsCtx, owner: &str, project: &str, payload: &[u8]) 
         Ok(b) => match inputs_shape_error(&b.inputs) {
             Some(message) => unprocessable(&message),
             None => {
-                let create = CreateJobRequest {
+                let create = CreateSpec {
                     owner: owner.to_string(),
                     project: project.to_string(),
                     r#type: b.r#type,

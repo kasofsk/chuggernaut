@@ -4,7 +4,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use dispatcher::core::{Core, CoreConfig, CreateJobRequest};
+use dispatcher::core::{Core, CoreConfig, CreateSpec};
 use dispatcher::handlers::spawn_container_handlers;
 use std::sync::Arc;
 use std::time::Duration;
@@ -126,7 +126,7 @@ async fn submits_flow_over_nats_to_the_core() {
     });
 
     let job = handle
-        .create_job(CreateJobRequest {
+        .create_job(CreateSpec {
             owner: "acme".into(),
             project: "api".into(),
             r#type: "impl-agent".into(),
@@ -301,7 +301,7 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
     });
 
     let job = handle
-        .create_job(CreateJobRequest {
+        .create_job(CreateSpec {
             owner: "acme".into(),
             project: "api".into(),
             r#type: "impl-agent".into(),
@@ -490,7 +490,7 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
     });
 
     let job = handle
-        .create_job(CreateJobRequest {
+        .create_job(CreateSpec {
             owner: "acme".into(),
             project: "api".into(),
             r#type: "impl-agent".into(),

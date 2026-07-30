@@ -10,7 +10,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use chrono::{DateTime, Duration, Utc};
-use dispatcher::core::{Core, CoreConfig, CreateJobRequest};
+use dispatcher::core::{Core, CoreConfig, CreateSpec};
 use std::sync::Arc;
 use store::NatsStore;
 use test_utils::repo::TempRepo;
@@ -61,7 +61,7 @@ async fn setup() -> Option<(NatsStore, Core, u64)> {
     .await
     .unwrap();
     let job = core
-        .create_job(CreateJobRequest {
+        .create_job(CreateSpec {
             owner: "acme".into(),
             project: "api".into(),
             r#type: "build".into(),

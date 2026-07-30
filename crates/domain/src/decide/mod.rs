@@ -33,6 +33,7 @@
 
 use types::{Job, JobState};
 
+pub mod authoring;
 pub mod escalation;
 pub mod eval;
 pub mod merge_gate;

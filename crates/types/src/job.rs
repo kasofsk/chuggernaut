@@ -307,6 +307,66 @@ impl Job {
     }
 }
 
+/// What a `POST jobs` asks for (spec §3.1 step 1, §6.2): the definition a job
+/// is born with, before any state the dispatcher stamps on it. It lives here
+/// rather than in the dispatcher because the pure authoring decider
+/// (`chuggernaut_domain::decide::authoring`) reads it and cannot see
+/// `dispatcher::core`, and because `types` is the crate that lets `api`
+/// eventually type the create body it forwards opaquely today.
+///
+/// The owner/project the request targets are *not* fields here for long: the
+/// authoring view carries them (refactor-plan F1b).
+pub struct CreateSpec {
+    pub owner: String,
+    pub project: String,
+    pub r#type: String,
+    /// Ticket-style identity: what this run is for (optional, empty = none).
+    pub title: String,
+    pub description: String,
+    /// Optional rich cover page for the UI (spec §1.1, §4.3). Purely
+    /// presentational — never enters any agent prompt. None = no cover.
+    pub cover_html: Option<String>,
+    pub deps: Vec<u64>,
+    /// Member job seqs to absorb into a **batch** (spec §2.1 batches). Empty for
+    /// an ordinary job; when non-empty this request creates a batch that pulls
+    /// each member Frozen→Batched, unions their deps and evaluators, and lands
+    /// one branch for all of them. Validated at creation (unlike per-job wiring,
+    /// which defers to release) — a batch is a structural act over existing
+    /// jobs, not a definition to iterate on.
+    pub members: Vec<u64>,
+    pub knowledge_tags: Vec<String>,
+    /// Additive per-job evaluators; validated (field rules + name collisions
+    /// against the type's list) at release, not creation.
+    pub eval: Vec<Evaluator>,
+    /// Optional per-job work-task timeout override (duration string, §1.1);
+    /// parseability validated at release. None → the type default applies.
+    pub timeout: Option<String>,
+    /// Optional per-job Work agent model override (§12.4); wins over the job
+    /// type, project, and platform defaults. None → the resolution chain applies.
+    pub model: Option<String>,
+    /// The values this job supplies for its type's declared `inputs:` (spec §1.1,
+    /// design #311). Shape-checked before it gets here (the 422 at the wire edge);
+    /// whether each name is *declared* and each value satisfies its declaration is
+    /// release-time, like every other wiring question. Empty for every job type
+    /// that declares no inputs.
+    pub inputs: BTreeMap<String, String>,
+    pub factory: Option<String>,
+    /// Land the job in [`JobState::Draft`] instead of Frozen (spec §2.1): its
+    /// definition can be edited (the dispatcher's `update_job`) before release.
+    /// Default false preserves today's behavior (created jobs land Frozen).
+    pub draft: bool,
+}
+
+/// The composition of a batch derived from its member list (spec §2.1): the
+/// union of the members' external deps and their additive evaluators. Computed
+/// by `chuggernaut_domain::decide::authoring::plan_batch` and committed onto the
+/// batch record at create (non-draft) or at finalize/release (draft).
+#[derive(Debug)]
+pub struct BatchComposition {
+    pub deps: Vec<u64>,
+    pub eval: Vec<Evaluator>,
+}
+
 /// Why the dispatcher escalated (→Escalated) or stalled (→Stalled) a job,
 /// carried on the job record so operators diagnose from what the API serves
 /// rather than from dispatcher logs (spec §1.2, §3.4).

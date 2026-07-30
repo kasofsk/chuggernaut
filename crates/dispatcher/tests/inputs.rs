@@ -11,7 +11,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use dispatcher::core::{Core, CoreConfig, CoreError, CreateJobRequest};
+use dispatcher::core::{Core, CoreConfig, CoreError, CreateSpec};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use store::NatsStore;
@@ -200,8 +200,8 @@ async fn core_over(
     .unwrap()
 }
 
-fn req(r#type: &str, deps: &[u64], inputs: &[(&str, &str)]) -> CreateJobRequest {
-    CreateJobRequest {
+fn req(r#type: &str, deps: &[u64], inputs: &[(&str, &str)]) -> CreateSpec {
+    CreateSpec {
         owner: "acme".into(),
         project: "api".into(),
         r#type: r#type.into(),

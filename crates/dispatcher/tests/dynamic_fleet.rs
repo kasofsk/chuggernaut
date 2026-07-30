@@ -10,7 +10,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use chrono::Utc;
-use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest};
+use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateSpec};
 use dispatcher::invariants::InvariantSink;
 use std::sync::Arc;
 use std::time::Duration;
@@ -157,7 +157,7 @@ async fn spawn_core(
 
 async fn release_cmd_work(handle: &CoreHandle, sink: &InvariantSink) -> u64 {
     let created = handle
-        .create_job(CreateJobRequest {
+        .create_job(CreateSpec {
             owner: "acme".into(),
             project: "api".into(),
             r#type: "cmd-work".into(),

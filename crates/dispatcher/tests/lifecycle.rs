@@ -5,7 +5,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use dispatcher::core::{Core, CoreConfig, CoreError, CreateJobRequest};
+use dispatcher::core::{Core, CoreConfig, CoreError, CreateSpec};
 use std::sync::Arc;
 use store::NatsStore;
 use test_utils::repo::TempRepo;
@@ -118,8 +118,8 @@ async fn setup() -> Option<(
     Some((server, store, repo, core))
 }
 
-fn req(r#type: &str, deps: &[u64]) -> CreateJobRequest {
-    CreateJobRequest {
+fn req(r#type: &str, deps: &[u64]) -> CreateSpec {
+    CreateSpec {
         owner: "acme".into(),
         project: "api".into(),
         r#type: r#type.into(),

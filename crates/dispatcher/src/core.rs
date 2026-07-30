@@ -12,7 +12,7 @@
 //!   processed one at a time; no shared mutable state, so no lock to misuse.
 //! - **Spec:** §3.1.
 
-use crate::decide::ready;
+use crate::decide::{authoring, ready};
 use crate::forge_ingest::origin::OriginStatusResponse;
 use crate::graph::JobGraph;
 use crate::queue::{QueuedJob, QueuedLaunch, ReadyQueue};
@@ -30,8 +30,13 @@ use store::{
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
-use types::{Job, JobState, TaskResolution, TokenUsage};
+use types::{BatchComposition, Job, JobState, TaskResolution, TokenUsage};
 use vcs::RepoManager;
+
+// The create spec is `types`' (refactor-plan F1a) so the pure authoring decider
+// can read it; re-exported here because `core` is the surface every caller of
+// [`Core::create_job`] already imports.
+pub use types::CreateSpec;
 
 #[derive(Debug, Error)]
 pub enum CoreError {
@@ -77,49 +82,8 @@ impl From<Vec<ValidationError>> for CoreError {
 
 pub type Result<T> = std::result::Result<T, CoreError>;
 
-pub struct CreateJobRequest {
-    pub owner: String,
-    pub project: String,
-    pub r#type: String,
-    /// Ticket-style identity: what this run is for (optional, empty = none).
-    pub title: String,
-    pub description: String,
-    /// Optional rich cover page for the UI (spec §1.1, §4.3). Purely
-    /// presentational — never enters any agent prompt. None = no cover.
-    pub cover_html: Option<String>,
-    pub deps: Vec<u64>,
-    /// Member job seqs to absorb into a **batch** (spec §2.1 batches). Empty for
-    /// an ordinary job; when non-empty this request creates a batch that pulls
-    /// each member Frozen→Batched, unions their deps and evaluators, and lands
-    /// one branch for all of them. Validated at creation (unlike per-job wiring,
-    /// which defers to release) — a batch is a structural act over existing
-    /// jobs, not a definition to iterate on.
-    pub members: Vec<u64>,
-    pub knowledge_tags: Vec<String>,
-    /// Additive per-job evaluators; validated (field rules + name collisions
-    /// against the type's list) at release, not creation.
-    pub eval: Vec<types::Evaluator>,
-    /// Optional per-job work-task timeout override (duration string, §1.1);
-    /// parseability validated at release. None → the type default applies.
-    pub timeout: Option<String>,
-    /// Optional per-job Work agent model override (§12.4); wins over the job
-    /// type, project, and platform defaults. None → the resolution chain applies.
-    pub model: Option<String>,
-    /// The values this job supplies for its type's declared `inputs:` (spec §1.1,
-    /// design #311). Shape-checked before it gets here (the 422 at the wire edge);
-    /// whether each name is *declared* and each value satisfies its declaration is
-    /// release-time, like every other wiring question. Empty for every job type
-    /// that declares no inputs.
-    pub inputs: BTreeMap<String, String>,
-    pub factory: Option<String>,
-    /// Land the job in [`JobState::Draft`] instead of Frozen (spec §2.1): its
-    /// definition can be edited (via [`Core::update_job`]) before release.
-    /// Default false preserves today's behavior (created jobs land Frozen).
-    pub draft: bool,
-}
-
 /// Full-field replacement of a Draft job's definition (spec §2.1). The same
-/// shape as [`CreateJobRequest`] minus the immutable identity: only a job in
+/// shape as [`CreateSpec`] minus the immutable identity: only a job in
 /// Draft accepts it. Validation is identical to create — deferred to release.
 pub struct UpdateJobRequest {
     pub owner: String,
@@ -140,15 +104,6 @@ pub struct UpdateJobRequest {
     /// Draft, [`Job::inputs`] is written only by the Ready-transition default
     /// fill, and never again after that.
     pub inputs: BTreeMap<String, String>,
-}
-
-/// The composition of a batch derived from its member list (spec §2.1): the
-/// union of the members' external deps and their additive evaluators. Computed
-/// by [`Core::plan_batch`] and committed onto the batch record at create
-/// (non-draft) or at finalize/release (draft).
-struct BatchComposition {
-    deps: Vec<u64>,
-    eval: Vec<types::Evaluator>,
 }
 
 /// `req.work.submit.*` payload (spec §4.2).
@@ -271,7 +226,7 @@ pub enum ChannelPost {
 type Reply<T> = oneshot::Sender<Result<T>>;
 
 pub enum Msg {
-    CreateJob(CreateJobRequest, Reply<Job>),
+    CreateJob(CreateSpec, Reply<Job>),
     ReleaseJob {
         owner: String,
         project: String,
@@ -548,7 +503,7 @@ impl CoreHandle {
         .await
     }
 
-    pub async fn create_job(&self, req: CreateJobRequest) -> Result<Job> {
+    pub async fn create_job(&self, req: CreateSpec) -> Result<Job> {
         self.call(|reply| Msg::CreateJob(req, reply)).await
     }
 
@@ -1614,7 +1569,7 @@ impl Core {
     /// Handle `req.jobs.create.*` (spec §3.1 step 1). Jobs land Frozen by
     /// default; with `draft: true` they land in [`JobState::Draft`] for
     /// editing (§2.1). Either way, wiring is validated at release, not creation.
-    pub async fn create_job(&mut self, req: CreateJobRequest) -> Result<Job> {
+    pub async fn create_job(&mut self, req: CreateSpec) -> Result<Job> {
         // A `members` payload creates a batch (spec §2.1 batches): it absorbs
         // existing Frozen jobs rather than describing a fresh unit of work.
         if !req.members.is_empty() {
@@ -1690,7 +1645,7 @@ impl Core {
     /// claimable/batchable elsewhere); membership is edited via
     /// [`Core::edit_members`] and absorption is deferred to finalize/release,
     /// which recompute the unions against *current* state ([`Core::absorb_plan`]).
-    async fn create_batch(&mut self, req: CreateJobRequest) -> Result<Job> {
+    async fn create_batch(&mut self, req: CreateSpec) -> Result<Job> {
         let (owner, project) = (req.owner.clone(), req.project.clone());
         let member_seqs = req.members.clone();
 
@@ -1772,12 +1727,10 @@ impl Core {
         Ok(batch)
     }
 
-    /// Validate one candidate against the batch membership rules (spec §2.1) at
-    /// *current* state: exists, Frozen, same type, not already batched, and not
-    /// itself a batch. Pushes a field error per violation and returns the record
-    /// (or `None` if the candidate does not exist). Shared by every path that
-    /// admits a member — atomic create, draft-member edits, and the
-    /// finalize/release re-validation.
+    /// The batch membership rules (spec §2.1), resolved against this project's
+    /// graph: see [`authoring::validate_member`], which owns them. Shared by
+    /// every path that admits a member — atomic create, draft-member edits, and
+    /// the finalize/release re-validation.
     fn validate_member(
         &self,
         owner: &str,
@@ -1786,84 +1739,13 @@ impl Core {
         m: u64,
         errs: &mut Vec<ValidationError>,
     ) -> Option<Job> {
-        let Some(job) = self
-            .graphs
-            .get(&format!("{owner}/{project}"))
-            .and_then(|g| g.get(m))
-            .cloned()
-        else {
-            errs.push(ValidationError::new(
-                Some(m),
-                "members",
-                format!("member #{m} does not exist"),
-            ));
-            return None;
-        };
-        if job.state != JobState::Frozen {
-            errs.push(ValidationError::new(
-                Some(m),
-                "members",
-                format!(
-                    "member #{m} is {:?}; only a Frozen job can be batched",
-                    job.state
-                ),
-            ));
-        }
-        if job.r#type != ty {
-            errs.push(ValidationError::new(
-                Some(m),
-                "members",
-                format!(
-                    "member #{m} is type '{}'; a batch absorbs one type ('{}')",
-                    job.r#type, ty
-                ),
-            ));
-        }
-        if job.batch_id.is_some() {
-            errs.push(ValidationError::new(
-                Some(m),
-                "members",
-                format!("member #{m} is already batched"),
-            ));
-        }
-        if job.is_batch() {
-            errs.push(ValidationError::new(
-                Some(m),
-                "members",
-                format!("member #{m} is itself a batch; batches do not nest"),
-            ));
-        }
-        // Batch × inputs is excluded in v1 (design #311 Decision 3): a batch
-        // collapses N members into ONE branch and one run, and values do not
-        // union the way `deps` and `eval` do — two members asking for different
-        // services have no defensible single answer. Reject with a clear field
-        // error rather than inventing one, or silently dropping a member's target.
-        if !job.inputs.is_empty() {
-            errs.push(ValidationError::new(
-                Some(m),
-                "members",
-                format!(
-                    "member #{m} carries inputs ({}); a batch cannot union input values — \
-                     release it on its own",
-                    job.inputs
-                        .keys()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            ));
-        }
-        Some(job)
+        authoring::validate_member(self.graph(owner, project), ty, m, errs)
     }
 
-    /// Validate `member_seqs` against the batch rules at *current* state and, if
-    /// all pass, compute the batch's external-dep and evaluator unions (spec
-    /// §2.1). Pure (no mutation) — the caller absorbs. Member-on-member deps are
-    /// satisfied jointly so they drop out; the batch depends on the union of the
-    /// members' *external* deps. Evaluators union by name (identical duplicates
-    /// dedup; a same-name-different-definition clash is a validation error).
-    /// `min_members` is the committable floor (2) everywhere the batch must be
-    /// releasable; a Draft batch composing passes 1.
+    /// The batch's composition against this project's graph: see
+    /// [`authoring::plan_batch`], which owns the rules and the unions. No
+    /// mutation — the caller absorbs; a violated rule surfaces as
+    /// [`CoreError::Validation`] (the 422), exactly as before the rules moved.
     fn plan_batch(
         &self,
         owner: &str,
@@ -1872,76 +1754,18 @@ impl Core {
         member_seqs: &[u64],
         min_members: usize,
     ) -> Result<BatchComposition> {
-        let mut errs: Vec<ValidationError> = Vec::new();
-        if member_seqs.len() < min_members {
-            errs.push(ValidationError::new(
-                None,
-                "members",
-                format!("a batch needs at least {min_members} members"),
-            ));
-        }
-        let mut seen = HashSet::new();
-        for &m in member_seqs {
-            if !seen.insert(m) {
-                errs.push(ValidationError::new(
-                    None,
-                    "members",
-                    format!("member #{m} listed more than once"),
-                ));
-            }
-        }
-        let member_set: HashSet<u64> = member_seqs.iter().copied().collect();
-
-        let mut members: Vec<Job> = Vec::new();
-        for &m in member_seqs {
-            if let Some(job) = self.validate_member(owner, project, ty, m, &mut errs) {
-                members.push(job);
-            }
-        }
-
-        let mut deps: Vec<u64> = Vec::new();
-        let mut eval: Vec<types::Evaluator> = Vec::new();
-        for job in &members {
-            for &d in &job.deps {
-                if !member_set.contains(&d) && !deps.contains(&d) {
-                    deps.push(d);
-                }
-            }
-            for e in &job.eval {
-                match eval.iter().find(|x| x.name == e.name) {
-                    Some(existing) if *existing != *e => errs.push(ValidationError::new(
-                        None,
-                        "eval.name",
-                        format!(
-                            "evaluator '{}' is defined differently across batch members",
-                            e.name
-                        ),
-                    )),
-                    Some(_) => {} // identical: deduped
-                    None => eval.push(e.clone()),
-                }
-            }
-        }
-
-        if !errs.is_empty() {
-            return Err(errs.into());
-        }
-        Ok(BatchComposition { deps, eval })
+        Ok(authoring::plan_batch(
+            self.graph(owner, project),
+            ty,
+            member_seqs,
+            min_members,
+        )?)
     }
 
     /// The auto-index description a batch defaults to (spec §2.1):
     /// `Batch of N {type} jobs: #a #b …`.
     fn batch_auto_description(ty: &str, member_seqs: &[u64]) -> String {
-        format!(
-            "Batch of {} {} jobs: {}",
-            member_seqs.len(),
-            ty,
-            member_seqs
-                .iter()
-                .map(|m| format!("#{m}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        )
+        authoring::batch_auto_description(ty, member_seqs)
     }
 
     /// Absorb a batch's members: each Frozen→Batched with `batch_id` set,

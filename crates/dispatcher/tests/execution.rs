@@ -5,9 +5,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use dispatcher::core::{
-    Core, CoreConfig, CoreHandle, CreateJobRequest, EvalSubmission, WorkSubmission,
-};
+use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateSpec, EvalSubmission, WorkSubmission};
 use dispatcher::invariants::InvariantSink;
 use std::sync::Arc;
 use std::time::Duration;
@@ -281,8 +279,8 @@ async fn rig_full(
     })
 }
 
-fn req(r#type: &str) -> CreateJobRequest {
-    CreateJobRequest {
+fn req(r#type: &str) -> CreateSpec {
+    CreateSpec {
         owner: "acme".into(),
         project: "api".into(),
         r#type: r#type.into(),

@@ -24,7 +24,7 @@
 mod common;
 
 use common::{assert_invariants, assert_invariants_of, assert_trace, spawn_checked};
-use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest};
+use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateSpec};
 use dispatcher::invariants::InvariantSink;
 use dispatcher::trace::TraceSink;
 use std::sync::Arc;
@@ -206,8 +206,8 @@ async fn setup() -> Option<(NatsStore, TempRepo, Core, TraceSink)> {
     Some((store, repo, core, sink))
 }
 
-fn req(r#type: &str, deps: &[u64]) -> CreateJobRequest {
-    CreateJobRequest {
+fn req(r#type: &str, deps: &[u64]) -> CreateSpec {
+    CreateSpec {
         owner: "acme".into(),
         project: "api".into(),
         r#type: r#type.into(),

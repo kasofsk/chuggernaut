@@ -6,7 +6,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use async_trait::async_trait;
-use dispatcher::core::{Core, CoreConfig, CoreError, CreateJobRequest};
+use dispatcher::core::{Core, CoreConfig, CoreError, CreateSpec};
 use dispatcher::forge_ingest::github::{GithubError, PrInfo, PullRequestApi};
 use dispatcher::forge_ingest::origin::{SECRET_DEPLOY_KEY, SECRET_PAT};
 use std::sync::{Arc, Mutex};
@@ -509,7 +509,7 @@ async fn held_job_lands_after_merged_release_sync() {
 
     // Run a job to eval-pass while the release is open.
     let job = handle
-        .create_job(CreateJobRequest {
+        .create_job(CreateSpec {
             owner: "acme".into(),
             project: "api".into(),
             r#type: "quick".into(),
@@ -624,7 +624,7 @@ async fn reserved_chug_secrets_never_reach_containers() {
 
     let (handle, sink) = spawn_checked(core);
     let job = handle
-        .create_job(CreateJobRequest {
+        .create_job(CreateSpec {
             owner: "acme".into(),
             project: "api".into(),
             r#type: "sneaky".into(),

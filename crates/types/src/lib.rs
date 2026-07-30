@@ -32,7 +32,9 @@ pub use inputs::{
     INPUT_ENV_PREFIX, INPUT_NAME_PATTERN, INPUT_VALUE_LEN_MAX, INPUT_VALUE_PATTERN,
     INPUTS_COUNT_MAX, InputValueError, SuppliedInputError, check_supplied, input_env_key,
 };
-pub use job::{Escalation, JOB_SUMMARY_EXTRA_FIELDS, Job, JobState, JobSummary};
+pub use job::{
+    BatchComposition, CreateSpec, Escalation, JOB_SUMMARY_EXTRA_FIELDS, Job, JobState, JobSummary,
+};
 pub use job_type::{
     ConfigWarning, Evaluator, EvaluatorType, Input, InputKind, JobType, Placement, ProjectDefaults,
     ReviewSpec, WorkSpec, WorkType, WrapUpMode, WrapUpSpec,

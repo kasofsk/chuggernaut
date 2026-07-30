@@ -5,7 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use chrono::Utc;
-use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateJobRequest, EvalSubmission};
+use dispatcher::core::{Core, CoreConfig, CoreHandle, CreateSpec, EvalSubmission};
 use dispatcher::invariants::InvariantSink;
 use std::sync::Arc;
 use std::time::Duration;
@@ -161,8 +161,8 @@ async fn rig() -> Option<Rig> {
     })
 }
 
-fn req(r#type: &str) -> CreateJobRequest {
-    CreateJobRequest {
+fn req(r#type: &str) -> CreateSpec {
+    CreateSpec {
         owner: "acme".into(),
         project: "api".into(),
         r#type: r#type.into(),
@@ -2424,7 +2424,7 @@ async fn restart_unblocks_dependent_whose_deps_completed() {
     assert_invariants_of(&rig.invariants);
     let down = rig
         .handle
-        .create_job(CreateJobRequest {
+        .create_job(CreateSpec {
             deps: vec![],
             ..req("flaky")
         })

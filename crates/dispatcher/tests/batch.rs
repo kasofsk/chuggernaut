@@ -8,7 +8,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use dispatcher::core::{Core, CoreConfig, CoreError, CoreHandle, CreateJobRequest, EvalSubmission};
+use dispatcher::core::{Core, CoreConfig, CoreError, CoreHandle, CreateSpec, EvalSubmission};
 use dispatcher::invariants::InvariantSink;
 use std::sync::Arc;
 use store::NatsStore;
@@ -122,14 +122,14 @@ async fn rig() -> Option<Rig> {
 /// `create_job` plus the invariant check the message it drives owes
 /// (refactor-plan B1a). Batch tests create four to six jobs of setup apiece, so
 /// the check lives in the wrapper rather than in a line after every one of them.
-async fn create_checked(rig: &Rig, req: CreateJobRequest) -> types::Job {
+async fn create_checked(rig: &Rig, req: CreateSpec) -> types::Job {
     let job = rig.handle.create_job(req).await.unwrap();
     assert_invariants_of(&rig.invariants);
     job
 }
 
-fn member(r#type: &str, deps: &[u64], title: &str, description: &str) -> CreateJobRequest {
-    CreateJobRequest {
+fn member(r#type: &str, deps: &[u64], title: &str, description: &str) -> CreateSpec {
+    CreateSpec {
         owner: "acme".into(),
         project: "api".into(),
         r#type: r#type.into(),
@@ -149,7 +149,7 @@ fn member(r#type: &str, deps: &[u64], title: &str, description: &str) -> CreateJ
 }
 
 /// A batch creation request over the given member seqs.
-fn batch(r#type: &str, members: &[u64], title: &str, description: &str) -> CreateJobRequest {
+fn batch(r#type: &str, members: &[u64], title: &str, description: &str) -> CreateSpec {
     let mut req = member(r#type, &[], title, description);
     req.members = members.to_vec();
     req
@@ -157,7 +157,7 @@ fn batch(r#type: &str, members: &[u64], title: &str, description: &str) -> Creat
 
 /// A **draft** batch creation request: stages the member list without absorbing
 /// it (spec §2.1 draft batches).
-fn draft_batch(r#type: &str, members: &[u64], title: &str, description: &str) -> CreateJobRequest {
+fn draft_batch(r#type: &str, members: &[u64], title: &str, description: &str) -> CreateSpec {
     let mut req = batch(r#type, members, title, description);
     req.draft = true;
     req

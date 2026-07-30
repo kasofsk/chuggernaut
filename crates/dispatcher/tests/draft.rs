@@ -7,9 +7,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use dispatcher::core::{
-    Core, CoreConfig, CoreError, CoreHandle, CreateJobRequest, UpdateJobRequest,
-};
+use dispatcher::core::{Core, CoreConfig, CoreError, CoreHandle, CreateSpec, UpdateJobRequest};
 use dispatcher::invariants::InvariantSink;
 use std::sync::Arc;
 use std::time::Duration;
@@ -95,8 +93,8 @@ async fn rig() -> Option<Rig> {
     })
 }
 
-fn create(draft: bool, deps: &[u64], description: &str) -> CreateJobRequest {
-    CreateJobRequest {
+fn create(draft: bool, deps: &[u64], description: &str) -> CreateSpec {
+    CreateSpec {
         owner: "acme".into(),
         project: "api".into(),
         r#type: "simple".into(),
