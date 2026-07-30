@@ -28,6 +28,8 @@ const NewJobPage = lazy(() => import('./pages/NewJob').then((m) => ({ default: m
 const StatsPage = lazy(() => import('./pages/Stats').then((m) => ({ default: m.StatsPage })))
 const PromptsPage = lazy(() => import('./pages/Prompts').then((m) => ({ default: m.PromptsPage })))
 const TagsPage = lazy(() => import('./pages/Tags').then((m) => ({ default: m.TagsPage })))
+const DesignsPage = lazy(() => import('./pages/Designs').then((m) => ({ default: m.DesignsPage })))
+const DesignPage = lazy(() => import('./pages/Designs').then((m) => ({ default: m.DesignPage })))
 const FileViewPage = lazy(() => import('./pages/FileView').then((m) => ({ default: m.FileViewPage })))
 const SettingsPage = lazy(() => import('./pages/Settings').then((m) => ({ default: m.SettingsPage })))
 const JobDetail = lazy(() => import('./pages/JobDetail').then((m) => ({ default: m.JobDetail })))
@@ -95,6 +97,8 @@ createRoot(document.getElementById('root')!).render(
         <Route path="/p/:owner/:project/stats" element={<StatsPage />} />
         <Route path="/p/:owner/:project/prompts" element={<PromptsPage />} />
         <Route path="/p/:owner/:project/tags" element={<TagsPage />} />
+        <Route path="/p/:owner/:project/designs" element={<DesignsPage />} />
+        <Route path="/p/:owner/:project/designs/:slug" element={<DesignPage />} />
         <Route path="/p/:owner/:project/files" element={<FileViewPage />} />
         <Route path="/p/:owner/:project/settings" element={<SettingsPage />} />
         <Route path="/p/:owner/:project/jobs/:seq" element={<JobDetail />} />

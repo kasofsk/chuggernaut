@@ -31,6 +31,7 @@ import type {
 } from './api/envelopes'
 import type {
   ChannelUpdate,
+  DesignEntry,
   DispatcherConfigSnapshot,
   FleetStatus,
   Identity,
@@ -49,12 +50,16 @@ export type {
   ChannelUpdate,
   DeployLeg,
   DeployReport,
+  DesignEntry,
   Escalation,
   EscalationAction,
   Evaluator,
   EvaluatorType,
   FleetNode,
   FleetStatus,
+  GroupEntry,
+  GroupJob,
+  GroupRollup,
   Identity,
   IdentityKind,
   Input,
@@ -238,6 +243,13 @@ export const api = {
    *  back by that path; `file` reads verbatim and both layouts exist (spec §1.1) */
   tags: (owner: string, project: string) =>
     req<{ name: string; path: string }[]>('GET', `/api/v1/projects/${owner}/${project}/tags`),
+  /** Every document under `docs/design/` at default-branch HEAD, joined to the
+   *  `design/{slug}` group its jobs carry (design #321 Decision 7). Repo-derived,
+   *  so a design nobody has filed a job against is a row with an empty roll-up —
+   *  the row `GET .../groups` cannot represent. The doc *body* is deliberately
+   *  not joined in: read it back through {@link api.file} at the row's `path`. */
+  designs: (owner: string, project: string) =>
+    req<DesignEntry[]>('GET', `/api/v1/projects/${owner}/${project}/designs`),
   jobType: (owner: string, project: string, name: string) =>
     req<JobTypeDetail>('GET', `/api/v1/projects/${owner}/${project}/job-types/${encodeURIComponent(name)}`),
   jobs: (owner: string, project: string) =>

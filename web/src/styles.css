@@ -1540,6 +1540,12 @@ table.jobs tbody tr.row-draft td:first-child {
   padding: 0;
   white-space: pre;
 }
+/* A whole repo document is read top to bottom, so its fences run to their full
+   height rather than becoming a nested scroll region inside the page's own —
+   the 40vh cap above is for prose bubbles in a transcript. */
+.md-doc pre {
+  max-height: none;
+}
 .md blockquote {
   margin: 0 0 var(--sp-2);
   padding-left: var(--sp-3);
@@ -4876,4 +4882,132 @@ table.type-stats .num {
   color: inherit;
   background: var(--inset);
   box-shadow: inset 0 0 8px 0 var(--glow);
+}
+
+/* ── Designs view (src/pages/Designs.tsx) ──────────────────────────────────
+   The design registry: one row per `docs/design/*.md`, its verbatim `Status:`
+   line, and its jobs as a per-state histogram in the StateBadge colors. The
+   index reuses the jobs toolbar (.jobs-toolbar/.jobs-controls) and the
+   edge-to-edge .jobs-main card, so search/sort and the row inset read the same
+   as the jobs table's. */
+.design-count {
+  font-size: var(--fs-sm);
+  margin-top: 0.15rem;
+}
+.design-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.design-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: var(--sp-3) var(--sp-5);
+  border-top: 1px solid var(--border-faint);
+}
+.design-row:first-child {
+  border-top: 0;
+}
+/* The card gave up its side padding (.jobs-main), so anything that is not a row
+   — the loading skeleton, the empty note — carries the same inset. */
+.design-note {
+  padding: var(--sp-3) var(--sp-5);
+}
+.design-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.design-title {
+  font-weight: 600;
+  overflow-wrap: anywhere; /* a long title wraps rather than widening the row */
+}
+.design-seq {
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+}
+/* The status line is the document's own prose and can be a whole sentence, so
+   it wraps, and the staleness flag rides beside it rather than claiming a row. */
+.design-status {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+.design-stale {
+  flex: none;
+}
+/* Histogram: the pills wrap instead of pushing the row sideways, so a design in
+   six states is three lines at 375px and the card still never scrolls. */
+.design-hist {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: var(--fs-sm);
+}
+.hist-pill {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Detail: the rendered document beside its member jobs. */
+.design-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 17rem;
+  gap: var(--sp-4);
+  align-items: start;
+}
+.design-doc .design-status {
+  margin-bottom: var(--sp-3);
+}
+.design-jobs h2 {
+  margin-top: 0;
+}
+.design-members {
+  list-style: none;
+  margin: var(--sp-3) 0 0;
+  padding: 0;
+}
+.design-members li {
+  padding: var(--sp-2) 0;
+  border-top: 1px solid var(--border-faint);
+}
+.design-member-title {
+  display: block;
+  overflow-wrap: anywhere; /* a long job title wraps inside the narrow column */
+}
+.design-member-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.2rem;
+  font-size: var(--fs-sm);
+}
+.design-group-name {
+  margin-top: var(--sp-3);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+/* Responsive rules for the block above. They sit at the end of the file, after
+   the selectors they override — the placement the mid-file media block's note
+   asks for. */
+@media (max-width: 900px) {
+  /* Below the two-column threshold the member jobs stack under the document
+     rather than squeezing it into a column of single words. */
+  .design-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 640px) {
+  /* Match the phone card's tighter inset, as .jobs-toolbar does. */
+  .design-row,
+  .design-note {
+    padding: var(--sp-3) var(--sp-4);
+  }
 }

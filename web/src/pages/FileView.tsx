@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ApiError, api } from '../api'
 import { ProjectHeader } from '../components/ProjectHeader'
+import { DocMarkdown } from '../components/DocMarkdown'
 import { YamlView } from '../components/YamlView'
 import { SkeletonLines, SkeletonTable } from '../components/Skeleton'
 
@@ -114,6 +115,11 @@ export function FileViewPage() {
           {file ? (
             /\.ya?ml$/.test(file.path) ? (
               <YamlView yaml={file.content} full />
+            ) : /\.md$/.test(file.path) ? (
+              // The docs tree reads as a wiki (job #88): markdown goes through
+              // the renderer the job pages already use, rather than a <pre>,
+              // and its relative links stay inside the browser.
+              <DocMarkdown owner={owner} project={project} path={file.path} text={file.content} />
             ) : (
               <pre className="prompt yaml-full">{file.content}</pre>
             )
