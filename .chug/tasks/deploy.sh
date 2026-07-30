@@ -1,7 +1,8 @@
 #!/bin/sh
 # Deploy the current tree to prod. Run as the `work` step of a `deploy` job
 # (.chug/jobs/deploy.yaml): a deploy job carries no commits, so HEAD is exactly the
-# `main` the job was released from — that SHA is what we ship.
+# `main` the job was released from — that SHA is what we ship. With an explicit
+# SHA argument it ships that commit instead (the `rollback` job type's path).
 #
 # Self-restart, by design: the ssh'd update.sh below `kickstart`s the dispatcher
 # that supervises THIS job's container. That restart drops the dispatcher's
@@ -26,7 +27,12 @@ MINI_PORT=2200
 REMOTE_UPDATE="~/chuggernaut/deploy/prod/update.sh"
 
 # A deploy job has no commits of its own: HEAD == the released main.
-SHA="$(git rev-parse HEAD)"
+#
+# A `rollback` job (.chug/jobs/rollback.yaml) passes its validated target instead,
+# as $1 — same ssh, same key handling, same self-restart contract, a different
+# commit. .chug/tasks/rollback.sh resolves and checks that SHA before calling
+# here; this script deploys whatever it is given, so the caller owns validation.
+SHA="${1:-$(git rev-parse HEAD)}"
 
 # Resolve the deploy key to a file for `ssh -i`.
 if [ -n "${MINI_DEPLOY_KEY_FILE:-}" ]; then

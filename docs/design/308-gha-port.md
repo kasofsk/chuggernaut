@@ -261,8 +261,12 @@ nothing merged.
    evaluators declare their own"), which is what `.chug/jobs/deploy.yaml`
    already does for `MINI_DEPLOY_KEY` and `DEPLOY_HEALTH_API_TOKEN`.
 
-**Blocked:** rollback needs an `image_tag` input, and there is no per-job input
-of any kind. See gap 1. Forward-only deploys port today; rollback does not.
+**Was blocked, now unblocked:** rollback needs a per-run target (an `image_tag`
+there, a git SHA here) and there was no per-job input of any kind. See gap 1.
+**Landed** as [#311](./311-job-inputs.md) slice A: `.chug/jobs/rollback.yaml`
+is `deploy.yaml`'s shape plus one required `sha` input, and
+`.chug/tasks/rollback.sh` reads it as `$CHUG_INPUT_SHA`. So this category ports
+whole — forward-only was never the ceiling, only the ordering.
 
 ### D. Image build and push (5 workflows) — open
 
@@ -585,7 +589,7 @@ Consequences:
 
 | # | Gap | Why it ranks here |
 | --- | --- | --- |
-| 1 | **Job inputs / parameterization** | No matrix, no dispatch inputs, no job-type params. Blocks rollback; forces 12 near-identical deploy files. Not in the spec at all, most structural, most underestimated |
+| 1 | **Job inputs / parameterization** | ~~Blocks rollback~~ — inputs landed ([#311](./311-job-inputs.md) slice A; `.chug/jobs/rollback.yaml` is the first consumer), so the deploy-file collapse is available too. Matrix / fan-out stays excluded, with reasons (#311 Decision 7). Still ranked first for what it unlocked: not in the spec at all, most structural, most underestimated |
 | 2 | **Cron** | One live workflow, but the trigger class the whole category-E port depends on |
 | 3 | **Host-native execution** | New backend + daemon polymorphism + schema epoch bump |
 | 4 | **Keyed caching** | Narrower than the brief assumed (correction 3), still real for gradle/pub/npm/buildx |
@@ -614,6 +618,13 @@ without rewriting it, and cannot weaken a gate. That is a much narrower thing
 than a matrix, and it is the thing rollback actually needs. Designing it is out
 of scope here; starting it anywhere other than that constraint would be
 re-litigating a settled decision.
+
+**Landed, with one correction to the sentence above.** [#311](./311-job-inputs.md)
+took the frame and tightened it: an input is *never* substituted into `work.run`
+or into any other job-type field — no substitution engine exists — it is
+delivered to the running container as `$CHUG_INPUT_{NAME}`, and the
+parameterization happens inside the work script where it always belonged
+(#311 Decision 1). Same guarantee, reached structurally rather than by rule.
 
 ## Decisions
 
@@ -673,7 +684,7 @@ Not a commitment — a dependency reading.
 | 6 | Image build and push (category D) | 2 or 4 |
 | 7 | Node-level exclusive resources (H.5) | 2 |
 | 8 | Mobile and simulator jobs on host nodes (F) | 2, 3, 7 |
-| 9 | Job inputs → unblocks rollback | — |
+| 9 | Job inputs → unblocks rollback (**landed**, [#311](./311-job-inputs.md) slice A) | — |
 
 Phases 1, 2, 3 and 9 are mutually independent.
 

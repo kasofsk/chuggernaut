@@ -1,0 +1,78 @@
+# Ship a SPECIFIC prior main commit to prod — the deploy sibling that needs a
+# per-run value, and the first consumer of job inputs (spec §1.1 `inputs:`,
+# design docs/design/311-job-inputs.md "Worked example"). #308 recorded rollback
+# as blocked because the target SHA had nowhere to live; `inputs:` is where it
+# lives now.
+#
+# Shape is .chug/jobs/deploy.yaml unchanged — same image, same work-scoped
+# secret, same stage-0 health gate, same `wrap_up: none` — because the only
+# difference between a deploy and a rollback is WHICH commit ships. The effect
+# is external and revoking the job does not undo it: .chug/tasks/rollback.sh
+# validates the target against main's history and prints what it will do before
+# it ssh's anywhere. See deploy/prod/README.md §3.
+name: rollback
+display_name: Rollback
+description: Ship a specific prior main SHA to prod (ssh → Mini update.sh). Effect is external; branch is scratch.
+image: chuggernaut/agent:prod       # has ssh + git (.chug/tasks/rollback.sh needs both)
+# A non-empty `inputs:` block requires this (types::INPUTS_SCHEMA_EPOCH, spec
+# §14). It is the gate an N-1 dispatcher can still read: a dispatcher that does
+# not understand `inputs:` would tolerate the field, capture it into `unknown`,
+# and run this job with NO target — i.e. inject no CHUG_INPUT_SHA and hand the
+# rollback nothing to act on. Declaring the epoch makes such a dispatcher refuse
+# the config outright instead, and fails this repo's own CI (the config-skew
+# gate in .chug/tasks/ci.sh) if it is ever ahead of the deployed binary.
+min_dispatcher: 2
+inputs:
+  # The whole reason this job type exists. Required, so a job released without
+  # it is rejected at release validation with `inputs.sha` — never at launch,
+  # and never as a rollback to nowhere.
+  - name: sha
+    type: string
+    required: true
+    # The narrowing, not the floor. The value reaches an ssh remote command as a
+    # positional argument (.chug/tasks/rollback.sh → deploy.sh), and the default
+    # input charset still permits a leading `-` or `/` — argument injection and
+    # absolute-path substitution, which quoting does not fix (#311 Decision 5
+    # layer 3). A hex string can be neither.
+    pattern: '^[0-9a-f]{7,40}$'
+    description: >-
+      The commit SHA to ship. Must be a commit on main — the work step refuses
+      anything else, and refuses a SHA it cannot resolve at all.
+work:
+  type: command
+  run: ./.chug/tasks/rollback.sh
+  # Injected as an env var (the private-key value) into the work container only
+  # (spec §1.1), exactly as for deploy: rollback.sh delegates the ssh to
+  # .chug/tasks/deploy.sh, which writes the value to a 0600 tempfile for
+  # `ssh -i` (§8.2).
+  secrets: [MINI_DEPLOY_KEY]
+eval:
+  # The same real gate a deploy gets (spec §3.3 staged evaluation): stage 0 runs
+  # first and alone decides whether the platform came back healthy on the older
+  # commit. A rollback whose target does not boot must go red here — that is the
+  # only automated signal that the rollback made things worse.
+  - name: health
+    type: command
+    image: chuggernaut/agent:prod
+    run: ./.chug/tasks/deploy-health.sh
+    stage: 0
+    # Platform-admin-only fleet read (spec §6.6), injected into this eval
+    # container alone. Provision per deploy/prod/README.md §3 "The health-gate
+    # API token"; until it is set, release validation rejects a rollback job
+    # outright rather than letting the gate pass blind (#267).
+    secrets: [DEPLOY_HEALTH_API_TOKEN]
+  # The appended project ci default (.chug/jobs/_defaults.yaml) stays at stage 1.
+  # A rollback job carries no commits, so ci sees an empty diff and glob-skips in
+  # seconds — cheap and harmless, so it stays.
+wrap_up:
+  type: none                        # external effect; the branch is discarded unmerged
+resources:
+  # Same budget as deploy: an ssh shell, but task_timeout must cover the
+  # Mini-side cargo build kicked by update.sh, which blocks until it finishes.
+  cpu: 1
+  memory: 512Mi
+  task_timeout: 30m
+# work_retries stays at 0 (default), and here that matters more than it does for
+# deploy: a retry would re-ship the same SHA after a half-applied rollback. The
+# operator decides whether to re-run, and (because inputs are immutable) a
+# different target is a different job.

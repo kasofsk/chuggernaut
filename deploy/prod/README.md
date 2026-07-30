@@ -271,6 +271,43 @@ supervises the very `deploy` job running it. The restart drops in-memory state;
 §3.6 reconciliation re-attaches to the still-running work container on the next
 tick and processes its exit normally. Don't "fix" this.
 
+### Rolling back to an earlier commit (a `rollback` job)
+
+Shipping an *older* `main` commit is a first-class job type, not a by-hand-only
+operation: `.chug/jobs/rollback.yaml` is `deploy.yaml`'s shape plus one required
+**input**, the target SHA (spec §1.1 `inputs:`, design
+[#311](../../docs/design/311-job-inputs.md)).
+
+1. **Create** a `rollback` job with the input: `POST .../jobs` with
+   `{type: "rollback", inputs: {sha: "<sha>"}}` (7–40 hex characters; the full
+   40 is preferred, and an abbreviation is expanded before it ships). The input is
+   `required`, so a job released without it is rejected at release validation
+   (`inputs.sha`) — never at launch. The UI create-form does **not** render
+   input fields yet (#311 slice B), so use the API until it does; a job created
+   in the UI would simply be rejected at release, not run blind.
+2. **Release** it. The work step, `.chug/tasks/rollback.sh`, reads the value as
+   `$CHUG_INPUT_SHA`, resolves it against the repo, and hands the resolved
+   40-char SHA to `.chug/tasks/deploy.sh` — same ssh, same key, same
+   `update.sh <sha>` as a deploy. Same stage-0 `deploy-health.sh` gate and the
+   same `wrap_up: none`.
+
+**It refuses more than it ships.** The effect is external and revoking the job
+does not undo it, so the script fails closed *before* the ssh, and says what it
+is about to do first (the resolved SHA, its subject, how far behind `main` it
+is). It exits non-zero without deploying anything when:
+
+- the input is absent (no value ⇒ no `CHUG_INPUT_SHA` key at all ⇒ `set -u`),
+- the SHA resolves to no commit — the case that matters most, because
+  `update.sh` would otherwise fall back to `origin/main` and silently deploy the
+  *newest* commit in response to a rollback request,
+- the commit exists but was never on `main` (a job branch, an abandoned
+  attempt): it has passed no merge gate, so it is not a rollback target.
+
+Re-running the same job type with the same SHA is safe: `update.sh` no-ops when
+`.deployed-sha` already matches. Inputs are immutable, so a *different* target
+is a different job — which is what keeps the job record an honest account of
+what shipped. Test the refusals without a Mini: `.chug/tasks/rollback.test.sh`.
+
 ### Post-restart health check + rollback (`restart-verify.sh`)
 
 The last thing a deploy does is restart the dispatcher that supervises it — so a
@@ -344,7 +381,10 @@ run and then fails its health gate with `fleet endpoint refused our
 credentials` — at that point the deploy has already landed (`wrap_up: none`), so
 refresh the token and re-run the job.
 
-**Manual deploy / rollback** (still available by hand, from the checkout):
+**Manual deploy / rollback** (the by-hand path — prefer a `deploy` or
+`rollback` job, which leaves a record; this is for when the platform itself is
+too broken to run one, per the [ad-hoc deploy
+runbook](../../docs/runbooks/adhoc-deploy.md)):
 ```sh
 CHUG_REPO=~/chuggernaut deploy/prod/update.sh              # deploy origin/main now
 CHUG_REPO=~/chuggernaut deploy/prod/update.sh <good-sha>   # roll back to a known-good commit
