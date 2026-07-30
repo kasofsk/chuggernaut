@@ -45,7 +45,9 @@
 # No secrets in check 1: the health endpoint is hit token-free (it leaks only
 # liveness + version). Use the tailnet URL, never 127.0.0.1 — the api runs on
 # the Mini, not in this eval container. `curl` is resolved via PATH so the shell
-# test can inject a fake.
+# test can inject a fake; `jq` (which parses the fleet body — see FLEET_JQ) is
+# resolved the same way and ships in the eval image, chuggernaut/agent:prod
+# (deploy/dev/Dockerfile.agent).
 set -eu
 
 BASE="${DEPLOY_HEALTH_BASE:-https://gumbo-mini-0.tail20c474.ts.net}"
@@ -73,8 +75,9 @@ HEALTH_INTERVAL_SECS="${HEALTH_INTERVAL_SECS:-3}"
 FLEET_TIMEOUT_SECS="${FLEET_TIMEOUT_SECS:-90}"
 FLEET_INTERVAL_SECS="${FLEET_INTERVAL_SECS:-5}"
 
-# Iteration cap for the node-record walk below (STYLE.md tier-2 rule 3). Our
-# fleet is single digits; anything past this is a malformed body, not a fleet.
+# Sanity cap on the node count the snapshot may report (STYLE.md tier-2 rule 3).
+# Our fleet is single digits; anything past this is a malformed body, not a
+# fleet.
 FLEET_NODES_MAX="${FLEET_NODES_MAX:-64}"
 
 # One probe of $1. Sets CODE, CTYPE, BODY from a single curl; CODE is empty on a
@@ -129,47 +132,89 @@ is_healthy() {
   return 0
 }
 
-# Tally one node record — the slice of the fleet body from this node's `{"name":`
-# up to the next one. Adds to FLEET_NODES / FLEET_ALIVE / FLEET_SLOTS. A record
-# we cannot read counts as registered but neither alive nor capacity: an
-# unreadable fleet must fail the gate, never flatter it.
-fleet_tally_record() {
-  record="$1"
-  FLEET_NODES=$((FLEET_NODES + 1))
-  # FleetNode serializes name,slots,occupied,available,version,…,running — so a
-  # key's value runs to the next comma. `slots` is null for a node seen only
-  # through a running container (cap unknown), which is not capacity either.
-  key_available='"available":'
-  key_slots='"slots":'
-  available="${record#*"$key_available"}"
-  available="${available%%,*}"
-  [ "$available" = "true" ] || return 0
-  FLEET_ALIVE=$((FLEET_ALIVE + 1))
-  slots="${record#*"$key_slots"}"
-  slots="${slots%%,*}"
-  case "$slots" in
-    "" | *[!0-9]*) return 0 ;;
-  esac
-  FLEET_SLOTS=$((FLEET_SLOTS + slots))
+# Reduce the fleet snapshot to "<nodes> <alive> <slots>".
+#
+# This keys on the only part of the shape the api PROMISES: a top-level `nodes`
+# array of objects, each carrying `available` and `slots` (spec §3.1). It must
+# key on nothing else. `GET /api/v1/platform/fleet` serves the dispatcher's
+# `fleet.status` snapshot VERBATIM (crates/api/src/routes.rs) — deliberately, so
+# a newer dispatcher's per-node fields survive an older api — which means both
+# the key ORDER and the key SET are free to change under this gate without any
+# api change at all. Both already have: serde_json's object map is a BTreeMap,
+# so keys serialize alphabetically, and #293 added `capacity_observed_at` /
+# `capacity_source`, which sort ahead of `name`. The previous parser split the
+# body on the literal `{"name":` and therefore read a fully-registered fleet as
+# empty (#335). jq addresses fields by name, so neither can break it again.
+#
+# `.slots` is counted only for available nodes, and only when it is a number:
+# null means a node seen solely through a running container (capacity unknown),
+# which is not provable capacity.
+FLEET_JQ='
+  if type != "object" or (.nodes | type) != "array" then
+    error("no top-level \"nodes\" array")
+  elif any(.nodes[]; type != "object") then
+    error("\"nodes\" holds a non-object entry")
+  else
+    [.nodes[] | select(.available == true)] as $alive
+    | "\(.nodes | length) \($alive | length) \([$alive[] | .slots | numbers] | add // 0)"
+  end'
+
+# A bounded, single-line excerpt of the last probe's body, for the FAIL line of
+# a body we could not read. Bounded because this lands in a job event an
+# operator reads: enough to recognize the shape (an HTML page, an error
+# document, truncated JSON), never a whole document.
+FLEET_EXCERPT_CHARS="${FLEET_EXCERPT_CHARS:-200}"
+fleet_body_excerpt() {
+  if [ -z "$BODY" ]; then
+    printf '<empty body>'
+    return 0
+  fi
+  excerpt="$(printf '%s' "$BODY" | tr '\n\r\t' '   ' | cut -c "1-$FLEET_EXCERPT_CHARS")"
+  printf '%s' "$excerpt"
+  [ "${#BODY}" -gt "$FLEET_EXCERPT_CHARS" ] && printf '…'
+  return 0
 }
 
-# Walk the last probe's body, tallying one record per node. Only FleetNode
-# carries a "name" key (SlotOccupant and RefreshOutcome do not), so splitting on
-# it isolates the nodes without a JSON parser — the eval image has no jq.
+# Parse the last probe's body into FLEET_NODES / FLEET_ALIVE / FLEET_SLOTS.
+# Returns 1 (with REASON set) when the body is not a fleet snapshot AT ALL —
+# which is a different failure from a snapshot that parses to zero nodes, and
+# must never borrow that one's message: #267 means "nothing can run work", and
+# wearing it for an unreadable body sent a healthy fleet's deploy to escalation
+# twice (#335). Both stay fatal; only the diagnosis differs.
 fleet_scan() {
   FLEET_NODES=0
   FLEET_ALIVE=0
   FLEET_SLOTS=0
-  sep='{"name":'
-  rest="$BODY"
-  while [ "${rest#*"$sep"}" != "$rest" ]; do
-    if [ "$FLEET_NODES" -ge "$FLEET_NODES_MAX" ]; then
-      REASON="fleet snapshot lists more than $FLEET_NODES_MAX nodes — refusing to parse"
-      return 1
-    fi
-    rest="${rest#*"$sep"}"
-    fleet_tally_record "${rest%%"$sep"*}"
+  if ! command -v jq >/dev/null 2>&1; then
+    REASON="jq is not on PATH in this eval image — the fleet body cannot be parsed (deploy/dev/Dockerfile.agent installs it; .chug/jobs/deploy.yaml pins the image)"
+    return 1
+  fi
+  err_file="$(mktemp)"
+  counts="$(printf '%s' "$BODY" | jq -r "$FLEET_JQ" 2>"$err_file")" || counts=""
+  jq_err="$(head -n 1 "$err_file" | cut -c 1-160)"
+  rm -f "$err_file"
+  # Word-splitting is the point: jq emits exactly three counts on one line.
+  # shellcheck disable=SC2086
+  set -- $counts
+  if [ "$#" -ne 3 ]; then
+    REASON="unreadable fleet snapshot: not the {\"nodes\":[…]} shape (${jq_err:-jq produced no counts}) — body was: $(fleet_body_excerpt)"
+    return 1
+  fi
+  for count in "$@"; do
+    case "$count" in
+      "" | *[!0-9]*)
+        REASON="unreadable fleet snapshot: node counts did not parse as numbers ('$counts') — body was: $(fleet_body_excerpt)"
+        return 1
+        ;;
+    esac
   done
+  FLEET_NODES="$1"
+  FLEET_ALIVE="$2"
+  FLEET_SLOTS="$3"
+  if [ "$FLEET_NODES" -gt "$FLEET_NODES_MAX" ]; then
+    REASON="fleet snapshot lists more than $FLEET_NODES_MAX nodes — refusing to trust it"
+    return 1
+  fi
   return 0
 }
 

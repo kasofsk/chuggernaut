@@ -112,6 +112,21 @@ run_gate() {
   fi
 }
 
+# <name> <has|lacks> <needle> — assert what the LAST run_gate actually printed.
+# `lacks` is the load-bearing direction: a failure must not borrow another
+# failure's message (#335 — an unreadable body reported as #267).
+assert_output() {
+  if grep -qF -- "$3" "$WORK/out"; then got=has; else got=lacks; fi
+  if [ "$got" = "$2" ]; then
+    echo "ok   - $1"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - $1: output $got '$3', want $2"
+    echo "----- output -----"; cat "$WORK/out"; echo "------------------"
+    fail=$((fail + 1))
+  fi
+}
+
 # <name> <health|fleet> <has|lacks> <needle> — assert what the last probe of
 # that endpoint actually put on curl's command line, which the gate's own output
 # never shows.
@@ -258,6 +273,71 @@ FAKE_FLEET_BODY='{"error":"platform admin required"}'
 run_gate "missing token still probes and fails closed" 1 "refused our credentials"
 assert_argv "no bearer header when the token is unset" \
   fleet lacks "Authorization"
+
+# ── the fleet body parser (#335) ────────────────────────────────────────────
+#
+# The api serves the dispatcher's fleet.status snapshot VERBATIM
+# (crates/api/src/routes.rs), so the body's key order and key set move without
+# any api change: serde_json emits object keys alphabetically, and #293 added
+# capacity_observed_at / capacity_source, which sort ahead of `name`. The old
+# parser split on the literal `{"name":` and read the real fleet as EMPTY.
+
+# 17. THE #335 REGRESSION: the body prod actually served on 2026-07-30 —
+#     alphabetical keys, capacity_* present, `name` fourth. Two available nodes
+#     with capacity, so this must PASS. It fails with "empty fleet ... (#267)"
+#     against the pre-fix parser.
+run_fleet_case "real fleet body with alphabetical keys passes" \
+  200 "application/json" \
+  '{"nodes":[{"available":true,"capacity_observed_at":"2026-07-30T20:45:57Z","capacity_source":"node","name":"air","occupied":0,"running":[],"slots":2,"version":"0.1.0+833f1a7"},{"available":true,"capacity_observed_at":"2026-07-30T20:45:57Z","capacity_source":"node","name":"nuc","occupied":0,"running":[],"slots":4,"version":"0.1.0+833f1a7"}],"queue_depth":0}' \
+  0 "2/2 node(s) alive, 6 slot(s)"
+
+# 18. A genuinely empty fleet — and with no `queue_depth` either, pinning that
+#     the parser reads `nodes` rather than a whole expected field set — still
+#     fails with #267 intact. That message is reserved for exactly this.
+run_fleet_case "bare empty nodes array still fails with #267" \
+  200 "application/json" '{"nodes":[]}' \
+  1 "empty fleet: no worker node is registered"
+
+# 19. Valid JSON, but not a fleet snapshot (an api serving some other document).
+#     FAIL — with its own reason and a quoted excerpt, never #267: an
+#     unrecognized shape is not evidence that nothing can run work.
+run_fleet_case "json of the wrong shape fails with its own reason" \
+  200 "application/json" '{"fleet":{"air":{"slots":2},"nuc":{"slots":4}}}' \
+  1 "unreadable fleet snapshot"
+assert_output "wrong-shape body quotes what it received" \
+  has '{"fleet":{"air":{"slots":2}'
+assert_output "wrong-shape body is not blamed on #267" lacks "#267"
+
+# 20. A body that is not JSON at all, mislabelled application/json (so the
+#     content-type check passes and the parser is what has to catch it).
+run_fleet_case "non-json body fails with its own reason" \
+  200 "application/json" '<!doctype html><html><body>app</body></html>' \
+  1 "unreadable fleet snapshot"
+assert_output "non-json body is not blamed on #267" lacks "#267"
+
+# 21. The excerpt is BOUNDED — it lands in a job event an operator reads, so a
+#     whole SPA page must not. Truncated at FLEET_EXCERPT_CHARS with a marker.
+fake_reset
+FAKE_CODE=200; FAKE_CTYPE="application/json"; FAKE_BODY="$HEALTH_OK"
+FAKE_FLEET_CODE=200; FAKE_FLEET_CTYPE="application/json"
+FAKE_FLEET_BODY='<!doctype html>'
+n=0
+while [ "$n" -lt 30 ]; do
+  FAKE_FLEET_BODY="$FAKE_FLEET_BODY<div>spa</div>"
+  n=$((n + 1))
+done
+FAKE_FLEET_BODY="$FAKE_FLEET_BODY<!--TAIL-MARKER-->"
+run_gate "an oversized body is excerpted, not dumped" 1 "unreadable fleet snapshot"
+assert_output "the excerpt is truncated" has "…"
+assert_output "the excerpt stops before the tail" lacks "TAIL-MARKER"
+
+# 22. Registered, alive, zero usable slots — in the real key order. Still the
+#     "no usable slots" branch (#267), not a parse failure: the shape was read
+#     fine, the fleet just cannot run anything.
+run_fleet_case "zero-slot node in real key order is not capacity" \
+  200 "application/json" \
+  '{"nodes":[{"available":true,"capacity_source":"docker-endpoint","name":"local","occupied":0,"running":[],"slots":0,"version":null}],"queue_depth":0}' \
+  1 "0 usable slots"
 
 echo
 echo "passed $pass, failed $fail"
