@@ -1171,16 +1171,29 @@ pub async fn tasks_resolve(
     .await
 }
 
+#[derive(serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DiffQuery {
+    /// Byte cursor into the diff text: return the diff from here on. 0
+    /// (default) reads from the start and carries the file summary.
+    #[serde(default)]
+    pub since: u64,
+}
+
+/// `GET .../diff/{seq}?since=<offset>` → one cursor page of the job's diff:
+/// `{ files, offset, data, done, diff }`. A caller loops on `offset` until
+/// `done`, because a diff can exceed what one NATS reply carries (§6.2).
 pub async fn diff(
     State(state): State<SharedState>,
     Path((owner, project, seq)): Path<(String, String, u64)>,
+    axum::extract::Query(q): axum::extract::Query<DiffQuery>,
     Auth(identity): Auth,
 ) -> ApiResult<Response> {
     read_project(&identity, &owner, &project)?;
     forward(
         &state,
         &store::subjects::vcs_diff(&owner, &project, seq),
-        serde_json::json!({}),
+        serde_json::json!({ "since": q.since }),
         StatusCode::OK,
     )
     .await

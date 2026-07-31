@@ -107,6 +107,7 @@ Depends on `container` (launches through the backend) and `store` (KO resolution
 - All git operations by shelling out (§5.1): branch create/delete/hard-reset, squash-merge with the §3.2 commit-message format, conflict detection
 - Conflict-context builder (§4.3): status/log/diff-stat between old and new `base_ref`
 - Read API: diff-by-job-state (§6.2 behavior table, including the Done-state `git log --grep` recovery), tree, blob, log
+- `diff_page` — cursor paging of a diff (§6.2): pure slicing of the diff text into byte-offset pages capped against their JSON-escaped length, so a diff of any size crosses a `max_payload`-bound reply; each page carries a sha-256 of the whole diff, because the diff is regenerated per page and a moving job branch must be detected rather than spliced
 
 ### `dispatcher`
 

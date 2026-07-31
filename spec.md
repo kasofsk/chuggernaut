@@ -1538,7 +1538,7 @@ req.groups.list.{owner}.{project}                            response: [{ name, 
 req.designs.list.{owner}.{project}                           response: [{ path, slug, seq?, title, status?, status_stale, name, jobs, counts, open }] — every docs/design/*.md at default HEAD joined to its group's roll-up (the same shape req.groups.list serves). Repo-derived, so a design with NO jobs is a row. `status` is the verbatim first `Status:` line; `status_stale` flags a design whose members all reached a terminal state — at least one of them a member other than the design's own authoring job (the member whose seq is the document's number) — while that line still says something. Bounded by DESIGNS_MAX
 req.graph.validate.{owner}.{project}
 req.graph.release.{owner}.{project}
-req.vcs.diff.{owner}.{project}.{seq}                         no payload; job seq is in subject
+req.vcs.diff.{owner}.{project}.{seq}                         payload: { since? } (byte cursor, default 0); job seq is in subject. Replies with ONE PAGE of the diff (see §6.2) — the text is capped per reply so a diff of any size fits under NATS's max_payload, and every page carries a `digest` of the whole diff so a caller can tell pages of one diff from pages of a diff that moved; a summary too large even for an empty page is a 422, never a reply that cannot be published
 req.vcs.tree.{owner}.{project}          payload: { ref }
 req.vcs.blob.{owner}.{project}          payload: { ref, path }
 req.vcs.log.{owner}.{project}           payload: { ref?, limit? }
@@ -1661,8 +1661,27 @@ GET    /api/v1/projects/{owner}/{project}/jobs/{seq}/events         per-job stre
 
 # VCS
 GET    /api/v1/projects/{owner}/{project}/diff/{seq}
-       response: { "files": [{ "path": string, "additions": int, "deletions": int }], "diff": string (unified diff) }
-       behavior by job state:
+       query params: since (optional byte cursor into the diff text, default 0)
+       response: { "files": [{ "path": string, "additions": int, "deletions": int }], "offset": int,
+                   "data": string (unified diff from `since` to `offset`), "done": bool,
+                   "digest": string (sha-256 hex of the whole diff text), "diff": string (unified diff) }
+       A diff has no size bound (job #342's was 1.3MB) and a NATS reply cannot exceed max_payload, so
+       this endpoint is CURSOR-PAGED like `.../tasks/{id}/output`: `data` carries the diff from `since`
+       on, capped per response against its JSON-ESCAPED length; the caller hands `offset` back as the
+       next `since` until `done` and concatenates. Byte offsets are stable for one diff CONTENT, not
+       for one job: the diff is regenerated from live refs on every page, so a Work/Evaluation job whose
+       branch moves mid-read changes the diff under the cursor. `digest` identifies the diff each page
+       was cut from and rides EVERY page; a caller must compare it against the first page's and, on a
+       change, restart at since=0 rather than concatenate — otherwise a shrunken diff answers a stale
+       cursor with an empty `done: true` page and the caller keeps an unmarked partial, which is the
+       silent truncation this contract exists to prevent. The web client restarts a bounded number of
+       times and then fails loudly (`api.diff`).
+       `files` rides the FIRST page (since=0) only — it is what the UI renders before any hunk text
+       arrives. `diff` is the legacy unpaged field, RETAINED for callers that do not page: it carries
+       the whole diff only when one page held it (every diff under the cap, i.e. all but the outliers)
+       and is empty otherwise, so an over-size diff never attempts an unpublishable single reply. A
+       caller that stops early therefore sees `done: false` — a partial diff is always marked as one.
+       behavior by job state (`data`/`diff` below are the whole diff when it fits one page):
          Frozen | Blocked | Ready — branch not yet created; returns { "files": [], "diff": "" }
          Work | Evaluation | Escalated — branch exists; returns git diff base_ref..job/{seq}
          Done — branch deleted after squash-merge; returns diff of the squash-merge commit against

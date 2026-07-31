@@ -6,17 +6,19 @@
 //!
 //! - **Accepts:** `req.vcs.file.{owner}.{project}` (`{ path }`),
 //!   `req.vcs.tree.{owner}.{project}`,
-//!   `req.vcs.diff.{owner}.{project}.{seq}`,
+//!   `req.vcs.diff.{owner}.{project}.{seq}` (`{ since }`),
 //!   `req.tags.list.{owner}.{project}`.
 //! - **Emits:** `RepoManager::{default_branch, resolve_ref, read_file_at, tree,
-//!   diff_for_job}` reads; file/tree/diff/tag JSON or a §6.5 error envelope.
-//!   Tags list as `{ name, path }` — the file read is verbatim, so the caller
-//!   fetching a tag back needs the path the listing resolved to.
+//!   diff_for_job}` reads; file/tree/tag JSON, a `vcs::DiffPage`, or a §6.5
+//!   error envelope. Tags list as `{ name, path }` — the file read is verbatim,
+//!   so the caller fetching a tag back needs the path the listing resolved to.
 //! - **Guarantees:** read-only, and pinned to one resolved ref per reply — the
-//!   same file an agent would receive, not a mix of two HEADs.
+//!   same file an agent would receive, not a mix of two HEADs. A diff of any
+//!   size answers within `max_payload`: it is served as cursor pages, and an
+//!   irreducible reply is a 422 rather than a request that never gets one.
 //! - **Spec:** §6.1, §5.2.
 
-use super::reply::{NOT_FOUND, bad_request, error_reply, ok_reply};
+use super::reply::{NOT_FOUND, bad_request, error_reply, ok_reply, unprocessable};
 use crate::core::CoreError;
 use std::sync::Arc;
 use store::NatsStore;
@@ -24,10 +26,7 @@ use vcs::RepoManager;
 
 /// Subscribe the repo-read subjects: `req.vcs.{file,tree,diff}` and
 /// `req.tags.list`.
-pub(super) async fn spawn_repo_handlers(
-    store: &NatsStore,
-    repos: Arc<RepoManager>,
-) -> store::Result<()> {
+pub async fn spawn_repo_handlers(store: &NatsStore, repos: Arc<RepoManager>) -> store::Result<()> {
     spawn_file_handler(store, repos.clone()).await?;
     spawn_tree_handler(store, repos.clone()).await?;
     spawn_tags_handler(store, repos.clone()).await?;
@@ -101,8 +100,9 @@ async fn spawn_tags_handler(store: &NatsStore, repos: Arc<RepoManager>) -> store
     Ok(())
 }
 
-/// `req.vcs.diff.{owner}.{project}.{seq}` — the job branch's diff against its
-/// base, read at the job's own refs.
+/// `req.vcs.diff.{owner}.{project}.{seq}` — one cursor page of the job
+/// branch's diff against its base, read at the job's own refs. Payload:
+/// `{ since }` (absent or `0` reads from the start).
 async fn spawn_diff_handler(store: &NatsStore, repos: Arc<RepoManager>) -> store::Result<()> {
     let mut diff_sub = store.subscribe_requests("req.vcs.diff.>").await?;
     let diff_store = store.clone();
@@ -117,10 +117,14 @@ async fn spawn_diff_handler(store: &NatsStore, repos: Arc<RepoManager>) -> store
                 req.respond(bad_request("malformed subject")).await;
                 continue;
             };
+            let since = serde_json::from_slice::<serde_json::Value>(&req.payload)
+                .ok()
+                .and_then(|v| v["since"].as_u64())
+                .unwrap_or(0);
             let body = match diff_store.jobs().await {
                 Ok(jobs) => match jobs.get(owner, project, seq).await {
                     Ok(Some(job)) => match repos.diff_for_job(&job).await {
-                        Ok(diff) => ok_reply(&diff),
+                        Ok(diff) => diff_page_reply(&diff, since),
                         Err(e) => error_reply(&e.into()),
                     },
                     Ok(None) => NOT_FOUND.to_vec(),
@@ -132,6 +136,22 @@ async fn spawn_diff_handler(store: &NatsStore, repos: Arc<RepoManager>) -> store
         }
     });
     Ok(())
+}
+
+/// Ceiling for a diff reply, under NATS's 1MB `max_payload`. Only the
+/// per-file summary can push a capped page past it, and a reply that cannot be
+/// published leaves the caller waiting for its own deadline.
+const DIFF_REPLY_BYTES_MAX: usize = 768 * 1024;
+
+/// One page of `diff` from cursor `since`, or a 422 envelope when even the page
+/// will not fit a reply. An error is the honest answer where an unpublishable
+/// reply would surface as a request timeout.
+fn diff_page_reply(diff: &vcs::DiffResponse, since: u64) -> Vec<u8> {
+    let body = ok_reply(&vcs::DiffPage::slice(diff, since));
+    if body.len() > DIFF_REPLY_BYTES_MAX {
+        return unprocessable("diff file summary is too large to carry in one reply");
+    }
+    body
 }
 
 /// Full recursive tree at default-branch HEAD, for the repo browser.

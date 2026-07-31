@@ -255,6 +255,7 @@ fn api_bundle_request_bodies(generator: &mut schemars::SchemaGenerator) {
         api::routes::MemberRoleBody,
         api::routes::FileQuery,
         api::routes::OutputQuery,
+        api::routes::DiffQuery,
     );
 }
 

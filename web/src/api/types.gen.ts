@@ -401,6 +401,13 @@ export interface GroupJob {
   title: string;
   type: string;
 }
+export interface DiffQuery {
+  /**
+   * Byte cursor into the diff text: return the diff from here on. 0
+   * (default) reads from the start and carries the file summary.
+   */
+  since?: number;
+}
 /**
  * A snapshot of the dispatcher's runtime configuration for display. Contains
  * no secrets — only names, endpoints, and resolved paths an operator needs to

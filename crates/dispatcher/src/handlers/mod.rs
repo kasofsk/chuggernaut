@@ -54,6 +54,7 @@ mod tasks;
 mod worker;
 
 pub use container::spawn_container_handlers;
+pub use repo::spawn_repo_handlers;
 pub use tasks::spawn_tasks_handler;
 pub use worker::spawn_worker_announce_handler;
 

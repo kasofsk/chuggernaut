@@ -94,8 +94,32 @@ export interface TaskOutput {
   running: boolean
 }
 
+/** A job's diff, assembled by {@link api.diff} from however many pages the
+ *  endpoint took to serve it. */
 export interface DiffResponse {
   files: { path: string; additions: number; deletions: number }[]
+  diff: string
+}
+
+/**
+ * GET .../diff/{seq}?since=<byte offset> — one cursor page of a job's diff
+ * (spec §6.2), because a diff has no size bound and a NATS reply cannot carry
+ * more than 1MB. Hand `offset` back as the next `since` until `done`,
+ * concatenating `data` only while `digest` holds — the summary rides the first
+ * page, and pages cut from two different diffs must never be spliced.
+ */
+export interface DiffPage {
+  /** per-file diffstat, on the first page (`since=0`) only */
+  files: { path: string; additions: number; deletions: number }[]
+  /** where `data` ends — pass as `since` on the next request */
+  offset: number
+  /** the diff text from the requested offset up to `offset` */
+  data: string
+  /** true once `offset` is the end of the diff */
+  done: boolean
+  /** sha-256 of the whole diff text: the identity of the diff this page was cut from */
+  digest: string
+  /** the whole diff for callers that do not page; empty unless one page held it */
   diff: string
 }
 

@@ -6,6 +6,10 @@
 //! `git merge-tree --write-tree` (git ≥ 2.38) + `commit-tree`. The single-writer
 //! dispatcher serializes all mutations; concurrent reads are safe.
 
+mod diff_page;
+
+pub use diff_page::{DIFF_PAGE_ESCAPED_MAX, DiffPage};
+
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::{DateTime, Utc};

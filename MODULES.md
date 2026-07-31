@@ -87,7 +87,7 @@ one surface.
 | `handlers/groups` | `req.groups.list` and `req.designs.list`: the group roll-up derived from the job records, and the `docs/design/` registry joined to it. Nothing stored, never through the core actor. | §1.1, §6.1, §6.2 |
 | `handlers/tasks` | The `req.tasks.*` family: the human inbox, a job's task log, operator resolutions, and the live container tail served off the core actor. | §6.1, §4.2 |
 | `handlers/jobtypes` | `req.jobtypes.{list,get}`: the job-type library at default-branch HEAD; a broken type still lists, with its errors. | §1.1, §6.1 |
-| `handlers/repo` | `req.vcs.{file,tree,diff}` and `req.tags.list`: repo-backed reads, each pinned to one resolved ref. | §6.1, §5.2 |
+| `handlers/repo` | `req.vcs.{file,tree,diff}` and `req.tags.list`: repo-backed reads, each pinned to one resolved ref; the diff serves one cursor page per reply. | §6.1, §5.2 |
 | `config` | Dispatcher configuration; `AGENT_PROVIDER_DEFAULT` required, refuses to start without it. | §12.4 |
 | `platform_ops` | Adapter for the platform-ops context crate: turns the single writer's fields into the narrow views it takes (`JobLookup`, `FleetView`, the borrowed `ConfigSnapshot`); gathers, never decides. | §3.1, §3.6 |
 

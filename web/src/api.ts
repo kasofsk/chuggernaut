@@ -3,6 +3,7 @@ import type {
   ArtifactKind,
   Attachment,
   AwaitingHuman,
+  DiffPage,
   DiffResponse,
   EvaluatorInput,
   HealthStatus,
@@ -89,6 +90,7 @@ export type {
   ArtifactKind,
   Attachment,
   AwaitingHuman,
+  DiffPage,
   DiffResponse,
   EvalStructured,
   EvaluatorInput,
@@ -153,6 +155,15 @@ export type TriageResult = Extract<TaskResult, { kind: 'Triage' }>
  *  and word the error the same way the API does (413). */
 export const MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024
 
+/** Page ceiling for one diff read (`api.diff`): 64 pages of ~256KB, so ~16MB.
+ *  Past it the read throws instead of looping forever on a wedged cursor. */
+const DIFF_PAGES_MAX = 64
+
+/** Restart ceiling for one diff read (`api.diff`). The dispatcher regenerates
+ *  the diff per page, so a running job's branch can move mid-read; a diff that
+ *  keeps moving throws rather than splicing pages of different diffs. */
+const DIFF_RESTARTS_MAX = 3
+
 export class ApiError extends Error {
   status: number
   body: unknown
@@ -173,6 +184,30 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   const json = text ? JSON.parse(text) : null
   if (!res.ok) throw new ApiError(res.status, json)
   return json as T
+}
+
+/** One cursor pass for {@link api.diff}, or null when the diff changed under
+ *  the cursor — every page carries a digest of the whole diff, and pages of two
+ *  different diffs must never be concatenated. */
+async function diffPagesRead(base: string, seq: number): Promise<DiffResponse | null> {
+  let files: DiffResponse['files'] = []
+  const chunks: string[] = []
+  let since = 0
+  let digest = ''
+  for (let page = 0; page < DIFF_PAGES_MAX; page++) {
+    const p = await req<DiffPage>('GET', `${base}?since=${since}`)
+    if (page === 0) {
+      files = p.files
+      digest = p.digest
+    } else if (p.digest !== digest) {
+      return null
+    }
+    chunks.push(p.data)
+    if (p.done) return { files, diff: chunks.join('') }
+    if (p.offset <= since) throw new Error(`diff for job ${seq} stopped advancing at byte ${since}`)
+    since = p.offset
+  }
+  throw new Error(`diff for job ${seq} exceeds ${DIFF_PAGES_MAX} pages`)
 }
 
 export const api = {
@@ -299,8 +334,18 @@ export const api = {
   resolve: (owner: string, project: string, seq: number, taskId: number, resolution: TaskResolution) =>
     req<unknown>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/tasks/${taskId}/resolve`, resolution),
 
-  diff: (owner: string, project: string, seq: number) =>
-    req<DiffResponse>('GET', `/api/v1/projects/${owner}/${project}/diff/${seq}`),
+  /** A job's whole diff, read as {@link DiffPage} chunks until `done`, and
+   *  re-read from the start when the job branch moves mid-read. Bounded by
+   *  {@link DIFF_PAGES_MAX} and {@link DIFF_RESTARTS_MAX} — never silently cut
+   *  short, never spliced from two diffs. */
+  diff: async (owner: string, project: string, seq: number): Promise<DiffResponse> => {
+    const base = `/api/v1/projects/${owner}/${project}/diff/${seq}`
+    for (let attempt = 0; attempt < DIFF_RESTARTS_MAX; attempt++) {
+      const whole = await diffPagesRead(base, seq)
+      if (whole) return whole
+    }
+    throw new Error(`diff for job ${seq} kept changing while it was read`)
+  },
 
   /** A task's stdout tail from `since` (byte offset); see {@link TaskOutput}. */
   taskOutput: (owner: string, project: string, seq: number, taskId: number, since: number) =>
