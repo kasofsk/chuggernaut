@@ -32,7 +32,9 @@ Then:
    Backtick'd code paths (e.g. `crates/api/src/routes.rs`) are checked
    best-effort — keep them accurate.
 4. Commit to the current branch (you are already on the job branch) with a clear
-   message, and push.
+   message, and push. `.githooks/pre-commit` runs the same doc lint on your
+   staged markdown as an advisory pass — it prints what a `docs` job's stage-1
+   gate will fail on, without blocking the commit. Act on what it reports.
 5. Narrate as you go with the `update_status` tool — it streams live to the
    operator. Call it at least three times: your one-line plan right after
    reading the brief (`update_status("plan: ...")`), after the page is written,

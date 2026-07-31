@@ -1,0 +1,336 @@
+#!/bin/sh
+# Pre-commit hook (ticket A6) — the fast half of the gate, run at the commit.
+#
+# Wired by `git config core.hooksPath .githooks`: for agents by
+# `container::bootstrap_cmd` right after the clone, for humans by running that
+# command once in a local checkout (CLAUDE.md). Bypass with
+# `git commit --no-verify`.
+#
+# Why it exists: the `ci` command evaluator runs AFTER the work agent has
+# exited, so a `cargo fmt` nit or a stray `//` costs a whole rework cycle. Every
+# check here is one the agent can act on in the second before the commit lands.
+#
+# What it runs, all scoped to the STAGED diff (a docs-only commit touches
+# neither cargo nor npm):
+#
+#   rustfmt        staged `*.rs`      fixed and re-staged, never rejected
+#   prettier       staged `web/**`    fixed and re-staged, never rejected
+#                                     (run from web/, so .prettierignore applies)
+#   check-comments.sh --staged        REJECTS (rule 1: no non-doc comments;
+#                                     a LINTER ERROR is a skip, not a rejection)
+#   check-modules.sh                  REJECTS (MODULES.md registry drift)
+#   check-duplication.sh              REJECTS (jscpd clones, threshold 0)
+#   doc-lint.sh                       ADVISORY (reports, never rejects)
+#
+# The rejection rule: a check may block a commit only when .chug/tasks/ci.sh
+# runs it UNCONDITIONALLY — then blocking here can never stop a commit CI would
+# have accepted, and the fix is in-loop. doc-lint is a `docs`/`design` stage-1
+# evaluator only, so it is advisory here. Formatting is never a rejection: it is
+# a thing to fix, not to report.
+#
+# What it deliberately does NOT run: `cargo clippy`, the test suite, `tsc -b` /
+# `vite build` (they need an `npm ci` on a fresh clone). Those are CI's job — a
+# hook that costs minutes gets bypassed, and then it gates nothing.
+#
+# Partial staging: `git add`ing a file the formatter rewrote would sweep in the
+# unstaged hunks beside it, producing a commit the author did not write. Files
+# with unstaged changes are therefore left unformatted, loudly.
+#
+# Missing tooling (no rustfmt, no prettier install, an npm registry the worker
+# cannot reach) degrades to a loud skip, never a blocked commit: losing feedback
+# is cheap, stranding an attempt with uncommitted work is not (job #84).
+#
+# Test: .githooks/pre-commit.test.sh
+set -u
+
+# Child processes (cargo, npx, the .chug/tasks/*.sh gates) inherit git's hook
+# environment and would resolve the wrong repo from another directory.
+unset GIT_DIR GIT_WORK_TREE
+
+root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$root" ] || exit 0
+cd "$root" || exit 0
+
+rejected=0
+ran=""
+
+hook_note() { echo "pre-commit: $*"; }
+hook_warn() { echo "!!! pre-commit: $*"; }
+
+hook_reject() { # <line>...
+	for _l in "$@"; do echo "!!! pre-commit: $_l"; done
+	rejected=1
+}
+
+hook_ran() { ran="$ran${ran:+, }$1"; }
+
+hook_now_ms() {
+	_n="$(date +%s%N 2>/dev/null || true)"
+	case "$_n" in
+	'' | *[!0-9]*) echo 0 ;;
+	*) echo $((_n / 1000000)) ;;
+	esac
+}
+
+started_ms="$(hook_now_ms)"
+
+# A merge, a revert or a cherry-pick commits content the author did not write;
+# gating it would reject someone else's debt. Git 2.39 commits a clean
+# revert/cherry-pick in-process without hooks, but a CONFLICTED one is finished
+# by a real `git commit`, which reaches here with REVERT_HEAD/CHERRY_PICK_HEAD
+# still on disk.
+for _h in MERGE_HEAD REVERT_HEAD CHERRY_PICK_HEAD; do
+	if [ -f "$(git rev-parse --git-path "$_h" 2>/dev/null)" ]; then
+		hook_note "$_h present — skipping"
+		exit 0
+	fi
+done
+
+staged="$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)"
+if [ -z "$staged" ]; then
+	hook_note "nothing staged — skipping"
+	exit 0
+fi
+# Worktree-vs-index: the files a formatter must not touch (see the header).
+partial="$(git diff --name-only 2>/dev/null || true)"
+
+# The staged paths matching any of the given globs, existing files only.
+hook_staged_matching() { # <glob>...
+	printf '%s\n' "$staged" | while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		[ -f "$f" ] || continue
+		for pat in "$@"; do
+			case "$f" in
+			$pat)
+				echo "$f"
+				break
+				;;
+			esac
+		done
+	done
+}
+
+# Split a candidate list into `formattable` (staged and nothing else) and a
+# warning for the rest, so a formatter never rewrites an unstaged edit.
+hook_formattable() { # <newline-list>
+	formattable=""
+	_held=""
+	IFS='
+'
+	for f in $1; do
+		if printf '%s\n' "$partial" | grep -qxF "$f"; then
+			_held="$_held $f"
+		else
+			formattable="$formattable$f
+"
+		fi
+	done
+	unset IFS
+	[ -n "$_held" ] && hook_warn "partially staged, left unformatted:$_held"
+	return 0
+}
+
+# Re-stage exactly the given paths that the formatter changed — never `git add
+# -A`, which is how a hook commits work the author did not stage.
+hook_restage() { # <label> <newline-list>
+	[ -n "$2" ] || return 0
+	IFS='
+'
+	# shellcheck disable=SC2086 # newline-split the list into path arguments
+	_touched="$(git diff --name-only -- $2 2>/dev/null || true)"
+	unset IFS
+	[ -n "$_touched" ] || return 0
+	IFS='
+'
+	# shellcheck disable=SC2086 # same
+	git add -- $_touched
+	unset IFS
+	hook_note "$1 reformatted and re-staged:"
+	printf '%s\n' "$_touched" | while IFS= read -r f; do echo "    $f"; done
+}
+
+# --- rustfmt (auto-fix) -------------------------------------------------------
+# rustfmt directly rather than `cargo fmt --all`: it takes the staged file list,
+# so unstaged files are not rewritten at all, and it needs no cargo metadata.
+hook_format_rust() {
+	_rs="$(hook_staged_matching '*.rs')"
+	[ -n "$_rs" ] || return 0
+	if ! command -v rustfmt >/dev/null 2>&1; then
+		hook_warn "no rustfmt on PATH — formatting SKIPPED (cargo fmt still gates in CI)"
+		return 0
+	fi
+	hook_formattable "$_rs"
+	[ -n "$formattable" ] || return 0
+	_edition="$(sed -n 's/^edition[[:space:]]*=[[:space:]]*"\([0-9][0-9]*\)".*/\1/p' Cargo.toml 2>/dev/null | head -n1)"
+	_edition="${_edition:-2024}"
+	IFS='
+'
+	# shellcheck disable=SC2086 # newline-split the list into path arguments
+	rustfmt --edition "$_edition" $formattable >/dev/null 2>&1 \
+		|| hook_warn "rustfmt exited non-zero (syntax error?) — cargo fmt is the authority in CI"
+	unset IFS
+	hook_restage rustfmt "$formattable"
+	hook_ran rustfmt
+}
+
+# --- prettier (auto-fix) ------------------------------------------------------
+# Prefer web/'s own install; else the version web/package.json pins, fetched by
+# npx. Either may be absent (no `npm ci` in a fresh clone, no registry) — that
+# is a skip, never a rejection. The path is absolute because the formatter runs
+# from web/.
+hook_prettier_bin() {
+	if [ -x web/node_modules/.bin/prettier ]; then
+		echo "$root/web/node_modules/.bin/prettier"
+		return 0
+	fi
+	command -v npx >/dev/null 2>&1 || return 1
+	_ver="$(sed -n 's/.*"prettier"[[:space:]]*:[[:space:]]*"[^0-9]*\([0-9][0-9.]*\)".*/\1/p' web/package.json 2>/dev/null | head -n1)"
+	[ -n "$_ver" ] || return 1
+	echo "npx --yes prettier@$_ver"
+	return 0
+}
+
+hook_format_web() {
+	_web="$(hook_staged_matching 'web/*.ts' 'web/*.tsx' 'web/*.js' 'web/*.jsx' \
+		'web/*.mjs' 'web/*.cjs' 'web/*.css' 'web/*.html' 'web/*.json')"
+	[ -n "$_web" ] || return 0
+	_bin="$(hook_prettier_bin)"
+	if [ -z "$_bin" ]; then
+		hook_warn "prettier unavailable (no web/node_modules, no npx) — web formatting SKIPPED"
+		return 0
+	fi
+	hook_formattable "$_web"
+	[ -n "$formattable" ] || return 0
+	# Split the resolved runner on spaces FIRST (it may be `npx --yes …`), then
+	# switch to newline splitting for the path list.
+	# shellcheck disable=SC2086 # deliberate word split of the runner
+	set -- $_bin
+	# Run from web/ with web-relative paths, exactly as `npm run format` does:
+	# prettier resolves its default --ignore-path against the cwd, so this is
+	# what makes it read web/.prettierignore.
+	_rel="$(printf '%s' "$formattable" | sed 's|^web/||')"
+	(
+		cd web || exit 0
+		IFS='
+'
+		# shellcheck disable=SC2086 # newline-split the list into path arguments
+		exec "$@" --write --ignore-unknown $_rel
+	) >/dev/null 2>&1 \
+		|| hook_warn "prettier exited non-zero (unreachable registry?) — web formatting may be INCOMPLETE"
+	hook_restage prettier "$formattable"
+	hook_ran prettier
+}
+
+# --- comment lint (rejects) ---------------------------------------------------
+# `--staged` mode, not explicit-file mode: rule 1 (no non-doc comments) over the
+# staged files, rule 2 (the 2-sentence cap) only where this commit adds a line,
+# so the hook never blocks on pre-existing doc-comment debt.
+#
+# Exit 1 is a comment the agent just wrote (actionable now); exit 2 is the
+# scanner itself failing on a file, which the agent cannot fix in-loop and so
+# degrades to a loud skip.
+hook_check_comments() {
+	_src="$(hook_staged_matching '*.rs' '*.ts' '*.tsx')"
+	[ -n "$_src" ] || return 0
+	[ -x .chug/tasks/check-comments.sh ] || return 0
+	_out="$(.chug/tasks/check-comments.sh --staged 2>&1)"
+	case "$?" in
+	0) ;;
+	1)
+		printf '%s\n' "$_out"
+		hook_reject "comment lint failed (STYLE.md Tier 1)." \
+			"    Delete the comment and put what it said in a doc under docs/ (or the" \
+			"    module's MODULES.md row), or in the commit message if it is rationale." \
+			"    Re-run with: .chug/tasks/check-comments.sh --staged"
+		;;
+	*)
+		hook_warn "comment lint could not run — SKIPPED (CI still gates it):"
+		printf '%s\n' "$_out" | tail -n 5
+		;;
+	esac
+	hook_ran comments
+}
+
+# --- MODULES.md registry (rejects) --------------------------------------------
+# Triggered by any staged `crates/*` path rather than the registered src trees:
+# check-modules.sh owns that list, and a second copy here would silently stop
+# gating the next context crate carved out of the dispatcher.
+hook_check_modules() {
+	_mods="$(hook_staged_matching 'crates/*' 'MODULES.md')"
+	[ -n "$_mods" ] || return 0
+	[ -x .chug/tasks/check-modules.sh ] || return 0
+	if ! .chug/tasks/check-modules.sh; then
+		hook_reject "MODULES.md registry drift." \
+			"    Add a one-line contract row for the new module (or drop the stale row)." \
+			"    Re-run with: .chug/tasks/check-modules.sh"
+	fi
+	hook_ran modules
+}
+
+# --- duplication (rejects on clones, skips when unrunnable) -------------------
+# Exit 1 is a clone (actionable now); exit 2 is a gate that could not run (no
+# npx, unreachable registry) and must degrade to a loud skip.
+hook_check_duplication() {
+	_code="$(hook_staged_matching '*.rs' '*.ts' '*.tsx' '*.js' '*.jsx' '*.css')"
+	[ -n "$_code" ] || return 0
+	[ -x .chug/tasks/check-duplication.sh ] || return 0
+	_out="$(.chug/tasks/check-duplication.sh 2>&1)"
+	case "$?" in
+	0) ;;
+	1)
+		printf '%s\n' "$_out"
+		hook_reject "duplicated code (STYLE.md Tier 1, threshold 0)." \
+			"    Extract the shared body into a helper named after its caller." \
+			"    Re-run with: .chug/tasks/check-duplication.sh"
+		;;
+	*)
+		hook_warn "duplication check could not run — SKIPPED (CI still gates it):"
+		printf '%s\n' "$_out" | tail -n 3
+		;;
+	esac
+	hook_ran duplication
+}
+
+# --- doc lint (advisory) ------------------------------------------------------
+# CI runs this only for `docs`/`design` jobs, so blocking here would reject
+# commits CI accepts. Report and move on.
+hook_check_docs() {
+	_md="$(hook_staged_matching '*.md')"
+	[ -n "$_md" ] || return 0
+	[ -x .chug/tasks/doc-lint.sh ] || return 0
+	IFS='
+'
+	# shellcheck disable=SC2086 # newline-split the list into path arguments
+	_out="$(.chug/tasks/doc-lint.sh $_md 2>&1)"
+	_rc=$?
+	unset IFS
+	if [ "$_rc" -ne 0 ]; then
+		printf '%s\n' "$_out" | grep -E '^(ERROR|WARN)' | head -n 20
+		hook_warn "doc lint reported errors (ADVISORY — commit proceeds)."
+		hook_warn "    A \`docs\` or \`design\` job WILL fail on these: .chug/tasks/doc-lint.sh"
+	fi
+	hook_ran doc-lint
+}
+
+hook_format_rust
+hook_format_web
+hook_check_comments
+hook_check_modules
+hook_check_duplication
+hook_check_docs
+
+ended_ms="$(hook_now_ms)"
+elapsed=""
+[ "$started_ms" -gt 0 ] && [ "$ended_ms" -ge "$started_ms" ] \
+	&& elapsed=" in $((ended_ms - started_ms))ms"
+
+if [ "$rejected" -ne 0 ]; then
+	hook_warn "commit REJECTED${elapsed}. Fix the above and commit again."
+	hook_warn "    If this is blocking work you must land, bypass it with"
+	hook_warn "    \`git commit --no-verify\` and say so in your summary — an"
+	hook_warn "    unlanded commit costs more than a lint nit."
+	exit 1
+fi
+
+hook_note "ok${elapsed} (${ran:-nothing to check})"
+exit 0

@@ -13,7 +13,7 @@
 #     from the v4 JavaScript tool — different config semantics, different clone
 #     sets. v4 docs do not apply. In v5, `ignorePattern` is the glob-exclusion
 #     key (in v4 that name meant an in-file regex, where globs silently failed).
-#   * A floating major resolves at run time, so the pre-commit hook's npx cache
+#   * A floating major resolves at run time, so .githooks/pre-commit's npx cache
 #     and CI could silently run different releases; 5.0.4 → 5.0.5 changed
 #     `ignorePattern` matching. Bump this deliberately, with the clone set
 #     re-measured in the same change.
@@ -26,8 +26,11 @@
 # fails. The duplication that matters is duplication a human wrote; the source
 # of these files (the Rust `types` crate) is itself under this gate.
 #
-# CI (.chug/tasks/ci.sh) and the pre-commit hook both call THIS script, so "clean
-# locally" and "clean in CI" cannot diverge. The whole-repo run costs ~30ms, so
+# CI (.chug/tasks/ci.sh) and the pre-commit hook (.githooks/pre-commit) both call
+# THIS script, so "clean locally" and "clean in CI" cannot diverge. The hook
+# rejects a clone (exit 1) but treats an unrunnable gate (exit 2) as a loud skip,
+# so an unreachable npm registry never blocks a commit. The whole-repo run
+# costs ~30ms (~1s including npx's resolve), so
 # it is unconditional — no diff scoping, and none should be added: a web-only or
 # docs-only diff exits ci.sh before the cargo section, and those are exactly the
 # diffs most likely to introduce duplicated TSX.
@@ -47,7 +50,7 @@ set -eu
 JSCPD_VERSION="5.0.5"
 
 # The repo root is two levels above this script (it lives in `.chug/tasks/`),
-# not the caller's cwd: the pre-commit hook, CI and a shell test all invoke it
+# not the caller's cwd: .githooks/pre-commit, CI and a shell test all invoke it
 # from different directories and must all scan (and configure from) the same
 # tree. Resolved with shell builtins only, so the diagnostics below still work
 # on a stripped PATH.

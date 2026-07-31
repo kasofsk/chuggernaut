@@ -74,16 +74,20 @@ that debt is what the pending checks will pin down.
   three lints defeats the ratchet and is rejected on sight.
 
 - **Formatting is `rustfmt` / `prettier` defaults.** *(live for Rust:
-  `.chug/tasks/ci.sh` runs `cargo fmt --all -- --check` on every merge. Pending for
+  `.chug/tasks/ci.sh` runs `cargo fmt --all -- --check` on every merge, and
+  `.githooks/pre-commit` formats staged files and re-stages them before the
+  commit — formatting is fixed, never reported. Pending for
   web: `web/` has `prettier` and an `npm run format:check` script as of A4,
-  but nothing runs it — the gate wiring and the one-time reformat of the 55
+  and the hook runs it on staged `web/` files when an install is present, but
+  no gate enforces it — the wiring and the one-time reformat of the 55
   files that fail it belong to refactor-plan E1.)* *Why:* zero decisions, zero
   diffs about decisions.
 
 - **No comments except doc comments; a doc comment is at most 2 sentences.**
   *(live: `.chug/tasks/check-comments.sh` runs from `.chug/tasks/ci.sh`,
   unconditionally and before the Rust early-exit, over the Rust and TypeScript
-  sources in the diff.)* `//`, `/* */` and every trailing-on-a-code-line form
+  sources in the diff — and from `.githooks/pre-commit` in `--staged` mode, so a
+  comment is caught at the commit rather than a rework cycle later.)* `//`, `/* */` and every trailing-on-a-code-line form
   are rejected; `///`, `//!`, `/** */`, `/*! */` are the only prose a source
   file may carry, and each block stays inside two sentences. Longer than that
   is a doc: write it under `docs/` (or in the module's `MODULES.md` row) and

@@ -48,7 +48,12 @@ Then:
    Run whatever you do run in the **foreground and wait** for it — never as a
    background task (see the finish-line rules below).
 4. Commit your work to the current branch (you are already on the job
-   branch) with clear commit messages, and push.
+   branch) with clear commit messages, and push. `.githooks/pre-commit` runs on
+   each commit: it reformats your staged files and re-stages them for you, and
+   rejects a non-doc comment, a `MODULES.md` registry gap or a duplicated block
+   — the same checks CI runs, minutes earlier. Fix what it names. If it ever
+   blocks work you cannot otherwise land, commit with `git commit --no-verify`
+   and say so in your summary: unlanded work costs far more than a lint nit.
 5. Narrate as you go with the `update_status` tool — this streams live to
    the operator's screen. Call it at least three times: right after reading
    the brief (`update_status("plan: ...")`, one line), after each meaningful

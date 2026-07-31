@@ -18,6 +18,11 @@ those docs disagree, the docs win — read them before large changes.
   Module headers (`//!`, `/*! */`, a TS file's first block) are exempt from
   the cap. Knowledge goes in a doc, rationale in the commit message; update
   the docs your change stales — `.chug/tasks/docs-update.md`.
+- `.githooks/pre-commit` enforces the fast half at **your** commit: it formats
+  and re-stages your staged files, and rejects a non-doc comment, a `MODULES.md`
+  registry gap or a duplicated block. Fix what it names rather than working
+  around it; `git commit --no-verify` is the escape hatch when the alternative
+  is leaving work uncommitted, and it belongs in your summary when used.
 
 ## Mechanical rules (Tier 2)
 

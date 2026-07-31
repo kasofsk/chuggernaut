@@ -1,14 +1,11 @@
 #!/bin/sh
-# Shell test for .chug/tasks/ci.sh's MODULES.md registry gate — no NATS, no Docker,
-# no cargo required.
+# Shell test for .chug/tasks/check-modules.sh, the MODULES.md registry gate —
+# no NATS, no Docker, no cargo required.
 #
-# The gate lives inside ci.sh as functions rather than as its own script, and
-# ci.sh's main body runs on source (it would try to build the workspace). So
-# this test slices the gate's block out of ci.sh with awk and sources *that*
-# into a subshell whose cwd is a fixture tree. The slice is delimited by the
-# same `# --- ` banner comments ci.sh already uses to separate its gates; if
-# those banners are renamed, the extraction below fails loudly (case 0) rather
-# than silently testing nothing.
+# The gate reads the tree under its cwd, so each case runs it in a subshell
+# whose cwd is a fixture root. Case 0 pins that .chug/tasks/ci.sh still calls
+# the script, so extracting the gate out of ci.sh (ticket A6) cannot silently
+# unwire it there.
 #
 # What it pins is the refactor-plan C8 rule the flat-glob version could not
 # express: a named context directory registers under its own name via its
@@ -22,16 +19,10 @@ set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CI="$HERE/ci.sh"
+SUT="$HERE/check-modules.sh"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-
-GATE="$WORK/gate.sh"
-awk '
-	/^# --- MODULES\.md registry-completeness gate/ { grab = 1 }
-	grab && /^# --- copy-paste detection gate/ { grab = 0 }
-	grab { print }
-' "$CI" >"$GATE"
 
 pass=0
 fail=0
@@ -59,9 +50,7 @@ run_gate() { # <fixture-root> -> writes rc to $RC, output to $OUT
 	set +e
 	(
 		cd "$1"
-		# shellcheck disable=SC1090
-		. "$GATE"
-		modules_registry_gate
+		"$SUT"
 	) >"$OUT" 2>&1
 	RC=$?
 	set -e
@@ -91,11 +80,11 @@ fixture() { # <name> <module-path>... ; rows on stdin
 	printf '%s' "$root"
 }
 
-# --- case 0: the slice actually contains the gate --------------------------
+# --- case 0: ci.sh still calls the extracted script -------------------------
 OUT="$WORK/out"
-grep -q '^modules_registry_gate() {' "$GATE" && RC=0 || RC=1
-echo "extracted $(wc -l <"$GATE") lines from ci.sh" >"$OUT"
-check "gate block extracted from ci.sh" 0 "$RC" "$OUT"
+{ [ -x "$SUT" ] && grep -q 'check-modules\.sh' "$CI"; } && RC=0 || RC=1
+echo "ci.sh references check-modules.sh: $(grep -c 'check-modules\.sh' "$CI") line(s)" >"$OUT"
+check "ci.sh calls the executable check-modules.sh" 0 "$RC" "$OUT"
 
 # --- case 1: flat modules, every one rowed, lib.rs needs no row ------------
 root="$(fixture flat core handlers <<'EOF'

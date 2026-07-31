@@ -90,10 +90,12 @@ wrong: `escalates_when_eval_retries_are_exhausted` carries what a comment above
 it would have said, and it carries it into the failure output.
 
 The gate itself has a shell test rather than a Rust one — `.chug/tasks/check-comments.test.sh`,
-run directly, no NATS or cargo — alongside `check-duplication.test.sh` and
-`doc-lint.test.sh`. Shell gates are tested in shell: the tier-1/2/3 ladder above
-is about the platform's behavior, and a gate's own behavior is not reachable from
-a cargo test.
+run directly, no NATS or cargo — alongside `check-duplication.test.sh`,
+`doc-lint.test.sh`, `modules-registry.test.sh` (which drives
+`.chug/tasks/check-modules.sh`) and `.githooks/pre-commit.test.sh` (which drives
+real `git commit`s in throwaway repos with the hook installed). Shell gates are
+tested in shell: the tier-1/2/3 ladder above is about the platform's behavior,
+and a gate's own behavior is not reachable from a cargo test.
 
 ## Conventions
 

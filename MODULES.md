@@ -133,7 +133,7 @@ modules** — the ones that decide what an operator-supplied value may be, so
 that every consumer shares one implementation — carry contract headers and
 register here as they are written. The plain record modules (`job`, `task`,
 `platform`, …) are shapes rather than units of work and are not scoping
-targets, which is why the registry gate (`.chug/tasks/ci.sh`) covers the
+targets, which is why the registry gate (`.chug/tasks/check-modules.sh`) covers the
 dispatcher, domain and context trees and not this one.
 
 | Module | Contract | Spec |

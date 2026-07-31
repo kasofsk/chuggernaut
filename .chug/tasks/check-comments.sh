@@ -51,6 +51,13 @@
 # Usage:
 #   .chug/tasks/check-comments.sh            # rule 1 tree-wide, rule 2 on added lines
 #   .chug/tasks/check-comments.sh <file>...  # explicit: lint every line of these files
+#   .chug/tasks/check-comments.sh --staged   # the staged Rust/TS files, rule 2 on staged
+#                                            # added lines (.githooks/pre-commit)
+#
+# `--staged` is the hook's mode and keeps CI's grandfathering: rule 1 over every
+# line of the staged files, rule 2 only where the commit adds a line. Explicit
+# file mode does NOT — it judges every doc comment in the files it is given, so
+# a hook using it would block a commit over pre-existing debt (ticket A6).
 #
 # Exit: 0 = clean. 1 = violations (each is reported as file:line). 2 = the linter
 # itself failed on at least one file; the gate cannot vouch for the tree.
@@ -246,10 +253,15 @@ check_comments_lang_of() { # <path>
 	esac
 }
 
-# The line numbers this diff adds to one file, as awk wants them: the `+a,b`
-# side of each unified-diff hunk header, expanded.
-check_comments_added_lines() { # <base> <file>
-	git diff -U0 "$1"...HEAD -- "$2" 2>/dev/null | LC_ALL=C awk '
+# The line numbers a diff adds to one file, as awk wants them: the `+a,b` side
+# of each unified-diff hunk header, expanded. The first argument selects the
+# diff — `--staged` for the index, else a merge-base to compare HEAD against.
+check_comments_added_lines() { # <base|--staged> <file>
+	if [ "$1" = "--staged" ]; then
+		git diff --cached -U0 -- "$2" 2>/dev/null
+	else
+		git diff -U0 "$1"...HEAD -- "$2" 2>/dev/null
+	fi | LC_ALL=C awk '
 		/^@@/ {
 			for (i = 1; i <= NF; i++) if ($i ~ /^\+[0-9]/) {
 				split(substr($i, 2), a, ",")
@@ -266,7 +278,12 @@ files=""
 mode="ratchet"
 base=""
 
-if [ "$#" -gt 0 ]; then
+if [ "${1:-}" = "--staged" ]; then
+	mode="staged"
+	base="--staged"
+	cd "$root"
+	files="$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs' '*.ts' '*.tsx' 2>/dev/null || true)"
+elif [ "$#" -gt 0 ]; then
 	mode="explicit"
 	for f in "$@"; do
 		files="$files$f

@@ -35,7 +35,11 @@ Ground rules:
    plus CI is the contract; suspect broad breakage you can't cheaply verify?
    Say so in your summary and let CI judge, rather than pre-running everything.
 5. Commit to the current branch (you are already on the job branch) with
-   clear messages, and push.
+   clear messages, and push. `.githooks/pre-commit` runs on each commit: it
+   prettier-formats and re-stages your staged `web/` files, and rejects a
+   non-doc comment or a duplicated block. Fix what it names — or, if it blocks
+   work you cannot otherwise land, commit with `git commit --no-verify` and say
+   so in your summary.
 6. Narrate with `update_status` as you go: after reading the brief (your
    one-line plan), after the meaningful edit(s), and before submitting.
 7. Finish with `submit_result`: a short markdown `summary` of what changed and

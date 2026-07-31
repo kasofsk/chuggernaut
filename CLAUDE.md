@@ -57,7 +57,8 @@ the absence of a workflow file.
 - `.chug/tasks/ci.sh` also runs four pure-shell gates **before** those diff-aware
   stages, so a web-only or docs-only change is still gated: the `.chug/jobs/*.yaml`
   version-skew check against the deployed dispatcher (spec §14), the
-  `MODULES.md` registry check, `.chug/tasks/check-duplication.sh` — copy-paste
+  `MODULES.md` registry check (`.chug/tasks/check-modules.sh`),
+  `.chug/tasks/check-duplication.sh` — copy-paste
   detection via a pinned `jscpd@5.0.5` at `threshold: 0` (STYLE.md Tier 1;
   ~30ms for the whole repo, so it is unconditional) — and
   `.chug/tasks/check-comments.sh`, the comment lint. Any clone fails the gate.
@@ -73,6 +74,21 @@ the absence of a workflow file.
   verdict is the same on every host and every awk (macOS's BWK awk aborts on the
   tree's astral-plane characters in a UTF-8 locale); a file the scanner cannot
   finish exits **2** as a `LINTER ERROR`, never as a comment violation.
+- **The fast half of that gate also runs at the commit.** `.githooks/pre-commit`
+  formats staged Rust/web files with `rustfmt`/`prettier` and re-stages them,
+  then runs the comment lint (`--staged` mode), the registry check and the
+  duplication check over the staged diff — ~2s, so an agent learns about
+  a stray `//` before it exits instead of a rework cycle later. `prettier` runs
+  from `web/` so `web/.prettierignore` applies: the Rust-emitted
+  `web/src/api/wire-samples.json`, whose exact bytes a cargo test asserts, is
+  never rewritten. It rejects only what `.chug/tasks/ci.sh` runs unconditionally
+  (so it never blocks a commit CI would accept); `doc-lint` is advisory, and a
+  gate that cannot run — missing tooling, an unreachable registry, a `LINTER
+  ERROR` — degrades to a loud skip. `git commit --no-verify` bypasses it —
+  legitimate when the alternative
+  is leaving work uncommitted. Work containers get it from
+  `container::bootstrap_cmd`; **a local checkout needs `git config
+  core.hooksPath .githooks` once.** Its test is `.githooks/pre-commit.test.sh`.
 - Per-type **stage-0 agent reviewers** run first (`.chug/tasks/review-*.md`), so the
   slow gate is spent only on changes the reviewer accepts; `docs`/`design`
   jobs additionally gate on `.chug/tasks/doc-lint.sh` at stage 1.

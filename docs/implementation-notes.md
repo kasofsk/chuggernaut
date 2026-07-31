@@ -130,6 +130,10 @@ stale.
 - **fn sample_job** — The effective set after the Ready-transition fill (§1.1, #311): a supplied value beside a materialized default, so the generated client's round-trip test sees a populated map rather than the empty common case.
 - **fn sample_job** — Two groups, one of each namespace (design #321 Decision 2): the wire shape a grouped record has, so the generated client's round-trip test sees a populated list rather than the empty common case.
 
+### `crates/container/src/lib.rs`
+- **fn bootstrap_cmd** — `git config core.hooksPath .githooks` runs after the clone, inside /workspace, so the hook the agent commits under is the one its own branch carries (a baked-in hook could only change with a worker image rebuild, and would skew from the code it checks). Project-agnostic: a repo without `.githooks/` gets no hooks and nothing happens.
+- **fn bootstrap_cmd** — That step is `|| true` while the clone and `cd` stay `&&`-guarded: losing the hook degrades feedback, but exec'ing outside a clean /workspace loses the whole attempt.
+
 ### `crates/container/src/docker.rs`
 - **fn wait** — A non-zero exit surfaces as ContainerWaitError on some daemons — the exit code rides in the error body.
 - **fn remove** — force=false — the caller only removes after the container has exited and its artifacts are harvested.

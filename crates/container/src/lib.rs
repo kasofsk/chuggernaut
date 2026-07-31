@@ -456,7 +456,7 @@ pub fn bootstrap_cmd(original: &[String]) -> Vec<String> {
         "sh".into(),
         "-c".into(),
         format!(
-            "git clone --single-branch --filter=blob:none --branch \"$JOB_BRANCH\" \"$REPO_URL\" /workspace && cd /workspace && exec {joined}"
+            "git clone --single-branch --filter=blob:none --branch \"$JOB_BRANCH\" \"$REPO_URL\" /workspace && cd /workspace && {{ git config core.hooksPath .githooks || true; }} && exec {joined}"
         ),
     ]
 }
@@ -554,6 +554,42 @@ mod tests {
         assert_eq!(cmd[1], "-c");
         assert!(cmd[2].starts_with("git clone "));
         assert!(cmd[2].ends_with("exec claude -p 'do the thing'"));
+        assert!(
+            cmd[2].contains("git config core.hooksPath .githooks"),
+            "{}",
+            cmd[2]
+        );
+    }
+
+    /// The `.githooks` opt-in must be non-fatal while the clone stays fatal:
+    /// losing the hook costs feedback, but exec'ing outside a clean /workspace
+    /// costs the attempt (ticket A6).
+    #[test]
+    fn bootstrap_hooks_path_failure_still_execs_but_clone_failure_does_not() {
+        let script = bootstrap_cmd(&["echo".into(), "started".into()])[2].clone();
+        let clone = "git clone --single-branch --filter=blob:none --branch \"$JOB_BRANCH\" \"$REPO_URL\" /workspace";
+        let run = |s: String| {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&s)
+                .output()
+                .unwrap();
+            (
+                out.status.success(),
+                String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            )
+        };
+
+        let hooks_fail = script
+            .replace(clone, "true")
+            .replace("cd /workspace", "cd /")
+            .replace("git config core.hooksPath .githooks", "false");
+        assert_eq!(run(hooks_fail), (true, "started".into()));
+
+        let clone_fail = script
+            .replace(clone, "false")
+            .replace("cd /workspace", "cd /");
+        assert_eq!(run(clone_fail), (false, String::new()));
     }
 
     /// The cursor slice underpinning live output: monotonic across polls, empty
