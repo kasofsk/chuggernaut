@@ -2,7 +2,18 @@ import { useState } from 'react'
 
 // Names must match the [data-theme='...'] blocks in styles.css. 'cosmos' is the
 // snazzy-redesign dark-first identity (#161); 'aurora' its light sibling.
-export const THEMES = ['cosmos', 'aurora', 'tokyo', 'midnight', 'gruvbox', 'nord'] as const
+// 'bauhaus'/'bauhaus-dark' are the brutalist pair — the chrome they share hangs
+// off a [data-theme^='bauhaus'] prefix selector, so keep both on that prefix.
+export const THEMES = [
+  'cosmos',
+  'aurora',
+  'tokyo',
+  'midnight',
+  'gruvbox',
+  'nord',
+  'bauhaus',
+  'bauhaus-dark',
+] as const
 export type Theme = (typeof THEMES)[number]
 
 const STORAGE_KEY = 'chug-theme'

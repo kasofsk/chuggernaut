@@ -189,6 +189,111 @@
   --backdrop-opacity: 0.05;
 }
 
+/* ── Bauhaus: industrial brutalism, light — concrete-and-paper surfaces, hard
+   black rules, primary-colour accents. The radii tokens go to 0 and
+   --shadow-card becomes a hard offset block instead of a blur, so every box
+   reads as a printed rectangle; the backdrop art and the accent halo are
+   switched off — these themes are flat by construction. The chrome both
+   Bauhaus themes share sits in the [data-theme^='bauhaus'] block below. */
+[data-theme='bauhaus'] {
+  color-scheme: light;
+  /* a grotesque, not the platform UI face — the industrial half of the vibe */
+  --font: 'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif;
+  --bg: #e9e6dd;
+  --card: #fbfaf6;
+  --inset: #ded9cd;
+  --btn-bg: #ded9cd;
+  --border: #16130f;
+  --border-faint: #b3ada0;
+  --text: #16130f;
+  --dim: #5a5449;
+  --accent: #1d4ed8;
+  --accent-2: #e02b1d;
+  --danger: #c81e10;
+  --green: #157f4b;
+  --orange: #b57d00;
+  --purple: #6d28d9;
+  --red: #c81e10;
+  --blue: #1d4ed8;
+  --gray: #6b6558;
+  --stripe: color-mix(in srgb, var(--text) 6%, transparent);
+  --backdrop-opacity: 0;
+  --glow: transparent;
+  --r-sm: 0;
+  --r-md: 0;
+  --r-lg: 0;
+  --r-full: 0;
+  --shadow-card: 3px 3px 0 0 var(--border);
+}
+
+/* ── Bauhaus dark: the same construction inverted — ink surfaces, bone rules,
+   signal-blue and red primaries. The hard shadow is a translucent bone block;
+   a black one would be invisible against the near-black page. */
+[data-theme='bauhaus-dark'] {
+  color-scheme: dark;
+  --font: 'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif;
+  --bg: #0b0b0c;
+  --card: #151517;
+  --inset: #101012;
+  --btn-bg: #212124;
+  --border: #ded9cd;
+  --border-faint: #33322e;
+  --text: #f4f1e7;
+  --dim: #a09b8f;
+  --accent: #4d79ff;
+  --accent-2: #ff3b21;
+  --danger: #ff4b32;
+  --green: #2fd07a;
+  --orange: #ffb800;
+  --purple: #a879ff;
+  --red: #ff4b32;
+  --blue: #4d79ff;
+  --gray: #8a857a;
+  --stripe: color-mix(in srgb, var(--text) 6%, transparent);
+  --backdrop-opacity: 0;
+  --glow: transparent;
+  --r-sm: 0;
+  --r-md: 0;
+  --r-lg: 0;
+  --r-full: 0;
+  --shadow-card: 3px 3px 0 0 color-mix(in srgb, var(--border) 25%, transparent);
+}
+
+/* Chrome the Bauhaus pair shares. The ^= prefix matches both theme names, and
+   outranks the base rules on specificity alone. Everything here is flatness or
+   type — the squared corners and hard shadows come from the tokens above. */
+[data-theme^='bauhaus'] body {
+  /* no accent halo behind the page: brutalist means flat, unlit surfaces */
+  background-image: none;
+}
+/* Display type is solid and set in caps rather than clipped from a gradient. */
+[data-theme^='bauhaus'] .topbar h1,
+[data-theme^='bauhaus'] .job-heading .job-num,
+[data-theme^='bauhaus'] .login h1 {
+  background: none;
+  color: var(--text);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+/* The masthead project name is flat primary rather than a gradient wash. Left
+   in mixed case: it is user data of unknown length inside a clipped header. */
+[data-theme^='bauhaus'] .proj-name {
+  background: none;
+  color: var(--accent);
+}
+/* Double-weight rules on cards so the page grid reads as printed blocks. */
+[data-theme^='bauhaus'] .card {
+  border-width: 2px;
+}
+/* Badges read as stamped labels: caps, tracked out, and one size down so the
+   uppercase width increase cancels out and table rows keep their metrics. */
+[data-theme^='bauhaus'] .badge {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
 * {
   box-sizing: border-box;
 }
