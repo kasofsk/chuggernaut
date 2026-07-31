@@ -49,14 +49,33 @@ refresh_phase() {
 # below: refuse up front when the space cannot be there, and prune on the
 # FAILED-build path too, not only the successful one.
 #
-# The threshold is a deliberately conservative CONSTANT, not a measurement:
-# ~14GB for a new agent-rust generation (it bakes the #123 warm-target seed) and
-# ~6GB of headroom for cache growth during the build. Revisit it if the seed
-# shrinks. Env-overridable so a node with a different disk shape can tune it:
-# build-worker.sh puts the knob in the daemon's environment at node creation and
-# the swap phase below carries it forward, so an override survives self-refreshes
-# instead of reverting to this default on the next one.
-DISK_FREE_GB_MIN="${WORKER_REFRESH_DISK_FREE_GB_MIN:-20}"
+# The threshold is a CONSTANT derived from a measured refresh, re-derived for
+# deploy #347 (the previous 20GB waved through an attempt with ~7GB of real
+# headroom, which then died with ENOSPC unpacking the agent-rust seed and
+# stranded prod on the old SHA for 40 minutes). The derivation, sampling free
+# space every 15s through a real refresh on dev-air:
+#   * a refresh consumed ~41GB peak against a 13.3GB agent-rust image, which is
+#     ~2x the image (docker holds it TWICE while exporting — the content blob
+#     plus the unpacked overlay snapshot — on top of the live generation the
+#     node keeps running) plus ~14GB of BuildKit growth, dominated by the #115
+#     /build-target cache mount that holds the FULL unpruned target dir;
+#   * #347 pruned the baked seed's linked executables, taking agent-rust to
+#     ~4.4GB, so the image half of that drops to ~9GB while the BuildKit half
+#     does not move (the cache mount still holds the fat pre-prune target);
+#   * ~23GB expected peak, rounded up to 30 for the volatility below.
+#
+# Free space at refresh time is NOT stable: it swung 47.8GB -> 72GB across two
+# runs an hour apart on the same node, because job-container overlays (agents
+# running cargo in their own containers) and the BuildKit cache both move it
+# under us. This constant is a FLOOR checked once before the build, not a
+# guarantee that the space is still there ten minutes later.
+#
+# Revisit it if the seed changes size again. Env-overridable so a node with a
+# different disk shape can tune it: build-worker.sh puts the knob in the
+# daemon's environment at node creation and the swap phase below carries it
+# forward, so an override survives self-refreshes instead of reverting to this
+# default on the next one.
+DISK_FREE_GB_MIN="${WORKER_REFRESH_DISK_FREE_GB_MIN:-30}"
 # Where the space is measured. The build runs inside the worker container, whose
 # root filesystem is an overlay on the filesystem that backs /var/lib/docker —
 # statfs on it reports exactly the pool images and the BuildKit cache compete

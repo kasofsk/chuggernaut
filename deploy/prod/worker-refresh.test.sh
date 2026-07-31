@@ -160,7 +160,7 @@ echo "ok: build announces each phase before it runs (deploy-log progress markers
 # The pre-flight measurement is echoed (free + needed) so an operator reads the
 # disk story off the deploy leg, and the post-refresh prune pair is unchanged:
 # dangling images + BuildKit cache above the keep threshold, NEVER `-a`.
-grep_out "disk pre-flight: 57.2GB free on /, need 20GB"
+grep_out "disk pre-flight: 57.2GB free on /, need 30GB"
 grep_log "docker image prune -f"
 grep_log "docker builder prune -f --keep-storage 15GB"
 grep_out "pruned after a successful refresh"
@@ -174,7 +174,7 @@ echo "ok: success path reports free/needed and keeps the safe prune pair"
 # generation dies ten minutes in and strands the partial generation. Refuse up
 # front instead, and say what is needed vs what is free.
 : > "$LOG"
-set_free_kb 10000000   # ~9.5GB — under the 20GB threshold
+set_free_kb 10000000   # ~9.5GB — under the 30GB threshold
 if PATH="$BIN:$PATH" \
      WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
      WORKER_GIT_KEY="$KEY" \
@@ -182,7 +182,7 @@ if PATH="$BIN:$PATH" \
      sh "$SUT" build abc123 prod > "$OUT" 2>&1; then
   fail "build should fail when the docker filesystem lacks room for a generation"
 fi
-grep_out "need ~20GB"
+grep_out "need ~30GB"
 grep_out "have 9.5GB free on /"
 # Fail FAST: no fetch, no docker call at all — seconds, not a doomed build.
 if grep -qE "git fetch|docker (build|tag|image prune|builder prune)" "$LOG"; then
@@ -316,8 +316,8 @@ echo "ok: a build that fails mid-way leaves the live :prod images untouched"
 # stranded until someone ssh'd in. The failure path now runs the same safe prune
 # pair and reports the reclaim, so the retry starts no fuller than this one did.
 : > "$LOG"
-set_free_kb 25000000                    # ~23.8GB free: clears the pre-flight
-export FREE_KB_AFTER_PRUNE=34000000     # ~32.4GB after the prune pair
+set_free_kb 35000000                    # ~33.4GB free: clears the pre-flight
+export FREE_KB_AFTER_PRUNE=44000000     # ~42.0GB after the prune pair
 if PATH="$BIN:$PATH" \
      WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
      WORKER_GIT_KEY="$KEY" \
@@ -335,7 +335,7 @@ if grep -qE "prune (-a|.* -a)" "$LOG"; then
   fail "the failure-path prune must never use -a (live :prod images must survive)"
 fi
 # ...and the reclaim is in the output the daemon relays into the failed leg.
-grep_out "reclaimed 8.5GB (23.8GB -> 32.4GB free on /)"
+grep_out "reclaimed 8.5GB (33.3GB -> 41.9GB free on /)"
 # A phase is ANNOUNCED BEFORE its step runs (ticket #253) — this build DIED in
 # agent-rust, so seeing its marker proves the marker preceded the work. A marker
 # printed after the step would relay the phase only once it was already over,
@@ -430,14 +430,16 @@ echo "ok: swap carries WORKER_CACHE_DIR forward as env (no daemon mount)"
 # disk shape must keep that tuning across a self-refresh, or the very next
 # refresh reverts it to the built-in default and the operator's override is a
 # no-op. Unset ⇒ nothing passed, so a stock node keeps the documented constant.
+# The value deliberately differs from the built-in default, so a swap that
+# hardcoded the default instead of forwarding the operator's value still fails.
 : > "$LOG"
 PATH="$BIN:$PATH" \
   WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-  WORKER_REFRESH_DISK_FREE_GB_MIN=30 \
+  WORKER_REFRESH_DISK_FREE_GB_MIN=45 \
   WORKER_REFRESH_DISK_PATH=/var/lib/docker \
   sh "$SUT" swap prod
 
-grep_log "WORKER_REFRESH_DISK_FREE_GB_MIN=30"
+grep_log "WORKER_REFRESH_DISK_FREE_GB_MIN=45"
 grep_log "WORKER_REFRESH_DISK_PATH=/var/lib/docker"
 
 : > "$LOG"

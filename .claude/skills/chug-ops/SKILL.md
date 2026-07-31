@@ -130,12 +130,17 @@ will run and wait.
 3. **Recurring cause on dev-air**: colima docker disk pressure (~80%+ full)
    kills the `cargo build` inside the image build. The script now owns this
    itself (#250): a **disk pre-flight** refuses in seconds with
-   `insufficient docker disk: need ~20GB … have NGB free` (a leg failing that
+   `insufficient docker disk: need ~30GB … have NGB free` (a leg failing that
    fast means grow the VM disk / prune, not debug the build), and a failed
    build runs the safe prune pair itself and reports the reclaim — a failure
-   no longer strands a generation for the next attempt. The 20GB threshold is
-   a conservative constant; a node with a different disk shape overrides it
-   with `WORKER_REFRESH_DISK_FREE_GB_MIN` (and `_DISK_PATH`) in the daemon's
+   no longer strands a generation for the next attempt. The 30GB threshold is
+   derived from a measured refresh against the post-shrink `agent-rust` image
+   — ~2x the image (docker holds it twice while exporting, content blob plus
+   unpacked overlay) on top of the live generation, plus BuildKit cache growth
+   — and it is a **floor** checked once before the build, not a guarantee:
+   free space moves while the build runs, as job-container overlays and the
+   BuildKit cache grow and shrink. A node with a different disk shape overrides
+   it with `WORKER_REFRESH_DISK_FREE_GB_MIN` (and `_DISK_PATH`) in the daemon's
    env at node creation — a self-refresh carries the override forward.
 4. Safe cleanup by hand (**ask first — it deletes**), same pair the script runs:
    `docker image prune -f` (dangling only, **never `-a`**) and

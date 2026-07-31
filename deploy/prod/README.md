@@ -683,6 +683,22 @@ the dependency layer so a SHA-only change never invalidates the deps.
   never collide. `agent-rust` still **bakes** its warm-target seed (#123) into
   the image — it compiles into the cache mount, then `cp -a`s the result into
   the baked `/opt/chug-prebuilt-target`.
+- **The baked seed is pruned in the `cp -a`'s own layer** (#123, #347). A prune
+  in a later `RUN` reclaims nothing — the bytes are already committed — so the
+  `rm -rf debug/incremental` and the `find … -perm /111 … -delete` that drops
+  the linked executables both sit in that same instruction. Measured on the
+  2026-07-31 prod image: an 11GB seed of which 8.9GiB was linked binaries and
+  test harnesses that a fresh clone relinks anyway, leaving ~2.1GB of
+  dependency `.rlib`/`.rmeta` and `build/` — the artifacts the seed exists for.
+  What must never change is the build *profile*: seed and runtime fingerprints
+  have to match or cargo ignores the seed and the image is pure dead weight.
+- **Both downloaded binaries are arch-selected** (#347). `sccache` and
+  `nats-server` pick their tarball from `dpkg --print-architecture`, because the
+  fleet is mixed (gumbo-nuc-0 amd64, dev-air's colima arm64) and a foreign-arch
+  binary runs under qemu rather than failing — an emulated `RUSTC_WRAPPER` on
+  every rustc call, and an emulated `nats-server` under the tier-2 tests
+  `.chug/tasks/ci.sh` reports as executed. An unrecognised arch fails the build.
+  `deploy/prod/agent-rust-seed.test.sh` asserts both statically.
 - **Prune protection.** All three images (`worker`, `agent`, `agent-rust`) carry
   `LABEL chug.managed="true"`. A host-level `docker system prune --all`
   (gumbo-nuc-0 runs one on a daily timer) removes every image not backing a

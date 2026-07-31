@@ -640,13 +640,10 @@ async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
     )
 }
 
-/// When node-local caching is on, point cargo at sccache and sccache at the
-/// bind-mounted node cache. The worker adds this purely from its own config —
-/// the launch message never mentions the cache (spec §3.1). `SCCACHE_DIR` is
-/// [`container::docker::CACHE_MOUNT_PATH`] so the env matches the bind the
-/// backend adds, with no path drift. Degrades gracefully: if `sccache` is
-/// absent from the image, `RUSTC_WRAPPER` points at nothing and cargo still
-/// builds — just uncached — so enabling the cache is never fatal.
+/// Inject the three cache variables spec §3.1 ("Node-local build caching")
+/// names, from the node's own config — the launch message never mentions the
+/// cache. `SCCACHE_DIR` is [`container::docker::CACHE_MOUNT_PATH`] so the env
+/// matches the bind the backend adds, with no path drift.
 fn inject_cache_env(env: &mut HashMap<String, String>, cache_enabled: bool) {
     if cache_enabled {
         env.insert("RUSTC_WRAPPER".into(), "sccache".into());
@@ -654,6 +651,7 @@ fn inject_cache_env(env: &mut HashMap<String, String>, cache_enabled: bool) {
             "SCCACHE_DIR".into(),
             container::docker::CACHE_MOUNT_PATH.into(),
         );
+        env.insert("CARGO_INCREMENTAL".into(), "0".into());
     }
 }
 
@@ -1312,7 +1310,8 @@ mod tests {
     }
 
     /// Caching on ⇒ the launch env gains sccache wiring, with `SCCACHE_DIR`
-    /// pinned to the same mount path the backend binds.
+    /// pinned to the same mount path the backend binds and incremental
+    /// compilation off (sccache does not cache incremental units, deploy #347).
     #[test]
     fn cache_env_injected_when_enabled() {
         let mut env = HashMap::from([("JOB_ID".to_string(), "7".to_string())]);
@@ -1325,6 +1324,7 @@ mod tests {
             env.get("SCCACHE_DIR").map(String::as_str),
             Some(container::docker::CACHE_MOUNT_PATH)
         );
+        assert_eq!(env.get("CARGO_INCREMENTAL").map(String::as_str), Some("0"));
         assert_eq!(env.get("JOB_ID").map(String::as_str), Some("7"));
     }
 
@@ -1366,6 +1366,7 @@ mod tests {
         inject_cache_env(&mut env, false);
         assert!(!env.contains_key("RUSTC_WRAPPER"));
         assert!(!env.contains_key("SCCACHE_DIR"));
+        assert!(!env.contains_key("CARGO_INCREMENTAL"));
         assert_eq!(env.len(), 1);
     }
 

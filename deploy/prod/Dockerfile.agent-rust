@@ -26,22 +26,46 @@ RUN apt-get update \
 # lock-protected cache dir. Installed from the released binary (a `cargo
 # install` here would itself be an uncached cold build). If it is ever absent,
 # RUSTC_WRAPPER=sccache degrades to an uncached build rather than failing.
+#
+# The tarball is selected from `dpkg --print-architecture`, never hardcoded
+# (deploy #347): the fleet is mixed — gumbo-nuc-0 is amd64, dev-air's colima is
+# arm64 — and a foreign-arch sccache does not fail, it runs under qemu as
+# RUSTC_WRAPPER for EVERY rustc call. Emulated it is slower than no cache at
+# all, and its server can hang on start, which is why .chug/tasks/ci.sh grew a
+# liveness probe that disables the wrapper. An unknown arch fails the build
+# loudly rather than baking a binary that cannot run.
 ARG SCCACHE_VERSION=0.8.2
-RUN curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+RUN arch="$(dpkg --print-architecture)" \
+ && case "$arch" in \
+      amd64) sccache_target=x86_64-unknown-linux-musl ;; \
+      arm64) sccache_target=aarch64-unknown-linux-musl ;; \
+      *) echo "unsupported build architecture: $arch" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-${sccache_target}.tar.gz" \
     | tar -xz -C /tmp \
- && install -m 0755 "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache \
- && rm -rf /tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl \
+ && install -m 0755 "/tmp/sccache-v${SCCACHE_VERSION}-${sccache_target}/sccache" /usr/local/bin/sccache \
+ && rm -rf "/tmp/sccache-v${SCCACHE_VERSION}-${sccache_target}" \
  && sccache --version
 
 # nats-server binary for tier-2 (NATS) integration tests. A single ~15 MB
 # static binary; test-utils' harness spawns it as an ephemeral process (no
 # Docker needed) so `.chug/tasks/ci.sh` in this image actually EXECUTES the NATS
 # tier instead of silently skipping it (testing.md).
+#
+# Arch-selected for the same reason as sccache above (deploy #347): this binary
+# IS the tier-2 gate on this image, so a qemu-emulated one means the tier the
+# gate reports as EXECUTED ran under emulation on every arm64 node.
 ARG NATS_VERSION=2.10.22
-RUN curl -fsSL "https://github.com/nats-io/nats-server/releases/download/v${NATS_VERSION}/nats-server-v${NATS_VERSION}-linux-amd64.tar.gz" \
+RUN arch="$(dpkg --print-architecture)" \
+ && case "$arch" in \
+      amd64) nats_target=linux-amd64 ;; \
+      arm64) nats_target=linux-arm64 ;; \
+      *) echo "unsupported build architecture: $arch" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL "https://github.com/nats-io/nats-server/releases/download/v${NATS_VERSION}/nats-server-v${NATS_VERSION}-${nats_target}.tar.gz" \
     | tar -xz -C /tmp \
- && install -m 0755 "/tmp/nats-server-v${NATS_VERSION}-linux-amd64/nats-server" /usr/local/bin/nats-server \
- && rm -rf "/tmp/nats-server-v${NATS_VERSION}-linux-amd64" \
+ && install -m 0755 "/tmp/nats-server-v${NATS_VERSION}-${nats_target}/nats-server" /usr/local/bin/nats-server \
+ && rm -rf "/tmp/nats-server-v${NATS_VERSION}-${nats_target}" \
  && nats-server --version
 
 RUN rustup component add rustfmt clippy \
@@ -101,11 +125,27 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
  && cargo clippy --workspace --all-targets --locked \
  && mkdir -p /opt/chug-prebuilt-target \
  && cp -a /build-target/. /opt/chug-prebuilt-target/ \
+ # Both prunes run in THIS layer, right after the `cp -a`: a later RUN would
+ # reclaim nothing, because the bytes are already committed to this layer.
+ #
  # incremental/ is session-bound rustc state (query caches keyed to this
  # build's mtimes) — a fresh runtime clone can't reuse it, and it's ~2.2G of
  # the baked seed (the 2026-07-23 air ENOSPC). The .rlib/dep reuse the seed
  # exists for lives in deps/ and build/, which stay.
  && rm -rf /opt/chug-prebuilt-target/debug/incremental \
+ # Same reasoning, same measurement, one step further (deploy #347): the LINKED
+ # executables — the workspace binaries and the `--all-targets` / `--no-run`
+ # test harnesses — are 8.9GiB of the 11GB seed, and they are exactly the
+ # artifacts the header above records as NOT reused (workspace crates are
+ # mtime-sensitive and recompile against a fresh clone, so cargo relinks them
+ # regardless). Deleting an output makes cargo rebuild that unit and nothing
+ # else, so the dependency .rlib/.rmeta in deps/ and the build/ script outputs —
+ # the reliable win — are kept, and the build PROFILE is untouched, so seed and
+ # runtime fingerprints still match. `-perm /111` is what distinguishes a linked
+ # binary from an .rlib/.rmeta/.d; proc-macro dylibs (.so) are dependency
+ # artifacts and stay, and build/ is excluded so build-script binaries survive.
+ && find /opt/chug-prebuilt-target/debug -maxdepth 2 -type f -perm /111 \
+      -not -path '*/build/*' -not -name '*.so' -delete \
  && cd / && rm -rf /workspace
 
 # Headless agents run as root inside a disposable container. Kept for the CLI's

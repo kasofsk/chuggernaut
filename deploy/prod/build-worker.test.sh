@@ -119,17 +119,20 @@ echo "ok: success path bakes + verifies the image label and probes daemon health
 # worker-refresh.sh's pre-flight threshold is documented as env-overridable, and
 # node creation is the only place an operator can set it — a knob the daemon
 # never receives is an inert knob. (worker-refresh.test.sh covers the other half:
-# the swap phase carrying it forward so a self-refresh does not drop it.)
+# the swap phase carrying it forward so a self-refresh does not drop it.) The
+# value deliberately differs from worker-refresh.sh's built-in default, so a run
+# path that hardcoded the default instead of forwarding the operator's value
+# still fails.
 : > "$LOG"
 PATH="$BIN:$PATH" \
   WORKER_SSH=worksalot@nuc \
   WORKER_NATS_URL=nats://10.0.0.1:4222 \
   CHUG_WORKER_NODE=nuc \
-  WORKER_REFRESH_DISK_FREE_GB_MIN=30 \
+  WORKER_REFRESH_DISK_FREE_GB_MIN=45 \
   WORKER_REFRESH_DISK_PATH=/var/lib/docker \
   sh "$SUT"
 
-grep_log "WORKER_REFRESH_DISK_FREE_GB_MIN=30"
+grep_log "WORKER_REFRESH_DISK_FREE_GB_MIN=45"
 grep_log "WORKER_REFRESH_DISK_PATH=/var/lib/docker"
 echo "ok: daemon run carries the disk pre-flight knobs when set"
 
