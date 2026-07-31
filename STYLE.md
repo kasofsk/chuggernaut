@@ -78,6 +78,33 @@ that debt is what the pending checks will pin down.
   files that fail it belong to refactor-plan E1.)* *Why:* zero decisions, zero
   diffs about decisions.
 
+- **No comments except doc comments; a doc comment is at most 2 sentences.**
+  *(live: `.chug/tasks/check-comments.sh` runs from `.chug/tasks/ci.sh`,
+  unconditionally and before the Rust early-exit, over the Rust and TypeScript
+  sources in the diff.)* `//`, `/* */` and every trailing-on-a-code-line form
+  are rejected; `///`, `//!`, `/** */`, `/*! */` are the only prose a source
+  file may carry, and each block stays inside two sentences. Longer than that
+  is a doc: write it under `docs/` (or in the module's `MODULES.md` row) and
+  leave a pointer. *Why:* comments are scattered by construction — nobody
+  reviews them as a body of knowledge, they drift out of step with the code
+  they annotate, and an agent reading the tree cannot tell a current one from a
+  stale one. Docs are intentional and organized: one place to look, one place
+  to update, and a job type that maintains them. Every comment this rule
+  rejects is a sentence that belongs in a doc.
+
+  Two carve-outs, both narrow. **Inner doc comments** (`//!`, `/*! */`, and a
+  TypeScript file's first doc block) are exempt from the sentence cap: the
+  module header — accepts / emits / guarantees / spec § — is the in-tree doc
+  surface NORTH-STAR §4 asks for, registered in `MODULES.md` and structurally
+  unable to scatter. **Machine-read directives** are not prose and are allowed:
+  `jscpd:ignore-start`/`-end`, `SAFETY:`, and the eslint/ts/prettier pragmas —
+  put the justification on the directive line itself.
+
+  Like the `unwrap_used` denies, this is a **ratchet, not a cleanup**: the gate
+  judges only the lines a diff *adds*, so the tree's existing comments are
+  pre-existing debt while new ones cannot land. A doc block is re-judged
+  whenever the diff adds a line inside it — edit a doc comment and you trim it.
+
 - **No duplicated code: zero clones.** *(live: `.chug/tasks/check-duplication.sh`
   runs `jscpd@5.0.5` — pinned exactly — over the whole repo from `.chug/tasks/ci.sh`,
   unconditionally and before the Rust early-exit, at `threshold: 0`. Config:
@@ -85,8 +112,9 @@ that debt is what the pending checks will pin down.
   generated trees excluded — ticket A5.)* Any clone fails the gate; extract the
   shared body into a helper named after its caller (Tier 2 rule 4) rather than
   raise the bar. A deliberate exception is a `jscpd:ignore-start` /
-  `jscpd:ignore-end` bracket **with a comment saying why** — never a threshold
-  change. *Why:* duplicated logic drifts apart, and the copy that didn't get
+  `jscpd:ignore-end` bracket **whose directive line says why** (the comment
+  rule above allows the directive, not a paragraph beside it) — never a
+  threshold change. *Why:* duplicated logic drifts apart, and the copy that didn't get
   the fix is where the next bug lives. Agent-written code duplicates far more
   readily than human-written code — an agent that cannot find the existing
   helper writes a second one — so a threshold set anywhere above zero would
@@ -131,12 +159,20 @@ verify it in seconds and must name it when rejecting.
    the call tree reads from the names alone. *Why:* agent-written code is
    navigated by grep; predictable names are the index.
 
-5. **Commit messages carry the why; comments are prose.** The commit message
-   explains why the change is shaped the way it is — PR descriptions and chat
-   transcripts don't persist, `git blame` does. Comments state constraints
-   the code cannot express ("why"), written as sentences; never narration of
-   the next line or where a change came from. *Why:* six months out, the
-   rationale is the only part that can't be re-derived from the diff.
+5. **Commit messages carry the why; docs carry the knowledge.** The commit
+   message explains why the change is shaped the way it is — PR descriptions
+   and chat transcripts don't persist, `git blame` does. A constraint the code
+   cannot express goes in a doc comment (two sentences, Tier 1) or the doc that
+   doc comment points at — never in a comment, and never as narration of the
+   next line. *Why:* six months out, the rationale is the only part that can't
+   be re-derived from the diff, and the knowledge is only findable if it lives
+   somewhere a reader thinks to look.
+
+   The other half of the same rule is the **doc-update task**
+   (`.chug/tasks/docs-update.md`, referenced from the `code` and `web` work
+   prompts): a change updates the docs it makes stale, in the same commit.
+   Its evaluation-phase counterpart (`.chug/tasks/review-docs-updated.md`) is
+   wired but deliberately inert until the project decides how docs are managed.
 
 6. **New behavior lands with a regression test at the lowest tier that can
    express it** (`testing.md`); the correctness core (`dispatcher::state`,

@@ -463,6 +463,20 @@ duplication_gate() {
 	.chug/tasks/check-duplication.sh
 }
 
+# --- comment lint (STYLE.md Tier 1) ------------------------------------------
+# Delegates to .chug/tasks/check-comments.sh: no comments in Rust/TypeScript
+# sources except doc comments, and a doc comment is at most 2 sentences.
+# Pure shell + awk, and a RATCHET over the lines the diff adds (the script
+# computes its own change set the same way this file does), so it runs here —
+# before the Rust early-exit — and gates a web-only diff too.
+comments_gate() {
+	[ -x .chug/tasks/check-comments.sh ] || {
+		echo "!!! ci: .chug/tasks/check-comments.sh is missing or not executable"
+		exit 1
+	}
+	.chug/tasks/check-comments.sh
+}
+
 # Diff-aware gate: run each stage only when the change actually touches paths
 # that stage owns, so docs/prompt/job-type changes still pass in seconds.
 #   Rust stage: crates/**  Cargo.toml  Cargo.lock  rust-toolchain*  .chug/tasks/ci.sh
@@ -508,6 +522,9 @@ modules_registry_gate
 # needs no diff scoping. Its own exit code is the gate (1 = clones, 2 = the check
 # could not run — neither is a pass).
 duplication_gate
+# Comment lint, same placement and for the same reason: a web-only diff never
+# reaches the cargo section, and TSX is as able to carry banned prose as Rust.
+comments_gate
 if [ "$diff_ok" -eq 1 ]; then
 	rust_changed=0
 	web_changed=0

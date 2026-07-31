@@ -22,6 +22,13 @@ eval:
     type: agent
     prompt: .chug/tasks/review-web.md
     stage: 0
+  # Same inert doc-update placeholder as .chug/jobs/code.yaml — a web change
+  # stales web/CLAUDE.md and the operator-facing wiki pages exactly as a Rust
+  # change stales spec.md.
+  - name: review-docs-updated
+    type: agent
+    prompt: .chug/tasks/review-docs-updated.md
+    stage: 0
 # Ship the merged result automatically: once the squash lands on main, the
 # wrap-up command builds web/dist at the merged HEAD and swaps it into the
 # served UI dir (same script as the standalone .chug/jobs/web-publish.yaml). Runs in

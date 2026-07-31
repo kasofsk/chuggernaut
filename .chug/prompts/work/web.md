@@ -18,6 +18,11 @@ Ground rules:
    especially the **mobile rule**: any layout/spacing/width change must be
    verified at a ~360–390px viewport, not reasoned about in your head.
 3. Match the existing component and CSS style; keep the change minimal.
+   **Write no comments.** Source carries doc comments only (`/** … */`), and a
+   doc comment is at most two sentences; `.chug/tasks/check-comments.sh` fails
+   CI on any comment the diff adds. What a comment would have said belongs in a
+   doc — work `.chug/tasks/docs-update.md` before you submit, and name the docs
+   you updated in your summary — or, if it is rationale, in the commit message.
 4. Before submitting, prove it builds: `cd web && npm ci && npm run build`
    (that is `tsc -b && vite build` — type errors fail the build). A change
    that does not build is not done. Run the build in the **foreground and

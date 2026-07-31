@@ -75,7 +75,24 @@ Two consequences worth knowing:
   copied. Keep such helpers in the same test module, next to the fixtures.
 - When a duplication genuinely belongs (a golden fixture, two tests that must
   stay independently readable), bracket it with `jscpd:ignore-start` /
-  `jscpd:ignore-end` and a comment saying why. Never raise the threshold.
+  `jscpd:ignore-end`, putting the reason on the directive line itself (the
+  comment gate below allows the directive, not a paragraph beside it). Never
+  raise the threshold.
+
+## Comments: tests are in scope
+
+The comment lint (`.chug/tasks/check-comments.sh`, STYLE.md Tier 1) covers every
+Rust and TypeScript source in the diff, `tests/` included — no non-doc comment on
+a line the change adds, and doc comments capped at two sentences. A test that
+needs a paragraph to explain what it pins is telling you the *test name* is
+wrong: `escalates_when_eval_retries_are_exhausted` carries what a comment above
+it would have said, and it carries it into the failure output.
+
+The gate itself has a shell test rather than a Rust one — `.chug/tasks/check-comments.test.sh`,
+run directly, no NATS or cargo — alongside `check-duplication.test.sh` and
+`doc-lint.test.sh`. Shell gates are tested in shell: the tier-1/2/3 ladder above
+is about the platform's behavior, and a gate's own behavior is not reachable from
+a cargo test.
 
 ## Conventions
 

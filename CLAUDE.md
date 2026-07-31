@@ -52,12 +52,21 @@ the absence of a workflow file.
   stages: a diff touching `web/` runs `npm ci && npm run build` (tsc + vite), a
   diff touching Rust paths runs the cargo gate, and a doc/config-only diff runs
   neither and gates in seconds.
-- `.chug/tasks/ci.sh` also runs three pure-shell gates **before** those diff-aware
+- `.chug/tasks/ci.sh` also runs four pure-shell gates **before** those diff-aware
   stages, so a web-only or docs-only change is still gated: the `.chug/jobs/*.yaml`
   version-skew check against the deployed dispatcher (spec §14), the
-  `MODULES.md` registry check, and `.chug/tasks/check-duplication.sh` — copy-paste
+  `MODULES.md` registry check, `.chug/tasks/check-duplication.sh` — copy-paste
   detection via a pinned `jscpd@5.0.5` at `threshold: 0` (STYLE.md Tier 1;
-  ~30ms for the whole repo, so it is unconditional). Any clone fails the gate.
+  ~30ms for the whole repo, so it is unconditional) — and
+  `.chug/tasks/check-comments.sh`, the comment lint. Any clone fails the gate.
+- **Comments are banned; docs are not.** `.chug/tasks/check-comments.sh` rejects
+  every non-doc comment a diff *adds* to a Rust or TypeScript source and caps
+  doc comments at two sentences (module headers exempt) — STYLE.md Tier 1. It is
+  a ratchet over added lines, so the tree's existing comments are pre-existing
+  debt, not a wall. The knowledge a comment would have carried goes in a doc and
+  the rationale in the commit message; `.chug/tasks/docs-update.md` is the work
+  task that keeps the docs in step, and `.chug/tasks/review-docs-updated.md` is
+  its (currently inert) evaluator.
 - Per-type **stage-0 agent reviewers** run first (`.chug/tasks/review-*.md`), so the
   slow gate is spent only on changes the reviewer accepts; `docs`/`design`
   jobs additionally gate on `.chug/tasks/doc-lint.sh` at stage 1.

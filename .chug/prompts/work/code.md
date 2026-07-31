@@ -18,6 +18,11 @@ Then:
    structure of this repository. New behavior lands with a regression test at
    the lowest tier that can express it.
 2. Keep the change minimal and focused — do not refactor unrelated code.
+   **Write no comments.** Source carries doc comments only (`///`, `//!`), and a
+   doc comment is at most two sentences; `.chug/tasks/check-comments.sh` fails
+   CI on any comment the diff adds. What a comment would have said belongs in a
+   doc — work `.chug/tasks/docs-update.md` before you submit, and name the docs
+   you updated in your summary — or, if it is rationale, in the commit message.
 3. Before submitting, verify your change — but run **only what it touches**, not
    the whole workspace. CI runs the full suite (`.chug/tasks/ci.sh`:
    `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D

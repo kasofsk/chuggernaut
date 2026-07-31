@@ -12,6 +12,11 @@ those docs disagree, the docs win — read them before large changes.
   domain code (`state.rs`, deciders, the domain crate) has **zero `.await`**.
 - Functions ≤ 70 lines. No `.unwrap()`/`.expect()` outside tests.
 - `rustfmt`/`prettier` defaults; `cargo clippy -D warnings` clean.
+- **No comments except doc comments, and a doc comment is ≤ 2 sentences**
+  (`.chug/tasks/check-comments.sh`, a ratchet over the lines a diff adds).
+  Module headers (`//!`, `/*! */`, a TS file's first block) are exempt from
+  the cap. Knowledge goes in a doc, rationale in the commit message; update
+  the docs your change stales — `.chug/tasks/docs-update.md`.
 
 ## Mechanical rules (Tier 2)
 
@@ -27,8 +32,9 @@ those docs disagree, the docs win — read them before large changes.
 4. **Naming:** units/qualifiers as suffixes in descending significance
    (`timeout_secs_max`); no abbreviations; helpers prefixed with their
    caller's name so the call tree reads from names alone.
-5. **Commit messages carry the why; comments are prose** stating constraints
-   the code can't express — never narration of the next line.
+5. **Commit messages carry the why; docs carry the knowledge.** A constraint
+   the code can't express goes in a doc comment (≤ 2 sentences) or the doc it
+   points at — never a comment, never narration of the next line.
 6. **New behavior lands with a regression test at the lowest tier that can
    express it**; `dispatcher::state` and release validation stay at
    near-total branch coverage.
