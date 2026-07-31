@@ -15,9 +15,6 @@ import { StateBadge } from '../components/StateBadge'
 import { Skeleton } from '../components/Skeleton'
 import { NodeCapacity } from '../components/NodeCapacity'
 
-// Poll cadence for the occupancy snapshot. The top-level cluster view has no
-// per-project SSE to ride, so it polls; the running counters tick every second
-// regardless (below).
 const POLL_MS = 2500
 
 /**
@@ -34,9 +31,6 @@ const POLL_MS = 2500
  */
 export function ClusterPage() {
   const navigate = useNavigate()
-  // Bumped after a capacity command so convergence shows up immediately rather
-  // than on the next poll — the 202 means "recorded and converging", so the
-  // interesting snapshot is the next one, not the reply.
   const [tick, setTick] = useState(0)
   const { fleet, unavailable, loaded } = useFleet({ tick, pollMs: POLL_MS })
   const [cfg, setCfg] = useState<PlatformConfig | null>(null)
@@ -58,26 +52,12 @@ export function ClusterPage() {
     )
   }, [navigate])
 
-  // The api node's own build SHA, read from the (unauthenticated) health probe
-  // so it is independent of the dispatcher's version. A 503 leaves it null and
-  // the node degrades to its role label — never an error on the graph.
   useEffect(() => {
     api.health().then(setHealth, () => setHealth(null))
   }, [])
 
-  // Initial load only: skeleton until both the occupancy snapshot and the
-  // config roster have answered once. Poll refreshes never re-skeleton.
   const loading = !loaded || !cfgLoaded
 
-  // The clock behind every elapsed-time readout on this page. It ticks once a
-  // second while slots are busy so the running-duration counters advance, and
-  // keeps ticking coarsely when nothing runs — an idle fleet is exactly the shape
-  // a broken capacity path leaves behind, so that is when the staleness window
-  // (`capacity.ts`) most needs to keep moving. Gating the interval on occupancy
-  // instead pinned `now` at mount: no node could ever age into `stale`, and once
-  // a fresh `capacity_observed_at` overtook the frozen `now` the clamped
-  // difference rendered as "reported 0s ago" — asserting freshness precisely
-  // where there was none.
   const [now, setNow] = useState(() => Date.now())
   const anyRunning = (fleet?.nodes ?? []).some((n) => n.occupied > 0)
   useEffect(() => {
@@ -85,9 +65,6 @@ export function ClusterPage() {
     return () => clearInterval(id)
   }, [anyRunning])
 
-  // Worker nodes: the live occupancy feed is the source of truth; before the
-  // dispatcher has published anything, fall back to the static configured roster
-  // rendered idle so the graph still draws.
   const workers: FleetNode[] = useMemo(() => {
     if (fleet && fleet.nodes.length > 0) return fleet.nodes
     const roster = cfg?.dispatcher?.nodes ?? []
@@ -97,25 +74,17 @@ export function ClusterPage() {
       occupied: 0,
       available: n.available,
       version: n.version ?? null,
-      // Provenance rides along from the static roster too, so a seed-sourced node
-      // reads as one before the dispatcher has published an occupancy snapshot.
       capacity_source: n.capacity_source ?? null,
       capacity_observed_at: n.capacity_observed_at ?? null,
       running: [],
     }))
   }, [fleet, cfg])
 
-  // Capacity is settable only on worker-endpoint nodes: `DOCKER_NODES` still owns
-  // a `unix://`/`tcp://` node's slot count and the command answers 409 for one
-  // (design #293 §7). A node absent from the static roster joined by announce,
-  // which only a worker does.
   const isWorkerEndpoint = useMemo(() => {
     const endpoints = new Map((cfg?.dispatcher?.nodes ?? []).map((n) => [n.name, n.endpoint]))
     return (name: string) => (endpoints.get(name) ?? 'worker') === 'worker'
   }, [cfg])
 
-  // Version drift: if the workers report more than one distinct build, flag the
-  // ones off the most common version with a subtle hint.
   const commonVersion = useMemo(() => {
     const counts = new Map<string, number>()
     for (const n of workers) if (n.version) counts.set(n.version, (counts.get(n.version) ?? 0) + 1)
@@ -125,23 +94,10 @@ export function ClusterPage() {
     return counts.size > 1 ? best : null
   }, [workers])
 
-  // Deploy freshness: the deployed platform SHA the fleet is measured against.
-  // A node drifts if it's behind that SHA (stale vs main) OR simply disagrees
-  // with its peers — a uniformly-stale fleet (every node behind the deployed
-  // platform) is invisible to peer comparison alone, which the audit flags.
   const deployedSha = cfg?.dispatcher?.dispatcher_sha ?? null
-  // The three platform deployables' baked build SHAs, each surfaced separately
-  // so the graph shows what commit every component actually runs: the dispatcher
-  // from its config snapshot, the api from its health probe, the web bundle from
-  // its own build-time define. Absent (local/dev, or an unreached health probe)
-  // renders as the role label rather than an error.
   const apiSha = health?.api_sha ?? null
   const webSha = __CHUG_WEB_SHA__ || null
   const commitsBehind = cfg?.dispatcher?.commits_behind ?? null
-  // A component is skewed when its baked SHA disagrees with the deployed
-  // dispatcher SHA (the baseline) — an api/web that restarted or republished
-  // onto a different commit. Unknown either side ⇒ not flagged (never a false
-  // alarm), consistent with the fleet-freshness rule.
   const shaSkew = (sha: string | null) =>
     !!sha && !!deployedSha && shortSha(sha) !== shortSha(deployedSha)
   const isDrift = (n: FleetNode) =>
@@ -286,10 +242,6 @@ export function ClusterPage() {
   )
 }
 
-// prod-vs-main drift: deployed SHA, main tip, and commits-behind. Green when in
-// sync, amber when prod trails main, neutral when the dispatcher hasn't reported
-// the CD fields (a local/dev build, an older snapshot, or SELF_REPO unset).
-// Platform-scoped, so it lives on Cluster alongside the fleet graph.
 function DriftBanner({
   d,
 }: {
@@ -331,10 +283,6 @@ function DriftBanner({
   )
 }
 
-// One worker's freshness: fresh (green) when its build carries the deployed SHA,
-// stale (red) when it demonstrably does not, unknown (grey) when either side is
-// unreported. Any refresh outcome (a failed or in-flight self-refresh) rides
-// alongside so a wedged refresh is visible, not just a stale version.
 function FreshnessRow({
   node,
   deployedSha,
@@ -362,9 +310,6 @@ function FreshnessRow({
   )
 }
 
-// The node's last self-refresh outcome, when it carries signal: a failed refresh
-// (red, naming the stage) or one still in flight. A clean `ok` is left implicit —
-// the version chip already shows the node landed the build.
 function RefreshChip({ outcome }: { outcome?: RefreshOutcome | null }) {
   if (!outcome) return null
   const r = outcome.result
@@ -385,10 +330,6 @@ function Edge() {
   return <div className="cl-edge" aria-hidden="true" />
 }
 
-// A platform tier node (api, dispatcher, web). Shows the deployable's short
-// build SHA when known; a skewed/behind component is marked amber with a
-// tooltip, reusing the drift-banner's presentation language (#188) rather than
-// duplicating its page.
 function Node({
   role,
   name,
@@ -445,9 +386,6 @@ function WorkerNode({
 }) {
   const total = node.slots ?? node.running.length
   const cells = Array.from({ length: Math.max(total, node.running.length) }, (_, i) => node.running[i] ?? null)
-  // Running above the cap is a drain in progress, not a rendering bug: lowering
-  // a cap never kills a container (design #293 §5), so the node finishes what it
-  // holds and takes nothing new. The cells past the cap are marked as such.
   const overCap = node.slots != null && node.occupied > node.slots
   return (
     <div className={`cl-node cl-worker${node.available ? '' : ' cl-dim cl-out'}${drift ? ' cl-drift' : ''}`}>

@@ -73,9 +73,6 @@ pub struct EscalationEvent {
 pub fn decide(view: &EscalationView<'_>, event: EscalationEvent) -> (Vec<Transition>, Vec<Effect>) {
     let job = view.job;
 
-    // Negative space (STYLE.md Tier 2 #2): terminal states are absorbing
-    // (§2.1) — deciding an escalation for a Done/Revoked job is a caller bug,
-    // and `assert_transition` would reject the transition anyway.
     debug_assert!(
         !job.state.is_terminal(),
         "escalation decided for terminal job #{} in {:?}",
@@ -83,8 +80,6 @@ pub fn decide(view: &EscalationView<'_>, event: EscalationEvent) -> (Vec<Transit
         job.state,
     );
 
-    // `Job::project` is always "owner/name" (§1.1); the publish subject needs
-    // the halves.
     let (owner, project) = job
         .project
         .split_once('/')
@@ -103,7 +98,6 @@ pub fn decide(view: &EscalationView<'_>, event: EscalationEvent) -> (Vec<Transit
         event.detail.clone(),
         view.now,
     );
-    // Postconditions on the task shape the resolution flow depends on.
     assert_eq!(task.phase, TaskPhase::Escalation, "escalation task phase");
     assert_eq!(
         task.state,
@@ -111,8 +105,6 @@ pub fn decide(view: &EscalationView<'_>, event: EscalationEvent) -> (Vec<Transit
         "escalation task starts Pending"
     );
 
-    // Record WHY on the job itself (§1.2), so operators see the reason in the
-    // header instead of digging through dispatcher logs (#69).
     let mut stamped = job.clone();
     stamped.escalation = Some(types::Escalation {
         reason: event.reason.clone(),
@@ -162,7 +154,6 @@ pub fn escalation_task(
         cycle,
         kind: TaskKind::Human { prompt },
         state: TaskState::Pending,
-        // Human task: no agent, no transcript.
         session_id: None,
         attempt: 1,
         evaluator: None,

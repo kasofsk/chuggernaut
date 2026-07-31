@@ -55,8 +55,6 @@ async fn setup(server_url: &str) -> (NatsStore, Arc<FakeBackend>, InvariantSink)
         .await
         .unwrap();
     store.ensure_topology().await.unwrap();
-    // A real (empty) repo just so Core::new has somewhere to load from; the
-    // output handler itself only touches the tasks KV and the backend.
     let repo = TempRepo::create("acme", "api").await;
     let repos_root = repo
         .bare_path()
@@ -109,7 +107,6 @@ async fn output_tails_running_serves_fallback_and_404s() {
     backend.put_logs(b"compiling chuggernaut v0.1.0\ncompiling store\n".to_vec());
     let tasks = store.tasks().await.unwrap();
 
-    // A running task with a live container → its tail, running: true, cursor > 0.
     tasks.put(&running_task(1, Some("fake/c1"))).await.unwrap();
     let v = output(&store, 1, 0).await;
     assert_eq!(v["running"], true);
@@ -119,30 +116,24 @@ async fn output_tails_running_serves_fallback_and_404s() {
     );
     let offset = v["offset"].as_u64().unwrap();
     assert!(offset > 0);
-    // Polling from the cursor: caught up, empty data, same offset (monotonic).
     let v = output(&store, 1, offset).await;
     assert_eq!(v["running"], true);
     assert_eq!(v["data"], "");
     assert_eq!(v["offset"].as_u64().unwrap(), offset);
 
-    // A finished task → running: false (the api's cue to serve the artifact).
     let mut done = running_task(2, Some("fake/c2"));
     done.state = TaskState::Done;
     tasks.put(&done).await.unwrap();
     let v = output(&store, 2, 0).await;
     assert_eq!(v["running"], false);
 
-    // A running task with no container yet → 404.
     tasks.put(&running_task(3, None)).await.unwrap();
     let v = output(&store, 3, 0).await;
     assert_eq!(v["error"]["status"], 404);
 
-    // An unknown task → 404.
     let v = output(&store, 999, 0).await;
     assert_eq!(v["error"]["status"], 404);
 
-    // Every request above reached the actor over NATS rather than through a `Core`
-    // call, so drain its log here — after the last one has been answered.
     assert_invariants_of(&sink);
 }
 
@@ -155,15 +146,11 @@ async fn wedged_node_errors_without_blocking_other_requests() {
     let tasks = store.tasks().await.unwrap();
     tasks.put(&running_task(1, Some("fake/c1"))).await.unwrap();
 
-    // A wedged node: the tail stalls well past a normal request. Fire it in the
-    // background and leave it hanging.
     backend.stall_logs_tail(Duration::from_secs(3));
     let bg_store = store.clone();
     let stalled = tokio::spawn(async move { output(&bg_store, 1, 0).await });
-    tokio::time::sleep(Duration::from_millis(100)).await; // let it start & stall
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Another leg of req.tasks.> must answer promptly — the stalled tail is
-    // spawned off the subscription loop, so it never wedges list/resolve.
     let start = Instant::now();
     let list = store
         .request_timeout(
@@ -182,7 +169,6 @@ async fn wedged_node_errors_without_blocking_other_requests() {
     assert!(listed.is_array(), "expected a task list: {listed}");
     stalled.abort();
 
-    // An unreachable node surfaces an error envelope, not a hang.
     backend.stall_logs_tail(Duration::ZERO);
     backend.fail_logs_tail("worker node unreachable");
     let v = output(&store, 1, 0).await;

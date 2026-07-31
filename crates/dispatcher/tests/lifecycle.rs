@@ -106,7 +106,6 @@ async fn setup() -> Option<(
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     seed_repo(&repo).await;
-    // Declared secret must exist for release validation.
     store
         .raw_bucket(store::buckets::SECRETS)
         .await
@@ -152,7 +151,6 @@ async fn release_blocking_unblocking_and_events() {
     assert_eq!(build.state, JobState::Frozen);
     assert_invariants(&core);
 
-    // No deps → Ready, base_ref pinned, queued. Deps not Done → Blocked.
     assert_eq!(
         core.release_job("acme", "api", build.id).await.unwrap(),
         JobState::Ready
@@ -173,22 +171,19 @@ async fn release_blocking_unblocking_and_events() {
         .clone();
     assert!(pinned.is_some());
 
-    // Double-release is an invalid transition.
     assert!(matches!(
         core.release_job("acme", "api", build.id).await,
         Err(CoreError::Transition(_))
     ));
     assert_invariants(&core);
 
-    // Simulate build completing (execution slice lands later): Done in KV,
-    // then a fresh Core reload — the restart path — and dependent unblocking.
     let jobs = store.jobs().await.unwrap();
     let mut done = jobs.get("acme", "api", build.id).await.unwrap().unwrap();
     done.state = JobState::Done;
     jobs.put(&done).await.unwrap();
 
     let mut core = new_core(&store, core_repos_root(&_repo)).await;
-    assert_invariants(&core); // restart reconciliation rebuilds a clean state
+    assert_invariants(&core);
     core.on_job_done("acme", "api", build.id).await.unwrap();
     assert_invariants(&core);
 
@@ -198,7 +193,6 @@ async fn release_blocking_unblocking_and_events() {
     assert!(dep.ready_at.is_some());
     assert_eq!(core.queue.len(), 1);
 
-    // The event stream carries the §6.3 trail.
     let events = collect_event_types(&store).await;
     for expected in ["job-created", "job-released", "job-unblocked"] {
         assert!(
@@ -214,7 +208,6 @@ async fn release_validation_rejects_bad_wiring_and_missing_secret() {
         return;
     };
 
-    // Unknown upstream.
     let bad = core.create_job(req("deploy", &[999])).await.unwrap();
     assert_invariants(&core);
     let Err(CoreError::Validation(errs)) = core.release_job("acme", "api", bad.id).await else {
@@ -223,10 +216,8 @@ async fn release_validation_rejects_bad_wiring_and_missing_secret() {
     assert_invariants(&core);
     let fields: Vec<&str> = errs.iter().map(|e| e.field.as_str()).collect();
     assert!(fields.iter().all(|f| f == &"deps"), "{errs:?}");
-    // depends on unknown job #999
     assert_eq!(errs.len(), 1, "{errs:?}");
 
-    // Missing secret fails static validation.
     store
         .raw_bucket(store::buckets::SECRETS)
         .await
@@ -261,7 +252,6 @@ async fn unblock_revalidation_failure_stalls_with_human_task() {
     core.release_job("acme", "api", deploy.id).await.unwrap();
     assert_invariants(&core);
 
-    // The deploy job type breaks on main between release and unblock.
     let clone = repo.clone_branch("main").await;
     clone
         .commit_file("jobs/deploy.yaml", b"not: [valid", "break deploy type")
@@ -277,8 +267,6 @@ async fn unblock_revalidation_failure_stalls_with_human_task() {
     core.on_job_done("acme", "api", build.id).await.unwrap();
     assert_invariants(&core);
 
-    // Pre-work escalation (§1.2): no work task ran, so the job Stalls rather
-    // than Escalates — resolvable Retry/Revoke only.
     let dep = jobs.get("acme", "api", deploy.id).await.unwrap().unwrap();
     assert_eq!(dep.state, JobState::Stalled);
     let tasks = store
@@ -300,8 +288,10 @@ async fn unblock_revalidation_failure_stalls_with_human_task() {
 /// Ready-transition re-validation — reaching Ready once the type parses again.
 /// The dedicated state is what makes Resolve→Evaluation impossible here.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
     let Some((_server, store, repo, mut core)) = setup().await else {
         return;
@@ -316,7 +306,6 @@ async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
     core.release_job("acme", "api", deploy.id).await.unwrap();
     assert_invariants(&core);
 
-    // Break the deploy type on main between release and unblock.
     let clone = repo.clone_branch("main").await;
     clone
         .commit_file("jobs/deploy.yaml", b"not: [valid", "break deploy type")
@@ -328,7 +317,6 @@ async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
     done.state = JobState::Done;
     jobs.put(&done).await.unwrap();
 
-    // A fresh core observes the dep complete and Stalls deploy on re-validation.
     let mut core2 = new_core(&store, core_repos_root(&repo)).await;
     core2.on_job_done("acme", "api", build.id).await.unwrap();
     assert_invariants(&core2);
@@ -351,8 +339,6 @@ async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
 
     let (handle, sink) = common::spawn_checked(core2);
 
-    // Resolve is rejected and leaves the escalation task Pending (the reject
-    // happens before the task is marked done — fix #2's ordering).
     let err = handle
         .resolve_task(
             "acme",
@@ -388,7 +374,6 @@ async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
         "rejected Resolve must not consume the task"
     );
 
-    // Fix the type on main; Retry re-validates and clears the stall.
     let clone = repo.clone_branch("main").await;
     clone
         .commit_file(
@@ -415,8 +400,6 @@ async fn stalled_job_rejects_resolve_and_retry_revalidates_to_ready() {
         .unwrap();
     common::assert_invariants_of(&sink);
 
-    // Watch the deploy job until it leaves Stalled; the forward-progress guard
-    // fires inside the check (#206 principle 3).
     test_utils::wait::job_where(
         &store,
         "acme",
@@ -458,10 +441,6 @@ async fn version_skewed_config_parks_stalled_not_escalated_at_launch() {
         return;
     };
 
-    // Land a config that outranks this binary's schema epoch, then pin a Ready
-    // job to it directly — release itself would reject the skew up front, so we
-    // simulate a config that passed validation under a newer dispatcher and is
-    // now reached by an older one at launch (the N-1 skew window, spec §14.1).
     let clone = repo.clone_branch("main").await;
     clone
         .commit_file(
@@ -481,8 +460,6 @@ async fn version_skewed_config_parks_stalled_not_escalated_at_launch() {
     ready.base_ref = Some(skewed_sha);
     jobs.put(&ready).await.unwrap();
 
-    // A fresh core enqueues the Ready job at construction; spawning drains the
-    // queue, launching it through `enter_work`.
     let core2 = new_core(&store, core_repos_root(&repo)).await;
     let (_handle, sink) = common::spawn_checked(core2);
 
@@ -496,11 +473,8 @@ async fn version_skewed_config_parks_stalled_not_escalated_at_launch() {
     )
     .await;
 
-    // The park happens inside the actor, driven by the queue drain rather than by
-    // a `Core` call the test makes: the sink caught every message it took.
     common::assert_invariants_of(&sink);
 
-    // Parked pre-Work (Stalled), never Escalated — no per-launch storm.
     assert_eq!(
         rec.state,
         JobState::Stalled,
@@ -509,7 +483,6 @@ async fn version_skewed_config_parks_stalled_not_escalated_at_launch() {
     let esc = rec.escalation.expect("stall records why on the job");
     assert_eq!(esc.reason, "config_schema_skew");
 
-    // Exactly one park: a single Human escalation task, not one per launch.
     let tasks = store
         .tasks()
         .await
@@ -539,27 +512,24 @@ async fn revoke_cascades_through_pending_dependents() {
     assert_invariants(&core);
     let c = core.create_job(req("deploy", &[b.id])).await.unwrap();
     assert_invariants(&core);
-    core.release_job("acme", "api", a.id).await.unwrap(); // Ready + queued
+    core.release_job("acme", "api", a.id).await.unwrap();
     assert_invariants(&core);
 
     let cascaded = core.revoke_job("acme", "api", a.id).await.unwrap();
     assert_invariants(&core);
     assert_eq!(cascaded, vec![b.id, c.id]);
-    assert_invariants(&core); // cascade must leave no terminal job in the queue
+    assert_invariants(&core);
     assert!(core.queue.is_empty());
 
     let jobs = store.jobs().await.unwrap();
     for seq in [a.id, b.id, c.id] {
         let rec = jobs.get("acme", "api", seq).await.unwrap().unwrap();
         assert_eq!(rec.state, JobState::Revoked);
-        // Every terminal transition — including a cascaded revoke — stamps the
-        // completion moment so the jobs list can show it without a lookup.
         assert!(
             rec.completed_at.is_some(),
             "revoked job #{seq} must carry completed_at"
         );
     }
-    // Terminal: revoking again is rejected.
     assert!(matches!(
         core.revoke_job("acme", "api", a.id).await,
         Err(CoreError::Transition(_))

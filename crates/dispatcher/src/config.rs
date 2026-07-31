@@ -89,10 +89,6 @@ impl DispatcherConfig {
             None => PlacementPolicy::default(),
         };
 
-        // `DOCKER_NODES` present but empty is an explicit *zero-seed* dynamic
-        // fleet (spec §3.1 dynamic registration): the dispatcher boots with no
-        // capacity and gains it when workers announce. Unset (the `Err` arm) keeps
-        // the single local-socket default. A non-empty value parses as before.
         let docker_nodes = match std::env::var("DOCKER_NODES") {
             Ok(spec) if spec.trim().is_empty() => Vec::new(),
             Ok(spec) => parse_docker_nodes(&spec)?,
@@ -200,9 +196,7 @@ impl DispatcherConfig {
             triage_image: self.triage_image.clone(),
             nats_account_seed: self.nats_account_seed().await?,
             hook_bin: self.hook_bin.clone(),
-            // Production uses the default 30m backstop (spec §3.5).
             launch_queue_max_wait: None,
-            // Production uses the default 60s heartbeat timeout (spec §3.1).
             worker_heartbeat_timeout: None,
         })
     }
@@ -239,15 +233,7 @@ impl DispatcherConfig {
                     types::WorkerNode {
                         name: n.name.clone(),
                         endpoint: n.endpoint.clone(),
-                        // The number the fleet actually places on: observed if
-                        // the boot probe pulled capacity from the node, the
-                        // `DOCKER_NODES` seed as the fallback until then (design
-                        // #293 §7). A docker-endpoint node reports no live slots,
-                        // so its seed stands outright — and `capacity_source`
-                        // below always describes *this* number, never the other.
                         slots: status.and_then(|s| s.slots).unwrap_or(n.slots),
-                        // Absent from the probe ⇒ assume up (same node set, so
-                        // this is belt-and-suspenders).
                         available: status.map(|s| s.available).unwrap_or(true),
                         version: status.and_then(|s| s.version.clone()),
                         refresh_outcome: status.and_then(|s| s.refresh_outcome.clone()),
@@ -271,7 +257,6 @@ impl DispatcherConfig {
             hook_bin: self.hook_bin.as_ref().map(|p| p.display().to_string()),
             secrets_encryption,
             dispatcher_sha: deployed_sha,
-            // Filled by the scan tick from the self-repo, if configured.
             main_tip_sha: None,
             commits_behind: None,
             placement_policy: self.placement_policy.as_str().to_string(),
@@ -289,8 +274,6 @@ fn parse_docker_nodes(spec: &str) -> Result<Vec<DockerNodeConfig>> {
                     "DOCKER_NODES entry {entry:?}: expected name|endpoint|slots"
                 )));
             };
-            // Node names ride in container ids and (for worker nodes) NATS
-            // subjects — keep them to a safe token either way.
             if name.is_empty()
                 || !name
                     .chars()
@@ -300,8 +283,6 @@ fn parse_docker_nodes(spec: &str) -> Result<Vec<DockerNodeConfig>> {
                     "DOCKER_NODES entry {entry:?}: node name must be [A-Za-z0-9_-]+"
                 )));
             }
-            // `worker` = NATS-proxied `chuggernaut worker` daemon (spec §3.1);
-            // unix/tcp/http = a Docker daemon driven directly.
             if *endpoint != "worker"
                 && !endpoint.starts_with("unix://")
                 && !endpoint.starts_with("tcp://")
@@ -345,10 +326,8 @@ mod tests {
             parse_docker_nodes("local|unix:///var/run/docker.sock|0, nuc|worker|4").unwrap();
         assert_eq!(nodes[1].endpoint, "worker");
         assert_eq!(nodes[1].slots, 4);
-        // Worker node names ride in NATS subjects; bad tokens rejected at parse.
         assert!(parse_docker_nodes("nuc.0|worker|4").is_err());
         assert!(parse_docker_nodes("|worker|4").is_err());
-        // Unknown endpoint schemes rejected at parse, not at backend construction.
         assert!(parse_docker_nodes("a|ssh://host|4").is_err());
     }
 
@@ -407,7 +386,6 @@ mod tests {
     #[test]
     fn base_snapshot_publishes_observed_capacity_with_its_provenance() {
         let observed_at = chrono::Utc::now();
-        // The startup probe applied a ping-reported 2 (the seed says 4).
         let fleet = vec![container::NodeStatus {
             name: "nuc".into(),
             available: true,
@@ -428,7 +406,6 @@ mod tests {
         );
         assert_eq!(snap.nodes[0].capacity_observed_at, Some(observed_at));
 
-        // A never-observed worker node: the seed, said to be the seed.
         let unobserved = vec![container::NodeStatus {
             name: "nuc".into(),
             available: true,
@@ -445,7 +422,6 @@ mod tests {
         );
         assert_eq!(snap.nodes[0].capacity_observed_at, None);
 
-        // A docker-endpoint node reports neither, so `DOCKER_NODES` owns it.
         let docker = vec![container::NodeStatus {
             name: "nuc".into(),
             available: true,
@@ -475,16 +451,13 @@ mod tests {
         let base = snapshot_config().base_snapshot(&fleet, Some("abc".into()), true);
         let published = serde_json::to_vec(&base).unwrap();
 
-        // Same content ⇒ identical bytes ⇒ skip.
         let same = serde_json::to_vec(&base).unwrap();
         assert_eq!(published, same);
 
-        // A worker self-refresh bumps the node version ⇒ bytes differ ⇒ fire.
         let mut changed = base.clone();
         changed.nodes[0].version = Some("0.2.0+def".into());
         assert_ne!(published, serde_json::to_vec(&changed).unwrap());
 
-        // So does the self-repo drift moving.
         let mut behind = base.clone();
         behind.main_tip_sha = Some("def456".into());
         behind.commits_behind = Some(2);
@@ -493,7 +466,6 @@ mod tests {
 
     #[test]
     fn placement_policy_parses_defaults_and_rejects_unknown() {
-        // Unset defaults to busyness (the new §3.1 default).
         assert_eq!(PlacementPolicy::default(), PlacementPolicy::Busyness);
         assert_eq!(
             PlacementPolicy::parse("busyness").unwrap(),
@@ -503,7 +475,6 @@ mod tests {
             PlacementPolicy::parse("headroom").unwrap(),
             PlacementPolicy::Headroom
         );
-        // Unknown value is a hard config error naming the accepted values.
         let err = PlacementPolicy::parse("random").unwrap_err();
         assert!(
             err.contains("busyness") && err.contains("headroom"),

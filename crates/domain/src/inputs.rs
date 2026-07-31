@@ -90,8 +90,6 @@ pub fn input_errors(
             ));
         }
     }
-    // Negative space (STYLE.md Tier 2 #2): every error this function produces is
-    // addressed to one named input, so a caller can route it to a form field.
     debug_assert!(
         errs.iter().all(|e| e.field.starts_with(INPUT_FIELD_PREFIX)),
         "an input error must name its input"
@@ -135,9 +133,6 @@ pub fn fill_input_defaults(
         let Some(default) = &input.default else {
             continue;
         };
-        // A supplied value wins by being left alone; only an absent key is
-        // written. The two lines are deliberately in this order so the assert
-        // below is about the write that just happened.
         if inputs.contains_key(&input.name) {
             continue;
         }
@@ -149,8 +144,6 @@ pub fn fill_input_defaults(
         );
         filled.push(input.name.clone());
     }
-    // Postcondition: add-only. The map grew by exactly the keys reported filled,
-    // and nothing else moved.
     debug_assert_eq!(
         inputs.len(),
         supplied_count + filled.len(),
@@ -188,9 +181,6 @@ pub fn inject_input_env(
     env: &mut HashMap<String, String>,
     inputs: &BTreeMap<String, String>,
 ) -> Vec<String> {
-    // Negative space (STYLE.md Tier 2 #2): no other source inserts into this
-    // namespace. Asserted before the first write, so the diagnostic names the
-    // *foreign* key rather than an input that arrived second.
     debug_assert!(
         !env.keys().any(|k| k.starts_with(types::INPUT_ENV_PREFIX)),
         "a non-input source inserted a {} key: {:?}",
@@ -209,17 +199,12 @@ pub fn inject_input_env(
             continue;
         }
         let previous = env.insert(types::input_env_key(name), value.clone());
-        // Covers both halves of the invariant at one line: nothing else claimed
-        // this key, and no two input names map onto it (the injectivity the
-        // lowercase-only name rule buys).
         debug_assert!(
             previous.is_none(),
             "input '{name}' collided on {}",
             types::input_env_key(name),
         );
     }
-    // Postcondition: exactly one key per accepted input, and no key for anything
-    // else — the env grew by nothing but inputs.
     debug_assert_eq!(
         env.len(),
         before + inputs.len() - refused.len(),
@@ -304,8 +289,6 @@ mod tests {
         assert_eq!(input_errors(Some(1), &[], &inputs), vec![]);
         assert_eq!(fill_input_defaults(&[], &mut inputs), Vec::<String>::new());
         assert!(inputs.is_empty());
-        // A type that declares inputs but requires none also leaves an empty map
-        // empty — an optional input with no default is *absent*, not blank.
         let optional = vec![Input {
             name: "note".into(),
             r#type: InputKind::String,
@@ -399,8 +382,6 @@ mod tests {
         let filled = fill_input_defaults(&declared(), &mut inputs);
         assert_eq!(filled, vec!["service"]);
         assert_eq!(inputs, supplied(&[("sha", "4f9c1ab"), ("service", "web")]));
-        // Idempotent: run again (a second Ready transition would be a bug, but
-        // the rule is add-only, so it cannot corrupt what it already wrote).
         assert!(fill_input_defaults(&declared(), &mut inputs).is_empty());
         assert_eq!(inputs, supplied(&[("sha", "4f9c1ab"), ("service", "web")]));
     }
@@ -455,9 +436,6 @@ mod tests {
         let mut env = before.clone();
         assert!(inject_input_env(&mut env, &BTreeMap::new()).is_empty());
         assert_eq!(env, before);
-        // …and an input the creator did not supply and the type does not default
-        // never reaches the map, so it cannot reach the env either: the pair of
-        // rules is what makes `set -u` the loud failure.
         let mut inputs = BTreeMap::new();
         fill_input_defaults(
             &[Input {

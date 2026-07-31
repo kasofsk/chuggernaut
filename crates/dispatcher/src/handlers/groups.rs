@@ -221,15 +221,10 @@ async fn group_docs<'a>(
         wanted.truncate(types::DESIGNS_MAX);
     }
 
-    // One resolved HEAD serves every lookup, so the statuses in a reply are
-    // never a mix of two trees.
     let branch = repos.default_branch(owner, project).await?;
     let head = repos.resolve_ref(owner, project, &branch).await?;
     let mut docs = BTreeMap::new();
     for (name, path) in wanted {
-        // Absent is the ordinary case, not an error: a group may name a design
-        // that has not been written yet (spec §4.4's posture for a knowledge tag
-        // with no file).
         let Some(text) = repos.read_file_at(owner, project, &head, &path).await? else {
             continue;
         };
@@ -288,9 +283,6 @@ async fn design_docs(
             continue;
         };
         let group_name = types::design_group_name(&slug);
-        // Listed by the tree and gone by the read is not a state one resolved
-        // HEAD produces; treat it as a document with nothing in its head rather
-        // than failing the whole registry over one blob.
         let text = repos
             .read_file_at(owner, project, &head, &path)
             .await?

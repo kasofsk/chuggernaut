@@ -34,8 +34,6 @@ export function TaskArtifacts({
 
   const terminal = task.state === 'Done' || task.state === 'Failed'
   useEffect(() => {
-    // Artifacts are harvested after the container exits; nothing to list until
-    // the task settles.
     if (!terminal) return
     api
       .artifacts(owner, project, seq, task.id)

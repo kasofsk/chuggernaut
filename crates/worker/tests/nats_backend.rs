@@ -70,9 +70,6 @@ async fn setup(
     )
     .unwrap();
 
-    // Wait for the daemon's subscription to be live: a ghost inspect answered
-    // with an op-level result (Ok(None)) proves the round trip. RPC liveness is
-    // not KV-watchable, so a tightened async poll (#206 principle 3).
     test_utils::wait::poll_async_default("worker daemon w1 to become reachable", || async {
         fleet.inspect(&"w1/deadbeef".to_string()).await.ok()
     })
@@ -123,12 +120,10 @@ async fn local_artifact_substitution_and_unknown_artifact() {
         return;
     };
 
-    // Known artifact: the worker substitutes its local bytes; the container
-    // executes them — proving mode and contents both arrived.
     let mut config = suite::cfg("/usr/local/bin/chuggernaut-channel > /out.txt");
     config.files = vec![container::InjectedFile {
         container_path: "/usr/local/bin/chuggernaut-channel".into(),
-        contents: vec![], // bytes intentionally absent — the tag carries it
+        contents: vec![],
         mode: 0o755,
         artifact: Some(types::worker::ARTIFACT_CHANNEL.into()),
     }];
@@ -138,7 +133,6 @@ async fn local_artifact_substitution_and_unknown_artifact() {
     assert_eq!(out, b"artifact-ran\n");
     suite::rm(&id);
 
-    // Unknown artifact name: launch fails with a clear error, no container.
     let mut config = suite::cfg("true");
     config.files = vec![container::InjectedFile {
         container_path: "/x".into(),
@@ -170,7 +164,6 @@ async fn remove_and_exited_sweep_through_the_proxy() {
     );
     fleet.remove(&id).await.unwrap();
     assert!(!fleet.list_managed_exited().await.unwrap().contains(&id));
-    // Idempotent, like the direct backend.
     fleet.remove(&id).await.unwrap();
     daemon.abort();
 }
@@ -183,7 +176,6 @@ async fn mock_worker(store: &store::NatsStore, node: &str) -> tokio::task::JoinH
         .subscribe_requests(&store::subjects::worker_all(node))
         .await
         .expect("subscribe mock worker");
-    // Ensure the SUB reached the server before any ping is published.
     store.client().flush().await.expect("flush sub");
     tokio::spawn(async move {
         while let Some(req) = sub.next().await {
@@ -193,7 +185,6 @@ async fn mock_worker(store: &store::NatsStore, node: &str) -> tokio::task::JoinH
                         running: 0,
                         version: env!("CARGO_PKG_VERSION").to_string(),
                         artifacts: std::collections::HashMap::new(),
-                        // A stand-in daemon reports no capacity of its own.
                         slots: None,
                         slots_max: None,
                         capacity_epoch: None,
@@ -267,7 +258,6 @@ async fn counting_worker(store: &store::NatsStore, node: &str) -> tokio::task::J
                         running: running.load(Ordering::SeqCst),
                         version: env!("CARGO_PKG_VERSION").to_string(),
                         artifacts: std::collections::HashMap::new(),
-                        // A stand-in daemon reports no capacity of its own.
                         slots: None,
                         slots_max: None,
                         capacity_epoch: None,
@@ -367,14 +357,12 @@ async fn worker_capacity_starts_fleet_and_dead_worker_fails_placement() {
     )
     .unwrap();
 
-    fleet.startup_check().await.unwrap(); // "up" responds ⇒ starts
-    // availability() still reports every node (spec §3.1 snapshot).
+    fleet.startup_check().await.unwrap();
     let avail = fleet.availability();
     assert_eq!(avail.len(), 2);
     assert!(avail.iter().any(|(n, up)| n == "up" && *up));
     assert!(avail.iter().any(|(n, up)| n == "ghost" && !*up));
 
-    // A pin onto the out-of-service worker fails placement, not startup.
     let mut cfg = suite::cfg("true");
     cfg.node = Some("ghost".into());
     let err = fleet.launch(cfg).await.unwrap_err();
@@ -498,7 +486,7 @@ async fn never_reporting_worker_is_visible_as_seed_sourced() {
         return;
     };
     let store = store::NatsStore::connect(server.url()).await.unwrap();
-    let mock = mock_worker(&store, "air").await; // reports no capacity
+    let mock = mock_worker(&store, "air").await;
     let fleet = FleetBackend::new(
         vec![DockerNodeConfig {
             name: "air".into(),
@@ -548,9 +536,6 @@ fn spawn_daemon(
     std::fs::create_dir_all(&dir).unwrap();
     let channel = dir.join("chuggernaut-channel");
     std::fs::write(&channel, channel_bytes).unwrap();
-    // A refresh-capable daemon (script wired) also gets a git credential so the
-    // accept path is exercised; the skip-without-credential path is covered by
-    // `refresh_reports_skip_without_git_credential`.
     let (refresh_git_url, refresh_git_key) = if refresh_script.is_some() {
         let key = dir.join("worker_git");
         std::fs::write(&key, b"fake-key").unwrap();
@@ -645,21 +630,17 @@ async fn wait_survives_daemon_restart() {
     let fleet = fleet_over(store, "w1", 8).await;
     await_reachable(&fleet, "w1").await;
 
-    // A container that outlives the daemon restart, then exits non-zero.
     let id = fleet.launch(suite::cfg("sleep 4; exit 7")).await.unwrap();
 
-    // Start waiting, then yank and replace the daemon underneath the wait.
     let wait_fleet = &fleet;
     let waiter = wait_fleet.wait(&id);
     tokio::pin!(waiter);
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     daemon.abort();
     let _ = daemon.await;
-    // Container is still running on Docker; bring a fresh daemon up on the node.
     let daemon2 = spawn_daemon(&server, "w1", b"x", None);
     await_reachable(&fleet, "w1").await;
 
-    // The exit is still delivered through the new daemon.
     let code = waiter.await.unwrap();
     assert_eq!(code, 7, "exit delivered across the daemon restart");
     suite::rm(&id);
@@ -682,7 +663,6 @@ async fn refresh_rpc_and_quiesce_window() {
         return;
     }
 
-    // 1. No script wired ⇒ refresh is cleanly rejected as unconfigured.
     let daemon = spawn_daemon(&server, "w1", b"x", None);
     let store = store::NatsStore::connect(server.url()).await.unwrap();
     let fleet = fleet_over(store.clone(), "w1", 8).await;
@@ -702,9 +682,6 @@ async fn refresh_rpc_and_quiesce_window() {
     daemon.abort();
     let _ = daemon.await;
 
-    // 2. Script wired ⇒ refresh is accepted and the swap window quiesces
-    //    launches. The no-op script leaves the daemon quiesced (a real swap
-    //    replaces the process here), so a subsequent launch is refused.
     let script = fake_refresh_script();
     let daemon = spawn_daemon(&server, "w1", b"x", Some(script));
     await_reachable(&fleet, "w1").await;
@@ -718,8 +695,6 @@ async fn refresh_rpc_and_quiesce_window() {
         .unwrap();
     assert!(ok.accepted);
 
-    // A second refresh while one is converging is reported as not-accepted
-    // (not an error, not drift) so the deploy caller skips the swap-wait.
     let again = rpc
         .refresh(&RefreshRequest {
             sha: "cafef00d".into(),
@@ -732,16 +707,12 @@ async fn refresh_rpc_and_quiesce_window() {
         "concurrent refresh must report not-accepted"
     );
 
-    // Once build+quiesce+swap have run, launches are refused. RPC-observed
-    // state (not KV) → tightened async poll; reaching past it is the assertion
-    // (#206 principle 3).
     test_utils::wait::poll_async(
         std::time::Duration::from_secs(30),
         "launches to be refused during the swap window",
         || async {
             match fleet.launch(suite::cfg("true")).await {
                 Ok(id) => {
-                    // Not quiesced yet (or a real container slipped in) — clean up.
                     suite::rm(&id);
                     None
                 }
@@ -771,8 +742,10 @@ async fn refresh_rpc_and_quiesce_window() {
 ///    off `ping` and reports "FAILED at cancelled", so a node the deploy itself
 ///    stopped is never diagnosed as a node whose build is broken.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn refresh_cancel_aborts_only_its_own_sha() {
     use store::worker::WorkerRpc;
     use types::worker::{
@@ -787,11 +760,6 @@ async fn refresh_cancel_aborts_only_its_own_sha() {
         return;
     }
 
-    // A build that BLOCKS, and announces its phase first so the test can tell
-    // the script is really running before it cancels (past that line the
-    // daemon has published the build's process group). The `sleep` is a CHILD
-    // of the script shell: only a process-GROUP signal takes it down — which is
-    // exactly what the cancel promises, and what step 2 below measures.
     let script = refresh_script_with(concat!(
         "if [ \"$1\" = build ]; then\n",
         "  echo 'worker-refresh: phase build-image 1/3 worker'\n",
@@ -814,7 +782,6 @@ async fn refresh_cancel_aborts_only_its_own_sha() {
         .unwrap()
         .accepted
     );
-    // RPC-observed state, so a tightened async poll (#206 principle 3).
     test_utils::wait::poll_async(
         std::time::Duration::from_secs(30),
         "the refresh build to start",
@@ -825,8 +792,6 @@ async fn refresh_cancel_aborts_only_its_own_sha() {
     )
     .await;
 
-    // 1. A cancel naming a DIFFERENT sha is declined, and — the part that
-    //    matters — changes nothing: the node keeps converging on its own target.
     let other = rpc
         .refresh_cancel(&RefreshCancelRequest {
             sha: "deadbeef".into(),
@@ -846,11 +811,6 @@ async fn refresh_cancel_aborts_only_its_own_sha() {
         "a declined cancel must leave the refresh converging"
     );
 
-    // 2. A cancel naming OUR sha fires, and the refresh reaches its terminal
-    //    verdict under the `cancelled` stage. Reaching it QUICKLY is also the
-    //    proof that the whole process group died: the script's `sleep 120`
-    //    outlives a signal sent to the shell alone, so a kill that missed the
-    //    group would leave this poll to time out.
     let ours = rpc
         .refresh_cancel(&RefreshCancelRequest {
             sha: "cafef00d".into(),
@@ -893,8 +853,6 @@ async fn refresh_reports_skip_without_git_credential() {
         return;
     }
 
-    // Script wired, but no WORKER_REFRESH_GIT_URL / key: the exact prod #114
-    // shape. Build the config inline (spawn_daemon would provision a credential).
     let dir = std::env::temp_dir().join(format!(
         "chug-worker-skip-{}-{:x}",
         std::process::id(),
@@ -917,7 +875,7 @@ async fn refresh_reports_skip_without_git_credential() {
         cache_dir: None,
         refresh_script: Some(fake_refresh_script()),
         refresh_git_url: None,
-        refresh_git_key: dir.join("worker_git"), // absent
+        refresh_git_key: dir.join("worker_git"),
     };
     let daemon = tokio::spawn(async move {
         if let Err(e) = worker::run(config).await {
@@ -949,7 +907,6 @@ async fn refresh_reports_skip_without_git_credential() {
         ok.skipped
     );
 
-    // The skip must not have quiesced the node — launches still flow.
     let id = fleet.launch(suite::cfg("true")).await.unwrap();
     suite::rm(&id);
     daemon.abort();
@@ -963,8 +920,6 @@ async fn payload_guard_rejects_bulk_inline_files() {
     let Some((fleet, daemon)) = setup(&server, b"x").await else {
         return;
     };
-    // A multi-MB inline file must be refused client-side (static artifacts
-    // belong node-local), not sent to NATS to bounce off max_payload.
     let mut config = suite::cfg("true");
     config.files = vec![container::InjectedFile {
         container_path: "/big".into(),
@@ -1022,7 +977,6 @@ async fn set_slots_adopts_re_announces_and_refuses_above_the_ceiling() {
     let store = store::NatsStore::connect(server.url()).await.unwrap();
     let rpc = WorkerRpc::new(store.clone(), "cap1");
 
-    // The pull transport carries the boot value, the ceiling, and the pair.
     let ping = test_utils::wait::poll_async_default("worker cap1 to answer ping", || async {
         rpc.ping().await.ok()
     })
@@ -1031,10 +985,8 @@ async fn set_slots_adopts_re_announces_and_refuses_above_the_ceiling() {
     assert_eq!(ping.slots_max, Some(DAEMON_SLOTS_MAX));
     assert_eq!(ping.capacity_generation, Some(0), "nothing adopted yet");
     let epoch = ping.capacity_epoch.unwrap();
-    // Milliseconds, not seconds — two restarts in one second must not collide.
     assert!(epoch > 1_577_836_800_000, "epoch not in ms: {epoch}");
 
-    // Subscribe BEFORE commanding, so the immediate re-announce cannot be missed.
     let mut announces = store
         .subscribe_requests(&store::subjects::worker_announce())
         .await
@@ -1052,7 +1004,6 @@ async fn set_slots_adopts_re_announces_and_refuses_above_the_ceiling() {
     assert_eq!(adopted.capacity_epoch, epoch, "the epoch is stamped once");
     assert_eq!(adopted.note, None);
 
-    // Announced NOW: well inside the 15s heartbeat this would otherwise wait for.
     let announce = await_announce(&mut announces, "cap1", 2).await;
     assert_eq!(announce.slots_max, Some(DAEMON_SLOTS_MAX));
     assert_eq!(announce.capacity_epoch, Some(epoch));
@@ -1062,7 +1013,6 @@ async fn set_slots_adopts_re_announces_and_refuses_above_the_ceiling() {
         "push and pull carry the same ordering key"
     );
 
-    // Above the ceiling: refused with a reason, and nothing changes.
     let refused = rpc
         .set_slots(&SetSlotsRequest {
             slots: DAEMON_SLOTS_MAX + 1,
@@ -1080,7 +1030,6 @@ async fn set_slots_adopts_re_announces_and_refuses_above_the_ceiling() {
     assert_eq!(refused.slots, 2, "the adopted value stays in force");
     assert_eq!(refused.capacity_generation, 1, "a refusal bumps nothing");
 
-    // And the pull transport agrees with the reply.
     let ping = rpc.ping().await.unwrap();
     assert_eq!((ping.slots, ping.capacity_generation), (Some(2), Some(1)));
     daemon.abort();

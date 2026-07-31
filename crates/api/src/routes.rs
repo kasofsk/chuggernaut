@@ -54,8 +54,6 @@ impl FromRequestParts<SharedState> for Auth {
         parts: &mut Parts,
         state: &SharedState,
     ) -> Result<Self, Self::Rejection> {
-        // `Authorization: Bearer <jwt>` first (machine callers — CLI-minted
-        // tokens, §7.1), then the browser session cookie. Same JWT either way.
         let bearer = parts
             .headers
             .get(header::AUTHORIZATION)
@@ -137,7 +135,6 @@ fn map_reply(reply: &[u8], success: StatusCode) -> ApiResult<Response> {
             .and_then(|s| s.as_u64())
             .and_then(|s| StatusCode::from_u16(s as u16).ok())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        // §6.5: validation failures use the {"errors": [...]} envelope.
         let body = match err.get("errors") {
             Some(errors) => serde_json::json!({ "errors": errors }),
             None => {
@@ -148,8 +145,6 @@ fn map_reply(reply: &[u8], success: StatusCode) -> ApiResult<Response> {
     }
     Ok((success, Json(value)).into_response())
 }
-
-// ── Health (§6.x) ──────────────────────────────────────────────────────────
 
 /// `GET /api/v1/health` (spec §6.x): unauthenticated liveness probe that proves
 /// the *dispatcher*, not just this api process. It issues a bounded `req.health`
@@ -173,8 +168,6 @@ pub async fn health(State(state): State<SharedState>) -> Response {
         .await
     {
         Ok(reply) => match serde_json::from_slice::<serde_json::Value>(&reply.payload) {
-            // Only a genuine {"dispatcher":"ok",..} reply is healthy; anything
-            // else (e.g. the actor's 503 envelope) maps to 503, never 200.
             Ok(mut body) if body.get("dispatcher").and_then(|d| d.as_str()) == Some("ok") => {
                 inject_api_sha(&mut body);
                 (StatusCode::OK, Json(body)).into_response()
@@ -219,8 +212,6 @@ fn inject_sha(body: &mut serde_json::Value, sha: Option<&str>) {
         obj.insert("api_sha".into(), serde_json::Value::String(sha.to_string()));
     }
 }
-
-// ── Auth (§7.1) ──────────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -299,8 +290,6 @@ pub async fn ssh_cert(
     Auth(identity): Auth,
     Json(body): Json<SshCertBody>,
 ) -> ApiResult<Response> {
-    // Size-cap: a public-key line is a few hundred bytes; anything larger is
-    // not a key we would sign.
     if body.public_key.len() > 8 * 1024 {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -313,8 +302,6 @@ pub async fn ssh_cert(
             "unparseable SSH public key",
         ));
     }
-    // The dispatcher loads the caller's roles from their user record and signs;
-    // we forward only the authenticated email, never a client-supplied identity.
     forward(
         &state,
         &store::subjects::ssh_sign_user_cert(),
@@ -323,8 +310,6 @@ pub async fn ssh_cert(
     )
     .await
 }
-
-// ── Projects ─────────────────────────────────────────────────────────────
 
 /// Projects visible to the caller. Platform admins see the whole registry
 /// (the counters bucket, written at `admin project create`, §12.2); everyone
@@ -353,8 +338,6 @@ pub async fn projects_list(
     projects.sort();
     Ok(Json(projects))
 }
-
-// ── Config (read-only settings overview) ────────────────────────────────────
 
 /// Reserved secret names holding a linked project's git-origin credentials
 /// (mirrors the dispatcher's `origin::SECRET_DEPLOY_KEY`/`SECRET_PAT`). Surfaced
@@ -395,7 +378,6 @@ pub async fn project_config_get(
     read_project(&identity, &owner, &project)?;
     let prefix = format!("{owner}.{project}.");
 
-    // vars — non-sensitive, name + value.
     let vars_bucket = state
         .store
         .raw_bucket(store::buckets::VARS)
@@ -418,8 +400,6 @@ pub async fn project_config_get(
     }
     vars.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
 
-    // secrets — NAMES ONLY (the api holds no decryption key). Split the reserved
-    // origin credentials out into presence flags.
     let secret_names = names_under(
         bucket_keys(&state, store::buckets::SECRETS, &prefix).await?,
         &prefix,
@@ -432,7 +412,6 @@ pub async fn project_config_get(
         .filter(|n| n.as_str() != ORIGIN_DEPLOY_KEY && n.as_str() != ORIGIN_PAT)
         .collect();
 
-    // origin link (from the project record; absent = classic self-hosted).
     let record: Option<types::ProjectRecord> = state
         .store
         .raw_bucket(store::buckets::PROJECTS)
@@ -517,20 +496,12 @@ pub async fn platform_fleet_get(
     Auth(identity): Auth,
 ) -> ApiResult<Response> {
     let platform = platform_bucket_for_admin(&state, &identity).await?;
-    // Served verbatim rather than re-serialized through `types::FleetStatus`.
-    // The api and the dispatcher deploy at different moments (the reason
-    // `api_sha` exists at all), so a typed round-trip here would silently drop
-    // the per-node capacity fields a *newer* dispatcher writes — a capacity path
-    // failing invisibly, which is the exact class of failure design #293 exists
-    // to remove. This crate is a bridge and reads none of these fields.
     let fleet: Option<serde_json::Value> = platform
         .get_json("fleet.status")
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     let fleet = match fleet {
         Some(fleet) => fleet,
-        // Cold start: the dispatcher has published nothing yet. An empty fleet,
-        // never a 404, so the UI needn't special-case it.
         None => serde_json::to_value(types::FleetStatus::default())
             .map_err(|e| ApiError::internal(e.to_string()))?,
     };
@@ -633,8 +604,6 @@ pub async fn projects_link(
     .await
 }
 
-// ── Members (§7.5 project-role management) ───────────────────────────────
-
 /// Platform-admin gate (§7.5 "platform-level config" row): role management is a
 /// platform-admin concern, mirroring `admin user role` on the CLI. The API layer
 /// already treats `platform_admin` as all-powerful.
@@ -709,8 +678,6 @@ pub async fn members_remove(
     .await
 }
 
-// ── Origin (linked projects) ─────────────────────────────────────────────
-
 /// Link + release state with an opportunistic PR check (Viewer+).
 pub async fn origin_get(
     State(state): State<SharedState>,
@@ -758,8 +725,6 @@ pub async fn origin_sync(
     )
     .await
 }
-
-// ── Jobs ─────────────────────────────────────────────────────────────────
 
 pub async fn jobs_create(
     State(state): State<SharedState>,
@@ -1145,8 +1110,6 @@ pub async fn jobs_triage(
     .await
 }
 
-// ── Graph ────────────────────────────────────────────────────────────────
-
 pub async fn graph_get(
     State(state): State<SharedState>,
     Path((owner, project)): Path<(String, String)>,
@@ -1161,8 +1124,6 @@ pub async fn graph_get(
     )
     .await
 }
-
-// ── Tasks ────────────────────────────────────────────────────────────────
 
 pub async fn tasks_pending(
     State(state): State<SharedState>,
@@ -1210,8 +1171,6 @@ pub async fn tasks_resolve(
     .await
 }
 
-// ── VCS ──────────────────────────────────────────────────────────────────
-
 pub async fn diff(
     State(state): State<SharedState>,
     Path((owner, project, seq)): Path<(String, String, u64)>,
@@ -1226,13 +1185,6 @@ pub async fn diff(
     )
     .await
 }
-
-// ── Live task output (§4.2): cursor-paged container stdout/stderr ───────────
-//
-// A running task's container is tailed live via the dispatcher (a bounded
-// req/reply, no held-open stream through the core actor); once it exits, this
-// falls back to the harvested `stdout.log` artifact at the SAME byte offsets,
-// so a poller never loses the tail when the container is removed (job #10).
 
 #[derive(serde::Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1269,8 +1221,6 @@ pub async fn task_output(
         .map_err(|e| ApiError::internal(format!("dispatcher unavailable: {e}")))?;
     let value: serde_json::Value = serde_json::from_slice(&reply.payload)
         .map_err(|e| ApiError::internal(format!("bad dispatcher reply: {e}")))?;
-    // The dispatcher signals errors (404 no container yet, 502 wedged node) in
-    // the §6.5 envelope — propagate its status verbatim.
     if let Some(err) = value.get("error") {
         let status = err
             .get("status")
@@ -1280,13 +1230,9 @@ pub async fn task_output(
         let message = err.get("message").cloned().unwrap_or_default();
         return Ok((status, Json(serde_json::json!({ "error": message }))).into_response());
     }
-    // Live container output: pass the tail through as-is.
     if value.get("running").and_then(|r| r.as_bool()) == Some(true) {
         return Ok((StatusCode::OK, Json(value)).into_response());
     }
-    // Finished (or the container is already gone): serve the harvested
-    // stdout.log from `since` on, so a poller that had offset N off the live
-    // stream continues seamlessly into the artifact.
     let (offset, data) = match &state.artifacts {
         Some(artifacts) => {
             let bytes = artifacts
@@ -1300,8 +1246,6 @@ pub async fn task_output(
                 String::from_utf8_lossy(&bytes[start..]).into_owned(),
             )
         }
-        // No artifact store configured: the task is finished with nothing to
-        // replay. Hold the cursor so a poller sees `running: false` and stops.
         None => (q.since, String::new()),
     };
     Ok((
@@ -1310,14 +1254,6 @@ pub async fn task_output(
     )
         .into_response())
 }
-
-// ── Artifacts (§4.2): session transcripts and container logs ────────────────
-//
-// These stream from the object store rather than riding a req/reply through
-// the dispatcher: a transcript routinely exceeds NATS's 1MB max_payload, which
-// a reply cannot carry. Decryption happens here because the API holds the
-// `age_artifacts` identity — a separate key from the secrets one, which stays
-// dispatcher-only (§10.2).
 
 /// Kinds present for a task, so the UI knows what to offer.
 pub async fn artifacts_list(
@@ -1336,15 +1272,6 @@ pub async fn artifacts_list(
     let names: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
     Ok(Json(serde_json::json!({ "artifacts": names })).into_response())
 }
-
-// ── Job attachments (§1.6): operator-uploaded files ─────────────────────────
-//
-// Screenshots on a bug report, reference documents. Like transcripts, these
-// stream directly from the object store rather than riding a req/reply through
-// the dispatcher — a screenshot routinely exceeds NATS's 1MB max_payload — and
-// the API encrypts on upload / decrypts on download with the `age_artifacts`
-// identity it already holds. Presentational reference material: never injected
-// into an agent prompt.
 
 /// Upper bound on a single uploaded attachment. Screenshots and short clips
 /// fit comfortably; the same value caps the request body (413 over it).
@@ -1489,7 +1416,6 @@ pub async fn artifact_get(
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "artifact not found"))?;
     let content_type = match kind {
-        // JSONL, not JSON: one object per line, so it is not a valid document.
         store::ArtifactKind::SessionTranscript => "application/x-ndjson",
         store::ArtifactKind::Stdout => "text/plain; charset=utf-8",
     };

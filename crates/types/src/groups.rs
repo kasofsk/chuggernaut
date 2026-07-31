@@ -95,9 +95,6 @@ pub fn name_is_well_formed(name: &str) -> bool {
 /// reports the bound it broke rather than whichever character happened to be
 /// outside the charset), then the shape.
 pub fn check_name(name: &str) -> Result<(), GroupsError> {
-    // Characters, not bytes: the charset is ASCII-only, so a multi-byte
-    // character is out of it regardless, and the count is what an operator can
-    // act on.
     let len = name.chars().count();
     if len > GROUP_NAME_LEN_MAX {
         return Err(GroupsError::TooLong { len });
@@ -107,8 +104,6 @@ pub fn check_name(name: &str) -> Result<(), GroupsError> {
             name: name.to_string(),
         });
     }
-    // Postcondition, negative space (STYLE.md Tier 2 #2): an accepted name is
-    // ASCII, which is what lets the length bound double as a byte bound.
     debug_assert!(name.is_ascii(), "an accepted group name is ASCII");
     Ok(())
 }
@@ -133,8 +128,6 @@ pub fn check_groups(groups: &[String]) -> Result<(), GroupsError> {
             return Err(GroupsError::Duplicate { name: name.clone() });
         }
     }
-    // Postcondition: an accepted list is exactly as long as its distinct set,
-    // which is what lets every reader treat `groups` as a set without sorting it.
     debug_assert_eq!(
         seen.len(),
         groups.len(),
@@ -217,8 +210,6 @@ mod tests {
         ] {
             assert_eq!(check_name(good), Ok(()), "should accept {good:?}");
         }
-        // Uppercase, a leading separator, whitespace, and the punctuation a
-        // label picks up when someone types a sentence instead of a name.
         for bad in [
             "Design/311",
             "/design",
@@ -254,8 +245,6 @@ mod tests {
             }),
             "one character over the bound is an error, not a truncation"
         );
-        // The bound is on characters, so a multi-byte name is measured the way
-        // an operator counts it — and still fails the charset.
         assert_eq!(
             check_name(&"é".repeat(GROUP_NAME_LEN_MAX + 1)),
             Err(GroupsError::TooLong {
@@ -315,8 +304,6 @@ mod tests {
                 len: GROUP_NAME_LEN_MAX + 1
             })
         );
-        // Each message names its own rule, so a 422 body is actionable without
-        // the reader knowing the validator's source.
         assert!(
             GroupsError::TooMany { count: 9 }
                 .to_string()

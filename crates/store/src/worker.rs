@@ -213,8 +213,10 @@ pub fn op_from_subject(subject: &str) -> Option<&str> {
 }
 
 /// Serialize a reply envelope; used by the daemon.
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::expect_used)]
+#[allow(
+    clippy::expect_used,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 pub fn encode_reply<T: serde::Serialize>(reply: &WorkerReply<T>) -> Vec<u8> {
     serde_json::to_vec(reply).unwrap_or_else(|e| {
         serde_json::to_vec(&WorkerReply::<()>::Err {

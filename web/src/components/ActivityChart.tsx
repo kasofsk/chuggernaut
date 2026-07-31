@@ -37,7 +37,6 @@ export function ActivityChart({
   const plotW = width - pad.left - pad.right
   const plotH = height - pad.top - pad.bottom
   const max = Math.max(1, ...created, ...completed)
-  // A few recessive gridlines on whole-number steps.
   const step = max <= 4 ? 1 : Math.ceil(max / 4)
   const ticks: number[] = []
   for (let v = step; v <= max; v += step) ticks.push(v)
@@ -51,17 +50,14 @@ export function ActivityChart({
 
   const fmtDay = (t: number) =>
     new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-  // Label roughly five ticks: first, last ("today" position) and every ~3rd.
   const labelEvery = Math.max(1, Math.round(n / 5))
   const labeled = (i: number) => i === 0 || i === n - 1 || i % labelEvery === 0
 
-  // Rounded top only: rect with rx would round the baseline too, so bars use a
-  // path — up, arc the two top corners, down — anchored flat on the baseline.
   const bar = (bx: number, v: number) => {
     const ty = y(v)
     const h = baseline - ty
     const r = Math.min(3, barW / 2, h)
-    if (h <= 0) return `M ${bx} ${baseline} h ${barW}` // zero: nothing visible
+    if (h <= 0) return `M ${bx} ${baseline} h ${barW}`
     return [
       `M ${bx} ${baseline}`,
       `V ${ty + r}`,

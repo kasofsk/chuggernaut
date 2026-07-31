@@ -29,9 +29,6 @@ eval:
     run: ./ci.sh
 "#;
 
-// Agent work + a STAGED command gate (job #154): build at stage 0, tests at
-// stage 1. A gate failure at stage 0 (build) is a compile-class failure eligible
-// for the gate-fix fast path; a stage-1 (test) failure takes the full loop.
 const GATEFIX: &str = r#"
 name: gatefix
 image: img:latest
@@ -82,8 +79,6 @@ work:
 work_retries: 1
 "#;
 
-// Agent work + command eval WITH a rework budget: lets an eval failure drive a
-// real eval-failure rework (Change A) rather than escalating on the spot.
 const REWORKABLE: &str = r#"
 name: reworkable
 image: img:latest
@@ -97,8 +92,6 @@ eval:
     run: ./ci.sh
 "#;
 
-// Agent work, NO evaluators: auto-squashes at wrap-up with no review to catch
-// conflict markers — the case the §3.2 step-12 marker guard exists for.
 const NO_EVAL: &str = r#"
 name: no-eval
 image: img:latest
@@ -166,8 +159,6 @@ async fn rig() -> Option<Rig> {
     .await
     .unwrap();
     let (handle, invariants) = spawn_checked(core);
-    // The operator inbox (`req.tasks.list.pending`) is served off the core actor
-    // by the tasks handler; wire it up so tests can hit the real request path.
     dispatcher::handlers::spawn_tasks_handler(&store, handle.clone(), backend.clone())
         .await
         .unwrap();
@@ -204,7 +195,6 @@ fn req(r#type: &str) -> CreateSpec {
 }
 
 async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::Job {
-    // Watch-based wait (#206 principle 3): value-inspecting, hard timeout.
     test_utils::wait::job_state(store, "acme", "api", seq, want).await
 }
 
@@ -267,7 +257,6 @@ async fn main_moves_during_work_rebases_and_skips_gate() {
     assert_invariants_of(&rig.invariants);
     let done = wait_for_state(&rig.store, job.id, JobState::Done).await;
 
-    // Both the concurrent land and the job's change are on main.
     let m = &rig.repo.manager;
     assert!(
         m.read_file_at("acme", "api", "main", "docs/other.md")
@@ -282,7 +271,6 @@ async fn main_moves_during_work_rebases_and_skips_gate() {
             .is_some()
     );
 
-    // Only work + eval; the rebase means no MergeGate task ever exists.
     let tasks = rig
         .store
         .tasks()
@@ -293,7 +281,6 @@ async fn main_moves_during_work_rebases_and_skips_gate() {
         .unwrap();
     assert_eq!(tasks.len(), 2);
     assert!(tasks.iter().all(|t| t.phase != TaskPhase::MergeGate));
-    // Evaluation ran against the rebased job branch (not a gate candidate).
     let launches = rig.backend.launches();
     assert_eq!(launches.len(), 1);
     assert_eq!(launches[0].env["JOB_BRANCH"], format!("job/{}", job.id));
@@ -301,7 +288,6 @@ async fn main_moves_during_work_rebases_and_skips_gate() {
     let events = event_types(&rig.store).await;
     assert!(events.contains(&"job-rebased".to_string()));
     assert!(!events.contains(&"job-merge-gate-started".to_string()));
-    // base_ref advanced to the HEAD it was evaluated (and merged) against.
     let head = done.base_ref.unwrap();
     assert_eq!(
         m.read_file_at("acme", "api", &head, "docs/other.md")
@@ -344,7 +330,6 @@ async fn main_moves_during_eval_fires_merge_gate() {
             .is_some()
     );
 
-    // Task log: work, eval, then a MergeGate re-run of the command evaluator.
     let tasks = rig
         .store
         .tasks()
@@ -356,7 +341,6 @@ async fn main_moves_during_eval_fires_merge_gate() {
     assert_eq!(tasks.len(), 3);
     assert_eq!(tasks[2].phase, TaskPhase::MergeGate);
     assert_eq!(tasks[2].state, TaskState::Done);
-    // Gate containers clone the candidate ref, not the job branch.
     let launches = rig.backend.launches();
     assert_eq!(launches.len(), 2);
     assert_eq!(launches[0].env["JOB_BRANCH"], format!("job/{}", job.id));
@@ -367,9 +351,7 @@ async fn main_moves_during_eval_fires_merge_gate() {
 
     let events = event_types(&rig.store).await;
     assert!(events.contains(&"job-merge-gate-started".to_string()));
-    // Main did not move during work, so there was no pre-eval rebase.
     assert!(!events.contains(&"job-rebased".to_string()));
-    // The candidate ref is cleaned up after promotion.
     assert!(
         m.resolve_ref("acme", "api", &format!("merge-gate/{}", job.id))
             .await
@@ -430,8 +412,6 @@ async fn rebase_conflict_falls_through_to_wrapup_conflict_path() {
     rig.backend
         .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
     let bare = rig.repo.bare_path();
-    // Work c1: commit src/a.rs on the branch AND land a conflicting src/a.rs on
-    // main, so the rebase at eval entry cannot replay cleanly.
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
         let clone = clone_branch_from(&bare, &branch).await;
@@ -445,7 +425,6 @@ async fn rebase_conflict_falls_through_to_wrapup_conflict_path() {
             .await;
         main.push("main").await;
     });
-    // Work c2 (conflict rework): re-commit on the freshly pinned base.
     let bare2 = rig.repo.bare_path();
     rig.provider.on_run(move |cfg| async move {
         assert!(
@@ -467,9 +446,7 @@ async fn rebase_conflict_falls_through_to_wrapup_conflict_path() {
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let events = event_types(&rig.store).await;
-    // The rebase reported a conflict and left the branch as pushed…
     assert!(events.contains(&"job-rebase-conflict".to_string()));
-    // …and the wrap-up conflict path (not the gate) drove the single rework.
     let reworks: Vec<&String> = events
         .iter()
         .filter(|e| *e == "job-rework-started")
@@ -485,16 +462,13 @@ async fn rebase_conflict_falls_through_to_wrapup_conflict_path() {
         .list_for_job("acme", "api", job.id)
         .await
         .unwrap();
-    // work c1, eval c1 (old base), work c2, eval c2 — no gate task.
     assert_eq!(tasks.len(), 4);
     assert_eq!(tasks[2].cycle, 2);
-    // The conflict-driven rework Work task records why it exists.
     assert_eq!(
         tasks[2].rework_reason,
         Some(types::ReworkReason::MergeConflict)
     );
     assert!(tasks.iter().all(|t| t.phase != TaskPhase::MergeGate));
-    // The reworked change is what landed.
     assert_eq!(
         rig.repo
             .manager
@@ -510,11 +484,9 @@ async fn rebase_conflict_falls_through_to_wrapup_conflict_path() {
 #[tokio::test]
 async fn merge_gate_failure_reworks_on_new_base_without_budget() {
     let Some(rig) = rig().await else { return };
-    // eval c1 pass, gate c1 FAIL, eval c2 pass (no second gate: base caught up).
     rig.backend.script_exits([0, 1, 0]);
     commit_branch(&rig, "src/a.rs");
     move_main_during_eval(&rig);
-    // Rework hook: re-commit on the new base.
     let bare = rig.repo.bare_path();
     rig.provider.on_run(move |cfg| async move {
         assert!(
@@ -545,8 +517,6 @@ async fn merge_gate_failure_reworks_on_new_base_without_budget() {
         .filter(|e| *e == "job-rework-started")
         .collect();
     assert_eq!(reworks.len(), 1);
-    // rework_budget is 0 on this job type — a consumed budget would have
-    // escalated instead of reworking. Reaching Done proves it wasn't consumed.
     let tasks = rig
         .store
         .tasks()
@@ -555,10 +525,8 @@ async fn merge_gate_failure_reworks_on_new_base_without_budget() {
         .list_for_job("acme", "api", job.id)
         .await
         .unwrap();
-    // work c1, eval c1, gate c1 (fail), work c2, eval c2
     assert_eq!(tasks.len(), 5);
     assert_eq!(tasks[3].cycle, 2);
-    // The gate-failure rework Work task records its cause.
     assert_eq!(
         tasks[3].rework_reason,
         Some(types::ReworkReason::GateCiFailure)
@@ -578,28 +546,23 @@ async fn merge_gate_failure_reworks_on_new_base_without_budget() {
 /// an approved branch launches a scoped gate-fix task that returns straight to
 /// the gate — no re-review, no eval-phase CI — and lands once the re-gate passes.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn gate_compile_failure_takes_fast_path_and_relands() {
     let Some(rig) = rig().await else { return };
-    // eval build(0) pass, eval test(0) pass, gate build FAIL(1) → compile;
-    // after the fix, re-gate build(0) pass, re-gate test(0) pass → land.
     rig.backend.script_exits([0, 0, 1, 0, 0]);
-    // The gate build container's captured output — the exact compiler errors the
-    // gate-fix brief must surface (job #154). Every fake container returns this,
-    // but only the failed gate build's copy is threaded into the fix brief.
     rig.backend
         .put_logs(b"error[E0433]: failed to resolve: use of undeclared crate `foo`".to_vec());
     commit_branch(&rig, "src/a.rs");
     move_main_during_eval(&rig);
-    // Gate-fix hook: a scoped compile repair on the rebased branch.
     let bare = rig.repo.bare_path();
     rig.provider.on_run(move |cfg| async move {
         let brief = cfg
             .merge_conflict
             .clone()
             .expect("gate-fix context must be injected");
-        // The failing gate build stage's compiler output rode into the brief.
         assert!(
             brief.contains("error[E0433]") && brief.contains("Gate build output"),
             "gate-fix brief must include the captured compiler output: {brief}"
@@ -626,7 +589,6 @@ async fn gate_compile_failure_takes_fast_path_and_relands() {
         .list_for_job("acme", "api", job.id)
         .await
         .unwrap();
-    // Exactly one gate-fix Work task, labelled and cause-stamped.
     let fixes: Vec<_> = tasks
         .iter()
         .filter(|t| t.rework_reason == Some(types::ReworkReason::GateCompileFix))
@@ -635,22 +597,18 @@ async fn gate_compile_failure_takes_fast_path_and_relands() {
     assert_eq!(fixes[0].phase, TaskPhase::Work);
     assert_eq!(fixes[0].cycle, 2);
     assert_eq!(fixes[0].label.as_deref(), Some("gate-fix"));
-    // The fast path skipped the eval phase entirely on cycle 2 — no reviewer, no
-    // eval CI ran between the fix and the re-gate.
     assert!(
         !tasks
             .iter()
             .any(|t| t.phase == TaskPhase::Evaluation && t.cycle == 2),
         "no cycle-2 evaluation tasks: {tasks:#?}"
     );
-    // The fix re-entered the gate directly (cycle-2 MergeGate tasks exist).
     assert!(
         tasks
             .iter()
             .any(|t| t.phase == TaskPhase::MergeGate && t.cycle == 2),
         "re-gate must run: {tasks:#?}"
     );
-    // The change landed and the squash body records the gate-fix round.
     assert!(
         rig.repo
             .manager
@@ -659,8 +617,6 @@ async fn gate_compile_failure_takes_fast_path_and_relands() {
             .unwrap()
             .is_some()
     );
-    // The note lives in the squash commit BODY; `RepoManager::log` reads only
-    // the subject (`--format=%s`), so read the full message straight from git.
     let body = tokio::process::Command::new("git")
         .args(["log", "-1", "--format=%B", "main"])
         .current_dir(rig.repo.bare_path())
@@ -681,8 +637,6 @@ async fn gate_compile_failure_takes_fast_path_and_relands() {
 #[tokio::test]
 async fn gate_test_stage_failure_takes_full_rework() {
     let Some(rig) = rig().await else { return };
-    // eval build(0) pass, eval test(0) pass, gate build(0) PASS, gate test FAIL,
-    // then rework: eval build pass, eval test pass, (base caught up, no gate).
     rig.backend.script_exits([0, 0, 0, 1, 0, 0]);
     commit_branch(&rig, "src/a.rs");
     move_main_during_eval(&rig);
@@ -710,8 +664,6 @@ async fn gate_test_stage_failure_takes_full_rework() {
         .list_for_job("acme", "api", job.id)
         .await
         .unwrap();
-    // A test-stage gate failure is a FULL rework (GateCiFailure), not a gate-fix,
-    // and the eval phase re-runs on cycle 2.
     assert!(
         tasks
             .iter()
@@ -739,8 +691,6 @@ async fn gate_test_stage_failure_takes_full_rework() {
 #[tokio::test]
 async fn gate_fix_budget_exhaustion_falls_back_to_full_rework() {
     let Some(rig) = rig().await else { return };
-    // eval build/test pass; gate build fails 3× (2 gate-fixes, then fallback);
-    // the full-rework cycle's eval build/test pass and it lands (base caught up).
     rig.backend.script_exits([0, 0, 1, 1, 1, 0, 0]);
     commit_branch(&rig, "src/a.rs");
     move_main_during_eval(&rig);
@@ -767,7 +717,6 @@ async fn gate_fix_budget_exhaustion_falls_back_to_full_rework() {
         gate_fixes, 2,
         "exactly the budget of gate-fix rounds: {tasks:#?}"
     );
-    // On exhaustion the failure escalates through the existing full rework loop.
     assert!(
         tasks
             .iter()
@@ -784,7 +733,6 @@ async fn gate_fix_budget_exhaustion_falls_back_to_full_rework() {
 #[tokio::test]
 async fn single_stage_gate_failure_is_unclassifiable_full_rework() {
     let Some(rig) = rig().await else { return };
-    // impl-cmd has ONE eval stage: eval c1 pass, gate c1 FAIL, eval c2 pass.
     rig.backend.script_exits([0, 1, 0]);
     commit_branch(&rig, "src/a.rs");
     move_main_during_eval(&rig);
@@ -812,7 +760,6 @@ async fn single_stage_gate_failure_is_unclassifiable_full_rework() {
         .list_for_job("acme", "api", job.id)
         .await
         .unwrap();
-    // An unclassifiable (single opaque stage) failure is Test-class → full loop.
     assert!(
         tasks
             .iter()
@@ -835,7 +782,7 @@ async fn single_stage_gate_failure_is_unclassifiable_full_rework() {
 #[tokio::test]
 async fn eval_failure_rework_preserves_prior_commits() {
     let Some(rig) = rig().await else { return };
-    rig.backend.script_exits([1, 0]); // command eval: c1 fail, c2 pass
+    rig.backend.script_exits([1, 0]);
 
     let bare = rig.repo.bare_path();
     rig.provider.on_run(move |cfg| async move {
@@ -846,7 +793,6 @@ async fn eval_failure_rework_preserves_prior_commits() {
     });
     let bare2 = rig.repo.bare_path();
     rig.provider.on_run(move |cfg| async move {
-        // Rework re-entry: commit ONLY file B, never re-creating A.
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
         let clone = clone_branch_from(&bare2, &branch).await;
         clone.commit_file("b.txt", b"from cycle 2", "c2").await;
@@ -881,7 +827,6 @@ async fn eval_failure_rework_preserves_prior_commits() {
         events.iter().filter(|e| *e == "job-rework-started").count(),
         1
     );
-    // work c1, eval c1, work c2, eval c2 — one rework cycle, no extra tasks.
     let tasks = rig
         .store
         .tasks()
@@ -903,7 +848,6 @@ async fn eval_failure_rework_preserves_prior_commits() {
 async fn unresolved_markers_on_no_evaluator_job_escalates() {
     let Some(rig) = rig().await else { return };
     let bare = rig.repo.bare_path();
-    // Work c1: commit src/x on the branch AND land a conflicting src/x on main.
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
         let clone = clone_branch_from(&bare, &branch).await;
@@ -913,7 +857,6 @@ async fn unresolved_markers_on_no_evaluator_job_escalates() {
         main.commit_file("src/x.rs", b"main side", "other").await;
         main.push("main").await;
     });
-    // Work c2 (conflict rework): the agent does NOTHING — markers stay unresolved.
     rig.provider.on_run(|_| async {});
 
     let job = rig.handle.create_job(req("no-eval")).await.unwrap();
@@ -922,7 +865,6 @@ async fn unresolved_markers_on_no_evaluator_job_escalates() {
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
-    // Nothing with markers reached the default branch.
     assert_eq!(
         rig.repo
             .manager
@@ -998,13 +940,14 @@ async fn resolved_wip_markers_squash_clean_on_no_evaluator_job() {
 }
 
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn human_evaluator_and_human_work_resolve_via_inbox() {
     let Some(rig) = rig().await else { return };
-    commit_branch(&rig, "src/gated.rs"); // agent work produces output (§3.2 guard)
+    commit_branch(&rig, "src/gated.rs");
 
-    // Agent work + human evaluator: job parks in Evaluation on a Pending task.
     let gated = rig.handle.create_job(req("human-gated")).await.unwrap();
     assert_invariants_of(&rig.invariants);
     rig.handle
@@ -1013,9 +956,8 @@ async fn human_evaluator_and_human_work_resolve_via_inbox() {
         .unwrap();
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, gated.id, JobState::Evaluation).await;
-    tokio::time::sleep(Duration::from_millis(100)).await; // task record settles
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Wrong kind is rejected.
     let err = rig
         .handle
         .resolve_task(
@@ -1050,7 +992,6 @@ async fn human_evaluator_and_human_work_resolve_via_inbox() {
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, gated.id, JobState::Done).await;
 
-    // Human work: Pending task in Work phase; Pass → command eval → Done.
     let manual = rig.handle.create_job(req("manual")).await.unwrap();
     assert_invariants_of(&rig.invariants);
     rig.handle
@@ -1087,8 +1028,6 @@ async fn human_evaluator_and_human_work_resolve_via_inbox() {
         .await
         .unwrap();
     assert_eq!(tasks.len(), 2);
-    // The operator's resolution summary is persisted on the work task's result,
-    // not just used as the squash-commit body.
     assert!(matches!(
         tasks[0].result,
         Some(types::TaskResult::Human { pass: true, ref operator, summary: Some(ref s), .. })
@@ -1100,10 +1039,10 @@ async fn human_evaluator_and_human_work_resolve_via_inbox() {
 #[tokio::test]
 async fn escalation_retry_relaunches_work_without_branch_reset() {
     let Some(rig) = rig().await else { return };
-    rig.provider.script_exits([1, 1]); // exhaust work_retries: 1
-    rig.provider.on_run(|_| async {}); // attempt 1 (exits 1)
-    rig.provider.on_run(|_| async {}); // attempt 2 (exits 1)
-    commit_branch(&rig, "src/retry.rs"); // Retry attempt commits so it lands (§3.2 guard)
+    rig.provider.script_exits([1, 1]);
+    rig.provider.on_run(|_| async {});
+    rig.provider.on_run(|_| async {});
+    commit_branch(&rig, "src/retry.rs");
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -1112,7 +1051,6 @@ async fn escalation_retry_relaunches_work_without_branch_reset() {
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Task 3 is the escalation task; Retry relaunches in the same cycle.
     rig.handle
         .resolve_task(
             "acme",
@@ -1128,7 +1066,7 @@ async fn escalation_retry_relaunches_work_without_branch_reset() {
         .await
         .unwrap();
     assert_invariants_of(&rig.invariants);
-    wait_for_state(&rig.store, job.id, JobState::Done).await; // third run exits 0
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let tasks = rig
         .store
@@ -1139,7 +1077,7 @@ async fn escalation_retry_relaunches_work_without_branch_reset() {
         .await
         .unwrap();
     assert_eq!(tasks.len(), 4);
-    assert_eq!((tasks[3].cycle, tasks[3].attempt), (1, 3)); // same cycle, attempt++
+    assert_eq!((tasks[3].cycle, tasks[3].attempt), (1, 3));
     assert_eq!(tasks[3].state, TaskState::Done);
     let events = event_types(&rig.store).await;
     assert!(events.contains(&"job-escalation-resolved".to_string()));
@@ -1166,7 +1104,7 @@ async fn pending_inbox(store: &NatsStore) -> Vec<types::Task> {
 #[tokio::test]
 async fn revoke_closes_pending_escalation_task() {
     let Some(rig) = rig().await else { return };
-    rig.provider.script_exits([1, 1]); // exhaust work_retries: 1 → escalate
+    rig.provider.script_exits([1, 1]);
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -1175,7 +1113,6 @@ async fn revoke_closes_pending_escalation_task() {
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // The escalation task sits in the inbox as a Pending Human task.
     let inbox = pending_inbox(&rig.store).await;
     assert_eq!(inbox.len(), 1);
     let esc_id = inbox[0].id;
@@ -1185,10 +1122,8 @@ async fn revoke_closes_pending_escalation_task() {
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Revoked).await;
 
-    // No zombie remains in the inbox.
     assert!(pending_inbox(&rig.store).await.is_empty());
 
-    // The task record is terminal, closed by a synthetic system revoke.
     let task = rig
         .store
         .tasks()
@@ -1224,7 +1159,6 @@ async fn list_pending_hides_terminal_job_zombie() {
     let jobs = rig.store.jobs().await.unwrap();
     let tasks = rig.store.tasks().await.unwrap();
 
-    // Seed a Revoked job with a leftover Pending Human escalation task.
     let mut job = rig.handle.create_job(req("flaky")).await.unwrap();
     assert_invariants_of(&rig.invariants);
     job.state = JobState::Revoked;
@@ -1259,7 +1193,6 @@ async fn list_pending_hides_terminal_job_zombie() {
     };
     tasks.put(&zombie).await.unwrap();
 
-    // The pending task exists in KV, but the inbox filters it out.
     assert_eq!(
         tasks
             .list_for_job("acme", "api", job.id)
@@ -1297,11 +1230,8 @@ async fn two_concurrent_landings_serialize_and_neither_is_lost() {
     let Some(rig) = rig().await else { return };
     rig.backend
         .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
-    // One work hook per job; whichever job draws which hook, both files land.
     commit_branch(&rig, "src/a.rs");
     commit_branch(&rig, "src/b.rs");
-    // Land an unrelated commit on main during the first eval container, so at
-    // least one landing finds HEAD moved and takes the gate.
     move_main_during_eval(&rig);
 
     let a = rig.handle.create_job(req("impl-cmd")).await.unwrap();
@@ -1315,7 +1245,6 @@ async fn two_concurrent_landings_serialize_and_neither_is_lost() {
     wait_for_state(&rig.store, a.id, JobState::Done).await;
     wait_for_state(&rig.store, b.id, JobState::Done).await;
 
-    // No lost update: both job changes AND the concurrent land are on main.
     let m = &rig.repo.manager;
     for path in ["src/a.rs", "src/b.rs", "docs/other.md"] {
         assert!(
@@ -1326,13 +1255,11 @@ async fn two_concurrent_landings_serialize_and_neither_is_lost() {
             "{path} must be on final main — a landing was lost"
         );
     }
-    // At least one landing found HEAD moved and went through the gate.
     let events = event_types(&rig.store).await;
     assert!(
         events.contains(&"job-merge-gate-started".to_string()),
         "expected at least one gated landing: {events:?}"
     );
-    // Both candidate refs are cleaned up whatever paths were taken.
     for seq in [a.id, b.id] {
         assert!(
             m.resolve_ref("acme", "api", &format!("merge-gate/{seq}"))

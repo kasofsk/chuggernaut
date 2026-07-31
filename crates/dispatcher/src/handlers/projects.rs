@@ -23,8 +23,6 @@ use vcs::RepoManager;
 pub(super) async fn spawn_projects_create_handler(
     store: &NatsStore,
     repos: Arc<RepoManager>,
-    // Binary path baked into new repos' pre-receive hooks (§5.2) — the path
-    // the binary has on the SSH host (`HOOK_BIN`); None → this process's own.
     hook_bin: Option<std::path::PathBuf>,
 ) -> store::Result<()> {
     let mut projects_sub = store

@@ -131,10 +131,6 @@ impl Bucket {
     ) -> Result<Vec<(String, Vec<u8>)>> {
         use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, pull};
 
-        // Subject filters match whole tokens, but `prefix` is a string prefix
-        // and callers may end mid-token. Narrow to the token-aligned part and
-        // let the `starts_with` check below do the rest, so the filter is an
-        // optimization and never changes which keys are returned.
         let aligned = match prefix.rfind('.') {
             Some(i) => &prefix[..=i],
             None => "",
@@ -145,9 +141,7 @@ impl Bucket {
             .create_consumer(pull::Config {
                 description: Some("chuggernaut prefix scan".to_string()),
                 filter_subject: format!("{}{aligned}>", self.kv.prefix),
-                // Only the latest revision of each key is the current value.
                 deliver_policy: DeliverPolicy::LastPerSubject,
-                // A snapshot read has nothing to ack; see the doc comment.
                 ack_policy: AckPolicy::None,
                 headers_only,
                 ..Default::default()
@@ -157,10 +151,6 @@ impl Bucket {
 
         let name = consumer.cached_info().name.clone();
         let scanned = self.scan_prefix_drain(consumer, prefix).await;
-        // Ephemeral consumers only disappear once the server's inactivity
-        // threshold reaps them, so an un-deleted one lingers per list call.
-        // Best-effort on both paths: the scan's own result is what callers
-        // asked for, and the reaper is still the backstop if this fails.
         let _ = stream.delete_consumer(&name).await;
         scanned
     }
@@ -178,8 +168,6 @@ impl Bucket {
         for _ in 0..expected {
             let message = match tokio::time::timeout(SCAN_MESSAGE_TIMEOUT, messages.next()).await {
                 Ok(Some(m)) => m.map_err(nats_err)?,
-                // The consumer ended early (transport dropped) — return what we
-                // have rather than hanging; callers re-read on the next request.
                 Ok(None) => break,
                 Err(_) => {
                     return Err(StoreError::Nats(format!(
@@ -190,9 +178,6 @@ impl Bucket {
                     )));
                 }
             };
-            // LastPerSubject delivers a delete/purge tombstone as the latest
-            // revision of a removed key. Its payload is empty, so keeping it
-            // would surface a deleted record as a deserialization failure.
             if is_tombstone(&message) {
                 continue;
             }
@@ -221,14 +206,14 @@ impl Bucket {
     /// the watch is created (so no put is lost in the gap). `watch_with_history`
     /// is deliberately avoided: it terminates immediately when no key matches at
     /// creation, which is exactly the wait-for-a-future-key case.
-    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+    )]
     pub async fn watch(&self, key: &str) -> Result<KvWatch> {
         use async_nats::jetstream::kv::Operation;
         use futures::StreamExt as _;
         let watch = self.kv.watch(key).await.map_err(nats_err)?;
-        // A transport error ends the stream, so a bounded wait falls through to
-        // its own named timeout instead of looping on errors.
         let inner = watch
             .take_while(|e| futures::future::ready(e.is_ok()))
             .map(|e| {

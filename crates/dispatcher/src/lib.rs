@@ -38,8 +38,5 @@ pub mod run;
 pub mod scan;
 pub mod trace;
 
-// The pure domain (refactor-plan C1) lives in `chuggernaut-domain`; re-exported
-// here so existing `crate::{state,graph,queue,effects,escalation}::*` call
-// sites stay stable. (`escalation` moved under the decider layer.)
 pub use chuggernaut_domain::decide::escalation;
 pub use chuggernaut_domain::{decide, effects, graph, inputs, queue, state};

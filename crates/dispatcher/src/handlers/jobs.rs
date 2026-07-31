@@ -198,17 +198,11 @@ pub(super) async fn spawn_jobs_handler(
     };
     tokio::spawn(async move {
         while let Some(req) = jobs_sub.next().await {
-            let parts: Vec<&str> = req.subject.split('.').collect();
-            // req.jobs.{verb}.{owner}.{project}[.{seq}]
-            let (Some(verb), Some(owner), Some(project)) = (
-                parts.get(2).copied(),
-                parts.get(3).copied(),
-                parts.get(4).copied(),
-            ) else {
+            let Some((verb, owner, project)) = super::subject_target(&req.subject) else {
                 req.respond(bad_request("malformed subject")).await;
                 continue;
             };
-            let seq = parts.get(5).and_then(|s| s.parse::<u64>().ok());
+            let seq = req.subject.split('.').nth(5).and_then(|s| s.parse().ok());
             let body = jobs_dispatch(&ctx, verb, owner, project, seq, &req.payload).await;
             req.respond(body).await;
         }
@@ -255,19 +249,12 @@ async fn jobs_transition(
 ) -> Option<Vec<u8>> {
     let handle = &ctx.handle;
     let outcome = match verb {
-        // §2.1 Frozen → Draft: reopen a never-released job for editing.
         "draft" => handle.draft_job(owner, project, seq).await,
-        // #166 Draft → Frozen: finalize the edited definition (validate like
-        // release, park re-batchable). 409 in any non-Draft state.
         "finalize" => handle.finalize_job(owner, project, seq).await,
         "release" => handle.release_job(owner, project, seq).await.map(|_| ()),
         "revoke" => handle.revoke_job(owner, project, seq).await.map(|_| ()),
-        // §1.2 claims: park the next work attempt for a human / clear a
-        // pending claim.
         "claim" => handle.claim_job(owner, project, seq).await,
         "unclaim" => handle.unclaim_job(owner, project, seq).await,
-        // Operator-dispatched advisory triage (§1.2): launches a triage agent
-        // over the job state; never changes job state.
         "triage" => handle.triage_job(owner, project, seq).await,
         _ => return None,
     };
@@ -441,15 +428,11 @@ mod tests {
     /// create and the Draft PATCH bodies, since both carry `cover_html`.
     #[test]
     fn cover_html_size_cap_rejects_over_limit_with_422() {
-        // Boundary: exactly at the cap is fine, one byte over is not.
         assert!(!cover_too_large(&None));
         assert!(!cover_too_large(&Some("x".repeat(COVER_HTML_MAX_BYTES))));
         assert!(cover_too_large(&Some("x".repeat(COVER_HTML_MAX_BYTES + 1))));
-        // The rejection is a 422.
         assert_eq!(status(&unprocessable("too big")), 422);
 
-        // An oversized cover still deserializes (well-formed body) — the cap is a
-        // semantic check on top, not a parse error.
         let over = format!(
             r#"{{"type":"code","cover_html":{}}}"#,
             serde_json::to_string(&"x".repeat(COVER_HTML_MAX_BYTES + 1)).unwrap()
@@ -459,13 +442,11 @@ mod tests {
         let update: UpdateJobBody = serde_json::from_str(&over).unwrap();
         assert!(cover_too_large(&update.cover_html));
 
-        // A modest cover is accepted and round-trips through the wire body.
         let ok = r#"{"type":"code","cover_html":"<h1>hi</h1>"}"#;
         let create: CreateJobBody = serde_json::from_str(ok).unwrap();
         assert_eq!(create.cover_html.as_deref(), Some("<h1>hi</h1>"));
         assert!(!cover_too_large(&create.cover_html));
 
-        // Absent cover parses to None (back-compat with pre-cover clients).
         let bare: CreateJobBody = serde_json::from_str(r#"{"type":"code"}"#).unwrap();
         assert!(bare.cover_html.is_none());
     }
@@ -476,8 +457,6 @@ mod tests {
     /// *semantic* violation is deliberately NOT decided here.
     #[test]
     fn supplied_inputs_shape_is_checked_at_create_with_422() {
-        // Absent → empty, which is what every job of a type declaring no inputs
-        // sends. Both bodies carry the field.
         let bare: CreateJobBody = serde_json::from_str(r#"{"type":"code"}"#).unwrap();
         assert!(bare.inputs.is_empty());
         assert_eq!(inputs_shape_error(&bare.inputs), None);
@@ -489,8 +468,6 @@ mod tests {
         assert_eq!(ok.inputs.get("sha").map(String::as_str), Some("4f9c1ab"));
         assert_eq!(inputs_shape_error(&ok.inputs), None);
 
-        // A shell metacharacter in a value, and an uppercase name no declaration
-        // could carry — both refused, both naming the input.
         for body in [
             r#"{"type":"rollback","inputs":{"sha":"4f9c1ab; rm -rf /"}}"#,
             r#"{"type":"rollback","inputs":{"SHA":"4f9c1ab"}}"#,
@@ -501,13 +478,10 @@ mod tests {
             assert_eq!(status(&unprocessable(&message)), 422);
         }
 
-        // The Draft edit runs the same check.
         let update: UpdateJobBody =
             serde_json::from_str(r#"{"type":"rollback","inputs":{"sha":"a b"}}"#).unwrap();
         assert!(inputs_shape_error(&update.inputs).is_some());
 
-        // Undeclared-but-well-shaped passes here; release rejects it with
-        // `inputs.{name}` (chuggernaut_domain::inputs::input_errors).
         let undeclared: CreateJobBody =
             serde_json::from_str(r#"{"type":"code","inputs":{"nobody_declared_me":"x"}}"#).unwrap();
         assert_eq!(inputs_shape_error(&undeclared.inputs), None);
@@ -519,8 +493,6 @@ mod tests {
     /// Unlike `inputs`, nothing is deferred: there is no release-time pass.
     #[test]
     fn supplied_groups_shape_is_checked_at_the_wire_edge_with_422() {
-        // Absent → empty, which is what every ungrouped job sends. Both bodies
-        // carry the field, and both run the same check.
         let bare: CreateJobBody = serde_json::from_str(r#"{"type":"code"}"#).unwrap();
         assert!(bare.groups.is_empty());
         assert_eq!(groups_shape_error(&bare.groups), None);
@@ -535,7 +507,6 @@ mod tests {
         assert_eq!(ok.groups.len(), 2);
         assert_eq!(groups_shape_error(&ok.groups), None);
 
-        // One body per rule: shape, length, duplicate, count.
         let long = "x".repeat(types::GROUP_NAME_LEN_MAX + 1);
         let many: Vec<String> = (0..=types::GROUPS_COUNT_MAX)
             .map(|i| format!("\"g-{i}\""))
@@ -550,7 +521,6 @@ mod tests {
             let message = groups_shape_error(&parsed.groups).expect("must be refused");
             assert!(message.starts_with("groups: "), "{message}");
             assert_eq!(status(&unprocessable(&message)), 422);
-            // The Draft edit refuses the same body for the same reason.
             let update: UpdateJobBody = serde_json::from_str(&body).unwrap();
             assert!(groups_shape_error(&update.groups).is_some());
         }

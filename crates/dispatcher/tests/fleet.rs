@@ -177,8 +177,6 @@ async fn spawn_core(
 
 /// Poll `fleet.status` until `pred` holds (or time out), returning the snapshot.
 async fn wait_for_fleet(store: &NatsStore, pred: impl Fn(&FleetStatus) -> bool) -> FleetStatus {
-    // Watch the platform KV `fleet.status` key, inspecting each republished
-    // snapshot until `pred` holds (#206 principle 3).
     let bucket = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
     let watch = bucket.watch("fleet.status").await.unwrap();
     let initial = || async {
@@ -218,8 +216,6 @@ async fn occupancy_reflects_launch_and_exit() {
         .unwrap();
     store.ensure_topology().await.unwrap();
 
-    // An Escalated job (recovery leaves it and its tasks alone) with a Running
-    // work task whose container is live on node `air`.
     let jobs = store.jobs().await.unwrap();
     jobs.put(&job(
         51,
@@ -247,8 +243,6 @@ async fn occupancy_reflects_launch_and_exit() {
     )
     .await;
 
-    // Launch is reflected: `air` shows one busy slot running job 51 / task 1;
-    // `nuc` (rostered, idle) shows its full capacity free.
     let fleet = wait_for_fleet(&store, |f| node(f, "air").occupied == 1).await;
     let air = node(&fleet, "air");
     assert_eq!(air.slots, Some(4));
@@ -269,8 +263,6 @@ async fn occupancy_reflects_launch_and_exit() {
     assert_eq!((nuc.slots, nuc.occupied), (Some(2), 0));
     assert_eq!(fleet.queue_depth, 0);
 
-    // The container exits (the backend no longer lists it): republishing on the
-    // next transition frees the slot.
     backend.set_managed_running([]);
     handle.trigger_scan().await.unwrap();
     assert_invariants_of(&sink);
@@ -304,8 +296,6 @@ async fn restart_reattach_rebuilds_occupancy_from_live_containers() {
     let head = repo.head().await;
     repo.create_job_branch(1, &head).await;
 
-    // Crash state: job mid-Work with a Running work task whose container is still
-    // alive on `nuc`.
     store
         .jobs()
         .await
@@ -321,8 +311,6 @@ async fn restart_reattach_rebuilds_occupancy_from_live_containers() {
         .await
         .unwrap();
 
-    // The fresh backend reports the container both alive (inspect → Running, so
-    // reconciliation re-attaches rather than failing it) and in the running set.
     let backend = Arc::new(FakeBackend::new());
     backend.seed_running(["nuc/live".to_string()]);
     backend.seed_managed_running([running("nuc/live", 1, 1)]);
@@ -350,11 +338,7 @@ async fn restart_reattach_rebuilds_occupancy_from_live_containers() {
     .with_fleet_roster(roster());
     let (_handle, sink) = spawn_checked(core);
 
-    // Occupancy is rebuilt from the live container: `nuc` shows the re-attached
-    // work task, with no launch replayed and nothing reaped.
     let fleet = wait_for_fleet(&store, |f| node(f, "nuc").occupied == 1).await;
-    // No `Core` call to hang a check on: reconciliation and the republish it drives
-    // are the whole scenario, so drain the actor's log once the wait let them through.
     assert_invariants_of(&sink);
     let slot = &node(&fleet, "nuc").running[0];
     assert_eq!(
@@ -381,8 +365,6 @@ async fn queue_depth_included() {
         .unwrap();
     store.ensure_topology().await.unwrap();
 
-    // The fleet is at capacity: every launch is refused with NoCapacity, so the
-    // command work launch is queued rather than run.
     let backend = Arc::new(FakeBackend::new());
     backend.fail_launch_no_capacity_if(|_| Some("no free slots".into()));
     let (handle, _repo, sink) = spawn_core(
@@ -418,7 +400,6 @@ async fn queue_depth_included() {
     handle.release_job("acme", "api", created.id).await.unwrap();
     assert_invariants_of(&sink);
 
-    // The queued launch bumps the depth; no node is occupied (nothing running).
     let fleet = wait_for_fleet(&store, |f| f.queue_depth >= 1).await;
     assert_eq!(fleet.queue_depth, 1);
     assert!(

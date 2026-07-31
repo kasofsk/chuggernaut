@@ -239,8 +239,10 @@ pub fn decide_enqueue(
 /// Decide one landing step. Pure: every await the old `try_finalize` /
 /// `gate_reduce` interleaved is either a pre-read in the view or an
 /// [`Effect`] whose result re-enters as the next event.
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 pub fn decide(
     state: MergeGateState,
     view: &LandingView<'_>,
@@ -251,8 +253,6 @@ pub fn decide(
     let (owner, project) = split_project(job);
     let mut state = state;
 
-    // Negative space (STYLE.md Tier 2 #2): a landing decision only ever runs
-    // for the seq the serializer popped or parked — never a queued one.
     debug_assert!(
         !state.queue.contains(&seq),
         "landing #{seq} decided while still queued"
@@ -260,8 +260,6 @@ pub fn decide(
 
     match event {
         LandingEvent::Start => {
-            // Revoked-while-queued staleness guard: the §2.1 record is the
-            // truth; anything not WrapUp by now does not land.
             if job.state != JobState::WrapUp {
                 return (state, vec![], vec![], LandingStep::Completed);
             }
@@ -270,7 +268,6 @@ pub fn decide(
                 .clone()
                 .unwrap_or_else(|| panic!("WrapUp job #{seq} has a base_ref"));
             let effect = if view.head == base_ref && !view.force_gate {
-                // Fast path: evaluators already ran against exactly what lands.
                 Effect::SquashMerge {
                     owner: owner.to_string(),
                     project: project.to_string(),
@@ -280,8 +277,6 @@ pub fn decide(
                     summary: view.summary.clone(),
                 }
             } else {
-                // HEAD moved (or a gate-fix must re-verify): build the
-                // candidate and open the gate (§3.3 Merge Gate).
                 Effect::CreateSquashCandidate {
                     owner: owner.to_string(),
                     project: project.to_string(),
@@ -298,8 +293,6 @@ pub fn decide(
             MergeOutcome::Merged { .. } | MergeOutcome::NoOp => {
                 (state, vec![], vec![], LandingStep::FinishLanding)
             }
-            // head == base_ref makes a conflict impossible by construction;
-            // treat one as the conflict path anyway rather than crash.
             MergeOutcome::Conflict { .. } => {
                 state.pending_rework = Some(PendingRework::Conflict);
                 let effects = vec![rebase_effect(owner, project, seq, &view.head)];
@@ -324,10 +317,6 @@ pub fn decide(
             }
             MergeOutcome::Merged { commit } => {
                 if view.gate_evaluators.is_empty() {
-                    // Nothing to re-run; the candidate promotes directly. The
-                    // CAS cannot be refused here in practice (nothing else
-                    // lands between the candidate build and this promote —
-                    // single writer), but the outcome still re-enters.
                     let effects = vec![
                         Effect::AdvanceDefault {
                             owner: owner.to_string(),
@@ -343,8 +332,6 @@ pub fn decide(
                     ];
                     return (state, vec![], effects, LandingStep::FinishLanding);
                 }
-                // Open the gate: this seq parks as the slug's one gating
-                // landing (depth-1 by type).
                 debug_assert!(state.gating.is_none(), "gate opened while occupied");
                 state.gating = Some(seq);
                 let effects = vec![
@@ -361,8 +348,6 @@ pub fn decide(
                         seq,
                         gate_branch: format!("merge-gate/{seq}"),
                         cycle: view.cycle,
-                        // Staged (§3.3, job #154): first stage only; the shim
-                        // parks the rest via the same `group_stages`.
                         evaluators: group_stages(view.gate_evaluators.clone())
                             .pop_front()
                             .unwrap_or_else(|| panic!("non-empty gate evaluators")),
@@ -373,7 +358,6 @@ pub fn decide(
         },
 
         LandingEvent::Rebased { conflict_context } => {
-            // Consume the continuation memory: which rework flavor is this?
             let pending = state
                 .pending_rework
                 .take()
@@ -386,8 +370,6 @@ pub fn decide(
                     ("merge_gate_failure", failures, ReworkReason::GateCiFailure)
                 }
             };
-            // Pin the job to the new base, announce the rework, re-enter
-            // Work with the context (§3.2 step 12, §3.3).
             let mut pinned = job.clone();
             pinned.base_ref = Some(view.head.clone());
             let effects = vec![
@@ -421,13 +403,10 @@ pub fn decide(
             first_stage_failed,
             compiler_output,
         } => {
-            // The verdict closes this seq's gate occupancy whatever follows.
             debug_assert_eq!(state.gating, Some(seq), "verdict for a non-gating seq");
             state.gating = None;
 
             if failures.is_empty() {
-                // Promote: the candidate commit IS the merge (§3.3). The CAS
-                // outcome re-enters (`PromoteRefused` on a moved HEAD).
                 let effects = vec![
                     Effect::AdvanceDefault {
                         owner: owner.to_string(),
@@ -450,18 +429,12 @@ pub fn decide(
                 return (state, vec![], effects, LandingStep::FinishLanding);
             }
 
-            // Deterministic classification (§3.3, job #154): compile iff the
-            // FIRST stage failed with later stages still pending — never by
-            // parsing output.
             let class = if first_stage_failed {
                 GateFailureClass::Compile
             } else {
                 GateFailureClass::Test
             };
             if class == GateFailureClass::Compile && view.gate_fix_used < GATE_FIX_BUDGET {
-                // Gate-fix fast path: a scoped fix task returns straight to
-                // the gate — no re-review, no eval CI. The fix rebases the
-                // branch itself (`launch_gate_fix` owns that composite).
                 let new_base = view
                     .gate_old_head
                     .clone()
@@ -477,10 +450,6 @@ pub fn decide(
                 return (state, vec![], effects, LandingStep::Completed);
             }
 
-            // Integration failure: rework on the new base, budget NOT
-            // consumed — same treatment as a merge conflict (§3.3). The
-            // rebase outcome re-enters as `Rebased`, which reads the flavor
-            // (and these failures) from the continuation memory.
             let new_base = view
                 .gate_old_head
                 .clone()
@@ -498,10 +467,6 @@ pub fn decide(
         }
 
         LandingEvent::PromoteRefused => {
-            // HEAD moved under the parked candidate (an origin-release reset,
-            // or restart-race leftovers): re-enqueue for finalization against
-            // the new HEAD instead of escalating — FIFO order, exactly the
-            // old `refinalize` re-entry.
             let effects = vec![Effect::DeleteBranch {
                 owner: owner.to_string(),
                 project: project.to_string(),
@@ -645,8 +610,6 @@ mod tests {
         }
     }
 
-    // --- queue mechanics -------------------------------------------------
-
     #[test]
     fn enqueue_transitions_evaluation_and_queues_idempotently() {
         let j = job(JobState::Evaluation);
@@ -659,7 +622,6 @@ mod tests {
         assert_eq!(state.queue, [7]);
         assert_eq!(step, EnqueueStep::Queued);
 
-        // refinalize re-entry: already WrapUp — no transition, no dup queue.
         let j2 = job(JobState::WrapUp);
         let (state, transitions, effects, step) = decide_enqueue(state, &j2, false);
         assert!(transitions.is_empty() && effects.is_empty());
@@ -669,8 +631,6 @@ mod tests {
 
     #[test]
     fn wrap_up_none_completes_directly_without_queueing() {
-        // `finalize: none`: eval-pass IS the wrap-up — no transition, no
-        // queue entry, no landing machinery.
         let j = job(JobState::Evaluation);
         let (state, transitions, effects, step) =
             decide_enqueue(MergeGateState::default(), &j, true);
@@ -708,8 +668,6 @@ mod tests {
         assert_eq!(s.gating, None);
         assert_eq!(s.pending_rework, None, "gating removal drops the memory");
     }
-
-    // --- Start -----------------------------------------------------------
 
     #[test]
     fn start_skips_a_stale_landing() {
@@ -759,8 +717,6 @@ mod tests {
             "gate-fix cycle must re-gate even on an unmoved HEAD"
         );
     }
-
-    // --- squash outcomes ---------------------------------------------------
 
     #[test]
     fn merged_or_noop_finishes_the_landing() {
@@ -860,8 +816,6 @@ mod tests {
         assert_eq!(s.gating, Some(7), "depth-1 slot taken, by type");
     }
 
-    // --- rebase re-entry ---------------------------------------------------
-
     #[test]
     fn rebased_after_conflict_reworks_without_findings() {
         let j = job(JobState::WrapUp);
@@ -920,8 +874,6 @@ mod tests {
         );
     }
 
-    // --- gate verdicts -------------------------------------------------------
-
     fn gating_state() -> MergeGateState {
         MergeGateState {
             gating: Some(7),
@@ -971,7 +923,6 @@ mod tests {
     #[test]
     fn exhausted_budget_or_later_stage_failure_takes_full_rework() {
         let j = job(JobState::WrapUp);
-        // Budget exhausted.
         let mut v = view(&j, "head2");
         v.gate_fix_used = GATE_FIX_BUDGET;
         let (s, _, e, step) = decide(
@@ -992,7 +943,6 @@ mod tests {
         );
         assert_eq!(step, LandingStep::AwaitOutcome);
 
-        // Later-stage failure (Test class) — same rework arm regardless of budget.
         let (_, _, e, _) = decide(
             gating_state(),
             &view(&j, "head2"),
@@ -1009,14 +959,12 @@ mod tests {
     fn refused_promote_requeues_fifo() {
         let j = job(JobState::WrapUp);
         let mut state = MergeGateState::default();
-        state.queue.push_back(9); // someone else is already waiting
+        state.queue.push_back(9);
         let (s, _, e, step) = decide(state, &view(&j, "head2"), LandingEvent::PromoteRefused);
         assert!(matches!(&e[0], Effect::DeleteBranch { .. }));
         assert_eq!(s.queue, [9, 7], "re-entry joins the BACK of the queue");
         assert_eq!(step, LandingStep::Completed);
     }
-
-    // --- derivation helpers ---------------------------------------------------
 
     #[test]
     fn gate_evaluators_filters_to_required_commands() {

@@ -152,8 +152,6 @@ async fn rig() -> Option<Rig> {
     clone.push("main").await;
 
     let backend = Arc::new(FakeBackend::new());
-    // The command evaluator reads its verdict from this file; the types that
-    // declare no evaluators never launch a container that looks for it.
     backend.put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
     let provider = Arc::new(FakeProvider::new());
     let core = core_over(&store, &repo, &backend, &provider, server.url()).await;
@@ -253,8 +251,6 @@ async fn release_to_ready_materializes_declared_defaults() {
         .await
         .unwrap();
     assert_invariants(&rig.core);
-    // At creation the record holds exactly what was supplied — no defaults yet,
-    // because no `base_ref` has been recorded to resolve them against.
     assert_eq!(job.inputs, pairs(&[("sha", "4f9c1ab")]));
     assert_eq!(stored(&rig.store, job.id).await.inputs, job.inputs);
 
@@ -319,7 +315,6 @@ async fn release_rejects_a_missing_required_input_by_field() {
     assert_eq!(errs[0].field, "inputs.sha");
     assert_eq!(errs[0].job_seq, Some(bare.id));
     assert!(errs[0].message.contains("required"), "{errs:?}");
-    // Rejected release leaves the job Frozen — nothing pinned, nothing filled.
     let after = stored(&rig.store, bare.id).await;
     assert_eq!(after.state, JobState::Frozen);
     assert!(after.base_ref.is_none() && after.inputs.is_empty());
@@ -411,7 +406,6 @@ async fn a_blocked_job_resolves_its_defaults_at_the_unblock_ref() {
         "no fill without a pin"
     );
 
-    // The type's declaration moves on main before the dependency completes.
     let clone = rig.repo.clone_branch("main").await;
     clone
         .commit_file(
@@ -453,8 +447,6 @@ async fn inputs_are_immutable_across_the_pre_eval_rebase() {
     let Some(rig) = rig().await else { return };
     let store = rig.store.clone();
 
-    // The work agent commits to the job branch and lands both an unrelated commit
-    // AND the moved job-type declaration on main before finishing.
     let bare = rig.repo.bare_path();
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
@@ -528,7 +520,6 @@ async fn golden_trace_inputs_reach_work_and_eval_container_envs() {
     assert_invariants_of(&sink);
     test_utils::wait::job_state(&store, "acme", "api", job.id, JobState::Done).await;
 
-    // 1. The §10.3 event pair: what was asked for, then what actually ran.
     let events = job_events(&store, job.id).await;
     assert_eq!(
         event(&events, "job-created")["inputs"],
@@ -545,7 +536,6 @@ async fn golden_trace_inputs_reach_work_and_eval_container_envs() {
         "the job started: {events:?}"
     );
 
-    // 2. The work container's env: exactly the resolved inputs, and no `note`.
     let expected = vec![
         ("CHUG_INPUT_SERVICE".to_string(), "web".to_string()),
         ("CHUG_INPUT_SHA".to_string(), "4f9c1ab".to_string()),
@@ -553,7 +543,6 @@ async fn golden_trace_inputs_reach_work_and_eval_container_envs() {
     let runs = provider.runs();
     assert_eq!(injected(&runs[0].env), expected, "work container env");
 
-    // 3. …and the evaluator's, which is the same choke point (`container_env`).
     let eval = backend
         .launches()
         .into_iter()
@@ -606,7 +595,6 @@ async fn an_input_free_job_launches_a_byte_identical_eval_env() {
         ],
         "an input-free job's eval env must not grow a key"
     );
-    // The `job-released` event is likewise untouched — no empty `inputs` field.
     let released = event(&job_events(&store, job.id).await, "job-released");
     assert_eq!(released["state"], serde_json::json!("Ready"));
     assert!(released["inputs"].is_null(), "{released}");
@@ -635,15 +623,11 @@ async fn a_value_outside_the_charset_parks_the_job_at_launch() {
     );
     assert_invariants(&rig.core);
 
-    // A value no supply path could have produced — three passes reject it — on a
-    // job that is otherwise ready to launch.
     let jobs = rig.store.jobs().await.unwrap();
     let mut ready = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
     ready.inputs.insert("sha".into(), "4f9c1ab;rm -rf /".into());
     jobs.put(&ready).await.unwrap();
 
-    // A fresh core enqueues the Ready job at construction; spawning drains the
-    // queue, which is what reaches `enter_work` and its launch-time pass.
     let core = core_over(
         &rig.store,
         &rig.repo,
@@ -663,8 +647,6 @@ async fn a_value_outside_the_charset_parks_the_job_at_launch() {
         |rec| rec.state != JobState::Ready,
     )
     .await;
-    // The park happens inside the actor with no `Core` call to hang a check on:
-    // the sink caught every message the launch drove, so drain it here.
     assert_invariants_of(&sink);
     assert_eq!(parked.state, JobState::Escalated, "parks like a missing KV");
     let escalation = parked.escalation.expect("the park records why");
@@ -759,7 +741,6 @@ async fn a_batch_refuses_members_that_carry_inputs() {
         "{errs:?}"
     );
 
-    // Members that carry none batch exactly as before.
     let c = rig.core.create_job(req("plain", &[], &[])).await.unwrap();
     assert_invariants(&rig.core);
     let d = rig.core.create_job(req("plain", &[], &[])).await.unwrap();

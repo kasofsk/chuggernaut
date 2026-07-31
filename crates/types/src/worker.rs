@@ -480,8 +480,6 @@ impl RefreshOutcome {
         version: &str,
         outcome: Option<&RefreshOutcome>,
     ) -> RefreshConfirmation {
-        // The swapped-in daemon reports `{pkg}+{sha}` — a `+{short_sha}` needle
-        // proves the swap landed even before any outcome field would.
         let needle = format!("+{}", &target_sha[..target_sha.len().min(12)]);
         if version.contains(&needle) {
             return RefreshConfirmation::Confirmed;
@@ -665,9 +663,6 @@ impl ObservedCapacity {
             return false;
         }
         self.mark = observation.mark;
-        // Keep the last ceiling the node named: a report that omits it says
-        // nothing about the ceiling, and forgetting it would un-bound the UI's
-        // stepper for no reason.
         self.slots_max = observation.slots_max.or(self.slots_max);
         self.observed_at = Some(at);
         debug_assert!(
@@ -726,7 +721,6 @@ mod tests {
             serde_json::from_str::<WorkerLaunchRequest>(&json).unwrap(),
             req
         );
-        // The artifact reference carries no bytes.
         assert!(!json.contains("data_b64\":\"\""));
         assert!(json.contains("local_artifact"));
     }
@@ -798,7 +792,6 @@ mod tests {
         let json = serde_json::to_string(&ping).unwrap();
         assert_eq!(serde_json::from_str::<PingOk>(&json).unwrap(), ping);
 
-        // Old daemon: no refresh_outcome / refresh_progress keys at all.
         let old = r#"{"running":0,"version":"0.1.0","artifacts":{}}"#;
         let back: PingOk = serde_json::from_str(old).unwrap();
         assert_eq!(back.refresh_outcome, None);
@@ -824,11 +817,8 @@ mod tests {
             serde_json::from_str::<WorkerAnnounce>(&json).unwrap(),
             announce
         );
-        // Millisecond epoch, not seconds: two restarts inside one second must
-        // not collide (see the field docs).
         assert!(json.contains("1769000000123"), "{json}");
 
-        // Pre-field daemon: `slots` alone, no ceiling and no ordering pair.
         let old: WorkerAnnounce =
             serde_json::from_str(r#"{"node":"air","slots":2,"version":"0.1.0"}"#).unwrap();
         assert_eq!(
@@ -836,7 +826,6 @@ mod tests {
             (None, None, None)
         );
 
-        // A rejection reports the ceiling and leaves the ordering pair alone.
         let rejected = SetSlotsOk {
             accepted: false,
             slots: 2,
@@ -888,37 +877,24 @@ mod tests {
         assert_eq!(observed.source(), CapacitySource::Seed);
         assert_eq!(observed.observed_at, None);
 
-        // First ordered observation lands and raises the watermark.
         assert!(observed.apply(&announce_at(4, 1_000, 3), now));
         assert_eq!(observed.mark, (1_000, 3));
         assert_eq!(observed.source(), CapacitySource::Node);
         assert_eq!(observed.slots_max, Some(6));
 
-        // A stale announce — same epoch, LOWER generation — is discarded, so an
-        // in-flight heartbeat cannot undo a fresher observation.
         assert!(!observed.apply(&announce_at(2, 1_000, 2), now));
         assert_eq!(
             observed.mark,
             (1_000, 3),
             "watermark untouched by a discard"
         );
-        // The same pair re-arriving still applies: the rule is `>=`, so a
-        // re-announce of the number in force is never dropped.
         assert!(observed.apply(&announce_at(4, 1_000, 3), now));
 
-        // The daemon restarts: its generation resets to 0, but the epoch
-        // advanced, so its observations still land. A counter-only key would
-        // have frozen this node's capacity at every deploy — `worker-refresh.sh`
-        // recreates the daemon container on each one.
         assert!(observed.apply(&announce_at(2, 2_000, 0), now));
         assert_eq!(observed.mark, (2_000, 0));
 
-        // The anti-freeze backstop: a ping applies even when its pair is LOWER
-        // than the last applied one, and RESETS the watermark to what it carries
-        // — so no ordering anomaly can permanently discard a node's reports.
         assert!(observed.apply(&ping_at(5, 500, 0), now));
         assert_eq!(observed.mark, (500, 0), "a ping resets, it does not merge");
-        // Having reset, an announce at the reset epoch is ordered normally again.
         assert!(observed.apply(&announce_at(5, 500, 1), now));
         assert_eq!(observed.mark, (500, 1));
     }
@@ -943,16 +919,12 @@ mod tests {
         let mut observed = ObservedCapacity::default();
         assert!(observed.apply(&unordered, now), "nothing ordered yet");
         assert_eq!(observed.slots_max, None);
-        // Still nothing ordered: repeated pre-field announces keep applying.
         assert!(observed.apply(&unordered, now));
 
-        // An ordered observation arrives; the pre-field one can never win again.
         assert!(observed.apply(&announce_at(4, 1_000, 0), now));
         assert!(!observed.apply(&unordered, now));
         assert_eq!(observed.mark, (1_000, 0));
 
-        // A pre-field daemon's ping reports no `slots` at all — silence about
-        // capacity, not a zero to schedule on.
         let silent = PingOk {
             running: 0,
             slots: None,
@@ -981,13 +953,11 @@ mod tests {
             recent: vec![],
         };
 
-        // First sighting of a phase always relays, with the caller's elapsed.
         assert_eq!(
             p.relay("target", &mut state, 12, REFRESH_HEARTBEAT_SECS)
                 .as_deref(),
             Some("phase=build-image 1/3 worker, 12s elapsed")
         );
-        // Same phase, heartbeat not yet due ⇒ silent (no log spam every poll).
         assert_eq!(
             p.relay("target", &mut state, 20, REFRESH_HEARTBEAT_SECS),
             None
@@ -996,15 +966,12 @@ mod tests {
             p.relay("target", &mut state, 41, REFRESH_HEARTBEAT_SECS),
             None
         );
-        // Heartbeat due ⇒ a "still" line carrying both clocks. A wait with zero
-        // progress lines is then itself signal.
         assert_eq!(
             p.relay("target", &mut state, 42, REFRESH_HEARTBEAT_SECS)
                 .as_deref(),
             Some("still phase=build-image 1/3 worker (5s in phase), 42s elapsed")
         );
 
-        // A new phase relays immediately, without waiting out the heartbeat.
         let next = RefreshProgress {
             phase: "build-image 2/3 agent".into(),
             ..p.clone()
@@ -1015,8 +982,6 @@ mod tests {
             Some("phase=build-image 2/3 agent, 43s elapsed")
         );
 
-        // Progress for some OTHER refresh is never relayed, and leaves the relay
-        // state untouched so our own next line is still correct.
         let mut fresh = RefreshRelayState::default();
         assert_eq!(
             p.relay("other", &mut fresh, 12, REFRESH_HEARTBEAT_SECS),
@@ -1031,13 +996,11 @@ mod tests {
     /// pending.
     #[test]
     fn refresh_confirmation_decision() {
-        // The swapped-in daemon reports the target SHA in its version → confirmed.
         assert_eq!(
             RefreshOutcome::confirm("abc123def456", "0.1.0+abc123def456", None),
             RefreshConfirmation::Confirmed
         );
 
-        // A failed outcome for this target reports stage/error rather than waiting.
         let failed = RefreshOutcome {
             accepted_at: chrono::Utc::now(),
             finished_at: Some(chrono::Utc::now()),
@@ -1056,7 +1019,6 @@ mod tests {
             }
         );
 
-        // An ok outcome for this target confirms.
         let ok = RefreshOutcome {
             result: RefreshResult::Ok,
             ..failed.clone()
@@ -1066,7 +1028,6 @@ mod tests {
             RefreshConfirmation::Confirmed
         );
 
-        // Still building, or an outcome for a different target → pending.
         let in_progress = RefreshOutcome {
             result: RefreshResult::InProgress,
             finished_at: None,

@@ -24,8 +24,6 @@ export function StatusFooter({
   fleetUnavailable: boolean
 }) {
   const [health, setHealth] = useState<Health | null>(null)
-  // Health is a dispatcher round-trip (NATS req/reply), so probe on mount and a
-  // slow visible-tab interval rather than on every project event.
   useEffect(() => {
     let ok = true
     const probe = () => {
@@ -55,8 +53,6 @@ export function StatusFooter({
   const active = jobs.filter((j) => !NON_TERMINAL.has(j.state)).length
   const spark = activityBuckets(jobs, 20)
 
-  // Fleet segment: same graceful-degrade rule as the capacity widget — hidden
-  // when the feed is unavailable or nothing sized has been published.
   const sized = fleet?.nodes.filter((n) => n.slots != null) ?? []
   const total = sized.reduce((n, x) => n + (x.slots ?? 0), 0)
   const busy = fleet?.nodes.reduce((n, x) => n + x.occupied, 0) ?? 0

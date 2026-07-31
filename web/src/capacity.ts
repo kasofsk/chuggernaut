@@ -114,9 +114,6 @@ export function capacityView(node: FleetNode, now: number): CapacityView {
  * intent states, and `converged` when there is nothing to say.
  */
 function capacityState(node: FleetNode, observedAgoMs: number | null): CapacityStateKind {
-  // No provenance at all: a docker-endpoint node (`DOCKER_NODES` still owns its
-  // capacity, design #293 §7) or a dispatcher older than the capacity fields.
-  // Say nothing rather than infer a state from an absence.
   if (!node.capacity_source && !node.capacity_state && !node.capacity_observed_at) return 'unknown'
   if (node.capacity_state === 'rejected') return 'rejected'
   if (node.capacity_source === 'seed') return 'seed'

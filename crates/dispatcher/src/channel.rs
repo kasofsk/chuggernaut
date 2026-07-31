@@ -35,12 +35,9 @@ impl Core {
         seq: u64,
         post: ChannelPost,
     ) -> Result<()> {
-        // Reject posts for jobs that do not exist: the subject is per-job and
-        // the container's credentials are scoped to it, but a stale container
-        // from a revoked job could still be talking.
         let job = self.must_get(owner, project, seq)?;
         if job.state.is_terminal() {
-            return Ok(()); // late post from a container we already finished with
+            return Ok(());
         }
 
         let key = keys::channel_key(owner, project, seq);
@@ -52,8 +49,6 @@ impl Core {
 
         match &post {
             ChannelPost::Update(update) => {
-                // Stamp acceptance time here rather than trusting the
-                // container's clock; the jobs list ages the message against it.
                 let mut update = update.clone();
                 update.at = Some(chrono::Utc::now());
                 entry.update = Some(update);
@@ -63,8 +58,6 @@ impl Core {
         let (event_type, payload) = channel_event(&post);
         bucket.put_json(&key, &entry).await?;
 
-        // The event is the history; the KV write above is only the latest-value
-        // cache that `GET .../status` reads.
         self.publish(owner, project, seq, event_type, payload).await
     }
 }

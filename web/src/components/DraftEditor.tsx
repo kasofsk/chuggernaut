@@ -16,10 +16,6 @@ import { JobInputFields, inputsOrUndefined, suppliedInputs, useJobTypeDetail } f
 import { GroupPicker, useGroupOptions } from './JobGroups'
 import { depCandidates } from '../jobFilters'
 
-// The editable fields, used as keys for focus/dirty/flash tracking. `eval` is
-// not edited here — it round-trips unchanged on the full-replace PATCH. The
-// declared inputs track as one field: they are one map on the record, and the
-// operator edits one of them at a time.
 type Field =
   | 'title'
   | 'description'
@@ -75,43 +71,28 @@ export function DraftEditor({
   const [description, setDescription] = useState(job.description)
   const [type, setType] = useState(job.type)
   const [tags, setTags] = useState<string[]>(job.knowledge_tags)
-  // What the job is part of (design #321): part of the full-replace PATCH like
-  // every other creation field while the job is a Draft. After it leaves Draft
-  // the field stays writable — through the job page's add/remove editor.
   const [groups, setGroups] = useState<string[]>(job.groups ?? [])
   const [deps, setDeps] = useState<number[]>(job.deps)
   const [timeout, setTimeoutVal] = useState(job.timeout ?? '')
   const [model, setModel] = useState(job.model ?? '')
-  // A Draft's `inputs` is what its creator supplied — declared defaults are
-  // materialized at the Ready transition, not here (#311 Decision 6), so this
-  // is the operator's own set and it is editable while the job is a Draft.
   const [inputs, setInputs] = useState<Record<string, string>>(job.inputs ?? {})
 
   const [preview, setPreview] = useState(false)
   const [depQuery, setDepQuery] = useState('')
   const [saveError, setSaveError] = useState<string | null>(null)
 
-  // Pickers: the type vocabulary, the tag vocabulary, and existing jobs (for the
-  // dependency picker), fetched once for the editor.
   const [jobTypes, setJobTypes] = useState<JobTypeSummary[]>([])
   const [availTags, setAvailTags] = useState<string[]>([])
   const groupChoices = useGroupOptions(owner, project)
   const [allJobs, setAllJobs] = useState<Job[]>([])
-  // The selected type's declaration — refetched when the operator (or the chat
-  // side) changes `type`, since the inputs a draft may carry are the new type's.
   const typeDetail = useJobTypeDetail(owner, project, type)
   const declaredInputs = typeDetail?.job_type?.inputs ?? []
   useEffect(() => {
     api.jobTypes(owner, project).then(setJobTypes, () => {})
-    // the picker names tags; the paths they resolved to are for readers
     api.tags(owner, project).then((ts) => setAvailTags(ts.map((t) => t.name)), () => {})
     api.jobs(owner, project).then(setAllJobs, () => {})
   }, [owner, project])
 
-  // Which field the operator is editing (never adopt a server value over it),
-  // which fields have a local edit not yet echoed by the server (don't let a
-  // stale refetch revert it), and which just flashed after adopting a remote
-  // change. focus/dirty are refs — read inside the reconcile effect, no re-render.
   const focusedRef = useRef<Field | null>(null)
   const dirtyRef = useRef<Set<Field>>(new Set())
   const localRef = useRef({ title, description, type, tags, groups, deps, timeout, model, inputs })
@@ -126,10 +107,6 @@ export function DraftEditor({
     }), 1200)
   }
 
-  // Remote-edit animation: text fields type the delta in (typewriter hook),
-  // select/multi-select fields pulse the control and flash the newly chosen
-  // value(s). A small wizard indicator rides the label of any animating field.
-  // All motion is skipped under prefers-reduced-motion (the flash wash stays).
   const { textActive, typewrite } = useTypewriter()
   const [pulsing, setPulsing] = useState<Set<Field>>(new Set())
   const [valFlash, setValFlash] = useState<Set<string>>(new Set())
@@ -150,14 +127,9 @@ export function DraftEditor({
     }), 1200)
   }
 
-  // Merge an incoming server snapshot. Per field: if the server matches local,
-  // our edit landed — clear its dirty flag. Otherwise adopt the remote value and
-  // flash — unless the operator is on that field, or it holds an un-echoed local
-  // edit (dirty), in which case we keep the operator's version.
   useEffect(() => {
     const cur = localRef.current
     const reduced = prefersReducedMotion()
-    // Only fields the operator isn't touching are ever adopted or animated.
     const canAdopt = (f: Field, equal: boolean) => {
       if (equal) {
         dirtyRef.current.delete(f)
@@ -165,15 +137,11 @@ export function DraftEditor({
       }
       return focusedRef.current !== f && !dirtyRef.current.has(f)
     }
-    // Text field: type the delta in (the hook degrades to an instant set under
-    // reduced motion), then flash the field so the change is legible.
     const adoptText = (f: Field, from: string, to: string, set: (v: string) => void) => {
       if (!canAdopt(f, from === to)) return
       typewrite(f, from, to, set)
       flashField(f)
     }
-    // Select / multi-select: snap the value (we don't drive dropdown internals),
-    // flash the field, pulse the control, and flash the newly chosen value(s).
     const adoptChoice = (f: Field, equal: boolean, apply: () => void, added: string[]) => {
       if (!canAdopt(f, equal)) return
       apply()
@@ -210,9 +178,6 @@ export function DraftEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job])
 
-  // Build the full PATCH payload from the latest state (this closure is recreated
-  // each render, so the debounced call reads current values at fire time). `eval`
-  // rides along unchanged so the full replace doesn't wipe per-job evaluators.
   const buildPayload = (): JobPatch => ({
     type,
     title,
@@ -223,10 +188,6 @@ export function DraftEditor({
     eval: job.eval,
     timeout: timeout.trim() || null,
     model: model.trim() || null,
-    // Until the declaration has loaded the stored map rides along unchanged:
-    // narrowing to an empty `declaredInputs` would wipe the draft's inputs on
-    // the first blur. Once loaded it narrows to what the type declares, so
-    // switching the draft's type drops values the new type doesn't accept.
     inputs: typeDetail ? suppliedInputs(declaredInputs, inputs) : inputsOrUndefined(inputs),
   })
 
@@ -243,8 +204,6 @@ export function DraftEditor({
   }
   const debouncedPatch = useDebouncedCallback(patchNow, 1000)
 
-  // A local edit: mark the field dirty (so a stale refetch won't revert it) and
-  // schedule the debounced full PATCH.
   const edit = (f: Field) => {
     dirtyRef.current.add(f)
     debouncedPatch()
@@ -255,7 +214,6 @@ export function DraftEditor({
   }
   const fieldClass = (f: Field) =>
     `field${flash.has(f) ? ' draft-flash' : ''}${pulsing.has(f) ? ' draft-pulse' : ''}`
-  // A small wand on the label of any field a remote edit is animating.
   const wiz = (f: Field) =>
     textActive.has(f) || pulsing.has(f) ? (
       <span className="draft-wiz" title="updating from chat" aria-hidden="true">
@@ -263,10 +221,6 @@ export function DraftEditor({
       </span>
     ) : null
 
-  // Discrete edits (tags, deps, type) go through the debounced PATCH, not an
-  // immediate one: the debounced call fires after the state update has
-  // re-rendered, so buildPayload reads the new value rather than the stale
-  // closure. `edit()` marks the field dirty and schedules that debounced PATCH.
   function toggleTag(t: string) {
     setTags((ts) => (ts.includes(t) ? ts.filter((x) => x !== t) : [...ts, t]))
     edit('knowledge_tags')
@@ -281,8 +235,6 @@ export function DraftEditor({
     edit('deps')
   }
 
-  // A group edit is a discrete edit like a tag: state first, then the debounced
-  // full PATCH, which reads the new value once the re-render has landed.
   function editGroups(next: string[]) {
     setGroups(next)
     edit('groups')
@@ -290,7 +242,6 @@ export function DraftEditor({
 
   const depMatches = depCandidates(allJobs, deps, depQuery, job.id)
 
-  // Tag options: the vocabulary plus any tags already on the job that aren't in it.
   const tagOptions = [...new Set([...availTags, ...tags])]
 
   return (
@@ -369,10 +320,6 @@ export function DraftEditor({
         </div>
       </div>
 
-      {/* The type's declared inputs (spec §1.1): editable while the job is a
-          Draft and frozen the moment it leaves it (#311 Decision 6), so this is
-          the only place they are ever an editable control. Nothing renders for a
-          type that declares none. */}
       <JobInputFields
         declared={declaredInputs}
         values={inputs}
@@ -452,9 +399,6 @@ export function DraftEditor({
         )}
       </div>
 
-      {/* Beside the knowledge tags because they look alike and are not: a tag is
-          an execution input, a group changes nothing about the run (#321
-          Decision 3). */}
       <GroupPicker
         value={groups}
         options={groupChoices}
@@ -500,13 +444,9 @@ export function DraftEditor({
         </label>
       </details>
 
-      {/* On a Draft the attachments are editable like the rest of the draft
-          (spec §1.6). The job already exists, so uploads PUT straight to it. */}
       <JobAttachments owner={owner} project={project} seq={job.id} />
 
       {isBatch ? (
-        // A Draft batch's finalize/release/revoke live in the ConsistEditor below,
-        // beside the cars they act on — only the autosave hint stays here.
         <div className="create-actions">
           <span className="dim draft-save-hint">edits save automatically · membership below</span>
         </div>

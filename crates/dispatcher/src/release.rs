@@ -49,12 +49,6 @@ pub async fn load_job_type(
         )]
     })?;
 
-    // Schema-tolerance (spec §14): unknown top-level fields are accepted, not
-    // rejected. Surface each loudly so a config that ran ahead of this
-    // dispatcher (a new section this binary predates) is visible platform-wide
-    // instead of silently ignored — but the job still launches. This is the
-    // 2026-07-22 incident's fix: a benign unknown field no longer escalates
-    // every job of the type.
     for w in job_type.config_warnings() {
         tracing::warn!(
             file = %path,
@@ -63,14 +57,6 @@ pub async fn load_job_type(
         );
     }
 
-    // Version-skew gate (spec §14): a config declaring a `min_dispatcher` newer
-    // than this binary's schema epoch is config-ahead-of-binary. Refuse it here
-    // with a clear, platform-level diagnostic naming the file, field, and
-    // needed version. At launch this parks the job pre-Work (Stalled) with the
-    // reason rather than burning a launch into a generic validation escalation;
-    // at release it blocks the same way. The merge-time CI check
-    // (`chuggernaut validate --deployed-epoch`) is the first line of defense so
-    // this rarely fires.
     if let Some(needed) = job_type.requires_dispatcher(types::CONFIG_SCHEMA_EPOCH) {
         return Err(vec![ValidationError::new(
             job_seq,
@@ -134,9 +120,6 @@ pub async fn static_errors(
     let mut errs = Vec::new();
     let mut require_file = Vec::new();
 
-    // §1.1 per-job timeout override: parseability validated at release (the
-    // string is on the Job, not pinned to a ref), consistent with "wiring
-    // validated at release, not creation".
     if let Some(t) = &job.timeout
         && let Err(e) = types::parse_duration(t)
     {
@@ -314,10 +297,6 @@ mod tests {
 
     #[test]
     fn reserved_prefix_is_rejected_for_vars_as_well_as_secrets() {
-        // A `CHUG_`-prefixed var is a shadow of an origin credential or a §6.3
-        // task-origin stamp (design #311 Decision 4) — and existing in KV does
-        // not redeem it, which is why the prefix check runs before the
-        // existence check.
         for (secrets, vars, field) in [
             (vec!["CHUG_ORIGIN_PAT"], vec![], "secrets"),
             (vec![], vec!["CHUG_PHASE"], "vars"),

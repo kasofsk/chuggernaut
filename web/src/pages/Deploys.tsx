@@ -6,10 +6,6 @@ import { StateBadge } from '../components/StateBadge'
 import { SkeletonLines } from '../components/Skeleton'
 import { DeployLegCard, deployReportOfTasks } from '../components/DeployLegCard'
 
-// How many deploys are shown (and have their leg report fetched) at a time.
-// A report costs one request per deploy job — it rides that job's command work
-// task — so an unbounded fan-out grows a round trip per deploy for the whole
-// history. The page renders the newest slice and extends on demand.
 const PAGE = 20
 
 /**
@@ -23,22 +19,11 @@ const PAGE = 20
 export function DeploysPage() {
   const { owner = '', project = '' } = useParams()
   const navigate = useNavigate()
-  // The deploy jobs, stamped with the project they were loaded for so a
-  // navigation between projects can't leave the previous project's rows (and
-  // their in-flight report fetches) on screen.
   const scope = `${owner}/${project}`
   const [loaded, setLoaded] = useState<{ scope: string; deploys: Job[] }>({ scope: '', deploys: [] })
   const deploys = loaded.scope === scope ? loaded.deploys : []
-  // Leg reports as they land, keyed by job seq; a present-but-null entry is
-  // "fetched, no report", an absent one is "still coming".
   const [reports, setReports] = useState<Map<number, DeployReport | null>>(new Map())
   const requested = useRef<Set<number>>(new Set())
-  // The scope in-flight report fetches were started for. Job ids are per-project
-  // seq numbers, so a response arriving after a project switch would otherwise
-  // land under a colliding id in the new project's map; settling checks this
-  // instead. Deliberately *not* an effect-cleanup flag — revealing older deploys
-  // re-runs the report effect, and tearing down on that would discard the
-  // newest page's in-flight fetches, which `requested` then never re-issues.
   const reportScope = useRef(scope)
   const [shown, setShown] = useState(PAGE)
   const [loading, setLoading] = useState(true)
@@ -54,9 +39,6 @@ export function DeploysPage() {
     api.jobs(owner, project).then(
       (jobs) => {
         if (cancelled) return
-        // Newest first by seq. The rows render from this alone — each leg
-        // report fills in behind its own row as it answers (effect below),
-        // rather than holding the page back until the slowest one lands.
         setLoaded({ scope, deploys: jobs.filter((j) => j.type === 'deploy').sort((a, b) => b.id - a.id) })
         setError(null)
         setLoading(false)
@@ -73,9 +55,6 @@ export function DeploysPage() {
     }
   }, [owner, project, scope, navigate])
 
-  // One row's report, recorded the moment it answers. Per-row rather than one
-  // Promise.all barrier so a slow deploy holds up only its own shimmer, and so
-  // no batch of results can be discarded wholesale.
   const settleReport = useCallback(
     (id: number, report: DeployReport | null) => {
       if (reportScope.current !== scope) return
@@ -84,11 +63,6 @@ export function DeploysPage() {
     [scope],
   )
 
-  // Leg reports for the visible slice only, in parallel, each fetched once.
-  // `shown` is what bounds the fan-out: revealing older deploys costs one more
-  // page of requests, not a request per deploy that ever happened — and the
-  // pages already in flight keep running, since `requested` would never re-issue
-  // a fetch this effect abandoned.
   useEffect(() => {
     const todo = deploys.slice(0, shown).filter((j) => !requested.current.has(j.id))
     if (todo.length === 0) return
@@ -153,17 +127,12 @@ export function DeploysPage() {
   )
 }
 
-// A row's leg report: the checklist once its fetch answers, a short shimmer
-// while it is still in flight (the row itself is already on screen), and the
-// muted note when the deploy job carried no report at all.
 function DeployEntryReport({ loaded, report }: { loaded: boolean; report: DeployReport | null }) {
   if (!loaded) return <SkeletonLines n={2} />
   if (!report) return <div className="dim deploy-entry-noreport">no leg report</div>
   return <DeployLegCard report={report} />
 }
 
-// Compact local timestamp: time-only when the moment is today, date prepended
-// otherwise (mirrors the jobs table's convention).
 function fmtWhen(iso: string): string {
   const d = new Date(iso)
   const now = new Date()

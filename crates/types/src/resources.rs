@@ -49,8 +49,6 @@ pub fn parse_memory(input: &str) -> Result<i64, MemoryParseError> {
     } else {
         (s, 1)
     };
-    // Only a bare non-negative integer is a legal numeric part; this rejects
-    // signs, decimals, and stray unit letters (the "g" in "5g", "GB" in "4GB").
     if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
         return Err(invalid("expected a positive integer"));
     }
@@ -79,7 +77,6 @@ mod tests {
 
     #[test]
     fn rejects_malformed() {
-        // The exact cases from the dogfood bug and the acceptance criteria.
         for bad in [
             "5g", "4GB", "", "  ", "-5", "-5Gi", "0", "1.5Gi", "Gi", "5 Gi", "5gi",
         ] {

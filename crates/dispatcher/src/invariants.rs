@@ -178,7 +178,6 @@ fn check_ready_queue_only_ready(state: &CoreState, out: &mut Vec<Violation>) {
 /// invented. Checked in both directions per project graph.
 fn check_rdeps_inverts_deps(state: &CoreState, out: &mut Vec<Violation>) {
     for (slug, graph) in state.graphs {
-        // Forward → reverse: every dep edge is reflected in `dependents`.
         for job in graph.jobs() {
             for &upstream in &job.deps {
                 if !graph.dependents(upstream).contains(&job.id) {
@@ -192,7 +191,6 @@ fn check_rdeps_inverts_deps(state: &CoreState, out: &mut Vec<Violation>) {
                 }
             }
         }
-        // Reverse → forward: every dependent genuinely depends on its upstream.
         for job in graph.jobs() {
             for &dependent in graph.dependents(job.id) {
                 let depends = graph
@@ -401,20 +399,16 @@ mod tests {
         let mut f = Fixture::new(vec![job("acme/api", 1, &[], JobState::Done)]);
         f.queue.enqueue(queued(1));
         let v = f.check();
-        // Done is neither Ready nor absorbing-clean: both invariants fire.
         assert!(v.iter().any(|x| x.invariant == "ready_queue_only_ready"));
         assert!(v.iter().any(|x| x.invariant == "terminal_is_absorbing"));
     }
 
     #[test]
     fn rdeps_stays_inverse_across_reinsert() {
-        // The graph maintains rdeps internally, so a well-formed graph is always
-        // clean — including after a dep-changing re-insert (the pruning path).
         let mut f = Fixture::new(vec![
             job("acme/api", 1, &[], JobState::Done),
             job("acme/api", 2, &[1], JobState::Ready),
         ]);
-        // Re-insert #2 dropping its dep on #1: rdeps(1) must lose #2.
         f.graphs
             .get_mut("acme/api")
             .unwrap()
@@ -475,8 +469,6 @@ mod tests {
         broken.queue.enqueue(queued(1));
 
         let sink = InvariantSink::new();
-        // A clean message records nothing, so the log length counts breaches, not
-        // messages — the property that keeps a passing test's log empty.
         sink.check("CreateJob", &clean.state());
         assert_eq!(sink.drain(), vec![]);
 
@@ -491,8 +483,6 @@ mod tests {
                 .any(|v| v.invariant == "ready_queue_only_ready"),
             "{breaches:?}"
         );
-        // Draining is destructive: one broken message must not fail every later
-        // assertion in the test that drains it.
         assert_eq!(sink.drain(), vec![]);
     }
 

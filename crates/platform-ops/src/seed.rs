@@ -73,7 +73,6 @@ mod tests {
         assert_eq!(jt.name, "code");
         assert_eq!(jt.display_name.as_deref(), Some("Code"));
         assert_eq!(jt.validate(), vec![]);
-        // Every repo path the type references ships in the template.
         for path in [".chug/prompts/work/code.md", ".chug/tasks/review-code.md"] {
             assert!(
                 CODE_TEMPLATE.iter().any(|(p, _)| *p == path),

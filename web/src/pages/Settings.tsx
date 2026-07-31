@@ -12,7 +12,7 @@ export function SettingsPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    setCfg(null) // param change: back to skeletons until the new fetch lands
+    setCfg(null)
     api
       .projectConfig(owner, project)
       .then((c) => {

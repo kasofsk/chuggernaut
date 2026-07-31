@@ -211,8 +211,6 @@ async fn release_cmd_work(handle: &CoreHandle, sink: &InvariantSink) -> u64 {
 }
 
 async fn wait_for_fleet(store: &NatsStore, pred: impl Fn(&FleetStatus) -> bool) -> FleetStatus {
-    // Watch the platform KV `fleet.status` key, inspecting each republished
-    // snapshot until `pred` holds (#206 principle 3).
     let bucket = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
     let watch = bucket.watch("fleet.status").await.unwrap();
     let initial = || async {
@@ -258,7 +256,6 @@ async fn announce_adds_capacity_and_drains_launch_queue() {
         .unwrap();
     store.ensure_topology().await.unwrap();
 
-    // A one-node fleet that is at capacity: every launch is refused.
     let backend = Arc::new(FakeBackend::new());
     backend.fail_launch_no_capacity_if(|_| Some("full".into()));
     let (handle, _repo, sink) = spawn_core(
@@ -270,13 +267,10 @@ async fn announce_adds_capacity_and_drains_launch_queue() {
     )
     .await;
 
-    // The command work launch is refused and queued.
     release_cmd_work(&handle, &sink).await;
     wait_for_fleet(&store, |f| f.queue_depth >= 1).await;
     assert!(backend.launches().is_empty(), "nothing launched while full");
 
-    // A new worker announces: capacity appears, and the actor re-drains the
-    // launch queue on the same turn — the queued launch fires onto the fleet.
     handle
         .announce_worker(announce("nuc", 2, "0.1.0+nuc"))
         .await
@@ -286,7 +280,6 @@ async fn announce_adds_capacity_and_drains_launch_queue() {
     wait_until(|| !backend.launches().is_empty()).await;
     let fleet = wait_for_fleet(&store, |f| f.queue_depth == 0).await;
     assert_eq!(fleet.queue_depth, 0, "queue drained once capacity appeared");
-    // The announce reached the backend, and the new node is live in the roster.
     assert!(
         backend
             .registered()
@@ -310,11 +303,6 @@ async fn heartbeat_loss_stops_placement_but_preserves_running() {
         .unwrap();
     store.ensure_topology().await.unwrap();
 
-    // A container is already running on `nuc` (seeded into the live set), WITH
-    // its backing job + Running task records and a live `inspect` — the §3.6
-    // startup sweep then re-attaches it. Without the records the sweep raced
-    // the test: it legitimately reaped the container as an orphan, tripping
-    // the "never killed" assertion (the old quarantined flake).
     let backend = Arc::new(FakeBackend::new());
     backend.seed_managed_running([running("nuc/live", 7, 1)]);
     backend.seed_running(["nuc/live".to_string()]);
@@ -333,8 +321,6 @@ async fn heartbeat_loss_stops_placement_but_preserves_running() {
         .await
         .unwrap();
 
-    // Zero-seed fleet with a tiny heartbeat timeout so the very next scan after
-    // an announce treats it as lapsed.
     let (handle, _repo, sink) = spawn_core(
         server,
         &store,
@@ -344,28 +330,22 @@ async fn heartbeat_loss_stops_placement_but_preserves_running() {
     )
     .await;
 
-    // `nuc` announces: it joins the fleet and supplies capacity.
     handle
         .announce_worker(announce("nuc", 2, "0.1.0+nuc"))
         .await
         .unwrap();
     assert_invariants_of(&sink);
-    // Its running container shows occupied.
     wait_for_fleet(&store, |f| {
         f.nodes.iter().any(|n| n.name == "nuc" && n.occupied == 1)
     })
     .await;
 
-    // The heartbeat lapses (no re-announce): the scan marks `nuc` unschedulable.
     handle.trigger_scan().await.unwrap();
     assert_invariants_of(&sink);
     wait_until(|| backend.unschedulable().iter().any(|n| n == "nuc")).await;
 
-    // A new launch finds no capacity and queues — placement stopped …
     release_cmd_work(&handle, &sink).await;
     let fleet = wait_for_fleet(&store, |f| f.queue_depth >= 1).await;
-    // … while the already-running container is still tracked, and the node reads
-    // as unavailable (down) rather than gone.
     let nuc = node(&fleet, "nuc");
     assert_eq!(nuc.occupied, 1, "running container preserved");
     assert!(!nuc.available, "deregistered node shows down");
@@ -390,7 +370,6 @@ async fn static_and_dynamic_merge_precedence() {
     store.ensure_topology().await.unwrap();
 
     let backend = Arc::new(FakeBackend::new());
-    // Seed `air` at 4 slots (a DOCKER_NODES worker entry).
     let (handle, _repo, sink) = spawn_core(
         server,
         &store,
@@ -401,13 +380,11 @@ async fn static_and_dynamic_merge_precedence() {
     .await;
     wait_for_fleet(&store, |f| f.nodes.iter().any(|n| n.name == "air")).await;
 
-    // Re-announce `air` at 5 slots (the air 4→5 case): the live value wins.
     handle
         .announce_worker(announce("air", 5, "0.2.0+air"))
         .await
         .unwrap();
     assert_invariants_of(&sink);
-    // And a brand-new node joins.
     handle
         .announce_worker(announce("nuc", 2, "0.1.0+nuc"))
         .await
@@ -422,7 +399,6 @@ async fn static_and_dynamic_merge_precedence() {
     assert_eq!(air.slots, Some(5), "announcement wins over the seed");
     assert_eq!(air.version.as_deref(), Some("0.2.0+air"));
     assert_eq!(node(&fleet, "nuc").slots, Some(2));
-    // Both announces reached the backend registry.
     let reg = backend.registered();
     assert!(reg.iter().any(|(n, s, _)| n == "air" && *s == 5));
     assert!(reg.iter().any(|(n, s, _)| n == "nuc" && *s == 2));
@@ -445,10 +421,6 @@ async fn announce_ordering_and_provenance_reach_the_snapshot() {
     store.ensure_topology().await.unwrap();
 
     let backend = Arc::new(FakeBackend::new());
-    // What a real `FleetBackend` reports for a seeded worker node that has never
-    // observed capacity: the seed slot cell, and a default (never-observed)
-    // `ObservedCapacity` whose provenance is therefore `seed`. The announce below
-    // updates this same entry in place.
     backend.set_fleet_status([container::NodeStatus {
         name: "air".into(),
         available: true,
@@ -466,14 +438,12 @@ async fn announce_ordering_and_provenance_reach_the_snapshot() {
     )
     .await;
 
-    // Before any announce: the boot seed is what we place on, and it says so.
     let seeded = wait_for_fleet(&store, |f| f.nodes.iter().any(|n| n.name == "air")).await;
     let air = node(&seeded, "air");
     assert_eq!(air.slots, Some(2));
     assert_eq!(air.capacity_source, Some(types::CapacitySource::Seed));
     assert_eq!(air.capacity_observed_at, None);
 
-    // The node reports 4 at (1000, 3): provenance flips to `node`.
     handle
         .announce_worker(announce_at("air", 4, "0.2.0+air", (1_000, 3)))
         .await
@@ -484,8 +454,6 @@ async fn announce_ordering_and_provenance_reach_the_snapshot() {
     assert_eq!(air.capacity_source, Some(types::CapacitySource::Node));
     assert!(air.capacity_observed_at.is_some());
 
-    // A stale in-flight heartbeat (same epoch, LOWER generation) must not undo
-    // it. Round-trip the actor so the snapshot has certainly been recomputed.
     handle
         .announce_worker(announce_at("air", 1, "0.2.0+air", (1_000, 2)))
         .await
@@ -514,17 +482,13 @@ async fn zero_seed_boot_then_announce() {
         .unwrap();
     store.ensure_topology().await.unwrap();
 
-    // No capacity at all: launches are refused until a node announces.
     let backend = Arc::new(FakeBackend::new());
     backend.fail_launch_no_capacity_if(|_| Some("no nodes yet".into()));
     let (handle, _repo, sink) = spawn_core(server, &store, vec![], None, backend.clone()).await;
 
-    // A launch on the empty fleet queues rather than failing.
     release_cmd_work(&handle, &sink).await;
     wait_for_fleet(&store, |f| f.queue_depth >= 1).await;
 
-    // The first worker announces: it becomes live fleet membership and its
-    // capacity drains the queued launch.
     handle
         .announce_worker(announce("air", 4, "0.1.0+air"))
         .await
@@ -551,21 +515,17 @@ async fn non_fleet_backend_drops_stray_announce() {
         .unwrap();
     store.ensure_topology().await.unwrap();
 
-    // A backend that does not support dynamic workers (a Docker deployment).
     let backend = Arc::new(FakeBackend::new());
     backend.disable_dynamic_workers();
     let (handle, _repo, sink) = spawn_core(server, &store, vec![], None, backend.clone()).await;
 
-    // Its boot fleet publishes with no nodes.
     wait_for_fleet(&store, |f| f.nodes.is_empty()).await;
 
-    // A misconfigured worker announces — the dispatcher must drop it.
     handle
         .announce_worker(announce("ghost", 2, "0.1.0+ghost"))
         .await
         .unwrap();
     assert_invariants_of(&sink);
-    // Give the actor a turn to process and republish (a Ping round-trips it).
     handle.ping().await.unwrap();
 
     let fleet = wait_for_fleet(&store, |_| true).await;
@@ -597,8 +557,6 @@ async fn ping_refresh_outcome_lands_in_fleet_status() {
     store.ensure_topology().await.unwrap();
 
     let backend = Arc::new(FakeBackend::new());
-    // The live fleet_status a real backend fills from worker pings: `air`
-    // reported a FAILED refresh, `nuc` reported none (an older daemon).
     backend.set_fleet_status([
         container::NodeStatus {
             name: "air".into(),
@@ -636,7 +594,6 @@ async fn ping_refresh_outcome_lands_in_fleet_status() {
     ]);
     let (handle, _repo, sink) = spawn_core(server, &store, vec![], None, backend.clone()).await;
 
-    // Any non-ping message republishes fleet.status; the scan tick does it.
     handle.trigger_scan().await.unwrap();
     assert_invariants_of(&sink);
 
@@ -657,7 +614,6 @@ async fn ping_refresh_outcome_lands_in_fleet_status() {
     }
     assert_eq!(air.refresh_outcome.as_ref().unwrap().to_sha, "target");
 
-    // A node whose ping carried no outcome (absent-field back-compat) stays None.
     assert!(
         node(&fleet, "nuc").refresh_outcome.is_none(),
         "a node with no reported refresh outcome must read None"
@@ -705,7 +661,6 @@ async fn capacity_intent_is_persisted_pushed_and_converges() {
         backend.clone(),
     )
     .await;
-    // The node reports 4 — the number the scheduler is using before any intent.
     handle
         .announce_worker(announce("air", 4, "0.1.0+air"))
         .await
@@ -725,7 +680,6 @@ async fn capacity_intent_is_persisted_pushed_and_converges() {
     assert_eq!(ack.state, types::CapacityState::Pending);
     assert_invariants_of(&sink);
 
-    // Intent is durable, with its audit stamp (design #293 §2/§9).
     let bucket = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
     let record: types::FleetCapacity = bucket
         .get_json("fleet.capacity")
@@ -736,7 +690,6 @@ async fn capacity_intent_is_persisted_pushed_and_converges() {
     assert_eq!(air_intent.slots, 2);
     assert_eq!(air_intent.set_by, "operator@example.com");
 
-    // The push reached the node, and its adoption converges the snapshot.
     wait_until(|| backend.slot_commands() == vec![("air".to_string(), 2)]).await;
     let fleet = wait_for_fleet(&store, |f| {
         f.nodes
@@ -789,7 +742,6 @@ async fn capacity_edit_is_refused_for_docker_and_unknown_nodes() {
         matches!(missing, dispatcher::core::CoreError::NotFound(_)),
         "expected 404 NotFound, got {missing:?}"
     );
-    // Neither refusal touched the fleet: no push, and no intent recorded.
     assert!(backend.slot_commands().is_empty());
     let bucket = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
     assert!(
@@ -859,7 +811,6 @@ async fn refused_capacity_is_terminal_and_surfaces_its_reason() {
         air.capacity_note
     );
 
-    // Terminal: ten scan ticks re-push nothing.
     for _ in 0..10 {
         handle.trigger_scan().await.unwrap();
     }
@@ -869,7 +820,6 @@ async fn refused_capacity_is_terminal_and_surfaces_its_reason() {
         "a refused number must never be re-pushed"
     );
 
-    // A different ask retires the refusal — it was of one value, not of the node.
     handle
         .set_node_capacity("air", 4, "operator@example.com")
         .await
@@ -896,8 +846,6 @@ async fn intent_for_a_node_the_fleet_lost_is_kept_but_never_pushed() {
         .unwrap();
     store.ensure_topology().await.unwrap();
 
-    // Intent set before this dispatcher booted, for a node its roster no longer
-    // holds and one it does.
     let mut record = types::FleetCapacity::default();
     for (node, slots) in [("ghost", 3), ("air", 2)] {
         record.nodes.insert(
@@ -928,8 +876,6 @@ async fn intent_for_a_node_the_fleet_lost_is_kept_but_never_pushed() {
         .unwrap();
     wait_for_fleet(&store, |f| node_slots(f, "air") == Some(Some(4))).await;
 
-    // The restored ask for the live node is re-asserted; the lost one is not
-    // pushed to on any tick.
     for _ in 0..10 {
         handle.trigger_scan().await.unwrap();
     }
@@ -942,7 +888,6 @@ async fn intent_for_a_node_the_fleet_lost_is_kept_but_never_pushed() {
         "a node the fleet no longer holds must never be pushed to: {pushes:?}"
     );
 
-    // …and its intent is kept, so it gets its number back if it re-announces.
     let after: types::FleetCapacity = bucket
         .get_json("fleet.capacity")
         .await
@@ -978,7 +923,6 @@ async fn a_first_announce_re_asserts_intent_without_waiting_for_a_scan() {
         .unwrap();
     store.ensure_topology().await.unwrap();
 
-    // Intent set before this dispatcher booted, for a node nothing seeds.
     let mut record = types::FleetCapacity::default();
     record.nodes.insert(
         "nuc".into(),
@@ -994,14 +938,11 @@ async fn a_first_announce_re_asserts_intent_without_waiting_for_a_scan() {
     let backend = Arc::new(FakeBackend::new());
     let (handle, _repo, sink) = spawn_core(server, &store, vec![], None, backend.clone()).await;
 
-    // The node appears for the first time, on its boot `WORKER_SLOTS` of 4.
     handle
         .announce_worker(announce("nuc", 4, "0.1.0+nuc"))
         .await
         .unwrap();
 
-    // A third of the scan interval: long enough for a spawned RPC against the
-    // fake, far short of the tick that would mask the bug.
     const BEFORE_ANY_SCAN_TICK: Duration = Duration::from_secs(10);
     test_utils::wait::poll(
         BEFORE_ANY_SCAN_TICK,
@@ -1059,15 +1000,10 @@ async fn launches_are_decided_without_reading_capacity_intent() {
         .await
         .unwrap();
 
-    // The initial launch path runs with intent on the record: it is refused for
-    // capacity and queues, rather than panicking on a guarded read. The refusal
-    // is armed *after* the announce on purpose — the fake models a registering
-    // worker as capacity appearing, so `register_worker` clears it.
     backend.fail_launch_no_capacity_if(|_| Some("full".into()));
     release_cmd_work(&handle, &sink).await;
     wait_for_fleet(&store, |f| f.queue_depth >= 1).await;
 
-    // …and so does the resume path when capacity appears.
     backend.fail_launch_no_capacity_if(|_| None);
     handle
         .announce_worker(announce("nuc", 2, "0.1.0+nuc"))
@@ -1114,7 +1050,6 @@ async fn silently_ignored_capacity_is_re_pushed_but_bounded_per_tick() {
         .unwrap();
     wait_until(|| !backend.slot_commands().is_empty()).await;
 
-    // Each tick re-asserts, and each tick pushes at most once.
     let ticks = 10;
     for _ in 0..ticks {
         handle.trigger_scan().await.unwrap();
@@ -1138,7 +1073,6 @@ async fn silently_ignored_capacity_is_re_pushed_but_bounded_per_tick() {
             .all(|(node, slots)| node == "air" && *slots == 2)
     );
 
-    // And it is never reported as converged, whatever the node claims.
     let fleet = wait_for_fleet(&store, |f| {
         f.nodes
             .iter()

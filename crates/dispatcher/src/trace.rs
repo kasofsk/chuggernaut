@@ -160,8 +160,6 @@ mod tests {
 
     #[test]
     fn records_before_any_step_are_dropped() {
-        // Reconcile-time writes land here before the test opens a step; they
-        // must not corrupt the first real step.
         let sink = TraceSink::new();
         sink.transition(9, JobState::Ready, JobState::Work);
         sink.effect("PublishEvent job-created");

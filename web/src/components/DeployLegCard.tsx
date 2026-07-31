@@ -1,11 +1,5 @@
 import type { DeployReport, Task } from '../api'
 
-// A deploy job's structured leg report (ticket #187) as a checklist card: the
-// from→to SHA header with a rollback/health badge, then one row per leg — green
-// ✓ ok, red ✕ failed (with the short reason), grey · skipped. A deploy is a
-// checklist, not a conversation, so it reads as one. Shared by JobDetail (in a
-// deploy job's command task) and the per-project Deploys page — one renderer, no
-// duplication.
 export function DeployLegCard({ report }: { report: DeployReport }) {
   const legs = report.legs ?? []
   const glyph = (s: string) => (s === 'ok' ? '✓' : s === 'failed' ? '✕' : '·')
@@ -51,10 +45,6 @@ export function DeployLegCard({ report }: { report: DeployReport }) {
   )
 }
 
-// A deploy job's structured payload carries a `legs` array (the envelope fields
-// are optional). Detect that shape on a task result's `structured` — tolerant of
-// either an object or a JSON string — so a deploy renders as a checklist rather
-// than a raw JSON block. Returns null for anything else.
 export function deployReportOf(structured: unknown): DeployReport | null {
   let value: Record<string, unknown> | null = null
   if (structured == null) return null
@@ -74,13 +64,6 @@ export function deployReportOf(structured: unknown): DeployReport | null {
   return Array.isArray(value.legs) ? (value as unknown as DeployReport) : null
 }
 
-// The deploy leg report for a whole job, harvested from its tasks. Which result
-// kind carries it depends on how the deploy ended — a command work task records
-// `Work` when it succeeds and `Command` only when it fails — so discriminating
-// on `kind` would see exactly one of the two (ticket #275: every successful
-// deploy read as "no leg report"). The honest predicate is "this result carries
-// a legs-shaped `structured`", which `deployReportOf` already decides. Scans
-// newest-first so a re-deploy's latest attempt wins.
 export function deployReportOfTasks(tasks: Task[]): DeployReport | null {
   for (let i = tasks.length - 1; i >= 0; i--) {
     const r = tasks[i].result

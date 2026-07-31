@@ -75,8 +75,6 @@ async fn create_project_allows_partial_clone() {
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&cfg.stdout).trim(), "true");
 
-    // Two versions of one file: v1's blob is history, not in the current tree,
-    // so a working filtered clone must leave it behind.
     let work = repo.clone_branch("main").await;
     work.commit_file("f.txt", b"old-content-v1", "v1").await;
     work.commit_file("f.txt", b"new-content-v2", "v2").await;
@@ -115,7 +113,6 @@ async fn create_project_allows_partial_clone() {
         .count();
     assert!(omitted > 0, "no blobs omitted — filter did not take effect");
 
-    // History is still walkable; that's what --depth 1 would have cost us.
     let log = std::process::Command::new("git")
         .arg("-C")
         .arg(&target)
@@ -141,7 +138,6 @@ async fn create_project_initializes_head_and_empty_commit() {
     let tree = repo.manager.tree("acme", "api", "main").await.unwrap();
     assert!(tree.is_empty());
 
-    // Same owner/project again is an error.
     assert!(
         repo.manager
             .create_project("acme", "api", "main")
@@ -182,7 +178,6 @@ async fn clean_squash_merge_creates_single_commit_with_spec_message() {
     let base = repo.head().await;
     repo.create_job_branch(2, &base).await;
 
-    // Simulated agent: clone, two commits, push.
     let clone = repo.clone_branch("job/2").await;
     clone
         .commit_file("src/lib.rs", b"pub fn hello() {}\n", "add hello")
@@ -218,13 +213,11 @@ async fn clean_squash_merge_creates_single_commit_with_spec_message() {
         panic!("expected Merged, got {outcome:?}")
     };
 
-    // Exactly one new commit on main (squash), with the §3.2 message format.
     let log = repo.manager.log("acme", "api", None, 50).await.unwrap();
     assert_eq!(log.len(), 2);
     assert_eq!(log[0].hash, commit);
     assert_eq!(log[0].message, "job/2: implement-endpoint");
 
-    // Content landed on main.
     let content = repo
         .manager
         .read_file_at("acme", "api", "main", "src/lib.rs")
@@ -232,7 +225,6 @@ async fn clean_squash_merge_creates_single_commit_with_spec_message() {
         .unwrap();
     assert_eq!(content.unwrap(), "pub fn hello() -> u8 { 42 }\n");
 
-    // Branch cleanup (dispatcher does this on Done).
     repo.manager
         .delete_branch("acme", "api", "job/2")
         .await
@@ -249,7 +241,6 @@ async fn clean_squash_merge_creates_single_commit_with_spec_message() {
 async fn conflicting_merge_reports_files_and_builds_context() {
     let repo = TempRepo::create("acme", "api").await;
     let old_base = repo.head().await;
-    // Both jobs fork from the same base and touch the same file.
     repo.create_job_branch(3, &old_base).await;
     repo.create_job_branch(4, &old_base).await;
 
@@ -262,7 +253,6 @@ async fn conflicting_merge_reports_files_and_builds_context() {
         .await;
     c4.push("job/4").await;
 
-    // Job 3 lands first.
     let m3 = repo
         .manager
         .squash_merge("acme", "api", 3, &old_base, "add-routes", None)
@@ -271,7 +261,6 @@ async fn conflicting_merge_reports_files_and_builds_context() {
     assert!(matches!(m3, MergeOutcome::Merged { .. }));
     let new_base = repo.head().await;
 
-    // Job 4 now conflicts (add/add on the same path).
     let m4 = repo
         .manager
         .squash_merge("acme", "api", 4, &old_base, "add-routes", None)
@@ -287,7 +276,6 @@ async fn conflicting_merge_reports_files_and_builds_context() {
         "default branch must not move on conflict"
     );
 
-    // §4.3 conflict-context block.
     let ctx = repo
         .manager
         .conflict_context("acme", "api", &old_base, &new_base, &files)
@@ -308,7 +296,6 @@ async fn rebase_replays_onto_advanced_base_preserving_identity() {
     let old_base = repo.head().await;
     repo.create_job_branch(5, &old_base).await;
 
-    // Agent commits its change on the old base.
     let clone = repo.clone_branch("job/5").await;
     clone
         .commit_file("src/a.rs", b"job change\n", "job commit")
@@ -320,7 +307,6 @@ async fn rebase_replays_onto_advanced_base_preserving_identity() {
         .await
         .unwrap();
 
-    // An unrelated commit lands on main afterwards.
     let landed = repo.clone_branch("main").await;
     landed
         .commit_file("docs/other.md", b"landed\n", "other job")
@@ -338,8 +324,6 @@ async fn rebase_replays_onto_advanced_base_preserving_identity() {
     };
     assert_ne!(new_head, branch_tip_before, "branch tip must have moved");
 
-    // The branch now descends from the new base: exactly the replayed commit
-    // sits beyond it, and the concurrently-landed file is visible on it.
     assert_eq!(
         repo.manager
             .count_commits_beyond("acme", "api", &new_base, "job/5")
@@ -364,13 +348,11 @@ async fn rebase_replays_onto_advanced_base_preserving_identity() {
         Some("job change\n")
     );
 
-    // The agent's author AND committer survive the replay — not the dispatcher.
     assert_eq!(
         identity(&repo, "job/5"),
         ("fake-agent".to_string(), "fake-agent".to_string())
     );
 
-    // Squash onto the new base is now a clean fast-forward-style merge.
     let merged = repo
         .manager
         .squash_merge("acme", "api", 5, &new_base, "implement-endpoint", None)
@@ -396,7 +378,6 @@ async fn rebase_conflict_leaves_branch_untouched() {
         .await
         .unwrap();
 
-    // A conflicting change to the same path lands on main.
     let landed = repo.clone_branch("main").await;
     landed
         .commit_file("src/a.rs", b"main version\n", "other job")
@@ -413,7 +394,6 @@ async fn rebase_conflict_leaves_branch_untouched() {
         panic!("expected Conflict, got {out:?}")
     };
     assert_eq!(files, vec!["src/a.rs".to_string()]);
-    // The branch is byte-for-byte as pushed — no commits lost, no partial state.
     assert_eq!(
         repo.manager
             .resolve_ref("acme", "api", "job/6")
@@ -421,7 +401,6 @@ async fn rebase_conflict_leaves_branch_untouched() {
             .unwrap(),
         tip_before
     );
-    // No leftover scratch worktree registration.
     let wts = std::process::Command::new("git")
         .arg("-C")
         .arg(repo.bare_path())
@@ -447,7 +426,6 @@ async fn rebase_keeps_redundant_commit_as_empty_not_conflict() {
     let old_base = repo.head().await;
     repo.create_job_branch(7, &old_base).await;
 
-    // The job and a concurrent land make the *same* change to the same file.
     let clone = repo.clone_branch("job/7").await;
     clone
         .commit_file("src/a.rs", b"identical change\n", "job commit")
@@ -466,7 +444,6 @@ async fn rebase_keeps_redundant_commit_as_empty_not_conflict() {
         .rebase_branch("acme", "api", "job/7", &old_base, &new_base)
         .await
         .unwrap();
-    // Redundant, not a conflict.
     assert!(
         matches!(out, RebaseOutcome::Rebased { .. }),
         "redundant commit must rebase clean, got {out:?}"
@@ -479,8 +456,6 @@ async fn rebase_keeps_redundant_commit_as_empty_not_conflict() {
             .as_deref(),
         Some("identical change\n")
     );
-    // The redundant commit is kept (as an empty commit), so exactly one commit
-    // sits beyond the caught-up base and it carries no tree change.
     assert_eq!(
         repo.manager
             .count_commits_beyond("acme", "api", &new_base, "job/7")
@@ -523,7 +498,6 @@ async fn rebase_onto_with_conflict_writes_wip_commit_with_markers() {
         .await;
     c.push("job/7").await;
 
-    // A conflicting change lands on main → new base.
     let land = repo.clone_branch("main").await;
     land.commit_file("src/x.rs", b"fn from_main() {}\n", "main x")
         .await;
@@ -540,7 +514,6 @@ async fn rebase_onto_with_conflict_writes_wip_commit_with_markers() {
     };
     assert_eq!(files, vec!["src/x.rs".to_string()]);
 
-    // Exactly one WIP commit, parented directly on the new base.
     assert_eq!(
         repo.manager
             .count_commits_beyond("acme", "api", &new_base, "job/7")
@@ -550,7 +523,6 @@ async fn rebase_onto_with_conflict_writes_wip_commit_with_markers() {
     );
     assert_eq!(parent_of(&repo, "job/7").await, new_base);
 
-    // The conflicting file carries markers and BOTH sides' text.
     let blob = repo
         .manager
         .read_file_at("acme", "api", "job/7", "src/x.rs")
@@ -577,7 +549,7 @@ async fn rebase_onto_with_conflict_clean_arm() {
 
     let c = repo.clone_branch("job/8").await;
     c.commit_file("src/a.rs", b"job change\n", "job a").await;
-    c.commit_file("src/b.rs", b"more\n", "job b").await; // two commits to collapse
+    c.commit_file("src/b.rs", b"more\n", "job b").await;
     c.push("job/8").await;
 
     let land = repo.clone_branch("main").await;
@@ -593,7 +565,6 @@ async fn rebase_onto_with_conflict_clean_arm() {
         .unwrap();
     assert_eq!(out, ConflictRebaseOutcome::Clean);
 
-    // Two job commits collapsed into ONE commit on the new base.
     assert_eq!(
         repo.manager
             .count_commits_beyond("acme", "api", &new_base, "job/8")
@@ -602,7 +573,6 @@ async fn rebase_onto_with_conflict_clean_arm() {
         1
     );
     assert_eq!(parent_of(&repo, "job/8").await, new_base);
-    // Both the job's files and the concurrently-landed file are visible.
     for (path, want) in [
         ("src/a.rs", "job change\n"),
         ("src/b.rs", "more\n"),
@@ -624,19 +594,16 @@ async fn rebase_onto_with_conflict_clean_arm() {
 #[tokio::test]
 async fn rebase_onto_with_conflict_structural_delete_modify() {
     let repo = TempRepo::create("acme", "api").await;
-    // Seed a file, and use that as the shared base.
     let seed = repo.clone_branch("main").await;
     seed.commit_file("f.txt", b"original\n", "seed f").await;
     seed.push("main").await;
     let old_base = repo.head().await;
     repo.create_job_branch(9, &old_base).await;
 
-    // Job modifies f.txt.
     let c = repo.clone_branch("job/9").await;
     c.commit_file("f.txt", b"job edit\n", "edit f").await;
     c.push("job/9").await;
 
-    // Main deletes f.txt → new base.
     let land = repo.clone_branch("main").await;
     std::fs::remove_file(land.path().join("f.txt")).unwrap();
     let out = std::process::Command::new("git")
@@ -654,7 +621,6 @@ async fn rebase_onto_with_conflict_structural_delete_modify() {
     land.push("main").await;
     let new_base = repo.head().await;
 
-    // No panic, branch advances to a single commit on the new base.
     let outcome = repo
         .manager
         .rebase_onto_with_conflict("acme", "api", 9, &new_base)
@@ -695,7 +661,6 @@ async fn wip_markers_guarded_then_clean_once_resolved() {
         .await
         .unwrap();
     assert!(matches!(out, ConflictRebaseOutcome::Conflict { .. }));
-    // Post-WIP the branch is ahead of the new base.
     assert!(
         repo.manager
             .has_commits_beyond("acme", "api", &new_base, "job/10")
@@ -703,7 +668,6 @@ async fn wip_markers_guarded_then_clean_once_resolved() {
             .unwrap()
     );
 
-    // Guard: an unresolved squash must NOT land markers.
     let guarded = repo
         .manager
         .squash_merge("acme", "api", 10, &new_base, "impl", None)
@@ -715,13 +679,11 @@ async fn wip_markers_guarded_then_clean_once_resolved() {
     assert_eq!(files, vec!["src/x.rs".to_string()]);
     assert_eq!(repo.head().await, new_base, "default must not move");
 
-    // Agent resolves the markers in place and commits.
     let fix = repo.clone_branch("job/10").await;
     fix.commit_file("src/x.rs", b"fn resolved() {}\n", "resolve markers")
         .await;
     fix.push("job/10").await;
 
-    // Now the squash is clean and lands the resolved tree as ONE commit.
     let merged = repo
         .manager
         .squash_merge("acme", "api", 10, &new_base, "impl", None)
@@ -736,7 +698,6 @@ async fn wip_markers_guarded_then_clean_once_resolved() {
         .unwrap();
     assert_eq!(landed, "fn resolved() {}\n");
     assert!(!landed.contains("<<<<<<<"));
-    // Exactly one squash commit beyond the new base on main.
     assert_eq!(
         repo.manager
             .count_commits_beyond("acme", "api", &new_base, "main")
@@ -751,12 +712,10 @@ async fn diff_for_job_by_state() {
     let repo = TempRepo::create("acme", "api").await;
     let base = repo.head().await;
 
-    // Frozen: no branch yet → empty.
     let frozen = job(&repo, 7, JobState::Frozen, None);
     let d = repo.manager.diff_for_job(&frozen).await.unwrap();
     assert!(d.files.is_empty() && d.diff.is_empty());
 
-    // Work: diff base_ref..job branch.
     repo.create_job_branch(7, &base).await;
     let clone = repo.clone_branch("job/7").await;
     clone
@@ -770,7 +729,6 @@ async fn diff_for_job_by_state() {
     assert_eq!(d.files[0].additions, 3);
     assert!(d.diff.contains("+# api"));
 
-    // Revoked: empty even though branch existed.
     let revoked = job(&repo, 7, JobState::Revoked, Some(base.clone()));
     assert!(
         repo.manager
@@ -786,7 +744,6 @@ async fn diff_for_job_by_state() {
 async fn done_diff_recovers_squash_commit_without_seq_prefix_collision() {
     let repo = TempRepo::create("acme", "api").await;
 
-    // Merge job/42 and job/421 — the grep for 42 must not match 421.
     for (seq, file) in [(42u64, "forty_two.txt"), (421u64, "four_twenty_one.txt")] {
         let base = repo.head().await;
         repo.create_job_branch(seq, &base).await;
@@ -866,7 +823,7 @@ async fn blob_tree_and_missing_files() {
     let blobs: Vec<_> = tree.iter().filter(|e| e.r#type == "blob").collect();
     let trees: Vec<_> = tree.iter().filter(|e| e.r#type == "tree").collect();
     assert_eq!(blobs.len(), 2);
-    assert_eq!(trees.len(), 2); // docs/, assets/
+    assert_eq!(trees.len(), 2);
     let guide = blobs.iter().find(|e| e.path == "docs/guide.md").unwrap();
     assert_eq!(guide.size, Some(8));
     assert!(trees.iter().all(|e| e.size.is_none()));

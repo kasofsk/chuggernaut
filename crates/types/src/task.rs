@@ -349,8 +349,6 @@ pub fn task_time_ms(tasks: &[Task]) -> Option<u64> {
         let (Some(started), Some(completed)) = (task.started_at, task.completed_at) else {
             continue;
         };
-        // A span that runs backwards is host clock skew, not negative work:
-        // count it as no span rather than letting it subtract from the total.
         let Ok(ms) = u64::try_from((completed - started).num_milliseconds()) else {
             continue;
         };
@@ -377,7 +375,6 @@ mod tests {
         for c in cases {
             let _: TaskResolution = serde_json::from_str(c).unwrap();
         }
-        // abort defaults false on the wire; explicit abort round-trips.
         let r: TaskResolution =
             serde_json::from_str(r#"{ "kind": "Fail", "structured": {} }"#).unwrap();
         assert_eq!(
@@ -397,7 +394,6 @@ mod tests {
             }
         );
 
-        // summary defaults None on Pass; explicit summary round-trips.
         let r: TaskResolution =
             serde_json::from_str(r#"{ "kind": "Pass", "structured": null }"#).unwrap();
         assert_eq!(
@@ -434,7 +430,6 @@ mod tests {
 
     #[test]
     fn performed_by_defaults_absent_and_round_trips() {
-        // Old task records (no performed_by key) deserialize to None.
         let json = r#"{
           "id": 1, "job_seq": 7, "project": "acme/api",
           "phase": "Work", "cycle": 1,
@@ -445,14 +440,12 @@ mod tests {
         }"#;
         let task: Task = serde_json::from_str(json).unwrap();
         assert_eq!(task.performed_by, None);
-        // Absent stays absent on the wire (skip_serializing_if).
         assert!(
             !serde_json::to_string(&task)
                 .unwrap()
                 .contains("performed_by")
         );
 
-        // A claimed attempt round-trips as "human".
         let mut claimed = task.clone();
         claimed.performed_by = Some(Performer::Human);
         let json = serde_json::to_string(&claimed).unwrap();
@@ -462,7 +455,6 @@ mod tests {
 
     #[test]
     fn rework_reason_defaults_absent_and_round_trips() {
-        // Old task records (no rework_reason key) deserialize to None.
         let json = r#"{
           "id": 3, "job_seq": 7, "project": "acme/api",
           "phase": "Work", "cycle": 2,
@@ -473,14 +465,12 @@ mod tests {
         }"#;
         let task: Task = serde_json::from_str(json).unwrap();
         assert_eq!(task.rework_reason, None);
-        // Absent stays absent on the wire (skip_serializing_if).
         assert!(
             !serde_json::to_string(&task)
                 .unwrap()
                 .contains("rework_reason")
         );
 
-        // Each cause round-trips through JSON.
         for reason in [
             ReworkReason::EvalFailure,
             ReworkReason::MergeConflict,
@@ -496,7 +486,6 @@ mod tests {
 
     #[test]
     fn infra_loss_defaults_absent_and_round_trips() {
-        // Old task records (no infra_loss key) deserialize to false.
         let json = r#"{
           "id": 1, "job_seq": 7, "project": "acme/api",
           "phase": "Work", "cycle": 1,
@@ -508,7 +497,6 @@ mod tests {
         let task: Task = serde_json::from_str(json).unwrap();
         assert!(!task.infra_loss);
 
-        // A retired infra loss round-trips as true.
         let mut lost = task.clone();
         lost.infra_loss = true;
         let json = serde_json::to_string(&lost).unwrap();
@@ -518,8 +506,6 @@ mod tests {
 
     #[test]
     fn pending_reason_and_queued_at_default_absent_and_round_trip() {
-        // Old task records (no pending_reason / queued_at keys) deserialize to
-        // None — an idle Pending stays indistinguishable, as before.
         let json = r#"{
           "id": 1, "job_seq": 7, "project": "acme/api",
           "phase": "Work", "cycle": 1,
@@ -531,12 +517,10 @@ mod tests {
         let task: Task = serde_json::from_str(json).unwrap();
         assert_eq!(task.pending_reason, None);
         assert_eq!(task.queued_at, None);
-        // Absent stays absent on the wire (skip_serializing_if).
         let out = serde_json::to_string(&task).unwrap();
         assert!(!out.contains("pending_reason"));
         assert!(!out.contains("queued_at"));
 
-        // A capacity-queued launch round-trips both fields.
         let queued_at = "2026-07-22T09:00:00Z".parse::<DateTime<Utc>>().unwrap();
         let mut queued = task.clone();
         queued.pending_reason = Some(PendingReason::QueuedForCapacity);
@@ -549,17 +533,14 @@ mod tests {
 
     #[test]
     fn triage_phase_and_result_round_trip() {
-        // TaskPhase::Triage round-trips.
         let p: TaskPhase = serde_json::from_str(r#""Triage""#).unwrap();
         assert_eq!(p, TaskPhase::Triage);
         assert_eq!(serde_json::to_string(&p).unwrap(), r#""Triage""#);
 
-        // TaskPhase::WrapUp round-trips.
         let p: TaskPhase = serde_json::from_str(r#""WrapUp""#).unwrap();
         assert_eq!(p, TaskPhase::WrapUp);
         assert_eq!(serde_json::to_string(&p).unwrap(), r#""WrapUp""#);
 
-        // TaskResult::Triage round-trips, with and without token usage.
         let with_usage = TaskResult::Triage {
             assessment: "Work failed on a missing migration; recommend Revoke.".into(),
             token_usage: Some(TokenUsage {
@@ -591,8 +572,6 @@ mod tests {
 
     #[test]
     fn human_result_summary_round_trips_and_stays_backward_compat() {
-        // A resolved Human work-task result carries the operator's summary and
-        // round-trips it.
         let resolved_at = "2026-07-22T09:00:00Z".parse::<DateTime<Utc>>().unwrap();
         let with_summary = TaskResult::Human {
             pass: true,
@@ -610,8 +589,6 @@ mod tests {
             with_summary
         );
 
-        // Old stored results (no `summary` key) still deserialize to None, and
-        // None is omitted on the wire (skip_serializing_if).
         let legacy: TaskResult = serde_json::from_str(
             r#"{ "kind": "Human", "pass": true, "structured": null, "action": null,
                  "operator": "david", "resolved_at": "2026-07-22T09:00:00Z" }"#,
@@ -634,8 +611,6 @@ mod tests {
 
     #[test]
     fn work_result_cover_html_round_trips_and_back_compat() {
-        // A pre-#143 Work result (no cover_html key) deserializes to None, and
-        // None is omitted on the wire (skip_serializing_if).
         let legacy = r#"{"kind":"Work","summary":"did it","structured":null,"token_usage":null}"#;
         let r: TaskResult = serde_json::from_str(legacy).unwrap();
         assert!(matches!(
@@ -647,8 +622,6 @@ mod tests {
         ));
         assert!(!serde_json::to_string(&r).unwrap().contains("cover_html"));
 
-        // A cover survives the round trip verbatim (sanitized at ingest, stored
-        // and served as-is — job #143).
         let with_cover = TaskResult::Work {
             summary: Some("did it".into()),
             structured: None,
@@ -662,7 +635,6 @@ mod tests {
             with_cover
         );
 
-        // Same for an evaluator verdict (Agent) cover.
         let agent = TaskResult::Agent {
             pass: true,
             abort: false,
@@ -677,8 +649,6 @@ mod tests {
 
     #[test]
     fn label_defaults_absent_and_round_trips() {
-        // Old task records (no `label` key) deserialize to None, and None is
-        // omitted on the wire (skip_serializing_if) — job #146 back-compat.
         let json = r#"{
           "id": 4, "job_seq": 7, "project": "acme/api",
           "phase": "WrapUp", "cycle": 1,
@@ -691,7 +661,6 @@ mod tests {
         assert_eq!(task.label, None);
         assert!(!serde_json::to_string(&task).unwrap().contains("label"));
 
-        // A labelled wrap-up task round-trips.
         let mut labelled = task.clone();
         labelled.label = Some("publish".into());
         let json = serde_json::to_string(&labelled).unwrap();
@@ -729,8 +698,6 @@ mod tests {
 
     #[test]
     fn task_time_sums_every_cycle_and_rework_attempt() {
-        // Two cycles, the second with a rework attempt: 10m + 5m + 3m. The
-        // 30-minute gaps between them are queueing, not work, and are excluded.
         let tasks = [
             spanned(1, 1, Some(0), Some(10)),
             spanned(2, 1, Some(40), Some(45)),
@@ -741,8 +708,6 @@ mod tests {
 
     #[test]
     fn task_time_skips_tasks_with_no_usable_span() {
-        // A never-started task (parked/queued/cancelled) and a still-running one
-        // contribute nothing; the one finished task is the whole total.
         let tasks = [
             spanned(1, 1, None, None),
             spanned(1, 2, None, Some(5)),
@@ -754,21 +719,15 @@ mod tests {
 
     #[test]
     fn task_time_is_none_without_a_usable_span() {
-        // No tasks at all, and tasks that never produced a span, both report
-        // None — the UI must be able to tell "nothing to show" from a real 0s.
         assert_eq!(task_time_ms(&[]), None);
         assert_eq!(task_time_ms(&[spanned(1, 1, None, None)]), None);
         assert_eq!(task_time_ms(&[spanned(1, 1, Some(3), None)]), None);
-        // Clock skew (completed before started) is not a usable span either.
         assert_eq!(task_time_ms(&[spanned(1, 1, Some(9), Some(4))]), None);
-        // …but a genuine zero-length span is: Some(0), not None.
         assert_eq!(task_time_ms(&[spanned(1, 1, Some(4), Some(4))]), Some(0));
     }
 
     #[test]
     fn escalation_phase_round_trips() {
-        // The dedicated escalation phase (job #141) round-trips, and the legacy
-        // `Work`-stamped escalation record still deserializes (back-compat).
         let p: TaskPhase = serde_json::from_str(r#""Escalation""#).unwrap();
         assert_eq!(p, TaskPhase::Escalation);
         assert_eq!(serde_json::to_string(&p).unwrap(), r#""Escalation""#);

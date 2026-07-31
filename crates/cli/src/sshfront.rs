@@ -123,7 +123,6 @@ pub async fn run_authz() -> Result<()> {
             .filter(|r| !r.is_empty())
             .as_deref(),
     )?;
-    // Old certs (pre-flag) export no admin env → non-admin, current behavior.
     let admin = std::env::var(ssh::ENV_ADMIN).is_ok_and(|a| a == "1");
     let repo = std::env::var(ssh::ENV_REPO).context(ssh::ENV_REPO)?;
     let (owner, project) = repo
@@ -208,7 +207,6 @@ mod tests {
         let body = pre_receive_hook_body(Path::new("/usr/local/bin/chuggernaut"));
         assert!(body.starts_with("#!/bin/sh\n"));
         assert!(body.contains("/usr/local/bin/chuggernaut ssh-authz"));
-        // Local access (no identity env) must not depend on the baked path.
         assert!(body.contains("[ -z \"$CHUGGERNAUT_PRINCIPAL\" ] && exit 0"));
     }
 }

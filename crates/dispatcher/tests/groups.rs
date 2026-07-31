@@ -162,8 +162,6 @@ fn commit_on_work(rig: &Rig) {
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
         let work = clone_branch_from(&bare, &branch).await;
-        // Branch-derived content so the commit always diffs: this test runs two
-        // jobs in sequence and the first one's merge puts the stub on the base.
         let body = format!("// work produced on {branch}\n");
         work.commit_file("src/work.rs", body.as_bytes(), "work")
             .await;
@@ -213,7 +211,6 @@ async fn a_done_job_can_be_grouped_and_the_record_shows_it() {
     assert_invariants_of(&sink);
     test_utils::wait::job_state(&store, "acme", "api", job.id, JobState::Done).await;
 
-    // The mutation the rest of the record forbids: a write to a terminal job.
     let updated = handle
         .edit_groups(
             "acme",
@@ -231,7 +228,6 @@ async fn a_done_job_can_be_grouped_and_the_record_shows_it() {
     assert_eq!(record.groups, names(&["design/321-job-groups"]));
     assert_eq!(record.state, JobState::Done);
 
-    // …announced as `job-updated {fields:["groups"]}` — the existing shape.
     let updates = update_events(&store, job.id).await;
     assert_eq!(
         updates.len(),
@@ -264,7 +260,6 @@ async fn group_edits_are_add_remove_and_idempotent() {
         .unwrap();
     assert_eq!(first.groups, names(&["design/321-job-groups"]));
 
-    // The second operator's label lands beside the first, not over it.
     let both = rig
         .core
         .edit_groups("acme", "api", job.id, names(&["beacon-import"]), vec![])
@@ -277,8 +272,6 @@ async fn group_edits_are_add_remove_and_idempotent() {
     assert_invariants(&rig.core);
     assert_eq!(update_events(&rig.store, job.id).await.len(), 2);
 
-    // Re-adding a label the job already carries changes nothing, and so does
-    // removing one it never had.
     for (add, remove) in [
         (names(&["beacon-import"]), vec![]),
         (vec![], names(&["never-set"])),
@@ -296,8 +289,6 @@ async fn group_edits_are_add_remove_and_idempotent() {
         "a no-op published nothing"
     );
 
-    // Removal is the same verb, and a name on both sides survives: removes
-    // apply first, so an add always wins.
     let pruned = rig
         .core
         .edit_groups(
@@ -376,8 +367,6 @@ async fn groups_never_reach_the_container_env() {
     test_utils::wait::job_state(&store, "acme", "api", grouped.id, JobState::Done).await;
     assert_invariants_of(&sink);
 
-    // 1. The work agent: same env, and the same prompt — the §4.3 brief is
-    //    composed from the record, so a leak would land there first.
     let runs = provider.runs();
     assert_eq!(runs.len(), 2, "both jobs ran a work agent");
     assert_eq!(
@@ -394,7 +383,6 @@ async fn groups_never_reach_the_container_env() {
         "a group changed the work agent's system prompt"
     );
 
-    // 2. The evaluator, which is the same choke point (`Exec::container_env`).
     let evals: Vec<_> = backend
         .launches()
         .into_iter()
@@ -407,8 +395,6 @@ async fn groups_never_reach_the_container_env() {
         "a group changed the eval container's environment"
     );
 
-    // 3. …and no group name appears anywhere in either, key or value. The
-    //    comparison above already implies it; this is what a reader checks.
     for env in [&runs[1].env, &evals[1].env] {
         assert!(
             !env.iter()
@@ -452,7 +438,6 @@ async fn the_draft_edit_replaces_groups_and_names_the_change() {
         groups: names(groups),
     };
 
-    // A replace, not a merge: the old label is gone.
     let edited = rig
         .core
         .update_job(update(&["design/321-job-groups"]))
@@ -469,7 +454,6 @@ async fn the_draft_edit_replaces_groups_and_names_the_change() {
         serde_json::json!(["groups"])
     );
 
-    // An edit that leaves groups alone does not name the field.
     rig.core
         .update_job(update(&["design/321-job-groups"]))
         .await
@@ -520,16 +504,12 @@ async fn a_bad_group_is_refused_by_the_rule_it_broke() {
             "{:?} should name the rule it broke",
             errs[0].message
         );
-        // A refused edit writes nothing.
         assert_eq!(
             stored(&rig.store, job.id).await.groups,
             names(&["beacon-import"])
         );
     }
 
-    // The count bound is on the RESULT, not the delta: seven more labels on a
-    // job that already carries one is exactly eight and is accepted; one more
-    // is nine, and nine is over.
     let at_limit: Vec<String> = (0..types::GROUPS_COUNT_MAX - 1)
         .map(|i| format!("g-{i}"))
         .collect();
@@ -553,8 +533,6 @@ async fn a_bad_group_is_refused_by_the_rule_it_broke() {
         types::GROUPS_COUNT_MAX
     );
 }
-
-// ── Slice B: the derived reads ─────────────────────────────────────────────
 
 /// The four design documents the registry read enumerates: one with jobs still
 /// in flight, one nobody has ticketed, one whose members are all terminal, and
@@ -595,8 +573,6 @@ async fn seed_grouped_jobs(rig: &mut Rig) -> Vec<u64> {
     ] {
         seqs.push(rig.core.create_job(req(groups)).await.unwrap().id);
     }
-    // The last three are revoked, which is what makes two of the groups fully
-    // terminal — and what proves a revoked member still lists (Decision 5).
     for seq in &seqs[2..] {
         rig.core.revoke_job("acme", "api", *seq).await.unwrap();
     }
@@ -659,9 +635,6 @@ fn row<'a>(rows: &'a [serde_json::Value], key: &str, value: &str) -> &'a serde_j
 /// each group carrying its members, its histogram, its open count and — for a
 /// `design/` name only — the document it resolves to at default HEAD.
 fn assert_groups_rollup(groups: &[serde_json::Value], seqs: &[u64], self_seq: u64) {
-    // Sorted rather than written out, because the self-authored design's name
-    // embeds a seq the rig allocates: where it falls in name order is not a
-    // property this test is about.
     let mut expected = names(&[
         "beacon-import",
         "design/238-finding",
@@ -702,15 +675,12 @@ fn assert_groups_rollup(groups: &[serde_json::Value], seqs: &[u64], self_seq: u6
         "the status line is surfaced verbatim and unparsed"
     );
 
-    // A revoked member still lists and is still counted (Decision 5: no
-    // cascade, no cleanup) — it is simply not open.
     let beacon = row(groups, "name", "beacon-import");
     assert_eq!(beacon["jobs"].as_array().unwrap().len(), 2);
     assert_eq!(beacon["counts"]["Revoked"], serde_json::json!(1));
     assert_eq!(beacon["counts"]["Frozen"], serde_json::json!(1));
     assert_eq!(beacon["open"], serde_json::json!(1));
 
-    // A name that resolves to no document is an ordinary group.
     let ops = row(groups, "name", "ops/fleet-refresh");
     assert_eq!(ops["open"], serde_json::json!(0), "its member is Revoked");
     assert!(
@@ -718,7 +688,6 @@ fn assert_groups_rollup(groups: &[serde_json::Value], seqs: &[u64], self_seq: u6
         "no document, no path: {ops:?}"
     );
     assert!(ops.get("doc_status").is_none());
-    // …and the design nobody has ticketed is no group at all.
     assert!(
         !groups
             .iter()
@@ -771,7 +740,6 @@ fn assert_designs_registry(designs: &[serde_json::Value], self_seq: u64) {
         "with no members, 'every member is terminal' is vacuous"
     );
 
-    // No `Status:` line and no seq in the name: both absent, neither an error.
     let scratch = row(designs, "slug", "scratch");
     assert!(scratch.get("status").is_none(), "{scratch:?}");
     assert!(scratch.get("seq").is_none(), "{scratch:?}");
@@ -784,9 +752,6 @@ fn assert_designs_registry(designs: &[serde_json::Value], self_seq: u64) {
 /// tier adds is that the seq the flag compares against is the seq the dispatcher
 /// actually allocated, joined to the document the repo actually holds.
 fn assert_designs_staleness(designs: &[serde_json::Value], self_seq: u64) {
-    // The discrepancy the platform reports and never resolves: every member
-    // terminal, the one member is not #238's own job, and the document still
-    // says FINDING.
     let stale = row(designs, "slug", "238-finding");
     assert_eq!(stale["jobs"].as_array().unwrap().len(), 1);
     assert_ne!(stale["jobs"][0]["id"], serde_json::json!(238));
@@ -794,10 +759,6 @@ fn assert_designs_staleness(designs: &[serde_json::Value], self_seq: u64) {
     assert_eq!(stale["status"], serde_json::json!("FINDING"));
     assert_eq!(stale["status_stale"], serde_json::json!(true));
 
-    // …and the design whose only member is the job that WROTE it is not: the
-    // group is fully terminal and the status line still says something, but no
-    // implementation work has happened. Every design in the repo read stale
-    // under the rule that counted the authoring job.
     let authored = row(designs, "slug", &format!("{self_seq}-self-authored"));
     assert_eq!(
         authored["jobs"],
@@ -814,7 +775,6 @@ fn assert_designs_staleness(designs: &[serde_json::Value], self_seq: u64) {
         "the job that wrote the doc is not implementation of it"
     );
 
-    // Work still in flight is not stale, whatever the line says.
     let live = row(designs, "slug", "311-job-inputs");
     assert_eq!(live["status_stale"], serde_json::json!(false));
     assert_eq!(live["jobs"].as_array().unwrap().len(), 2);

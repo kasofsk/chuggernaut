@@ -289,7 +289,6 @@ pub enum ProjectCmd {
 }
 
 pub async fn run(args: AdminArgs) -> Result<()> {
-    // Local-only commands first — no NATS connection.
     if let AdminCmd::WorkerCreds { node, out } = &args.cmd {
         return mint_worker_creds(&args.keys_dir, node, out.as_deref()).await;
     }
@@ -302,8 +301,6 @@ pub async fn run(args: AdminArgs) -> Result<()> {
     {
         return mint_worker_git_key(&args.keys_dir, node, project, out_dir.as_deref(), *days).await;
     }
-    // Operator-mode NATS requires the dispatcher credentials from init
-    // (§12.1); without them (open dev server) connect plain.
     let store = match tokio::fs::read_to_string(args.keys_dir.join("dispatcher.creds")).await {
         Ok(creds) => NatsStore::connect_with_creds(&args.nats_url, &creds).await?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -429,22 +426,15 @@ async fn run_worker_refresh(
     let ok = match rpc.refresh(&req).await {
         Ok(ok) => ok,
         Err(e) => {
-            // Unreachable or refused: warn, don't fail the deploy.
             println!("WARNING: worker refresh node={node} not accepted (drift remains): {e}");
             return Ok(());
         }
     };
     if let Some(reason) = &ok.skipped {
-        // The node has no git credential (spec §3.1 / #114): it could not even
-        // attempt the refresh. Surface it LOUDLY so a deploy never looks like a
-        // success that silently refreshed nothing. Non-fatal, like every other
-        // refresh outcome — the drift also shows in the fleet snapshot.
         println!("node {node}: refresh SKIPPED — {reason}");
         return Ok(());
     }
     if !ok.accepted {
-        // A refresh is already in flight (converging to some SHA) — not a
-        // failure and not drift; nothing new to start or wait on.
         println!(
             "refresh already in progress: node={node} from={}",
             ok.from_version
@@ -504,11 +494,6 @@ async fn worker_refresh_wait(
     sha: &str,
     wait_secs: u64,
 ) -> Result<()> {
-    // Confirm against the SAME reported field the fleet snapshot shows (ticket
-    // #187): a swapped-in daemon carries the target SHA in its version, and the
-    // surviving daemon of a FAILED refresh reports a `Failed` outcome — so a
-    // broken refresh is surfaced immediately with its stage/error instead of
-    // waiting out the whole timeout.
     use types::worker::{
         REFRESH_HEARTBEAT_SECS, RefreshConfirmation, RefreshOutcome, RefreshProgress,
         RefreshRelayState,
@@ -516,14 +501,9 @@ async fn worker_refresh_wait(
     let started = std::time::Instant::now();
     let deadline = started + std::time::Duration::from_secs(wait_secs);
     let mut relay = RefreshRelayState::default();
-    // Kept across polls so a timeout can still report the last thing we saw even
-    // when the final ping itself failed.
     let mut last: Option<RefreshProgress> = None;
     loop {
         if let Ok(ping) = rpc.ping().await {
-            // Only OUR refresh's progress is relayed or remembered: a node
-            // converging on some other SHA must not be reported as this
-            // deploy's, least of all in the timeout report below.
             if let Some(progress) = ping.refresh_progress.filter(|p| p.to_sha == sha) {
                 let elapsed = started.elapsed().as_secs();
                 if let Some(line) = progress.relay(sha, &mut relay, elapsed, REFRESH_HEARTBEAT_SECS)
@@ -563,8 +543,6 @@ fn worker_refresh_report_failed(node: &str, stage: &str, error_tail: &str) {
         "WARNING: worker refresh node={node} FAILED at {stage} \
          (prod stays on the old images; check the fleet snapshot)"
     );
-    // Stream the daemon-captured tail into the deploy task log so the real cause
-    // (deploy #212: docker disk pressure) is visible without ssh'ing the node.
     if !error_tail.trim().is_empty() {
         println!("--- worker-refresh.sh tail (node={node}, stage={stage}) ---");
         for line in error_tail.lines() {
@@ -572,8 +550,6 @@ fn worker_refresh_report_failed(node: &str, stage: &str, error_tail: &str) {
         }
         println!("--- end worker-refresh.sh tail ---");
     }
-    // A single-line, machine-readable detail line update.sh harvests into the
-    // failed leg's bounded `detail` field.
     println!(
         "{REFRESH_DETAIL_MARKER} {}",
         one_line(&format!("{stage}: {error_tail}"))
@@ -596,8 +572,6 @@ fn worker_refresh_report_timeout(
          (build may still be running; check the fleet snapshot for its version)"
     );
     let Some(progress) = last else {
-        // No progress at all: the daemon never reported a phase — itself signal
-        // (an old daemon, or one that never started the script).
         println!(
             "{REFRESH_DETAIL_MARKER} not confirmed within {wait_secs}s (no progress reported)"
         );
@@ -715,7 +689,6 @@ async fn run_secret(store: &NatsStore, keys_dir: &std::path::Path, cmd: SecretCm
     use store::secrets::{AgeSecretStore, SecretStore};
     let bucket = store.raw_bucket(store::buckets::SECRETS).await?;
 
-    // Copy moves the stored ciphertext verbatim — no keys involved.
     if let SecretCmd::Copy { from, to, name } = &cmd {
         let split = |s: &str| -> Result<(String, String)> {
             let Some((o, p)) = s.split_once('/') else {
@@ -835,7 +808,6 @@ async fn run_user(store: &NatsStore, keys_dir: &std::path::Path, cmd: UserCmd) -
                 project_roles: user.project_roles.clone(),
                 platform_admin: user.platform_admin,
             };
-            // Token only — stdout is pipeable into a credentials file.
             println!("{}", signer.issue(&identity, ttl)?);
         }
         UserCmd::Create {
@@ -878,7 +850,6 @@ async fn run_user(store: &NatsStore, keys_dir: &std::path::Path, cmd: UserCmd) -
 /// admin CLI is the operator-side writer. `--project` is `{owner}/{project}`.
 async fn run_role(store: &NatsStore, cmd: RoleCmd) -> Result<()> {
     let users = store.raw_bucket(store::buckets::USERS).await?;
-    // Validate a `{owner}/{project}` slug into the map-key form it is stored as.
     let slug = |project: &str| -> Result<String> {
         let Some((owner, name)) = project.split_once('/') else {
             bail!("--project must be owner/project, got {project:?}");
@@ -945,7 +916,6 @@ pub async fn create_user(
         return Ok(false);
     }
     let user = User {
-        // Stable opaque id; the email's KV encoding is already unique.
         id: key.clone(),
         email: email.to_string(),
         password_hash: auth::hash_password(password)?,
@@ -957,8 +927,10 @@ pub async fn create_user(
     Ok(true)
 }
 
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 async fn run_project(store: &NatsStore, cmd: ProjectCmd) -> Result<()> {
     let counters = store.raw_bucket(store::buckets::COUNTERS).await?;
     match cmd {
@@ -969,7 +941,6 @@ async fn run_project(store: &NatsStore, cmd: ProjectCmd) -> Result<()> {
             repos_root,
             hook_bin,
         } => {
-            // Owner/project become NATS key segments and subject tokens.
             keys::validate_subject_component(&owner)?;
             keys::validate_subject_component(&name)?;
             if owner == keys::RESERVED_OWNER {
@@ -979,13 +950,9 @@ async fn run_project(store: &NatsStore, cmd: ProjectCmd) -> Result<()> {
             if counters.get_json::<u64>(&key).await?.is_some() {
                 bail!("project {owner}/{name} already exists");
             }
-            // Repo before counter: a failed repo init leaves nothing behind,
-            // so the command can simply be re-run (§12.2).
             vcs::RepoManager::new(&repos_root)
                 .create_project(&owner, &name, &default_branch)
                 .await?;
-            // §5.2 per-ref push authorization for SSH traffic; local access
-            // (no CHUGGERNAUT_PRINCIPAL env) passes through.
             let bin = match hook_bin {
                 Some(path) => path,
                 None => std::env::current_exe()?,
@@ -1008,8 +975,6 @@ async fn run_project(store: &NatsStore, cmd: ProjectCmd) -> Result<()> {
         } => {
             keys::validate_subject_component(&owner)?;
             keys::validate_subject_component(&name)?;
-            // Preflight the origin credentials so the failure mode is a clear
-            // pointer at `admin secret set` instead of a dispatcher error.
             let needs_ssh = origin_url.starts_with("ssh://") || origin_url.contains('@');
             let is_github = origin_url.contains("github.com");
             let secrets = store.raw_bucket(store::buckets::SECRETS).await?;

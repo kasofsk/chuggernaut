@@ -102,8 +102,10 @@ pub struct PlacementCandidate<'a> {
 ///   out-of-service pin yields the same `NoCapacity` "no free slots" shape as
 ///   the unpinned case; an unknown pin is a hard `Launch` error naming the
 ///   known nodes.
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::expect_used)]
+#[allow(
+    clippy::expect_used,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 pub fn choose_placement(
     policy: PlacementPolicy,
     candidates: &[PlacementCandidate<'_>],
@@ -126,9 +128,9 @@ pub fn choose_placement(
     }
     let mut best: Option<&PlacementCandidate> = None;
     for c in candidates {
-        let Some(load) = c.load else { continue }; // out of service — skipped
+        let Some(load) = c.load else { continue };
         if load.free <= 0 {
-            continue; // full or 0-slot node — never chosen (#60)
+            continue;
         }
         let better = match best {
             None => true,
@@ -491,7 +493,6 @@ mod tests {
         let by = PlacementPolicy::Busyness;
         let nodes = [cand("air", 1, 3, 0), cand("nuc", 0, 2, 1)];
         assert_eq!(choose_placement(by, &nodes, None).unwrap(), 1);
-        // Headroom on the SAME fleet keeps the old behavior: air's 3 free wins.
         assert_eq!(
             choose_placement(PlacementPolicy::Headroom, &nodes, None).unwrap(),
             0
@@ -502,10 +503,8 @@ mod tests {
     #[test]
     fn busyness_ties_break_by_free_then_name() {
         let by = PlacementPolicy::Busyness;
-        // Equal running (2 each): the one with more free slots wins.
         let nodes = [cand("air", 2, 2, 0), cand("nuc", 2, 4, 1)];
         assert_eq!(choose_placement(by, &nodes, None).unwrap(), 1);
-        // Equal running AND equal free: lexicographically-first name wins.
         let nodes = [cand("nuc", 2, 3, 0), cand("air", 2, 3, 1)];
         assert_eq!(choose_placement(by, &nodes, None).unwrap(), 1);
     }
@@ -516,7 +515,6 @@ mod tests {
     #[test]
     fn zero_slot_and_out_of_service_skipped_under_both_policies() {
         for policy in [PlacementPolicy::Busyness, PlacementPolicy::Headroom] {
-            // idle 0-slot node (0 running) must lose to the busy node with a slot.
             let nodes = [cand("zero", 0, 0, 0), cand("nuc", 3, 1, 1)];
             assert_eq!(
                 choose_placement(policy, &nodes, None).unwrap(),
@@ -524,7 +522,6 @@ mod tests {
                 "{policy:?}"
             );
 
-            // Out-of-service node skipped; the only live node wins.
             let nodes = [
                 PlacementCandidate {
                     index: 0,
@@ -539,7 +536,6 @@ mod tests {
                 "{policy:?}"
             );
 
-            // No eligible node ⇒ the shared no-capacity message.
             let nodes = [cand("full", 4, 0, 0)];
             let err = choose_placement(policy, &nodes, None)
                 .unwrap_err()
@@ -565,25 +561,19 @@ mod tests {
     #[test]
     fn log_tail_slice_is_monotonic_and_capped() {
         let full = b"line-0\nline-1\nline-2\n";
-        // From the start: the whole buffer, cursor at its end.
         let t = LogTail::slice(full, 0);
         assert_eq!(t.offset, full.len() as u64);
         assert_eq!(t.data, full);
-        // From a mid cursor: only the remainder, cursor unchanged at the end.
         let t = LogTail::slice(full, 7);
         assert_eq!(t.data, b"line-1\nline-2\n");
         assert_eq!(t.offset, full.len() as u64);
-        // At the end: empty, offset holds — a caught-up poll makes no progress.
         let t = LogTail::slice(full, full.len() as u64);
         assert!(t.data.is_empty());
         assert_eq!(t.offset, full.len() as u64);
-        // Past the end (a truncated/rotated log): clamped, never panics.
         let t = LogTail::slice(full, 9_999);
         assert!(t.data.is_empty());
         assert_eq!(t.offset, full.len() as u64);
 
-        // Capped: a chunk larger than MAX_LOG_TAIL returns exactly the cap and
-        // an offset that still advances the caller past it.
         let big = vec![b'x'; MAX_LOG_TAIL + 4096];
         let t = LogTail::slice(&big, 0);
         assert_eq!(t.data.len(), MAX_LOG_TAIL);
@@ -600,7 +590,6 @@ mod tests {
         let cmd = bootstrap_cmd(&["true".into()]);
         assert!(cmd[2].contains("--single-branch"), "{}", cmd[2]);
         assert!(cmd[2].contains("--filter=blob:none"), "{}", cmd[2]);
-        // The branch and URL stay shell-quoted env refs, cloned to /workspace.
         assert!(
             cmd[2].contains("--branch \"$JOB_BRANCH\" \"$REPO_URL\" /workspace"),
             "{}",

@@ -24,7 +24,6 @@ impl Core {
             .flat_map(|g| g.jobs().cloned().collect::<Vec<_>>())
             .collect();
 
-        // §3.6 step 3: Blocked jobs whose deps completed while we were down.
         for job in &jobs {
             let (owner, project) = split(&job.project);
             if job.state == JobState::Blocked
@@ -37,15 +36,12 @@ impl Core {
             }
         }
 
-        // §3.6 step 2: in-flight recovery.
         for job in &jobs {
             let (owner, project) = split(&job.project);
             match job.state {
                 JobState::Work => self.recover_work(&owner, &project, job.id).await?,
                 JobState::Evaluation => self.recover_evaluation(&owner, &project, job.id).await?,
                 JobState::WrapUp => self.recover_wrapup(&owner, &project, job.id).await?,
-                // Escalated/Stalled wait on the operator inbox; the only thing
-                // to recover is the inbox artifact itself (C1 heal below).
                 JobState::Escalated | JobState::Stalled => {
                     self.heal_missing_escalation_task(&owner, &project, job)
                         .await?
@@ -54,25 +50,11 @@ impl Core {
             }
         }
 
-        // §3.5: the in-flight recovery above re-queued capacity-deferred launches
-        // as it walked jobs in graph order, not enqueue order. Sort the whole
-        // launch queue by the persisted `queued_at` so FIFO fairness is restored
-        // exactly as it stood before the restart — the launch that waited longest
-        // resumes first, and the max-wait backstop stays honest.
         self.launch_queue
             .make_contiguous()
             .sort_by_key(|q| q.queued_at);
 
-        // §3.6: reclaim exited containers orphaned by the crash/restart. Runs
-        // last so any container in-flight recovery still needs (Running tasks,
-        // re-attached monitors) has been settled and protected first.
         self.sweep_exited_containers(&jobs).await;
-        // §3.6: reap *running* containers no live task owns. Runs after the
-        // in-flight recovery above — which may itself have relaunched fresh
-        // containers for the tasks it re-Ran — so the running set it reads
-        // already reflects every task this boot will resume. All of this is
-        // still before the message loop starts, so no concurrent launch can
-        // race the reap (single-writer ordering).
         self.sweep_orphan_running_containers(&jobs).await;
         Ok(())
     }
@@ -99,11 +81,9 @@ impl Core {
             .iter()
             .any(|t| t.phase == TaskPhase::Escalation && t.state == TaskState::Pending)
         {
-            return Ok(()); // Inbox intact — the normal case.
+            return Ok(());
         }
         let Some(esc) = &job.escalation else {
-            // No WHY to rebuild from (pre-#69 record); surface it rather than
-            // invent an empty escalation.
             tracing::warn!(
                 "job {}#{} is {:?} with no pending escalation task and no \
                  escalation record; cannot heal — resolve via triage",
@@ -114,9 +94,6 @@ impl Core {
             return Ok(());
         };
 
-        // Sequential-within-job id (§1.2) and the cycle the failure happened
-        // in; the decision moment is the stamped one, so the healed task and
-        // the record still agree about when.
         let task_id = tasks.len() as u64 + 1;
         let cycle = tasks.iter().map(|t| t.cycle).max().unwrap_or(1);
         let task = crate::escalation::escalation_task(
@@ -171,8 +148,10 @@ impl Core {
     /// restart). It is logged and left running.
     ///
     /// Best-effort: a backend hiccup only warns and never blocks startup.
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider."
+    )]
     async fn sweep_orphan_running_containers(&self, jobs: &[Job]) {
         let running = match self.backend.list_managed_running().await {
             Ok(cs) => cs,
@@ -185,9 +164,6 @@ impl Core {
             return;
         }
 
-        // The containers a live task will resume: their `(project, seq, task)`
-        // identity and any recorded container id. Matching either keeps a
-        // container for step-2 recovery to re-attach to.
         let mut live_tasks = std::collections::HashSet::new();
         let mut live_cids = std::collections::HashSet::new();
         for job in jobs {
@@ -195,8 +171,6 @@ impl Core {
             let tasks = match self.tasks.list_for_job(&owner, &project, job.id).await {
                 Ok(tasks) => tasks,
                 Err(e) => {
-                    // Can't prove these containers are disposable — skip the
-                    // whole sweep rather than risk reaping a live one.
                     tracing::warn!(
                         "startup fleet sweep: listing tasks for job {} failed: {e}; skipping sweep",
                         job.id
@@ -218,12 +192,6 @@ impl Core {
             if live_cids.contains(&rc.id) {
                 continue;
             }
-            // The marker alone does not make a container ours to kill: a launch
-            // stamps the `(project, job, task)` identity labels alongside it, so
-            // a marker without an identity was not launched by this dispatcher.
-            // Anything that inherits the marker from its image lands here — the
-            // `chug-worker` daemon did, and reaping on the marker alone took the
-            // fleet down on every restart (#268). Leave it alone and say so.
             let (Some(project), Some(job), Some(task)) = (&rc.project, rc.job, rc.task) else {
                 tracing::warn!(
                     "startup fleet sweep: container {} carries the managed marker but no \
@@ -235,9 +203,6 @@ impl Core {
             if live_tasks.contains(&(project.clone(), job, task)) {
                 continue;
             }
-            // Orphan: kill it to free the slot. The task it belonged to was
-            // already failed by step-2 recovery; the work is lost either way,
-            // so reaping (not re-adoption) is the simple, safe choice.
             match self.backend.kill(&rc.id).await {
                 Ok(()) => {
                     let label = format!("{job}/{task}");
@@ -245,7 +210,6 @@ impl Core {
                         "startup fleet sweep: reaped orphan container {} for {label}",
                         rc.id
                     );
-                    // Attribute the reap to its owning job.
                     let (owner, project) = split(project);
                     let _ = self
                         .publish(
@@ -292,17 +256,12 @@ impl Core {
             return;
         }
 
-        // Container ids we must not touch: those a live task may still resume.
-        // Only active (non-terminal) jobs can hold live tasks, and those are
-        // exactly the jobs in the graphs.
         let mut live = std::collections::HashSet::new();
         for job in jobs {
             let (owner, project) = split(&job.project);
             let tasks = match self.tasks.list_for_job(&owner, &project, job.id).await {
                 Ok(tasks) => tasks,
                 Err(e) => {
-                    // Can't prove these containers are disposable — skip the
-                    // whole sweep rather than risk removing a live one.
                     tracing::warn!(
                         "startup container sweep: listing tasks for job {} failed: {e}; skipping sweep",
                         job.id
@@ -332,8 +291,10 @@ impl Core {
         }
     }
 
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider."
+    )]
     async fn recover_work(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         self.ensure_exec_state(owner, project, seq).await?;
         let key = (owner.to_string(), project.to_string(), seq);
@@ -354,9 +315,6 @@ impl Core {
             .filter(|t| t.phase == TaskPhase::Work && t.cycle == cycle && t.evaluator.is_none())
             .max_by_key(|t| t.id);
         let Some(task) = latest else {
-            // Crashed between Ready→Work and the first task write: relaunch. The
-            // branch may already carry commits if the crash was later than it
-            // looks — recover them rather than reset (§3.2).
             let job = self.must_get(owner, project, seq)?.clone();
             let base_ref = job.base_ref.clone().expect("base_ref set in Work");
             let resume = crate::exec::recover_or_reset_branch(
@@ -373,10 +331,6 @@ impl Core {
         };
         match (task.state, work_type) {
             (TaskState::Pending, _) => {
-                // A command work task queued under capacity pressure (§3.5) —
-                // Pending, no container, not human-performed — re-queues so the
-                // launch resumes when a slot frees. A Pending human/claimed
-                // attempt (kind Human, or performed_by Human) waits on the inbox.
                 if task.container_id.is_none()
                     && !matches!(task.kind, TaskKind::Human { .. })
                     && task.performed_by.is_none()
@@ -387,19 +341,13 @@ impl Core {
                         seq,
                         task_id: task.id,
                         priority: crate::queue::launch_priority(task.phase),
-                        // Restore the persisted enqueue time (§3.5) so the queue's
-                        // FIFO order and the max-wait clock survive this restart;
-                        // fall back to now for records written before it existed.
                         queued_at: task.queued_at.unwrap_or_else(Utc::now),
                     });
                 }
                 Ok(())
             }
             (TaskState::Running, _) => self.settle_running(owner, project, seq, task).await,
-            // Completed before the crash, transition lost: replay it.
             (TaskState::Done, _) => self.enter_evaluation(owner, project, seq).await,
-            // Crashed between marking Failed and launching the retry: replay
-            // the retry logic directly (the exit handler skips Failed tasks).
             (TaskState::Failed, _) => {
                 self.retry_or_escalate_failed_work(owner, project, seq, &task)
                     .await
@@ -422,8 +370,10 @@ impl Core {
     ///   `refinalize` → `finish_landing` re-launches the publish on the re-merge,
     ///   so a crash in the narrow window before the publish task was written still
     ///   ships it.
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider."
+    )]
     async fn recover_wrapup(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         self.ensure_exec_state(owner, project, seq).await?;
         let key = (owner.to_string(), project.to_string(), seq);
@@ -439,8 +389,6 @@ impl Core {
             return self.recover_wrapup_command(owner, project, seq, task).await;
         }
 
-        // A gate in flight is superseded, whether its task was Running or queued
-        // under capacity pressure (§3.5): refinalize re-opens the gate fresh.
         for t in all.iter().filter(|t| {
             t.phase == TaskPhase::MergeGate
                 && t.cycle == cycle
@@ -472,11 +420,7 @@ impl Core {
         task: Task,
     ) -> Result<()> {
         match task.state {
-            // Publish finished before the crash; only the Done transition was
-            // lost. Land it.
             TaskState::Done => self.complete_done(owner, project, seq).await,
-            // Publish ran and failed; the escalation was lost. Replay it — the
-            // merge stays (design-lifecycle.md wrap-up failure).
             TaskState::Failed => {
                 self.active
                     .remove(&(owner.to_string(), project.to_string(), seq));
@@ -494,10 +438,6 @@ impl Core {
                 )
                 .await
             }
-            // In flight at crash time. If the container is still alive, re-attach
-            // and let it finish (settle_running); otherwise it is dead or was
-            // never launched — relaunch a fresh attempt, the command is
-            // idempotent by contract (§3.2).
             TaskState::Running | TaskState::Pending => {
                 let alive = match &task.container_id {
                     Some(cid) => matches!(
@@ -509,8 +449,6 @@ impl Core {
                 if alive {
                     return self.settle_running(owner, project, seq, task).await;
                 }
-                // Retire the orphaned record so it does not linger as Running,
-                // then relaunch (the newer task's higher id wins any future scan).
                 let mut dead = task.clone();
                 dead.state = TaskState::Failed;
                 dead.completed_at = Some(Utc::now());
@@ -521,8 +459,11 @@ impl Core {
         }
     }
 
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::expect_used, clippy::too_many_lines)]
+    #[allow(
+        clippy::expect_used,
+        clippy::too_many_lines,
+        reason = "TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider."
+    )]
     async fn recover_evaluation(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         self.ensure_exec_state(owner, project, seq).await?;
         let key = (owner.to_string(), project.to_string(), seq);
@@ -537,15 +478,9 @@ impl Core {
             .eval
             .clone();
         if evaluators.is_empty() {
-            // Auto-pass job caught between Evaluation and Done: re-finalize.
             return self.refinalize(owner, project, seq).await;
         }
 
-        // Rebuild the staged round from the task log (§3.3). Stages are launched
-        // in order, so the started stages form a prefix: the last stage with any
-        // task this cycle is the one in flight (`slots`), earlier stages are
-        // `done`, later stages `pending` (no tasks yet). A single-stage job
-        // collapses to one group — identical to the pre-staging rebuild.
         let stages: Vec<Vec<types::Evaluator>> =
             crate::decide::merge_gate::group_stages(evaluators)
                 .into_iter()
@@ -565,9 +500,6 @@ impl Core {
             .rposition(|stage| stage.iter().any(|ev| latest(ev).is_some()))
             .unwrap_or(0);
 
-        // Earlier stages passed before we advanced: rebuild their terminal
-        // outcomes so the reduce sees the whole run. A non-terminal task here is
-        // structurally impossible; treat one as infra rather than panic.
         let mut done: Vec<EvalSlot> = Vec::new();
         for stage in &stages[..current_idx] {
             for evaluator in stage {
@@ -596,8 +528,6 @@ impl Core {
             }
         }
 
-        // The stage in flight: rebuild each slot, relaunching any evaluator that
-        // never got a task (crashed mid-fan-out).
         let mut slots = Vec::new();
         let mut running: Vec<Task> = Vec::new();
         for evaluator in stages[current_idx].clone() {
@@ -632,16 +562,11 @@ impl Core {
                             output: result_output(r),
                         }),
                         (TaskState::Failed, _) => Some(SlotOutcome::Infra),
-                        _ => None, // Pending human, queued command, or Running container
+                        _ => None,
                     };
                     if task.state == TaskState::Running {
                         running.push(task.clone());
                     }
-                    // An evaluator queued under capacity pressure (§3.5): Pending,
-                    // no container — re-queue so the launch resumes when a slot
-                    // frees; the slot stays open (outcome None) meanwhile. Covers
-                    // command and agent evaluators alike (#140); a Pending Human
-                    // evaluator waits on the inbox, not the launch queue.
                     if task.state == TaskState::Pending
                         && task.container_id.is_none()
                         && !matches!(task.kind, types::TaskKind::Human { .. })
@@ -652,8 +577,6 @@ impl Core {
                             seq,
                             task_id: task.id,
                             priority: crate::queue::launch_priority(task.phase),
-                            // Persisted enqueue time (§3.5): stable FIFO + clock
-                            // across restarts. See recover_work for the rationale.
                             queued_at: task.queued_at.unwrap_or_else(Utc::now),
                         });
                     }
@@ -679,9 +602,6 @@ impl Core {
             self.settle_running(owner, project, seq, task).await?;
         }
         if complete {
-            // No Running tasks and every slot in the stage resolved before the
-            // crash: replay the advance-or-reduce decision — it may launch the
-            // next stage or run the (lost) reduce and merge.
             return self.eval_stage_settled(owner, project, seq).await;
         }
         Ok(())
@@ -697,35 +617,9 @@ impl Core {
         seq: u64,
         task: Task,
     ) -> Result<()> {
-        // Persisted result + Running only happens for agent eval tasks whose
-        // submit_eval landed but whose exit event was lost — on_eval_exited
-        // reads the persisted verdict whatever exit code we synthesize.
         let exit = match &task.container_id {
             Some(cid) => match self.backend.inspect(cid).await {
                 Ok(Some(status)) => {
-                    // The container is still there — running, or exited while
-                    // this dispatcher was down. Either way, re-attach the *same*
-                    // monitor the launch path uses for this phase, so exit
-                    // handling is byte-identical — not a bespoke inline monitor
-                    // that drops the structured result. A command work / wrap-up
-                    // task's `@chug:leg` deploy report (§3.6, #187) is then
-                    // harvested from its logs at exit exactly as on the launch
-                    // path (`spawn_logs_monitor`), instead of vanishing as
-                    // `structured: None`. A SELF-deploy always spans its own
-                    // dispatcher restart, so this re-attach is the only path its
-                    // report can survive on — the report the Deploys page (#188)
-                    // renders. Evaluators keep their eval-result.json monitor.
-                    //
-                    // An ALREADY-EXITED container takes the same path (ticket
-                    // #270): the monitor's `wait` returns its recorded code at
-                    // once, and the harvest that follows is what stores the
-                    // task's `stdout.log` artifact. Synthesizing the exit inline
-                    // instead — as this arm used to for `Exited` — skipped the
-                    // harvest entirely, so a deploy whose work container exited
-                    // in the seconds between restart-verify's `kickstart` and
-                    // this reconcile (the common case: the ssh session ends as
-                    // soon as update.sh returns) left NO record at all: empty
-                    // artifacts, empty task output, no legs (deploy #267).
                     let cid = cid.clone();
                     match (task.phase, status) {
                         (TaskPhase::Work | TaskPhase::WrapUp, _) => {
@@ -736,35 +630,23 @@ impl Core {
                             self.spawn_eval_monitor(owner, project, seq, task.id, cid);
                             return Ok(());
                         }
-                        // An evaluator that exited during the downtime keeps the
-                        // pre-#270 shape: a real exit the crash lost, whose code
-                        // is authoritative and keeps burning budget exactly as it
-                        // would have live. Only the work/wrap-up harvest — the
-                        // deploy's paper trail — changed.
                         (_, container::ContainerStatus::Exited { exit_code }) => {
                             TaskExit::code(exit_code)
                         }
                     }
                 }
-                // The container is GONE — pruned, node rebooted, colima
-                // restarted (or the backend can't answer). We recorded an id, so
-                // the container did exist; its disappearance is an infrastructure
-                // loss, not a real nonzero exit. Relaunch without spending retry
-                // budget (§3.6), capped so a vanishing environment still
-                // escalates (`infra_loss`) rather than looping forever.
                 Ok(None) | Err(_) => TaskExit::infra_loss(),
             },
-            // No recorded container id (Human task, or a launch that never
-            // reported one): we can't prove a container ever ran, so keep the
-            // failure semantics — a -1 exit that burns budget as before.
             None => TaskExit::code(-1),
         };
         self.on_task_exited(owner, project, seq, task.id, exit)
             .await
     }
 
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider."
+    )]
     async fn retry_or_escalate_failed_work(
         &mut self,
         owner: &str,
@@ -779,8 +661,6 @@ impl Core {
             .and_then(|e| e.job_type.work_retries)
             .unwrap_or(0);
         if task.attempt <= work_retries {
-            // §3.2 crash recovery: a task found Failed on restart may have pushed
-            // commits before dying — recover the branch instead of resetting.
             let job = self.must_get(owner, project, seq)?.clone();
             let base_ref = job.base_ref.clone().expect("base_ref set in Work");
             let resume = crate::exec::recover_or_reset_branch(
@@ -808,8 +688,10 @@ impl Core {
     }
 }
 
-// TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-#[allow(clippy::expect_used)]
+#[allow(
+    clippy::expect_used,
+    reason = "TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider."
+)]
 fn split(slug: &str) -> (String, String) {
     let (o, p) = slug.split_once('/').expect("owner/project slug");
     (o.to_string(), p.to_string())
@@ -820,8 +702,6 @@ pub(crate) fn result_pass(result: &TaskResult) -> bool {
         TaskResult::Command { pass, .. }
         | TaskResult::Agent { pass, .. }
         | TaskResult::Human { pass, .. } => *pass,
-        // Triage is advisory (§1.2) — never an eval verdict, so this is never
-        // consulted; treat it as a non-failure for completeness.
         TaskResult::Work { .. } | TaskResult::Triage { .. } => true,
     }
 }
@@ -839,7 +719,6 @@ pub(crate) fn result_structured(result: &TaskResult) -> Option<serde_json::Value
         | TaskResult::Agent { structured, .. }
         | TaskResult::Human { structured, .. }
         | TaskResult::Work { structured, .. } => structured.clone(),
-        // Triage carries prose, not structured findings.
         TaskResult::Triage { .. } => None,
     }
 }

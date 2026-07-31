@@ -59,7 +59,6 @@ impl Front {
 
 fn git(cwd: &Path, args: &[&str]) -> (bool, String) {
     let out = std::process::Command::new("git")
-        // The ext:: transport is opt-in (it runs an arbitrary command).
         .args(["-c", "protocol.ext.allow=always"])
         .args(args)
         .current_dir(cwd)
@@ -139,7 +138,6 @@ async fn single_branch_clone_works_over_the_ssh_front() {
         "content"
     );
 
-    // Only the job branch came across, not main.
     let listed = std::process::Command::new("git")
         .arg("-C")
         .arg(&co)
@@ -156,7 +154,6 @@ async fn job_certs_clone_and_push_only_their_branch() {
     let front = Front::setup().await;
     let work = tempfile::tempdir().unwrap();
 
-    // Work container identity (rw): clone succeeds.
     let job_args = "--kind job --principal job:acme/api:1 --access rw";
     let pull = front.remote("job-pull.sh", "git-upload-pack", job_args);
     let (ok, err) = git(work.path(), &["clone", &pull, "co"]);
@@ -179,19 +176,15 @@ async fn job_certs_clone_and_push_only_their_branch() {
     );
 
     let push = front.remote("job-push.sh", "git-receive-pack", job_args);
-    // Own branch: allowed.
     let (ok, err) = git(&co, &["push", &push, "HEAD:refs/heads/job/1"]);
     assert!(ok, "push to own branch should succeed: {err}");
-    // Another job's branch: denied by the pre-receive hook.
     let (ok, err) = git(&co, &["push", &push, "HEAD:refs/heads/job/2"]);
     assert!(!ok);
     assert!(err.contains("denied"), "{err}");
-    // Protected default branch: denied.
     let (ok, err) = git(&co, &["push", &push, "HEAD:refs/heads/main"]);
     assert!(!ok);
     assert!(err.contains("denied"), "{err}");
 
-    // Read-only (eval) certificate: receive-pack refused at entry.
     let eval_push = front.remote(
         "eval-push.sh",
         "git-receive-pack",
@@ -201,7 +194,6 @@ async fn job_certs_clone_and_push_only_their_branch() {
     assert!(!ok);
     assert!(err.contains("access denied"), "{err}");
 
-    // A job cert for a different project cannot read this one.
     let foreign_pull = front.remote(
         "foreign-pull.sh",
         "git-upload-pack",
@@ -217,7 +209,6 @@ async fn user_and_dispatcher_rules() {
     let front = Front::setup().await;
     let work = tempfile::tempdir().unwrap();
 
-    // Viewer: clone yes, push refused at entry.
     let viewer = format!(
         "--kind user --principal d@e.com --roles {}",
         roles_b64("viewer")
@@ -246,7 +237,6 @@ async fn user_and_dispatcher_rules() {
     assert!(!ok);
     assert!(err.contains("access denied"), "{err}");
 
-    // Member: job branches yes, default branch and tags no.
     let member = format!(
         "--kind user --principal d@e.com --roles {}",
         roles_b64("member")
@@ -262,7 +252,6 @@ async fn user_and_dispatcher_rules() {
     assert!(!ok);
     assert!(err.contains("denied"), "{err}");
 
-    // Dispatcher: protected refs allowed.
     let dispatcher_push = front.remote(
         "dispatcher-push.sh",
         "git-receive-pack",
@@ -271,8 +260,6 @@ async fn user_and_dispatcher_rules() {
     let (ok, err) = git(&co, &["push", &dispatcher_push, "HEAD:refs/heads/main"]);
     assert!(ok, "dispatcher push to main: {err}");
 
-    // No identity env (local file:// access, the dispatcher's own path):
-    // the hook passes through even though it is installed.
     let clone =
         test_utils::repo::clone_branch_from(&front.repos_root.join("acme/api.git"), "main").await;
     clone.commit_file("local.txt", b"local", "local").await;
@@ -287,7 +274,6 @@ async fn platform_admin_cert_bypasses_roles() {
     let front = Front::setup().await;
     let work = tempfile::tempdir().unwrap();
 
-    // No roles at all ({}), but --admin is set: the cert may read the project.
     let empty_roles = URL_SAFE_NO_PAD.encode("{}");
     let admin = format!("--kind user --principal admin@e.com --roles {empty_roles} --admin");
 
@@ -311,16 +297,12 @@ async fn platform_admin_cert_bypasses_roles() {
     );
 
     let admin_push = front.remote("admin-push.sh", "git-receive-pack", &admin);
-    // Job branch: allowed via the admin bypass, despite holding no role.
     let (ok, err) = git(&co, &["push", &admin_push, "HEAD:refs/heads/job/9"]);
     assert!(ok, "admin push to job branch: {err}");
-    // Default branch: still dispatcher-only, refused by the pre-receive hook.
     let (ok, err) = git(&co, &["push", &admin_push, "HEAD:refs/heads/main"]);
     assert!(!ok);
     assert!(err.contains("denied"), "{err}");
 
-    // Regression: the SAME identity without --admin and with no roles is fully
-    // refused — clone denied at entry.
     let no_role = format!("--kind user --principal admin@e.com --roles {empty_roles}");
     let no_role_pull = front.remote("norole-pull.sh", "git-upload-pack", &no_role);
     let (ok, err) = git(work.path(), &["clone", &no_role_pull, "co2"]);
@@ -331,7 +313,6 @@ async fn platform_admin_cert_bypasses_roles() {
 #[tokio::test]
 async fn ssh_shell_rejects_garbage() {
     let front = Front::setup().await;
-    // Non-git and malformed commands are refused before any spawn.
     for cmd in ["rm -rf /", "", "git-upload-archive '/acme/api.git'"] {
         let out = std::process::Command::new(BIN)
             .args([
@@ -348,7 +329,6 @@ async fn ssh_shell_rejects_garbage() {
             .unwrap();
         assert!(!out.status.success(), "{cmd:?} must be rejected");
     }
-    // Unknown repository.
     let out = std::process::Command::new(BIN)
         .args([
             "ssh-shell",

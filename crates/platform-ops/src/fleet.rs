@@ -85,8 +85,6 @@ fn phase_kind(phase: TaskPhase) -> &'static str {
         TaskPhase::MergeGate => "gate",
         TaskPhase::WrapUp => "wrap_up",
         TaskPhase::Triage => "triage",
-        // Escalation tasks are Human (#141) and never occupy a fleet slot, so
-        // this arm is only for match exhaustiveness.
         TaskPhase::Escalation => "escalation",
     }
 }
@@ -133,14 +131,8 @@ fn fleet_node(name: String, running: Vec<SlotOccupant>, facts: NodeFacts) -> Fle
         available: facts.base_available && facts.occupancy_listed,
         version: facts.version,
         refresh_outcome: facts.refresh_outcome,
-        // Provenance travels with the number (design #293 §7/§8): a node still
-        // serving a boot seed reads as such in the fleet view instead of being
-        // indistinguishable from one whose daemon confirmed it.
         capacity_source: facts.capacity.map(|c| c.source()),
         capacity_observed_at: facts.capacity.and_then(|c| c.observed_at),
-        // Intent, for display only (design #293 §2). It arrives already resolved
-        // by the dispatcher, so this composer — which sits on the occupancy path —
-        // never reads the intent record itself.
         slots_desired: facts.intent.as_ref().map(|i| i.slots_desired),
         capacity_state: facts.intent.as_ref().map(|i| i.state),
         capacity_note: facts.intent.and_then(|i| i.note),
@@ -193,7 +185,7 @@ pub async fn publish(
         }
     };
     if last_published.as_deref() == Some(bytes.as_slice()) {
-        return; // nothing moved — the common no-op
+        return;
     }
     match store.raw_bucket(store::buckets::PLATFORM).await {
         Ok(bucket) => match bucket.put_json(FLEET_KEY, status).await {
@@ -210,9 +202,6 @@ pub async fn publish(
 /// health/version, and the launch-queue depth. Enrichment (job type, phase,
 /// started_at) is read from the records the container resolves to.
 pub async fn compute(view: &FleetView<'_>) -> FleetStatus {
-    // Occupied slots grouped by node. A backend that cannot list (an
-    // unreachable node) yields an empty occupancy rather than an error, like
-    // the §3.6 sweep — occupancy degrades, it never wedges the loop.
     let running = match view.backend.list_managed_running().await {
         Ok(cs) => cs,
         Err(e) => {
@@ -228,21 +217,16 @@ pub async fn compute(view: &FleetView<'_>) -> FleetStatus {
             .or_default()
             .push(occupant);
     }
-    // Stable ordering so change-detection compares like with like.
     for slots in by_node.values_mut() {
         slots.sort_by_key(|o| (o.project.clone(), o.job_seq, o.task_id));
     }
 
-    // Nodes whose containers could not be listed this pass (spec §3.1): a
-    // worker that answers ping but whose `list_running` failed. Their slots
-    // are unknown, so they must show out-of-service, not falsely idle.
     let unlisted: HashSet<String> = view
         .backend
         .occupancy_unavailable_nodes()
         .into_iter()
         .collect();
 
-    // Node set = configured roster ∪ live-health nodes ∪ nodes seen busy.
     let live = view.backend.fleet_status();
     let mut names: BTreeMap<String, ()> = BTreeMap::new();
     for n in view.roster {
@@ -279,10 +263,6 @@ fn compose_node(
     let roster = view.roster.iter().find(|n| n.name == name);
     let status = live.iter().find(|s| s.name == name);
     let running = by_node.remove(&name).unwrap_or_default();
-    // Observed capacity wins over the boot seed (design #293 §7): the backend
-    // reports the number it actually places on — announced or ping-pulled —
-    // and the `DOCKER_NODES` roster value is only the pre-observation fallback.
-    // A docker-endpoint node reports no live slots, so its roster number stands.
     let slots = status
         .and_then(|s| s.slots)
         .or_else(|| roster.map(|n| n.slots));
@@ -293,9 +273,6 @@ fn compose_node(
     let version = status
         .and_then(|s| s.version.clone())
         .or_else(|| roster.and_then(|n| n.version.clone()));
-    // The live ping-reported outcome (ticket #187) wins; fall back to the
-    // roster's last-known so a failed refresh stays visible across the
-    // occasional probe miss.
     let refresh_outcome = status
         .and_then(|s| s.refresh_outcome.clone())
         .or_else(|| roster.and_then(|n| n.refresh_outcome.clone()));
@@ -371,8 +348,6 @@ mod tests {
     /// keeps its true health, idle or busy.
     #[test]
     fn unlisted_node_shows_out_of_service_not_idle() {
-        // Healthy (ping-reachable) but its `list_running` failed → occupancy is
-        // unknown, so it must NOT read as an available idle node.
         let unlisted = fleet_node("air".into(), vec![], facts(true, false));
         assert_eq!(unlisted.occupied, 0);
         assert!(
@@ -380,12 +355,10 @@ mod tests {
             "an unlistable node must show out of service, not false-idle"
         );
 
-        // A genuinely idle node whose listing succeeded stays available.
         let idle = fleet_node("nuc".into(), vec![], facts(true, true));
         assert!(idle.available);
         assert_eq!(idle.occupied, 0);
 
-        // An already-down node stays down whether or not it was listed.
         let down = fleet_node("old".into(), vec![], facts(false, true));
         assert!(!down.available);
     }
@@ -430,7 +403,6 @@ mod tests {
         );
         assert_eq!(reported.capacity_observed_at, Some(at));
 
-        // Docker endpoint: no observation, so no provenance to claim.
         let docker = fleet_node("local".into(), vec![], facts(true, true));
         assert_eq!(docker.capacity_source, None);
     }
@@ -462,7 +434,6 @@ mod tests {
         assert_eq!(refused.capacity_state, Some(types::CapacityState::Rejected));
         assert_eq!(refused.capacity_note.as_deref(), Some("node max is 4"));
 
-        // No intent for the node: nothing to display, and no state to invent.
         let untouched = fleet_node("nuc".into(), vec![], facts(true, true));
         assert_eq!(untouched.slots_desired, None);
         assert_eq!(untouched.capacity_state, None);

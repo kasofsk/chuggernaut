@@ -137,7 +137,6 @@ mod tests {
             "payments/stripe-integration",
             "webhook.retry.policy",
         );
-        // owner + project + two encoded segments = exactly 4 dot-separated parts
         assert_eq!(key.split('.').count(), 4);
         let parts: Vec<&str> = key.split('.').collect();
         assert_eq!(b64_decode(parts[2]).unwrap(), "payments/stripe-integration");
@@ -152,7 +151,6 @@ mod tests {
         assert_eq!(key, "acme.api.42.attachments.mobile-bug.png");
         let prefix = job_attachment_prefix("acme", "api", 42);
         assert_eq!(key.strip_prefix(&prefix), Some("mobile-bug.png"));
-        // A task artifact of the same job must not match the attachment prefix.
         let task_artifact = artifact_key("acme", "api", 42, 7, "stdout.log");
         assert!(task_artifact.strip_prefix(&prefix).is_none());
     }

@@ -22,10 +22,11 @@ pub struct InitArgs {
     pub admin_password: Option<String>,
 }
 
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::expect_used)]
+#[allow(
+    clippy::expect_used,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 pub async fn run(args: InitArgs) -> Result<()> {
-    // 1. Keypairs (skip existing).
     let report = keygen::ensure_all(&args.keys_dir).await?;
     for name in &report.generated {
         println!("generated {}", args.keys_dir.join(name).display());
@@ -38,9 +39,6 @@ pub async fn run(args: InitArgs) -> Result<()> {
         .await
         .with_context(|| format!("creating {}", args.repos_root.display()))?;
 
-    // 2. NATS buckets + streams, VAPID public key at platform.vapid.public.
-    // Connect with the dispatcher credentials keygen just ensured — a plain
-    // (no-auth) dev server ignores them, an operator-mode server requires them.
     let creds = tokio::fs::read_to_string(args.keys_dir.join("dispatcher.creds")).await?;
     let store = NatsStore::connect_with_creds(&args.nats_url, &creds)
         .await
@@ -55,7 +53,6 @@ pub async fn run(args: InitArgs) -> Result<()> {
         .put_json("vapid.public", &vapid_public)
         .await?;
 
-    // 3. Optional initial admin user (skip if it already exists).
     if let Some(email) = &args.admin_email {
         let password = args.admin_password.as_deref().expect("clap requires");
         match crate::admin::create_user(&store, email, password, true).await? {

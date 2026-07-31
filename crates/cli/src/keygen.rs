@@ -13,8 +13,11 @@ pub struct KeygenReport {
     pub skipped: Vec<String>,
 }
 
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::too_many_lines, clippy::unwrap_used)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::unwrap_used,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 pub async fn ensure_all(dir: &Path) -> Result<KeygenReport> {
     tokio::fs::create_dir_all(dir)
         .await
@@ -24,7 +27,6 @@ pub async fn ensure_all(dir: &Path) -> Result<KeygenReport> {
         skipped: vec![],
     };
 
-    // JWT RS256 (§7.1)
     ensure(&mut report, dir, "jwt_private.pem", |path| async move {
         run(
             "openssl",
@@ -58,8 +60,6 @@ pub async fn ensure_all(dir: &Path) -> Result<KeygenReport> {
     })
     .await?;
 
-    // SSH CA (§7.4) — ssh-keygen writes both halves in one shot, so report
-    // the .pub as generated too rather than "skipped".
     let ssh_ca_fresh = !dir.join("ssh_ca").exists();
     ensure(&mut report, dir, "ssh_ca", |path| async move {
         run(
@@ -89,7 +89,6 @@ pub async fn ensure_all(dir: &Path) -> Result<KeygenReport> {
         .await?;
     }
 
-    // age (§8.2)
     ensure(&mut report, dir, "age_private.key", |path| async move {
         let (identity, _) = store::secrets::generate_age_keypair();
         write_key(&path, &format!("{identity}\n"), true).await
@@ -102,12 +101,6 @@ pub async fn ensure_all(dir: &Path) -> Result<KeygenReport> {
     })
     .await?;
 
-    // Artifacts (transcripts, container logs) — a *separate* age keypair from
-    // the secrets one above. §10.2 keeps the secrets identity dispatcher-only,
-    // but the API must decrypt artifacts to serve them, and proxying blobs
-    // through the dispatcher would reintroduce the NATS max_payload cap that
-    // the object store exists to avoid. Different key, different trust
-    // boundary: this one guards artifacts at rest, not from the API.
     ensure(&mut report, dir, "age_artifacts.key", |path| async move {
         let (identity, _) = store::secrets::generate_age_keypair();
         write_key(&path, &format!("{identity}\n"), true).await
@@ -126,9 +119,6 @@ pub async fn ensure_all(dir: &Path) -> Result<KeygenReport> {
     )
     .await?;
 
-    // NATS decentralized auth (§7.4): operator + system + platform account
-    // nkey seeds, generated in-process (nkeys is already in the tree via the
-    // NATS client). Derived server/dispatcher artifacts: ensure_nats_artifacts.
     ensure(&mut report, dir, "nats_operator.seed", |path| async move {
         let kp = nkeys::KeyPair::new_operator();
         write_key(&path, &format!("{}\n", seed_of(&kp)?), true).await
@@ -142,7 +132,6 @@ pub async fn ensure_all(dir: &Path) -> Result<KeygenReport> {
         .await?;
     }
 
-    // VAPID / web push (§9): ES256 = P-256
     ensure(&mut report, dir, "vapid_private.pem", |path| async move {
         run(
             "openssl",
@@ -176,7 +165,6 @@ pub async fn ensure_all(dir: &Path) -> Result<KeygenReport> {
     })
     .await?;
 
-    // openssl/ssh-keygen create world-readable files by default.
     for private in [
         "jwt_private.pem",
         "ssh_ca",

@@ -84,8 +84,6 @@ fn validate_file(path: &Path, deployed_epoch: u32) -> Outcome {
 
     if path.file_name().is_some_and(|n| n == "_defaults.yaml") {
         return match ProjectDefaults::parse(&content) {
-            // Field rules for default evaluators are checked where they land:
-            // against each job type they merge into.
             Ok(_) => Outcome {
                 errors: vec![],
                 warnings: vec![],
@@ -99,7 +97,6 @@ fn validate_file(path: &Path, deployed_epoch: u32) -> Outcome {
         Err(e) => return Outcome::err(format!("parse error: {e}")),
     };
 
-    // Unknown top-level fields are tolerated (spec §14) — reported as warnings.
     let mut warnings: Vec<String> = job_type
         .config_warnings()
         .iter()
@@ -108,9 +105,6 @@ fn validate_file(path: &Path, deployed_epoch: u32) -> Outcome {
 
     let mut errors = Vec::new();
 
-    // Merge-time version-skew gate: a config that needs a newer dispatcher than
-    // the deployed one fails its own CI rather than merging and escalating at
-    // launch.
     if let Some(needed) = job_type.requires_dispatcher(deployed_epoch) {
         errors.push(format!(
             "requires dispatcher schema epoch >= {needed} but the deployed dispatcher is at \
@@ -119,7 +113,6 @@ fn validate_file(path: &Path, deployed_epoch: u32) -> Outcome {
         ));
     }
 
-    // Merge the sibling _defaults.yaml if present — validate what will run.
     let merged = match sibling_defaults(path) {
         Some(Ok(defaults)) => match job_type.with_defaults(&defaults) {
             Ok(m) => m,
@@ -174,8 +167,6 @@ mod tests {
             Vec::<String>::new()
         );
 
-        // Missing image: caught for the type itself AND for the merged
-        // default evaluator that needs the fallback.
         let bad = dir.path().join("bad.yaml");
         std::fs::write(&bad, "name: bad\nwork:\n  type: agent\n  prompt: p.md\n").unwrap();
         let errs = errors(&bad, types::CONFIG_SCHEMA_EPOCH);
@@ -187,8 +178,6 @@ mod tests {
 
     #[test]
     fn unknown_top_level_field_is_a_warning_not_an_error() {
-        // Post spec §14: an unknown top-level field no longer fails validation
-        // — the config runs, the field is flagged as a warning.
         let dir = tempfile::tempdir().unwrap();
         let unknown = dir.path().join("unknown.yaml");
         std::fs::write(
@@ -220,9 +209,6 @@ mod tests {
 
     #[test]
     fn validate_covers_the_inputs_block() {
-        // `chuggernaut validate` is the offline half of the release checks, so the
-        // whole `inputs:` field-rule set has to reach it — an author fixes a
-        // rollback type at their desk, not by watching a job park.
         let dir = tempfile::tempdir().unwrap();
         let head = format!(
             "name: rollback\nimage: img:latest\nmin_dispatcher: {}\n",
@@ -233,7 +219,6 @@ mod tests {
                     values: [web, worker]\n    default: web\n";
         assert_eq!(input_errors(dir.path(), &head, good), Vec::<String>::new());
 
-        // Each violation names its own field.
         for (block, field) in [
             ("  - name: SHA\n    type: string\n", "inputs.name"),
             ("  - name: service\n    type: enum\n", "inputs.values"),
@@ -261,9 +246,6 @@ mod tests {
             );
         }
 
-        // And the skew gate: an `inputs:` block with no `min_dispatcher` is
-        // refused offline, before it can merge and be silently ignored by an
-        // older dispatcher.
         let ungated = input_errors(
             dir.path(),
             "name: rollback\nimage: img:latest\n",
@@ -277,8 +259,6 @@ mod tests {
 
     #[test]
     fn config_requiring_a_newer_dispatcher_fails_the_merge_gate() {
-        // The version-skew merge gate: a config declaring a higher
-        // min_dispatcher than the deployed dispatcher fails its own CI.
         let dir = tempfile::tempdir().unwrap();
         let ahead = dir.path().join("ahead.yaml");
         std::fs::write(
@@ -286,14 +266,12 @@ mod tests {
             "name: web\nimage: img:latest\nmin_dispatcher: 3\nwork:\n  type: agent\n  prompt: p.md\n",
         )
         .unwrap();
-        // Simulated older dispatcher at epoch 1 → refused with a clear message.
         let errs = errors(&ahead, 1);
         assert!(
             errs.iter()
                 .any(|e| e.contains("requires dispatcher schema epoch >= 3")),
             "{errs:?}"
         );
-        // A dispatcher already at the needed epoch accepts it.
         assert_eq!(errors(&ahead, 3), Vec::<String>::new());
     }
 }

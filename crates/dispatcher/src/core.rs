@@ -33,9 +33,6 @@ use tokio::sync::{mpsc, oneshot};
 use types::{BatchComposition, Job, JobState, TaskResolution, TokenUsage};
 use vcs::RepoManager;
 
-// The create spec is `types`' (refactor-plan F1a) so the pure authoring decider
-// can read it; re-exported here because `core` is the surface every caller of
-// [`Core::create_job`] already imports.
 pub use types::CreateSpec;
 
 #[derive(Debug, Error)]
@@ -1020,7 +1017,7 @@ pub fn spawn(mut core: Core) -> CoreHandle {
     let ticker_tx = tx.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(SCAN_INTERVAL);
-        interval.tick().await; // consume the immediate first tick
+        interval.tick().await;
         loop {
             interval.tick().await;
             if ticker_tx.send(Msg::Scan { reply: None }).await.is_err() {
@@ -1036,13 +1033,9 @@ pub fn spawn(mut core: Core) -> CoreHandle {
         if let Err(e) = core.drain_queue().await {
             tracing::error!("post-reconcile drain: {e}");
         }
-        // Re-attempt launches reconciliation re-queued under capacity pressure.
         if let Err(e) = core.drain_launch_queue().await {
             tracing::error!("post-reconcile launch drain: {e}");
         }
-        // Publish live fleet occupancy once reconciliation settled the running
-        // set (re-attached survivors, reaped orphans) — the first snapshot is
-        // rebuilt from live containers, not stale state (spec §3.1/§3.6).
         core.refresh_fleet_status().await;
         core.run(rx).await
     });
@@ -1053,8 +1046,10 @@ impl Core {
     /// Connect stores and rebuild in-memory state from `jobs.*` KV (spec §3.6
     /// steps 1 and 5): graphs, the rdeps index (written back — it is a derived
     /// cache), and the Ready queue.
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider."
+    )]
     pub async fn new(
         store: NatsStore,
         repos: RepoManager,
@@ -1127,12 +1122,8 @@ impl Core {
             invariant_sink: None,
         };
 
-        // The operator's capacity asks outlive this process (design #293 §4): load
-        // them before the first scan tick can reconcile against them.
         core.load_capacity_intent().await;
 
-        // Restore merge-queue holds for Open origin releases before reconcile
-        // runs — recovered Evaluation jobs must re-enqueue without landing.
         for (key, record) in core.projects.list_all().await? {
             if matches!(&record.release, Some(r) if r.status == types::ReleaseStatus::Open)
                 && let Some((owner, project)) = key.split_once('.')
@@ -1190,8 +1181,6 @@ impl Core {
     /// (see [`crate::platform_ops::fleet`]). Wired by [`crate::run`] from the
     /// config snapshot's nodes; tests set it to assert per-node slots.
     pub fn with_fleet_roster(mut self, roster: Vec<types::WorkerNode>) -> Self {
-        // The seed set is the boot roster's names: these stay ping-managed and
-        // are never heartbeat-gated (spec §3.1 dynamic registration).
         self.seed_node_names = roster.iter().map(|n| n.name.clone()).collect();
         self.fleet_roster = roster;
         self
@@ -1214,12 +1203,6 @@ impl Core {
     pub(crate) fn on_worker_announce(&mut self, announce: types::worker::WorkerAnnounce) {
         let (node, version) = (announce.node.clone(), announce.version.clone());
         let capacity = types::CapacityObservation::from_announce(&announce);
-        // Only a fleet-capable backend can route to an announced node. On a
-        // single-node Docker deployment (no announcing workers by design) a stray
-        // or misconfigured announce would otherwise insert a phantom worker into
-        // the roster that nothing can ever route to — and which would then show
-        // permanently "down" after the heartbeat scan. Drop it before it can
-        // touch the heartbeat table or the roster.
         if !self.backend.supports_dynamic_workers() {
             tracing::debug!(node = %node, "ignoring worker announce — backend has no dynamic fleet");
             return;
@@ -1237,20 +1220,11 @@ impl Core {
             );
         }
         match self.fleet_roster.iter_mut().find(|n| n.name == node) {
-            // A worker (seed or previously-announced) of this name: the live
-            // announcement re-admits it and refreshes its version. Its slots stay
-            // the boot seed here — the pre-observation fallback the backend's
-            // observed number supersedes (design #293 §7).
             Some(n) if n.endpoint == worker::backend::WORKER_ENDPOINT => {
                 n.available = true;
                 n.version = Some(version);
             }
-            // The name is held by a docker-endpoint node — the backend already
-            // refused it; leave the roster untouched.
             Some(_) => {}
-            // A node that was never seeded has no seed to fall back to, so its
-            // roster entry starts at what it just reported; provenance is filled
-            // from the backend when the snapshot is composed.
             None => self.fleet_roster.push(types::WorkerNode {
                 name: node.clone(),
                 endpoint: worker::backend::WORKER_ENDPOINT.to_string(),
@@ -1263,17 +1237,6 @@ impl Core {
             }),
         }
         if joined {
-            // The observation moved (design #293 §4): a refreshed daemon comes back
-            // on its boot `WORKER_SLOTS`, so re-assert the operator's number now
-            // rather than waiting out a scan tick. Gated on `joined` — a node
-            // reporting the same wrong value every 15s is pushed by the tick
-            // alone, which is what keeps the one-push-per-tick bound honest.
-            //
-            // Deliberately **after** the roster merge above: the reconciler will
-            // not push to a node the roster does not hold, and a node announcing
-            // for the first time is inserted by that merge. Reconciling before it
-            // would silently no-op in exactly the case this fast path exists for,
-            // which is what the assert pins.
             debug_assert!(
                 self.fleet_holds(&node),
                 "an accepted announce must reach the roster before the capacity \
@@ -1285,37 +1248,23 @@ impl Core {
 
     async fn run(mut self, mut rx: mpsc::Receiver<Msg>) {
         while let Some(msg) = rx.recv().await {
-            // Graceful shutdown (spec §3.6 drain): quiesce and stop the loop.
-            // Handled here, not in `handle_msg`, because it needs the receiver
-            // to sweep the remaining mailbox.
             if let Msg::Drain { reply } = msg {
                 let result = self.drain(&mut rx).await;
                 let _ = reply.send(result);
                 return;
             }
-            // Any message but a bare liveness ping can move fleet occupancy or
-            // the launch-queue depth (a launch, an exit, a queued/resumed
-            // launch); republish after the drains so the `platform` bucket
-            // stays current (spec §3.1). Pings are excluded so a busy
-            // health-check path never triggers a fleet recompute.
             let occupancy_relevant = !matches!(msg, Msg::Ping { .. });
             let checked = self.invariant_sink.is_some().then(|| msg.label());
             self.handle_msg(msg).await;
             if let Err(e) = self.drain_queue().await {
                 tracing::error!("drain_queue: {e}");
             }
-            // A just-handled container exit may have freed a fleet slot; retry
-            // any launches queued under capacity pressure (spec §3.5).
             if let Err(e) = self.drain_launch_queue().await {
                 tracing::error!("drain_launch_queue: {e}");
             }
             if occupancy_relevant {
                 self.refresh_fleet_status().await;
             }
-            // Check the data invariants once the message has fully settled — the
-            // drains and the fleet republish are part of handling it, and the
-            // queue is legitimately inconsistent midway through them
-            // (refactor-plan B1a). Only ever `Some` under test.
             if let (Some(label), Some(sink)) = (checked, &self.invariant_sink) {
                 sink.check(label, &self.state());
             }
@@ -1333,20 +1282,14 @@ impl Core {
     /// ever makes records MORE accurate, never worse.
     pub(crate) async fn drain(&mut self, rx: &mut mpsc::Receiver<Msg>) -> Result<()> {
         self.draining = true;
-        // Sweep the mailbox. `handle_msg` records exits and stamps container ids
-        // as normal; the launch paths it may reach are no-ops while draining.
         while let Ok(msg) = rx.try_recv() {
             match msg {
-                // A second drain: already draining — just ack it.
                 Msg::Drain { reply } => {
                     let _ = reply.send(Ok(()));
                 }
                 other => self.handle_msg(other).await,
             }
         }
-        // Audit + flush: a Running task whose container-start message was still
-        // in flight would carry no id and reconcile as a synthetic -1. Recover
-        // the id from the live fleet so restart re-attaches instead.
         self.flush_running_container_ids().await;
         Ok(())
     }
@@ -1365,8 +1308,6 @@ impl Core {
                 return;
             }
         };
-        // Index the live containers by the (project, job, task) identity their
-        // labels carry, so a task with no recorded id can be matched back.
         let mut by_identity: HashMap<(String, u64, u64), String> = HashMap::new();
         for rc in running {
             if let (Some(p), Some(j), Some(t)) = (&rc.project, rc.job, rc.task) {
@@ -1410,8 +1351,10 @@ impl Core {
         }
     }
 
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider."
+    )]
     async fn handle_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Ping { reply } => {
@@ -1578,8 +1521,6 @@ impl Core {
             } => {
                 let _ = reply.send(self.origin_sync(&owner, &project).await);
             }
-            // Drain is intercepted by `run` (and by `drain`'s own sweep) because
-            // it needs the receiver; it never reaches here. Ack defensively.
             Msg::Drain { reply } => {
                 let _ = reply.send(Ok(()));
             }
@@ -1695,8 +1636,10 @@ impl Core {
     /// tiny forwarder that turns the provider's launch signal into a
     /// [`Msg::TaskContainerStarted`], so the container id reaches the task
     /// record through the single-writer loop rather than a direct mutation.
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider."
+    )]
     pub(crate) fn launch_reporter(
         &self,
         owner: &str,
@@ -1726,8 +1669,6 @@ impl Core {
     /// §3.1 step 5: launch every queued Ready job. Slot caps live in the
     /// backend (fleet) — the core does not throttle.
     pub(crate) async fn drain_queue(&mut self) -> Result<()> {
-        // Draining (spec §3.6): initiate no new work. Ready jobs stay enqueued in
-        // KV and are re-enqueued on restart, so nothing is lost.
         if self.draining {
             return Ok(());
         }
@@ -1741,8 +1682,6 @@ impl Core {
     /// default; with `draft: true` they land in [`JobState::Draft`] for
     /// editing (§2.1). Either way, wiring is validated at release, not creation.
     pub async fn create_job(&mut self, req: CreateSpec) -> Result<Job> {
-        // A `members` payload creates a batch (spec §2.1 batches): it absorbs
-        // existing Frozen jobs rather than describing a fresh unit of work.
         if !req.members.is_empty() {
             return self.create_batch(req).await;
         }
@@ -1768,11 +1707,7 @@ impl Core {
             eval: req.eval,
             timeout: req.timeout,
             model: req.model,
-            // Supply path 1 of the two that ever write this field (§1.1, design
-            // #311 Decision 6); the other is the Ready-transition default fill.
             inputs: req.inputs,
-            // Shape-checked at the wire edge (422); nothing here re-decides it,
-            // and nothing downstream reads it (design #321 Decision 3).
             groups: req.groups,
             claim_next: false,
             escalation: None,
@@ -1784,7 +1719,6 @@ impl Core {
         };
         self.jobs.put(&job).await?;
         for &upstream in &job.deps {
-            // Non-fatal by spec §2.3 — the index is rebuilt on startup.
             let _ = self
                 .rdeps
                 .append(&req.owner, &req.project, upstream, seq)
@@ -1794,11 +1728,6 @@ impl Core {
             .entry(job.project.clone())
             .or_default()
             .insert(job.clone());
-        // §10.3 audit trail: creation records what the originator *asked for*.
-        // The effective set — this plus the defaults the Ready transition
-        // materializes — rides the transition event that pins `base_ref`, and
-        // the difference between the two events is exactly the defaults (design
-        // #311 Decision 6).
         let mut extra = serde_json::json!({});
         inputs::stamp_event_inputs(&mut extra, &job.inputs);
         self.publish(&req.owner, &req.project, seq, "job-created", extra)
@@ -1823,18 +1752,9 @@ impl Core {
         let (owner, project) = (req.owner.clone(), req.project.clone());
         let member_seqs = req.members.clone();
 
-        // A Draft batch composes incrementally, so it may hold below the
-        // committable floor of 2 while members are added/removed; a non-draft
-        // batch is an atomic act over ≥2 existing jobs. Either way the per-
-        // candidate rules are enforced now (absorption at create only for the
-        // non-draft path).
         let min = if req.draft { 1 } else { 2 };
         let comp = self.plan_batch(&owner, &project, &req.r#type, &member_seqs, min)?;
 
-        // A draft holds a non-binding member list: its dep/eval unions and
-        // auto-description are (re)computed only at finalize/release, so the
-        // record carries an empty composition until then. A non-draft batch
-        // commits the composition at create.
         let (deps, eval, description) = if req.draft {
             (Vec::new(), Vec::new(), req.description)
         } else {
@@ -1868,11 +1788,7 @@ impl Core {
             eval,
             timeout: req.timeout,
             model: req.model,
-            // A batch supplies its own inputs like any job of its type; what it
-            // will not do is union its *members'* — see `validate_member`.
             inputs: req.inputs,
-            // A batch is a job with its own seq, so it carries its own groups
-            // (design #321 Decision 3, "not a batch"); members keep theirs.
             groups: req.groups,
             claim_next: false,
             escalation: None,
@@ -1895,8 +1811,6 @@ impl Core {
         self.publish(&owner, &project, seq, "job-created", extra)
             .await?;
 
-        // A non-draft batch pulls each member Frozen→Batched now; a Draft batch
-        // absorbs nothing until it leaves Draft.
         if !req.draft {
             self.absorb_batch(&owner, &project, seq, &member_seqs)
                 .await?;
@@ -2010,8 +1924,10 @@ impl Core {
     /// `job` is left untouched, so the caller keeps it Draft with nothing
     /// absorbed. Returns the member list to absorb once the caller's own
     /// validation passes.
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider."
+    )]
     fn absorb_plan(&self, job: &mut Job) -> Result<Vec<u64>> {
         let (owner, project) = job
             .project
@@ -2030,8 +1946,6 @@ impl Core {
     /// Frozen→Ready|Blocked). Returns the resulting state.
     pub async fn release_job(&mut self, owner: &str, project: &str, seq: u64) -> Result<JobState> {
         let mut job = self.must_get(owner, project, seq)?.clone();
-        // Frozen and Draft both release; a Draft is finalized (its edited
-        // definition locked in) in the same step (§2.1). Any other state rejects.
         if !matches!(job.state, JobState::Frozen | JobState::Draft) {
             return Err(InvalidTransition {
                 from: job.state,
@@ -2041,13 +1955,6 @@ impl Core {
         }
         let from_draft = job.state == JobState::Draft;
 
-        // A Draft batch commits its membership at release (spec §2.1): re-
-        // validate the members against current state and recompute the dep/eval
-        // unions + auto-description before the wiring/static pass runs on them.
-        // A stale member (or fewer than 2) fails here, leaving the batch Draft
-        // with nothing absorbed. Absorption itself is deferred to after the
-        // whole release validation succeeds. The recomputed record is inserted
-        // into the graph now so `wiring_errors`/`deps_done` see the union deps.
         let batch_members = if from_draft && job.is_batch() {
             let members = self.absorb_plan(&mut job)?;
             self.graphs
@@ -2061,10 +1968,6 @@ impl Core {
 
         let (head, declared_inputs) = self.release_validation(owner, project, &job).await?;
 
-        // The validated release is the C4 decider's `Released` event: dependency
-        // satisfaction, the `base_ref` pin, the declared-default fill, queue
-        // admission, the batch's membership commit, and both announcements are its
-        // decision (§2.1, §2.2, §3.1).
         self.run_ready(
             owner,
             project,
@@ -2162,14 +2065,8 @@ impl Core {
             self.close_pending_tasks(owner, project, target).await;
             self.active
                 .remove(&(owner.to_string(), project.to_string(), target));
-            // Snapshot the record only after `close_pending_tasks`: closing a
-            // claimed attempt stamps `completed_at`, which refreshes the job's
-            // `task_time_ms`. A clone taken before that would carry the stale
-            // total and `set_state`'s write would revert it — permanently, as
-            // Revoked is terminal and no later task write can self-heal it.
             let mut j = self.must_get(owner, project, target)?.clone();
             self.set_state(&mut j, JobState::Revoked).await?;
-            // Delete job/{seq} and any parked candidate; missing refs are fine.
             let _ = self.repos.delete_branch(owner, project, &j.branch).await;
             let _ = self
                 .repos
@@ -2187,16 +2084,9 @@ impl Core {
                 }
             }
         }
-        // Revoking a batch releases its members rather than dropping them
-        // (spec §2.1 batches): each returns Batched→Frozen with its `batch_id`
-        // cleared, so it is re-batchable and re-releasable on its own. Members
-        // are not graph dependents of the batch, so the cascade above never
-        // touched them. A Draft batch (never absorbed) leaves its would-be
-        // members untouched — `release_batch_members` skips non-Batched jobs.
         let members = job.members.clone();
         self.release_batch_members(owner, project, seq, &members)
             .await?;
-        // A revoked gate occupant frees the queue for the next candidate.
         self.pump_merges(owner, project).await?;
         self.publish(
             owner,
@@ -2240,15 +2130,8 @@ impl Core {
             groups,
         } = req;
 
-        // Upstreams this edit drops — used to prune both the KV rdeps index
-        // (below) and, implicitly, the in-memory reverse edges when the graph
-        // re-inserts the job (see `JobGraph::insert`). Without pruning, a later
-        // revoke of a dropped upstream would cascade to this job by a stale edge.
         let old_deps = job.deps.clone();
 
-        // Full-field replace; identity (id/branch/created_at) and lifecycle
-        // fields (state/base_ref/ready_at/claim_next) are untouched — a Draft
-        // holds no branch or base_ref, exactly like a Frozen job.
         job.r#type = r#type;
         job.title = title;
         job.description = description;
@@ -2258,20 +2141,14 @@ impl Core {
         job.eval = eval;
         job.timeout = timeout;
         job.model = model;
-        // Still the creation-time writer: a Draft edit re-states what was
-        // supplied, and no default has been materialized yet (that happens at the
-        // Ready transition, which a Draft has not reached).
         job.inputs = inputs;
         job.groups = groups;
 
         self.jobs.put(&job).await?;
         for &upstream in &job.deps {
-            // Mirror create: best-effort rdeps append (§2.3, rebuilt on startup).
             let _ = self.rdeps.append(&owner, &project, upstream, seq).await;
         }
         for &upstream in &old_deps {
-            // Prune the reverse edge for any upstream this edit dropped, so the
-            // KV index stays consistent (best-effort, §2.3 — rebuilt on startup).
             if !job.deps.contains(&upstream) {
                 let _ = self.rdeps.remove(&owner, &project, upstream, seq).await;
             }
@@ -2323,9 +2200,6 @@ impl Core {
     pub async fn draft_job(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let mut job = self.must_get(owner, project, seq)?.clone();
         self.set_state(&mut job, JobState::Draft).await?;
-        // Reopening a batch for editing un-absorbs its members (spec §2.1): each
-        // Batched→Frozen with `batch_id` cleared, so membership can be edited
-        // before finalize/release re-absorbs. Mirrors the revoke un-absorb.
         if job.is_batch() {
             let members = job.members.clone();
             self.release_batch_members(owner, project, seq, &members)
@@ -2366,9 +2240,6 @@ impl Core {
             )));
         }
 
-        // Validate the adds against current state, rejecting duplicates and
-        // candidates already in the batch. A draft reserves nothing, so a
-        // removed member simply drops from the list.
         let mut errs: Vec<ValidationError> = Vec::new();
         let mut present: HashSet<u64> = job.members.iter().copied().collect();
         for &a in &add {
@@ -2460,8 +2331,6 @@ impl Core {
             )])
         })?;
         if groups == job.groups {
-            // Idempotent: re-adding a label the job already carries is a no-op,
-            // not a redundant write and a `job-updated` the UI would re-render on.
             return Ok(job);
         }
 
@@ -2471,8 +2340,6 @@ impl Core {
             .entry(job.project.clone())
             .or_default()
             .insert(job.clone());
-        // Negative space (STYLE.md Tier 2 #2): this verb annotates and nothing
-        // else — no transition, no scheduling, no second writer of job state.
         debug_assert_eq!(job.state, state_before, "a group edit never moves a job");
         self.publish(
             owner,
@@ -2502,23 +2369,12 @@ impl Core {
             .into());
         }
 
-        // A Draft batch commits its membership at finalize (spec §2.1): re-
-        // validate every member against current state and recompute the dep/
-        // eval unions + auto-description, exactly as an atomic create would.
-        // A stale member (or fewer than 2) fails here, leaving the batch Draft
-        // with nothing absorbed. Absorption is deferred to after the field-rule
-        // validation below passes.
         let batch_members = if job.is_batch() {
             self.absorb_plan(&mut job)?
         } else {
             Vec::new()
         };
 
-        // Validate the (possibly recomputed) definition against the current
-        // default HEAD: the job type's §1.1 field rules (via `load_job_type`)
-        // plus the additive evaluators' name-collision / field rules
-        // (`with_job_evaluators`, over the unioned eval for a batch). Any error
-        // returns before the state write, so the job stays Draft.
         let default_branch = self.repos.default_branch(owner, project).await?;
         let head = self
             .repos
@@ -2530,8 +2386,6 @@ impl Core {
         release::with_job_evaluators(job_type, &job)?;
 
         self.set_state(&mut job, JobState::Frozen).await?;
-        // A batch now absorbs its members (Frozen→Batched) and indexes its
-        // newly-committed union deps (best-effort, §2.3).
         if !batch_members.is_empty() {
             let deps = job.deps.clone();
             for upstream in deps {
@@ -2559,15 +2413,11 @@ impl Core {
                 job.state
             )));
         }
-        // A Draft job has no work attempt to claim — it is invisible to
-        // scheduling until released (§2.1). Claim it after release, not before.
         if job.state == JobState::Draft {
             return Err(CoreError::Conflict(format!(
                 "job {seq} is Draft; release it before claiming a work attempt"
             )));
         }
-        // A Batched member holds no work attempt of its own — its changes are
-        // produced on the batch's branch (spec §2.1 batches). Claim the batch.
         if job.state == JobState::Batched {
             return Err(CoreError::Conflict(format!(
                 "job {seq} is Batched; claim its batch (#{}), not the member",
@@ -2716,7 +2566,6 @@ impl Core {
         detail: String,
         failing_task: Option<u64>,
     ) -> Result<()> {
-        // Pre-work: cycle 1, no exec state.
         self.run_escalation(
             owner,
             project,
@@ -2746,7 +2595,6 @@ impl Core {
         failing_task: Option<u64>,
         cycle: u32,
     ) -> Result<()> {
-        // 1. Reads feed the view — they are not effects.
         let job = self.must_get(owner, project, seq)?.clone();
         let next_task_id = self.next_task_id(owner, project, seq).await?;
         let view = escalation::EscalationView {
@@ -2755,7 +2603,6 @@ impl Core {
             cycle,
             now: Utc::now(),
         };
-        // 2. The decision, made purely.
         let (transitions, effects) = escalation::decide(
             &view,
             escalation::EscalationEvent {
@@ -2765,17 +2612,9 @@ impl Core {
                 failing_task,
             },
         );
-        // 3. Commit the decision: transitions first (§2.1 record is the
-        // source of truth; a crash before the effects land is healed by
-        // restart reconciliation re-creating the task from the stamped WHY).
         for mut t in transitions {
             self.set_state(&mut t.job, t.to).await?;
         }
-        // 4. The artifacts of the decision. Boxed: `interpret`'s composite
-        // arms (and the launch paths behind them) can re-enter `escalate`,
-        // and this call is the one new edge closing that async cycle — the
-        // indirection lives here so every arm stays plain. The runtime never
-        // actually recurses: this decider emits only PutTask/PublishEvent.
         for effect in effects {
             Box::pin(self.interpret(effect)).await?;
         }
@@ -2846,11 +2685,6 @@ impl Core {
             trace.transition(job.id, job.state, to);
         }
         job.state = to;
-        // Stamp the completion moment once, at the terminal transition (Done or
-        // Revoked). This is the single funnel every job-state write flows
-        // through, so it covers the finalize (Evaluation/WrapUp→Done) and revoke
-        // paths uniformly. `get_or_insert_with` keeps it immutable — terminal
-        // states are absorbing, but be defensive.
         if to.is_terminal() {
             job.completed_at.get_or_insert_with(Utc::now);
         }
@@ -2868,7 +2702,6 @@ impl Core {
         project: &str,
         job_seq: u64,
     ) -> Result<u64> {
-        // Sequential within job (§1.2); safe as read-then-write: single writer.
         Ok(self
             .tasks
             .list_for_job(owner, project, job_seq)
@@ -2981,9 +2814,6 @@ impl Core {
     /// contract a tier-2 test drives directly (`tests/task_time.rs`).
     pub async fn task_put(&mut self, task: &types::Task) -> Result<()> {
         self.tasks.put(task).await?;
-        // Only a completion can move the total, and the other writes (a
-        // container-id stamp, a queue park, a state flip) are the frequent
-        // ones — so the extra list read is spent only where it can matter.
         if task.completed_at.is_some() {
             self.task_put_time_refresh(&task.project, task.job_seq)
                 .await?;
@@ -3001,17 +2831,10 @@ impl Core {
         let (owner, project) = split_slug(slug)?;
         let tasks = self.tasks.list_for_job(&owner, &project, job_seq).await?;
         let task_time_ms = types::task_time_ms(&tasks);
-        // Take the record from the in-memory graph when it is loaded there:
-        // that is the working copy every other job write starts from, so
-        // writing a KV-read copy back could revert a field the graph is ahead
-        // on. A job absent from the graph (a project not loaded) still gets its
-        // total from KV.
         let job = match self.must_get(&owner, &project, job_seq) {
             Ok(job) => Some(job.clone()),
             Err(_) => self.jobs.get(&owner, &project, job_seq).await?,
         };
-        // A task whose job record is gone (revoked and swept) has nothing to
-        // stamp; the recompute is advisory, never a reason to fail the write.
         let Some(mut job) = job else {
             return Ok(());
         };
@@ -3019,9 +2842,6 @@ impl Core {
             return Ok(());
         }
         job.task_time_ms = task_time_ms;
-        // Dual-write like `set_state`: KV is the truth and the graph is the
-        // copy the next transition is taken from — skip it and that transition
-        // writes the stale value straight back over this one.
         self.jobs.put(&job).await?;
         self.graphs
             .entry(job.project.clone())

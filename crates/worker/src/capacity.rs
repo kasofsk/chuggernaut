@@ -100,9 +100,6 @@ impl Capacity {
     /// nothing, which is what makes it terminal rather than a value that
     /// oscillates.
     pub fn set_slots(&self, requested: u32) -> SetSlotsOk {
-        // Read, decide, and bump under one guard: the reply names the pair this
-        // call installed, which is what lets the dispatcher order two racing
-        // adoptions by generation and land on the number the node is running.
         let mut cell = self.cell();
         let (slots_before, generation_before) = *cell;
         if requested > self.slots_max {
@@ -178,7 +175,6 @@ mod tests {
         assert_eq!(report.epoch_ms, 1_769_000_000_123);
         assert_eq!(report.generation, 0, "no adoption has happened yet");
 
-        // Under the ceiling the boot value stands verbatim.
         assert_eq!(Capacity::new(2, 6, 1).report().slots, 2);
     }
 
@@ -201,7 +197,6 @@ mod tests {
             "the report agrees with the reply"
         );
 
-        // A full drain is an ordinary adoption, and the boundary value fits.
         let drained = capacity.set_slots(0);
         assert!(drained.accepted);
         assert_eq!((drained.slots, drained.capacity_generation), (0, 2));
@@ -209,8 +204,6 @@ mod tests {
         assert!(at_max.accepted, "the ceiling itself is adoptable");
         assert_eq!(at_max.capacity_generation, 3);
 
-        // Re-adopting the same number still moves the key forward, so a
-        // dispatcher re-push is never ordered behind what it is re-asserting.
         let again = capacity.set_slots(6);
         assert_eq!((again.slots, again.capacity_generation), (6, 4));
         assert_eq!(
@@ -330,7 +323,6 @@ mod tests {
     #[test]
     fn epoch_is_unix_milliseconds() {
         let epoch = now_epoch_ms();
-        // 2020-01-01 in ms; a seconds-precision stamp would be ~1000x smaller.
         assert!(epoch > 1_577_836_800_000, "not milliseconds: {epoch}");
     }
 }

@@ -45,9 +45,6 @@ pub fn channel_reply(owner: &str, project: &str, seq: u64) -> String {
     format!("req.channel.reply.{owner}.{project}.{seq}")
 }
 
-// ── API-facing request subjects (spec §6.1) ─────────────────────────────────
-// Published by the api crate, handled by the dispatcher.
-
 /// §6.x liveness probe: a project-agnostic request that only a live dispatcher
 /// answers, and that round-trips the core actor (so a *wedged* state loop reads
 /// as unhealthy, not merely a dead process). The api's `GET /api/v1/health`
@@ -253,11 +250,6 @@ pub fn ssh_sign_user_cert() -> String {
     "req.ssh.sign-user-cert".into()
 }
 
-// ── Fleet (spec §3.1 operator capacity control) ─────────────────────────────
-// Published by the api, handled by the dispatcher's actor. Fleet-scoped, not
-// project-scoped: a node belongs to the platform, so nothing owner/project rides
-// in the subject.
-
 /// Set a worker node's **desired** slot count (design #293 §3). Payload
 /// `{ node, slots, by }`; the reply is the 202 body
 /// ([`types::NodeCapacityAck`]) or the `{"error": {...}}` envelope. The node name
@@ -266,11 +258,6 @@ pub fn ssh_sign_user_cert() -> String {
 pub fn fleet_capacity_set() -> String {
     "req.fleet.capacity.set".into()
 }
-
-// ── Worker-node protocol (spec §3.1) ────────────────────────────────────────
-// Published by the dispatcher's fleet backend, served by the `chuggernaut
-// worker` daemon on the node. Node names are validated subject-safe at
-// DOCKER_NODES parse time.
 
 pub fn worker_op(node: &str, op: &str) -> String {
     format!("req.worker.{node}.{op}")

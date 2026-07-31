@@ -277,7 +277,6 @@ impl<'a> From<&'a Job> for JobSummary<'a> {
             ready_at: job.ready_at,
             completed_at: job.completed_at,
             task_time_ms: job.task_time_ms,
-            // Lives in a different bucket; the list handler joins it in.
             channel: None,
         }
     }
@@ -480,11 +479,8 @@ mod tests {
         assert_eq!(job.id, 42);
         assert_eq!(job.state, JobState::Frozen);
         assert_eq!(job.deps, vec![11, 22]);
-        // `timeout` is optional and defaults to None on records that predate it.
         assert_eq!(job.timeout, None);
-        // `model` defaults to None on records that predate per-job model selection.
         assert_eq!(job.model, None);
-        // `claim_next` defaults false on records that predate claims.
         assert!(!job.claim_next);
         let back = serde_json::to_string(&job).unwrap();
         let again: Job = serde_json::from_str(&back).unwrap();
@@ -548,7 +544,6 @@ mod tests {
 
     #[test]
     fn job_round_trips_in_draft_state() {
-        // Draft is a first-class serde variant, distinct from Frozen.
         let json = r#"{
           "id": 9,
           "project": "acme/api",
@@ -573,8 +568,6 @@ mod tests {
 
     #[test]
     fn job_round_trips_with_escalation_and_stays_backward_compat() {
-        // Old records (no escalation key) deserialize to None and omit it on
-        // the wire.
         let json = r#"{
           "id": 9,
           "project": "acme/api",
@@ -592,7 +585,6 @@ mod tests {
         assert_eq!(job.escalation, None);
         assert!(!serde_json::to_string(&job).unwrap().contains("escalation"));
 
-        // A populated escalation round-trips, with and without a failing task.
         let at = "2026-07-22T11:00:00Z".parse::<DateTime<Utc>>().unwrap();
         let mut escalated = job.clone();
         escalated.escalation = Some(Escalation {
@@ -603,7 +595,7 @@ mod tests {
         });
         let back = serde_json::to_string(&escalated).unwrap();
         assert!(back.contains("launch_validation_failed"));
-        assert!(!back.contains("failing_task")); // None is skipped
+        assert!(!back.contains("failing_task"));
         assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), escalated);
 
         escalated.escalation.as_mut().unwrap().failing_task = Some(4);
@@ -614,8 +606,6 @@ mod tests {
 
     #[test]
     fn job_round_trips_with_completed_at_and_stays_backward_compat() {
-        // Old records (no completed_at key) deserialize to None and omit it on
-        // the wire — the jobs list treats a missing stamp as "still live".
         let json = r#"{
           "id": 5,
           "project": "acme/api",
@@ -637,7 +627,6 @@ mod tests {
                 .contains("completed_at")
         );
 
-        // A stamped completion round-trips and appears on the wire.
         let at = "2026-07-22T12:30:00Z".parse::<DateTime<Utc>>().unwrap();
         let mut finished = job.clone();
         finished.completed_at = Some(at);
@@ -648,9 +637,6 @@ mod tests {
 
     #[test]
     fn job_round_trips_with_task_time_and_stays_backward_compat() {
-        // The ~290 records written before task time exists carry no key: they
-        // load as None and stay keyless on the wire, so the UI shows a stamp
-        // with no duration hint rather than a bogus 0s.
         let json = r#"{
           "id": 6,
           "project": "acme/api",
@@ -672,8 +658,6 @@ mod tests {
                 .contains("task_time_ms")
         );
 
-        // A computed total round-trips, including a genuine zero — which must
-        // stay distinguishable from "nothing to show".
         for ms in [0u64, 18 * 60 * 1000] {
             let mut timed = job.clone();
             timed.task_time_ms = Some(ms);
@@ -685,8 +669,6 @@ mod tests {
 
     #[test]
     fn job_round_trips_as_batch_and_member() {
-        // A batch job carries `members`; a member carries `batch_id`. Both
-        // round-trip and the Batched state is a first-class serde variant.
         let json = r#"{
           "id": 20,
           "project": "acme/api",
@@ -735,9 +717,6 @@ mod tests {
 
     #[test]
     fn old_record_without_batch_fields_stays_compat() {
-        // Records written before batches lack `members`/`batch_id`: they
-        // deserialize to empty/None and omit `batch_id` on the wire (an
-        // ordinary job never advertises a batch it does not belong to).
         let json = r#"{
           "id": 1,
           "project": "acme/api",
@@ -760,8 +739,6 @@ mod tests {
 
     #[test]
     fn job_round_trips_with_cover_html_and_stays_backward_compat() {
-        // Old records (no cover_html key) deserialize to None and omit it on
-        // the wire — a job with a plain-text brief carries no cover.
         let json = r#"{
           "id": 3,
           "project": "acme/api",
@@ -779,7 +756,6 @@ mod tests {
         assert_eq!(job.cover_html, None);
         assert!(!serde_json::to_string(&job).unwrap().contains("cover_html"));
 
-        // A populated cover round-trips and appears on the wire.
         let mut rich = job.clone();
         rich.cover_html = Some("<h1>Ship it</h1>".into());
         let back = serde_json::to_string(&rich).unwrap();
@@ -809,7 +785,6 @@ mod tests {
         assert!(job.inputs.is_empty());
         assert!(!serde_json::to_string(&job).unwrap().contains("inputs"));
 
-        // A populated map round-trips, in the map's own (sorted) order.
         let mut parameterized = job.clone();
         parameterized.inputs = BTreeMap::from([
             ("sha".to_string(), "4f9c1ab".to_string()),
@@ -855,8 +830,6 @@ mod tests {
             "{back}"
         );
         assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), grouped);
-        // Terminal is not a special case on the wire: the record that carries a
-        // group is most often a finished one (design #321 Decision 5).
         assert!(grouped.state.is_terminal());
     }
 
@@ -939,8 +912,6 @@ mod tests {
                 .collect()
         };
 
-        // The job is in Work and carries a post, so every optional field of the
-        // projection — including the added `channel` — is present too.
         let update = ChannelUpdate {
             message: "running the gate".into(),
             percent: Some(40),
@@ -977,7 +948,6 @@ mod tests {
             "description leaked: {json}"
         );
         assert!(!json.contains("<p>cover</p>"), "cover_html leaked: {json}");
-        // …while still carrying what the operator table renders.
         assert!(json.contains("\"title\":\"title\""));
         assert!(json.contains("\"state\":\"Work\""));
     }

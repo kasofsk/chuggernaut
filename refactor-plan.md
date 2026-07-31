@@ -117,7 +117,9 @@ reviewer-honour-system. A4 adds `clippy.toml` (`too-many-lines-threshold =
 `lints.workspace = true` on every member.
 
 It is a **ratchet, not a cleanup**: the ~280 pre-existing violations wear a
-site-specific `#[allow]` with a `TODO` naming the ticket that dissolves them
+site-specific `#[allow]` whose `reason = "TODO(…)"` names the ticket that
+dissolves them (the marker moved from a comment above the attribute into the
+attribute itself when job #342 deleted every non-doc comment)
 (C6 for `eval.rs`/`exec.rs` — landed, so what it did not dissolve now carries
 `TODO(io-split)`; C7 for `handlers.rs`, whose markers went with the split; C8
 for `triage`/`origin`, whose three did not — see C8),

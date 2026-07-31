@@ -65,10 +65,12 @@ that debt is what the pending checks will pin down.
   panic stalls every job in the DAG.
 
   Both denies landed as a **ratchet, not a cleanup**: the violations the tree
-  already had wear a site-specific `#[allow]` with a `TODO` naming the Track C
-  ticket that dissolves them, so existing debt is greppable
-  (`git grep 'clippy::too_many_lines'`) while new code cannot add a violation
-  without an explicit, reviewable allow. Crate-level `#![allow]` of these
+  already had wear a site-specific `#[allow]` whose `reason = "TODO(…)"` names
+  the Track C ticket that dissolves them, so existing debt is greppable
+  (`git grep 'clippy::too_many_lines'`, `git grep 'TODO(style)'`) while new code
+  cannot add a violation without an explicit, reviewable allow. The marker rides
+  the attribute rather than a comment above it — job #342 deleted every non-doc
+  comment in the tree. Crate-level `#![allow]` of these
   three lints defeats the ratchet and is rejected on sight.
 
 - **Formatting is `rustfmt` / `prettier` defaults.** *(live for Rust:
@@ -98,12 +100,18 @@ that debt is what the pending checks will pin down.
   surface NORTH-STAR §4 asks for, registered in `MODULES.md` and structurally
   unable to scatter. **Machine-read directives** are not prose and are allowed:
   `jscpd:ignore-start`/`-end`, `SAFETY:`, and the eslint/ts/prettier pragmas —
-  put the justification on the directive line itself.
+  put the justification on the directive line itself. The allowlist matches the
+  text right after the opener, so a directive is **one line**: a wrapped second
+  line is an ordinary comment and the gate rejects it. Write the justification
+  so it fits, however long that line runs.
 
-  Like the `unwrap_used` denies, this is a **ratchet, not a cleanup**: the gate
-  judges only the lines a diff *adds*, so the tree's existing comments are
-  pre-existing debt while new ones cannot land. A doc block is re-judged
-  whenever the diff adds a line inside it — edit a doc comment and you trim it.
+  **Rule 1 is absolute; rule 2 is still a ratchet.** Job #342 deleted every
+  non-doc comment in the tree — the rationale worth keeping was hoisted into
+  [`docs/implementation-notes.md`](docs/implementation-notes.md) — so the gate
+  lints every tracked Rust/TypeScript source and one non-doc comment anywhere
+  fails it, changed file or not. The two-sentence cap still has pre-existing
+  debt (~500 over-long doc comments), so it judges only blocks a diff adds a
+  line inside: edit a doc comment and you trim it.
 
 - **No duplicated code: zero clones.** *(live: `.chug/tasks/check-duplication.sh`
   runs `jscpd@5.0.5` — pinned exactly — over the whole repo from `.chug/tasks/ci.sh`,

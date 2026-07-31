@@ -71,11 +71,13 @@ impl Core {
     /// over the job. Guards on Escalated/Stalled and a configured `TRIAGE_IMAGE`;
     /// creates a `TaskPhase::Triage` task and spawns the run. Never changes job
     /// state, so it is not routed through `set_state`/`assert_transition`.
-    // TODO(track-C8): dissolved by the named-contexts regroup.
-    #[allow(clippy::expect_used, clippy::too_many_lines)]
+    #[allow(
+        clippy::expect_used,
+        clippy::too_many_lines,
+        reason = "TODO(track-C8): dissolved by the named-contexts regroup."
+    )]
     pub async fn triage_job(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let job = self.must_get(owner, project, seq)?.clone();
-        // §1.2: triage is an operator aid for the two intervention states.
         if !matches!(job.state, JobState::Escalated | JobState::Stalled) {
             return Err(CoreError::Conflict(format!(
                 "triage is only available while a job is Escalated or Stalled; \
@@ -83,7 +85,6 @@ impl Core {
                 job.state
             )));
         }
-        // Platform-level image (§1.2). 422 when unset — the action is unavailable.
         let image = self.config.triage_image.clone().ok_or_else(|| {
             CoreError::Validation(vec![ValidationError::new(
                 Some(seq),
@@ -94,13 +95,10 @@ impl Core {
 
         let prompt = self.build_triage_prompt(owner, project, &job).await?;
 
-        // Provider/model reuse the platform agent defaults (§1.2, §12.4).
         let provider = provider_name(None, self.config.agent_provider_default.as_deref());
         let model = self.config.agent_model_default.clone();
         let session_id = uuid::Uuid::new_v4().to_string();
 
-        // Advisory tag: pin to the latest cycle so the task sorts with the run
-        // it is triaging. Triage is not part of the rework loop.
         let existing = self.tasks.list_for_job(owner, project, seq).await?;
         let cycle = existing.iter().map(|t| t.cycle).max().unwrap_or(1);
         let task_id = existing.len() as u64 + 1;
@@ -137,10 +135,6 @@ impl Core {
         self.task_create(owner, project, &task, serde_json::Value::Null)
             .await?;
 
-        // Minimal launch env: clone the default branch (always present — a
-        // Stalled job may have no job branch) read-only for code context, plus
-        // the platform agent credentials so the CLI can authenticate. No channel
-        // MCP, no NATS credentials — the prompt is self-contained (§1.2).
         let default_branch = self.repos.default_branch(owner, project).await?;
         let mut env = HashMap::from([
             ("JOB_ID".to_string(), seq.to_string()),
@@ -153,14 +147,11 @@ impl Core {
         ]);
         self.inject_git_ssh_command(&mut env);
         self.inject_platform_agent_secrets(&mut env).await?;
-        // Read-only SSH credential for the clone (empty when no SSH front).
         let files = self
             .ssh_credential_files(
                 owner,
                 project,
                 seq,
-                // Read-only access, like an evaluator; triage runs no channel
-                // MCP (§1.2), so the evaluator-name origin is never read.
                 ChannelRole::Eval {
                     task_id,
                     evaluator: String::new(),
@@ -174,17 +165,14 @@ impl Core {
             prompt,
             model,
             system_prompt: None,
-            mcp_servers: vec![], // no channel MCP (§1.2)
+            mcp_servers: vec![],
             files,
             env,
             task_timeout: TRIAGE_TIMEOUT,
             eval_context: vec![],
             merge_conflict: None,
             session_id: session_id.clone(),
-            node: None, // triage runs on the platform image; no per-type pin
-            // Triage diagnoses a stalled job from a read-only clone and answers
-            // in its result text (§1.2) — it reads, it does not build or edit,
-            // so it shares the evaluator's profile.
+            node: None,
             permissions: agent::PermissionProfile::Review,
         };
         let provider = self.provider.clone();
@@ -195,8 +183,6 @@ impl Core {
         tokio::spawn(async move {
             let (exit_code, assessment, usage) = match provider.run(config, on_launch).await {
                 Ok(out) => {
-                    // The assessment rides the CLI's JSON result on stdout, so
-                    // harvest it before reporting the exit.
                     let (assessment, usage) =
                         harvest.collect_agent(&o, &p, seq, task_id, &out).await;
                     if let Some(id) = &out.container_id {
@@ -263,8 +249,6 @@ impl Core {
                 .await?;
             }
             None => {
-                // Container died or produced no parseable result. Record the
-                // attempt so the operator sees it, rather than a silent no-op.
                 task.state = TaskState::Failed;
                 task.result = Some(TaskResult::Triage {
                     assessment:
@@ -309,9 +293,6 @@ impl Core {
 
         let tasks = self.tasks.list_for_job(owner, project, job.id).await?;
 
-        // Why the job stopped: the escalation/stall task summoning the human is
-        // the one still Pending (the operator dispatched triage instead of
-        // resolving it).
         if let Some(TaskKind::Human { prompt }) = tasks
             .iter()
             .filter(|t| t.state == TaskState::Pending && matches!(t.kind, TaskKind::Human { .. }))
@@ -325,8 +306,6 @@ impl Core {
 
         p.push_str("\n---\n## Task log\n");
         for t in &tasks {
-            // Skip prior triage tasks: an earlier assessment is not evidence,
-            // and feeding it back invites drift.
             if t.phase == TaskPhase::Triage {
                 continue;
             }
@@ -432,7 +411,6 @@ fn render_task_result(result: &TaskResult) -> String {
                 .map(compact)
                 .unwrap_or_else(|| "(none)".into())
         ),
-        // Skipped from the log above; here only for exhaustiveness.
         TaskResult::Triage { .. } => "(prior triage assessment)".into(),
     }
 }

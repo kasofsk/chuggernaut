@@ -61,11 +61,6 @@ eval:
     run: ./scripts/ci.sh
 "#;
 
-// Agent work + a single command evaluator (the `ci` gate from `_defaults.yaml`;
-// this type adds none of its own, so the eval fan-out is a single task with no
-// legitimately-nondeterministic completion order). Main never moves, so the job
-// evaluates and squash-merges with no rebase and no merge gate (gate_and_human.rs
-// `no_movement_evaluates_and_merges_without_rebase_or_gate`).
 const IMPL_CMD_YAML: &str = r#"
 name: impl-cmd
 image: img:latest
@@ -74,9 +69,6 @@ work:
   prompt: prompts/impl.md
 "#;
 
-// Agent work + the appended `ci` default evaluator, WITH a rework budget: a
-// failing required evaluator reworks the job (§3.3 reduce) rather than
-// escalating, so the trace pins the reduce's rework arm.
 const IMPL_REWORK_YAML: &str = r#"
 name: impl-rework
 image: img:latest
@@ -86,9 +78,6 @@ work:
 rework_budget: 1
 "#;
 
-// Agent work + a STAGED command gate (job #154, mirrors gate_and_human.rs
-// `GATEFIX`): build at stage 0, tests at stage 1, so a stage-0 gate failure
-// classifies as compile and takes the gate-fix fast path.
 const GATEFIX_YAML: &str = r#"
 name: gatefix
 image: img:latest
@@ -257,11 +246,6 @@ async fn trace_release_block_unblock() {
     );
     assert_invariants(&core);
 
-    // Build completes (its execution slice lands elsewhere): mark Done in KV,
-    // then reload a fresh core (the restart path) so it observes the completion
-    // and drives the dependent's unblock. The same sink follows the new core;
-    // reload rebuilds state without `set_state`, so nothing records before the
-    // `begin` below.
     let jobs = store.jobs().await.unwrap();
     let mut done = jobs.get("acme", "api", build.id).await.unwrap().unwrap();
     done.state = JobState::Done;
@@ -297,7 +281,6 @@ async fn trace_stall_on_revalidation_failure() {
     core.release_job("acme", "api", deploy.id).await.unwrap();
     assert_invariants(&core);
 
-    // Break the deploy job type on main after release.
     let clone = repo.clone_branch("main").await;
     clone
         .commit_file("jobs/deploy.yaml", b"not: [valid", "break deploy type")
@@ -309,7 +292,6 @@ async fn trace_stall_on_revalidation_failure() {
     done.state = JobState::Done;
     jobs.put(&done).await.unwrap();
 
-    // Reload the core (restart path) so it observes build Done, then unblock.
     let mut core = new_core(&store, core_repos_root(&repo)).await;
     core.attach_trace(sink.clone());
     sink.begin("on_job_done build (deploy re-validation fails)");
@@ -403,8 +385,10 @@ async fn spawn_setup() -> Option<SpawnRig> {
     spawn_setup_with(SpawnOpts::default()).await
 }
 
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn spawn_setup_with(opts: SpawnOpts) -> Option<SpawnRig> {
     let server = test_utils::nats::NatsTestServer::shared().await?;
     let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
@@ -470,7 +454,6 @@ async fn spawn_setup_with(opts: SpawnOpts) -> Option<SpawnRig> {
             main.push("main").await;
         });
     }
-    // The command evaluator reads its verdict from this file.
     backend.put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
 
     let mut core = new_core_with(&store, core_repos_root(&repo), backend.clone(), provider).await;
@@ -525,13 +508,6 @@ async fn trace_work_eval_merge_no_gate() {
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
     test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
-    // `complete_done` writes the Done KV revision (which `job_state` above
-    // observes) *before* it publishes the trailing `job-done` event, so the Done
-    // state alone does not mean the actor has finished recording the step. Wait
-    // for that terminal effect — the last write of the merge chain, with no
-    // dependents to fan out — so the snapshot is taken only once the actor has
-    // quiesced. Synchronizing on the trace itself (not the KV state) is what
-    // keeps this actor-driven scenario from flaking on scheduler timing.
     wait_trace_effect(&rig.sink, "PublishEvent job-done").await;
     assert_invariants_of(&rig.invariants);
 

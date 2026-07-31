@@ -439,8 +439,10 @@ impl JobType {
 
     /// Enforce the §1.1 field-rules matrices. Returns all violations, not just
     /// the first.
-    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+    )]
     pub fn validate(&self) -> Vec<FieldRuleError> {
         let mut errs = Vec::new();
         let ctx = |w: WorkType| format!("work.type: {w:?}").to_lowercase();
@@ -466,9 +468,6 @@ impl JobType {
                     });
                 }
                 if let Some(review) = &self.work.review {
-                    // v1: the resolved review provider must be claude. Only
-                    // statically resolvable here; a None-None chain falls back
-                    // to platform config, checked by the dispatcher at release.
                     if review.provider.or(self.work.provider) == Some(Provider::Codex) {
                         errs.push(FieldRuleError::Invalid {
                             field: "work.review.provider",
@@ -600,7 +599,6 @@ impl JobType {
                     }
                 }
             }
-            // Container evaluators need an image from somewhere (per-evaluator or top-level).
             if matches!(e.r#type, EvaluatorType::Command | EvaluatorType::Agent)
                 && e.image.is_none()
                 && self.image.is_none()
@@ -612,12 +610,6 @@ impl JobType {
             }
         }
 
-        // `resources.memory` is an opaque string until the container backend
-        // parses it at launch; validate the format here so `chuggernaut
-        // validate` and release validation reject a bad limit (e.g. "5g")
-        // offline instead of wedging the job when the eval container fails to
-        // launch. `resources.cpu` needs no such check — serde already enforces
-        // it is a float, and it is never re-parsed from a string downstream.
         if let Some(mem) = self.resources.as_ref().and_then(|r| r.memory.as_deref())
             && let Err(e) = crate::resources::parse_memory(mem)
         {
@@ -649,13 +641,7 @@ impl JobType {
             }
         }
 
-        // Wrap-up command hook (spec §3.2): the post-merge `run` only makes
-        // sense for a merge job (there is no merge to follow otherwise), needs an
-        // image from somewhere, and its `image`/`secrets` are meaningless without
-        // it.
         let wrap = &self.wrap_up;
-        // The wrap-up task label (job #146) is validated like an evaluator name:
-        // a bad token would render as a broken task row / event field.
         if let Some(name) = wrap.name.as_deref()
             && !is_valid_task_name(name)
         {
@@ -693,10 +679,6 @@ impl JobType {
             }
         }
 
-        // Placement is shape-validated only (spec §3.1): the fleet node list
-        // lives in the dispatcher's env and is not knowable offline, so a bad
-        // node token is the only thing catchable here. An unknown-but-valid
-        // name surfaces at launch as a placement error.
         if let Some(node) = self.placement.as_ref().and_then(|p| p.node.as_deref())
             && !Placement::node_is_well_formed(node)
         {
@@ -727,11 +709,6 @@ impl JobType {
             return errs;
         }
         let ctx = format!("job type '{}'", self.name);
-        // Skew gate (spec §14.1): an N-1 dispatcher tolerates `inputs:` as an
-        // unknown top-level field, so without this the config would run with
-        // required-input validation skipped and no value reaching the container.
-        // Declaring `min_dispatcher` is what makes that refusal happen in a
-        // dispatcher that cannot see `inputs:` at all.
         if self.min_dispatcher.unwrap_or(0) < crate::version::INPUTS_SCHEMA_EPOCH {
             errs.push(FieldRuleError::Required {
                 field: "min_dispatcher",
@@ -796,9 +773,6 @@ impl JobType {
                         context: ctx.clone(),
                     });
                 }
-                // A declared value outside the charset is a value no supply path
-                // could ever match — the enum's own version of an unsatisfiable
-                // default.
                 for value in &input.values {
                     if let Err(e) = crate::inputs::check_value_charset(value) {
                         errs.push(FieldRuleError::Invalid {
@@ -836,8 +810,6 @@ impl JobType {
             } else if errs.is_empty()
                 && let Err(e) = crate::inputs::check_value(input, default)
             {
-                // Only checked once the declaration itself is sound, so one
-                // mistake reports once.
                 errs.push(FieldRuleError::Invalid {
                     field: "inputs.default",
                     context: ctx,
@@ -1011,7 +983,6 @@ work:
     prompt: r.md
 "#;
         let jt = JobType::parse(yaml).unwrap();
-        // review.provider unset → defaults to work provider (codex) → rejected in v1
         assert!(jt.validate().iter().any(|e| matches!(
             e,
             FieldRuleError::Invalid {
@@ -1084,7 +1055,6 @@ resources:
             .unwrap()
         };
 
-        // The dogfood bug: "5g" passed validate but failed at launch.
         let errs = jt_with_mem("5g").validate();
         assert_eq!(errs.len(), 1);
         assert!(matches!(
@@ -1094,12 +1064,10 @@ resources:
                 ..
             }
         ));
-        // The accepted form validates cleanly.
         assert_eq!(jt_with_mem("5Gi").validate(), vec![]);
         assert_eq!(jt_with_mem("512Mi").validate(), vec![]);
         assert_eq!(jt_with_mem("1048576").validate(), vec![]);
 
-        // Other malformed forms are all rejected offline.
         for bad in ["4GB", "-5", "0", "1.5Gi"] {
             assert!(
                 jt_with_mem(bad).validate().iter().any(|e| matches!(
@@ -1131,13 +1099,10 @@ placement:
             .unwrap()
         };
 
-        // Well-formed node tokens validate and thread through `placement_node`.
         let jt = jt_with_node("gumbo-nuc-0");
         assert_eq!(jt.validate(), vec![]);
         assert_eq!(jt.placement_node(), Some("gumbo-nuc-0"));
 
-        // A bad token is caught offline — the node existing is not checkable
-        // here, but its shape is.
         for bad in ["nuc.0", "has space", "nuc>"] {
             let errs = jt_with_node(bad).validate();
             assert!(
@@ -1152,7 +1117,6 @@ placement:
             );
         }
 
-        // Omitted placement (and an empty block) is fine: no pin.
         let none = JobType::parse(
             r#"
 name: impl
@@ -1198,8 +1162,6 @@ eval:
 
     #[test]
     fn project_default_model_fills_undeclared_agents_only() {
-        // A job type whose work agent and one evaluator declare no model, plus
-        // an evaluator and a command evaluator that do.
         let yaml = r#"
 name: code
 image: img:latest
@@ -1221,13 +1183,9 @@ eval:
         let jt = JobType::parse(yaml).unwrap();
         let defaults = ProjectDefaults::parse("model: claude-sonnet-5\n").unwrap();
         let merged = jt.with_defaults(&defaults).unwrap();
-        // Work agent: undeclared → gets the project default.
         assert_eq!(merged.work.model.as_deref(), Some("claude-sonnet-5"));
-        // Agent evaluator without a model → gets the project default.
         assert_eq!(merged.eval[0].model.as_deref(), Some("claude-sonnet-5"));
-        // Agent evaluator that declared one → keeps it (type wins over project).
         assert_eq!(merged.eval[1].model.as_deref(), Some("claude-opus-4-8"));
-        // Command evaluator → left untouched (takes no model).
         assert_eq!(merged.eval[2].model, None);
         assert_eq!(merged.validate(), vec![]);
     }
@@ -1238,10 +1196,7 @@ eval:
         assert_eq!(jt.work.model.as_deref(), Some("claude-sonnet-4-6"));
         let defaults = ProjectDefaults::parse("model: claude-sonnet-5\n").unwrap();
         let merged = jt.with_defaults(&defaults).unwrap();
-        // The type's own work.model wins over the project default.
         assert_eq!(merged.work.model.as_deref(), Some("claude-sonnet-4-6"));
-        // The type's undeclared-model agent evaluators pick up the default;
-        // the ones that declared a model keep it.
         let arch = merged.eval.iter().find(|e| e.name == "architecture-review");
         assert_eq!(arch.unwrap().model.as_deref(), Some("claude-sonnet-5"));
         let sec = merged.eval.iter().find(|e| e.name == "security-review");
@@ -1289,8 +1244,6 @@ wrap_up:
 
     #[test]
     fn wrap_up_run_parses_and_validates_against_top_level_image() {
-        // The web-job shape: default `merge` wrap-up plus a post-merge publish
-        // command that inherits the top-level image and declares its own secret.
         let yaml = r#"
 name: web
 image: img:latest
@@ -1310,8 +1263,6 @@ wrap_up:
 
     #[test]
     fn wrap_up_run_takes_its_own_image() {
-        // A human-work job has no top-level image, so the wrap-up command must
-        // carry one; when it does, it validates.
         let yaml = r#"
 name: manual
 work:
@@ -1328,8 +1279,6 @@ wrap_up:
 
     #[test]
     fn wrap_up_run_requires_an_image_and_forbids_type_none() {
-        // No top-level image and no wrap_up.image → the command cannot launch;
-        // and `run` on a `type: none` job has no merge to follow.
         let yaml = r#"
 name: manual
 work:
@@ -1395,7 +1344,6 @@ wrap_up:
 
     #[test]
     fn wrap_up_name_round_trips_and_derives_label() {
-        // Explicit name parses, round-trips, and is the label.
         let yaml = r#"
 name: web
 image: img:latest
@@ -1410,7 +1358,6 @@ wrap_up:
         assert_eq!(jt.wrap_up.name.as_deref(), Some("publish"));
         assert_eq!(jt.wrap_up.label(), "publish");
         assert_eq!(jt.validate(), vec![]);
-        // Absent name is omitted on the wire (skip_serializing_if).
         let no_name = JobType::parse(
             r#"
 name: web
@@ -1429,10 +1376,8 @@ wrap_up:
                 .unwrap()
                 .contains("name")
         );
-        // Unset → derived from the command's script basename.
         assert_eq!(no_name.wrap_up.label(), "web-publish");
 
-        // Derivation drops path and args and strips the extension.
         let derived = |run: &str| {
             WrapUpSpec {
                 run: Some(run.into()),
@@ -1442,7 +1387,6 @@ wrap_up:
         };
         assert_eq!(derived("./tasks/web-publish.sh staging"), "web-publish");
         assert_eq!(derived("deploy"), "deploy");
-        // A run with no derivable stem (or no run at all) falls back.
         assert_eq!(WrapUpSpec::default().label(), "wrap-up-agent");
     }
 
@@ -1463,10 +1407,8 @@ wrap_up:
             ))
             .unwrap()
         };
-        // Good names validate cleanly.
         assert_eq!(jt_with_name("publish").validate(), vec![]);
         assert_eq!(jt_with_name("web-publish").validate(), vec![]);
-        // Whitespace / shell-hostile tokens are rejected offline.
         for bad in ["has space", "bad;rm", "", "na/me"] {
             let errs = jt_with_name(bad).validate();
             assert!(
@@ -1484,9 +1426,6 @@ wrap_up:
 
     #[test]
     fn evaluator_stage_defaults_zero_parses_and_validates() {
-        // Omitted `stage` defaults to 0 across all evaluator kinds; an explicit
-        // non-negative value parses. A negative value is rejected at parse
-        // (serde into u32), so it can never reach validate().
         let jt = JobType::parse(SPEC_EXAMPLE).unwrap();
         assert!(jt.eval.iter().all(|e| e.stage == 0));
 
@@ -1528,9 +1467,6 @@ eval:
 
     #[test]
     fn project_defaults_preserve_declared_stage_after_append() {
-        // The append does not reorder; the default keeps whatever `stage` it
-        // declares, so a job type's stage-0 review sits ahead of a stage-1 CI
-        // default in the merged list.
         let yaml = r#"
 name: code
 image: img:latest
@@ -1565,12 +1501,6 @@ eval:
 
     #[test]
     fn unknown_top_level_field_is_tolerated_with_a_warning() {
-        // The 2026-07-22 incident, in regression form: a config that adds a
-        // top-level section the running dispatcher predates (here a stand-in
-        // `future_section`) must PARSE and VALIDATE — the field is ignored and
-        // surfaced as a warning, not rejected. Under the old
-        // `deny_unknown_fields` this was a hard parse error that escalated every
-        // job of the type.
         let yaml = r#"
 name: web
 image: img:latest
@@ -1589,10 +1519,8 @@ another_unknown: 42
         );
         let warnings = jt.config_warnings();
         let fields: Vec<&str> = warnings.iter().map(|w| w.field.as_str()).collect();
-        // BTreeMap ordering makes this deterministic.
         assert_eq!(fields, vec!["another_unknown", "future_section"]);
         assert!(warnings[0].to_string().contains("ignored"));
-        // A clean config produces no warnings.
         assert!(
             JobType::parse(SPEC_EXAMPLE)
                 .unwrap()
@@ -1603,10 +1531,6 @@ another_unknown: 42
 
     #[test]
     fn unknown_field_inside_evaluator_is_still_a_hard_error() {
-        // Gate-relevant laxity is NOT safe: an unknown key inside an evaluator
-        // (a typo'd `required`, a mis-nested check) could silently skip a merge
-        // gate, so the nested block keeps `deny_unknown_fields` and the config
-        // is refused outright at parse.
         let yaml = r#"
 name: code
 image: img:latest
@@ -1635,15 +1559,10 @@ min_dispatcher: 5
 "#;
         let jt = JobType::parse(yaml).unwrap();
         assert_eq!(jt.min_dispatcher, Some(5));
-        // Round-trips and still passes the field rules (it's metadata, not a
-        // gate itself).
         assert_eq!(jt.validate(), vec![]);
-        // A dispatcher at epoch 1 is too old → it must park with a diagnostic.
         assert_eq!(jt.requires_dispatcher(1), Some(5));
-        // A dispatcher at the needed epoch (or newer) is fine.
         assert_eq!(jt.requires_dispatcher(5), None);
         assert_eq!(jt.requires_dispatcher(6), None);
-        // No declaration → never gated.
         assert_eq!(
             JobType::parse(SPEC_EXAMPLE).unwrap().requires_dispatcher(0),
             None
@@ -1668,8 +1587,6 @@ min_dispatcher: 5
 
     #[test]
     fn inputs_block_parses_and_validates() {
-        // The #311 rollback case, verbatim: one required string narrowed to a git
-        // SHA, plus an optional enum with a default.
         let jt = jt_with_inputs(
             "  - name: sha\n    type: string\n    required: true\n    \
              pattern: '^[0-9a-f]{7,40}$'\n    description: The commit SHA.\n\
@@ -1682,11 +1599,8 @@ min_dispatcher: 5
         assert_eq!(jt.inputs[0].r#type, InputKind::String);
         assert!(jt.inputs[0].required);
         assert_eq!(jt.inputs[1].r#type, InputKind::Enum);
-        // `required` defaults to false and `default` round-trips.
         assert!(!jt.inputs[1].required);
         assert_eq!(jt.inputs[1].default.as_deref(), Some("web"));
-        // A type that declares nothing is byte-identical to today: no inputs, no
-        // min_dispatcher requirement, no errors.
         let none = JobType::parse(SPEC_EXAMPLE).unwrap();
         assert_eq!(none.inputs, vec![]);
         assert_eq!(none.validate(), vec![]);
@@ -1694,8 +1608,6 @@ min_dispatcher: 5
 
     #[test]
     fn unknown_field_inside_an_input_is_a_hard_error() {
-        // Same reasoning as an evaluator (§14.2): a typo'd `patern` would drop a
-        // validation control silently, so the nested block stays strict.
         let yaml = format!(
             "name: rollback\nimage: img:latest\nmin_dispatcher: {}\n\
              work:\n  type: command\n  run: ./r.sh\n\
@@ -1708,10 +1620,6 @@ min_dispatcher: 5
 
     #[test]
     fn non_empty_inputs_require_the_min_dispatcher_declaration() {
-        // The structural half of the §14.1 skew gate: an N-1 dispatcher captures
-        // `inputs:` into `unknown` and never sees it, but it *does* parse
-        // `min_dispatcher` — so the declaration is what makes it refuse the
-        // config instead of running a job with no value.
         let yaml = |line: &str| {
             format!(
                 "name: rollback\nimage: img:latest\n{line}work:\n  type: command\n  run: ./r.sh\n\
@@ -1729,7 +1637,6 @@ min_dispatcher: 5
                 ),
             }]
         );
-        // Declaring an older epoch is the same failure — the gate is `>=`.
         let stale = JobType::parse(&yaml(&format!(
             "min_dispatcher: {}\n",
             crate::version::INPUTS_SCHEMA_EPOCH - 1
@@ -1742,14 +1649,12 @@ min_dispatcher: 5
                 ..
             }
         )));
-        // A newer dispatcher than the feature needs is fine.
         let newer = JobType::parse(&yaml(&format!(
             "min_dispatcher: {}\n",
             crate::version::INPUTS_SCHEMA_EPOCH + 1
         )))
         .unwrap();
         assert_eq!(newer.validate(), vec![]);
-        // And a type with no inputs is never asked for one.
         assert_eq!(
             JobType::parse("name: x\nimage: i:l\nwork:\n  type: command\n  run: ./r.sh\n")
                 .unwrap()
@@ -1760,8 +1665,6 @@ min_dispatcher: 5
 
     #[test]
     fn input_names_are_lowercase_tokens_and_unique() {
-        // Lowercase-only is what makes the env mapping injective; a duplicate
-        // name would collide the same way.
         for bad in ["IMAGE_TAG", "1sha", "_sha", "image-tag", "image.tag"] {
             let errs = input_errors(&format!("  - name: {bad}\n    type: string\n"));
             assert!(
@@ -1805,7 +1708,6 @@ min_dispatcher: 5
                 ..
             }
         )));
-        // An enum value outside the charset is one no supply path could match.
         let bad_value = input_errors("  - name: service\n    type: enum\n    values: ['a b']\n");
         assert!(bad_value.iter().any(|e| matches!(
             e,
@@ -1869,8 +1771,6 @@ min_dispatcher: 5
                 ..
             }
         )));
-        // A default no supply path could have produced is caught here, not at
-        // launch: outside the charset, outside `pattern`, outside `values`.
         for bad in [
             "  - name: sha\n    type: string\n    default: 'a;rm -rf'\n",
             "  - name: sha\n    type: string\n    pattern: '^[0-9a-f]{7,40}$'\n    default: nope\n",
@@ -1899,7 +1799,6 @@ min_dispatcher: 5
 
     #[test]
     fn input_bounds_are_hard_errors_at_the_boundary() {
-        // Count bound: exactly the limit validates, one more is an error.
         let block = |count: usize| {
             (0..count)
                 .map(|i| format!("  - name: in_{i}\n    type: string\n"))
@@ -1920,8 +1819,6 @@ min_dispatcher: 5
             )),
             "{over:?}"
         );
-        // Value-length bound, reached through the one value a job type can
-        // declare: a `default`.
         let with_default = |len: usize| {
             input_errors(&format!(
                 "  - name: sha\n    type: string\n    default: {}\n",
@@ -1965,11 +1862,6 @@ rework_budget: 1
 
     #[test]
     fn repo_doc_producing_job_types_parse_and_validate() {
-        // The shipped `design`/`docs` job types (spec §9.4) must parse and pass
-        // the §1.1 field rules once the project `_defaults.yaml` is merged in —
-        // exactly as the dispatcher loads them at release. Embedded from the
-        // repo so an edit to either file that breaks the schema fails here, at
-        // the lowest tier, instead of at a live job launch.
         let defaults =
             ProjectDefaults::parse(include_str!("../../../.chug/jobs/_defaults.yaml")).unwrap();
         for (name, yaml) in [
@@ -1983,9 +1875,6 @@ rework_budget: 1
                 .with_defaults(&defaults)
                 .unwrap_or_else(|e| panic!("{name}.yaml default merge error: {e}"));
             assert_eq!(merged.validate(), vec![], "{name}.yaml field rules");
-            // The shared doc lint is a stage-1 command evaluator, the type's own
-            // reviewer is stage 0, and the appended `ci` default rounds out
-            // stage 1 (it self-skips a doc-only diff).
             assert!(
                 merged
                     .eval

@@ -83,9 +83,6 @@ mod tests {
 
     #[test]
     fn epochs_are_positive() {
-        // A guard so a future edit that zeroes one of these is caught: the
-        // deployed-version contract assumes positive, comparable epochs. Held
-        // in a runtime slice so this is a real assertion, not a const one.
         for (name, epoch) in [
             ("config", CONFIG_SCHEMA_EPOCH),
             ("worker-rpc", WORKER_RPC_VERSION),
@@ -97,11 +94,6 @@ mod tests {
 
     #[test]
     fn feature_epochs_are_understood_by_this_binary() {
-        // A feature epoch names the generation that introduced a schema feature
-        // this binary implements, so it can never exceed the epoch this binary
-        // advertises — that would gate configs on a dispatcher newer than the one
-        // enforcing the gate. Held in a runtime slice for the same reason
-        // `epochs_are_positive` is: a real assertion, not a const one.
         let feature_epochs: Vec<(&str, u32)> = vec![("inputs", INPUTS_SCHEMA_EPOCH)];
         for (name, epoch) in feature_epochs {
             assert!(

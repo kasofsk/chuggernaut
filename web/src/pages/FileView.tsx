@@ -24,7 +24,7 @@ export function FileViewPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    setTree(null) // param change: back to skeletons until the new fetch lands
+    setTree(null)
     api.tree(owner, project).then(
       (t) => {
         setTree(t)
@@ -38,7 +38,7 @@ export function FileViewPage() {
   }, [owner, project, navigate])
 
   useEffect(() => {
-    setFile(null) // path change: back to the skeleton until the new fetch lands
+    setFile(null)
     if (!path) return
     api.file(owner, project, path).then(
       (f) => setFile(f),
@@ -76,7 +76,6 @@ export function FileViewPage() {
     )
   }
 
-  // Immediate children of `dir`, dirs first — the tree fetch is recursive.
   const children = (() => {
     if (!tree) return []
     const prefix = dir ? `${dir}/` : ''
@@ -116,9 +115,6 @@ export function FileViewPage() {
             /\.ya?ml$/.test(file.path) ? (
               <YamlView yaml={file.content} full />
             ) : /\.md$/.test(file.path) ? (
-              // The docs tree reads as a wiki (job #88): markdown goes through
-              // the renderer the job pages already use, rather than a <pre>,
-              // and its relative links stay inside the browser.
               <DocMarkdown owner={owner} project={project} path={file.path} text={file.content} />
             ) : (
               <pre className="prompt yaml-full">{file.content}</pre>

@@ -1,17 +1,3 @@
-// The part of the §6.2 wire surface that is still hand-mirrored, and why.
-//
-// Everything the Rust `types` crate names is generated into `types.gen.ts`.
-// These shapes are not in it because no Rust type describes them: the
-// dispatcher assembles each of these replies with `serde_json::json!` at the
-// handler, so `chuggernaut schema api` has nothing to derive a schema from.
-// They are the remaining drift surface — the compiler cannot tell you when the
-// backend changes one — and the fix for any entry here is to name it in Rust
-// and cover it in `cli::schema::api_bundle`, not to transcribe it more
-// carefully.
-//
-// Where an envelope merely *wraps* a covered type, it wraps the generated one:
-// `JobTypeDetail.job_type` is the generated `JobType`, `OriginStatus.origin` is
-// the generated `OriginLink`.
 
 import type {
   CapacityState,

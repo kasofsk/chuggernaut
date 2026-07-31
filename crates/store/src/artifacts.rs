@@ -231,16 +231,12 @@ impl ArtifactStore {
         let name = keys::artifact_key(owner, project, job_seq, task_id, kind.as_str());
         let mut object = match tokio::time::timeout(OBJ_OP_BOUND, self.obj.get(name.as_str())).await
         {
-            // The object-store API reports a missing object as an error, not None.
             Ok(Err(_)) => return Ok(None),
             Ok(Ok(o)) => o,
             Err(_) => {
                 return Err(StoreError::Nats("artifact get: exceeded bound".into()));
             }
         };
-        // Same tombstone hazard as `get_attachment` (#196): a DELETEd object's
-        // reader has no chunks and `read_to_end` awaits forever. Nothing deletes
-        // transcripts today, but the guard costs nothing and the hang is fatal.
         if object.info.deleted {
             return Ok(None);
         }
@@ -248,17 +244,6 @@ impl ArtifactStore {
         bound("artifact read", object.read_to_end(&mut sealed)).await?;
         self.crypto.open(&sealed).map(Some)
     }
-
-    // ── Job attachments (operator-uploaded files) ──────────────────────────
-    //
-    // A job attachment is an operator-uploaded file carried alongside a job —
-    // a screenshot on a bug report, a reference document. Unlike task
-    // artifacts, it is per-*job*, has an arbitrary filename, and carries a
-    // client-supplied content type. It reuses this store's object bucket and
-    // crypto: the bytes are gzipped + age-encrypted at rest, dodging the 1MB
-    // `max_payload` cap exactly as transcripts do. Like a transcript, an
-    // attachment is presentational reference material — served to the UI, never
-    // injected into an agent prompt.
 
     /// Store (or replace) an attachment. `content_type` and the original byte
     /// length ride in the object's description so a listing need not open the
@@ -294,17 +279,12 @@ impl ArtifactStore {
         let key = keys::job_attachment_key(owner, project, job_seq, name);
         let mut object = match tokio::time::timeout(OBJ_OP_BOUND, self.obj.get(key.as_str())).await
         {
-            // The object-store API reports a missing object as an error, not None.
             Ok(Err(_)) => return Ok(None),
             Ok(Ok(o)) => o,
             Err(_) => {
                 return Err(StoreError::Nats("attachment get: exceeded bound".into()));
             }
         };
-        // A DELETEd object is a tombstone: `get` succeeds but the reader has no
-        // chunks and `read_to_end` awaits forever (reproduced 2026-07-23 —
-        // GET-after-DELETE hung http_bridge_end_to_end and a prod CI task).
-        // Deleted ⇒ absent.
         if object.info.deleted {
             return Ok(None);
         }
@@ -358,8 +338,6 @@ impl ArtifactStore {
         name: &str,
     ) -> crate::Result<bool> {
         let key = keys::job_attachment_key(owner, project, job_seq, name);
-        // `info` on a DELETEd object still succeeds (tombstone) — treat it as
-        // already-gone, same as missing, so double-delete reports false.
         match tokio::time::timeout(OBJ_OP_BOUND, self.obj.info(key.as_str())).await {
             Ok(Err(_)) => return Ok(false),
             Ok(Ok(info)) if info.deleted => return Ok(false),
@@ -386,9 +364,6 @@ impl ArtifactStore {
         let infos: Vec<_> = bound("artifact list collect", list.try_collect()).await?;
         Ok(infos
             .iter()
-            // Tombstones read as absent, same as get()/list_attachments (#196):
-            // nothing deletes task artifacts today, but a deleted one must
-            // never resurface as a live kind (#207 review, cycle 2).
             .filter(|i| !i.deleted)
             .filter_map(|i| i.name.strip_prefix(&prefix))
             .filter_map(ArtifactKind::parse)
@@ -423,7 +398,6 @@ mod tests {
         assert_eq!(key, "acme.api.42.7.session.jsonl");
         let prefix = keys::artifact_task_prefix("acme", "api", 42, 7);
         assert_eq!(key.strip_prefix(&prefix), Some("session.jsonl"));
-        // A sibling task's artifacts must not match this task's prefix.
         let other = keys::artifact_key("acme", "api", 42, 71, "stdout.log");
         assert!(other.strip_prefix(&prefix).is_none());
     }
@@ -433,7 +407,6 @@ mod tests {
         let (ct, size) = parse_attachment_desc(Some(&attachment_desc("image/png", 4096)));
         assert_eq!(ct, "image/png");
         assert_eq!(size, 4096);
-        // Missing or malformed descriptions fall back gracefully.
         let (ct, size) = parse_attachment_desc(None);
         assert_eq!(ct, DEFAULT_ATTACHMENT_CONTENT_TYPE);
         assert_eq!(size, 0);
@@ -448,7 +421,6 @@ mod tests {
         let writer = ArtifactCrypto::encrypt_only(&public).unwrap();
         let reader = ArtifactCrypto::with_identity(&identity).unwrap();
 
-        // Transcript-shaped: repetitive JSONL, which is why gzip precedes age.
         let plaintext = r#"{"type":"user","message":{"role":"user","content":"hello"}}"#
             .repeat(500)
             .into_bytes();

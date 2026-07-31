@@ -1,6 +1,3 @@
-// Hand-rolled inline SVG icons for the snazzy redesign (#161). Stroke-based,
-// currentColor, 20px grid — no icon library (web/CLAUDE.md: no component libs).
-// Each takes an optional size; colour comes from the parent's `color`.
 
 type P = { size?: number }
 const svg = (size: number) => ({

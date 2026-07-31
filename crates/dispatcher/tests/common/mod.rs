@@ -36,9 +36,6 @@
 //! per-call drains keep narrow.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-// Each `tests/*.rs` is its own binary and uses only the helpers it needs, so
-// anything unused *there* is not dead in the tree. Without this, adding a helper
-// warns in sixteen binaries at once.
 #![allow(dead_code)]
 
 use dispatcher::core::{Core, CoreHandle};

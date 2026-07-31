@@ -9,10 +9,6 @@ import {
   statusColor,
 } from './Designs'
 
-// The index's default order is the whole point of the view: a design whose jobs
-// are all finished while its `Status:` line still says PROPOSED is the row an
-// operator has to act on, and it must not sit below eight quiet ones.
-
 function design(over: Partial<DesignEntry> & { slug: string }): DesignEntry {
   return {
     path: `docs/design/${over.slug}.md`,
@@ -37,7 +33,6 @@ const inflight = design({
   slug: '321-groups', seq: 321, jobs: [job], counts: { Work: 1 }, open: 1,
 })
 const untouched = design({ slug: '313-identity', seq: 313 })
-// Filed, finished, and honest about it: no status line, so nothing to be stale.
 const finished = design({
   slug: '293-capacity', seq: 293, status: null, jobs: [job], counts: { Done: 1 },
 })
@@ -77,16 +72,11 @@ describe('the designs index', () => {
     expect(matchesQuery(stale, 'INPUTS')).toBe(true)
     expect(matchesQuery(stale, 'proposed')).toBe(true)
     expect(matchesQuery(stale, '  ')).toBe(true)
-    expect(matchesQuery(finished, 'proposed')).toBe(false) // no status line to match
+    expect(matchesQuery(finished, 'proposed')).toBe(false)
   })
 })
 
-// The status line is a document's own prose, bounded to 120 characters by the
-// API and handed over unparsed. The view badges its leading word, so the split
-// has to hold for every delimiter the tree writes — the fixtures below are the
-// eleven live `Status:` lines as the registry returns them.
 describe('the status line split', () => {
-  // slug, the status the API returns, the word the badge must show
   const live: [string, string, string][] = [
     ['169-handoff', 'DRAFT (interactive session 2026-07-24, operator + Claude). Produced', 'DRAFT'],
     ['238-ingest', 'FINDING. Written against the tree at `01624fd`, the parent of the C9', 'FINDING'],
@@ -94,7 +84,6 @@ describe('the status line split', () => {
     ['293-capacity', 'PROPOSED. Written against the tree at `a90d660`; every claim about', 'PROPOSED'],
     ['313-identity', 'PROPOSED. Written against the tree at `d7ebfae`. Every claim about', 'PROPOSED'],
     ['310-scheduled', 'PROPOSED. Written against the tree at `55f6595`. Every claim about', 'PROPOSED'],
-    // The comma case: a period-only split would badge the whole sentence.
     ['308-gha', 'PROPOSED, **amended 2026-07-30** (job #320). The original was written', 'PROPOSED'],
     ['321-groups', 'PROPOSED. Written against the tree at `00dd0dc`. Every claim about', 'PROPOSED'],
     ['322-macos', 'PROPOSED. Written against the tree at `61b721d` (2026-07-30). Every', 'PROPOSED'],
@@ -127,8 +116,8 @@ describe('the status line split', () => {
 
   it('gives an unrecognized token a neutral badge rather than dropping it', () => {
     expect(statusColor('PROPOSED')).toEqual('blue')
-    expect(statusColor('draft')).toEqual('purple') // matched case-insensitively…
-    expect(splitStatus('draft. lowercase').token).toEqual('draft') // …but shown as written
+    expect(statusColor('draft')).toEqual('purple')
+    expect(splitStatus('draft. lowercase').token).toEqual('draft')
     expect(statusColor('SUPERSEDED')).toEqual('gray')
     expect(statusColor('¯\\_(ツ)_/¯')).toEqual('gray')
   })

@@ -1,16 +1,3 @@
-// Typed client for the §6.2 HTTP surface. Cookies ride automatically
-// (same-origin); a 401 anywhere bounces to /login via the caller.
-//
-// The wire types are GENERATED: `api/types.gen.ts` comes from the Rust `types`
-// crate via `.chug/schemas/api.schema.json` (NORTH-STAR §2), so a backend field that
-// changes shape is a TypeScript error here instead of an `undefined` at
-// runtime. Regenerate with `npm run codegen`; CI fails on a stale file.
-//
-// What stays hand-written: the fetch methods below, and the reply envelopes in
-// `api/envelopes.ts` — the ones the dispatcher assembles with
-// `serde_json::json!`, which no Rust type describes and so no schema covers.
-// This module re-exports both halves under one name, so a consumer imports
-// from `../api` without caring which side a type came from.
 
 import type {
   ArtifactKind,
@@ -327,7 +314,6 @@ export const api = {
       'GET',
       `/api/v1/projects/${owner}/${project}/jobs/${seq}/tasks/${taskId}/artifacts`,
     ),
-  // Artifacts are bytes (JSONL / plain text), not JSON, so they bypass req().
   artifactUrl: (owner: string, project: string, seq: number, taskId: number, kind: ArtifactKind) =>
     `/api/v1/projects/${owner}/${project}/jobs/${seq}/tasks/${taskId}/artifacts/${kind}`,
   artifactText: async (
@@ -345,7 +331,6 @@ export const api = {
     return res.text()
   },
 
-  // ── Job attachments (spec §1.6) ─────────────────────────────────────────
   /** Files uploaded to a job, sorted by name. Empty when storage is unconfigured. */
   attachments: (owner: string, project: string, seq: number) =>
     req<{ attachments: Attachment[] }>(

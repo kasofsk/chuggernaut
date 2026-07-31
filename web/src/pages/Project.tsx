@@ -21,9 +21,6 @@ import {
   type JobFilters,
 } from '../jobFilters'
 
-// The states the state-filter dropdown offers, lifecycle-ordered. The default
-// ("Active") is no filter at all — the finished-hiding gate in matchesFilters
-// is what makes the unfiltered view active-only.
 const FILTER_STATES: JobState[] = [
   'Draft', 'Frozen', 'Batched', 'Blocked', 'Ready', 'Work',
   'Evaluation', 'WrapUp', 'Escalated', 'Stalled', 'Done', 'Revoked',
@@ -31,14 +28,9 @@ const FILTER_STATES: JobState[] = [
 
 type SortKey = 'id' | 'state' | 'type' | 'completed'
 
-// Which direction a freshly picked sort key opens in: the numeric/temporal keys
-// read newest-first, the categorical ones A→Z.
 const sortDirDefault = (key: SortKey): 'asc' | 'desc' =>
   key === 'id' || key === 'completed' ? 'desc' : 'asc'
 
-// The toolbar's sort-by control. It offers exactly the sortable columns, because
-// on phones the table header — and with it the click-to-sort affordance — is not
-// on screen: the rows render as two-line item widgets, not columns.
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: 'state', label: 'State' },
   { key: 'id', label: 'Number' },
@@ -46,9 +38,6 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: 'completed', label: 'Completed' },
 ]
 
-// Compact local timestamp for the jobs table (reuses JobDetail's #57
-// conventions): time-only when the moment is today, date prepended otherwise.
-// Callers pass the raw ISO string as the cell's `title` for the full tooltip.
 function fmtStamp(iso: string): string {
   const d = new Date(iso)
   const now = new Date()
@@ -60,28 +49,16 @@ function fmtStamp(iso: string): string {
   return sameDay ? time : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`
 }
 
-// Tooltip for the completed cell: the full ISO instant plus the humanized
-// created→completed WALL-CLOCK span. Deliberately not what the cell shows — the
-// gap between this and the task time below is the queueing and waiting the job
-// did while Frozen and Blocked. Undefined for live jobs so the cell has no
-// tooltip.
 export function completedTip(j: Job): string | undefined {
   if (!j.completed_at) return undefined
   const wall = fmtDuration(Date.parse(j.completed_at) - Date.parse(j.created_at))
   return `${j.completed_at} · ${wall} from creation to completion`
 }
 
-// The completed cell's muted hint: how long the job spent *working* — the sum of
-// its own tasks' spans, carried on the jobs-list record (`task_time_ms`) so the
-// table reads it straight off the row instead of fetching tasks per job. Null
-// when no task carried a usable span, which the cell renders as no hint at all
-// rather than a misleading '0s'; a real zero total still shows.
 export function taskTimeHint(j: Job): string | null {
   return j.task_time_ms == null ? null : fmtDuration(j.task_time_ms)
 }
 
-// Compact "N ago" for a channel post's age. Coarse on purpose — the exact
-// instant rides in the tooltip; here we only want a cheap glance ('2m ago').
 function fmtAge(iso: string): string {
   const t = Date.parse(iso)
   if (Number.isNaN(t)) return ''
@@ -94,36 +71,25 @@ function fmtAge(iso: string): string {
   return `${Math.floor(h / 24)}d ago`
 }
 
-// Collapse a channel message to a single line for the muted under-title glance
-// (the full multi-line text rides in the tooltip). Runs of whitespace —
-// including the newlines in markdown prose — become single spaces.
 function oneLine(s: string): string {
   return s.replace(/\s+/g, ' ').trim()
 }
 
-// Jobs whose latest channel-update is worth surfacing under the title: the two
-// live, agent-driven phases. Evaluation shares Work's channel stream, so it
-// costs nothing extra to include (per the brief).
 const CHANNEL_STATES = new Set(['Work', 'Evaluation'])
 
-// State-column sort order. Alphabetical scatters related states, so rank them by
-// lifecycle instead: inert pre-release first, terminal history next, live activity,
-// then attention-needed at the very end — so the default descending click surfaces
-// Escalated/Failed on top and sinks Frozen/Revoked to the bottom. Unknown/future
-// states rank after everything (RANK_UNKNOWN) and still render their name as-is.
 const RANK_UNKNOWN = 1000
 const STATE_RANK: Record<string, number> = {
-  Draft: 0, // inert pre-release, alongside Frozen
+  Draft: 0,
   Frozen: 1,
-  Batched: 2, // inert member absorbed into a batch — adjacent to Frozen
-  Revoked: 3, // terminal history
+  Batched: 2,
+  Revoked: 3,
   Done: 4,
-  Blocked: 5, // queued to run, between Done and Work
+  Blocked: 5,
   Ready: 6,
-  Work: 7, // live activity
+  Work: 7,
   Evaluation: 8,
   WrapUp: 9,
-  Failed: 10, // attention-needed, adjacent to Escalated
+  Failed: 10,
   Stalled: 11,
   Escalated: 12,
 }
@@ -134,17 +100,10 @@ export function ProjectPage() {
   const navigate = useNavigate()
   const [jobs, setJobs] = useState<Job[]>([])
   const [pending, setPending] = useState<Task[]>([])
-  // Job seqs with a capacity-deferred launch waiting for a fleet slot (§3.5).
   const [queuedSeqs, setQueuedSeqs] = useState<Set<number>>(new Set())
-  // Initial load only: skeleton until the first jobs fetch answers. SSE-driven
-  // refreshes never re-skeleton; a project change resets it (effect below).
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  // Jobs table controls: column sort (default state-descending, so live and
-  // attention-needed jobs surface on top). The filter model (#162) lives in
-  // the URL so a filtered view is shareable.
   const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'state', dir: 'desc' })
-  // Batches whose member rows are unfolded in the table (collapsed by default).
   const [expandedBatches, setExpandedBatches] = useState<Set<number>>(new Set())
   const [params, setParams] = useSearchParams()
   const filters = filtersFromParams(params)
@@ -152,12 +111,6 @@ export function ProjectPage() {
     (f: JobFilters) => setParams(filtersToParams(f), { replace: true }),
     [setParams],
   )
-  // The URL owns the filters (a filtered view is shareable, #162), but writing
-  // `q` there on every keystroke re-runs the filter/sort/batch-grouping pipeline
-  // over every job for each letter typed. So type into local state and push to
-  // the URL once typing settles. `qPending` also tracks what we last wrote, so
-  // the sync below can tell a URL change we caused from one we didn't
-  // (back/forward, a shared link) and only adopt the latter.
   const [qDraft, setQDraft] = useState(filters.q)
   const qPending = useRef(filters.q)
   const commitQ = useDebouncedCallback(() => setFilters({ ...filters, q: qPending.current }), 200)
@@ -173,10 +126,6 @@ export function ProjectPage() {
       .then(([js, ts]) => {
         setJobs(js)
         setPending(ts)
-        // Seed/refresh the progress lines from the list. A live SSE event is
-        // always newer than the snapshot it raced, so let the existing ts guard
-        // decide rather than clobbering: only fill in what we don't already
-        // hold at an equal-or-newer stamp.
         setChannelMsgs((prev) => {
           const next = new Map(prev)
           for (const j of js) {
@@ -195,21 +144,12 @@ export function ProjectPage() {
         else setError(e instanceof Error ? e.message : 'load failed')
         setLoading(false)
       })
-    // Best-effort capacity-queue snapshot (spec §3.5): the seqs with a launch
-    // waiting for a fleet slot, for the subtle "queued" chip. Never blocks the
-    // list — an unreachable dispatcher just drops the chip.
     api.queue(owner, project).then(
       (q) => setQueuedSeqs(new Set(q.entries.map((e) => e.seq))),
       () => setQueuedSeqs(new Set()),
     )
   }, [owner, project, navigate])
 
-  // Latest channel-update message per job, surfaced muted under the title for
-  // live jobs. Seeded from the jobs list itself (each live job carries its
-  // latest post), then kept current from live SSE events. It used to be seeded
-  // from the SSE history replay, which meant every page load downloaded the
-  // project's entire event history — ~900 KB to annotate a handful of rows.
-  // Reset on project change so stale rows don't bleed across navigations.
   const [channelMsgs, setChannelMsgs] = useState<Map<number, { message: string; ts: string }>>(
     new Map(),
   )
@@ -217,23 +157,10 @@ export function ProjectPage() {
   useEffect(() => setLoading(true), [owner, project])
 
   useEffect(refresh, [refresh])
-  // The SSE stream is the source of truth (Part 11): any event → refetch. On
-  // page load the stream replays the full history, so debounce to collapse that
-  // burst (and any live burst) into a single refetch.
   const debouncedRefresh = useDebouncedCallback(refresh, 250)
-  // Live fleet capacity readout (#148). Every occupancy change rides a task
-  // lifecycle event already on this stream, so bump a tick (debounced against the
-  // load-time replay burst) to refetch the snapshot. Admin-only feed: the widget
-  // hides itself when unavailable. The tick only fires on *this* project's events,
-  // but the fleet is shared across projects (#177) — so also poll on an interval,
-  // catching a sibling project's occupancy changes and the end-of-burst quiescence
-  // after which no further event fires. Same-project activity still updates instantly.
   const [fleetTick, setFleetTick] = useState(0)
   const bumpFleet = useDebouncedCallback(() => setFleetTick((n) => n + 1), 400)
   const fleet = useFleet({ tick: fleetTick, pollMs: 5000 })
-  // Every event both feeds the debounced refetch and, when it's a channel-update,
-  // updates the latest-message-per-job map. Guard on ts so an out-of-order frame
-  // can't overwrite a newer message with an older one.
   const onEvent = useCallback(
     (e: JobEvent) => {
       if (e.event_type === 'channel-update' && typeof e.message === 'string' && e.message) {
@@ -256,11 +183,6 @@ export function ProjectPage() {
 
   const jobBySeq = new Map(jobs.map((j) => [j.id, j]))
 
-  // Release readiness of a Frozen job's deps, resolved client-side from the same
-  // jobs fetch (the list already holds every job). Releasing before every dep is
-  // Done is at best a Blocked transition; a dep that is Revoked/Failed can never
-  // satisfy it, so the job is un-runnable. Gate the run button accordingly and
-  // surface which deps are the holdup instead of silently offering a bad action.
   const depGate = (j: Job) => {
     const unmet = j.deps.filter((d) => jobBySeq.get(d)?.state !== 'Done')
     if (unmet.length === 0) return { runnable: true as const }
@@ -278,27 +200,15 @@ export function ProjectPage() {
     }
   }
 
-  // Jobs whose Work attempt is parked for a human (a claim materialized: a human
-  // is doing the work locally, no agent launched). The jobs LIST reply carries
-  // `claim_next` but not the derived `awaiting_human`, so we read this off the
-  // pending tasks the page already loads for the Inbox — a parked claimed attempt
-  // is a Pending Work task with performed_by='human'. No extra fetch, no API
-  // change: `claim_next` covers the pre-park window, this covers the in-Work
-  // window, so the claimed badge persists for the whole life of the claim.
   const claimedInWork = new Set(
     pending.filter((t) => t.phase === 'Work' && t.performed_by === 'human').map((t) => t.job_seq),
   )
 
-  // A terminal job's pending tasks are zombies — revoke doesn't (yet) close
-  // them out server-side, and there is nothing valid to resolve. Hide them so
-  // the inbox never offers actions the dispatcher will reject.
   const inbox = pending.filter((t) => {
     const state = jobBySeq.get(t.job_seq)?.state
     return state !== 'Revoked' && state !== 'Done'
   })
 
-  // What the card is asking of the operator — the resolution vocabulary
-  // differs (escalations take retry/resolve/revoke, the rest pass/fail).
   const askKind = (t: Task): string => {
     const state = jobBySeq.get(t.job_seq)?.state
     if (state === 'Escalated' || state === 'Stalled') return 'escalation'
@@ -326,12 +236,6 @@ export function ProjectPage() {
   const sortIndicator = (key: SortKey) =>
     sort.key === key ? <span className="sort-ind">{sort.dir === 'asc' ? '▲' : '▼'}</span> : null
 
-  // Filter + stickiness. The default view hides finished jobs, but a job that
-  // was on screen must not vanish mid-view when the SSE refresh flips it to
-  // Done/Revoked. `pinnedRef` remembers the ids currently shown and unions them
-  // with the filter result on the next refresh, so a live transition stays put;
-  // a job that is already finished the first time we see it is filtered out as
-  // usual. Changing the filter resets the pins (finished rows then disappear).
   const filterKey = filtersToParams(filters).toString()
   const pinnedRef = useRef<Set<number>>(new Set())
   const filterKeyRef = useRef(filterKey)
@@ -345,9 +249,6 @@ export function ProjectPage() {
 
   const sorted = [...visible].sort((a, b) => {
     if (sort.key === 'completed') {
-      // Only terminal jobs have a completion moment; non-terminal jobs sink to
-      // the bottom regardless of direction (nothing to order them by), so the
-      // default descending click surfaces the most-recently-finished job first.
       const ta = a.completed_at ? Date.parse(a.completed_at) : null
       const tb = b.completed_at ? Date.parse(b.completed_at) : null
       if (ta === null && tb === null) return b.id - a.id
@@ -362,16 +263,10 @@ export function ProjectPage() {
         : sort.key === 'state'
           ? stateRank(a.state) - stateRank(b.state)
           : a.type.localeCompare(b.type)
-    if (r === 0) r = a.id - b.id // stable tiebreak
+    if (r === 0) r = a.id - b.id
     return sort.dir === 'asc' ? r : -r
   })
 
-  // Group batch members under their batch so they always travel as one unit:
-  // while a batch is on screen its members never float free in the list — they
-  // render indented directly beneath it, and only when the batch is expanded
-  // (members come from the full jobs list, so expanding shows all of them even
-  // if the current filter would hide Batched rows). A member whose batch is
-  // filtered out falls back to an ordinary top-level row.
   const byId = new Map(jobs.map((j) => [j.id, j]))
   const visibleBatchIds = new Set(
     sorted.filter((j) => (j.members ?? []).length > 0).map((j) => j.id),
@@ -391,10 +286,6 @@ export function ProjectPage() {
   const stateDropdownValue =
     filters.states.length === 1 ? filters.states[0] : filters.states.length ? '__multi' : ''
 
-  // The group filter's vocabulary is whatever the loaded rows carry (design
-  // #321 Decision 7 — decidable from a list row). A group named in the URL that
-  // no loaded row carries still shows as the selected option, so a shared link
-  // to a filter reads as filtered rather than as unfiltered.
   const groupChoices = groupOptions(jobs)
   const groupSelectable =
     filters.group && !groupChoices.includes(filters.group)
@@ -593,11 +484,6 @@ export function ProjectPage() {
                     <span className="col-title-num">#{j.id}</span>
                     {j.title || <span className="dim">—</span>}
                   </Link>
-                  {/* What the job is part of (design #321). In the title cell
-                      rather than a column of its own: the table has no width to
-                      spend on an eighth column, and on a phone the title cell
-                      claims the whole line, so the chips wrap under the title
-                      instead of squeezing the metadata line. */}
                   <GroupChips owner={owner} project={project} groups={j.groups} />
                   {CHANNEL_STATES.has(j.state) && channelMsgs.has(j.id) && (
                     <div className="job-channel dim" title={channelMsgs.get(j.id)!.message}>
@@ -666,8 +552,6 @@ export function ProjectPage() {
                       {taskTime !== null && <span className="job-dur">{taskTime}</span>}
                     </>
                   ) : (
-                    // A live job has no completion moment: the table wants a
-                    // placeholder in the column, the mobile item layout drops it.
                     <span className="col-done-none">—</span>
                   )}
                 </td>

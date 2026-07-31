@@ -24,12 +24,14 @@
 # unable to scatter (one per module). Rule 1 still applies inside them — they
 # are doc comments.
 #
-# A RATCHET, NOT A CLEANUP (the STYLE.md `unwrap_used` precedent). The tree
-# predates the rule and is full of comments, so the default mode reports only
-# violations on lines the change ADDS: touch a line, and it must comply; leave
-# it alone, and the pre-existing comment is somebody else's job. A doc block is
-# judged whenever the diff adds a line inside it, so an edited doc comment gets
-# trimmed rather than grandfathered.
+# RULE 1 IS ABSOLUTE; RULE 2 IS STILL A RATCHET. Job #342 deleted every non-doc
+# comment in the tree (the rationale worth keeping was hoisted into
+# `docs/implementation-notes.md`), so rule 1 no longer has pre-existing debt to
+# grandfather: the default mode lints EVERY tracked Rust/TypeScript source, not
+# just the changed ones, and one non-doc comment anywhere fails the gate. Rule 2
+# still has ~500 over-long doc comments to work through, so it reports only
+# blocks the diff ADDS a line inside — an edited doc comment gets trimmed rather
+# than grandfathered (the STYLE.md `unwrap_used` precedent).
 #
 # Escape hatch: NONE for prose. The narrow allowlist below covers only comments
 # a MACHINE reads — `jscpd:ignore-start`/`-end` (required by the Tier 1
@@ -38,7 +40,7 @@
 # change's rationale in the commit message (STYLE.md Tier 2 rule 5).
 #
 # Usage:
-#   .chug/tasks/check-comments.sh            # ratchet: added lines vs the merge-base
+#   .chug/tasks/check-comments.sh            # rule 1 tree-wide, rule 2 on added lines
 #   .chug/tasks/check-comments.sh <file>...  # explicit: lint every line of these files
 #
 # Exit: 0 = clean. 1 = violations (each is reported as file:line).
@@ -48,15 +50,16 @@ root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
 # The awk linter. Reads one source file and prints one `file:line: message` per
 # violation; `added` is either the literal ALL or a space-separated list of the
-# line numbers the diff added.
+# line numbers the diff added, and `all_lines` makes rule 1 ignore it entirely.
 #
 # It is a scanner, not a set of line regexes, because `//` is only a comment
 # outside a string: `"nats://127.0.0.1"` is code. String state carries across
 # lines only where the language allows a literal to (Rust `"…"`, TS templates),
 # so a stray apostrophe in JSX text cannot swallow the rest of a file.
-check_comments_lint_file() { # <file> <lang> <added>
-	awk -v file="$1" -v lang="$2" -v added="$3" '
+check_comments_lint_file() { # <file> <lang> <added> <all_lines>
+	awk -v file="$1" -v lang="$2" -v added="$3" -v all_lines="$4" '
 	function is_added(n) { return added == "ALL" || index(addedset, " " n " ") > 0 }
+	function in_scope(n) { return all_lines == "1" || is_added(n) }
 
 	# Comments a machine reads, matched on the text right after the opener.
 	function is_directive(t) {
@@ -143,7 +146,7 @@ check_comments_lint_file() { # <file> <lang> <added>
 					kind = (c3 == "//!") ? "inner" : "outer"
 					text = text " " substr($0, i + 3)
 				} else if (!is_directive(substr($0, i + 2))) {
-					if (is_added(NR)) {
+					if (in_scope(NR)) {
 						report(NR, "comment — only doc comments (/// //! /** */) are allowed; " \
 							"put the knowledge in a doc, the rationale in the commit message")
 					}
@@ -157,7 +160,7 @@ check_comments_lint_file() { # <file> <lang> <added>
 					blk_inner = (c3 == "/*!")
 				} else {
 					blk = 1
-					if (!is_directive(substr($0, i + 2)) && is_added(NR)) {
+					if (!is_directive(substr($0, i + 2)) && in_scope(NR)) {
 						report(NR, "block comment — only doc comments (/// //! /** */) are allowed; " \
 							"put the knowledge in a doc, the rationale in the commit message")
 					}
@@ -241,6 +244,7 @@ check_comments_added_lines() { # <base> <file>
 violations=0
 files=""
 mode="ratchet"
+base=""
 
 if [ "$#" -gt 0 ]; then
 	mode="explicit"
@@ -253,22 +257,18 @@ else
 	# Same change-set computation as .chug/tasks/ci.sh: HEAD vs the merge-base
 	# with origin/$BASE_BRANCH, which holds for both the evaluation run (job
 	# branch) and the merge-gate rerun (candidate commit).
-	base=""
 	if [ -n "${BASE_BRANCH:-}" ] \
 		&& git fetch origin "$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" >/dev/null 2>&1; then
 		base="$(git merge-base HEAD "origin/$BASE_BRANCH" 2>/dev/null || true)"
 	fi
 	if [ -z "$base" ]; then
-		# Unlike the other gates, an unknown diff CANNOT fail safe by linting
-		# everything: this is a ratchet, and the whole tree is pre-existing
-		# debt by construction, so a full scan would fail every job forever.
-		# Say so loudly instead — a skipped ratchet is visible, not silent.
+		# Rule 1 needs no diff — it holds over the whole tree — so an unknown
+		# change-set degrades to rule 1 only rather than skipping the gate.
 		echo "!!! check-comments: could not determine the changed lines (BASE_BRANCH unset"
-		echo "!!!     or no merge-base) — the ratchet has nothing to ratchet against and is"
-		echo "!!!     NOT enforced for this run. Comment rules still apply by review."
-		exit 0
+		echo "!!!     or no merge-base) — rule 1 (no non-doc comments) is still enforced over"
+		echo "!!!     the whole tree; the doc-length ratchet is NOT enforced for this run."
 	fi
-	files="$(git diff --name-only "$base"...HEAD 2>/dev/null || true)"
+	files="$(git ls-files -- '*.rs' '*.ts' '*.tsx' 2>/dev/null || true)"
 fi
 
 checked=0
@@ -279,15 +279,17 @@ for f in $files; do
 	[ -f "$f" ] || continue
 	lang="$(check_comments_lang_of "$f")"
 	[ -n "$lang" ] || continue
+	all_lines=0
 	if [ "$mode" = "explicit" ]; then
 		lines="ALL"
 	else
-		lines="$(check_comments_added_lines "$base" "$f")"
-		[ -n "$lines" ] || continue
+		all_lines=1
+		lines=""
+		[ -n "$base" ] && lines="$(check_comments_added_lines "$base" "$f")"
 	fi
 	checked=$((checked + 1))
 	set +e
-	out="$(check_comments_lint_file "$f" "$lang" "$lines")"
+	out="$(check_comments_lint_file "$f" "$lang" "$lines" "$all_lines")"
 	rc=$?
 	set -e
 	[ -n "$out" ] && echo "$out"

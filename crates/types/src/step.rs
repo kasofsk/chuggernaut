@@ -47,7 +47,6 @@ mod tests {
 
     #[test]
     fn step_kind_wire_format_matches_events_spec() {
-        // §6.3: step events carry kind as `author-iteration` | `inline-review`.
         assert_eq!(
             serde_json::to_string(&StepKind::InlineReview).unwrap(),
             r#""inline-review""#

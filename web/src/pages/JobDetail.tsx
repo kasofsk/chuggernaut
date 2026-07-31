@@ -34,9 +34,6 @@ import { Skeleton, SkeletonLines } from '../components/Skeleton'
 import { DeployLegCard, deployReportOf } from '../components/DeployLegCard'
 import { fmtDuration } from '../format'
 
-// A fetch the page can do without: its failure resolves to null instead of
-// rejecting, so it can be awaited alongside the required ones without taking
-// the page down with it.
 function bestEffort<T>(p: Promise<T>): Promise<T | null> {
   return p.then(
     (v) => v,
@@ -44,12 +41,6 @@ function bestEffort<T>(p: Promise<T>): Promise<T | null> {
   )
 }
 
-// How many of a batch's members get their detail fetched. Fetching each member
-// directly beats pulling the project's whole job list for the handful a batch
-// normally holds, but it costs a request per member on *every* refresh and the
-// spec puts no ceiling on `members` — so the fan-out is bounded, and a batch
-// past the bound renders its remaining members as bare ids with a note saying
-// so rather than issuing an unbounded burst per SSE event.
 const MEMBER_DETAIL_MAX = 24
 
 export function JobDetail() {
@@ -57,38 +48,17 @@ export function JobDetail() {
   const jobSeq = Number(seq)
   const navigate = useNavigate()
   const [job, setJob] = useState<JobFull | null>(null)
-  // When this job is a batch, the member jobs it absorbs — fetched from the
-  // project list so the Members section can show their titles and live states.
   const [members, setMembers] = useState<Job[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [diff, setDiff] = useState<DiffResponse | null>(null)
-  // Capacity launch-queue snapshot (spec §3.5): drives the "queued" badge's
-  // "position N of M". Best-effort — null when the dispatcher can't answer, in
-  // which case the badge still renders, just without a position.
   const [queue, setQueue] = useState<QueueSnapshot | null>(null)
   const [criteria, setCriteria] = useState<JobCriteria | null>(null)
   const [events, setEvents] = useState<JobEvent[]>([])
-  // Initial load only: skeleton until the first fetch answers. SSE-driven
-  // refreshes never re-skeleton; a seq/project change resets it (effect below).
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  // The one task whose live-log pane is expanded, if any. Kept to a single open
-  // pane so at most one tail loop polls at a time.
   const [openLogs, setOpenLogs] = useState<number | null>(null)
-  // The platform's triage image (from the config snapshot): a string when triage
-  // is available, null when it isn't (dispatcher rejects triage with 422), and
-  // undefined while unknown — snapshot not yet loaded, offline, or forbidden.
-  // We only disable the button on a confirmed null, so an unknown state keeps
-  // the current behavior (the 422 mapping below still catches a live rejection).
   const [triageImage, setTriageImage] = useState<string | null | undefined>(undefined)
-  // True while the run (release) request is in flight. Disables the run button
-  // and shows a working label so a tap reads as acknowledged — and so a stray
-  // second tap can't land on the revoke button that wraps directly below it.
   const [releasing, setReleasing] = useState(false)
-  // The group vocabulary the picker suggests, and whether a groups write is in
-  // flight. `groups` is mutable in every state including Done and Revoked
-  // (design #321 Decision 5) — a finished job is the case this exists for — so
-  // the editor is offered here, on the read view, not only on a Draft.
   const groupChoices = useGroupOptions(owner, project)
   const [groupBusy, setGroupBusy] = useState(false)
 
@@ -99,14 +69,6 @@ export function JobDetail() {
     )
   }, [])
 
-  // Everything the page needs, in one round trip. Nothing here depends on
-  // another's result, so nothing may be chained: at operator latency (~240ms
-  // RTT over the tailnet) each serialized fetch is another quarter second on
-  // every load *and* every SSE-triggered refresh. `criteria` and `queue` stay
-  // best-effort — bestEffort() turns their failure into null so they can ride
-  // the same Promise.all without ever failing the page — which leaves
-  // job/tasks/diff as the only rejectors, so the 401 → /login bounce below is
-  // unchanged.
   const refresh = useCallback(() => {
     Promise.all([
       api.job(owner, project, jobSeq),
@@ -122,10 +84,6 @@ export function JobDetail() {
         setCriteria(c)
         setQueue(q)
         setError(null)
-        // A batch: fetch its member jobs directly — one small request each, in
-        // parallel — rather than the project's entire job list to filter a
-        // handful of rows out of it. Best-effort: a member that fails to load
-        // just renders as its id. Non-batches clear any stale members.
         const memberIds = (j.members ?? []).slice(0, MEMBER_DETAIL_MAX)
         if (memberIds.length === 0) {
           setMembers([])
@@ -144,9 +102,6 @@ export function JobDetail() {
 
   useEffect(() => setLoading(true), [owner, project, jobSeq])
   useEffect(refresh, [refresh])
-  // Keep the per-event log immediate, but debounce the refetch: the SSE stream
-  // replays the full history on load, so a naive refresh() per event fires a
-  // storm of GETs. Coalesce that (and any live burst) into one refetch.
   const debouncedRefresh = useDebouncedCallback(refresh, 250)
   useProjectEvents(
     owner,
@@ -158,11 +113,6 @@ export function JobDetail() {
     jobSeq,
   )
 
-  // Live-ticking durations: a single shared clock that re-renders the duration
-  // cells once a second while any visible task is Running or capacity-queued,
-  // and is torn down otherwise (and on unmount). Finished tasks compute from
-  // completed_at, so they don't tick — only the elapsed-since-start (or
-  // queued-for) cells move.
   const [now, setNow] = useState(() => Date.now())
   const anyTicking = tasks.some((t) => t.state === 'Running' || isQueued(t))
   useEffect(() => {
@@ -171,7 +121,6 @@ export function JobDetail() {
     return () => clearInterval(id)
   }, [anyTicking])
 
-  // `loading` also covers a seq change while a stale job is still in state.
   if (!job || loading) {
     return (
       <div className="page">
@@ -197,22 +146,15 @@ export function JobDetail() {
     )
   }
 
-  // Human-kind tasks AND claimed attempts of any kind (§1.2 claims) — both
-  // resolve through the inbox.
   const pendingHuman = tasks.filter(
     (t) => (t.kind.kind === 'Human' || t.performed_by === 'human') && t.state === 'Pending',
   )
-  // Advisory triage runs (§1.2), newest first.
   const triageTasks = tasks
     .filter((t) => t.phase === 'Triage')
     .sort((a, b) => b.id - a.id)
 
-  // Triage is unavailable when the platform has no TRIAGE_IMAGE configured; the
-  // dispatcher enforces this with a 422, so don't offer the action.
   const triageUnavailable = triageImage === null
   const triageMessage = 'triage unavailable — set TRIAGE_IMAGE on the platform'
-  // A 422 means the config changed under us (race): show the friendly message
-  // and reflect the now-known-unavailable state so the button disables too.
   const onTriageError = (e: unknown) => {
     if (e instanceof ApiError && e.status === 422) {
       setTriageImage(null)
@@ -220,9 +162,6 @@ export function JobDetail() {
     } else setActionError(setError)(e)
   }
 
-  // Add/remove one group label. The endpoint is add/remove rather than a
-  // whole-list replace, so two operators grouping the same job from two tabs
-  // both land; the refetch adopts whatever the dispatcher ended up holding.
   const editGroups = (body: { add?: string[]; remove?: string[] }) => {
     setGroupBusy(true)
     api
@@ -231,19 +170,10 @@ export function JobDetail() {
       .finally(() => setGroupBusy(false))
   }
 
-  // A Draft renders the live edit form in place of the read-only info card; its
-  // task/criteria/diff sections are empty (nothing has run) so they're hidden.
   const isDraft = job.state === 'Draft'
-  // A Draft *batch* (§2.1 draft batches): its members are edited as a consist
-  // (train of cars) rather than the plain deps picker. A non-empty members list
-  // is the batch marker.
   const isDraftBatch = isDraft && (job.members ?? []).length > 0
-  // Already in the record's BTreeMap order (spec §1.1) — Object.entries keeps it.
   const inputEntries = Object.entries(job.inputs ?? {})
 
-  // Tasks banded with an escalation resolution: the resolving Human task and the
-  // failed attempts in the same cycle above it. They share an amber left edge in
-  // the table so the story reads "these failed → a human stepped in".
   const escalationBand = new Set<number>()
   for (const t of tasks) {
     if (!isEscalationResolution(t)) continue
@@ -307,12 +237,6 @@ export function JobDetail() {
           <dd>{job.branch}</dd>
           <dt>base_ref</dt>
           <dd>{job.base_ref ?? '—'}</dd>
-          {/* The job's EFFECTIVE inputs (spec §1.1, #311 Decision 6): supplied
-              values plus the type's declared defaults, which the Ready
-              transition materializes onto the record. A released job can
-              therefore show a value its creator never typed — that is the audit
-              surface, so defaulted entries are shown, not hidden. Immutable
-              after that transition, hence read-only here. */}
           {inputEntries.length > 0 && (
             <>
               <dt>inputs</dt>
@@ -362,9 +286,6 @@ export function JobDetail() {
             </>
           )}
         </dl>
-        {/* Editable in every state, terminal included (design #321 Decision 5):
-            a group is an operator annotation, inert to what ran, and every job
-            the feature was designed for is already finished. */}
         <GroupPicker
           value={job.groups ?? []}
           options={groupChoices}
@@ -477,8 +398,6 @@ export function JobDetail() {
 
       {!isDraft && criteria && <CriteriaCard owner={owner} project={project} criteria={criteria} />}
 
-      {/* Attachments (spec §1.6): screenshots and reference files. The Draft
-          editor renders its own copy, so only the read view shows it here. */}
       {!isDraft && <JobAttachments owner={owner} project={project} seq={jobSeq} />}
 
       {pendingHuman.length > 0 && (
@@ -706,13 +625,6 @@ function setActionError(setError: (s: string) => void) {
   return (e: unknown) => setError(e instanceof Error ? e.message : 'action failed')
 }
 
-// Per-phase hue so the task table reads as a sequence of distinct phases at a
-// glance rather than near-uniform rows. Hues match the app-wide state badges
-// (Work=blue, Evaluation=purple) so the phase language is consistent
-// everywhere. Merge gate is the evaluation family — a CI re-run against the
-// squash candidate — so it shares evaluation's purple, set apart by its label +
-// tooltip. WrapUp/Triage are the muted housekeeping/advisory phases. Escalation
-// is amber and handled separately (see PhaseLabel's escalation branch).
 const PHASE_HUE: Record<string, string> = {
   Work: 'blue',
   Evaluation: 'purple',
@@ -721,12 +633,6 @@ const PHASE_HUE: Record<string, string> = {
   Triage: 'gray',
 }
 
-// The task's phase, as a hued pill. An escalation resolution (a human stepping
-// in to decide a run of failed attempts) renders as an amber `escalation` pill
-// regardless of the phase the record was stamped under — old records carry the
-// resolution under Work; see isEscalationResolution. MergeGate keeps its
-// "why is a CI task running after evaluation passed?" tooltip. Unknown/future
-// phases fall back to a neutral pill so they still read as a phase.
 function PhaseLabel({ phase, escalation = false }: { phase: string; escalation?: boolean }) {
   if (escalation) {
     return (
@@ -752,18 +658,11 @@ function PhaseLabel({ phase, escalation = false }: { phase: string; escalation?:
   return <span className={`badge badge-${hue}`}>{phase}</span>
 }
 
-// Whether a task record is a human resolving an escalation, rather than an
-// attempt of its stamped phase. The code side stamps these under a dedicated
-// `Escalation` phase; older records carry them as a Human-kind result whose
-// `action` (Retry/Resolve/Revoke) is the resolving decision — both are treated
-// as escalation events so the table tells the story consistently.
 function isEscalationResolution(t: Task): boolean {
   if (t.phase === 'Escalation') return true
   return t.result?.kind === 'Human' && !!t.result.action
 }
 
-// The escalation-event detail line: the resolving action and the operator who
-// made the call, e.g. "escalation resolved: Retry — david@…".
 function escalationDetail(t: Task): string {
   const r = t.result?.kind === 'Human' ? t.result : null
   const action = r?.action ?? '—'
@@ -771,16 +670,10 @@ function escalationDetail(t: Task): string {
   return `escalation resolved: ${action}${op ? ` — ${op}` : ''}`
 }
 
-// A Failed task that never got a container is a launch that never happened (no
-// free slot, rejected before spawn) — 0s and no output, otherwise identical to
-// a real agent crash (which spawns a container that then dies). Human tasks
-// never spawn a container, so exclude them.
 function neverLaunched(t: Task): boolean {
   return t.state === 'Failed' && !t.container_id && t.performed_by !== 'human' && !t.result
 }
 
-// One-line gloss for the tasks table's detail column; the full report renders
-// in the Reports thread below. Triage prose lives in its own section.
 function resultSummary(t: Task): string {
   const r = t.result
   if (!r) return ''
@@ -841,9 +734,6 @@ function TaskReports({ tasks }: { tasks: Task[] }) {
   )
 }
 
-// Dispatches on the result's discriminant; an absent result is the crashed /
-// never-ran case (e.g. a launch that found no free slot) — say so plainly
-// rather than rendering blank. Unknown kinds fall through to raw JSON.
 function TaskReportBody({ task }: { task: Task }) {
   const r = task.result
   if (!r) {
@@ -865,8 +755,6 @@ function TaskReportBody({ task }: { task: Task }) {
   }
 }
 
-// Work agent: the summary paragraph up front, files_changed as a compact list,
-// notes below.
 function WorkReport({ r }: { r: WorkResult }) {
   const parsed = parseStructured(r.structured)
   const obj = parsed?.kind === 'object' ? parsed.value : null
@@ -895,10 +783,6 @@ function WorkReport({ r }: { r: WorkResult }) {
   )
 }
 
-// A structured payload as it arrives on the wire: an object, a JSON-encoded
-// string (agent evaluators emit this), or absent. Parsing is tolerant — a
-// string that is valid JSON *object* unwraps; anything else (parse failure, a
-// bare string, an array/number) is surfaced verbatim rather than dropped.
 type ParsedStructured =
   | { kind: 'object'; value: Record<string, unknown> }
   | { kind: 'raw'; text: string }
@@ -912,9 +796,7 @@ function parseStructured(structured: unknown): ParsedStructured {
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         return { kind: 'object', value: parsed as Record<string, unknown> }
       }
-    } catch {
-      // not JSON — fall through and show the raw string
-    }
+    } catch {}
     return { kind: 'raw', text: structured }
   }
   if (typeof structured === 'object' && !Array.isArray(structured)) {
@@ -923,9 +805,6 @@ function parseStructured(structured: unknown): ParsedStructured {
   return { kind: 'raw', text: JSON.stringify(structured, null, 2) }
 }
 
-// Findings list: each finding tappable to reveal its issue + suggestion. Every
-// field is optional, so an unexpected finding shape degrades to a bare row
-// rather than crashing.
 function FindingList({ findings }: { findings: ReviewFinding[] }) {
   return (
     <ul className="report-findings">
@@ -945,11 +824,6 @@ function FindingList({ findings }: { findings: ReviewFinding[] }) {
   )
 }
 
-// Renders a parsed structured payload generically, keys open-ended: a
-// `summary`/`notes` string becomes the readable body up front, a `findings`
-// array becomes the expandable finding list, and every remaining key (verdict,
-// scope_check, how_checked, anything unknown) collapses into a small details
-// JSON block. An unparseable payload shows its raw text in the same block.
 function StructuredBody({ parsed }: { parsed: ParsedStructured }) {
   if (!parsed) return null
   if (parsed.kind === 'raw') {
@@ -987,10 +861,6 @@ function StructuredBody({ parsed }: { parsed: ParsedStructured }) {
   )
 }
 
-// Agent evaluator (e.g. review): the verdict badge, then the structured payload
-// rendered generically — the reviewer's summary is readable without expanding,
-// findings stay tappable, and scope-check/verdict/unknown keys tuck into a
-// collapsed details block. Handles both object and JSON-string wire shapes.
 function EvalReport({ r }: { r: EvalResult }) {
   const parsed = parseStructured(r.structured)
   return (
@@ -1012,8 +882,6 @@ function EvalReport({ r }: { r: EvalResult }) {
   )
 }
 
-// Command / CI evaluator: pass/fail + exit code, with the (long) output in a
-// collapsed details that scrolls inside its own box — never widens the page.
 function CommandReport({ r }: { r: CommandResult }) {
   const parsed = parseStructured(r.structured)
   const deploy = deployReportOf(r.structured)
@@ -1038,9 +906,6 @@ function CommandReport({ r }: { r: CommandResult }) {
   )
 }
 
-// A human resolution mirrored back as a result: the verdict, an operator note
-// (render-if-present — backend persistence is landing separately), and any
-// structured payload rendered the same generic way as an agent report.
 function HumanReport({ r }: { r: HumanResult }) {
   const parsed = parseStructured(r.structured)
   return (
@@ -1059,8 +924,6 @@ function HumanReport({ r }: { r: HumanResult }) {
   )
 }
 
-// Shape drift / kinds this UI doesn't model: show the payload verbatim rather
-// than crash.
 function RawReport({ r }: { r: TaskResult }) {
   const parsed = parseStructured((r as { structured?: unknown }).structured)
   return (
@@ -1074,7 +937,6 @@ function RawReport({ r }: { r: TaskResult }) {
   )
 }
 
-// Token accounting, small and muted; absent when the runner didn't measure it.
 function TokenChip({ usage }: { usage?: TokenUsage | null }) {
   if (!usage) return null
   return (
@@ -1084,35 +946,21 @@ function TokenChip({ usage }: { usage?: TokenUsage | null }) {
   )
 }
 
-// A task's start time as a compact local HH:MM:SS; blank until it starts. The
-// full ISO timestamp rides along as the cell's title tooltip (set by caller).
 function fmtTime(iso: string | null): string {
   if (!iso) return ''
   return new Date(iso).toLocaleTimeString([], { hour12: false })
 }
 
-// A task parked Pending by the capacity launch queue (spec §3.5) — waiting for
-// a fleet slot, not idle. It carries no container and no start time; `queued_at`
-// anchors the queued-for duration.
 export function isQueued(t: Task): boolean {
   return t.state === 'Pending' && t.pending_reason === 'QueuedForCapacity'
 }
 
-// The "queued" badge's tooltip: names the wait and, when the queue snapshot is
-// available, this launch's position. Degrades gracefully to just the reason
-// when the snapshot is missing (dispatcher unreachable) or the entry has
-// already drained out of it.
 function queuedTooltip(t: Task, queue: QueueSnapshot | null): string {
   const base = 'waiting for a fleet slot'
   const entry = queue?.entries.find((e) => e.seq === t.job_seq && e.task_id === t.id)
   return entry ? `${base} — position ${entry.position} of ${queue!.depth}` : base
 }
 
-// Finished tasks show completed_at − started_at; Running shows elapsed since
-// started_at; a capacity-queued task shows how long it has waited (now −
-// queued_at). All live cells are measured against the caller's shared `now`
-// clock so they tick (JobDetail drives a 1s interval while any task is Running
-// or queued); an idle Pending is blank.
 function taskDuration(t: Task, now: number): string {
   if (isQueued(t)) return t.queued_at ? fmtDuration(now - new Date(t.queued_at).getTime()) : ''
   if (!t.started_at) return ''
@@ -1124,20 +972,11 @@ function taskDuration(t: Task, now: number): string {
   return ''
 }
 
-// Whether the logs button shows for a task. Gate on state, not container_id:
-// the record carries no container_id while an agent task is Running, so gating
-// on it hides the button for the very case the log viewer exists to serve
-// (tailing a live agent). Any container-backed run — Running ('live'), or a
-// finished Done/Failed ('logs') — offers logs; the pane handles a not-yet-
-// spawned container gracefully (404 → muted note, slow re-checks). Human tasks
-// (claimed attempts, human-kind) never spawn a container, so they keep the dash.
 function hasLogs(t: Task): boolean {
   if (t.performed_by === 'human') return false
   return t.state === 'Running' || t.state === 'Done' || t.state === 'Failed'
 }
 
-// Plain unified-diff render with line coloring; react-diff-view lands with
-// the full PWA pass (Part 11).
 function DiffView({ diff }: { diff: string }) {
   return (
     <pre className="diff">
@@ -1172,14 +1011,9 @@ function DiffView({ diff }: { diff: string }) {
  * `job-events` stream, which is also what feeds this page over SSE.
  */
 function ChannelLog({ events }: { events: JobEvent[] }) {
-  // Newest first: the latest post is why the operator opens the section.
   const posts = events
     .filter((e) => e.event_type === 'channel-update' || e.event_type === 'channel-reply')
     .reverse()
-  // Collapsed by default; the header toggles. While collapsed, a dot flags
-  // posts that arrived after the page was opened — the SSE stream replays the
-  // durable history on load, so replayed posts (ts before mount) never count
-  // as "new", and opening the section acknowledges everything seen so far.
   const [open, setOpen] = useState(false)
   const [seen, setSeen] = useState(0)
   const mountTs = useRef(Date.now())
@@ -1190,7 +1024,6 @@ function ChannelLog({ events }: { events: JobEvent[] }) {
   const unread =
     !open &&
     posts.length > seen &&
-    // newest-first: the unacknowledged posts are at the head of the list
     posts.slice(0, posts.length - seen).some((e) => Date.parse(String(e.ts)) > mountTs.current)
   return (
     <section className="card">
@@ -1212,8 +1045,6 @@ function ChannelLog({ events }: { events: JobEvent[] }) {
       <ul className="channel-log">
         {posts.map((e, i) => {
           const reply = e.event_type === 'channel-reply'
-          // channel-reply is the operator/platform replying to the agent;
-          // channel-update is the agent's own progress note.
           const text = String((reply ? e.text : e.message) ?? '')
           const percent = !reply && typeof e.percent === 'number' ? e.percent : null
           const origin = channelOrigin(e)
@@ -1237,12 +1068,6 @@ function ChannelLog({ events }: { events: JobEvent[] }) {
   )
 }
 
-// Attribution for a channel post, straight from the event. Channel frames now
-// carry their originating task's identity end to end (spec §6.3): `task_id`, an
-// optional `phase`, and the evaluator name when the post came from an evaluator.
-// We render a compact chip consistent with the Reports thread headers
-// ("task 3 · review"). Legacy posts carry none of this → null (no chip), which
-// is why the old timestamp-window guessing is gone.
 function channelOrigin(e: JobEvent): string | null {
   const taskId = numField(e, 'task_id')
   if (taskId == null) return null
@@ -1252,20 +1077,16 @@ function channelOrigin(e: JobEvent): string | null {
   return detail ? `task ${taskId} · ${detail}` : `task ${taskId}`
 }
 
-// A numeric field off an open-keyed event, or null when absent/non-numeric.
 function numField(e: JobEvent, key: string): number | null {
   const v = e[key]
   return typeof v === 'number' ? v : null
 }
 
-// A non-empty string field off an open-keyed event, or null.
 function strField(e: JobEvent, key: string): string | null {
   const v = e[key]
   return typeof v === 'string' && v.length > 0 ? v : null
 }
 
-// Who ran the task: the agent model (kind.model on Agent tasks) or, for a
-// human-claimed/human-kind task, the operator's email if the result carries it.
 function performerLabel(t: Task): string {
   if (t.performed_by === 'human') {
     const op = t.result?.kind === 'Human' ? t.result.operator : null
@@ -1276,8 +1097,6 @@ function performerLabel(t: Task): string {
   return ''
 }
 
-// A timestamp as compact local time, prefixed with the date when it isn't
-// today (channel history can span days). The full ISO value rides as a tooltip.
 function fmtStamp(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
@@ -1286,7 +1105,6 @@ function fmtStamp(iso: string): string {
   return `${d.toLocaleDateString()} ${time}`
 }
 
-// Full ISO-8601 for a tooltip; the raw value back if it doesn't parse.
 function fmtIso(iso: string): string {
   const d = new Date(iso)
   return Number.isNaN(d.getTime()) ? iso : d.toISOString()

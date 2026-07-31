@@ -114,7 +114,6 @@ impl GithubClient {
             .await
             .map_err(|e| GithubError::Http(e.to_string()))?;
         if !status.is_success() {
-            // GitHub error envelopes carry a "message"; fall back to the body.
             let message = serde_json::from_str::<serde_json::Value>(&text)
                 .ok()
                 .and_then(|v| v["message"].as_str().map(String::from))

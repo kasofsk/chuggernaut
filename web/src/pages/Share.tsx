@@ -26,11 +26,9 @@ export function SharePage() {
   const [mode, setMode] = useState<'new' | 'existing'>('new')
   const [busy, setBusy] = useState(false)
 
-  // New-job fields.
   const [title, setTitle] = useState('')
   const [jobTypes, setJobTypes] = useState<JobTypeSummary[]>([])
   const [type, setType] = useState('')
-  // Existing-job picker.
   const [jobs, setJobs] = useState<Job[]>([])
   const [jobQuery, setJobQuery] = useState('')
 
@@ -39,8 +37,6 @@ export function SharePage() {
     [project],
   )
 
-  // Pull the shared file the SW stashed, then clear it so a later manual visit
-  // doesn't resurrect a stale screenshot (one-shot handoff).
   useEffect(() => {
     let revoked = false
     fetch(SHARED_KEY)
@@ -65,7 +61,6 @@ export function SharePage() {
   }, [])
   useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl) }, [previewUrl])
 
-  // Projects the operator can post to; default to the last one used from here.
   useEffect(() => {
     api.projects().then(
       (ps) => {
@@ -81,7 +76,6 @@ export function SharePage() {
     ).finally(() => setLoading(false))
   }, [navigate])
 
-  // Per-project vocabulary: job types (default the picker to `web`) and jobs.
   useEffect(() => {
     if (!owner || !projName) return
     api.jobTypes(owner, projName).then(

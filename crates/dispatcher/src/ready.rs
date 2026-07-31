@@ -43,8 +43,6 @@ impl Core {
     /// pass below. Also used by restart reconciliation (§3.6 step 3), which
     /// re-drives it for every parked job.
     pub(crate) async fn try_unblock(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
-        // The fan-out is advisory: a dependent that vanished (revoked, unknown
-        // project) is not an error, it is nothing to decide.
         if self.must_get(owner, project, seq).is_err() {
             return Ok(());
         }
@@ -65,7 +63,6 @@ impl Core {
         seq: u64,
         event: ready::ReadyEvent,
     ) -> Result<()> {
-        // 1. Reads feed the view — they are not effects.
         let job = self.must_get(owner, project, seq)?.clone();
         let deps_done = self
             .graphs
@@ -76,32 +73,19 @@ impl Core {
             deps_done,
             now: Utc::now(),
         };
-        // 2. The decision, made purely.
         let (transitions, effects, step) = ready::decide(&view, event);
-        // 3. Commit the decision: transitions first (§2.1 record is the source
-        // of truth; the announcements are its artifacts, and restart
-        // reconciliation re-drives `try_unblock` for anything a crash lost).
         for mut t in transitions {
             self.set_state(&mut t.job, t.to).await?;
         }
-        // Queue admission and a batch's membership commit are part of
-        // committing the decision, so they run BEFORE the effects (the same
-        // placement C3's `drops_exec` established, and the pre-C4 write order).
         if let ready::ReadyStep::Admitted { enqueue, absorb } = &step {
             self.apply_ready_admission(owner, project, &job, *enqueue, absorb)
                 .await?;
         }
-        // 4. The artifacts of the decision.
         for effect in effects {
             self.interpret(effect).await?;
         }
-        // 5. The bookkeeping the step names.
         match step {
             ready::ReadyStep::Idle | ready::ReadyStep::Admitted { .. } => Ok(()),
-            // The continuation hop (contracts.md §2): the §2.2 pass is
-            // ref-reading I/O, so its verdict re-enters the decider as the next
-            // event against a freshly gathered view. Boxed because that
-            // re-entry is a self-recursive future.
             ready::ReadyStep::Revalidate => {
                 let event = self.ready_revalidation(owner, project, &job).await?;
                 Box::pin(self.run_ready(owner, project, seq, event)).await
@@ -156,11 +140,6 @@ impl Core {
             .repos
             .resolve_ref(owner, project, &default_branch)
             .await?;
-        // The declaration travels with the verdict: the type may have grown or
-        // dropped an input since release, and this HEAD is the one the run will
-        // use — so it is also the one whose defaults get materialized (§2.2 pass
-        // 2, design #311 Decision 3). A type that failed to load declares nothing,
-        // and the errors beside it mean nothing is admitted anyway.
         let (errors, declared_inputs) = match release::load_job_type(
             &self.repos,
             owner,
@@ -172,8 +151,6 @@ impl Core {
         .await
         .and_then(|jt| release::with_job_evaluators(jt, job))
         {
-            // KV names are re-checked at launch, not here (§2.2): a secret set
-            // after release must not strand a job that is otherwise ready.
             Ok(jt) => {
                 let errors =
                     release::static_errors(&self.repos, owner, project, &head, job, &jt, None)

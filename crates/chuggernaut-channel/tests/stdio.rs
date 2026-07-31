@@ -10,8 +10,10 @@ use store::NatsStore;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn binary_speaks_mcp_and_submits_over_nats() {
     let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
         return;
@@ -19,10 +21,6 @@ async fn binary_speaks_mcp_and_submits_over_nats() {
     let store = NatsStore::connect(server.url()).await.unwrap();
     store.ensure_topology().await.unwrap();
 
-    // Stand-in dispatcher: ack the work submit, and the channel post that
-    // `update_status` now sends. The binary no longer writes `channels` KV
-    // itself — the dispatcher owns that bucket — so what we assert here is the
-    // wire message the binary emits.
     let responder = NatsStore::connect(server.url()).await.unwrap();
     let mut sub = responder
         .subscribe_requests("req.work.submit.acme.api.42")
@@ -102,7 +100,6 @@ async fn binary_speaks_mcp_and_submits_over_nats() {
     .unwrap();
     assert_ne!(submit["result"]["isError"], true, "{submit}");
 
-    // The dispatcher-side responder saw the work payload…
     assert!(
         seen.lock()
             .await
@@ -111,15 +108,11 @@ async fn binary_speaks_mcp_and_submits_over_nats() {
             .contains("did the thing")
     );
 
-    // …and update_status arrived as a ChannelUpdate on req.channel.update,
-    // rather than as a direct KV write.
     let post = posted.lock().await.clone().expect("channel update posted");
     let update: types::ChannelUpdate = serde_json::from_str(&post).expect("ChannelUpdate shape");
     assert_eq!(update.message, "working");
     assert_eq!(update.percent, Some(40));
 
-    // Nothing wrote the channels bucket: only the dispatcher does, and this
-    // test stands in for it without persisting.
     let entry: Option<types::ChannelEntry> = store
         .raw_bucket(store::buckets::CHANNELS)
         .await

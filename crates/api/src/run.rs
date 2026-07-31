@@ -56,16 +56,12 @@ pub async fn run(config: ApiConfig) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("jwt_public.pem in {}: {e}", config.keys_dir.display()))?;
 
-    // Operator-mode NATS needs credentials (§12.1); open dev servers don't.
     let creds_path = config.keys_dir.join("dispatcher.creds");
     let store = match tokio::fs::read_to_string(&creds_path).await {
         Ok(creds) => NatsStore::connect_with_creds(&config.nats_url, &creds).await?,
         Err(_) => NatsStore::connect(&config.nats_url).await?,
     };
 
-    // The artifacts identity — not `age_private.key`, which stays
-    // dispatcher-only (§10.2). Missing → the platform captures no artifacts,
-    // and the routes report that rather than failing startup.
     let artifacts = match tokio::fs::read_to_string(config.keys_dir.join("age_artifacts.key")).await
     {
         Ok(identity) => {

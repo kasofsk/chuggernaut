@@ -47,8 +47,6 @@ const WAIT_POLL: std::time::Duration = std::time::Duration::from_secs(3);
 pub const WORKER_ENDPOINT: &str = "worker";
 
 enum NodeHandle {
-    // Boxed: the bollard-backed variant is much larger than Worker
-    // (clippy::large_enum_variant), and nodes are few and long-lived.
     Docker {
         backend: Box<DockerBackend>,
     },
@@ -198,9 +196,6 @@ fn ingest_capacity(
     capacity: &Mutex<types::ObservedCapacity>,
     observation: &types::CapacityObservation,
 ) -> bool {
-    // Poisoning cannot corrupt the record — nothing between the lock and the
-    // unlock can panic — so recover rather than propagate and keep the fleet
-    // ingesting capacity.
     let mut observed = capacity
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -255,8 +250,6 @@ fn evaluate_startup(nodes: &[NodeCapacity]) -> Result<StartupCapacity, BackendEr
     if nodes.iter().any(|n| n.reachable && n.slots > 0) {
         return Ok(StartupCapacity::Live);
     }
-    // Zero live capacity, but a reachable worker means it is observed state
-    // that can still arrive or be commanded, so the fleet starts.
     if nodes.iter().any(|n| n.worker && n.reachable) {
         return Ok(StartupCapacity::ZeroWithReachableWorker);
     }
@@ -307,10 +300,6 @@ impl FleetBackend {
                 list_failed: AtomicBool::new(false),
             }));
         }
-        // An empty node set is legal: a dynamic fleet may boot with zero seeds
-        // (`DOCKER_NODES` empty) and gain capacity when workers announce (spec
-        // §3.1 dynamic registration). Launches queue via the NoCapacity path
-        // until the first announce arrives (`startup_check` permits it).
         Ok(Self {
             nodes: RwLock::new(nodes),
             store,
@@ -323,8 +312,10 @@ impl FleetBackend {
     /// lock, then release it so callers do their awaits lock-free. Registration
     /// (the sole writer, the single-threaded dispatcher actor) may append or
     /// mutate a node in between, which a reader simply sees on its next snapshot.
-    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-    #[allow(clippy::unwrap_used)]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+    )]
     fn snapshot(&self) -> Vec<Arc<FleetNode>> {
         self.nodes.read().unwrap().clone()
     }
@@ -342,10 +333,6 @@ impl FleetBackend {
     /// [`DockerBackend::ping_all`].
     pub async fn startup_check(&self) -> Result<(), BackendError> {
         let nodes = self.snapshot();
-        // Zero seeds is a dynamic fleet awaiting announcements (spec §3.1): start
-        // successfully and let launches queue via NoCapacity until the first
-        // worker announces. Only a *configured* fleet with no live capacity is a
-        // fatal misconfiguration (the crash-loop guard `evaluate_startup` keeps).
         if nodes.is_empty() {
             tracing::warn!(
                 "no fleet nodes configured — starting with zero capacity; launches queue until a worker announces (spec §3.1 dynamic registration)"
@@ -365,12 +352,6 @@ impl FleetBackend {
                     }
                 }
                 NodeHandle::Worker { slots, .. } => {
-                    // ORDER IS LOAD-BEARING (design #293 §1): the probe applies
-                    // any ping-reported capacity to the slot cell on its reply
-                    // path, and only THEN is the cell read into the gate. Read
-                    // first and the gate would see the boot seed — which, with
-                    // the seed demoted to a pre-observation fallback (§7), turns
-                    // the startup capacity check into a seed-only check.
                     let reachable = self.probe_worker(node).await.is_some();
                     if !reachable {
                         tracing::warn!(
@@ -386,9 +367,6 @@ impl FleetBackend {
                 }
             }
         }
-        // The §5a trade — a warning where there used to be a crash — is only
-        // correct because the warning happens. The dispatcher's §8 scan then
-        // keeps naming the nodes responsible at a bounded cadence.
         if evaluate_startup(&caps)? == StartupCapacity::ZeroWithReachableWorker {
             tracing::warn!(
                 "fleet starting with ZERO capacity: every reachable node reports 0 slots \
@@ -410,8 +388,10 @@ impl FleetBackend {
     /// cannot be a stale in-flight message, so it applies unconditionally and
     /// resets the watermark — the backstop that keeps any ordering anomaly
     /// self-healing at the next placement probe rather than terminal.
-    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-    #[allow(clippy::unwrap_used)]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+    )]
     async fn probe_worker(&self, node: &FleetNode) -> Option<NodeLoad> {
         let NodeHandle::Worker {
             rpc,
@@ -426,9 +406,6 @@ impl FleetBackend {
         else {
             return None;
         };
-        // Heartbeat lapsed (spec §3.1 dynamic registration): skip placement
-        // without even pinging. `route` ignores this flag, so containers already
-        // running on the node keep being waited on.
         if !schedulable.load(Ordering::Relaxed) {
             return None;
         }
@@ -437,30 +414,16 @@ impl FleetBackend {
                 if !in_service.swap(true, Ordering::Relaxed) {
                     tracing::info!(node = %node.name, version = %ping.version, "worker node back in service");
                 }
-                // Record the reported version for the platform snapshot. A
-                // refreshed daemon reports the new SHA here, which both clears
-                // the drift warning below and flows to the UI.
                 {
                     let mut v = last_version.lock().unwrap();
                     if v.as_deref() != Some(ping.version.as_str()) {
-                        // Version moved (e.g. after a refresh): re-arm the drift
-                        // warning so a *new* mismatch is re-reported.
                         version_warned.store(false, Ordering::Relaxed);
                         *v = Some(ping.version.clone());
                     }
                 }
-                // Record the last refresh outcome (ticket #187) so a failed
-                // refresh surfaces in the fleet snapshot rather than staying a
-                // node-local log line. Only overwrite when the node reports one;
-                // a swapped-in daemon reports `None`, and we keep the last known
-                // outcome until it does.
                 if let Some(outcome) = &ping.refresh_outcome {
                     *last_refresh.lock().unwrap() = Some(outcome.clone());
                 }
-                // The pull half of the capacity source, applied before the load
-                // below reads `slots` — and before the startup gate does. A
-                // pre-field daemon reports no `slots` and so supplies nothing;
-                // the seed keeps standing in and §8's warning surfaces it.
                 if let Some(observation) = types::CapacityObservation::from_ping(&ping)
                     && ingest_capacity(slots, capacity, &observation)
                 {
@@ -503,16 +466,11 @@ impl FleetBackend {
         &self,
         pin: Option<&str>,
     ) -> Result<(Arc<FleetNode>, Reservation), BackendError> {
-        // Hold the placement lock across read-loads → choose → reserve: two
-        // launches placed back-to-back (agent launches each run on their own
-        // spawned task) otherwise both read the pre-reservation counts and tie
-        // onto the same node. Serialized, the second sees the first's
-        // reservation and busyness sends it to the idle node (spec §3.1).
         let _guard = self.place_lock.lock().await;
         let nodes = self.snapshot();
         let mut candidates = Vec::with_capacity(nodes.len());
         for (i, node) in nodes.iter().enumerate() {
-            let load = self.node_load(node).await?; // None ⇒ out of service
+            let load = self.node_load(node).await?;
             candidates.push(PlacementCandidate {
                 index: i,
                 name: node.name.as_str(),
@@ -521,8 +479,6 @@ impl FleetBackend {
         }
         let index = choose_placement(self.policy, &candidates, pin)?;
         let node = nodes[index].clone();
-        // Reserve before releasing the lock so the next placement counts this
-        // launch even though its container does not exist yet.
         node.reserved.fetch_add(1, Ordering::SeqCst);
         Ok((node.clone(), Reservation { node }))
     }
@@ -540,10 +496,6 @@ impl FleetBackend {
                 .next(),
             NodeHandle::Worker { .. } => self.probe_worker(node).await,
         };
-        // Fold in launches already placed on this node whose containers the
-        // live count can't see yet (spec §3.1): they occupy the slot for
-        // placement purposes, so busyness and the free-slot check both treat a
-        // reserved slot as busy.
         Ok(base.map(|l| {
             let reserved = node.reserved.load(Ordering::SeqCst) as i64;
             NodeLoad {
@@ -565,9 +517,6 @@ impl FleetBackend {
                         .first()
                         .map(|(_, a)| *a)
                         .unwrap_or(true),
-                    // A worker counts as available only while both reachable
-                    // (ping) and schedulable (heartbeat live) — a deregistered
-                    // node shows down in the UI, matching that placement skips it.
                     NodeHandle::Worker {
                         in_service,
                         schedulable,
@@ -583,8 +532,10 @@ impl FleetBackend {
     /// version)` as of the last successful ping. `None` for docker-endpoint
     /// nodes (they carry no chuggernaut version) and for workers that have not
     /// answered yet. Lets the UI show fleet versions and spot deploy drift.
-    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-    #[allow(clippy::unwrap_used)]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+    )]
     pub fn node_versions(&self) -> Vec<(String, Option<String>)> {
         self.snapshot()
             .iter()
@@ -601,8 +552,10 @@ impl FleetBackend {
     /// Per-node last self-refresh outcome for the platform snapshot (ticket
     /// #187): `(name, outcome)` as of the last successful ping. `None` for
     /// docker-endpoint nodes and workers that have not reported a refresh.
-    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-    #[allow(clippy::unwrap_used)]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+    )]
     pub fn node_refreshes(&self) -> Vec<(String, Option<RefreshOutcome>)> {
         self.snapshot()
             .iter()
@@ -681,7 +634,6 @@ fn to_wire(config: &ContainerLaunchConfig) -> WorkerLaunchRequest {
                 container_path: f.container_path.clone(),
                 mode: f.mode,
                 source: match &f.artifact {
-                    // The worker substitutes its node-local copy; bytes stay home.
                     Some(name) => FileSource::LocalArtifact { name: name.clone() },
                     None => FileSource::Inline {
                         data_b64: b64_encode(&f.contents),
@@ -697,10 +649,6 @@ fn to_wire(config: &ContainerLaunchConfig) -> WorkerLaunchRequest {
 #[async_trait]
 impl ContainerBackend for FleetBackend {
     async fn launch(&self, config: ContainerLaunchConfig) -> Result<ContainerId, BackendError> {
-        // `_reservation` is held until this method returns — i.e. across the
-        // launch RPC. Once the RPC completes the container exists and the node's
-        // live count reports it, so releasing the reservation then hands the
-        // accounting back to the live count with no gap and no double-count.
         let (node, _reservation) = self.place(config.node.as_deref()).await?;
         match &node.handle {
             NodeHandle::Docker { backend } => backend.launch(config).await,
@@ -723,9 +671,6 @@ impl ContainerBackend for FleetBackend {
                         Some(WireStatus::Running) => {}
                         None => return Err(BackendError::NotFound(id.clone())),
                     },
-                    // Transport blips (worker restart, NATS reconnect) are
-                    // survivable — the container is still running on the node;
-                    // keep polling. Op-level errors are real.
                     Err(WorkerRpcError::Transport(m)) => {
                         tracing::debug!(container = %id, "wait poll transport error (retrying): {m}");
                     }
@@ -831,8 +776,6 @@ impl ContainerBackend for FleetBackend {
                 NodeHandle::Docker { backend } => ids.extend(backend.list_managed_exited().await?),
                 NodeHandle::Worker { rpc, .. } => match rpc.list_exited().await {
                     Ok(ok) => ids.extend(ok.ids),
-                    // An unreachable worker must not fail the whole sweep —
-                    // its exited containers get reclaimed on a later pass.
                     Err(e) => {
                         tracing::warn!(node = %node.name, "list_exited skipped: {e}");
                     }
@@ -857,11 +800,6 @@ impl ContainerBackend for FleetBackend {
                             task: c.task,
                         }));
                     }
-                    // An unreachable worker must not fail the whole sweep — its
-                    // orphans get reaped on a later pass. Record the failure so
-                    // the occupancy snapshot can show the node out-of-service
-                    // rather than falsely idle (spec §3.1; job/181): the node may
-                    // still answer ping/launch, so nothing else marks it down.
                     Err(e) => {
                         node.list_failed.store(true, Ordering::Relaxed);
                         tracing::warn!(node = %node.name, "fleet occupancy: list_running failed — node shown out of service: {e}");
@@ -887,9 +825,6 @@ impl ContainerBackend for FleetBackend {
                     .iter()
                     .find(|(n, _)| n == &name)
                     .and_then(|(_, o)| o.clone());
-                // `None` here means a docker-endpoint node: `DOCKER_NODES` still
-                // owns its capacity outright, so it reports no provenance and
-                // the roster's static number stands (design #293 §7).
                 let capacity = capacities.iter().find(|(n, _)| n == &name).map(|(_, c)| *c);
                 NodeStatus {
                     name,
@@ -917,8 +852,10 @@ impl ContainerBackend for FleetBackend {
     /// capacity changed (a join, or a slot change) so the caller logs a join and
     /// re-drains the launch queue only when it matters. Runs on the single-writer
     /// actor — the fleet's only writer.
-    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-    #[allow(clippy::unwrap_used)]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+    )]
     fn register_worker(
         &self,
         name: &str,
@@ -955,10 +892,6 @@ impl ContainerBackend for FleetBackend {
                 else {
                     return false;
                 };
-                // Liveness is unconditional — an announce that lost the ordering
-                // race still proves the node is up — while its slot count goes
-                // through the watermark. Only a slot change (or re-admitting a
-                // heartbeat-dropped node) is "capacity moved" for the drain.
                 let changed = ingest_capacity(slot_cell, observed, &capacity)
                     || !schedulable.swap(true, Ordering::Relaxed);
                 in_service.store(true, Ordering::Relaxed);
@@ -968,8 +901,6 @@ impl ContainerBackend for FleetBackend {
                 changed
             }
             RegisterAction::Add => {
-                // A joining node has no watermark yet, so its announce is its
-                // first observation and lands by the same rule.
                 let handle = worker_handle(self.store.clone(), name, capacity.slots);
                 if let NodeHandle::Worker {
                     slots: slot_cell,
@@ -1067,7 +998,6 @@ pub fn has_worker_nodes(configs: &[DockerNodeConfig]) -> bool {
     configs.iter().any(|c| c.endpoint == WORKER_ENDPOINT)
 }
 
-// Arc so run.rs can pass it around like the DockerBackend today.
 pub type SharedFleet = Arc<FleetBackend>;
 
 #[cfg(test)]
@@ -1105,18 +1035,13 @@ mod tests {
     /// node is refused.
     #[test]
     fn plan_register_precedence() {
-        // Static + dynamic merge: a seeded worker of the same name is updated,
-        // not duplicated — the announce's slot count then wins.
         let roster = [("air", true), ("local", false)];
         assert_eq!(plan_register(&roster, "air"), RegisterAction::Update(0));
-        // A brand-new node joins.
         assert_eq!(plan_register(&roster, "nuc"), RegisterAction::Add);
-        // An announce can't repurpose a docker-endpoint node of the same name.
         assert_eq!(
             plan_register(&roster, "local"),
             RegisterAction::RejectDockerName
         );
-        // Zero-seed fleet: the first announce is always an Add.
         assert_eq!(plan_register(&[], "air"), RegisterAction::Add);
     }
 

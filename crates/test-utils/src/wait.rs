@@ -59,8 +59,10 @@ pub async fn job_state(
 /// Wait until job `seq` satisfies `pred`, returning the record. Watches the job
 /// key: an initial read (taken after the watch is created, so no put is lost)
 /// then every delivered revision, bounded by [`DEFAULT_TIMEOUT`].
-// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+)]
 pub async fn job_where(
     store: &NatsStore,
     owner: &str,
@@ -81,8 +83,10 @@ pub async fn job_where(
 /// Wait until some task of job `seq` satisfies `pred`, returning it. Watches the
 /// job's task keys (initial scan + every delivered revision), so a transient
 /// task state is caught rather than raced past.
-// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+)]
 pub async fn task_where(
     store: &NatsStore,
     owner: &str,
@@ -124,8 +128,6 @@ where
     FCheck: FnMut(&V) -> Option<T>,
 {
     let run = async {
-        // The watch (DeliverPolicy::New) was created before this read, so a put
-        // landing in the gap is still delivered below — nothing is lost.
         if let Some(value) = initial().await
             && let Some(found) = check(&value)
         {
@@ -140,10 +142,7 @@ where
                         return found;
                     }
                 }
-                // A delete/purge — nothing to test.
                 Some(None) => {}
-                // New watches do not end on their own; a `None` means the
-                // transport dropped. Re-scan and nudge, still under the timeout.
                 None => {
                     if let Some(value) = initial().await
                         && let Some(found) = check(&value)
@@ -186,8 +185,6 @@ where
                 return value;
             }
             if !signal.changed().await {
-                // The watch ended (transport dropped). Fall back to a short
-                // nudge so we re-check; still bounded by the outer timeout.
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }

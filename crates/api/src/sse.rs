@@ -68,12 +68,6 @@ pub async fn project_events(
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     events_authorize_read(&identity, &owner, &project)?;
     let filter = format!("job.events.{owner}.{project}.>");
-    // A fresh connect gets live events only. The project feed spans every job
-    // the project has ever run, so replaying it costs the operator a multi-
-    // megabyte download before the first live frame — and nothing needs it:
-    // the page's initial state comes from the jobs list (which now carries each
-    // live job's latest channel post), and this stream's job is to keep that
-    // state current. A reconnect still resumes exactly where it left off.
     let start = last_event_id(&headers).map_or(store::StreamStart::New, store::StreamStart::After);
     bridge(&state, filter, start).await
 }
@@ -86,8 +80,6 @@ pub async fn job_events(
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     events_authorize_read(&identity, &owner, &project)?;
     let filter = format!("job.events.{owner}.{project}.{seq}.>");
-    // Unlike the project feed, one job's history is bounded and *is* the
-    // content: the detail page renders the event log itself. Replay it whole.
     let start = last_event_id(&headers).map_or(store::StreamStart::All, store::StreamStart::After);
     bridge(&state, filter, start).await
 }

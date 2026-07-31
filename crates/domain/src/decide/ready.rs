@@ -177,8 +177,6 @@ pub fn decide(
     view: &ReadyView<'_>,
     event: ReadyEvent,
 ) -> (Vec<Transition>, Vec<Effect>, ReadyStep) {
-    // `Job::project` is always "owner/name" (§1.1); every published subject and
-    // the `Stall` composite need the halves.
     let (owner, project) = view
         .job
         .project
@@ -225,9 +223,6 @@ fn decide_released(
     declared_inputs: &[Input],
 ) -> (Vec<Transition>, Vec<Effect>, ReadyStep) {
     let job = view.job;
-    // Negative space (§2.1): terminal states are absorbing — releasing a
-    // Done/Revoked job is a caller bug, and `assert_transition` would reject the
-    // transition anyway.
     debug_assert!(
         !job.state.is_terminal(),
         "release decided for terminal job #{} in {:?}",
@@ -246,7 +241,6 @@ fn decide_released(
         JobState::Blocked
     };
     let stamped = admitted_record(job, to, &head, view.now, declared_inputs);
-    // Postcondition: exactly the admitted job carries a pinned base (§2.2).
     debug_assert!(
         stamped.base_ref.is_some() == (to == JobState::Ready || job.base_ref.is_some()),
         "base_ref pin disagrees with the {to:?} admission of job #{}",
@@ -255,8 +249,6 @@ fn decide_released(
 
     let mut effects = Vec::new();
     if from_draft {
-        // Leaving Draft finalizes the edited definition — announced separately
-        // from the release so the UI can tell the two apart (§2.1).
         effects.push(Effect::PublishEvent {
             owner: owner.to_string(),
             project: project.to_string(),
@@ -265,13 +257,6 @@ fn decide_released(
             extra: serde_json::json!({}),
         });
     }
-    // §10.3: the Ready transition's event carries the **effective** input set —
-    // the supplied values plus the defaults `admitted_record` just materialized
-    // — so "what actually ran" is in the event stream beside `job-created`'s
-    // "what was asked for" (design #311 Decision 6). A release that parks
-    // `Blocked` pinned nothing and so resolved nothing; its event carries the
-    // supplied set, and the `job-unblocked` that does pin carries the effective
-    // one.
     let mut extra = serde_json::json!({ "state": to });
     crate::inputs::stamp_event_inputs(&mut extra, &stamped.inputs);
     effects.push(Effect::PublishEvent {
@@ -352,7 +337,6 @@ fn decide_revalidated(
     }
 
     let stamped = admitted_record(job, JobState::Ready, &head, view.now, declared_inputs);
-    // The effective set, on the write that pins `base_ref` (§10.3, #311 D6).
     let mut extra = serde_json::json!({});
     crate::inputs::stamp_event_inputs(&mut extra, &stamped.inputs);
     let effects = vec![Effect::PublishEvent {
@@ -418,8 +402,6 @@ fn admitted_record(
             fill_input_defaults(declared_inputs, &mut stamped.inputs);
         }
     }
-    // Negative space: a job that already carried a pinned base keeps the exact
-    // input map it entered with — the immutability half of the contract.
     debug_assert!(
         job.base_ref.is_none() || stamped.inputs == job.inputs,
         "job #{} had its inputs re-resolved on a later base_ref update",
@@ -604,7 +586,6 @@ mod tests {
                 name: "sha".into(),
                 r#type: types::InputKind::String,
                 required: true,
-                // A default the creator's value must win over.
                 default: Some("deadbee".into()),
                 values: vec![],
                 pattern: None,

@@ -344,15 +344,9 @@ fn decide_entered(
         round.is_none(),
         "evaluation entered for job #{seq} over a live round",
     );
-    // Draining (§3.6): launch no evaluator containers and do not move the
-    // record — the job stays in Work with its Done work task and restart
-    // reconciliation re-enters here. (The shim skips the pre-eval rebase for
-    // the same reason: a drain performs no git work either.)
     if view.draining {
         return (round, Vec::new(), Vec::new(), EvalStep::Hold);
     }
-    // Negative space (§2.1): terminal states are absorbing, so a job that was
-    // revoked out from under its work task never enters evaluation.
     debug_assert!(
         !view.job.state.is_terminal(),
         "evaluation entered for terminal job #{seq} in {:?}",
@@ -372,12 +366,9 @@ fn decide_entered(
     }];
 
     if view.evaluators.is_empty() {
-        // Nothing to judge: the eval-pass IS immediate (§3.3 auto-pass).
         return (None, transitions, effects, EvalStep::Finalize);
     }
 
-    // Staged fan-out (§3.3): create stage 0 now and hold the rest until each
-    // prior stage passes. A single-stage job launches everything at once.
     let mut pending = group_stages(view.evaluators.to_vec());
     let first = pending
         .pop_front()
@@ -398,8 +389,6 @@ fn decide_stage_launched(
     round: Option<EvalRound>,
     slots: Vec<EvalSlot>,
 ) -> (Option<EvalRound>, Vec<Transition>, Vec<Effect>, EvalStep) {
-    // The slice was released while the stage launched (a revoke): the launched
-    // tasks' exits will find no open slot and be ignored in turn.
     let Some(mut round) = round else {
         return (None, Vec::new(), Vec::new(), EvalStep::Ignored);
     };
@@ -451,7 +440,6 @@ fn decide_slot_exited(
     let Some(round) = round else {
         return (None, Vec::new(), Vec::new(), EvalStep::Ignored);
     };
-    // Stale monitor from a superseded round, or a duplicate exit.
     let Some(idx) = round.open_slot(task.id) else {
         return (Some(round), Vec::new(), Vec::new(), EvalStep::Ignored);
     };
@@ -462,11 +450,6 @@ fn decide_slot_exited(
         task.phase,
     );
 
-    // The container never launched: an infra failure whatever the evaluator's
-    // type (a command exit code or an agent verdict needs a container that
-    // ran). Record why, then route through the same `eval_retries` path an
-    // agent's missing verdict uses — without this the task stays Running and
-    // the job wedges in Evaluation forever (the dogfood-#1 bug).
     if let Some(reason) = exit.launch_error {
         let mut task = task;
         task.result = Some(TaskResult::Command {
@@ -495,8 +478,6 @@ fn decide_slot_exited(
             decide_command_exit(round, view, owner, project, task, exit, idx)
         }
         TaskKind::Agent { .. } => decide_agent_exit(round, view, owner, project, task, exit, idx),
-        // A Human evaluator launches no container, so no exit is its verdict —
-        // the inbox resolution is (`SlotResolved`).
         TaskKind::Human { .. } => (Some(round), Vec::new(), Vec::new(), EvalStep::Await),
     }
 }
@@ -522,8 +503,6 @@ fn decide_command_exit(
     let seq = view.job.id;
     let task_id = task.id;
     let pass = exit.exit_code == 0;
-    // The captured tail (last ~8 KB, harvested by the eval monitor) is the
-    // failure evidence for the job page, the rework brief and #155's re-review.
     let output = exit.log_tail.unwrap_or_default();
     let verdict_less = !NORMAL_EXIT_CODES.contains(&exit.exit_code);
 
@@ -542,8 +521,6 @@ fn decide_command_exit(
         return decide_no_output(round, view, owner, project, idx, attempt, task_id, effects);
     }
 
-    // A non-empty output on a fail is what the next work agent reads to see WHY
-    // the evaluator failed; an empty one carries no evidence to thread.
     let slot_output = (!output.is_empty()).then(|| output.clone());
     task.result = Some(TaskResult::Command {
         pass,
@@ -567,7 +544,6 @@ fn decide_command_exit(
             }),
         },
     ];
-    // Command evaluators can't judge fixability: no abort verdict.
     round.slots[idx].outcome = Some(SlotOutcome::Product {
         pass,
         abort: false,
@@ -593,8 +569,6 @@ fn decide_agent_exit(
     let mut round = round;
     let task_id = task.id;
     let mut effects = Vec::new();
-    // `submit_eval` could only self-report usage; now the container is gone we
-    // have the CLI's measured figure — prefer it, as the work path does.
     if let (Some(measured), Some(TaskResult::Agent { token_usage, .. })) =
         (exit.usage, task.result.as_mut())
     {
@@ -615,17 +589,10 @@ fn decide_agent_exit(
                 pass: *pass,
                 abort: *abort,
                 structured: structured.clone(),
-                // Agents report through structured findings, not a log tail.
                 output: None,
             });
             decide_settled(round, view, owner, project, effects)
         }
-        // #167: an agent evaluator that ended without a `submit_eval` verdict
-        // produced no evidence — the same invalid-fail class as a command with
-        // an empty stream. Route it through the evidence-free path (no
-        // `eval_retries` burned, escalates `evaluator_no_output`) rather than a
-        // plain infra retry, so the reason distinguishes "no verdict" from a
-        // real infra loss and the round is never failed on nothing.
         _ => {
             let attempt = task.attempt;
             effects.push(retire(task, view.now, true));
@@ -665,7 +632,7 @@ fn decide_slot_resolved(
         pass,
         abort,
         structured,
-        output: None, // humans report through structured findings
+        output: None,
     });
     decide_settled(round, view, owner, project, Vec::new())
 }
@@ -718,9 +685,6 @@ fn decide_no_output(
 ) -> (Option<EvalRound>, Vec<Transition>, Vec<Effect>, EvalStep) {
     let seq = view.job.id;
     let evaluator = &round.slots[idx].evaluator;
-    // The loss being decided is not in `infra_losses_prior` (its record is
-    // retired by an effect that has not run yet), so the Nth loss sees N —
-    // the same count the pre-C5 read-after-write produced.
     let losses = view.infra_losses_prior + 1;
     if losses > view.infra_relaunch_cap {
         let name = evaluator.name.clone();
@@ -738,7 +702,6 @@ fn decide_no_output(
         });
         return (None, Vec::new(), effects, EvalStep::EscalatedDropExec);
     }
-    // Same attempt: `eval_retries` untouched (infra loss, not a real failure).
     effects.push(relaunch(owner, project, view, evaluator, failed_attempt));
     (Some(round), Vec::new(), effects, EvalStep::AwaitOutcome)
 }
@@ -759,14 +722,10 @@ fn decide_settled(
     if !round.stage_resolved() {
         return (Some(round), Vec::new(), effects, EvalStep::Await);
     }
-    // Draining (§3.6): don't advance to the next stage, run the reduce, or open
-    // the merge gate. The resolved slots are kept; restart reconciliation
-    // rebuilds the round from the task log and replays this decision.
     if view.draining {
         return (Some(round), Vec::new(), effects, EvalStep::Hold);
     }
     if stage_passed(&round.slots) && !round.pending.is_empty() {
-        // Fold the finished stage into `done` and fan out the next one.
         let finished = std::mem::take(&mut round.slots);
         round.done.extend(finished);
         let next = round
@@ -809,13 +768,9 @@ fn decide_reduce(
         return (None, Vec::new(), effects, EvalStep::EscalatedDropExec);
     }
     if overall_pass {
-        // The round is spent but kept: the landing reads no slots, and the
-        // execution slice (round included) is released when the job completes.
         return (Some(round), Vec::new(), effects, EvalStep::Finalize);
     }
 
-    // Abort verdict: rework can't fix this — skip the remaining budget and hand
-    // the evaluators' findings to a human (design-lifecycle.md).
     if !aborted.is_empty() {
         effects.push(escalate(
             owner,
@@ -1259,8 +1214,6 @@ mod tests {
         )
     }
 
-    // ── entry: the staged fan-out (§3.2 steps 9–10, §3.3) ───────────────────
-
     /// Entry moves the record, announces the round, and creates STAGE 0 ONLY —
     /// the later stages stay pending, which is what "not created" means.
     #[test]
@@ -1368,8 +1321,6 @@ mod tests {
         assert_eq!(step, EvalStep::Await);
     }
 
-    // ── superseded rounds: nothing to decide ────────────────────────────────
-
     /// A slice released under a late exit (the revoke case that once panicked
     /// the actor) and a duplicate exit both decide nothing.
     #[test]
@@ -1388,7 +1339,6 @@ mod tests {
         assert!(round.is_none() && t.is_empty() && e.is_empty());
         assert_eq!(step, EvalStep::Ignored);
 
-        // A round whose slot already resolved: the exit is a duplicate.
         let resolved = open_round(
             vec![resolved_slot("ci", None, product(true, false))],
             vec![],
@@ -1404,7 +1354,6 @@ mod tests {
         assert!(e.is_empty());
         assert_eq!(step, EvalStep::Ignored);
 
-        // A relaunch for an evaluator this round does not know.
         let (_, _, _, step) = decide(
             Some(open_round(vec![open_slot("ci", 1)], vec![])),
             &v,
@@ -1416,7 +1365,6 @@ mod tests {
         );
         assert_eq!(step, EvalStep::Ignored);
 
-        // An inbox resolution the round has no open slot for.
         let (_, _, _, step) = decide(
             Some(open_round(vec![open_slot("ci", 1)], vec![])),
             &v,
@@ -1429,12 +1377,9 @@ mod tests {
         );
         assert_eq!(step, EvalStep::Ignored);
 
-        // Reconciliation replaying a settle for a job with no round.
         let (_, _, _, step) = decide(None, &v, EvalEvent::StageSettled);
         assert_eq!(step, EvalStep::Ignored);
     }
-
-    // ── command verdicts (#167/#198) ────────────────────────────────────────
 
     /// Exit 0 records the verdict, announces it, and — a single-stage round —
     /// reduces to a pass.
@@ -1642,7 +1587,7 @@ mod tests {
         let job = sample_job(JobState::Evaluation);
         let mut v = view(&job, &[]);
         v.infra_relaunch_cap = 3;
-        v.infra_losses_prior = 3; // this exit is the 4th
+        v.infra_losses_prior = 3;
         let (round, _, effects, step) = decide(
             Some(open_round(vec![open_slot("ci", 1)], vec![])),
             &v,
@@ -1669,8 +1614,6 @@ mod tests {
         assert!(round.is_none());
         assert_eq!(step, EvalStep::EscalatedDropExec);
     }
-
-    // ── infra failures: the `eval_retries` budget (§3.3) ────────────────────
 
     /// A container that never launched is an infra failure whatever the
     /// evaluator's type: record why, then retry the slot at the next attempt.
@@ -1728,7 +1671,7 @@ mod tests {
     fn exhausted_eval_retries_escalate_as_an_infra_failure() {
         let job = sample_job(JobState::Evaluation);
         let mut task = command_task(1, "ci");
-        task.attempt = 2; // > eval_retries (1)
+        task.attempt = 2;
         let (round, _, effects, step) = decide(
             Some(open_round(vec![open_slot("ci", 1)], vec![])),
             &view(&job, &[]),
@@ -1791,8 +1734,6 @@ mod tests {
         );
         assert_eq!(step, EvalStep::Finalize);
     }
-
-    // ── agent verdicts (§3.3) ───────────────────────────────────────────────
 
     /// `submit_eval` already recorded and announced the verdict, so the exit
     /// only reads it — no second task write, no second announcement.
@@ -1926,8 +1867,6 @@ mod tests {
         assert_eq!(step, EvalStep::Await);
     }
 
-    // ── inbox resolutions and the abort verdict ─────────────────────────────
-
     /// A Human verdict resolves its slot and settles the round.
     #[test]
     fn inbox_resolution_records_the_verdict() {
@@ -2007,8 +1946,6 @@ mod tests {
         assert!(effects.is_empty(), "{effects:?}");
         assert_eq!(step, EvalStep::Finalize);
     }
-
-    // ── staged evaluation: advance, short-circuit, wait ─────────────────────
 
     /// A stage that passes with a later stage queued advances: the finished
     /// slots retire into `done` and the next stage is created.
@@ -2172,8 +2109,6 @@ mod tests {
         }
     }
 
-    // ── negative space (STYLE.md Tier 2 #2) ────────────────────────────────
-
     #[test]
     #[should_panic(expected = "terminal job")]
     #[cfg(debug_assertions)]
@@ -2203,8 +2138,6 @@ mod tests {
             vec![resolved_slot("ci", None, product(true, false))],
             vec![],
         );
-        // A `done` stage can only hold resolved slots; an open one there means
-        // the round was rebuilt wrong.
         r.done = vec![open_slot("review", 2)];
         decide(Some(r), &view(&job, &[]), EvalEvent::StageSettled);
     }
@@ -2238,12 +2171,8 @@ mod tests {
         );
     }
 
-    // ── the pure fragments the round is built from ─────────────────────────
-
     #[test]
     fn group_stages_single_stage_is_one_group() {
-        // The compatibility story: every evaluator at the default stage 0 →
-        // exactly one stage, in declared order.
         let evs = vec![
             evaluator("a", 0, None),
             evaluator("b", 0, None),
@@ -2257,8 +2186,6 @@ mod tests {
 
     #[test]
     fn group_stages_orders_by_stage_stable_within() {
-        // Out-of-order, multi-stage input sorts ascending; declared order is
-        // preserved within a stage (stable).
         let evs = vec![
             evaluator("ci", 1, None),
             evaluator("review", 0, None),
@@ -2317,8 +2244,6 @@ mod tests {
 
     #[test]
     fn stage_passed_advisory_failures_never_block() {
-        // Advisory fail, advisory abort, advisory infra — none stop the next
-        // stage from starting.
         let slots = vec![
             resolved_slot("pass", None, product(true, false)),
             resolved_slot("adv-fail", Some(false), product(false, false)),

@@ -64,20 +64,17 @@ impl Core {
     /// Result-carrying arms hand their port's answer back so the calling shim
     /// can re-enter its decider with it as the next event — the effect stays
     /// fire-and-forget from the decider's side.
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider."
+    )]
     pub async fn interpret(&mut self, effect: Effect) -> Result<Outcome> {
         match effect {
-            // --- Job records & graph ---
             Effect::SetJobState { job, to } => {
                 let mut job = *job;
                 self.set_state(&mut job, to).await?;
             }
             Effect::PutJob { job } => {
-                // Dual-write like `set_state`: KV is the truth, the in-memory
-                // graph is the working copy every scheduling read consults —
-                // a record write that skips it leaves stale decisions behind
-                // (the C2 conflict-rework base pin found this).
                 self.jobs.put(&job).await?;
                 self.graphs
                     .entry(job.project.clone())
@@ -105,12 +102,8 @@ impl Core {
                     .await?;
             }
 
-            // --- Task & project records ---
             Effect::PutTask { task } => {
                 self.task_put(&task).await?;
-                // Golden-trace label parity: Human escalation task writes are
-                // the one PutTask production callers recorded before the
-                // decider migration (B3 fixtures pin the exact string).
                 if let Some(trace) = &self.trace
                     && matches!(task.kind, types::TaskKind::Human { .. })
                     && task.phase == types::TaskPhase::Escalation
@@ -134,7 +127,6 @@ impl Core {
                 self.projects.put(&owner, &project, &record).await?;
             }
 
-            // --- Events & status snapshots ---
             Effect::PublishEvent {
                 owner,
                 project,
@@ -156,7 +148,6 @@ impl Core {
                     .await?;
             }
 
-            // --- Container lifecycle ---
             Effect::KillContainer { container_id } => {
                 self.backend.kill(&container_id).await?;
             }
@@ -164,7 +155,6 @@ impl Core {
                 self.backend.remove(&container_id).await?;
             }
 
-            // --- Task launches ---
             Effect::LaunchWorkTask {
                 owner,
                 project,
@@ -173,8 +163,6 @@ impl Core {
                 attempt,
                 resume,
             } => {
-                // Boxed: the launch shim interprets its own `CreateTask`
-                // effect, closing an async cycle through this function.
                 Box::pin(self.launch_work_task(&owner, &project, seq, cycle, attempt, resume))
                     .await?;
             }
@@ -198,9 +186,6 @@ impl Core {
                 if let Some(trace) = &self.trace {
                     trace.effect("LaunchGateFix");
                 }
-                // Boxed for the same reason as `LaunchWorkTask`: the gate-fix
-                // launch runs the Work attempt shim, which interprets its own
-                // task-creation effect.
                 Box::pin(self.launch_gate_fix(
                     &owner,
                     &project,
@@ -223,7 +208,6 @@ impl Core {
                     .await?;
             }
 
-            // --- Repository mutations ---
             Effect::SquashMerge {
                 owner,
                 project,
@@ -256,8 +240,6 @@ impl Core {
                 if let Some(trace) = &self.trace {
                     trace.effect(format!("DeleteBranch {branch}"));
                 }
-                // Branch deletion is best-effort cleanup everywhere it is
-                // decided (a missing scratch ref must not wedge a landing).
                 let _ = self.repos.delete_branch(&owner, &project, &branch).await;
             }
             Effect::CreateSquashCandidate {
@@ -335,10 +317,6 @@ impl Core {
                     .await?;
                 return Ok(Outcome::GateSlots(slots));
             }
-            // The Evaluation fan-out (§3.3). Deliberately NOT trace-recorded:
-            // the golden fixtures pin the pre-C5 effect list, where an eval
-            // launch was recorded only through the `task-created` events it
-            // publishes (unlike the gate stage, which always logged its own).
             Effect::LaunchEvalStage {
                 owner,
                 project,
@@ -387,8 +365,6 @@ impl Core {
                 if let Some(trace) = &self.trace {
                     trace.effect("EnterWork");
                 }
-                // Boxed for the same reason as `LaunchWorkTask`: Work entry
-                // runs the C6 shim, which interprets its own effects.
                 Box::pin(self.enter_work(
                     &owner,
                     &project,
@@ -400,7 +376,6 @@ impl Core {
                 ))
                 .await?;
             }
-            // --- Credentials (§7.4) ---
             Effect::IssueCredentials {
                 owner,
                 project,
@@ -408,8 +383,6 @@ impl Core {
                 access,
                 ttl_secs,
             } => {
-                // No SSH front configured (file:// dev repos, tests) → nothing to
-                // mint, exactly as `ssh_credential_files` short-circuits.
                 if let Some(ca_key) = &self.config.ssh_ca {
                     let ca = auth::ssh::SshCa::new(ca_key);
                     let ttl = chrono::Duration::seconds(ttl_secs as i64);
@@ -421,7 +394,6 @@ impl Core {
                 }
             }
 
-            // --- Escalation composites ---
             Effect::Escalate {
                 owner,
                 project,

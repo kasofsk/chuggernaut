@@ -207,30 +207,20 @@ mod tests {
 
     #[test]
     fn cache_dir_parses_present_and_absent() {
-        // Absent ⇒ caching disabled.
         assert_eq!(parse_cache_dir(None), None);
-        // Present ⇒ the host path, verbatim.
         assert_eq!(
             parse_cache_dir(Some("/var/cache/chuggernaut/sccache".into())),
             Some(PathBuf::from("/var/cache/chuggernaut/sccache"))
         );
-        // An empty value is treated as unset, not a bind on `/`.
         assert_eq!(parse_cache_dir(Some(String::new())), None);
     }
 
     #[test]
     fn git_url_parses_present_and_absent() {
-        // Absent ⇒ no credential (refresh reported as skipped).
         assert_eq!(parse_git_url(None), None);
-        // An empty value is treated as unset, the exact prod condition (#114:
-        // WORKER_REFRESH_GIT_URL empty) that must surface as a skip.
         assert_eq!(parse_git_url(Some(String::new())), None);
-        // Whitespace-only is likewise unset — build-worker.sh's REFRESH_ENV can
-        // inject a blank value when the operator's shell has the var unset, and
-        // a blank string must not be taken as a configured URL.
         assert_eq!(parse_git_url(Some("   ".into())), None);
         assert_eq!(parse_git_url(Some("\t\n".into())), None);
-        // Present ⇒ the URL, verbatim.
         assert_eq!(
             parse_git_url(Some("ssh://git@front:2222/acme/chug.git".into())),
             Some("ssh://git@front:2222/acme/chug.git".to_string())
@@ -239,27 +229,21 @@ mod tests {
 
     #[test]
     fn refresh_script_resolves_explicit_and_absent() {
-        // Explicit path is taken verbatim, even if it does not (yet) exist.
         assert_eq!(
             resolve_refresh_script(Some("/opt/refresh.sh".into())),
             Some(PathBuf::from("/opt/refresh.sh"))
         );
-        // Empty is treated as unset; the bundled default is absent in tests, so
-        // self-refresh is cleanly unconfigured rather than pointing at nothing.
         assert_eq!(resolve_refresh_script(Some(String::new())), None);
         assert_eq!(resolve_refresh_script(None), None);
     }
 
     #[test]
     fn slots_parses_default_and_value() {
-        // Absent / empty ⇒ the default capacity.
         assert_eq!(parse_slots(None).unwrap(), 4);
         assert_eq!(parse_slots(Some(String::new())).unwrap(), 4);
         assert_eq!(parse_slots(Some("  ".into())).unwrap(), 4);
-        // A number is taken verbatim (the air 4→5 re-announce case).
         assert_eq!(parse_slots(Some("5".into())).unwrap(), 5);
         assert_eq!(parse_slots(Some(" 2 ".into())).unwrap(), 2);
-        // Non-numeric is a hard config error.
         assert!(parse_slots(Some("lots".into())).is_err());
     }
 
@@ -267,20 +251,14 @@ mod tests {
     /// count by default, overridable in either direction, and never zero.
     #[test]
     fn slots_max_parses_default_and_value() {
-        // Absent / empty ⇒ the node's CPU count.
         assert_eq!(parse_slots_max(None, 6).unwrap(), 6);
         assert_eq!(parse_slots_max(Some(String::new()), 6).unwrap(), 6);
         assert_eq!(parse_slots_max(Some(" \t".into()), 6).unwrap(), 6);
-        // Lowered below the core count — the air/colima case the env exists for.
         assert_eq!(parse_slots_max(Some(" 2 ".into()), 6).unwrap(), 2);
-        // Raised above it: a node that knows better is trusted either way.
         assert_eq!(parse_slots_max(Some("12".into()), 6).unwrap(), 12);
-        // Zero would pin the node at a full drain with no way back up.
         assert!(parse_slots_max(Some("0".into()), 6).is_err());
         assert!(parse_slots_max(Some("some".into()), 6).is_err());
-        // No CPU count available ⇒ the boot default, so it never clamps.
         assert_eq!(parse_slots_max(None, SLOTS_DEFAULT).unwrap(), SLOTS_DEFAULT);
-        // The real node always reports at least one CPU.
         assert!(node_cpu_count() >= 1);
     }
 

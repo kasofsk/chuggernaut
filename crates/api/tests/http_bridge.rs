@@ -100,8 +100,10 @@ fn gen_jwt_keys(dir: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
 }
 
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn http_bridge_end_to_end() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -162,7 +164,6 @@ async fn http_bridge_end_to_end() {
     .await
     .unwrap();
 
-    // A Member user in the users bucket, exactly as `admin user create` writes.
     let users = store.raw_bucket(store::buckets::USERS).await.unwrap();
     let user = User {
         id: "op".into(),
@@ -176,7 +177,6 @@ async fn http_bridge_end_to_end() {
         .put_json(&store::keys::user_key(&user.email), &user)
         .await
         .unwrap();
-    // A platform admin for the project-creation path.
     let root = User {
         id: "root".into(),
         email: "root@example.com".into(),
@@ -192,8 +192,6 @@ async fn http_bridge_end_to_end() {
 
     let keys_dir = tempfile::tempdir().unwrap();
     let (private, public) = gen_jwt_keys(keys_dir.path());
-    // The API decrypts artifacts with the artifacts identity (never the
-    // secrets one, §10.2); seed one and an artifact to serve.
     let (artifacts_identity, _) = store::secrets::generate_age_keypair();
     let artifacts = store
         .artifacts(store::ArtifactCrypto::with_identity(&artifacts_identity).unwrap())
@@ -219,7 +217,6 @@ async fn http_bridge_end_to_end() {
     });
     let router = api::router(state, None);
 
-    // Unauthenticated → 401; bad credentials → 401.
     let (status, _, _) = call(&router, "GET", "/api/v1/projects/acme/api/jobs", None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _, _) = call(
@@ -232,7 +229,6 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    // Login → cookie; /auth/me echoes the identity.
     let (status, me, cookie) = call(
         &router,
         "POST",
@@ -248,8 +244,6 @@ async fn http_bridge_end_to_end() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(me["sub"], "op@example.com");
 
-    // Bearer tokens (machine callers, §7.1): the same JWT via the
-    // Authorization header — what `admin user token` mints.
     let bearer = auth::jwt::JwtSigner::from_pem(&private)
         .unwrap()
         .issue(
@@ -271,8 +265,6 @@ async fn http_bridge_end_to_end() {
     let res = router.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    // Project creation: members get 403; a platform admin creates a project
-    // whose repo arrives seeded with the Code starter template.
     let (status, _, _) = call(
         &router,
         "POST",
@@ -312,10 +304,8 @@ async fn http_bridge_end_to_end() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(types[0]["name"], "code", "{types}");
     assert_eq!(types[0]["display_name"], "Code");
-    // The seeded pre-receive hook is present and executable.
     let hook = repos_root.join("acme/web.git/hooks/pre-receive");
     assert!(hook.is_file(), "hook installed");
-    // Duplicate creation is a conflict.
     let (status, _, _) = call(
         &router,
         "POST",
@@ -326,8 +316,6 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
 
-    // Members / role management (§7.5, platform admins only). A non-admin is
-    // refused before the request ever reaches the dispatcher.
     let (status, _, _) = call(
         &router,
         "GET",
@@ -347,8 +335,6 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // Admin grants op `owner` (→ Admin) on acme/api; the write lands on the
-    // user record via the dispatcher (single writer of users.*).
     let (status, granted, _) = call(
         &router,
         "PUT",
@@ -370,7 +356,6 @@ async fn http_bridge_end_to_end() {
         Some(&ProjectRole::Admin)
     );
 
-    // List returns op with its role.
     let (status, list, _) = call(
         &router,
         "GET",
@@ -383,7 +368,6 @@ async fn http_bridge_end_to_end() {
     assert_eq!(list["members"][0]["email"], "op@example.com");
     assert_eq!(list["members"][0]["role"], "admin");
 
-    // A bad role is a 400; an unknown user is a 404.
     let (status, _, _) = call(
         &router,
         "PUT",
@@ -403,7 +387,6 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    // Remove clears the grant.
     let (status, _, _) = call(
         &router,
         "DELETE",
@@ -423,7 +406,6 @@ async fn http_bridge_end_to_end() {
             .contains_key("acme/api")
     );
 
-    // Create (201) — and a bad type is a 422 validation envelope at release.
     let (status, job, _) = call(
         &router,
         "POST",
@@ -459,8 +441,6 @@ async fn http_bridge_end_to_end() {
         "expected §6.5 errors envelope: {body}"
     );
 
-    // Criteria: a job created with an extra evaluator reports the type's
-    // list plus its own, source-annotated, resolved at default HEAD pre-Ready.
     let (status, extra, _) = call(
         &router,
         "POST",
@@ -501,7 +481,6 @@ async fn http_bridge_end_to_end() {
         (Some("linkcheck"), Some("job"))
     );
 
-    // Library: one job type in full — raw YAML plus the parsed view.
     let (status, jt, _) = call(
         &router,
         "GET",
@@ -512,8 +491,6 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(jt["name"], "manual");
-    // This repo predates the config root, so the reply names the file it
-    // actually resolved to — not the canonical `.chug/` path (spec §1.1).
     assert_eq!(jt["path"], "jobs/manual.yaml");
     assert!(jt["yaml"].as_str().unwrap().contains("type: human"), "{jt}");
     assert_eq!(jt["job_type"]["work"]["type"], "human");
@@ -528,9 +505,6 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    // Tag vocabulary at default HEAD, each with the path it resolved to — the
-    // UI reads a tag's contents back by that path, and this repo keeps its tags
-    // at the repo root.
     let (status, tags, _) = call(
         &router,
         "GET",
@@ -545,7 +519,6 @@ async fn http_bridge_end_to_end() {
         serde_json::json!([{ "name": "rust", "path": "tags/rust.md" }])
     );
 
-    // Release job 1 → human work task lands in the inbox.
     let (status, released, _) = call(
         &router,
         "POST",
@@ -557,8 +530,6 @@ async fn http_bridge_end_to_end() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(released["state"], "Ready");
 
-    // Watch the job's task keys, re-issuing the HTTP read on each change until
-    // the inbox shows the pending work task (#206 principle 3).
     let signal = store
         .tasks()
         .await
@@ -585,7 +556,6 @@ async fn http_bridge_end_to_end() {
     assert_eq!(work_task["phase"], "Work");
     let task_id = work_task["id"].as_u64().unwrap();
 
-    // Job list/get/graph/diff all serve while the job is in flight.
     let (status, jobs, _) = call(
         &router,
         "GET",
@@ -626,7 +596,6 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    // Resolve work → approval eval task appears → resolve → Done.
     let (status, _, _) = call(
         &router,
         "POST",
@@ -677,8 +646,6 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    // Watch the job record, re-reading via HTTP until it reports Done (#206
-    // principle 3); reaching past the wait is itself the assertion.
     let signal = store
         .jobs()
         .await
@@ -703,7 +670,6 @@ async fn http_bridge_end_to_end() {
     )
     .await;
 
-    // Per-job task log has both cycles' tasks.
     let (status, tasks, _) = call(
         &router,
         "GET",
@@ -715,14 +681,8 @@ async fn http_bridge_end_to_end() {
     assert_eq!(status, StatusCode::OK);
     assert!(tasks.as_array().unwrap().len() >= 2);
 
-    // SSE replay (§6.4). The two feeds start differently on a *fresh* connect,
-    // and the difference is the whole point: a project feed spans every job the
-    // project ever ran, so replaying it costs the operator the entire history
-    // before the first live frame; one job's history is bounded and is itself
-    // the content the detail page renders.
     use futures::StreamExt;
 
-    // A job feed with no Last-Event-ID still replays from the beginning.
     let req = Request::builder()
         .method("GET")
         .uri("/api/v1/projects/acme/api/jobs/1/events")
@@ -751,9 +711,6 @@ async fn http_bridge_end_to_end() {
         "a job feed replays from the beginning: {frame}"
     );
 
-    // A project feed with no Last-Event-ID delivers live events only — the
-    // history it would otherwise replay is exactly what the jobs list now
-    // carries. Nothing arrives until something new is published.
     let req = Request::builder()
         .method("GET")
         .uri("/api/v1/projects/acme/api/events")
@@ -770,9 +727,6 @@ async fn http_bridge_end_to_end() {
         "a fresh project feed must not replay the trail"
     );
 
-    // …but a *resuming* client still gets everything after its Last-Event-ID.
-    // Losing this would silently drop events across a reconnect, which is the
-    // failure the bounded start could plausibly introduce.
     let req = Request::builder()
         .method("GET")
         .uri("/api/v1/projects/acme/api/events")
@@ -794,10 +748,6 @@ async fn http_bridge_end_to_end() {
         "resuming from 0 replays the trail: {frame}"
     );
 
-    // ── Artifacts: the transcript reaches the operator, decrypted ──────────
-    //
-    // Served as raw bytes off the object store rather than through a dispatcher
-    // req/reply, which could not carry a multi-MB transcript (1MB max_payload).
     let (status, body, _) = call(
         &router,
         "GET",
@@ -817,7 +767,6 @@ async fn http_bridge_end_to_end() {
         .unwrap();
     let res = router.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    // JSONL, not JSON: one object per line is not a valid document.
     assert_eq!(
         res.headers().get(header::CONTENT_TYPE).unwrap(),
         "application/x-ndjson"
@@ -827,8 +776,6 @@ async fn http_bridge_end_to_end() {
         .unwrap();
     assert_eq!(&bytes[..], br#"{"type":"user","message":"do it"}"#);
 
-    // Absent artifacts and unknown kinds are 404s, not 500s — a human task has
-    // no transcript, and the kind comes straight off the URL.
     let (status, _, _) = call(
         &router,
         "GET",
@@ -848,8 +795,6 @@ async fn http_bridge_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    // Transcripts can contain anything the agent saw: they are behind the same
-    // project read authz as everything else, not public.
     let (status, _, _) = call(
         &router,
         "GET",
@@ -859,19 +804,16 @@ async fn http_bridge_end_to_end() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-    // Job attachments moved to their own test (`job_attachments_over_http`,
-    // #196): the section made this mega-test hang nondeterministically while
-    // the async-nats tombstone bug was live, and a hang in a smaller test
-    // localizes itself.
 }
 
 /// Job attachments over HTTP (§1.6), split from the mega-test (#196) so a
 /// store-level hang localizes here instead of poisoning the whole bridge run.
 /// Router-only rig: attachments need auth + artifact storage, no dispatcher.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn job_attachments_over_http() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -922,10 +864,6 @@ async fn job_attachments_over_http() {
     assert_eq!(status, StatusCode::OK);
     let cookie = cookie.expect("session cookie");
 
-    // ── Job attachments: an operator uploads a screenshot on the job ───────
-    //
-    // Raw bytes off the object store (a screenshot exceeds 1MB max_payload),
-    // encrypted with the same identity as transcripts, behind project authz.
     let png = b"\x89PNG\r\n\x1a\nmobile UI screenshot bytes".to_vec();
     let put = |name: &str, ctype: &str, cookie: Option<&str>, bytes: Vec<u8>| {
         let mut req = Request::builder()
@@ -940,7 +878,6 @@ async fn job_attachments_over_http() {
         router.clone().oneshot(req.body(Body::from(bytes)).unwrap())
     };
 
-    // Upload requires auth (Member+): anonymous is rejected.
     let res = put("bug.png", "image/png", None, png.clone())
         .await
         .unwrap();
@@ -951,13 +888,11 @@ async fn job_attachments_over_http() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
 
-    // A traversal-shaped filename is rejected before it can escape the prefix.
     let res = put("..", "image/png", Some(&cookie), png.clone())
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
-    // Listing reports the file with its content type and original size.
     let (status, body, _) = call(
         &router,
         "GET",
@@ -976,7 +911,6 @@ async fn job_attachments_over_http() {
         }])
     );
 
-    // Download returns the exact bytes under the stored content type.
     let req = Request::builder()
         .method("GET")
         .uri("/api/v1/projects/acme/api/jobs/1/attachments/bug.png")
@@ -994,7 +928,6 @@ async fn job_attachments_over_http() {
         .unwrap();
     assert_eq!(&bytes[..], &png[..]);
 
-    // Delete removes it; the listing goes empty and the file 404s.
     let req = Request::builder()
         .method("DELETE")
         .uri("/api/v1/projects/acme/api/jobs/1/attachments/bug.png")
@@ -1019,8 +952,10 @@ async fn job_attachments_over_http() {
 /// `200 {"dispatcher":"ok","version"}` as `application/json`; with no responder
 /// it answers `503` — never a masquerading `200`. Unauthenticated by design.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn health_endpoint() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -1042,8 +977,6 @@ async fn health_endpoint() {
         })
     };
 
-    // GET /api/v1/health → (status, content-type, json body). No cookie: the
-    // probe is unauthenticated (it leaks only liveness + version, spec §6.x).
     async fn get_health(router: &axum::Router) -> (StatusCode, String, serde_json::Value) {
         let req = Request::builder()
             .method("GET")
@@ -1064,14 +997,12 @@ async fn health_endpoint() {
         (status, ctype, serde_json::from_slice(&bytes).unwrap())
     }
 
-    // No dispatcher on the bus yet → no responder → 503 (not a fake 200).
     let router = api::router(mk_state(), None);
     let (status, ctype, body) = get_health(&router).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert!(ctype.starts_with("application/json"), "ctype: {ctype}");
     assert_eq!(body["dispatcher"], "error", "{body}");
 
-    // Bring the dispatcher up with its req.health handler → 200 + health JSON.
     let repos_root = tempfile::tempdir().unwrap();
     let core = Core::new(
         store.clone(),
@@ -1101,8 +1032,6 @@ async fn health_endpoint() {
     let router = api::router(mk_state(), None);
     let (status, ctype, body) = get_health(&router).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    // Content-type MUST be JSON: a text/html body is exactly the SPA fallback
-    // masquerade the deploy gate now rejects (spec §6.x, #77/#81).
     assert!(ctype.starts_with("application/json"), "ctype: {ctype}");
     assert_eq!(body["dispatcher"], "ok", "{body}");
     assert!(
@@ -1110,8 +1039,6 @@ async fn health_endpoint() {
         "version missing: {body}"
     );
 }
-
-// ── Platform fleet capacity (spec §3.1 operator capacity control) ───────────
 
 /// One fleet roster entry. `endpoint` is what separates the two transports: a
 /// `worker` node's capacity is operator-changeable, a docker-endpoint node's is
@@ -1260,8 +1187,6 @@ async fn platform_fleet_capacity_is_accepted_for_a_platform_admin() {
     let keys_dir = tempfile::tempdir().unwrap();
     let router = platform_router(&store, &gen_jwt_keys(keys_dir.path()));
 
-    // Unauthenticated → 401; a non-admin → 403, refused before the request can
-    // reach the dispatcher (§7.5: fleet capacity is platform-level config).
     let (status, _) = put_capacity(&router, "air", serde_json::json!(1), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let member = login(&router, "op@example.com", "hunter2").await;
@@ -1272,19 +1197,14 @@ async fn platform_fleet_capacity_is_accepted_for_a_platform_admin() {
         "a refused caller must never reach the node"
     );
 
-    // The admin's edit is accepted: 202, not 200 — nothing waited on the node.
     let admin = login(&router, "root@example.com", "s3cret").await;
     let (status, ack) = put_capacity(&router, "air", serde_json::json!(1), Some(&admin)).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{ack}");
     assert_eq!(ack["node"], "air");
     assert_eq!(ack["desired"], 1);
-    // The node has never reported, so nothing is in force yet and the ask reads
-    // as converging — never `converged` off the strength of a boot seed.
     assert_eq!(ack["observed"], serde_json::Value::Null, "{ack}");
     assert_eq!(ack["state"], "pending", "{ack}");
 
-    // Intent is persisted before the reply is sent, so the 202 having landed is
-    // enough — there is nothing to wait for.
     let record: types::FleetCapacity = store
         .raw_bucket(store::buckets::PLATFORM)
         .await
@@ -1344,7 +1264,6 @@ async fn platform_fleet_capacity_refusals_reach_the_operator() {
         put_capacity(&router, "air", serde_json::json!("lots"), Some(&admin)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
-    // None of the three reached the node.
     assert!(backend.slot_commands().is_empty());
 }
 
@@ -1376,11 +1295,9 @@ async fn platform_fleet_snapshot_passes_capacity_fields_through() {
             "occupied": 0,
             "available": true,
             "version": "0.1.0+air",
-            // Provenance: where the number the scheduler uses came from.
             "capacity_source": "node",
             "capacity_observed_at": at,
             "slots_max": 6,
-            // Intent, beside the observed number and never instead of it.
             "slots_desired": 8,
             "capacity_state": "rejected",
             "capacity_note": "node max is 6",
@@ -1438,8 +1355,10 @@ fn keygen(path: &std::path::Path, comment: &str) -> String {
 /// key into a 24h cert whose principals are `{email},git` and whose forced
 /// command embeds the caller's roles as read from their user record.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn ssh_cert_minting() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -1449,7 +1368,6 @@ async fn ssh_cert_minting() {
         .unwrap();
     store.ensure_topology().await.unwrap();
 
-    // A CA keypair for the dispatcher's user-cert handler, and JWT keys + user.
     let keys_dir = tempfile::tempdir().unwrap();
     let ca = keys_dir.path().join("ssh_ca");
     keygen(&ca, "ca");
@@ -1504,11 +1422,9 @@ async fn ssh_cert_minting() {
     });
     let router = api::router(state, None);
 
-    // The caller's SSH public key to be signed.
     let user_key = keys_dir.path().join("id_ed25519");
     let pubkey = keygen(&user_key, "op@example.com");
 
-    // Unauthenticated → 401.
     let (status, _, _) = call(
         &router,
         "POST",
@@ -1529,7 +1445,6 @@ async fn ssh_cert_minting() {
     .await;
     let cookie = cookie.unwrap();
 
-    // Junk public key → 422 (rejected before it reaches the CA).
     let (status, _, _) = call(
         &router,
         "POST",
@@ -1540,7 +1455,6 @@ async fn ssh_cert_minting() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    // Authed with a real key → 200 + a signed certificate.
     let (status, body, _) = call(
         &router,
         "POST",
@@ -1553,8 +1467,6 @@ async fn ssh_cert_minting() {
     let cert = body["certificate"].as_str().unwrap();
     assert!(cert.starts_with("ssh-ed25519-cert-v01@openssh.com"));
 
-    // Inspect the cert: principals `op@example.com` + `git`, roles from the
-    // user record baked into the forced command, and a 24h validity window.
     let cert_path = keys_dir.path().join("cert.pub");
     std::fs::write(&cert_path, cert).unwrap();
     let out = std::process::Command::new("ssh-keygen")
@@ -1565,17 +1477,10 @@ async fn ssh_cert_minting() {
     assert!(listing.contains("op@example.com"), "{listing}");
     assert!(listing.contains("git"), "{listing}");
     assert!(listing.contains("--kind user"), "{listing}");
-    // base64url(no-pad) of {"acme/api":"member"} — the user's roles at signing.
     assert!(
         listing.contains("--roles eyJhY21lL2FwaSI6Im1lbWJlciJ9"),
         "{listing}"
     );
-    // Validity window is ~24h (spec §7.3). `ssh-keygen -V +Ns` sets valid-to to
-    // now+N exactly but *backdates* valid-from to a minute boundary (rounded
-    // down, plus a minute of clock-skew allowance), so the printed window runs
-    // 24h + [60s, 120s). Assert a tolerant band around 24h rather than a single
-    // wall-clock-sensitive value — a bare `== 24h` only ever held when the cert
-    // happened to be signed at exactly :00 seconds, hence the time-of-day flake.
     let window = cert_validity_seconds(&listing);
     assert!(
         (24 * 3600..24 * 3600 + 180).contains(&window),
@@ -1587,8 +1492,10 @@ async fn ssh_cert_minting() {
 /// task's container through the dispatcher, enforces viewer auth, and falls
 /// back to the harvested `stdout.log` artifact once the task has finished.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn task_output_endpoint() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -1626,7 +1533,6 @@ async fn task_output_endpoint() {
     .await
     .unwrap();
 
-    // A Member user, JWT keys, and an artifacts identity to serve stdout.log.
     let users = store.raw_bucket(store::buckets::USERS).await.unwrap();
     let user = User {
         id: "op".into(),
@@ -1689,7 +1595,6 @@ async fn task_output_endpoint() {
         .await
         .unwrap();
 
-    // Unauthenticated → 401 (viewer auth, same as artifacts).
     let (status, _, _) = call(
         &router,
         "GET",
@@ -1700,7 +1605,6 @@ async fn task_output_endpoint() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    // Login for a session cookie.
     let (_, _, cookie) = call(
         &router,
         "POST",
@@ -1711,7 +1615,6 @@ async fn task_output_endpoint() {
     .await;
     let cookie = cookie.unwrap();
 
-    // Running task → live tail, running: true, a non-zero cursor.
     let (status, body, _) = call(
         &router,
         "GET",
@@ -1729,7 +1632,6 @@ async fn task_output_endpoint() {
     let offset = body["offset"].as_u64().unwrap();
     assert!(offset > 0);
 
-    // A task with no container yet → 404.
     tasks
         .put(&mk_task(2, None, types::TaskState::Running))
         .await
@@ -1744,8 +1646,6 @@ async fn task_output_endpoint() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    // Finish task 1 and harvest its stdout.log: the endpoint keeps working,
-    // now running: false, serving the artifact at the same byte offsets.
     tasks
         .put(&mk_task(1, Some("fake/c1"), types::TaskState::Done))
         .await
@@ -1789,7 +1689,6 @@ fn cert_validity_seconds(listing: &str) -> i64 {
         .find(|l| l.starts_with("Valid:"))
         .expect("no Valid: line");
     let mut parts = line.split_whitespace();
-    // "Valid:" "from" <from> "to" <to>
     let from = parts.nth(2).unwrap();
     let to = parts.nth(1).unwrap();
     let parse =

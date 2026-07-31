@@ -7,12 +7,13 @@
 #     themselves — what counts as a comment, what counts as a sentence, and the
 #     three things that must NOT be flagged: `//` inside a string, a scheme
 #     separator, and a machine-read directive.
-#   * Ratchet mode (no arguments) in a throwaway git repo with an origin, for
-#     the property the whole gate rests on: a comment the diff ADDS fails, a
-#     comment that was already there does not.
+#   * Default mode (no arguments) in a throwaway git repo with an origin, for
+#     the split the gate now rests on: rule 1 (no non-doc comments) holds over
+#     every tracked source, diff or no diff, while rule 2 (the 2-sentence doc
+#     cap) still reports only blocks the diff adds a line inside.
 #
-# Plus: an undeterminable diff reports the ratchet as unenforced (rc 0, loud) —
-# a ratchet with nothing to ratchet against must not fail every job forever.
+# Plus: an undeterminable diff drops the doc-length ratchet (loud) but still
+# enforces rule 1 — the tree has no non-doc comments to grandfather.
 #
 # Run:  .chug/tasks/check-comments.test.sh   (exits 0 if all cases pass)
 set -eu
@@ -123,15 +124,21 @@ EOF
 run_sut "$WORK/gen.gen.ts"
 check "generated file is skipped" 0 "$RC" "$OUT" "0 source file(s) checked"
 
-# --- ratchet mode: added lines only ------------------------------------------
+# --- default mode: rule 1 tree-wide, rule 2 on added lines -------------------
 
 REPO="$WORK/repo"
 mkdir -p "$REPO/crates/demo/src"
 git init -q -b main "$REPO"
 cat >"$REPO/crates/demo/src/lib.rs" <<'EOF'
-// pre-existing comment, untouched by the diff
+/// Pre-existing doc over the cap. It is untouched by the diff. Third sentence.
 pub fn old() -> u32 {
     1
+}
+EOF
+cat >"$REPO/crates/demo/src/legacy.rs" <<'EOF'
+// pre-existing comment in a file no diff touches
+pub fn legacy() -> u32 {
+    9
 }
 EOF
 git -C "$REPO" add -A
@@ -141,7 +148,7 @@ git -C "$REPO" remote add origin "$WORK/origin.git"
 git -C "$REPO" push -q origin main
 git -C "$REPO" checkout -q -b job
 
-run_ratchet() { # -> $RC / $OUT, run from inside the temp repo
+run_default() { # -> $RC / $OUT, run from inside the temp repo
 	OUT="$WORK/out"
 	set +e
 	(cd "$REPO" && BASE_BRANCH=main "$SUT") >"$OUT" 2>&1
@@ -157,8 +164,14 @@ pub fn added() -> u32 {
 }
 EOF
 git -C "$REPO" commit -qam "clean addition"
-run_ratchet
-check "untouched pre-existing comment does not fail the ratchet" 0 "$RC" "$OUT" "check-comments: clean"
+run_default
+check        "a comment in an untouched file fails rule 1" 1 "$RC" "$OUT" "legacy.rs:1: comment"
+check_absent "an untouched over-long doc stays ratcheted"  1 "$RC" "$OUT" "lib.rs:1: doc comment"
+
+git -C "$REPO" rm -q "$REPO/crates/demo/src/legacy.rs"
+git -C "$REPO" commit -qm "delete the legacy comment"
+run_default
+check "a tree with no non-doc comment passes" 0 "$RC" "$OUT" "check-comments: clean"
 
 cat >>"$REPO/crates/demo/src/lib.rs" <<'EOF'
 
@@ -168,17 +181,26 @@ pub fn added_dirty() -> u32 {
 }
 EOF
 git -C "$REPO" commit -qam "dirty addition"
-run_ratchet
-check "a comment the diff adds fails the ratchet" 1 "$RC" "$OUT" "lib.rs:11: comment"
+run_default
+check "a comment the diff adds fails" 1 "$RC" "$OUT" "lib.rs:11: comment"
 
-# --- ratchet mode: no diff to ratchet against --------------------------------
+# --- default mode: no diff to ratchet against --------------------------------
 
-OUT="$WORK/out"
-set +e
-(cd "$REPO" && unset BASE_BRANCH; "$SUT") >"$OUT" 2>&1
-RC=$?
-set -e
-check "an undeterminable diff reports the ratchet as unenforced" 0 "$RC" "$OUT" "NOT enforced"
+run_baseless() { # -> $RC / $OUT, with BASE_BRANCH unset
+	OUT="$WORK/out"
+	set +e
+	(cd "$REPO" && unset BASE_BRANCH; "$SUT") >"$OUT" 2>&1
+	RC=$?
+	set -e
+}
+
+run_baseless
+check "an undeterminable diff still enforces rule 1" 1 "$RC" "$OUT" "lib.rs:11: comment"
+
+git -C "$REPO" checkout -q HEAD~1 -- crates/demo/src/lib.rs
+git -C "$REPO" commit -qm "revert the dirty addition"
+run_baseless
+check "an undeterminable diff reports the doc-length ratchet as unenforced" 0 "$RC" "$OUT" "NOT enforced"
 
 echo
 echo "check-comments.test: $pass passed, $fail failed"

@@ -39,8 +39,6 @@ export function useFleet({ tick = 0, pollMs }: { tick?: number; pollMs?: number 
         () => {
           if (cancelled) return
           setLoaded(true)
-          // Only hide when we have never had data; a blip after a good load
-          // keeps the last snapshot so the widget doesn't flicker out.
           if (!gotData.current) setUnavailable(true)
         },
       )

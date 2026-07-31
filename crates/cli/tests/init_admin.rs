@@ -20,8 +20,10 @@ fn init_args(server_url: &str, dir: &std::path::Path) -> InitArgs {
 }
 
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn init_bootstraps_and_is_idempotent() {
     let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
         return;
@@ -32,7 +34,6 @@ async fn init_bootstraps_and_is_idempotent() {
         .await
         .unwrap();
 
-    // Keypairs on disk, private files 0600.
     let keys = dir.path().join("keys");
     for name in [
         "jwt_private.pem",
@@ -53,8 +54,6 @@ async fn init_bootstraps_and_is_idempotent() {
     ] {
         assert!(keys.join(name).exists(), "missing {name}");
     }
-    // The artifacts key is distinct from the secrets key — same generator, but
-    // sharing them would hand the API the secrets identity (§10.2).
     assert_ne!(
         std::fs::read_to_string(keys.join("age_private.key")).unwrap(),
         std::fs::read_to_string(keys.join("age_artifacts.key")).unwrap(),
@@ -81,7 +80,6 @@ async fn init_bootstraps_and_is_idempotent() {
             .contains("BEGIN NATS USER JWT")
     );
 
-    // Topology + VAPID public + admin user in KV.
     let store = NatsStore::connect(server.url()).await.unwrap();
     store.jobs().await.unwrap();
     let platform = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
@@ -96,7 +94,6 @@ async fn init_bootstraps_and_is_idempotent() {
     assert!(user.platform_admin);
     assert!(auth::verify_password("hunter2", &user.password_hash).unwrap());
 
-    // Re-run: keys and the existing user survive untouched.
     let age_before = std::fs::read_to_string(keys.join("age_private.key")).unwrap();
     init::run(init_args(server.url(), dir.path()))
         .await
@@ -126,7 +123,7 @@ async fn admin_project_and_user_commands() {
 
     let admin_args = |cmd| AdminArgs {
         nats_url: server.url().to_string(),
-        keys_dir: dir.path().join("no-keys"), // absent → plain connect
+        keys_dir: dir.path().join("no-keys"),
         cmd,
     };
     admin::run(admin_args(AdminCmd::Project(ProjectCmd::Create {
@@ -139,13 +136,11 @@ async fn admin_project_and_user_commands() {
     .await
     .unwrap();
 
-    // Counter initialized to 0, bare repo has the right default branch.
     let counters = store.raw_bucket(store::buckets::COUNTERS).await.unwrap();
     assert_eq!(counters.get_json::<u64>("acme.api").await.unwrap(), Some(0));
     let repos = vcs::RepoManager::new(&repos_root);
     assert_eq!(repos.default_branch("acme", "api").await.unwrap(), "trunk");
 
-    // Duplicate create fails; reserved/invalid names rejected.
     for (owner, name) in [("acme", "api"), ("global", "x"), ("has.dot", "x")] {
         assert!(
             admin::run(admin_args(AdminCmd::Project(ProjectCmd::Create {
@@ -194,8 +189,10 @@ async fn admin_project_and_user_commands() {
 }
 
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn admin_user_role_commands() {
     let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
         return;
@@ -218,7 +215,6 @@ async fn admin_user_role_commands() {
     .await
     .unwrap();
 
-    // Re-read the stored user's role on a project (None if unset).
     let role_of = |slug: &str| {
         let store = store.clone();
         let slug = slug.to_string();
@@ -237,7 +233,6 @@ async fn admin_user_role_commands() {
         }
     };
 
-    // set: `owner` is the CLI alias for the top project role (Admin).
     admin::run(admin_args(AdminCmd::User(UserCmd::Role(RoleCmd::Set {
         email: "dev@example.com".into(),
         project: "acme/api".into(),
@@ -247,7 +242,6 @@ async fn admin_user_role_commands() {
     .unwrap();
     assert_eq!(role_of("acme/api").await, Some(types::ProjectRole::Admin));
 
-    // A second set on another project coexists; list runs without error.
     admin::run(admin_args(AdminCmd::User(UserCmd::Role(RoleCmd::Set {
         email: "dev@example.com".into(),
         project: "acme/web".into(),
@@ -261,7 +255,6 @@ async fn admin_user_role_commands() {
     .await
     .unwrap();
 
-    // remove: clears just that project's grant.
     admin::run(admin_args(AdminCmd::User(UserCmd::Role(RoleCmd::Remove {
         email: "dev@example.com".into(),
         project: "acme/api".into(),
@@ -271,7 +264,6 @@ async fn admin_user_role_commands() {
     assert_eq!(role_of("acme/api").await, None);
     assert_eq!(role_of("acme/web").await, Some(types::ProjectRole::Viewer));
 
-    // Errors: bad role, bad slug, unknown user, removing an absent grant.
     assert!(
         admin::run(admin_args(AdminCmd::User(UserCmd::Role(RoleCmd::Set {
             email: "dev@example.com".into(),

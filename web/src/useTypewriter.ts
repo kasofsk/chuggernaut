@@ -1,8 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 
-// Typewriter feel: type the delta at tens of ms/char, but never run longer than
-// ~1.5s or animate more than the first ~200 chars — past that we snap the tail
-// so a big remote paste doesn't crawl across the screen for seconds.
 const CHAR_MS = 14
 const MAX_CHARS = 200
 const CAP_MS = 1500
@@ -52,7 +49,6 @@ export function useTypewriter() {
     to: string,
     apply: (v: string) => void,
   ) => {
-    // Reduced motion, or superseded mid-animation: snap to the newest value.
     if (prefersReducedMotion() || timers.current.has(key)) {
       stop(key)
       clearActive(key)
@@ -60,7 +56,6 @@ export function useTypewriter() {
       return
     }
     const start = commonPrefixLen(from, to)
-    // A deletion (or no net addition) has nothing to type — just apply it.
     if (to.length <= start) {
       apply(to)
       return
@@ -75,7 +70,7 @@ export function useTypewriter() {
       if (pos >= end) {
         stop(key)
         clearActive(key)
-        apply(to) // snap the tail beyond the first ~200 chars
+        apply(to)
       } else {
         apply(to.slice(0, pos))
       }

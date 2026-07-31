@@ -62,6 +62,16 @@ use std::sync::Arc;
 use store::NatsStore;
 use vcs::RepoManager;
 
+/// The `{verb}.{owner}.{project}` target of a `req.{family}.>` subject (spec
+/// §6.1), or `None` when the subject is too short to carry one.
+pub(super) fn subject_target(subject: &str) -> Option<(&str, &str, &str)> {
+    let parts: Vec<&str> = subject.split('.').collect();
+    match (parts.get(2), parts.get(3), parts.get(4)) {
+        (Some(verb), Some(owner), Some(project)) => Some((verb, owner, project)),
+        _ => None,
+    }
+}
+
 /// Subscribe the API-facing subject families (spec §6.1): the status probes,
 /// project creation, origin, access, jobs, graph, tasks, job types and the repo
 /// reads. Reads go straight to the store or repos; mutations go through the
@@ -71,15 +81,8 @@ pub async fn spawn_api_handlers(
     store: &NatsStore,
     handle: CoreHandle,
     repos: Arc<RepoManager>,
-    // Binary path baked into new repos' pre-receive hooks (§5.2) — the path
-    // the binary has on the SSH host (`HOOK_BIN`); None → this process's own.
     hook_bin: Option<std::path::PathBuf>,
-    // SSH CA private key path (§7.3) for user-cert minting; None (no ssh_ca, or
-    // `file://` dev repos) → `req.ssh.sign-user-cert` replies 503.
     ssh_ca: Option<std::path::PathBuf>,
-    // Container backend for the read-only live-output tail (`req.tasks.output`).
-    // Served off the core actor, so a slow node never wedges state transitions.
-    // Path-qualified: `container` names this directory's module here.
     backend: Arc<dyn ::container::ContainerBackend>,
 ) -> store::Result<()> {
     status::spawn_health_handler(store, handle.clone()).await?;

@@ -129,8 +129,6 @@ pub fn decide(
     view: &WrapUpView<'_>,
     event: WrapUpEvent,
 ) -> (Vec<Transition>, Vec<Effect>, WrapUpStep) {
-    // `Job::project` is always "owner/name" (§1.1); the publish subject and
-    // every repo-scoped effect need the halves.
     let (owner, project) = view
         .job
         .project
@@ -207,7 +205,6 @@ fn decide_publish_exited(
     task.result = Some(TaskResult::Command {
         pass,
         exit_code,
-        // A launch failure never produced output; its reason IS the output.
         output: if pass {
             String::new()
         } else {
@@ -284,9 +281,6 @@ fn decide_retry(
     owner: &str,
     project: &str,
 ) -> (Vec<Transition>, Vec<Effect>, WrapUpStep) {
-    // Negative space (§2.1): terminal states are absorbing — a Retry decided
-    // for a Done/Revoked job is a caller bug, and `assert_transition` would
-    // reject the transition anyway.
     debug_assert!(
         !view.job.state.is_terminal(),
         "wrap-up retry decided for terminal job #{} in {:?}",

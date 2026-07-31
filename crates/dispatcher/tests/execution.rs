@@ -29,8 +29,6 @@ eval:
     run: ./ci.sh
 "#;
 
-// Agent work + command eval WITH a rework budget: a failing ci triggers a
-// rework cycle (#167 rework-context threading) instead of escalating.
 const IMPL_CMD_REWORK: &str = r#"
 name: impl-cmd-rework
 image: img:latest
@@ -57,10 +55,6 @@ eval:
     prompt: prompts/eval.md
 "#;
 
-// Command work + **agent** eval: the work launches through the backend directly
-// (so it takes the freed slot), while the evaluator runs through the provider —
-// the #125/#130 saturated-web shape where an agent evaluator (review-web) hits
-// NoCapacity and must queue rather than burn eval_retries (#140).
 const CMD_WORK_AGENT_EVAL: &str = r#"
 name: cmd-agent-eval
 image: img:latest
@@ -83,9 +77,6 @@ work_retries: 1
 knowledge: [rust]
 "#;
 
-// Command work + command eval: both launch through the container backend, so
-// each exercises a `backend.launch` failure directly (the agent path already
-// surfaces launch failure via the provider as exit -1).
 const CMD_WORK: &str = r#"
 name: cmd-work
 image: img:latest
@@ -95,8 +86,6 @@ work:
 work_retries: 1
 "#;
 
-// Staged evaluation (spec §3.3): a required stage-0 agent review gates a
-// stage-1 command evaluator. review runs first; ci only after it passes.
 const STAGED: &str = r#"
 name: staged
 image: img:latest
@@ -115,10 +104,6 @@ eval:
     stage: 1
 "#;
 
-// Two AGENT evaluators at distinct stages (job #155): review (stage 0) gates
-// review2 (stage 1). A required stage-0 failure reworks the job before review2
-// ever launches, so on cycle 2 review carries re-review context while review2 —
-// appearing for the first time — gets the unchanged cycle-1 (no-context) form.
 const STAGED_AGENTS: &str = r#"
 name: staged-agents
 image: img:latest
@@ -137,9 +122,6 @@ eval:
     stage: 1
 "#;
 
-// A web-style job with a post-merge wrap-up command (spec §3.2): agent work,
-// no evaluators (auto-pass), and a `wrap_up.run` publish that ships the merged
-// result. The publish is the only container that launches through the backend.
 const WEBPUB: &str = r#"
 name: webpub
 image: img:latest
@@ -150,8 +132,6 @@ wrap_up:
   run: ./tasks/web-publish.sh
 "#;
 
-// Web-style wrap-up with an explicit label (job #146): the wrap-up task should
-// render `Command · publish`, not a bare `Command`.
 const WEBPUB_NAMED: &str = r#"
 name: webpub-named
 image: img:latest
@@ -163,8 +143,6 @@ wrap_up:
   name: publish
 "#;
 
-// Same shape but the stage-0 review is advisory: its failure must not stop the
-// stage-1 evaluator from running.
 const STAGED_ADVISORY: &str = r#"
 name: staged-advisory
 image: img:latest
@@ -259,7 +237,6 @@ async fn rig_full(
             repo_url_base: "file:///repos".into(),
             nats_url: server.url().into(),
             artifacts_identity,
-            // Enables the operator-dispatched triage action (§1.2).
             triage_image: Some("triage:latest".into()),
             launch_queue_max_wait,
             ..Default::default()
@@ -309,8 +286,6 @@ fn commit_work(rig: &Rig) {
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
         let clone = clone_branch_from(&bare, &branch).await;
-        // Branch-derived content so the commit always diffs, even when a prior
-        // job already merged this stub path to the base.
         let body = format!("// work produced on {branch}\n");
         clone
             .commit_file("src/work.rs", body.as_bytes(), "work")
@@ -320,9 +295,6 @@ fn commit_work(rig: &Rig) {
 }
 
 async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::Job {
-    // Watch-based (#206 principle 3): value-inspecting wait, hard timeout, named
-    // failure. The terminal-state guard is preserved so a job that lands in an
-    // unexpected terminal state still fails loudly rather than timing out.
     test_utils::wait::job_where(
         store,
         "acme",
@@ -351,7 +323,6 @@ async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::J
 async fn agent_work_commits_eval_passes_squash_merges_to_done() {
     let Some(rig) = rig().await else { return };
 
-    // The "agent" commits a file to its job branch, like a real container.
     let bare = rig.repo.bare_path();
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
@@ -361,7 +332,6 @@ async fn agent_work_commits_eval_passes_squash_merges_to_done() {
             .await;
         clone.push(&branch).await;
     });
-    // Command evaluator: exit 0 with structured findings.
     rig.backend.put_file(
         "/workspace/eval-result.json",
         br#"{"coverage": 91}"#.to_vec(),
@@ -373,7 +343,6 @@ async fn agent_work_commits_eval_passes_squash_merges_to_done() {
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
-    // The squash-merge landed the agent's commit on main.
     let merged = rig
         .repo
         .manager
@@ -382,7 +351,6 @@ async fn agent_work_commits_eval_passes_squash_merges_to_done() {
         .unwrap();
     assert_eq!(merged.as_deref(), Some("pub fn f() {}"));
 
-    // Task log: work Done, eval Done with structured result.
     let tasks = rig
         .store
         .tasks()
@@ -416,7 +384,7 @@ async fn agent_work_commits_eval_passes_squash_merges_to_done() {
 #[tokio::test]
 async fn work_failure_retries_with_reset_then_escalates() {
     let Some(rig) = rig().await else { return };
-    rig.provider.script_exits([2, 3]); // work_retries: 1 → both attempts fail
+    rig.provider.script_exits([2, 3]);
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -432,7 +400,6 @@ async fn work_failure_retries_with_reset_then_escalates() {
         .list_for_job("acme", "api", job.id)
         .await
         .unwrap();
-    // attempt 1 Failed, attempt 2 Failed, Human escalation task Pending
     assert_eq!(tasks.len(), 3);
     assert_eq!((tasks[0].attempt, tasks[0].state), (1, TaskState::Failed));
     assert_eq!((tasks[1].attempt, tasks[1].state), (2, TaskState::Failed));
@@ -450,9 +417,6 @@ async fn work_failure_retries_with_reset_then_escalates() {
 #[tokio::test]
 async fn work_exit0_empty_branch_empty_summary_fails_with_no_output() {
     let Some(rig) = rig().await else { return };
-    // Default provider: both attempts exit 0, commit nothing, submit nothing.
-    // flaky declares work_retries: 1, so attempt 1 fails → relaunch → attempt 2
-    // fails → escalate.
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -460,7 +424,6 @@ async fn work_exit0_empty_branch_empty_summary_fails_with_no_output() {
     assert_invariants_of(&rig.invariants);
     let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
-    // Two work attempts ran: the guard burned a retry and relaunched.
     assert_eq!(
         rig.provider.runs().len(),
         2,
@@ -495,19 +458,15 @@ async fn work_exit0_empty_branch_empty_summary_fails_with_no_output() {
             other => panic!("expected a no-output failure result, got {other:?}"),
         }
     }
-    // The empty-output failure never advanced the job to Evaluation.
     assert!(
         !tasks.iter().any(|t| t.phase == TaskPhase::Evaluation),
         "no Evaluation task may exist: {tasks:?}"
     );
-    // Retries exhausted → the standard work escalation.
     assert_eq!(
         escalated.escalation.expect("escalation recorded").reason,
         "work_retries_exhausted"
     );
 
-    // The machine reason rode the task-failed events, so the UI can show
-    // "exited without producing changes" instead of a silent Done cycle.
     let failed: Vec<_> = job_events(&rig.store, job.id)
         .await
         .into_iter()
@@ -527,8 +486,6 @@ async fn work_exit0_empty_branch_empty_summary_fails_with_no_output() {
 #[tokio::test]
 async fn work_exit0_empty_branch_with_summary_proceeds() {
     let Some(rig) = rig().await else { return };
-    // Work reports a summary over the handle (like submit_result) but commits
-    // nothing — the branch stays empty.
     let h = rig.handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_result(
@@ -584,7 +541,7 @@ async fn work_exit0_empty_branch_with_summary_proceeds() {
 #[tokio::test]
 async fn work_exit0_with_commits_and_no_summary_proceeds() {
     let Some(rig) = rig().await else { return };
-    commit_work(&rig); // commits, submits no summary
+    commit_work(&rig);
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
     assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
@@ -618,19 +575,14 @@ async fn work_exit0_with_commits_and_no_summary_proceeds() {
 #[tokio::test]
 async fn eval_launch_failure_escalates_instead_of_stuck_running() {
     let Some(rig) = rig().await else { return };
-    // The eval command container is refused at launch (e.g. an invalid resolved
-    // resource limit). Agent work runs through the provider, so the only
-    // `backend.launch` calls in this rig are the eval containers.
     rig.backend
         .fail_launch_if(|_| Some("invalid memory limit \"5g\"".into()));
-    commit_work(&rig); // work succeeds (agent path) so the job reaches Evaluation
+    commit_work(&rig);
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
     assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
-    // Never stalls in Evaluation with a Running task: after eval_retries the
-    // required evaluator's infra failure escalates.
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     let tasks = rig
@@ -641,8 +593,6 @@ async fn eval_launch_failure_escalates_instead_of_stuck_running() {
         .list_for_job("acme", "api", job.id)
         .await
         .unwrap();
-    // Work Done; two eval attempts Failed (eval_retries default 1); Human
-    // escalation Pending. No task is left Running.
     assert_eq!(tasks[0].phase, TaskPhase::Work);
     assert_eq!(tasks[0].state, TaskState::Done);
     let evals: Vec<_> = tasks
@@ -652,9 +602,6 @@ async fn eval_launch_failure_escalates_instead_of_stuck_running() {
     assert_eq!(evals.len(), 2, "eval attempt + one eval_retries");
     for t in &evals {
         assert_eq!(t.state, TaskState::Failed);
-        // The launch error is surfaced in the result — single-wrapped, no
-        // spurious `job not found:` / doubled `launch failed:` — so
-        // `GET .../tasks` tells the operator what happened.
         match &t.result {
             Some(types::TaskResult::Command {
                 pass: false,
@@ -696,8 +643,6 @@ async fn work_command_launch_failure_retries_then_escalates() {
     assert_invariants_of(&rig.invariants);
     let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
-    // The escalation is self-describing on the job record: reason code, a
-    // human-readable detail, and the failing task — no log archaeology (#69).
     let esc = escalated
         .escalation
         .expect("escalation recorded on the job");
@@ -717,13 +662,10 @@ async fn work_command_launch_failure_retries_then_escalates() {
         .list_for_job("acme", "api", job.id)
         .await
         .unwrap();
-    // The escalation Human task also carries phase Work (escalation::
-    // escalation_task), so exclude it — `works` is the container work attempts.
     let works: Vec<_> = tasks
         .iter()
         .filter(|t| t.phase == TaskPhase::Work && !matches!(t.kind, types::TaskKind::Human { .. }))
         .collect();
-    // The failing task named on the escalation is the last failed work attempt.
     assert_eq!(esc.failing_task, works.last().map(|t| t.id));
     assert_eq!(works.len(), 2, "attempt + one work_retries");
     for t in &works {
@@ -754,15 +696,15 @@ async fn work_command_launch_failure_retries_then_escalates() {
 }
 
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn eval_failure_reworks_with_context_then_passes() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
 
-    // Run order: work c1, eval c1 (fail w/ findings), work c2, eval c2 (pass).
-    // Task ids are sequential per job: 1=work, 2=eval, 3=work, 4=eval.
-    commit_work(&rig); // work cycle 1 commits so the branch is non-empty
+    commit_work(&rig);
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -781,7 +723,7 @@ async fn eval_failure_reworks_with_context_then_passes() {
         .await
         .unwrap();
     });
-    rig.provider.on_run(|_| async {}); // work cycle 2
+    rig.provider.on_run(|_| async {});
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -810,11 +752,9 @@ async fn eval_failure_reworks_with_context_then_passes() {
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
-    // Cycle 2's work run received the cycle-1 findings (§4.3).
     let runs = rig.provider.runs();
     assert_eq!(runs.len(), 4);
     assert!(runs[0].eval_context.is_empty());
-    // The §4.3 job brief reaches the work agent AND the agent evaluator.
     for run in [&runs[0], &runs[1]] {
         assert!(run.prompt.contains("Job Brief"), "{}", run.prompt);
         assert!(run.prompt.contains("Add fortune file"), "{}", run.prompt);
@@ -836,7 +776,6 @@ async fn eval_failure_reworks_with_context_then_passes() {
         .unwrap();
     assert_eq!(tasks.len(), 4);
     assert_eq!(tasks[2].cycle, 2);
-    // The rework-created Work task self-explains its cause; cycle 1 has none.
     assert_eq!(tasks[0].rework_reason, None);
     assert_eq!(
         tasks[2].rework_reason,
@@ -851,14 +790,15 @@ async fn eval_failure_reworks_with_context_then_passes() {
 /// its prior verdict/findings, the SHA it last reviewed, the delta diff since,
 /// and a job-history digest — while the cycle-1 review is unchanged.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn cycle2_evaluator_gets_prior_review_context() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
     let bare = rig.repo.bare_path();
 
-    // work c1: commit src/a.rs.
     let b = bare.clone();
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
@@ -866,7 +806,6 @@ async fn cycle2_evaluator_gets_prior_review_context() {
         clone.commit_file("src/a.rs", b"pub fn a() {}", "a").await;
         clone.push(&branch).await;
     });
-    // eval c1: fail with a distinctive finding.
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -885,7 +824,6 @@ async fn cycle2_evaluator_gets_prior_review_context() {
         .await
         .unwrap();
     });
-    // work c2 (rework): commit a NEW file so the delta is non-empty.
     let b = bare.clone();
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
@@ -893,7 +831,6 @@ async fn cycle2_evaluator_gets_prior_review_context() {
         clone.commit_file("src/b.rs", b"pub fn b() {}", "b").await;
         clone.push(&branch).await;
     });
-    // eval c2: pass.
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -921,14 +858,12 @@ async fn cycle2_evaluator_gets_prior_review_context() {
 
     let runs = rig.provider.runs();
     assert_eq!(runs.len(), 4, "work c1, eval c1, work c2, eval c2");
-    // Cycle-1 review is unchanged — no re-review block.
     let eval_c1 = &runs[1];
     assert!(
         !eval_c1.prompt.contains("Re-Review Context"),
         "cycle-1 eval must not carry re-review context: {}",
         eval_c1.prompt
     );
-    // Cycle-2 review carries the full re-review block.
     let eval_c2 = &runs[3];
     let p = &eval_c2.prompt;
     assert!(p.contains("Re-Review Context"), "{p}");
@@ -946,7 +881,6 @@ async fn cycle2_evaluator_gets_prior_review_context() {
         p.contains("Job history at a glance"),
         "history digest missing: {p}"
     );
-    // The digest records cycle 1's failing review.
     assert!(p.contains("reviewer=fail"), "history verdict missing: {p}");
     assert_invariants_of(&rig.invariants);
 }
@@ -955,15 +889,15 @@ async fn cycle2_evaluator_gets_prior_review_context() {
 /// (the branch was rebased onto a moved base), the re-review block says so and
 /// omits a bogus delta rather than diffing across the rebase.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn cycle2_evaluator_after_rebase_gets_full_diff_note() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
     let bare = rig.repo.bare_path();
 
-    // work c1: commit src/a.rs on the branch AND land a conflicting src/a.rs on
-    // main, so the wrap-up squash cannot replay cleanly → conflict rework.
     let b = bare.clone();
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
@@ -977,7 +911,6 @@ async fn cycle2_evaluator_after_rebase_gets_full_diff_note() {
             .await;
         main.push("main").await;
     });
-    // eval c1: pass, so the job proceeds to wrap-up where the conflict fires.
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -996,7 +929,6 @@ async fn cycle2_evaluator_after_rebase_gets_full_diff_note() {
         .await
         .unwrap();
     });
-    // work c2 (conflict rework): re-commit on the freshly pinned base.
     let b = bare.clone();
     rig.provider.on_run(move |cfg| async move {
         assert!(cfg.merge_conflict.is_some(), "conflict context expected");
@@ -1007,7 +939,6 @@ async fn cycle2_evaluator_after_rebase_gets_full_diff_note() {
             .await;
         clone.push(&branch).await;
     });
-    // eval c2: pass.
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -1037,10 +968,8 @@ async fn cycle2_evaluator_after_rebase_gets_full_diff_note() {
     assert_eq!(runs.len(), 4);
     let eval_c2 = &runs[3];
     let p = &eval_c2.prompt;
-    // Re-review context is present (prior findings carried over)…
     assert!(p.contains("Re-Review Context"), "{p}");
     assert!(p.contains("nit: naming"), "prior findings missing: {p}");
-    // …but the delta is suppressed in favor of a rebase note.
     assert!(p.contains("rebased"), "rebase note missing: {p}");
     assert!(
         !p.contains("```diff"),
@@ -1055,14 +984,15 @@ async fn cycle2_evaluator_after_rebase_gets_full_diff_note() {
 /// never runs that cycle; on cycle 2 `review` carries re-review context while
 /// `review2`, appearing for the first time, does not.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn evaluator_first_appearing_on_cycle2_gets_no_context() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
     let bare = rig.repo.bare_path();
 
-    // work c1: commit src/a.rs.
     let b = bare.clone();
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
@@ -1070,7 +1000,6 @@ async fn evaluator_first_appearing_on_cycle2_gets_no_context() {
         clone.commit_file("src/a.rs", b"pub fn a() {}", "a").await;
         clone.push(&branch).await;
     });
-    // eval c1 stage-0 review (task 2): FAIL → rework; stage-1 review2 never runs.
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -1089,7 +1018,6 @@ async fn evaluator_first_appearing_on_cycle2_gets_no_context() {
         .await
         .unwrap();
     });
-    // work c2 (rework): commit a new file so the delta is non-empty.
     let b = bare.clone();
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
@@ -1097,7 +1025,6 @@ async fn evaluator_first_appearing_on_cycle2_gets_no_context() {
         clone.commit_file("src/b.rs", b"pub fn b() {}", "b").await;
         clone.push(&branch).await;
     });
-    // eval c2 stage-0 review (task 4): PASS → stage 1 launches.
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -1116,7 +1043,6 @@ async fn evaluator_first_appearing_on_cycle2_gets_no_context() {
         .await
         .unwrap();
     });
-    // eval c2 stage-1 review2 (task 5): its first appearance — PASS.
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -1148,14 +1074,12 @@ async fn evaluator_first_appearing_on_cycle2_gets_no_context() {
         5,
         "work c1, review c1, work c2, review c2, review2 c2"
     );
-    // The pre-existing evaluator (review) carries re-review context on cycle 2…
     let review_c2 = &runs[3];
     assert!(
         review_c2.prompt.contains("Re-Review Context"),
         "pre-existing evaluator must carry re-review context: {}",
         review_c2.prompt
     );
-    // …while review2, appearing for the first time on cycle 2, does not.
     let review2_c2 = &runs[4];
     assert!(
         !review2_c2.prompt.contains("Re-Review Context"),
@@ -1173,16 +1097,13 @@ async fn crashed_work_attempt_recovers_branch_and_notes_resume() {
     let Some(rig) = rig().await else { return };
     let bare = rig.repo.bare_path();
 
-    // Attempt 1 pushes a commit, then "crashes" (the scripted non-zero exit).
-    // Attempt 2 (no hook) just succeeds — nothing to push, the recovered commit
-    // is the whole product.
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
         let clone = clone_branch_from(&bare, &branch).await;
         clone.commit_file("wip.rs", b"partial work", "wip").await;
         clone.push(&branch).await;
     });
-    rig.provider.script_exits([2, 0]); // flaky: work_retries 1 → crash then recover
+    rig.provider.script_exits([2, 0]);
 
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -1203,7 +1124,6 @@ async fn crashed_work_attempt_recovers_branch_and_notes_resume() {
         runs[1].prompt
     );
 
-    // The crashed attempt's commit was recovered — not redone — and merged.
     let merged = rig
         .repo
         .manager
@@ -1218,8 +1138,6 @@ async fn crashed_work_attempt_recovers_branch_and_notes_resume() {
     assert_invariants_of(&rig.invariants);
 }
 
-// ---- §3.5 capacity queue: no free slots defers the launch, never fails it ----
-
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Poll the task log for the first task matching `pred`.
@@ -1228,9 +1146,6 @@ async fn wait_for_task(
     seq: u64,
     pred: impl Fn(&types::Task) -> bool,
 ) -> types::Task {
-    // Watch the job's task keys, testing each delivered revision so a transient
-    // state (a task flipping through Pending between relaunch attempts) is
-    // caught, not raced past (#206 principle 3).
     test_utils::wait::task_where(
         store,
         "acme",
@@ -1261,8 +1176,6 @@ async fn eval_launch_queues_on_no_capacity_then_launches_when_freed() {
     rig.backend
         .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
 
-    // Fleet at capacity until we free it. Agent work runs through the provider,
-    // so the only `backend.launch` here is the command evaluator.
     let full = Arc::new(AtomicBool::new(true));
     let f = full.clone();
     rig.backend.fail_launch_no_capacity_if(move |_| {
@@ -1275,7 +1188,6 @@ async fn eval_launch_queues_on_no_capacity_then_launches_when_freed() {
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
 
-    // The eval task parks Pending (queued), holding the job in Evaluation.
     let eval = wait_for_task(&rig.store, job.id, |t| {
         t.phase == TaskPhase::Evaluation && t.state == TaskState::Pending
     })
@@ -1302,7 +1214,6 @@ async fn eval_launch_queues_on_no_capacity_then_launches_when_freed() {
         "a task-queued event surfaces the wait",
     );
 
-    // Free a slot; the scan message drives the drain and the eval launches.
     full.store(false, Ordering::SeqCst);
     rig.handle.trigger_scan().await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -1351,15 +1262,11 @@ async fn command_work_queues_on_no_capacity_then_launches_when_freed() {
     .await;
     assert_eq!(work.attempt, 1, "queueing consumed no work_retries");
     assert!(work.container_id.is_none());
-    // The deferred launch is stamped visibly-queued: the UI reads *why* it is
-    // Pending and *since when* off the record, not just a bare Pending.
     assert_eq!(
         work.pending_reason,
         Some(types::PendingReason::QueuedForCapacity)
     );
     assert!(work.queued_at.is_some());
-    // The queue snapshot the api forwards reflects the same launch: depth 1, and
-    // this task at position 1 — the "position 1 of 1" the badge shows.
     let snap = rig.handle.queue_snapshot("acme", "api").await.unwrap();
     assert_eq!(snap.depth, 1);
     assert_eq!(snap.entries.len(), 1);
@@ -1398,7 +1305,6 @@ async fn command_work_queues_on_no_capacity_then_launches_when_freed() {
         .collect();
     assert_eq!(works.len(), 1, "one work task launched from the queue");
     assert_eq!(works[0].state, TaskState::Done);
-    // Launching cleared the queued markers, and the queue drained empty.
     assert_eq!(works[0].pending_reason, None);
     assert_eq!(works[0].queued_at, None);
     assert_eq!(
@@ -1431,14 +1337,12 @@ async fn failed_command_work_still_carries_harvested_leg_report() {
         "@chug:report {\"from_sha\":\"prev999\",\"to_sha\":\"abc123\",\"rollback\":false}\n",
     );
     rig.backend.put_logs(logs.as_bytes().to_vec());
-    rig.backend.script_exits([1]); // the deploy failed
+    rig.backend.script_exits([1]);
 
     let job = rig.handle.create_job(req("cmd-work")).await.unwrap();
     assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
-    // cmd-work has work_retries: 1 — the retry (exit 0 scripted default, but
-    // logs unchanged) is irrelevant here; assert on the FIRST, failed task.
     let failed = wait_for_task(&rig.store, job.id, |t| {
         t.phase == TaskPhase::Work && t.state == TaskState::Failed
     })
@@ -1466,8 +1370,6 @@ async fn failed_command_work_still_carries_harvested_leg_report() {
 #[tokio::test]
 async fn command_work_harvests_deploy_legs_into_structured_result() {
     let Some(rig) = rig().await else { return };
-    // Interleave ordinary output, valid legs, a malformed leg (must be ignored),
-    // and the deploy envelope — exactly what update.sh's stdout looks like.
     let logs = concat!(
         "update: deploying abc123\n",
         "@chug:leg {\"name\":\"build-dispatcher\",\"status\":\"ok\",\"secs\":41}\n",
@@ -1511,7 +1413,6 @@ async fn command_work_harvests_deploy_legs_into_structured_result() {
     };
     let report: types::DeployReport = serde_json::from_value(value.clone()).unwrap();
 
-    // The malformed line dropped; the four valid legs survive in emission order.
     assert_eq!(report.legs.len(), 4, "malformed leg dropped: {report:?}");
     assert_eq!(report.legs[0].name, "build-dispatcher");
     assert_eq!(report.legs[0].status, types::LegStatus::Ok);
@@ -1523,7 +1424,6 @@ async fn command_work_harvests_deploy_legs_into_structured_result() {
     assert_eq!(report.legs[3].name, "sha-advance");
     assert_eq!(report.legs[3].status, types::LegStatus::Skipped);
     assert_eq!(report.legs[3].secs, None);
-    // The @chug:report envelope merged in.
     assert_eq!(report.from_sha.as_deref(), Some("prev999"));
     assert_eq!(report.to_sha.as_deref(), Some("abc123"));
     assert!(report.rollback);
@@ -1571,12 +1471,9 @@ async fn command_work_without_legs_has_no_structured_result() {
 /// (§3.5). The rig shrinks the max wait so the scan fires it immediately.
 #[tokio::test]
 async fn queued_launch_escalates_after_max_wait() {
-    // 300ms, not 1ms: overdue entries also expire at resume time (#202), and
-    // the Pending observation below needs the entry to survive being seen.
     let Some(rig) = rig_full(None, Some(Duration::from_millis(300))).await else {
         return;
     };
-    // Fleet stays full for the whole test — the launch never gets a slot.
     rig.backend
         .fail_launch_no_capacity_if(|_| Some("no free slots on any node".to_string()));
 
@@ -1585,7 +1482,6 @@ async fn queued_launch_escalates_after_max_wait() {
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
 
-    // It queues first (Pending), then the backstop scan escalates it.
     wait_for_task(&rig.store, job.id, |t| {
         t.phase == TaskPhase::Work && t.state == TaskState::Pending
     })
@@ -1606,8 +1502,6 @@ async fn queued_launch_escalates_after_max_wait() {
         .list_for_job("acme", "api", job.id)
         .await
         .unwrap();
-    // The queued work task is Failed (not left Pending) and a Human escalation
-    // task names the wedge.
     assert!(
         tasks
             .iter()
@@ -1632,10 +1526,6 @@ async fn queued_launch_escalates_after_max_wait() {
 #[tokio::test]
 async fn queued_eval_drains_before_queued_work() {
     let Some(rig) = rig().await else { return };
-    // Phase 1: fleet full — every backend launch is refused, so both the eval
-    // (impl-cmd, agent work + command eval) and the work (cmd-work, command
-    // work) queue Pending. Phase 2: permit exactly one launch, then observe
-    // which of the two queued launches takes it.
     let full = Arc::new(AtomicBool::new(true));
     let permits = Arc::new(AtomicUsize::new(0));
     let (f, p) = (full.clone(), permits.clone());
@@ -1643,11 +1533,9 @@ async fn queued_eval_drains_before_queued_work() {
         if f.load(Ordering::SeqCst) {
             return Some("no free slots on any node".to_string());
         }
-        // Let the first drained launch through; block the rest so only the
-        // higher-priority one lands on the freed slot.
         (p.fetch_add(1, Ordering::SeqCst) >= 1).then(|| "no free slots on any node".to_string())
     });
-    commit_work(&rig); // the eval job's agent work runs via the provider and passes
+    commit_work(&rig);
     rig.backend
         .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
 
@@ -1666,7 +1554,6 @@ async fn queued_eval_drains_before_queued_work() {
         .unwrap();
     assert_invariants_of(&rig.invariants);
 
-    // Both launches park Pending under capacity pressure.
     wait_for_task(&rig.store, eval_job.id, |t| {
         t.phase == TaskPhase::Evaluation && t.state == TaskState::Pending
     })
@@ -1676,13 +1563,11 @@ async fn queued_eval_drains_before_queued_work() {
     })
     .await;
 
-    // Free one slot: the eval drains first and the eval job completes.
     full.store(false, Ordering::SeqCst);
     rig.handle.trigger_scan().await.unwrap();
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, eval_job.id, JobState::Done).await;
 
-    // The work launch never got the slot — still queued Pending, no container.
     let work = rig
         .store
         .tasks()
@@ -1717,24 +1602,18 @@ async fn queued_eval_drains_before_queued_work() {
 /// retries (#140). Same backstop the work path uses; this pins the eval arm.
 #[tokio::test]
 async fn queued_eval_escalates_after_max_wait_not_retry_exhaustion() {
-    // Wide enough to observe the stably-queued Pending state: overdue entries
-    // now also expire at resume time (#202), so a 1ms max-wait escalates
-    // before the first poll can see the queue.
     let Some(rig) = rig_full(None, Some(Duration::from_millis(300))).await else {
         return;
     };
-    // Fleet stays full forever: the eval command launch never gets a slot.
     rig.backend
         .fail_launch_no_capacity_if(|_| Some("no free slots on any node".to_string()));
-    commit_work(&rig); // agent work passes, so the job reaches Evaluation
+    commit_work(&rig);
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
     assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
 
-    // The eval queues (Pending, attempt 1 — no eval_retries burned), then the
-    // backstop scan escalates it.
     let eval = wait_for_task(&rig.store, job.id, |t| {
         t.phase == TaskPhase::Evaluation && t.state == TaskState::Pending
     })
@@ -1759,24 +1638,21 @@ async fn queued_eval_escalates_after_max_wait_not_retry_exhaustion() {
 /// relaunches the *same* task, which passes → the job lands. The command work
 /// took the earlier slot, so only the eval — the finishing-phase launch — waits.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn agent_eval_queues_on_no_capacity_then_launches_when_freed() {
-    // The provider launches through the backend (artifacts capture on), so an
-    // agent eval's launch actually reaches NoCapacity — mirroring ClaudeProvider.
     let (identity, _public) = store::secrets::generate_age_keypair();
     let Some(rig) = rig_full(Some(identity), None).await else {
         return;
     };
-    // Command work launches fine; only the agent eval container (cmd `["agent"]`)
-    // is refused while the fleet is full, so the queued launch is the eval.
     let full = Arc::new(AtomicBool::new(true));
     let f = full.clone();
     rig.backend.fail_launch_no_capacity_if(move |cfg| {
         (f.load(Ordering::SeqCst) && cfg.cmd.iter().any(|c| c == "agent"))
             .then(|| "no free slots on any node".to_string())
     });
-    // The agent eval passes once it finally runs (task 2 on the only job).
     let h = rig.handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -1801,8 +1677,6 @@ async fn agent_eval_queues_on_no_capacity_then_launches_when_freed() {
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
 
-    // The agent eval parks Pending (queued) — attempt 1, no eval_retries burned —
-    // holding the job in Evaluation rather than escalating on retry exhaustion.
     let eval = wait_for_task(&rig.store, job.id, |t| {
         t.phase == TaskPhase::Evaluation && t.state == TaskState::Pending
     })
@@ -1839,8 +1713,6 @@ async fn agent_eval_queues_on_no_capacity_then_launches_when_freed() {
         "a task-queued event surfaces the wait",
     );
 
-    // Free a slot; the scan drives the drain and the eval relaunches the *same*
-    // task, passes, and the job lands.
     full.store(false, Ordering::SeqCst);
     rig.handle.trigger_scan().await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -1876,7 +1748,6 @@ async fn agent_eval_escalates_after_max_wait_not_retry_exhaustion() {
     let Some(rig) = rig_full(Some(identity), Some(Duration::from_millis(100))).await else {
         return;
     };
-    // The agent eval container is refused forever; command work still launches.
     rig.backend.fail_launch_no_capacity_if(|cfg| {
         cfg.cmd
             .iter()
@@ -1889,11 +1760,6 @@ async fn agent_eval_escalates_after_max_wait_not_retry_exhaustion() {
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
 
-    // A starved agent eval ping-pongs between the queue and an optimistic
-    // relaunch, so its Pending state is only ever transient — the assertions
-    // target the outcomes: the backstop escalates with the queue-timeout
-    // reason (never eval_infra_failure), and the whole wait burned zero
-    // eval_retries (the failed record still says attempt 1).
     tokio::time::sleep(Duration::from_millis(200)).await;
     rig.handle.trigger_scan().await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -1928,17 +1794,15 @@ async fn agent_eval_escalates_after_max_wait_not_retry_exhaustion() {
 /// (never restamped), exactly one eval task runs at attempt 1 (no `eval_retries`
 /// burned), and the resumed record drops its `QueuedForCapacity` badge.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn agent_eval_redefer_preserves_queue_time_and_burns_no_retries() {
     let (identity, _public) = store::secrets::generate_age_keypair();
     let Some(rig) = rig_full(Some(identity), None).await else {
         return;
     };
-    // The agent eval container (cmd `["agent"]`) is refused while the fleet is
-    // full; command work always launches. After capacity returns, the first
-    // resume still loses the slot race exactly once (`redefer`), forcing the
-    // re-defer under test; the next resume places.
     let full = Arc::new(AtomicBool::new(true));
     let redefer = Arc::new(AtomicBool::new(true));
     let (f, rd) = (full.clone(), redefer.clone());
@@ -1975,20 +1839,14 @@ async fn agent_eval_redefer_preserves_queue_time_and_burns_no_retries() {
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
 
-    // Observe the queued eval and capture its enqueue time; the re-defer must
-    // keep this exact value (a reset would restamp it to a later `now`).
     let queued = wait_for_task(&rig.store, job.id, |t| {
         t.phase == TaskPhase::Evaluation && t.state == TaskState::Pending
     })
     .await;
     assert_eq!(queued.attempt, 1, "queueing burns no eval_retries");
     let first_queued_at = queued.queued_at.expect("a queued eval carries queued_at");
-    // A measurable gap so a *reset* on the re-defer would land at a distinctly
-    // later `now` — the assertion below would then catch it.
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    // Free a slot; the first resume re-defers (loses the race), the next places
-    // the same task, which passes → the job lands.
     full.store(false, Ordering::SeqCst);
     rig.handle.trigger_scan().await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -2039,15 +1897,13 @@ async fn agent_eval_redefer_preserves_queue_time_and_burns_no_retries() {
 #[tokio::test]
 async fn eval_exhaustion_retry_reruns_evaluation_without_new_work() {
     let Some(rig) = rig().await else { return };
-    // The command eval is refused at launch until we clear the flag, so
-    // eval_retries exhausts and the job escalates with `eval_infra_failure`.
     let fail = Arc::new(AtomicBool::new(true));
     let f = fail.clone();
     rig.backend.fail_launch_if(move |_| {
         f.load(Ordering::SeqCst)
             .then(|| "invalid memory limit \"5g\"".to_string())
     });
-    commit_work(&rig); // agent work passes → job reaches Evaluation
+    commit_work(&rig);
     rig.backend
         .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
 
@@ -2057,8 +1913,6 @@ async fn eval_exhaustion_retry_reruns_evaluation_without_new_work() {
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
-    // Read twice — once side of the Retry, once the other — so hoisting the
-    // fetch keeps the two reads provably identical.
     let tasks_now = || async {
         rig.store
             .tasks()
@@ -2075,10 +1929,8 @@ async fn eval_exhaustion_retry_reruns_evaluation_without_new_work() {
         .iter()
         .find(|t| matches!(t.kind, types::TaskKind::Human { .. }) && t.state == TaskState::Pending)
         .expect("a Human escalation task");
-    // #141: escalation tasks are stamped with their own phase, not Work.
     assert_eq!(esc.phase, TaskPhase::Escalation);
 
-    // Clear the fleet fault and Retry: evaluation re-runs, no new work.
     fail.store(false, Ordering::SeqCst);
     rig.handle
         .resolve_task(
@@ -2098,21 +1950,18 @@ async fn eval_exhaustion_retry_reruns_evaluation_without_new_work() {
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
     let after = tasks_now().await;
-    // No new work task: work still ran exactly once, still attempt 1.
     let works: Vec<_> = after
         .iter()
         .filter(|t| t.phase == TaskPhase::Work)
         .collect();
     assert_eq!(works.len(), 1, "Retry re-ran evaluation, not work (#141)");
     assert_eq!(works[0].attempt, 1, "work attempt counter untouched");
-    // A fresh eval fan-out ran after the retry and passed.
     assert!(
         after
             .iter()
             .any(|t| t.phase == TaskPhase::Evaluation && t.state == TaskState::Done),
         "the retried evaluation produced a passing eval task: {after:?}",
     );
-    // Cycle never bumped — a retry is not a rework.
     assert!(
         after.iter().all(|t| t.cycle == 1),
         "cycle stays 1 across the escalation retry: {after:?}",
@@ -2125,9 +1974,8 @@ async fn eval_exhaustion_retry_reruns_evaluation_without_new_work() {
 #[tokio::test]
 async fn wrap_up_task_carries_label() {
     let Some(rig) = rig().await else { return };
-    commit_work(&rig); // agent work for the named job
-    commit_work(&rig); // agent work for the derived job
-    // Explicit name → the wrap-up task's label is exactly it.
+    commit_work(&rig);
+    commit_work(&rig);
     let named = rig.handle.create_job(req("webpub-named")).await.unwrap();
     assert_invariants_of(&rig.invariants);
     rig.handle
@@ -2149,7 +1997,6 @@ async fn wrap_up_task_carries_label() {
         .expect("a wrap-up task");
     assert_eq!(wrap.label.as_deref(), Some("publish"));
 
-    // Unset name → derived from the publish script's basename.
     let derived = rig.handle.create_job(req("webpub")).await.unwrap();
     assert_invariants_of(&rig.invariants);
     rig.handle
@@ -2209,8 +2056,10 @@ work:
 /// Full launch wiring (§4.2/§8.2): the channel MCP binary is injected with
 /// its config entry, and declared secrets arrive age-decrypted in the env.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -2229,7 +2078,6 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
         .await;
     clone.push("main").await;
 
-    // Encrypted write with the public key (the API layer's path)…
     let (identity, public_key) = store::secrets::generate_age_keypair();
     let secrets_bucket = store.raw_bucket(store::buckets::SECRETS).await.unwrap();
     {
@@ -2240,8 +2088,6 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
             .set("acme", "api", "DEPLOY_KEY", "s3cret-value")
             .await
             .unwrap();
-        // Platform agent credential (reserved global/agents scope): reaches
-        // every agent container without any declaration in the job type.
         api_side
             .set("global", "agents", "PROVIDER_TOKEN", "tok-123")
             .await
@@ -2257,7 +2103,6 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
         .await
         .unwrap();
 
-    // SSH front enabled: generate a CA so launches carry a job cert (§5.2).
     let ssh_ca = repo.bare_path().parent().unwrap().join("ssh_ca");
     let status = tokio::process::Command::new("ssh-keygen")
         .args([
@@ -2276,7 +2121,6 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
 
     let provider = Arc::new(FakeProvider::new());
     {
-        // Work produces a commit so the job clears the §3.2 empty-output guard.
         let bare = repo.bare_path();
         provider.on_run(move |cfg| async move {
             let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
@@ -2322,12 +2166,10 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
 
     let runs = provider.runs();
     assert_eq!(runs.len(), 1);
-    // …decrypted read at launch (the dispatcher's path).
     assert_eq!(
         runs[0].env.get("DEPLOY_KEY").map(String::as_str),
         Some("s3cret-value")
     );
-    // Platform agent credential injected without being declared anywhere.
     assert_eq!(
         runs[0].env.get("PROVIDER_TOKEN").map(String::as_str),
         Some("tok-123")
@@ -2338,7 +2180,6 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
         "/usr/local/bin/chuggernaut-channel"
     );
     assert!(runs[0].mcp_servers[0].env.contains_key("NATS_URL"));
-    // §7.4: per-launch scoped credentials, forwarded to the channel binary.
     let creds = runs[0]
         .env
         .get("NATS_CREDS")
@@ -2349,7 +2190,6 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
         runs[0].env.get("CHANNEL_ROLE").map(String::as_str),
         Some("work")
     );
-    // Channel binary + §5.2 job SSH credential (key 0600 + cert).
     let paths: Vec<&str> = runs[0]
         .files
         .iter()
@@ -2382,17 +2222,16 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
 /// died with its container: the provider dropped the container id, so nothing
 /// could name the file even though the container itself was never removed.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn agent_run_captures_transcript_logs_and_measured_usage() {
     let (identity, _public) = store::secrets::generate_age_keypair();
     let Some(rig) = rig_with_artifacts(Some(identity.clone())).await else {
         return;
     };
 
-    // stdout as the real CLI emits it under `--output-format stream-json`: a
-    // stream of JSONL events whose final `type:"result"` event carries the
-    // authoritative usage. Harvesting scans for the last parseable line.
     rig.backend.put_logs(
         br#"Cloning into '/workspace'...
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}],"usage":{"input_tokens":1200,"output_tokens":10}},"session_id":"s"}
@@ -2403,8 +2242,6 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
     let bare = rig.repo.bare_path();
     let backend = rig.backend.clone();
     rig.provider.on_run(move |cfg| async move {
-        // The CLI writes its transcript keyed by the session id the dispatcher
-        // chose; put it exactly where `--session-id` + CLAUDE_CONFIG_DIR say.
         backend.put_file(
             &agent::transcript_path(&cfg.session_id),
             br#"{"type":"user","message":"do it"}"#.to_vec(),
@@ -2429,8 +2266,6 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
     let log = tasks.list_for_job("acme", "api", job.id).await.unwrap();
     let work = log.iter().find(|t| t.phase == TaskPhase::Work).unwrap();
 
-    // The session id is persisted, so the transcript stays addressable after a
-    // restart rather than being lost with the process.
     let session_id = work
         .session_id
         .clone()
@@ -2462,8 +2297,6 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
         .expect("stdout captured");
     assert!(String::from_utf8_lossy(&stdout).contains("Cloning into"));
 
-    // Usage is measured from the CLI's own result object, not self-reported —
-    // the agent here never called submit_result with a token_usage.
     match work.result.as_ref().expect("work result") {
         types::TaskResult::Work { token_usage, .. } => {
             let u = token_usage.as_ref().expect("measured usage");
@@ -2475,8 +2308,6 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
         other => panic!("unexpected work result: {other:?}"),
     }
 
-    // The command evaluator's container logs are captured too — TaskResult
-    // carries no output, so this is the only record of what it printed.
     let eval = log
         .iter()
         .find(|t| t.phase == TaskPhase::Evaluation)
@@ -2489,13 +2320,9 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
             .is_some(),
         "eval container logs captured"
     );
-    // Command evals run no agent, so they have no session.
     assert!(eval.session_id.is_none());
     assert!(!session_id.is_empty());
 
-    // The leak fix (spec §3.1): every container the job ran is removed once its
-    // result is recorded. The artifacts above were all read out first, so this
-    // proves capture-happens-before-removal — a job leaves nothing on the node.
     let removed = rig.backend.removed();
     assert_eq!(
         removed.len(),
@@ -2504,8 +2331,6 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
     );
     assert_invariants_of(&rig.invariants);
 }
-
-// ── Lifecycle generalization (design-lifecycle.md) ───────────────────────
 
 const DEPLOY_NONE: &str = r#"
 name: deploy-none
@@ -2532,7 +2357,6 @@ async fn finalize_none_completes_without_merging() {
         .await;
     clone.push("main").await;
 
-    // The "agent" commits scratch to its branch, like a deploy that jots notes.
     let bare = rig.repo.bare_path();
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
@@ -2549,7 +2373,6 @@ async fn finalize_none_completes_without_merging() {
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
-    // The evaluator still ran; nothing landed on main; the branch is gone.
     let tasks = rig
         .store
         .tasks()
@@ -2597,8 +2420,6 @@ async fn wrap_up_command_runs_after_merge_against_main() {
             .await;
         clone.push(&branch).await;
     });
-    // The publish container clones main and, in the moment it runs, must see the
-    // merged content already on the default branch.
     let repos_root = rig
         .repo
         .bare_path()
@@ -2628,7 +2449,6 @@ async fn wrap_up_command_runs_after_merge_against_main() {
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
-    // Task log: work Done, then the WrapUp command task Done.
     let tasks = rig
         .store
         .tasks()
@@ -2644,8 +2464,6 @@ async fn wrap_up_command_runs_after_merge_against_main() {
     assert_eq!(wrapup.state, TaskState::Done);
     assert!(matches!(wrapup.kind, types::TaskKind::Command { .. }));
 
-    // The single backend launch is the publish, and it cloned the DEFAULT
-    // branch (merged main), not the scratch job branch.
     let launches = rig.backend.launches();
     assert_eq!(
         launches.len(),
@@ -2678,7 +2496,7 @@ async fn wrap_up_command_failure_escalates_but_merge_stays() {
             .await;
         clone.push(&branch).await;
     });
-    rig.backend.script_exits([7]); // the publish command fails
+    rig.backend.script_exits([7]);
 
     let job = rig.handle.create_job(req("webpub")).await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -2686,7 +2504,6 @@ async fn wrap_up_command_failure_escalates_but_merge_stays() {
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
-    // The merge stands — the change is on main despite the failed publish.
     let merged = rig
         .repo
         .manager
@@ -2699,7 +2516,6 @@ async fn wrap_up_command_failure_escalates_but_merge_stays() {
         "a failed publish must not un-merge the landed squash"
     );
 
-    // The WrapUp command is Failed and a Human escalation task is open.
     let tasks = rig
         .store
         .tasks()
@@ -2740,7 +2556,7 @@ async fn wrap_up_failure_retry_reruns_only_publish() {
             .await;
         clone.push(&branch).await;
     });
-    rig.backend.script_exits([7, 0]); // publish fails, then succeeds on retry
+    rig.backend.script_exits([7, 0]);
 
     let job = rig.handle.create_job(req("webpub")).await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -2763,7 +2579,6 @@ async fn wrap_up_failure_retry_reruns_only_publish() {
         .expect("a Human escalation task");
     assert_eq!(esc.phase, TaskPhase::Escalation);
 
-    // Retry: re-run only the publish.
     rig.handle
         .resolve_task(
             "acme",
@@ -2813,29 +2628,26 @@ async fn wrap_up_failure_retry_reruns_only_publish() {
 async fn revoked_job_never_runs_wrap_up_command() {
     let Some(rig) = rig().await else { return };
 
-    // Hold the work agent open so the revoke lands while the job is in Work —
-    // well before any merge or wrap-up.
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let (s2, r2) = (started.clone(), release.clone());
     rig.provider.on_run(move |_cfg| async move {
         s2.notify_one();
-        r2.notified().await; // block until the test lets go
+        r2.notified().await;
     });
 
     let job = rig.handle.create_job(req("webpub")).await.unwrap();
     assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
-    started.notified().await; // work is running
+    started.notified().await;
     wait_for_state(&rig.store, job.id, JobState::Work).await;
 
     rig.handle.revoke_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
-    release.notify_one(); // let the (now-orphaned) work run return
+    release.notify_one();
 
     wait_for_state(&rig.store, job.id, JobState::Revoked).await;
-    // Give any erroneous follow-on work a moment to (not) happen.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let tasks = rig
@@ -2868,9 +2680,6 @@ async fn revoked_job_never_runs_wrap_up_command() {
 async fn late_exit_after_revoke_is_ignored_and_core_survives() {
     let Some(rig) = rig().await else { return };
 
-    // Hold the agent run open so the revoke lands mid-Work. Exit 0 matters:
-    // on a Revoked job the no-output guard is skipped (it only applies in
-    // Work), so the exit runs straight into eval entry.
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let (s2, r2) = (started.clone(), release.clone());
@@ -2889,7 +2698,7 @@ async fn late_exit_after_revoke_is_ignored_and_core_survives() {
     rig.handle.revoke_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Revoked).await;
-    release.notify_one(); // the orphaned run now returns, exit 0
+    release.notify_one();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -2916,7 +2725,7 @@ async fn eval_abort_escalates_without_consuming_rework_budget() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
 
-    commit_work(&rig); // work cycle 1 produces a commit
+    commit_work(&rig);
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -2938,7 +2747,6 @@ async fn eval_abort_escalates_without_consuming_rework_budget() {
         .unwrap();
     });
 
-    // impl-agent has rework_budget: 1 — abort must not spend it.
     let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
     assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
@@ -2995,7 +2803,6 @@ async fn staged_eval_review_passes_then_ci_runs_and_merges() {
     });
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
-        // Stage-0 review verdict (task 2).
         h.submit_eval(
             "acme",
             "api",
@@ -3027,13 +2834,11 @@ async fn staged_eval_review_passes_then_ci_runs_and_merges() {
         .list_for_job("acme", "api", job.id)
         .await
         .unwrap();
-    // work(1), review(2, stage 0), ci(3, stage 1) — nothing else.
     assert_eq!(tasks.len(), 3);
     assert_eq!(tasks[1].evaluator.as_deref(), Some("review"));
     assert_eq!(tasks[1].stage, 0);
     assert_eq!(tasks[2].evaluator.as_deref(), Some("ci"));
     assert_eq!(tasks[2].stage, 1);
-    // The gate is ordered: ci is created only after review completes.
     assert!(tasks[2].created_at >= tasks[1].completed_at.unwrap());
     assert_eq!(
         rig.provider.runs().len(),
@@ -3051,10 +2856,9 @@ async fn staged_eval_required_review_fail_skips_ci_and_reworks_from_stage0() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
 
-    commit_work(&rig); // work cycle 1 produces a commit
+    commit_work(&rig);
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
-        // Stage-0 review fails (task 2) → short-circuit; no ci this cycle.
         h.submit_eval(
             "acme",
             "api",
@@ -3071,10 +2875,9 @@ async fn staged_eval_required_review_fail_skips_ci_and_reworks_from_stage0() {
         .await
         .unwrap();
     });
-    rig.provider.on_run(|_| async {}); // work cycle 2
+    rig.provider.on_run(|_| async {});
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
-        // Rework restarts at stage 0: review again (task 4), now passing.
         h.submit_eval(
             "acme",
             "api",
@@ -3113,10 +2916,8 @@ async fn staged_eval_required_review_fail_skips_ci_and_reworks_from_stage0() {
                 && t.evaluator.as_deref() == Some("ci")
         })
     };
-    // Cycle 1's failed review created no ci task; cycle 2's passing review did.
     assert!(!ci(1), "stage-1 ci must not run when stage-0 review fails");
     assert!(ci(2), "ci runs once review passes on the rework cycle");
-    // The rework cycle re-opened at stage 0 with a fresh review task.
     assert!(tasks.iter().any(|t| {
         t.phase == TaskPhase::Evaluation
             && t.cycle == 2
@@ -3134,7 +2935,7 @@ async fn staged_eval_advisory_review_fail_still_runs_ci() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
 
-    commit_work(&rig); // work produces a commit
+    commit_work(&rig);
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -3143,7 +2944,7 @@ async fn staged_eval_advisory_review_fail_still_runs_ci() {
             1,
             2,
             EvalSubmission {
-                pass: false, // advisory fail
+                pass: false,
                 abort: false,
                 structured: None,
                 token_usage: None,
@@ -3168,7 +2969,6 @@ async fn staged_eval_advisory_review_fail_still_runs_ci() {
         .list_for_job("acme", "api", job.id)
         .await
         .unwrap();
-    // work(1), advisory review(2, failed), ci(3, passed) → merged.
     assert_eq!(tasks.len(), 3);
     assert!(matches!(
         tasks[1].result,
@@ -3186,7 +2986,7 @@ async fn staged_eval_stage0_abort_escalates_without_ci() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
 
-    commit_work(&rig); // work produces a commit
+    commit_work(&rig);
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -3221,7 +3021,6 @@ async fn staged_eval_stage0_abort_escalates_without_ci() {
         .list_for_job("acme", "api", job.id)
         .await
         .unwrap();
-    // work(1), review abort(2), Human escalation(3) — no ci ever.
     assert_eq!(tasks.len(), 3);
     assert!(
         !tasks.iter().any(|t| t.evaluator.as_deref() == Some("ci")),
@@ -3237,12 +3036,12 @@ async fn staged_eval_stage0_abort_escalates_without_ci() {
 async fn job_level_evaluators_run_alongside_type_evaluators() {
     let Some(rig) = rig().await else { return };
 
-    commit_work(&rig); // work must produce output to reach Evaluation
-    let mut r = req("flaky"); // type declares no evaluators
+    commit_work(&rig);
+    let mut r = req("flaky");
     r.eval = vec![types::Evaluator {
         name: "extra-ci".into(),
         r#type: types::EvaluatorType::Command,
-        image: None, // falls back to the type's top-level image
+        image: None,
         run: Some("./ci.sh".into()),
         prompt: None,
         provider: None,
@@ -3281,8 +3080,8 @@ async fn job_level_evaluators_run_alongside_type_evaluators() {
 async fn knowledge_tags_inject_into_work_system_prompt() {
     let Some(rig) = rig().await else { return };
 
-    commit_work(&rig); // work must produce output to reach Done
-    let mut create = req("flaky"); // type declares knowledge: [rust]
+    commit_work(&rig);
+    let mut create = req("flaky");
     create.knowledge_tags = vec!["style".into(), "no-such-tag".into()];
     let job = rig.handle.create_job(create).await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -3311,7 +3110,7 @@ async fn knowledge_tags_inject_into_work_system_prompt() {
 async fn job_evaluator_name_collision_fails_release() {
     let Some(rig) = rig().await else { return };
 
-    let mut r = req("impl-cmd"); // type declares evaluator "tests"
+    let mut r = req("impl-cmd");
     r.eval = vec![types::Evaluator {
         name: "tests".into(),
         r#type: types::EvaluatorType::Command,
@@ -3324,7 +3123,7 @@ async fn job_evaluator_name_collision_fails_release() {
         required: None,
         stage: 0,
     }];
-    let job = rig.handle.create_job(r).await.unwrap(); // creation always lands Frozen
+    let job = rig.handle.create_job(r).await.unwrap();
     assert_invariants_of(&rig.invariants);
     let err = rig
         .handle
@@ -3345,10 +3144,9 @@ async fn finalize_hard_failure_escalates_instead_of_wedging() {
     let handle = rig.handle.clone();
     let bare = rig.repo.bare_path();
 
-    commit_work(&rig); // work commits real content so wrap-up has a squash to run
+    commit_work(&rig);
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
-        // Sabotage wrap-up: the branch vanishes before the squash-merge.
         let out = tokio::process::Command::new("git")
             .args([
                 "-C",
@@ -3403,8 +3201,6 @@ async fn finalize_hard_failure_escalates_instead_of_wedging() {
     assert_invariants_of(&rig.invariants);
 }
 
-// ── Issue #31: per-job timeout override + operator-dispatched triage ────────
-
 /// The per-job `Job.timeout` override (§1.1) drives the Work agent's own run
 /// timeout, while the evaluator keeps the type default — the override is
 /// Work-scoped. Asserted at the mechanism: the recorded run configs.
@@ -3413,7 +3209,7 @@ async fn work_timeout_override_applies_to_work_not_eval() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
 
-    commit_work(&rig); // work c1 produces a commit
+    commit_work(&rig);
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -3443,7 +3239,6 @@ async fn work_timeout_override_applies_to_work_not_eval() {
 
     let runs = rig.provider.runs();
     assert_eq!(runs.len(), 2);
-    // Work: the 45m override. Eval: the type default (no `resources` → 1h).
     assert_eq!(runs[0].task_timeout, Duration::from_secs(45 * 60));
     assert_eq!(runs[1].task_timeout, Duration::from_secs(3600));
     assert_invariants_of(&rig.invariants);
@@ -3454,11 +3249,10 @@ async fn work_timeout_override_applies_to_work_not_eval() {
 #[tokio::test]
 async fn work_timeout_override_times_out_running_work_task() {
     let Some(rig) = rig().await else { return };
-    // The work "container" never exits on its own — the scan must end it.
     rig.provider
         .on_run(|_| async { tokio::time::sleep(Duration::from_secs(30)).await });
 
-    let mut create = req("impl-agent"); // no work_retries → escalates on first fail
+    let mut create = req("impl-agent");
     create.timeout = Some("1s".into());
     let job = rig.handle.create_job(create).await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -3466,7 +3260,6 @@ async fn work_timeout_override_times_out_running_work_task() {
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Work).await;
 
-    // Age the Running work task past the 1s override, then scan.
     tokio::time::sleep(Duration::from_millis(1200)).await;
     rig.handle.trigger_scan().await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -3495,8 +3288,7 @@ async fn work_timeout_override_times_out_running_work_task() {
 #[tokio::test]
 async fn eval_task_ignores_work_timeout_override() {
     let Some(rig) = rig().await else { return };
-    commit_work(&rig); // work c1: produces a commit and exits immediately
-    // Eval "container" blocks so it is Running when the scan fires.
+    commit_work(&rig);
     rig.provider
         .on_run(|_| async { tokio::time::sleep(Duration::from_secs(30)).await });
 
@@ -3508,7 +3300,6 @@ async fn eval_task_ignores_work_timeout_override() {
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Evaluation).await;
 
-    // Age well past the 1s work override; the eval task's 1h default protects it.
     tokio::time::sleep(Duration::from_millis(1200)).await;
     rig.handle.trigger_scan().await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -3553,8 +3344,8 @@ async fn eval_task_ignores_work_timeout_override() {
 async fn malformed_timeout_override_rejected_at_release() {
     let Some(rig) = rig().await else { return };
     let mut create = req("impl-agent");
-    create.timeout = Some("2 hours".into()); // not a valid duration string
-    let job = rig.handle.create_job(create).await.unwrap(); // creation is permissive
+    create.timeout = Some("2 hours".into());
+    let job = rig.handle.create_job(create).await.unwrap();
     assert_invariants_of(&rig.invariants);
     let err = rig
         .handle
@@ -3581,7 +3372,6 @@ async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
         return;
     };
 
-    // Drive the job to Escalated: both work attempts fail (flaky: work_retries 1).
     rig.provider.script_exits([2, 3]);
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -3589,7 +3379,6 @@ async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
-    // The triage agent's assessment rides the CLI's JSON `result` on stdout.
     rig.backend.put_logs(
         br#"{"type":"result","subtype":"success","is_error":false,"result":"Root cause: the work container exited non-zero on both attempts. Recommend Revoke.","session_id":"t","usage":{"input_tokens":10,"output_tokens":20}}"#
             .to_vec(),
@@ -3598,8 +3387,6 @@ async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
     rig.handle.triage_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
 
-    // Wait for the Triage task to land with a recorded assessment (#206
-    // principle 3): watch the job's task keys, inspecting each revision.
     let triage = test_utils::wait::task_where(
         &rig.store,
         "acme",
@@ -3617,7 +3404,6 @@ async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
         other => panic!("expected a Triage result, got {other:?}"),
     }
 
-    // Advisory: the job state is untouched.
     let job_now = rig
         .store
         .jobs()
@@ -3629,7 +3415,6 @@ async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
         .unwrap();
     assert_eq!(job_now.state, JobState::Escalated);
 
-    // The run used the platform triage image and carried no channel MCP.
     let last = rig.provider.runs().pop().unwrap();
     assert_eq!(last.image, "triage:latest");
     assert!(
@@ -3643,7 +3428,6 @@ async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
 #[tokio::test]
 async fn triage_rejected_on_non_intervention_state() {
     let Some(rig) = rig().await else { return };
-    // A freshly created job is Frozen.
     let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
     assert_invariants_of(&rig.invariants);
     let err = rig
@@ -3674,10 +3458,6 @@ async fn wait_for_work_task(store: &NatsStore, seq: u64) -> types::Task {
     .await
 }
 
-// §12.4 model resolution: a per-job `Job.model` override lands on the Work
-// agent task. `impl-cmd` declares no `work.model`, this rig has no
-// `jobs/_defaults.yaml` and no platform `agent_model_default`, so the override
-// is the only source — proving it flows create → launch → the task's kind.
 #[tokio::test]
 async fn per_job_model_override_reaches_work_task() {
     let Some(rig) = rig().await else { return };
@@ -3698,8 +3478,6 @@ async fn per_job_model_override_reaches_work_task() {
     assert_invariants_of(&rig.invariants);
 }
 
-// The baseline: with no override, no project default, and no platform default,
-// the Work agent's model resolves to None (the provider's built-in default).
 #[tokio::test]
 async fn work_task_model_none_without_any_default() {
     let Some(rig) = rig().await else { return };
@@ -3721,8 +3499,6 @@ async fn work_task_model_none_without_any_default() {
 /// survives on the finished record.
 #[tokio::test]
 async fn work_container_id_recorded_while_running_and_kept_after_exit() {
-    // Artifacts identity makes the fake provider launch through the backend, so
-    // the run reports a container id (as the real ClaudeProvider does).
     let (identity, _public) = store::secrets::generate_age_keypair();
     let Some(rig) = rig_with_artifacts(Some(identity)).await else {
         return;
@@ -3730,10 +3506,6 @@ async fn work_container_id_recorded_while_running_and_kept_after_exit() {
     let bare = rig.repo.bare_path();
     let store = rig.store.clone();
     rig.provider.on_run(move |cfg| async move {
-        // The "container" is alive until this hook returns: the id must already
-        // be on the Running task record by now.
-        // Resolves only once the Running work task carries a container id, so
-        // reaching past it is itself the assertion (#206 principle 3).
         let work = test_utils::wait::task_where(
             &store,
             "acme",
@@ -3747,7 +3519,6 @@ async fn work_container_id_recorded_while_running_and_kept_after_exit() {
             work.container_id.is_some(),
             "container_id must be set while the work task is Running"
         );
-        // Commit so the job lands real content.
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
         let clone = clone_branch_from(&bare, &branch).await;
         clone
@@ -3762,7 +3533,6 @@ async fn work_container_id_recorded_while_running_and_kept_after_exit() {
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Done).await;
 
-    // Kept after exit: the completed record still names its container.
     let work = wait_for_work_task(&rig.store, job.id).await;
     assert_eq!(work.state, TaskState::Done);
     assert!(
@@ -3780,7 +3550,7 @@ async fn work_container_id_recorded_while_running_and_kept_after_exit() {
 async fn abort_verdict_escalates_with_recorded_reason() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
-    commit_work(&rig); // work c1 produces a commit
+    commit_work(&rig);
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -3817,8 +3587,6 @@ async fn abort_verdict_escalates_with_recorded_reason() {
     assert_invariants_of(&rig.invariants);
 }
 
-// ── #167: evaluator failures carry evidence ─────────────────────────────────
-
 /// #167 fix 1: a failing command evaluator embeds the captured output tail in
 /// `result.output` (was hardcoded empty), and the tail is size-capped and
 /// stderr-biased — the LAST bytes survive the cap, the head is dropped. This is
@@ -3826,22 +3594,19 @@ async fn abort_verdict_escalates_with_recorded_reason() {
 #[tokio::test]
 async fn failing_command_eval_embeds_size_capped_output_tail() {
     let Some(rig) = rig().await else { return };
-    commit_work(&rig); // agent work produces output → Evaluation
+    commit_work(&rig);
 
-    // A large captured stream: a unique HEAD marker at the very start, a unique
-    // TAIL marker at the very end, padded past the ~8 KB cap in between.
     let big = format!(
         "HEAD_MARKER_dropped_by_cap\n{}\nTAIL_MARKER_assertion_failed_at_foo_rs_42",
         "x".repeat(20_000)
     );
     rig.backend.put_logs(big.clone().into_bytes());
-    rig.backend.script_exits([101]); // the ci container exits non-zero
+    rig.backend.script_exits([101]);
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
     assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
-    // impl-cmd has no rework budget: a product failure escalates.
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
     let tasks = rig
@@ -3895,8 +3660,6 @@ async fn no_output_command_eval_retries_without_burning_retries_then_escalates()
     let Some(rig) = rig().await else { return };
     commit_work(&rig);
 
-    // Every ci launch is SIGKILLed (137) before it can judge; logs stay empty
-    // (never call put_logs), so every attempt is an evidence-free no-output loss.
     rig.backend.script_exits([137, 137, 137, 137, 137]);
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
@@ -3934,7 +3697,6 @@ async fn no_output_command_eval_retries_without_burning_retries_then_escalates()
         );
         assert!(t.infra_loss, "each no-output loss is stamped infra_loss");
     }
-    // No rework was triggered: the single Work task is the only one.
     assert_eq!(
         tasks.iter().filter(|t| t.phase == TaskPhase::Work).count(),
         1,
@@ -3959,14 +3721,14 @@ async fn no_output_command_eval_retries_without_burning_retries_then_escalates()
 /// discarded. (This is the prod scenario the #198 hotfix protects: a failing
 /// review with empty log capture must rework, not silently retry into a pass.)
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn agent_eval_fail_with_findings_empty_output_reworks_not_invalid() {
     let Some(rig) = rig().await else { return };
     let handle = rig.handle.clone();
-    commit_work(&rig); // work c1 commits → Evaluation (provider run 0)
-    // eval c1 (task 2): FAIL with findings. Agent evals carry no captured output,
-    // so this is precisely "a delivered verdict with an empty stream".
+    commit_work(&rig);
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -3985,7 +3747,6 @@ async fn agent_eval_fail_with_findings_empty_output_reworks_not_invalid() {
         .await
         .unwrap();
     });
-    // work c2 (rework): commit a distinct file so the branch diffs.
     let bare = rig.repo.bare_path();
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
@@ -3995,7 +3756,6 @@ async fn agent_eval_fail_with_findings_empty_output_reworks_not_invalid() {
             .await;
         clone.push(&branch).await;
     });
-    // eval c2 (task 4): PASS → Done.
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -4029,14 +3789,12 @@ async fn agent_eval_fail_with_findings_empty_output_reworks_not_invalid() {
         .list_for_job("acme", "api", job.id)
         .await
         .unwrap();
-    // The FAIL verdict reworked: a cycle-2 work task exists.
     assert!(
         tasks
             .iter()
             .any(|t| t.phase == TaskPhase::Work && t.cycle == 2 && t.evaluator.is_none()),
         "an agent FAIL verdict must rework, not retry: {tasks:#?}"
     );
-    // The cycle-1 eval recorded a real product FAIL verdict — never an infra loss.
     let eval1 = tasks
         .iter()
         .find(|t| t.phase == TaskPhase::Evaluation && t.cycle == 1)
@@ -4057,7 +3815,6 @@ async fn agent_eval_fail_with_findings_empty_output_reworks_not_invalid() {
         eval1.attempt, 1,
         "the verdict is taken on attempt 1, no relaunch"
     );
-    // The invalid no-output path was never taken.
     let no_output = job_events(&rig.store, job.id)
         .await
         .into_iter()
@@ -4078,9 +3835,7 @@ async fn agent_eval_fail_with_findings_empty_output_reworks_not_invalid() {
 #[tokio::test]
 async fn agent_eval_no_verdict_no_output_retries_without_burning_eval_retries_then_escalates() {
     let Some(rig) = rig().await else { return };
-    commit_work(&rig); // work c1 commits → Evaluation
-    // No eval hooks registered: every agent eval run exits without a submit_eval
-    // and carries no output → an evidence-free no-verdict loss each time.
+    commit_work(&rig);
 
     let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -4130,8 +3885,7 @@ async fn agent_eval_no_verdict_no_output_retries_without_burning_eval_retries_th
 #[tokio::test]
 async fn normal_nonzero_command_eval_empty_output_reworks() {
     let Some(rig) = rig().await else { return };
-    commit_work(&rig); // work c1 commits → Evaluation (provider run 0)
-    // work c2 (rework): commit a distinct file so the reworked branch diffs.
+    commit_work(&rig);
     let bare = rig.repo.bare_path();
     rig.provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
@@ -4141,7 +3895,6 @@ async fn normal_nonzero_command_eval_empty_output_reworks() {
             .await;
         clone.push(&branch).await;
     });
-    // ci c1 exits 1 (a real fail, empty output) → rework; ci c2 exits 0 → pass.
     rig.backend.script_exits([1, 0]);
 
     let job = rig.handle.create_job(req("impl-cmd-rework")).await.unwrap();
@@ -4158,14 +3911,12 @@ async fn normal_nonzero_command_eval_empty_output_reworks() {
         .list_for_job("acme", "api", job.id)
         .await
         .unwrap();
-    // The exit-1 fail reworked: a cycle-2 work task exists.
     assert!(
         tasks
             .iter()
             .any(|t| t.phase == TaskPhase::Work && t.cycle == 2 && t.evaluator.is_none()),
         "a normal non-zero command exit must rework, not retry: {tasks:#?}"
     );
-    // The cycle-1 eval recorded a real product FAIL (exit 1), never an infra loss.
     let eval1 = tasks
         .iter()
         .find(|t| t.phase == TaskPhase::Evaluation && t.cycle == 1)
@@ -4202,7 +3953,6 @@ async fn passing_command_eval_embeds_tail_and_reaches_done_unchanged() {
     let Some(rig) = rig().await else { return };
     commit_work(&rig);
     rig.backend.put_logs(b"all 42 tests passed".to_vec());
-    // No scripted exit → the ci container exits 0 (pass).
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -4238,20 +3988,17 @@ async fn passing_command_eval_embeds_tail_and_reaches_done_unchanged() {
 #[tokio::test]
 async fn rework_context_carries_command_eval_output_tail() {
     let Some(rig) = rig().await else { return };
-    commit_work(&rig); // first work cycle produces output → Evaluation
+    commit_work(&rig);
 
     rig.backend
         .put_logs(b"FAILING_CI: assertion failed at src/lib.rs:99".to_vec());
-    rig.backend.script_exits([101]); // first ci fails; the rework's ci defaults to 0
+    rig.backend.script_exits([101]);
 
     let job = rig.handle.create_job(req("impl-cmd-rework")).await.unwrap();
     assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
 
-    // Wait for the rework work cycle to launch (a second provider run). This
-    // observes in-memory FakeProvider state — no KV to watch — so it uses the
-    // tightened poll (10ms + hard timeout + named message) (#206 principle 3).
     let prompt = test_utils::wait::poll_default(
         "a rework work cycle (2nd provider run) after the ci failure",
         || {
@@ -4271,8 +4018,6 @@ async fn rework_context_carries_command_eval_output_tail() {
     assert_invariants_of(&rig.invariants);
 }
 
-// ── #168: task retries see their predecessor ────────────────────────────────
-
 /// #168: a work retry (attempt > 1) leads with a predecessor block carrying the
 /// prior attempt's captured output tail — size-capped (tail kept, head dropped)
 /// and fenced/labelled as the predecessor's output. Attempt 1's prompt is
@@ -4283,10 +4028,7 @@ async fn work_retry_prepends_predecessor_block_with_capped_tail() {
     let Some(rig) = rig_with_artifacts(Some(identity)).await else {
         return;
     };
-    // flaky: work_retries 1 → attempt 1 (exit 2) retries as attempt 2 (exit 3).
     rig.provider.script_exits([2, 3]);
-    // The predecessor's captured stdout: a HEAD marker the cap drops, a TAIL
-    // marker it keeps, padded past PREDECESSOR_TAIL_BYTES between them.
     let log = format!(
         "PRED_HEAD_dropped_by_cap\n{}\nPRED_TAIL_diagnosis_stack_overflow_at_lib_rs_88",
         "y".repeat(20_000)
@@ -4338,9 +4080,7 @@ async fn agent_eval_relaunch_prepends_empty_noted_predecessor_block() {
     let Some(rig) = rig_with_artifacts(Some(identity)).await else {
         return;
     };
-    commit_work(&rig); // agent work commits (run 0) → Evaluation
-    // No put_logs: each agent evaluator produces no captured output, and never
-    // submits a verdict → #167 no-output invalid fail → relaunch loop.
+    commit_work(&rig);
 
     let job = rig.handle.create_job(req("impl-agent")).await.unwrap();
     assert_invariants_of(&rig.invariants);
@@ -4381,8 +4121,7 @@ async fn agent_eval_relaunch_prepends_empty_noted_predecessor_block() {
 #[tokio::test]
 async fn command_eval_retry_gets_no_predecessor_prompt() {
     let Some(rig) = rig().await else { return };
-    commit_work(&rig); // agent work (the only provider run) → Evaluation
-    // ci is SIGKILLed (137) with empty output → evidence-free no-output relaunch.
+    commit_work(&rig);
     rig.backend.script_exits([137, 137, 137, 137, 137]);
 
     let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
@@ -4391,8 +4130,6 @@ async fn command_eval_retry_gets_no_predecessor_prompt() {
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, job.id, JobState::Escalated).await;
 
-    // Only the single agent WORK run went through the provider; every command
-    // eval relaunch is a bare backend container with no agent prompt.
     let runs = rig.provider.runs();
     assert_eq!(
         runs.len(),

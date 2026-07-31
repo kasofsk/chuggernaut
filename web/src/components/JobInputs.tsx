@@ -102,8 +102,6 @@ export function inputValueError(input: Input, value: string): string | null {
       return re && !re.test(value) ? `does not match ${input.pattern}` : null
     }
     default:
-      // An unknown kind carries no narrowing this build understands; the
-      // charset above is the whole check, and the server applies the rest.
       return null
   }
 }
@@ -270,9 +268,6 @@ export function JobInputFields({
             {message && <span className="input-error">{message}</span>}
           </>
         )
-        // A <label> for the text field (clicking the name focuses it); a <div>
-        // for the enum, whose RichSelect is a button — wrapping one in a label
-        // would make the label's own click open the menu.
         return input.type === 'enum' ? (
           <div className={fieldClassName} key={input.name}>
             {contents}

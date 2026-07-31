@@ -19,7 +19,7 @@ export function LibraryPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    setLoading(true) // param change: back to skeletons until the new fetch lands
+    setLoading(true)
     api
       .jobTypes(owner, project)
       .then((summaries) => Promise.all(summaries.map((s) => api.jobType(owner, project, s.name))))
@@ -27,8 +27,6 @@ export function LibraryPage() {
         setTypes(ts)
         setError(null)
         setLoading(false)
-        // Cards render after the fetch, so a #type anchor (e.g. the create
-        // form's peek links) must scroll once they exist.
         const anchor = decodeURIComponent(window.location.hash.slice(1))
         if (anchor) {
           requestAnimationFrame(() => document.getElementById(anchor)?.scrollIntoView())
@@ -206,7 +204,7 @@ export function JobTypePage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    setT(null) // param change: back to the skeleton until the new fetch lands
+    setT(null)
     api.jobType(owner, project, name).then(
       (d) => {
         setT(d)

@@ -44,9 +44,6 @@ use types::{
 };
 use vcs::{ConflictRebaseOutcome, RebaseOutcome};
 
-// The round is a decider-owned value (refactor-plan C5); re-exported so the
-// dispatcher-side readers of it — the merge gate's parked round, restart
-// reconciliation's rebuild, the §3.6 infra-loss relaunch — keep one surface.
 pub use crate::decide::eval::{EvalRound, EvalSlot, SlotOutcome, stage_passed};
 
 /// Hard cap on continuation hops in one evaluation fold (STYLE.md Tier 2 #3).
@@ -134,10 +131,6 @@ impl Core {
         seq: u64,
     ) -> Result<()> {
         let mut job = self.must_get(owner, project, seq)?.clone();
-        // Draining (spec §3.6): the decider holds the job in Work — and the
-        // rebase is skipped for the same reason, since a drain launches no
-        // evaluator container to test the restacked branch anyway. Restart
-        // reconciliation re-enters here.
         if !self.draining {
             self.rebase_for_evaluation(owner, project, seq, &mut job)
                 .await?;
@@ -174,11 +167,7 @@ impl Core {
         let mut event = event;
         let mut entry_job = entry_job;
         for _ in 0..EVAL_FOLD_STEPS_MAX {
-            // 1. Reads feed the view — they are not effects.
             let Some(inputs) = self.gather_eval_view(owner, project, seq, &event).await? else {
-                // No execution slice: a late container exit from a job that was
-                // revoked or completed. There is nothing to decide — and this is
-                // the guard class that once panicked the actor (§3.6).
                 tracing::warn!(
                     "eval event for {owner}/{project}#{seq}: no exec state \
                      (job revoked or completed); ignoring"
@@ -190,23 +179,16 @@ impl Core {
                 None => self.must_get(owner, project, seq)?.clone(),
             };
             let view = inputs.view(&job, self.draining);
-            // 2. The decision, made purely — over the round it owns.
             let round = self.active.get_mut(&key).and_then(|e| e.round.take());
             let (round, transitions, effects, step) = decide_eval::decide(round, &view, event);
             if let Some(exec) = self.active.get_mut(&key) {
                 exec.round = round;
             }
-            // 3. Commit the decision: transitions first (§2.1 record is the
-            // source of truth; the task records and announcements are its
-            // artifacts, re-derived by restart reconciliation if a crash loses
-            // them).
             for mut t in transitions {
                 self.set_state(&mut t.job, t.to).await?;
             }
             self.commit_eval_step(&key, &step);
-            // 4. The artifacts of the decision, and the event a launch answers with.
             let next = self.interpret_eval_effects(effects).await?;
-            // 5. The bookkeeping the step names, and the hop it asks for.
             match self.run_eval_step(owner, project, seq, step, next).await? {
                 Some(hop) => event = hop,
                 None => return Ok(()),
@@ -222,8 +204,10 @@ impl Core {
     /// landing hand-off and the rework re-entry, both of which touch shell state
     /// the pure crate cannot see. Returns the event to re-enter the decider with,
     /// or `None` when this fold is finished.
-    // TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here."
+    )]
     async fn run_eval_step(
         &mut self,
         owner: &str,
@@ -287,8 +271,10 @@ impl Core {
     /// Run one decision's effects, returning the event its launch answered with
     /// (contracts.md §2's continuation contract): a stage's slots or a
     /// relaunched slot's task id, which exist only once the launch ran.
-    // TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here."
+    )]
     async fn interpret_eval_effects(
         &mut self,
         effects: Vec<Effect>,
@@ -315,9 +301,6 @@ impl Core {
                     });
                 }
                 Outcome::Done => {}
-                // The eval decider emits no repo or gate effect, so no landing
-                // outcome can reach this fold. Matched explicitly (not `_`) so a
-                // new variant breaks the build here.
                 Outcome::Merge(_)
                 | Outcome::CasRefused
                 | Outcome::Rebase(_)
@@ -343,12 +326,6 @@ impl Core {
         let Some(exec) = self.active.get(&key) else {
             return Ok(None);
         };
-        // The evidence-free relaunch budget (#167) counts one evaluator
-        // lineage's already-retired losses. Read on every exit rather than only
-        // where the branch needs it: a pure decision cannot read, so the count
-        // has to be in the view before the decider picks that branch. The
-        // exiting task is excluded — its own retirement is an effect that has
-        // not run yet, and the decider counts it in.
         let infra_losses_prior = match event {
             decide_eval::EvalEvent::SlotExited { task, .. } => self
                 .tasks
@@ -418,7 +395,6 @@ impl Core {
             .repos
             .resolve_ref(owner, project, &default_branch)
             .await?;
-        // No movement since base_ref was pinned: byte-identical to no rebase.
         if head == base_ref {
             return Ok(());
         }
@@ -533,8 +509,11 @@ impl Core {
     /// Create + launch one evaluator task (§3.3 evaluator types). Shared by the
     /// Evaluation fan-out (job branch) and the merge gate (candidate branch).
     #[allow(clippy::too_many_arguments)]
-    // TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here.
-    #[allow(clippy::expect_used, clippy::too_many_lines)]
+    #[allow(
+        clippy::expect_used,
+        clippy::too_many_lines,
+        reason = "TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here."
+    )]
     pub(crate) async fn launch_evaluator_task(
         &mut self,
         owner: &str,
@@ -583,14 +562,8 @@ impl Core {
                 true,
             ),
         };
-        // Agent evaluators get a transcript too — an eval that fails the job
-        // is exactly the reasoning an operator wants to read back.
         let session_id = matches!(evaluator.r#type, EvaluatorType::Agent)
             .then(|| uuid::Uuid::new_v4().to_string());
-        // Record the branch tip this evaluator round is judging (spec §3.3, job
-        // #155): a later cycle's re-review shows the reviewer "what you reviewed"
-        // and diffs `reviewed_tip..HEAD`. Best-effort — a resolve failure just
-        // omits the delta, never blocks the launch.
         let reviewed_tip = self.repos.resolve_ref(owner, project, branch).await.ok();
         let mut task = Task {
             id: task_id,
@@ -606,9 +579,6 @@ impl Core {
             },
             attempt,
             evaluator: Some(evaluator.name.clone()),
-            // Mirror the evaluator name into the shared label field so the UI
-            // reads one label mechanism for every task kind (job #146). The
-            // `evaluator` field stays populated for back-compat.
             label: Some(evaluator.name.clone()),
             stage: evaluator.stage,
             performed_by: None,
@@ -634,18 +604,13 @@ impl Core {
         )
         .await?;
         if pending_human {
-            return Ok(task_id); // operator inbox (§3.3 human)
+            return Ok(task_id);
         }
 
-        // Eval containers get vars but only the evaluator's own secrets (§4.1).
-        // Evaluators keep the job type's timeout — the per-job `Job.timeout`
-        // override is Work-scoped only (§1.1, §3.5).
         let eval_timeout = task_timeout(&job_type);
 
         match evaluator.r#type {
             EvaluatorType::Command => {
-                // The window covers the whole launch decision, not just the RPC
-                // (design #293 §2).
                 let placement = self.placement_guard();
                 let run = evaluator.run.clone().unwrap_or_default();
                 let config = self
@@ -674,28 +639,16 @@ impl Core {
                         self.task_put(&task).await?;
                         self.spawn_eval_monitor(owner, project, seq, task_id, id);
                     }
-                    // No free slot: queue the launch and retry when one frees,
-                    // rather than failing the slot and burning eval_retries (§3.5).
                     Err(container::BackendError::NoCapacity(reason)) => {
                         self.defer_launch(owner, project, seq, &mut task, reason)
                             .await?;
                     }
-                    // Any other launch failure is an infra failure of this slot
-                    // (§3.3): report it through the exit fan-in so `on_eval_exited`
-                    // marks the task Failed with the launch error and applies
-                    // eval_retries → Infra → escalation. Without this the task
-                    // stays `Running` and the job wedges in Evaluation forever
-                    // (the dogfood-#1 bug).
                     Err(e) => {
                         self.report_launch_failure(owner, project, seq, task_id, e);
                     }
                 }
             }
             EvaluatorType::Agent => {
-                // Agent evaluators launch through the provider, whose
-                // `NoCapacity` is queued (not burned as a verdict-less exit) —
-                // shared with the launch-queue resume so a queued agent eval
-                // relaunches identically (§3.5, #140).
                 self.spawn_eval_agent(
                     owner,
                     project,
@@ -725,8 +678,10 @@ impl Core {
     /// not run on a prior cycle / a non-agent prior result. Assembled entirely
     /// from persisted records (the task log + the bare repo), so it is rebuilt
     /// faithfully after a dispatcher restart.
-    // TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here."
+    )]
     async fn prior_review_block(
         &self,
         owner: &str,
@@ -740,7 +695,6 @@ impl Core {
             return Ok(None);
         }
         let tasks = self.tasks.list_for_job(owner, project, seq).await?;
-        // This evaluator's most-recent completed review on an earlier cycle.
         let Some(prior) = tasks
             .iter()
             .filter(|t| {
@@ -751,15 +705,13 @@ impl Core {
             })
             .max_by_key(|t| (t.cycle, t.id))
         else {
-            // Evaluator added to the job between cycles: no prior review → it
-            // gets the unchanged cycle-1 form.
             return Ok(None);
         };
         let (prior_pass, prior_findings) = match &prior.result {
             Some(TaskResult::Agent {
                 pass, structured, ..
             }) => (*pass, structured.clone()),
-            _ => return Ok(None), // command/human prior — not a re-review case
+            _ => return Ok(None),
         };
 
         let mut block = String::from("\n\n---\n## Re-Review Context (job #155)\n");
@@ -782,11 +734,6 @@ impl Core {
             .unwrap_or_else(|| "(no structured findings)".into());
         block.push_str(&format!("Findings:\n```json\n{findings}\n```\n"));
 
-        // Was the branch rebased since the prior review? A conflict/gate rework
-        // replays it onto a moved base, so the delta from the last-reviewed tip
-        // is not meaningful. Signalled by the current cycle's work
-        // `rework_reason` (persisted, restart-safe) and double-checked by an
-        // ancestry test below.
         let rebased = tasks
             .iter()
             .filter(|t| t.phase == TaskPhase::Work && t.cycle == cycle && t.evaluator.is_none())
@@ -801,7 +748,6 @@ impl Core {
                 )
             });
 
-        // What you reviewed + the delta since — or a rebase note.
         let current_tip = self.repos.resolve_ref(owner, project, branch).await.ok();
         match (prior.reviewed_tip.as_deref(), current_tip.as_deref()) {
             (Some(last), Some(now)) => {
@@ -848,8 +794,11 @@ impl Core {
     }
 
     #[allow(clippy::too_many_arguments)]
-    // TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here.
-    #[allow(clippy::expect_used, clippy::too_many_lines)]
+    #[allow(
+        clippy::expect_used,
+        clippy::too_many_lines,
+        reason = "TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here."
+    )]
     pub(crate) async fn spawn_eval_agent(
         &mut self,
         owner: &str,
@@ -883,7 +832,6 @@ impl Core {
             )
             .await?;
         self.inject_platform_agent_secrets(&mut env).await?;
-        // Evaluators judge against the same brief the author saw.
         let mut prompt = format!(
             "{}{}",
             self.repos
@@ -897,10 +845,6 @@ impl Core {
                 .unwrap_or_default(),
             self.work_brief(owner, project, &job)
         );
-        // Re-review context (spec §3.3, job #155): on cycle N > 1, if this same
-        // evaluator ran on a prior cycle, prepend its prior verdict/findings, the
-        // SHA it reviewed, the delta since, and a compact job-history digest — so
-        // it focuses on what changed rather than re-deriving the whole review.
         let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
         if let Some(block) = self
             .prior_review_block(owner, project, seq, branch, evaluator, cycle)
@@ -908,11 +852,6 @@ impl Core {
         {
             prompt.push_str(&block);
         }
-        // #168: a relaunched evaluator (a prior attempt in this same round died —
-        // #167 no-output invalid fail, container loss, crash) leads with the
-        // predecessor's partial output, so it doesn't re-review blind. Distinct
-        // from the cross-cycle re-review above (#155): this is same-round
-        // attempt-to-attempt continuity. Evaluators push no commits.
         if let Some(pred) = self
             .predecessor_block(
                 owner,
@@ -958,10 +897,6 @@ impl Core {
             merge_conflict: None,
             session_id: session_id.unwrap_or_default(),
             node: job_type.placement_node().map(String::from),
-            // An evaluator reads the diff and judges it against the brief; the
-            // stage-1 `ci` gate owns building and testing (spec §4.3). Without
-            // this the reviewer re-runs a cold cargo build that CI is about to
-            // run anyway — minutes of shared Docker host for no added signal.
             permissions: agent::PermissionProfile::Review,
         };
         let provider = self.provider.clone();
@@ -993,9 +928,6 @@ impl Core {
                         })
                         .await;
                 }
-                // Fleet at capacity: queue this launch behind the freed-slot
-                // signal rather than reporting a verdict-less exit that would
-                // exhaust eval_retries in milliseconds (#140).
                 Err(agent::AgentError::Backend(container::BackendError::NoCapacity(reason))) => {
                     let _ = tx
                         .send(Msg::LaunchDeferred {
@@ -1049,8 +981,6 @@ impl Core {
         if task.state == TaskState::Done {
             return Ok(());
         }
-        // abort implies fail — the verdicts are pass | fail | abort; a
-        // contradictory pass+abort submission normalizes to abort.
         task.result = Some(TaskResult::Agent {
             pass: submission.pass && !submission.abort,
             abort: submission.abort,
@@ -1088,10 +1018,6 @@ impl Core {
         abort: bool,
         structured: Option<serde_json::Value>,
     ) -> Result<()> {
-        // Precondition (contracts.md §1): the resolution must name an OPEN slot
-        // of the live round. Checked here, not decided: the operator gets an
-        // error back rather than a silently dropped verdict, and a `CoreError`
-        // is not something a pure decider can return.
         let open = self
             .active
             .get(&(owner.to_string(), project.to_string(), seq))
@@ -1128,10 +1054,6 @@ impl Core {
         task: Task,
         exit: TaskExit,
     ) -> Result<()> {
-        // The one read this exit owes the decision: `handle_submit_eval` marks an
-        // agent evaluator's task Done (with its verdict) BEFORE the container
-        // exits, so the record must be re-read — the snapshot the exit fan-in
-        // carries may predate the verdict.
         let task = match task.kind {
             TaskKind::Agent { .. } => self
                 .tasks
@@ -1172,8 +1094,6 @@ impl Core {
     async fn finalize_pass(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let job = self.must_get(owner, project, seq)?.clone();
         let slug = format!("{owner}/{project}");
-        // `finalize: none` is a view input (design-lifecycle.md): the work's
-        // effect is external and the branch is scratch.
         let wrap_up_none = self
             .active
             .get(&(owner.to_string(), project.to_string(), seq))
@@ -1184,8 +1104,6 @@ impl Core {
             merge_gate::decide_enqueue(state, &job, wrap_up_none);
         self.store_gate_state(&slug, state);
         if step == merge_gate::EnqueueStep::CompleteDirectly {
-            // Eval-pass IS the wrap-up; complete_done is the platform
-            // bookkeeping every job gets.
             return self.complete_done(owner, project, seq).await;
         }
         for mut t in transitions {
@@ -1216,9 +1134,6 @@ impl Core {
     pub(crate) async fn pump_merges(&mut self, owner: &str, project: &str) -> Result<()> {
         let slug = format!("{owner}/{project}");
         loop {
-            // Draining (spec §3.6): no gate starts, no landing. An Open
-            // origin release holds the queue the same way (the post-merge
-            // integration reset is lossless because of exactly this hold).
             let held = self.release_holds.contains(&slug);
             let draining = self.draining;
             let mut state = self.merge_gates.remove(&slug).unwrap_or_default();
@@ -1285,8 +1200,6 @@ impl Core {
         let key = (owner.to_string(), project.to_string(), seq);
         let job = self.must_get(owner, project, seq)?.clone();
         let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
-        // Was this landing's current cycle a gate-fix round (job #154)? Read
-        // from the persisted task log so it holds across a restart.
         let tasks = self.tasks.list_for_job(owner, project, seq).await?;
         let force_gate = merge_gate::force_gate(&tasks, cycle);
         let mut summary = self
@@ -1294,9 +1207,6 @@ impl Core {
             .get(&key)
             .and_then(|e| e.work_submission.as_ref())
             .and_then(|s| s.summary.clone());
-        // Audit trail (job #154): note the gate-fix round in the squash body so
-        // the landed commit records that a mechanical compile fix was applied
-        // after review, not that the branch was re-reviewed.
         if force_gate {
             let note = "Includes a gate-fix round (job #154): a compile-only merge-gate \
                         failure was repaired by a scoped fix task and re-gated, without \
@@ -1306,10 +1216,6 @@ impl Core {
                 _ => note.to_string(),
             });
         }
-        // A batch lands as one squash that completes every member, so open the
-        // commit body with the member list — otherwise git history records only
-        // `job/{batchseq}: {type}` with no trace of which tickets it closed
-        // (spec §2.1 batches; mirrors the create_batch auto-index).
         if job.is_batch() {
             let header = format!(
                 "Batch of {} {} jobs: {}",
@@ -1360,8 +1266,11 @@ impl Core {
     /// when an effect carries a result, feed it back as the next event until
     /// the decider settles. This loop IS the shape every later phase decider's
     /// shim copies.
-    // TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here.
-    #[allow(clippy::expect_used, clippy::too_many_lines)]
+    #[allow(
+        clippy::expect_used,
+        clippy::too_many_lines,
+        reason = "TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here."
+    )]
     async fn run_landing(
         &mut self,
         owner: &str,
@@ -1373,9 +1282,6 @@ impl Core {
         use merge_gate::{LandingEvent, LandingStep, MergeOutcome as Mo};
         let key = (owner.to_string(), project.to_string(), seq);
         let slug = format!("{owner}/{project}");
-        // Fold-local carry between rounds: the conflict files feeding the
-        // context composition, and the candidate commit a gate round parks
-        // (both arrive one round before the decision that consumes them).
         let mut conflict_files: Vec<String> = Vec::new();
         let mut candidate_commit: Option<String> = None;
         loop {
@@ -1399,9 +1305,6 @@ impl Core {
             for mut t in transitions {
                 self.set_state(&mut t.job, t.to).await?;
             }
-            // An escalation out of the landing releases the exec slice BEFORE
-            // its Escalate effect runs (parity with the pre-C2 order: the
-            // escalation task's cycle must not read the dropped exec state).
             if step == LandingStep::CompletedDropExec {
                 self.active.remove(&key);
             }
@@ -1437,8 +1340,6 @@ impl Core {
                     }
                     Outcome::CasRefused => next = Some(LandingEvent::PromoteRefused),
                     Outcome::Rebase(outcome) => {
-                        // Compose the rework brief: the conflict context read
-                        // plus the rebase outcome folded in (§3.2 step 12).
                         let new_base = rebase_target.expect("rebase outcome from a rebase effect");
                         let old_base = view_data.job.base_ref.clone().expect("base_ref set");
                         let mut context = self
@@ -1452,10 +1353,6 @@ impl Core {
                         });
                     }
                     Outcome::GateSlots(slots) => {
-                        // Park the gate round: the candidate commit from this
-                        // round, the head it was built against, and the stages
-                        // beyond the launched first (same pure grouping the
-                        // decider used).
                         let mut pending =
                             merge_gate::group_stages(view_data.gate_evaluators.clone());
                         pending.pop_front();
@@ -1472,9 +1369,6 @@ impl Core {
                             },
                         });
                     }
-                    // The landing emits no Evaluation fan-out effect, so these
-                    // cannot arrive here. Matched explicitly so a new variant
-                    // breaks the build rather than falling into a wildcard.
                     Outcome::EvalSlots(_) | Outcome::EvaluatorTask(_) => {
                         debug_assert!(false, "evaluation outcome in a landing decision");
                     }
@@ -1497,8 +1391,12 @@ impl Core {
 
     /// Gate container exited: command evaluators only, exit code is the
     /// verdict (§3.3 Merge Gate).
-    // TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here.
-    #[allow(clippy::expect_used, clippy::too_many_lines, clippy::unwrap_used)]
+    #[allow(
+        clippy::expect_used,
+        clippy::too_many_lines,
+        clippy::unwrap_used,
+        reason = "TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here."
+    )]
     pub(crate) async fn on_gate_exited(
         &mut self,
         owner: &str,
@@ -1526,17 +1424,13 @@ impl Core {
                     .position(|s| s.task_id == task.id && s.outcome.is_none())
             })
         else {
-            return Ok(()); // stale monitor
+            return Ok(());
         };
 
         let pass = exit_code == 0;
         task.result = Some(TaskResult::Command {
             pass,
             exit_code,
-            // The captured container output (compiler errors for a failed build
-            // stage) is the record of why the gate failed — a compile-class
-            // failure threads it into the gate-fix brief (job #154). A launch
-            // failure has no container output, so its reason stands in instead.
             output: log_tail.clone().or(launch_error).unwrap_or_default(),
             structured: eval_json.clone(),
         });
@@ -1559,20 +1453,14 @@ impl Core {
             pass,
             abort: false,
             structured: eval_json,
-            // The gate threads its captured compiler output into the gate-fix
-            // brief from the task record directly (job #154), not via the slot.
             output: None,
         });
         if gate.round.slots.iter().any(|s| s.outcome.is_none()) {
             return Ok(());
         }
-        // The current gate stage completed. If it passed and a later stage is
-        // queued, launch it and keep waiting (job #154 staged gate). Only reduce
-        // when a stage fails, or the last stage passes.
         if stage_passed(&gate.round.slots) && !gate.round.pending.is_empty() {
             let cycle = self.active.get(&key).map(|e| e.cycle).unwrap_or(1);
             let gate_branch = format!("merge-gate/{seq}");
-            // Retire the passed stage into `done` and pull the next stage.
             let (passed, next) = {
                 let g = self.active.get_mut(&key).unwrap().gate.as_mut().unwrap();
                 let passed: Vec<EvalSlot> = g.round.slots.drain(..).collect();
@@ -1590,8 +1478,6 @@ impl Core {
             g.round.slots = slots;
             return Ok(());
         }
-        // Same triage rule as pump_merges: a hard error in gate resolution
-        // (promote, rework re-entry) escalates rather than wedging the queue.
         if let Err(e) = self.gate_reduce(owner, project, seq).await {
             tracing::error!("gate reduce for {owner}/{project}#{seq}: {e}");
             let slug = format!("{owner}/{project}");
@@ -1611,8 +1497,11 @@ impl Core {
     /// The gate's verdict (§3.3): fold the round's slots into the failure
     /// set, derive the deterministic classification inputs, and re-enter the
     /// landing fold with [`merge_gate::LandingEvent::GateVerdict`].
-    // TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here.
-    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        reason = "TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here."
+    )]
     async fn gate_reduce(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
         let gate = self
@@ -1651,12 +1540,7 @@ impl Core {
                 _ => None,
             })
             .collect();
-        // The classification input (job #154): the first stage failing while a
-        // distinct later stage was queued is the compile class. The decider
-        // owns the classification itself.
         let first_stage_failed = gate.round.done.is_empty() && !gate.round.pending.is_empty();
-        // The failed build stage's captured compiler output — the gate-fix
-        // brief's evidence; only a first-stage failure can need it.
         let compiler_output = if !failures.is_empty() && first_stage_failed {
             self.gate_stage_output(owner, project, seq, &failed_ids)
                 .await
@@ -1717,8 +1601,10 @@ impl Core {
         out
     }
 
-    // TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here."
+    )]
     pub(crate) async fn launch_gate_fix(
         &mut self,
         owner: &str,
@@ -1740,10 +1626,6 @@ impl Core {
             .repos
             .rebase_onto_with_conflict(owner, project, seq, &new_base)
             .await?;
-        // Scoped brief: the gate-fix framing, the exact compiler errors the gate
-        // build stage emitted (job #154 requirement), then the rebase/conflict
-        // context. Embedding the captured output means the agent sees the errors
-        // without having to reproduce the build first.
         let mut context = String::from(GATE_FIX_FRAMING);
         if !compiler_output.trim().is_empty() {
             context.push_str("\n### Gate build output (the errors to fix)\n\n");
@@ -1763,8 +1645,6 @@ impl Core {
             .entry(job.project.clone())
             .or_default()
             .insert(job.clone());
-        // Count this round against the gate-fix budget (in-memory; enter_work
-        // preserves it, and it is rebuilt from the task log on restart).
         if let Some(e) = self.active.get_mut(&key) {
             e.gate_fix_used += 1;
         }
@@ -1841,7 +1721,6 @@ impl Core {
         seq: u64,
         event: wrapup::WrapUpEvent,
     ) -> Result<()> {
-        // 1. Reads feed the view — they are not effects.
         let key = (owner.to_string(), project.to_string(), seq);
         let job = self.must_get(owner, project, seq)?.clone();
         let members = job
@@ -1859,26 +1738,16 @@ impl Core {
             members: &members,
             now: Utc::now(),
         };
-        // 2. The decision, made purely.
         let (transitions, effects, step) = wrapup::decide(&view, event);
-        // 3. Commit the decision: transitions first (§2.1 record is the source
-        // of truth; the publish task and the announcements are its artifacts,
-        // re-derived by restart reconciliation if a crash loses them).
         for mut t in transitions {
             self.set_state(&mut t.job, t.to).await?;
         }
-        // The exec slice is released BEFORE the effects run (parity with the
-        // pre-C3 order, and with C2's `CompletedDropExec`): neither the
-        // escalation task's cycle nor the terminal announcement may read a
-        // slice the decision just ended.
         if step.drops_exec() {
             self.active.remove(&key);
         }
-        // 4. The artifacts of the decision.
         for effect in effects {
             self.interpret(effect).await?;
         }
-        // 5. The bookkeeping the step names.
         match step {
             wrapup::WrapUpStep::AwaitPublish | wrapup::WrapUpStep::EscalatedDropExec => Ok(()),
             wrapup::WrapUpStep::Complete => self.complete_done(owner, project, seq).await,
@@ -1897,8 +1766,11 @@ impl Core {
     /// the restart marker: its presence tells reconciliation the merge is done
     /// and only the publish remains (§3.6). Idempotent by contract — a restart
     /// may re-launch it.
-    // TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here.
-    #[allow(clippy::expect_used, clippy::too_many_lines)]
+    #[allow(
+        clippy::expect_used,
+        clippy::too_many_lines,
+        reason = "TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here."
+    )]
     pub(crate) async fn launch_wrapup_task(
         &mut self,
         owner: &str,
@@ -1906,9 +1778,6 @@ impl Core {
         seq: u64,
         attempt: u32,
     ) -> Result<()> {
-        // Draining (spec §3.6): launch no wrap-up publish. The squash has already
-        // landed; restart reconciliation (recover_wrapup_command) relaunches it —
-        // the command is idempotent by contract (§3.2).
         if self.draining {
             return Ok(());
         }
@@ -1917,8 +1786,6 @@ impl Core {
         let job_type = self.active.get(&key).expect("exec state").job_type.clone();
         let cycle = self.active.get(&key).expect("exec state").cycle;
         let run = job_type.wrap_up.run.clone().unwrap_or_default();
-        // The publish ships merged main, so it runs against the default branch,
-        // not the (now-landed) scratch job branch.
         let default_branch = self.repos.default_branch(owner, project).await?;
         let timeout = task_timeout(&job_type);
 
@@ -1933,8 +1800,6 @@ impl Core {
             state: TaskState::Running,
             attempt,
             evaluator: None,
-            // The wrap-up task carries its configured/derived label so it renders
-            // as `Command · publish`, not a bare `Command` (job #146).
             label: Some(job_type.wrap_up.label()),
             stage: 0,
             performed_by: None,
@@ -1958,8 +1823,6 @@ impl Core {
         )
         .await?;
 
-        // The window covers the whole launch decision, not just the RPC
-        // (design #293 §2).
         let placement = self.placement_guard();
         let image = job_type
             .wrap_up
@@ -1981,26 +1844,14 @@ impl Core {
                 timeout,
             )
             .await?;
-        match self
-            .place_container(DecidedLaunch { config, placement })
-            .await
-        {
-            Ok(id) => {
-                task.container_id = Some(id.clone());
-                self.task_put(&task).await?;
-                self.spawn_logs_monitor(owner, project, seq, task_id, id);
-            }
-            // No free slot: queue the publish and retry when one frees (§3.5).
-            Err(container::BackendError::NoCapacity(reason)) => {
-                self.defer_launch(owner, project, seq, &mut task, reason)
-                    .await?;
-            }
-            // Any other launch failure surfaces through the exit fan-in like
-            // every other task (§3.2): `on_wrapup_exited` records it and escalates.
-            Err(e) => {
-                self.report_launch_failure(owner, project, seq, task_id, e);
-            }
-        }
+        self.place_or_defer_launch(
+            owner,
+            project,
+            seq,
+            &mut task,
+            DecidedLaunch { config, placement },
+        )
+        .await?;
         Ok(())
     }
 
@@ -2107,8 +1958,10 @@ fn fenced_delta(diff: &str) -> String {
 /// page tells a human skimming it — a few lines per cycle with each round's
 /// verdicts, rework reasons, and the work agent's summary first line — built
 /// from the persisted task log so it survives restart.
-// TODO(io-split): prose assembly for the §3.3 re-review context, not a decision.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(io-split): prose assembly for the §3.3 re-review context, not a decision."
+)]
 fn history_digest(tasks: &[types::Task], cycles: u32) -> String {
     let first_line = |s: &str| {
         let line = s
@@ -2270,7 +2123,6 @@ mod tests {
         let d = history_digest(&tasks, 2);
         assert!(d.contains("Cycle 1"), "{d}");
         assert!(d.contains("first pass at the feature"), "{d}");
-        // Only the first non-empty line of the work summary is kept.
         assert!(!d.contains("more detail"), "{d}");
         assert!(d.contains("reviewer=fail"), "{d}");
         assert!(d.contains("Cycle 2"), "{d}");
@@ -2287,8 +2139,6 @@ mod tests {
         let small = fenced_delta("+added line");
         assert!(small.starts_with("```diff") && small.contains("+added line"));
         assert!(!small.contains("truncated"));
-        // Over the cap → truncated with a workspace pointer, and never split a
-        // char boundary (the cut is byte-safe).
         let big = "x".repeat(DELTA_DIFF_MAX_BYTES + 500);
         let out = fenced_delta(&big);
         assert!(out.contains("truncated"), "{}", &out[out.len() - 80..]);

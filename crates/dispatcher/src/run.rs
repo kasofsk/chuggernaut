@@ -53,8 +53,6 @@ impl Dispatcher {
                 "dispatcher drain exceeded {DRAIN_BUDGET:?} — exiting; records already flushed stand"
             ),
         }
-        // The snapshot is static for the process lifetime; re-publishing on exit
-        // keeps the platform record present and current at the last moment.
         write_config_snapshot(&self.store, &self.snapshot).await;
     }
 }
@@ -96,11 +94,11 @@ pub async fn wait_for_signal() {
 /// Bring up the dispatcher and return the running handle; the process stays
 /// alive as long as the caller holds it and drives shutdown via
 /// [`Dispatcher::shutdown`] on SIGTERM/SIGINT.
-// TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider."
+)]
 pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
-    // Operator-mode NATS requires the dispatcher credentials from init
-    // (§12.1); without them (open dev server) connect plain.
     let store = match config.dispatcher_creds().await? {
         Some(creds) => NatsStore::connect_with_creds(&config.nats_url, &creds).await?,
         None => NatsStore::connect(&config.nats_url).await?,
@@ -109,15 +107,6 @@ pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
     let repos = RepoManager::new(&config.repos_root);
     repos.check_git_version().await?;
 
-    // Mixed fleets (spec §3.1/§3.6) probe every node — docker or worker — mark
-    // each in/out-of-service, and apply the "no live capacity" hard-fail once
-    // across the whole fleet: capacity is a fleet-level property, so a
-    // placement-inert 0-slot node never vetoes a fleet with slots elsewhere.
-    // A plain Docker fleet (no worker nodes) keeps the exact single-backend
-    // path below.
-    // A worker-capable fleet is used whenever any node is a worker endpoint OR
-    // the seed list is empty — a zero-seed dynamic fleet (spec §3.1 dynamic
-    // registration) that gains capacity only from worker announcements.
     let backend: Arc<dyn container::ContainerBackend> = if worker::backend::has_worker_nodes(
         &config.docker_nodes,
     ) || config.docker_nodes.is_empty()
@@ -127,22 +116,14 @@ pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
             store.clone(),
             config.placement_policy,
         )?;
-        // Fleet-level rule: refuses only when a *configured* fleet has no
-        // reachable node with slots > 0; a zero-seed fleet starts and waits
-        // for announcements.
         fleet.startup_check().await?;
         Arc::new(fleet)
     } else {
         let docker = DockerBackend::new(config.docker_nodes.clone())?
             .with_placement_policy(config.placement_policy);
-        // §3.1/§3.6: start as long as one node with slots responds; any
-        // unreachable node is logged and excluded until it answers again.
         docker.ping_all().await?;
         Arc::new(docker)
     };
-    // Per-node health and build version as of the boot probe, for the platform
-    // snapshot (spec §3.1). The scan tick keeps it fresh as nodes drop/recover
-    // and workers self-refresh (see `crate::platform_ops::cd`).
     let fleet_status = backend.fleet_status();
 
     let provider: Arc<dyn AgentProvider> = match config.agent_provider_default.as_str() {
@@ -166,12 +147,6 @@ pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
         tracing::warn!("CHANNEL_BINARY unset — agent containers run without the channel MCP");
     }
 
-    // Publish a read-only snapshot of the runtime config (fleet + agent
-    // defaults + resolved paths + deploy drift) to the `platform` bucket so the
-    // api/UI can display it — this config otherwise lives only in this process's
-    // env. Best-effort: a failed write must not stop the dispatcher from
-    // starting. The returned state lets the scan tick republish it live
-    // (`crate::platform_ops::cd`).
     let snapshot = publish_config_snapshot(
         &store,
         &config,
@@ -179,15 +154,9 @@ pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
         core_config.age_identity.is_some(),
     )
     .await;
-    // The boot snapshot the graceful-shutdown drain (§3.6) re-publishes at exit;
-    // the live copy moves into the core, which republishes it from the scan tick.
     let boot_snapshot = snapshot.base.clone();
 
-    // §7.3 user-cert minting signs with the CA key directly (no job-record
-    // write), so it rides the API handlers rather than the single-writer core.
     let ssh_ca = core_config.ssh_ca.clone();
-    // Kept for the read-only live-output tail (`req.tasks.output`), which reads
-    // the backend directly off the core actor.
     let output_backend = backend.clone();
     let core = Core::new(store.clone(), repos, backend, provider, core_config)
         .await?
@@ -195,8 +164,6 @@ pub async fn run(config: DispatcherConfig) -> Result<Dispatcher> {
         .with_config_snapshot(snapshot);
     let handle = spawn(core);
     handlers::spawn_container_handlers(&store, handle.clone()).await?;
-    // Runtime dynamic worker registration (spec §3.1): merge worker announce
-    // heartbeats into the live fleet with no dispatcher restart.
     handlers::spawn_worker_announce_handler(&store, handle.clone()).await?;
     handlers::spawn_api_handlers(
         &store,

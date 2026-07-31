@@ -39,7 +39,6 @@ fn encode_jwt(
     claims.insert("sub".into(), json!(subject));
     claims.insert("nats".into(), nats);
 
-    // jti mirrors the Go jwt library: sha256 of the claims JSON, base32.
     let hash = Sha256::digest(serde_json::to_vec(&claims).map_err(internal)?);
     claims.insert("jti".into(), json!(BASE32_NOPAD.encode(&hash)));
 
@@ -189,12 +188,6 @@ pub fn resolver_config(
     )
 }
 
-// ---------------------------------------------------------------------------
-// §7.4 allow-lists, mapped to the concrete NATS subjects behind each KV and
-// stream operation the injected binaries perform (KV get = JetStream direct
-// get; channel_check = ephemeral pull consumer on `channel-inbox`).
-// ---------------------------------------------------------------------------
-
 /// KV read of specific keys: direct-get subjects + the stream-info call
 /// async-nats issues when binding the bucket.
 fn kv_read(perms: &mut Permissions, bucket: &str, key_patterns: &[String]) {
@@ -223,9 +216,6 @@ fn common_container(perms: &mut Permissions, owner: &str, project: &str, seq: u6
         store::buckets::CHANNELS,
         std::slice::from_ref(&channel_key),
     );
-    // Deliberately no `kv_write` on CHANNELS: containers post through the
-    // dispatcher instead, keeping it the sole writer of the bucket and making
-    // each post durable event history rather than a last-write-wins overwrite.
     perms
         .publish
         .push(store::subjects::channel_update(owner, project, seq));
@@ -233,19 +223,12 @@ fn common_container(perms: &mut Permissions, owner: &str, project: &str, seq: u6
         .publish
         .push(store::subjects::channel_reply(owner, project, seq));
 
-    // Knowledge keys nest b64 segments (`global.{s}.{p}`, `{owner}.{s}.{p}`,
-    // `{owner}.{project}.{s}.{p}`): `{owner}.>` covers the §7.4 owner and
-    // project grants in one pattern.
     kv_read(
         perms,
         store::buckets::KNOWLEDGE,
         &["global.>".into(), format!("{owner}.>")],
     );
 
-    // channel_check: ephemeral pull consumer on the inbox stream. Unnamed
-    // ephemeral creation targets `CONSUMER.CREATE.{stream}` exactly (no
-    // trailing tokens, which `.>` would require), named/filtered creation
-    // appends `.{name}.{filter}`.
     let stream = store::buckets::STREAM_CHANNEL_INBOX;
     perms.publish.push(format!("$JS.API.STREAM.INFO.{stream}"));
     perms
@@ -372,14 +355,12 @@ mod tests {
         );
         assert!(claims["exp"].as_i64().unwrap() > chrono::Utc::now().timestamp());
 
-        // Signature verifies against the account key over header.payload.
         let signing_input = format!("{header}.{payload}");
         let sig_bytes = BASE64URL_NOPAD.decode(sig.as_bytes()).unwrap();
         account
             .verify(signing_input.as_bytes(), &sig_bytes)
             .unwrap();
 
-        // The seed in the creds parses as a user nkey.
         let seed = creds
             .lines()
             .skip_while(|l| !l.starts_with("-----BEGIN USER NKEY SEED-----"))
@@ -404,7 +385,6 @@ mod tests {
         assert_eq!(acc_claims["nats"]["type"], "account");
         assert_eq!(acc_claims["iss"], operator.public_key());
         assert_eq!(acc_claims["sub"], account.public_key());
-        // JetStream enabled: unlimited storage.
         assert_eq!(acc_claims["nats"]["limits"]["disk_storage"], -1);
     }
 
@@ -429,9 +409,6 @@ mod tests {
             p.subscribe
                 .contains(&"channel.inbox.acme.api.42".to_string())
         );
-        // Reads its own channel entry, but cannot write it: posts go through
-        // the dispatcher so it stays the bucket's sole writer and each post
-        // becomes durable event history instead of an in-place overwrite.
         assert!(
             p.publish
                 .iter()
@@ -442,7 +419,6 @@ mod tests {
             "container must not write channels KV directly: {:?}",
             p.publish
         );
-        // No eval submit, no job creation, no event publishing.
         for forbidden in ["req.eval.submit", "req.jobs.create", "job.events"] {
             assert!(
                 !p.publish.iter().any(|s| s.contains(forbidden)),
@@ -464,8 +440,6 @@ mod tests {
                 .iter()
                 .any(|s| s == "$JS.API.DIRECT.GET.KV_tasks.$KV.tasks.acme.api.42.7")
         );
-        // An eval agent reports status like a work agent, through the
-        // dispatcher — and likewise cannot write the bucket itself.
         assert!(
             p.publish
                 .iter()
@@ -483,16 +457,11 @@ mod tests {
     #[test]
     fn worker_allow_list_includes_the_announce_heartbeat() {
         let p = worker_permissions("gumbo-nuc-0");
-        // Serves its own node's op subjects and answers inbox replies.
         assert!(
             p.subscribe
                 .contains(&"req.worker.gumbo-nuc-0.>".to_string())
         );
         assert!(p.publish.contains(&"_INBOX.>".to_string()));
-        // The dynamic-registration heartbeat (spec §3.1): without this grant an
-        // operator-mode NATS server denies the announce and the fleet never
-        // gains capacity dynamically. Sourced from the subject helper so it
-        // cannot drift from what the daemon actually publishes to.
         assert!(
             p.publish.contains(&store::subjects::worker_announce()),
             "worker must be allowed to publish its announce heartbeat: {:?}",

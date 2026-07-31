@@ -79,8 +79,6 @@ fn workspace_denies_the_tier_one_lints() {
         .split_once("[workspace.lints.clippy]")
         .expect("root Cargo.toml has a `[workspace.lints.clippy]` table")
         .1;
-    // Stop at the next table header so a deny further down the file cannot
-    // masquerade as one inside the lint table.
     let table = table.split_once("\n[").map_or(table, |(head, _)| head);
     for lint in TIER_ONE_LINTS {
         assert!(

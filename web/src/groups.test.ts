@@ -3,11 +3,6 @@ import type { Job } from './api'
 import { groupHref, groupNameError } from './groups'
 import { EMPTY_FILTERS, filtersFromParams, filtersToParams, groupOptions, matchesFilters } from './jobFilters'
 
-// Job groups on the jobs surface (design #321 slice C2): where a chip leads,
-// what the picker refuses before the round trip, and the group filter — which
-// has to show *finished* jobs, since annotating a Done job is the case the
-// feature exists for.
-
 function job(over: Partial<Job>): Job {
   return {
     id: 1,
@@ -40,8 +35,6 @@ describe('groupHref', () => {
 
   it('sends every other name to the jobs list filtered to it', () => {
     expect(groupHref('acme', 'api', 'beacon-import')).toBe('/p/acme/api?group=beacon-import')
-    // A namespaced non-design group, and a design/ name whose slug is itself a
-    // path — neither is a design route, so both fall back to the filter.
     expect(groupHref('acme', 'api', 'ops/fleet-refresh')).toBe(
       '/p/acme/api?group=ops%2Ffleet-refresh',
     )
@@ -75,8 +68,6 @@ describe('the group filter', () => {
   })
 
   it('shows finished members — a group is mostly finished jobs', () => {
-    // Same Done job, hidden by the default view and revealed by the filter:
-    // the group is explicit, so the hide-finished gate steps aside.
     expect(matchesFilters(grouped, EMPTY_FILTERS, NO_CLAIMS)).toBe(false)
     expect(
       matchesFilters(grouped, { ...EMPTY_FILTERS, group: 'design/311-job-inputs' }, NO_CLAIMS),

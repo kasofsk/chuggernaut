@@ -98,8 +98,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    // Test-only RSA keypair generated once with:
-    //   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048
     const TEST_KEY: &str = include_str!("../testdata/jwt_test_key.pem");
     const TEST_PUB: &str = include_str!("../testdata/jwt_test_key.pub.pem");
 

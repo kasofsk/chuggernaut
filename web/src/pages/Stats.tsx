@@ -23,7 +23,7 @@ export function StatsPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    setLoading(true) // param change: back to skeletons until the new fetch lands
+    setLoading(true)
     api.jobs(owner, project).then(
       (js) => {
         setJobs(js)
@@ -38,8 +38,6 @@ export function StatsPage() {
     )
   }, [owner, project, navigate])
 
-  // Per-type rollup: counts plus mean wall-clock duration of Done jobs
-  // (ready_at → completed_at; created_at stands in for pre-release records).
   const byType = new Map<string, { total: number; done: number; durSum: number; durN: number }>()
   for (const j of jobs) {
     const t = byType.get(j.type) ?? { total: 0, done: 0, durSum: 0, durN: 0 }

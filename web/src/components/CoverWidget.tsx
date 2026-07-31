@@ -21,8 +21,6 @@ import { useEffect, useState } from 'react'
  */
 export function CoverWidget({ html, title = 'cover' }: { html: string; title?: string }) {
   const [open, setOpen] = useState(false)
-  // Presentational-only CSP (job #143): no network of any kind, inline styles
-  // and data: images/fonts only. Prepended so it is parsed before any resource.
   const sandboxed = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'">${html}`
 
   useEffect(() => {
@@ -31,7 +29,6 @@ export function CoverWidget({ html, title = 'cover' }: { html: string; title?: s
       if (e.key === 'Escape') setOpen(false)
     }
     document.addEventListener('keydown', onKey)
-    // Lock background scroll while the lightbox owns the viewport.
     const prev = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
@@ -46,21 +43,15 @@ export function CoverWidget({ html, title = 'cover' }: { html: string; title?: s
         <iframe
           className="cover-frame"
           title={title}
-          /* Presentational only (spec §4.3). Fully sandboxed: no scripts, no
-             same-origin, no forms. The injected CSP blocks all network fetches
-             (job #143). Content rides in via srcDoc. Same policy popped out. */
           sandbox=""
           srcDoc={sandboxed}
         />
-        {/* Transparent full-preview hit target: click anywhere on the collapsed
-            preview to expand. The iframe below never receives the click. */}
         <button
           type="button"
           className="cover-hit"
           aria-label="expand cover to full view"
           onClick={() => setOpen(true)}
         />
-        {/* Unobtrusive corner affordance, revealed on hover. */}
         <button
           type="button"
           className="cover-expand"

@@ -77,27 +77,11 @@ fn capacity_warning_due(
 impl Core {
     pub(crate) async fn run_scans(&mut self) -> Result<()> {
         self.scan_task_timeouts().await?;
-        // Backstop for launches wedged in the capacity queue (§3.5). The
-        // periodic drain that retries them rides `Core::run` after this scan
-        // message, like every other slot-freed retry.
         self.scan_launch_queue_timeouts().await?;
-        // Dynamically-announced workers whose heartbeat lapsed (§3.1): stop
-        // placing on them. Runs before the deadline scan so a lost node's queued
-        // launches simply wait for other capacity this same tick.
         self.scan_worker_heartbeats();
-        // Workers that answer RPCs but have never reported capacity (§8): the
-        // exact signature of the denied-publish bug, and the reason §5a's
-        // narrowed startup gate is a correct trade rather than a regression.
         self.scan_never_observed_capacity();
-        // Re-assert the operator's capacity intent wherever the fleet disagrees
-        // with it (design #293 §4): one push per node per tick, and a refused
-        // value is left alone. Runs beside the other fleet scans and never blocks
-        // — each push is spawned.
         self.reconcile_capacity_intent();
         self.scan_job_deadlines().await?;
-        // Keep the platform config snapshot fresh: republish only when live
-        // fleet state or deploy drift moved (spec §3.1, CD plan C). Best-effort
-        // — never fails the scan.
         self.refresh_config_snapshot().await;
         Ok(())
     }
@@ -122,7 +106,6 @@ impl Core {
             .map(|(name, _)| name.clone())
             .collect();
         for name in stale {
-            // Idempotent: an already-gated node stays gated until it re-announces.
             if self
                 .fleet_roster
                 .iter()
@@ -174,9 +157,6 @@ impl Core {
             );
             self.capacity_warned_at.insert(node.name.clone(), now);
         }
-        // Bounded: forget nodes that have since reported (or left the fleet), so
-        // the table can never outgrow the roster and a node that lapses again
-        // warns promptly rather than waiting out a stale interval.
         let warned: std::collections::HashSet<&str> = live
             .iter()
             .filter(|n| n.capacity.is_some_and(|c| c.observed_at.is_none()))
@@ -193,9 +173,6 @@ impl Core {
         let keys: Vec<(String, String, u64)> = self.active.keys().cloned().collect();
         let now = Utc::now();
         for (owner, project, seq) in keys {
-            // The per-job override is Work-scoped (§1.1, §3.5): Work-phase tasks
-            // use it, every other phase uses the type default. Enforcing the
-            // split here — at kill time — is what keeps the override work-scoped.
             let (work_timeout, type_timeout) =
                 match self.active.get(&(owner.clone(), project.clone(), seq)) {
                     Some(e) => (e.work_timeout(), task_timeout(&e.job_type)),
@@ -271,8 +248,11 @@ impl Core {
 
     /// Jobs in Ready/Work/Evaluation past `job_deadline` (anchored at
     /// `ready_at`): kill containers, escalate once (§3.5 one-shot rule).
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::expect_used, clippy::too_many_lines)]
+    #[allow(
+        clippy::expect_used,
+        clippy::too_many_lines,
+        reason = "TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider."
+    )]
     async fn scan_job_deadlines(&mut self) -> Result<()> {
         let now = Utc::now();
         let candidates: Vec<(String, u64)> = self
@@ -296,8 +276,6 @@ impl Core {
             let (owner, project) = (owner.to_string(), project.to_string());
             let job = self.must_get(&owner, &project, seq)?.clone();
 
-            // Deadline comes from the job type: exec state if active, else
-            // loaded at base_ref (Ready jobs).
             let key = (owner.clone(), project.clone(), seq);
             let deadline_str = match self.active.get(&key) {
                 Some(e) => e.job_type.job_deadline.clone(),
@@ -316,7 +294,7 @@ impl Core {
                     .await
                     {
                         Ok(jt) => jt.job_deadline,
-                        Err(_) => continue, // launch path surfaces this itself
+                        Err(_) => continue,
                     }
                 }
             };
@@ -329,7 +307,6 @@ impl Core {
                 continue;
             }
 
-            // One-shot: a resolved deadline escalation disables enforcement.
             let tasks = self.tasks.list_for_job(&owner, &project, seq).await?;
             let already_resolved = tasks.iter().any(|t| {
                 matches!(&t.kind, TaskKind::Human { prompt } if prompt.starts_with(DEADLINE_MARKER))
@@ -354,9 +331,6 @@ impl Core {
             });
             self.active.remove(&key);
             let dl = deadline_str.unwrap_or_default();
-            // Deadline from Ready is a pre-work escalation (no work task):
-            // Stalled, resolved Retry/Revoke only. From Work/Evaluation it is
-            // post-work: Escalated, where Resolve is also available (§1.2, §3.5).
             if job.state == JobState::Ready {
                 self.stall(
                     &owner,
@@ -419,15 +393,12 @@ mod tests {
         let past_grace = started + chrono::Duration::from_std(CAPACITY_OBSERVE_GRACE).unwrap();
         let never = Some(types::worker::ObservedCapacity::default());
 
-        // Inside the grace window: a daemon that simply came up second is not
-        // accused.
         assert!(!capacity_warning_due(
             &node(true, never),
             started,
             started,
             None
         ));
-        // Past it, with no report: warn.
         assert!(capacity_warning_due(
             &node(true, never),
             past_grace,
@@ -435,7 +406,6 @@ mod tests {
             None
         ));
 
-        // Bounded cadence: silent until the interval elapses, then loud again.
         let just_warned = past_grace;
         assert!(!capacity_warning_due(
             &node(true, never),
@@ -450,8 +420,6 @@ mod tests {
             Some(just_warned)
         ));
 
-        // An unreachable node is already loud through the ping path; this
-        // warning names the RPC-works-announce-does-not signature only.
         assert!(!capacity_warning_due(
             &node(false, never),
             past_grace,
@@ -459,7 +427,6 @@ mod tests {
             None
         ));
 
-        // A node that HAS reported has nothing to warn about.
         let reported = Some(types::worker::ObservedCapacity {
             mark: (1_000, 1),
             slots_max: Some(6),
@@ -472,8 +439,6 @@ mod tests {
             None
         ));
 
-        // A docker-endpoint node carries no observation at all — `DOCKER_NODES`
-        // legitimately owns its number, so it is never a §8 case.
         assert!(!capacity_warning_due(
             &node(true, None),
             past_grace,

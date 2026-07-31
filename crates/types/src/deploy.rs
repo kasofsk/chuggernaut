@@ -140,10 +140,8 @@ mod tests {
         };
         let json = serde_json::to_string(&report).unwrap();
         assert_eq!(serde_json::from_str::<DeployReport>(&json).unwrap(), report);
-        // A skipped leg carries neither secs nor error on the wire.
         assert!(json.contains(r#""status":"skipped"#));
         assert!(!json.contains(r#""name":"sha-advance","status":"skipped","secs"#));
-        // A failed leg carries its detail tail alongside the one-line error.
         assert!(json.contains(r#""detail":"docker: no space left on device""#));
     }
 

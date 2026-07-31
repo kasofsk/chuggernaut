@@ -18,14 +18,14 @@ use store::{NatsStore, buckets, keys, subjects};
 use test_utils::require_nats_config;
 
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn scoped_creds_enforced_by_operator_mode_server() {
     let operator = KeyPair::new_operator();
     let sys = KeyPair::new_account();
     let chug = KeyPair::new_account();
-    // Auth/resolver stanza only — the harness owns the listen port and the
-    // JetStream store (spawn_with_config prepends both).
     let config = resolver_config(
         &operator_jwt(&operator, "chuggernaut").unwrap(),
         &sys.public_key(),
@@ -37,7 +37,6 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
 
     let signer = NatsUserSigner::from_account_seed(&chug.seed().unwrap()).unwrap();
 
-    // Dispatcher identity: unrestricted user in the platform account.
     let dispatcher_creds = signer
         .mint_creds("dispatcher", &Permissions::default(), None)
         .unwrap();
@@ -46,7 +45,6 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
         .expect("dispatcher connect");
     dispatcher.ensure_topology().await.unwrap();
 
-    // Seed state: a job record and one operator inbox message.
     let jobs = dispatcher.raw_bucket(buckets::JOBS).await.unwrap();
     jobs.put_json(&keys::job_key("acme", "api", 1), &json!({ "seq": 1 }))
         .await
@@ -62,7 +60,6 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
         .await
         .unwrap();
 
-    // Dispatcher-side responder for all req.* submits.
     let client = dispatcher.client().clone();
     let mut sub = dispatcher.client().subscribe("req.>").await.unwrap();
     tokio::spawn(async move {
@@ -73,7 +70,6 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
         }
     });
 
-    // Work-container credential, valid 5 minutes.
     let work_creds = signer
         .mint_creds(
             "job-acme-api-1-work",
@@ -85,9 +81,6 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
         .await
         .expect("work connect");
 
-    // Allowed: read own channel entry, but NOT write it. Containers post
-    // through `req.channel.*` so the dispatcher stays the bucket's sole writer
-    // and each post becomes durable event history rather than an overwrite.
     let channels = work.raw_bucket(buckets::CHANNELS).await.unwrap();
     let _: Option<Value> = channels
         .get_json(&keys::channel_key("acme", "api", 1))
@@ -106,7 +99,6 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
         "direct channel KV write must be denied: {denied:?}"
     );
 
-    // Allowed: read own job record (KV direct get).
     let job: Option<Value> = work
         .raw_bucket(buckets::JOBS)
         .await
@@ -116,7 +108,6 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
         .expect("job read");
     assert_eq!(job.unwrap()["seq"], 1);
 
-    // Allowed: poll the operator inbox (ephemeral pull consumer).
     let msgs = work
         .read_subject_after(
             buckets::STREAM_CHANNEL_INBOX,
@@ -128,7 +119,6 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
         .expect("inbox poll");
     assert_eq!(msgs.len(), 1);
 
-    // Allowed: work submit round-trips through the responder.
     work.request_with_retry(
         &subjects::work_submit("acme", "api", 1),
         b"{}",
@@ -138,7 +128,6 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
     .await
     .expect("work submit");
 
-    // Denied: another job's record — the direct-get publish is dropped.
     let denied = tokio::time::timeout(
         Duration::from_secs(3),
         work.raw_bucket(buckets::JOBS)
@@ -152,7 +141,6 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
         "cross-project job read must not succeed: {denied:?}"
     );
 
-    // Denied: eval submit (same live responder answered work submit above).
     let denied = work
         .request_with_retry(
             &subjects::eval_submit("acme", "api", 1, 7),
@@ -163,7 +151,6 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
         .await;
     assert!(denied.is_err(), "eval submit must be denied for work creds");
 
-    // Denied: reading another project's channel entry.
     let denied = tokio::time::timeout(
         Duration::from_secs(3),
         channels.get_json::<Value>(&keys::channel_key("acme", "web", 9)),

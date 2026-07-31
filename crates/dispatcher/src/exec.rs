@@ -38,10 +38,6 @@ use types::{
     TaskPhase, TaskResolution, TaskResult, TaskState, WorkType, parse_duration,
 };
 
-// The Work phase's vocabulary moved into the pure decider with C6; re-exported
-// here so the eval and triage launch paths (which reuse the §12.4 provider
-// resolution and the §3.6 relaunch bound) keep one import surface, exactly as
-// `lib.rs` re-exports the domain modules.
 pub(crate) use crate::decide::work::{INFRA_LOSS_REASON, INFRA_RELAUNCH_CAP, provider_name};
 
 /// Bound on one Work decision fold (STYLE.md Tier 2 #3). The only continuation
@@ -150,8 +146,6 @@ impl Core {
         let base_ref = job.base_ref.clone().ok_or_else(|| {
             CoreError::NotFound(format!("{owner}/{project}#{seq} has no base_ref"))
         })?;
-        // 1. Reads feed the view: the contract at base_ref and the §2.2
-        // launch-time pass. Which park a failure earns is the decider's call.
         let job_type = match self
             .work_entry_contract(owner, project, &job, &base_ref)
             .await?
@@ -163,15 +157,6 @@ impl Core {
                 return Ok(());
             }
         };
-        // Cycle 1 (start_job) creates the branch; every rework re-entry finds it
-        // already present and PRESERVES the agent's commits — reworks are
-        // fix-in-place (spec §3.2 step 12). Eval-failure rework keeps base_ref, so
-        // the prior work carries forward untouched; conflict / gate-failure rework
-        // has already rebased the branch onto the new base with a WIP marker
-        // commit (see `conflict_rework` / `gate_reduce`), so we must not discard
-        // it either. Branch existence is what discriminates cycle 1 (absent) from
-        // all three rework callers (present). Container-failure retries reset the
-        // branch directly via `recover_or_reset_branch`, NOT through here.
         if self
             .repos
             .resolve_ref(owner, project, &job.branch)
@@ -188,9 +173,6 @@ impl Core {
         {
             return Ok(());
         }
-        // The execution slice is dispatcher state the pure crate cannot hold, so
-        // opening it is the entry's bookkeeping — and attempt 1 follows it,
-        // because the launch decision reads the slice it just opened.
         self.open_exec_state(
             owner,
             project,
@@ -233,11 +215,6 @@ impl Core {
             Ok(job_type) => job_type,
             Err(errors) => return Ok(Err(work::EntryFailure::Contract(errors))),
         };
-        // The third and last pass over the job's inputs (§2.2, design #311
-        // Decision 3): the shape floor only — charset, length, name form, count —
-        // re-checked immediately before injection and deliberately consulting no
-        // declaration, since the declaration was judged at release and at the
-        // Ready transition. Costs no I/O, so it decides before the KV round trip.
         if let Err(violation) = types::inputs::check_supplied(&job.inputs) {
             return Ok(Err(work::EntryFailure::BadInput(violation.to_string())));
         }
@@ -280,8 +257,6 @@ impl Core {
         for mut t in transitions {
             self.set_state(&mut t.job, t.to).await?;
         }
-        // Boxed: the escalation composites behind `interpret` can re-enter the
-        // Work phase, and this is the edge that closes that async cycle.
         for effect in effects {
             Box::pin(self.interpret(effect)).await?;
         }
@@ -323,9 +298,6 @@ impl Core {
                 eval_context,
                 merge_conflict,
                 rework_reason,
-                // §1.1 per-job override: parseability is validated at release, so
-                // a malformed string here is a stale record — fall back to the
-                // type default rather than failing the launch.
                 work_timeout: job.timeout.as_deref().and_then(|s| parse_duration(s).ok()),
             },
         );
@@ -345,7 +317,6 @@ impl Core {
         attempt: u32,
         resume: bool,
     ) -> Result<()> {
-        // 1. Reads feed the view.
         let Some(inputs) = self.gather_work_view(owner, project, seq).await? else {
             tracing::warn!(
                 "work launch for {owner}/{project}#{seq}: no exec state \
@@ -355,7 +326,6 @@ impl Core {
         };
         let job = self.must_get(owner, project, seq)?.clone();
         let view = inputs.view(&job, self.draining);
-        // 2. The decision, made purely.
         let (transitions, effects, step) = work::decide(
             &view,
             work::WorkEvent::Attempt {
@@ -364,17 +334,12 @@ impl Core {
                 resume,
             },
         );
-        // 3. Commit the decision — an attempt decides no §2.1 transition of its
-        // own (Work entry already moved the record), so this is empty in practice.
         for mut t in transitions {
             self.set_state(&mut t.job, t.to).await?;
         }
-        // 4. The artifacts of the decision: the task record, and a consumed claim.
         for effect in effects {
             self.interpret(effect).await?;
         }
-        // 5. The launch itself is I/O. A parked attempt (human work, or a claim)
-        // has none — the operator inbox drives it from here (§1.2).
         match step {
             work::WorkStep::Launch { task, resume } => {
                 self.launch_work_container(owner, project, seq, *task, resume)
@@ -388,9 +353,6 @@ impl Core {
     /// is already on `task`, so this only assembles the prompt, the §7.4
     /// credentials and the container env, and hands the run to the provider (an
     /// agent) or the backend (a command). No decision lives here.
-    // TODO(io-split): assembly and port calls the decider carve left behind — no
-    // decision logic here. `self.self_tx` is the core's own sender: every path that
-    // reaches a launch runs inside the spawned actor.
     #[allow(clippy::expect_used, clippy::too_many_lines)]
     async fn launch_work_container(
         &mut self,
@@ -405,9 +367,6 @@ impl Core {
             return Ok(());
         };
         let job_type = exec.job_type.clone();
-        // §1.1 per-job override for Work-phase tasks (else type default). Drives
-        // the agent run timeout and the §7.4 credential TTLs so creds outlive a
-        // longer override.
         let work_timeout = exec.work_timeout();
         let (eval_context, merge_conflict) =
             (exec.eval_context.clone(), exec.merge_conflict.clone());
@@ -433,10 +392,6 @@ impl Core {
                     .await?;
                 self.inject_platform_agent_secrets(&mut env).await?;
                 let brief = self.work_brief(owner, project, &job);
-                // #168: a work retry (attempt > 1) leads with the predecessor's
-                // partial output. `resume` means the branch already carries the
-                // predecessor's pushed commits, so the block points the agent at
-                // both the log tail and those commits.
                 let predecessor = self
                     .predecessor_block(
                         owner,
@@ -476,16 +431,11 @@ impl Core {
                 let config = AgentRunConfig {
                     image: job_type.image.clone().unwrap_or_default(),
                     prompt,
-                    // §12.4 model resolution for the Work agent: per-job
-                    // override → job type → project default (folded into
-                    // work.model by `with_defaults`) → platform default.
                     model: job
                         .model
                         .clone()
                         .or_else(|| job_type.work.model.clone())
                         .or_else(|| self.config.agent_model_default.clone()),
-                    // §4.4 upfront injection: tagged knowledge (tags/{tag}.md
-                    // at base_ref) rides the system prompt, work agents only.
                     system_prompt: self
                         .knowledge_block(owner, project, &base_ref, &job_type, &job)
                         .await?,
@@ -497,8 +447,6 @@ impl Core {
                     merge_conflict,
                     session_id: session_id.clone().unwrap_or_default(),
                     node: job_type.placement_node().map(String::from),
-                    // Work builds, edits, commits and pushes — the permissive
-                    // profile (spec §4.3).
                     permissions: agent::PermissionProfile::Work,
                 };
                 let provider = self.provider.clone();
@@ -509,12 +457,7 @@ impl Core {
                 tokio::spawn(async move {
                     let (exit_code, usage) = match provider.run(config, on_launch).await {
                         Ok(out) => {
-                            // Harvest before reporting the exit: once the task
-                            // completes the job may advance, and the artifacts
-                            // are the only record of how it got here.
                             let usage = harvest.collect(&o, &p, seq, task_id, &out).await;
-                            // Reclaim the overlay now that logs/transcript are
-                            // captured — otherwise every task leaks its build.
                             if let Some(id) = &out.container_id {
                                 harvest.dispose(seq, task_id, id).await;
                             }
@@ -546,10 +489,6 @@ impl Core {
                 });
             }
             WorkType::Command => {
-                // The placement window opens where the decision to launch does,
-                // not at the launch (design #293 §2): everything from here to
-                // `place_container` is the decision, and none of it may consult
-                // the operator's intent.
                 let placement = self.placement_guard();
                 let run = job_type.work.run.clone().unwrap_or_default();
                 let config = self
@@ -566,35 +505,15 @@ impl Core {
                         work_timeout,
                     )
                     .await?;
-                match self
-                    .place_container(DecidedLaunch { config, placement })
-                    .await
-                {
-                    Ok(id) => {
-                        task.container_id = Some(id.clone());
-                        self.task_put(&task).await?;
-                        // Logs are the only record of what a command task printed —
-                        // TaskResult::Command.output has never carried it.
-                        self.spawn_logs_monitor(owner, project, seq, task_id, id);
-                    }
-                    // No free slot: queue the launch and retry when one frees,
-                    // rather than failing the task and burning a retry (§3.5).
-                    Err(container::BackendError::NoCapacity(reason)) => {
-                        self.defer_launch(owner, project, seq, &mut task, reason)
-                            .await?;
-                    }
-                    // Any other launch failure is a task failure (§3.2): report it
-                    // through the exit fan-in so the exit decision marks the task
-                    // Failed with the launch error and applies work_retries →
-                    // escalation. The agent work path already gets this for free
-                    // (`provider.run` errors surface as exit -1).
-                    Err(e) => {
-                        self.report_launch_failure(owner, project, seq, task_id, e);
-                    }
-                }
+                self.place_or_defer_launch(
+                    owner,
+                    project,
+                    seq,
+                    &mut task,
+                    DecidedLaunch { config, placement },
+                )
+                .await?;
             }
-            // A human work task parks Pending in the operator inbox; the
-            // decision never hands one to this launch half.
             WorkType::Human => unreachable!("human work launches no container"),
         }
         Ok(())
@@ -617,8 +536,6 @@ impl Core {
     /// The reason is single-wrapped: `container {backend_error}` reads e.g.
     /// `container launch failed: invalid memory limit "5g"` — no double
     /// `launch failed: launch failed:` and no spurious `job not found:` prefix.
-    // The core's own sender: `spawned core` holds for every path that can reach a
-    // launch, and there is no fallback that could report the failure instead.
     #[allow(clippy::expect_used)]
     pub(crate) fn report_launch_failure(
         &self,
@@ -655,11 +572,6 @@ impl Core {
         let Some(task) = self.tasks.get(owner, project, seq, task_id).await? else {
             return Ok(());
         };
-        // A revoked (or otherwise terminated) job has no exec state; a late
-        // exit from one of its containers is noise, not a state transition.
-        // Every phase handler except Triage assumes exec state exists, so
-        // without this guard a stale exit panics the core loop. Triage is
-        // advisory and passes through: it never reads exec state.
         if task.phase != TaskPhase::Triage
             && !self
                 .active
@@ -671,11 +583,6 @@ impl Core {
             );
             return Ok(());
         }
-        // Container gone at restart (§3.6): an infrastructure loss, not a real
-        // exit. Handled before the per-phase verdict logic so a Work retry
-        // budget is never spent and a command evaluator's vanished container is
-        // never misread as a failing verdict. Only ever set by `settle_running`,
-        // and only for a Running Work/Evaluation task.
         if exit.infra_loss
             && task.state == TaskState::Running
             && matches!(task.phase, TaskPhase::Work | TaskPhase::Evaluation)
@@ -683,8 +590,6 @@ impl Core {
             return self.on_infra_loss(owner, project, seq, task).await;
         }
         match task.phase {
-            // The exit verdict — including whether a stale monitor's exit for an
-            // already-resolved task is noise — is the C6 decider's (§3.2).
             TaskPhase::Work => {
                 self.run_work(
                     owner,
@@ -702,28 +607,20 @@ impl Core {
                 )
                 .await
             }
-            // Eval tasks can legitimately be Done already — submit_eval lands
-            // before the container exits, and the exit completes the slot.
-            // on_eval_exited drops anything not in the current round.
             TaskPhase::Evaluation => self.on_eval_exited(owner, project, seq, task, exit).await,
             TaskPhase::MergeGate => self.on_gate_exited(owner, project, seq, task, exit).await,
-            // Post-merge wrap-up command (§3.2): exit 0 lands the job Done, a
-            // non-zero exit escalates — the merge already landed.
             TaskPhase::WrapUp => {
                 if task.state != TaskState::Running {
                     return Ok(());
                 }
                 self.on_wrapup_exited(owner, project, seq, task, exit).await
             }
-            // Advisory triage (§1.2): record the assessment; never touch job state.
             TaskPhase::Triage => {
                 if task.state != TaskState::Running {
                     return Ok(());
                 }
                 self.on_triage_exited(owner, project, seq, task, exit).await
             }
-            // Escalation tasks are Human — they launch no container, so no
-            // TaskExited ever fires for one; nothing to do defensively.
             TaskPhase::Escalation => Ok(()),
         }
     }
@@ -744,11 +641,7 @@ impl Core {
         let key = (owner.to_string(), project.to_string(), seq);
         let mut event = event;
         for _ in 0..WORK_FOLD_STEPS_MAX {
-            // 1. Reads feed the view — they are not effects.
             let Some(inputs) = self.gather_work_view(owner, project, seq).await? else {
-                // A late exit from a job that was revoked or completed: there is
-                // nothing to decide, and this is the guard class that once
-                // panicked the actor (§3.6).
                 tracing::warn!(
                     "work event for {owner}/{project}#{seq}: no exec state \
                      (job revoked or completed); ignoring"
@@ -757,21 +650,14 @@ impl Core {
             };
             let job = self.must_get(owner, project, seq)?.clone();
             let view = inputs.view(&job, self.draining);
-            // 2. The decision, made purely.
             let (transitions, effects, step) = work::decide(&view, event);
-            // 3. Commit the decision: transitions first (§2.1 record is the
-            // source of truth; the task records and announcements are its
-            // artifacts).
             for mut t in transitions {
                 self.set_state(&mut t.job, t.to).await?;
             }
             self.commit_work_step(&key, &step);
-            // 4. The artifacts of the decision. Boxed: the escalation and
-            // launch composites behind `interpret` can re-enter this phase.
             for effect in effects {
                 Box::pin(self.interpret(effect)).await?;
             }
-            // 5. The I/O the step names, and the hop it asks for.
             match self.run_work_step(owner, project, seq, step).await? {
                 Some(hop) => event = hop,
                 None => return Ok(()),
@@ -795,9 +681,6 @@ impl Core {
         step: work::WorkStep,
     ) -> Result<Option<work::WorkEvent>> {
         match step {
-            // The continuation hop (contracts.md §2): "did the branch move
-            // beyond base_ref?" is a ref read, so the decider gates it, this
-            // performs it, and the answer re-enters against a fresh view.
             work::WorkStep::CheckOutput { task } => {
                 let job = self.must_get(owner, project, seq)?;
                 let (branch, base_ref) = (job.branch.clone(), job.base_ref.clone());
@@ -829,8 +712,6 @@ impl Core {
                 Box::pin(self.reenter_gate_after_fix(owner, project, seq)).await?;
                 Ok(None)
             }
-            // Idle/Hold end the fold; Begin/Launch/Park belong to the entry and
-            // attempt shims and never come back out of this fold.
             work::WorkStep::Idle
             | work::WorkStep::Hold
             | work::WorkStep::Begin
@@ -944,7 +825,6 @@ impl Core {
     ) -> Result<()> {
         let phase = task.phase;
 
-        // Retire the lost attempt, stamped as an infra loss (not a real failure).
         task.state = TaskState::Failed;
         task.infra_loss = true;
         task.completed_at = Some(Utc::now());
@@ -961,8 +841,6 @@ impl Core {
         )
         .await?;
 
-        // Count infra losses for this task's lineage (same cycle + evaluator):
-        // the freshly-stamped attempt is included, so the Nth loss sees count N.
         let losses = self
             .tasks
             .list_for_job(owner, project, seq)
@@ -978,8 +856,6 @@ impl Core {
         let over_cap = losses > INFRA_RELAUNCH_CAP as usize;
 
         match phase {
-            // Relaunch-or-escalate is Work-phase policy, so it is the C6
-            // decider's; only the retirement above is shared with Evaluation.
             TaskPhase::Work => {
                 self.run_work(
                     owner,
@@ -996,7 +872,6 @@ impl Core {
                 self.on_infra_loss_evaluation(owner, project, seq, &task, losses, over_cap)
                     .await
             }
-            // The interception in `on_task_exited` restricts this to Work/Eval.
             _ => Ok(()),
         }
     }
@@ -1018,14 +893,13 @@ impl Core {
         over_cap: bool,
     ) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
-        // The recovered round still owns a slot awaiting this task.
         let Some(slot_idx) = self
             .active
             .get(&key)
             .and_then(|e| e.round.as_ref())
             .and_then(|r| r.slots.iter().position(|s| s.task_id == task.id))
         else {
-            return Ok(()); // superseded round; nothing to relaunch into
+            return Ok(());
         };
         if over_cap {
             self.active.remove(&key);
@@ -1050,7 +924,6 @@ impl Core {
             (slot.evaluator.clone(), exec.cycle)
         };
         let branch = self.must_get(owner, project, seq)?.branch.clone();
-        // Same attempt: eval_retries untouched.
         let new_id = self
             .launch_evaluator_task(
                 owner,
@@ -1080,16 +953,11 @@ impl Core {
     ) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
         let Some(exec) = self.active.get_mut(&key) else {
-            return Ok(()); // job already past Work — late duplicate, ack it
+            return Ok(());
         };
         exec.work_submission = Some(submission.clone());
         let cycle = exec.cycle;
 
-        // Persist it, not just cache it: the submission arrives while the
-        // container is still running (§4.2 ack-then-exit), so a dispatcher
-        // restart in that window used to lose the agent's summary entirely —
-        // ExecState rebuilds as None, and the commit message reads from it.
-        // The task is still Running; the exit handler fills in the rest.
         if let Some(mut task) = self.running_work_task(owner, project, seq, cycle).await? {
             task.result = Some(TaskResult::Work {
                 summary: submission.summary,
@@ -1127,8 +995,6 @@ impl Core {
     /// Operator resolution of a Pending Human task (§1.2): human work tasks,
     /// human evaluator tasks, and escalation tasks — the valid `kind` depends
     /// on the job state, wrong kinds are rejected (the API layer's 400).
-    // TODO(io-split): the §1.2 resolution router — every arm's decision now lives in a
-    // decider (C1 escalation, C5 eval, C6 work); what is left is the routing itself.
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn handle_resolve_task(
         &mut self,
@@ -1142,10 +1008,6 @@ impl Core {
         let Some(mut task) = self.tasks.get(owner, project, seq, task_id).await? else {
             return Err(CoreError::NotFound(format!("task {task_id}")));
         };
-        // Resolvable: Pending Human-kind tasks (declared human work, human
-        // evaluators, escalations) and Pending claimed attempts of ANY kind —
-        // the claim made the human the performer without changing the kind
-        // (§1.2 claims).
         let human_performed = matches!(task.kind, TaskKind::Human { .. })
             || task.performed_by == Some(types::Performer::Human);
         if task.state != TaskState::Pending || !human_performed {
@@ -1174,9 +1036,6 @@ impl Core {
         };
 
         match (job.state, resolution) {
-            // Post-work escalation task (§1.2): work executed, automation ran
-            // out. Retry resumes at the phase that exhausted (see
-            // `escalation_retry_phase`); Resolve re-enters Evaluation.
             (JobState::Escalated, TaskResolution::Escalation { action, structured }) => {
                 complete_task(&mut task, true, false, structured, Some(action));
                 self.task_put(&task).await?;
@@ -1191,8 +1050,6 @@ impl Core {
                 match action {
                     EscalationAction::Retry => self.escalation_retry(owner, project, seq).await,
                     EscalationAction::Resolve => {
-                        // §1.2: operator did the work; submit the current
-                        // branch for evaluation as-is.
                         self.ensure_exec_state(owner, project, seq).await?;
                         self.enter_evaluation(owner, project, seq).await
                     }
@@ -1201,9 +1058,6 @@ impl Core {
                     }
                 }
             }
-            // Pre-work escalation task (§1.2): no work task exists. Retry
-            // re-runs the failed step (re-validation / re-enqueue) via
-            // prework_retry; Resolve is rejected — there is nothing to submit.
             (JobState::Stalled, TaskResolution::Escalation { action, structured }) => {
                 if matches!(action, EscalationAction::Resolve) {
                     return Err(CoreError::InvalidResolution(
@@ -1235,9 +1089,6 @@ impl Core {
                 "kind: Escalation is only valid on escalation tasks".into(),
             )),
 
-            // Human-performed work attempt: declared human work (§1.1
-            // work.type: human) or a claimed attempt of any kind (§1.2
-            // claims). `abort` on Fail is an evaluator concept — ignored here.
             (
                 JobState::Work,
                 TaskResolution::Pass {
@@ -1246,17 +1097,11 @@ impl Core {
                 },
             ) => {
                 complete_task(&mut task, true, false, structured.clone(), None);
-                // Persist the operator's completion summary on the task record
-                // too, so the Reports thread renders human-completed work like
-                // an agent's closing summary — not just in the squash body.
                 if let Some(TaskResult::Human { summary: s, .. }) = &mut task.result {
                     *s = summary.clone();
                 }
                 self.task_put(&task).await?;
                 self.ensure_exec_state(owner, project, seq).await?;
-                // The human's summary is this attempt's submit_result (§1.2
-                // claims): it flows into the squash-merge commit body exactly
-                // like an agent's submission.
                 if summary.is_some() || structured.is_some() {
                     let key = (owner.to_string(), project.to_string(), seq);
                     if let Some(exec) = self.active.get_mut(&key) {
@@ -1264,24 +1109,14 @@ impl Core {
                             summary,
                             structured,
                             token_usage: None,
-                            // Operator-completed work carries no agent cover.
                             cover_html: None,
                         });
                     }
                 }
                 self.enter_evaluation(owner, project, seq).await
             }
-            // Fail consumes the attempt through the normal work-failure path
-            // (§1.2 claims): retries remaining → the next attempt launches per
-            // the DECLARED kind (an agent picks the work right back up — no
-            // un-conversion), else escalation. A Fail resolution is a deliberate
-            // handoff at a clean commit boundary, so — unlike a container crash —
-            // the branch is PRESERVED and the operator's notes carry forward
-            // (#121).
             (JobState::Work, TaskResolution::Fail { structured, .. }) => {
                 complete_task(&mut task, false, false, Some(structured.clone()), None);
-                // The slice has to exist before the decision reads its budget;
-                // rebuilding it is reads only, so nothing is written out of order.
                 self.ensure_exec_state(owner, project, seq).await?;
                 self.run_work(
                     owner,
@@ -1296,7 +1131,6 @@ impl Core {
                 .await
             }
 
-            // Human evaluator task (§3.3 human).
             (JobState::Evaluation, TaskResolution::Pass { structured, .. }) => {
                 complete_task(&mut task, true, false, structured.clone(), None);
                 self.task_put(&task).await?;
@@ -1334,13 +1168,8 @@ impl Core {
         self.ensure_exec_state(owner, project, seq).await?;
         match self.escalation_retry_phase(owner, project, seq).await? {
             TaskPhase::Evaluation | TaskPhase::MergeGate => {
-                // Work is Done and the branch intact: re-enter Evaluation. The
-                // round is rebuilt from the job type, so eval_retries is a fresh
-                // grant and the work attempt counter is untouched (#141).
                 self.enter_evaluation(owner, project, seq).await
             }
-            // Only the publish re-runs: the squash already landed, so the C3
-            // decider takes the job back to WrapUp and relaunches the command.
             TaskPhase::WrapUp => {
                 self.run_wrapup(owner, project, seq, wrapup::WrapUpEvent::RetryRequested)
                     .await
@@ -1390,8 +1219,10 @@ impl Core {
     /// Re-run Work after a work-phase escalation (#141, pre-existing behavior):
     /// new work task, same cycle, attempt++, branch used AS-IS — the operator
     /// may have modified it. `work_retries` budget is not reset.
-    // TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here."
+    )]
     async fn retry_work(&mut self, owner: &str, project: &str, seq: u64) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
         let cycle = self.active.get(&key).expect("exec state").cycle;
@@ -1416,8 +1247,6 @@ impl Core {
             .max()
             .unwrap_or(0);
         let mut job = self.must_get(owner, project, seq)?.clone();
-        // Branch used as-is (§1.2); if it carries commits from the escalated
-        // attempt, tell the retry it is resuming so it builds on them (§3.2).
         let base_ref = job.base_ref.clone().ok_or_else(|| {
             CoreError::NotFound(format!("{owner}/{project}#{seq} has no base_ref"))
         })?;
@@ -1465,12 +1294,6 @@ impl Core {
         };
         match revalidation {
             Ok(declared_inputs) => {
-                // A pre-work Retry is a Ready transition (§2.1), so it obeys the
-                // same input rule: declared defaults materialize only if THIS is
-                // the write that first pins `base_ref` — a job that stalled from
-                // Blocked. One that already ran (a `job_deadline` stall) keeps the
-                // map it entered with; re-resolving would make its target mutable
-                // (design #311 Decision 6).
                 if job.base_ref.is_none() {
                     inputs::fill_input_defaults(&declared_inputs, &mut job.inputs);
                 }
@@ -1482,8 +1305,6 @@ impl Core {
                     project: project.into(),
                     seq,
                 });
-                // Effective set on the transition that pins `base_ref` — the same
-                // audit rule the other two Ready transitions follow (§10.3).
                 let mut extra = serde_json::json!({});
                 inputs::stamp_event_inputs(&mut extra, &job.inputs);
                 self.publish(owner, project, seq, "job-unblocked", extra)
@@ -1540,16 +1361,12 @@ impl Core {
         let job_type = release::with_job_evaluators(job_type, &job)?;
         let all_tasks = self.tasks.list_for_job(owner, project, seq).await?;
         let cycle = all_tasks.iter().map(|t| t.cycle).max().unwrap_or(1);
-        // Gate-fix rounds are counted from the persisted task log so the budget
-        // survives restart (job #154): one Work task per gate-fix round.
         let gate_fix_used = all_tasks
             .iter()
             .filter(|t| {
                 t.phase == TaskPhase::Work && t.rework_reason == Some(ReworkReason::GateCompileFix)
             })
             .count() as u32;
-        // Recover the submission from the task log rather than starting blank:
-        // it is what the squash-merge commit message is built from.
         let work_submission = all_tasks
             .iter()
             .filter(|t| t.phase == TaskPhase::Work && t.cycle == cycle && t.evaluator.is_none())
@@ -1580,7 +1397,6 @@ impl Core {
                 gate: None,
                 eval_context: vec![],
                 merge_conflict: None,
-                // Operator-driven Retry re-runs work fresh — not a rework cycle.
                 rework_reason: None,
                 work_timeout: job.timeout.as_deref().and_then(|s| parse_duration(s).ok()),
             },
@@ -1598,8 +1414,10 @@ impl Core {
     /// §3.6 loss) reuses the same attempt number across the lineage. Command (ci)
     /// retries are deterministic scripts and never call this.
     #[allow(clippy::too_many_arguments)]
-    // TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here."
+    )]
     pub(crate) async fn predecessor_block(
         &self,
         owner: &str,
@@ -1628,7 +1446,6 @@ impl Core {
             return None;
         }
         priors.sort_by_key(|t| t.id);
-        // This retry is the Nth attempt in the lineage; the predecessor is N-1.
         let ordinal = (priors.len() + 1) as u32;
         let prev = priors.last().expect("non-empty checked");
         let tail = self.predecessor_tail(owner, project, seq, prev.id).await;
@@ -1679,8 +1496,6 @@ impl Core {
         predecessor: Option<&str>,
     ) -> Result<String> {
         let mut prompt = String::new();
-        // #168: the predecessor block leads the prompt so the agent sees it before
-        // the task instructions — attempt N knows a predecessor existed up front.
         if let Some(pred) = predecessor {
             prompt.push_str(pred);
         }
@@ -1702,8 +1517,10 @@ impl Core {
     }
 
     #[allow(clippy::too_many_arguments)]
-    // TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here."
+    )]
     pub(crate) async fn container_env(
         &self,
         owner: &str,
@@ -1713,9 +1530,6 @@ impl Core {
         job_type: &JobType,
         secrets_declared: &[String],
         role: ChannelRole,
-        // §7.4 credential TTL: the resolved timeout of the task these creds
-        // serve (work override or type default), so a longer-running task's
-        // credentials outlive it.
         creds_ttl: Duration,
     ) -> Result<HashMap<String, String>> {
         let mut env = HashMap::from([
@@ -1741,15 +1555,12 @@ impl Core {
                 env.insert("JOB_TASK_ID".into(), task_id.to_string());
             }
         }
-        // §6.3 task origin: the channel binary stamps these onto every post so
-        // the event carries which task produced it (no timestamp guessing).
         env.insert("CHUG_TASK_ID".into(), role.task_id().to_string());
         env.insert("CHUG_PHASE".into(), role.phase().into());
         if let Some(evaluator) = role.evaluator() {
             env.insert("CHUG_EVALUATOR".into(), evaluator.to_string());
         }
         self.inject_git_ssh_command(&mut env);
-        // §7.4: scoped credentials valid for task_timeout, minted per launch.
         if let Some(seed) = &self.config.nats_account_seed {
             let signer = auth::nats::NatsUserSigner::from_account_seed(seed)
                 .map_err(|e| CoreError::Config(format!("nats account seed: {e}")))?;
@@ -1780,11 +1591,6 @@ impl Core {
         }
         let vars = self.store.raw_bucket(store::buckets::VARS).await?;
         for name in &job_type.vars {
-            // Reserved names are rejected at release validation for vars as well
-            // as secrets (`release::static_errors_kv`, design #311 Decision 4);
-            // skipping them here too keeps a var written before that rule existed
-            // from shadowing an origin credential or a §6.3 task-origin stamp —
-            // the same defense in depth the secret loop below applies.
             if name.starts_with(crate::forge_ingest::origin::RESERVED_SECRET_PREFIX) {
                 continue;
             }
@@ -1795,14 +1601,10 @@ impl Core {
                 env.insert(name.clone(), value);
             }
         }
-        // Reserved names (origin credentials) are rejected at release
-        // validation; skipping them here too keeps them out of containers even
-        // if a job record predates the rule.
         let injectable = secrets_declared
             .iter()
             .filter(|n| !n.starts_with(crate::forge_ingest::origin::RESERVED_SECRET_PREFIX));
         match &self.secrets {
-            // §8.2: age-decrypted immediately before injection.
             Some(secrets) => {
                 use store::secrets::SecretStore;
                 for name in injectable {
@@ -1811,7 +1613,6 @@ impl Core {
                     }
                 }
             }
-            // Dev mode without an identity: values injected as stored.
             None => {
                 let secrets = self.store.raw_bucket(store::buckets::SECRETS).await?;
                 for name in injectable {
@@ -1846,8 +1647,6 @@ impl Core {
     ) -> Result<()> {
         let refused = inputs::inject_input_env(env, &self.must_get(owner, project, seq)?.inputs);
         if !refused.is_empty() {
-            // Unreachable for a job that cleared the §2.2 launch-time pass; loud
-            // in the log because reaching it means a record predates a rule.
             tracing::warn!(
                 "{owner}/{project}#{seq}: inputs refused at injection (outside the \
                  declared charset): {}",
@@ -1931,7 +1730,6 @@ impl Core {
                     }
                 }
             }
-            // Dev mode without an identity: values injected as stored.
             None => {
                 let bucket = self.store.raw_bucket(store::buckets::SECRETS).await?;
                 let prefix = format!("{owner}.{SCOPE}.");
@@ -1973,16 +1771,16 @@ impl Core {
 
     /// §7.4 per-job SSH credential as injected files (work rw, eval ro).
     /// Empty when the SSH front isn't configured (file:// dev repos, tests).
-    // TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here."
+    )]
     pub(crate) async fn ssh_credential_files(
         &self,
         owner: &str,
         project: &str,
         seq: u64,
         role: ChannelRole,
-        // §7.4 credential TTL: the resolved timeout of the task these creds
-        // serve (work override or type default).
         creds_ttl: Duration,
     ) -> Result<Vec<container::InjectedFile>> {
         if !self.ssh_front_active() {
@@ -2025,8 +1823,6 @@ impl Core {
             return (vec![], vec![]);
         };
         let path = "/usr/local/bin/chuggernaut-channel";
-        // §4.2: the binary connects using NATS_URL/NATS_CREDS from
-        // McpServerConfig.env (the rest of its context rides on container env).
         let mcp_env: HashMap<String, String> = ["NATS_URL", "NATS_CREDS"]
             .iter()
             .filter_map(|k| env.get(*k).map(|v| (k.to_string(), v.clone())))
@@ -2042,8 +1838,6 @@ impl Core {
                 container_path: path.into(),
                 contents: bytes.clone(),
                 mode: 0o755,
-                // Worker nodes hold their own (worker-arch) channel binary;
-                // the fleet backend sends this name instead of the bytes.
                 artifact: Some(types::worker::ARTIFACT_CHANNEL.into()),
             }],
         )
@@ -2230,12 +2024,10 @@ fn predecessor_failure_mode(prev: &Task) -> &'static str {
         return "was lost to infrastructure (its container vanished before it could finish)";
     }
     match &prev.result {
-        // #167 no-output eval invalid fail, or a command with an empty stream.
         Some(TaskResult::Command { output, .. }) if output.trim().is_empty() => {
             "exited without producing any output"
         }
         Some(TaskResult::Command { pass: false, .. }) => "exited with a failing result",
-        // An agent that ended without submitting a result (crash / finish-line).
         None => "exited without submitting a result",
         _ => "did not complete successfully",
     }
@@ -2316,9 +2108,6 @@ pub(crate) fn rework_context_block(
                 "**{}** (pass: {}):\n{findings}\n\n",
                 r.evaluator, r.pass
             ));
-            // #167: a command evaluator carries no structured findings — its
-            // captured output tail is the failure evidence the next work agent
-            // needs to fix against, so fence it clearly as the evaluator's output.
             if let Some(output) = &r.output {
                 block.push_str(&format!(
                     "Output (tail) from **{}**:\n```\n{}\n```\n\n",
@@ -2411,7 +2200,7 @@ mod tests {
     async fn empty_branch_is_reset_no_resume() {
         let repo = TempRepo::create("acme", "api").await;
         let base = repo.head().await;
-        repo.create_job_branch(1, &base).await; // created, nothing pushed
+        repo.create_job_branch(1, &base).await;
 
         let resume = recover_or_reset_branch(&repo.manager, "acme", "api", "job/1", &base)
             .await
@@ -2429,7 +2218,6 @@ mod tests {
         let repo = TempRepo::create("acme", "api").await;
         let base = repo.head().await;
 
-        // Default branch moves on after base_ref was pinned.
         let main_clone = repo.clone_branch("main").await;
         main_clone
             .commit_file("landed.rs", b"deploy", "deploy")
@@ -2438,7 +2226,6 @@ mod tests {
         let new_main = repo.head().await;
         assert_ne!(new_main, base);
 
-        // The crashed attempt's branch, built off the OLD base_ref.
         repo.create_job_branch(1, &base).await;
         let job_clone = repo.clone_branch("job/1").await;
         job_clone.commit_file("wip.rs", b"partial", "wip").await;
@@ -2524,9 +2311,6 @@ mod tests {
             "no group name may appear in the brief"
         );
 
-        // A batch is a job with its own record, so it carries its own groups —
-        // and its brief, which is composed from the batch AND its members, must
-        // ignore every one of them.
         let member = types::Job {
             id: 2,
             groups: vec!["beacon-import".into()],

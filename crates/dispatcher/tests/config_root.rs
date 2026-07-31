@@ -63,7 +63,6 @@ async fn job_type_and_defaults_load_from_the_config_root() {
         .await
         .unwrap();
     assert_eq!(jt.image.as_deref(), Some("img:latest"));
-    // The defaults overlay resolved from `.chug/` too — not silently skipped.
     assert_eq!(jt.eval.len(), 1);
     assert_eq!(jt.eval[0].name, "ci");
 }

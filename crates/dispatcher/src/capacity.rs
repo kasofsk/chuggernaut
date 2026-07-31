@@ -264,13 +264,8 @@ pub fn decide(
         return settled(CapacityState::Converged);
     }
     if !in_fleet {
-        // "Intent recorded, node not converging" is exactly what the display
-        // state means (design #293 §10), and a decommissioned node is the
-        // starkest case of it.
         return settled(CapacityState::Unacknowledged);
     }
-    // A ledger for a *different* value is a previous ask; the operator has moved
-    // on, so nothing it remembers — least of all a rejection — applies here.
     let ledger = ledger.filter(|l| l.slots == desired);
     if let Some(l) = ledger {
         if l.rejected.is_some() {
@@ -359,12 +354,7 @@ impl Core {
         let staged = self.capacity_intent.staged(&node, slots, &by, at);
         self.persist_capacity_intent(&staged).await?;
         self.capacity_intent.commit(staged);
-        // A fresh ask retires everything the old one recorded — a rejection is
-        // terminal for the value that was refused, never for the operator's next.
         self.capacity_pushes.remove(&node);
-        // The §9 audit line: the record carries last-writer only, so the change
-        // itself lives in the platform's log collection until a retained
-        // `platform.events` stream exists.
         tracing::info!(
             node = %node,
             slots,
@@ -373,7 +363,6 @@ impl Core {
         );
         self.push_node_capacity(&node, slots, at);
         let observed = observed_slots(&self.backend.fleet_status(), &node);
-        // `check_capacity_target` just proved the roster holds this node.
         let decision = decide(slots, observed, true, self.capacity_pushes.get(&node), at);
         Ok(types::NodeCapacityAck {
             node,
@@ -419,11 +408,6 @@ impl Core {
         let now = Utc::now();
         let live = self.backend.fleet_status();
         let intent = self.capacity_intent.for_reconcile();
-        // What bounds this loop is the `in_fleet` test below, not the map: intent
-        // has one entry per node an operator ever set and entries are never
-        // dropped, so a decommissioned node's ask outlives the node itself — by
-        // design, since a dynamic node that has not re-announced since a
-        // dispatcher restart must not lose it.
         for (node, desired) in &intent {
             let (node, desired) = (node.as_str(), *desired);
             let in_fleet = self.fleet_holds(node);
@@ -541,9 +525,6 @@ impl Core {
     /// single writer.
     fn push_node_capacity(&mut self, node: &str, slots: u32, now: DateTime<Utc>) {
         let Some(tx) = self.self_tx.clone() else {
-            // No mailbox to answer into (a Core driven directly in a unit test):
-            // recording a push whose reply can never land would wedge the ledger
-            // `in_flight` forever, so decline instead.
             tracing::debug!(node = %node, "capacity push skipped — core not spawned");
             return;
         };
@@ -551,8 +532,6 @@ impl Core {
             .capacity_pushes
             .entry(node.to_string())
             .or_insert_with(|| PushRecord::first(slots, now));
-        // A ledger from an older ask is retired rather than reused, so
-        // `first_pushed_at` always dates the value being pushed now.
         if ledger.slots != slots {
             *ledger = PushRecord::first(slots, now);
         }
@@ -594,10 +573,10 @@ impl Core {
     /// transport for it (spec §3.1 slot source).
     pub(crate) fn on_capacity_pushed(&mut self, node: &str, slots: u32, outcome: &PushOutcome) {
         let Some(ledger) = self.capacity_pushes.get_mut(node) else {
-            return; // intent withdrawn while the push was out
+            return;
         };
         if ledger.slots != slots {
-            return; // the operator asked for something else meanwhile
+            return;
         }
         ledger.in_flight = false;
         match outcome {
@@ -606,8 +585,6 @@ impl Core {
                 slots,
                 "worker adopted the operator's capacity"
             ),
-            // An "accepted" reply naming a different number is a daemon we cannot
-            // take at its word; the next tick's divergence check re-asserts.
             PushOutcome::Accepted { slots: in_force } => tracing::warn!(
                 node = %node,
                 requested = slots,
@@ -639,8 +616,6 @@ impl Core {
         let now = Utc::now();
         let intent = self.capacity_intent.for_display();
         if intent.is_empty() {
-            // The common case (no operator has ever set capacity), and this runs on
-            // every occupancy-relevant message — so it costs nothing there.
             return BTreeMap::new();
         }
         let live = self.backend.fleet_status();
@@ -741,7 +716,6 @@ mod tests {
             },
             "never observed is not converged — assert the operator's number"
         );
-        // A full drain is an ordinary number on both sides of the comparison.
         assert!(!decide(0, Some(0), true, None, at(0)).push);
         assert!(decide(0, Some(1), true, None, at(0)).push);
     }
@@ -760,7 +734,6 @@ mod tests {
                 push: false
             }
         );
-        // Once the reply lands the divergence is re-asserted — exactly once more.
         ledger.in_flight = false;
         assert!(decide(2, Some(4), true, Some(&ledger), at(0)).push);
     }
@@ -776,17 +749,12 @@ mod tests {
         assert_eq!(decision.state, CapacityState::Rejected);
         assert!(!decision.push, "a refused number is never re-pushed");
 
-        // …and it stays terminal however long it sits there.
         assert!(!decide(8, Some(4), true, Some(&refused), at(10_000)).push);
 
-        // A different ask retires the record wholesale: the refusal was of ONE
-        // value, and the operator's next one gets a clean push.
         let next = decide(4, Some(2), true, Some(&refused), at(60));
         assert_eq!(next.state, CapacityState::Pending);
         assert!(next.push);
 
-        // Convergence beats the memory: if the node ends up reporting the refused
-        // number anyway (its ceiling was raised out of band), that is a fact.
         assert_eq!(
             decide(8, Some(8), true, Some(&refused), at(60)).state,
             CapacityState::Converged
@@ -799,7 +767,6 @@ mod tests {
     #[test]
     fn silent_node_surfaces_as_unacknowledged() {
         let ledger = pushed(4, 0);
-        // Inside the window it is still just converging.
         assert_eq!(
             decide(4, Some(2), true, Some(&ledger), at(1)).state,
             CapacityState::Pending
@@ -816,7 +783,6 @@ mod tests {
             stale.push,
             "unacknowledged still re-asserts — the bound is the rate, not a count"
         );
-        // Never converged, no matter how long it stays silent.
         assert_ne!(
             decide(4, Some(2), true, Some(&ledger), at(10_000)).state,
             CapacityState::Converged
@@ -836,9 +802,7 @@ mod tests {
             CapacityState::Unacknowledged,
             "intent recorded, node not converging — which is what the operator sees"
         );
-        // A stale push ledger does not resurrect it, however long it sits there.
         assert!(!decide(2, None, false, Some(&pushed(2, 0)), at(10_000)).push);
-        // …and the same ask is pushed the moment the node is back in the roster.
         assert!(decide(2, None, true, None, at(0)).push);
     }
 
@@ -849,8 +813,6 @@ mod tests {
     fn the_two_consumers_read_and_the_writer_does_not() {
         let mut intent = CapacityIntent::default();
         let staged = intent.staged("air", 2, "operator@example.com", at(0));
-        // Staging and committing are the writer's own path; a window is open, so
-        // this panics if either ever becomes a read.
         let window = intent.placement();
         intent.commit(staged);
         drop(window);
@@ -869,8 +831,8 @@ mod tests {
     #[should_panic(expected = "a placement path read capacity intent")]
     fn an_admission_check_that_reads_intent_panics() {
         let intent = CapacityIntent::default();
-        let _placement = intent.placement(); // top of a launch-deciding path
-        let _ = intent.for_reconcile(); // …reaching for the operator's number
+        let _placement = intent.placement();
+        let _ = intent.for_reconcile();
     }
 
     /// The display consumer is caught the same way — the guard is on the record,
@@ -893,8 +855,6 @@ mod tests {
             let _placement = intent.placement();
         }
         assert!(intent.for_reconcile().is_empty());
-        // Nested windows (a drain that resumes several launches) each close their
-        // own, and only the last one out reopens reading.
         let outer = intent.placement();
         drop(intent.placement());
         drop(outer);
@@ -925,8 +885,6 @@ mod tests {
         }))];
         assert_eq!(observed_slots(&reported, "air"), Some(2));
 
-        // A docker-endpoint node carries no observation at all, and no node of
-        // that name at all is the same answer.
         assert_eq!(observed_slots(&[node(None)], "air"), None);
         assert_eq!(observed_slots(&reported, "nuc"), None);
     }

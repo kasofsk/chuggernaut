@@ -82,7 +82,6 @@ pub enum CredentialAccess {
 /// scalar variants; an unboxed variant would bloat every `Effect` value).
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Effect {
-    // --- Job records & graph (JobStore / RdepsStore) ---
     /// Transition a job through the §2.1 funnel (`assert_transition`, then
     /// `jobs.put`, then the in-memory graph). Maps to `Core::set_state`.
     ///
@@ -116,7 +115,6 @@ pub enum Effect {
         dependent_seq: u64,
     },
 
-    // --- Task records (TaskStore) ---
     /// Persist a task record. Maps to `tasks.put`.
     ///
     /// Example call site: `exec.rs::launch_work_task` writing the Running task.
@@ -136,7 +134,6 @@ pub enum Effect {
         extra: serde_json::Value,
     },
 
-    // --- Project records (ProjectStore) ---
     /// Persist a linked-origin project record. Maps to `projects.put`.
     ///
     /// Example call site: `origin.rs` recording an opened origin release.
@@ -146,7 +143,6 @@ pub enum Effect {
         record: Box<ProjectRecord>,
     },
 
-    // --- Events & status snapshots ---
     /// Append a `job-events` trail entry (durable JetStream publish). Maps to
     /// `Core::publish` → `store.publish_event`.
     ///
@@ -175,7 +171,6 @@ pub enum Effect {
         value: serde_json::Value,
     },
 
-    // --- Container lifecycle (ContainerBackend) ---
     /// SIGKILL a running container. Maps to `backend.kill`.
     ///
     /// Example call site: `core.rs::kill_running_containers` on revoke.
@@ -186,7 +181,6 @@ pub enum Effect {
     /// Example call site: `harvest.rs` overlay reclaim after artifact pull.
     RemoveContainer { container_id: String },
 
-    // --- Task launches (AgentProvider + ContainerBackend, via exec/eval) ---
     /// Launch (or resume) a Work-phase task. Maps to `Core::launch_work_task`
     /// → `provider.run`.
     ///
@@ -237,7 +231,6 @@ pub enum Effect {
         reason: String,
     },
 
-    // --- Repository mutations (RepoManager) ---
     /// Squash-merge a job's branch onto the default branch. Maps to
     /// `repos.squash_merge`.
     ///
@@ -297,7 +290,6 @@ pub enum Effect {
         new_base: String,
     },
 
-    // --- Credentials (auth SSH CA, §7.4) ---
     /// Mint a per-job SSH certificate scoped to `access` for `ttl_secs`. Maps
     /// to `SshCa::issue_job_credential`.
     ///
@@ -310,7 +302,6 @@ pub enum Effect {
         ttl_secs: u64,
     },
 
-    // --- Merge-gate launches (§3.3) ---
     /// Launch one stage of merge-gate evaluators against the candidate branch.
     /// Maps to `Core::launch_gate_stage` → `provider.run` per evaluator; the
     /// launched slots re-enter the merge-gate decider as its gate round.
@@ -325,7 +316,6 @@ pub enum Effect {
         evaluators: Vec<Evaluator>,
     },
 
-    // --- Evaluation fan-out (§3.3) ---
     /// Fan one Evaluation stage out against the job branch: one task per
     /// evaluator, launched together (§3.3 staged evaluation). Maps to
     /// `Core::launch_eval_stage`; the launched slots re-enter the eval decider
@@ -357,7 +347,6 @@ pub enum Effect {
         attempt: u32,
     },
 
-    // --- Work re-entry composite (§3.2) ---
     /// Re-enter the Work phase for a rework cycle (gate failure, conflict,
     /// gate-fix). Maps to `Core::enter_work` — a composite in the same spirit
     /// as [`Effect::Escalate`].
@@ -373,7 +362,6 @@ pub enum Effect {
         rework_reason: Option<ReworkReason>,
     },
 
-    // --- Escalation composites (§1.2) ---
     /// Post-work escalation: create a Human task, move the job to
     /// [`JobState::Escalated`], publish `job-escalated`. Maps to
     /// `Core::escalate`.
@@ -761,8 +749,6 @@ mod tests {
             },
             "SshCa::issue_job_credential",
         );
-        // The mapping back onto the auth crate's `CertAccess` lives with the
-        // dispatcher's interpreter (orphan rule + purity), tested there.
     }
 
     #[test]

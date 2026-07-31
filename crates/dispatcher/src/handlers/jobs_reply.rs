@@ -111,7 +111,6 @@ pub(super) async fn latest_channel_updates(
     let Ok(bucket) = store.raw_bucket(store::buckets::CHANNELS).await else {
         return std::collections::HashMap::new();
     };
-    // Mirrors `keys::channel_key`, whose per-job key is `{owner}.{project}.jobs.{seq}`.
     let prefix = format!("{owner}.{project}.jobs.");
     let entries: Vec<(String, types::ChannelEntry)> = match bucket.list_prefix_keyed(&prefix).await
     {
@@ -140,7 +139,6 @@ pub(super) async fn fetch_job(store: &NatsStore, owner: &str, project: &str, seq
         Ok(None) => return NOT_FOUND.to_vec(),
         Err(e) => return error_reply(&e.into()),
     };
-    // Task-log read is best-effort: the job still serializes if it fails.
     let tasks = match store.tasks().await {
         Ok(t) => t
             .list_for_job(owner, project, seq)
@@ -159,9 +157,6 @@ pub(super) async fn fetch_job(store: &NatsStore, owner: &str, project: &str, seq
 /// read, never stored, like the retry/rework counts (§1.1).
 fn job_reply_with_awaiting(job: &types::Job, tasks: &[types::Task]) -> Vec<u8> {
     use types::JobState;
-    // A terminal job (Done/Revoked) asks nothing of a human, even if a stale
-    // Pending task record lingers in its log (a pre-fix zombie). Guard here so
-    // the derived field agrees with list_pending's terminal-job filter.
     let awaiting = (!job.state.is_terminal())
         .then(|| {
             tasks.iter().find(|t| {
@@ -175,10 +170,8 @@ fn job_reply_with_awaiting(job: &types::Job, tasks: &[types::Task]) -> Vec<u8> {
             let kind = match job.state {
                 JobState::Work => "work",
                 JobState::Evaluation => "eval",
-                _ => "escalation", // Escalated | Stalled
+                _ => "escalation",
             };
-            // `claimed` marks a parked claimed attempt: a human is actively
-            // working it (§1.2 claims), vs. passively awaited human input.
             serde_json::json!({
                 "task_id": t.id,
                 "kind": kind,
@@ -269,26 +262,22 @@ mod tests {
 
     #[test]
     fn awaiting_human_kind_follows_state() {
-        // Post-work escalation: kind escalation, carrying the task id.
         let v = awaiting(
             &job(JobState::Escalated),
             &[human_task(3, TaskPhase::Work, TaskState::Pending)],
         );
         assert_eq!(v["task_id"], 3);
         assert_eq!(v["kind"], "escalation");
-        // Pre-work escalation (Stalled) is escalation too.
         let v = awaiting(
             &job(JobState::Stalled),
             &[human_task(3, TaskPhase::Work, TaskState::Pending)],
         );
         assert_eq!(v["kind"], "escalation");
-        // Human work task in the Work phase.
         let v = awaiting(
             &job(JobState::Work),
             &[human_task(1, TaskPhase::Work, TaskState::Pending)],
         );
         assert_eq!(v["kind"], "work");
-        // Human evaluator task in the Evaluation phase.
         let v = awaiting(
             &job(JobState::Evaluation),
             &[human_task(2, TaskPhase::Evaluation, TaskState::Pending)],
@@ -298,21 +287,17 @@ mod tests {
 
     #[test]
     fn awaiting_human_null_without_pending_human_task() {
-        // A resolved (Done) human task does not count.
         let v = awaiting(
             &job(JobState::Evaluation),
             &[human_task(1, TaskPhase::Evaluation, TaskState::Done)],
         );
         assert!(v.is_null());
-        // No tasks at all.
         let v = awaiting(&job(JobState::Work), &[]);
         assert!(v.is_null());
     }
 
     #[test]
     fn awaiting_human_null_on_terminal_job() {
-        // A terminal job asks nothing of a human even if a stale Pending human
-        // task lingers in its log (a pre-fix zombie): the derived field is null.
         for state in [JobState::Revoked, JobState::Done] {
             let v = awaiting(
                 &job(state),

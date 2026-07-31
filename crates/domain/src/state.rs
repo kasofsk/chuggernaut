@@ -21,44 +21,18 @@ pub struct InvalidTransition {
 pub fn assert_transition(from: JobState, to: JobState) -> Result<(), InvalidTransition> {
     use JobState::*;
     let valid = match (from, to) {
-        // Draft→Ready|Blocked: release finalizes the edited definition in one
-        // step (same as a Frozen release). Draft→Frozen: finalize parks the
-        // edited definition Frozen (re-batchable) instead of scheduling it
-        // (#166). Frozen→Draft: a never-released job moves back to Draft for
-        // editing (§2.1). Draft→Revoked is covered by the generic Revoked row
-        // below (Draft is non-terminal).
         (Draft, Ready | Blocked | Frozen) => true,
         (Frozen, Draft) => true,
         (Frozen, Ready | Blocked) => true,
-        // Batches (spec §2.1). Frozen→Batched: a member is absorbed at batch
-        // creation. Batched→Frozen: the batch was revoked/failed, so the member
-        // is returned (re-batchable). Batched→Done: the batch merged, fanning
-        // completion out to each member. Batched→Revoked via the generic row.
         (Frozen, Batched) => true,
         (Batched, Frozen | Done) => true,
-        // Blocked→Stalled: Ready-transition re-validation failed (pre-work).
         (Blocked, Ready | Stalled) => true,
-        // Ready→Stalled: job_deadline elapsed before work started (pre-work).
         (Ready, Work | Stalled) => true,
-        // Work→Work: retry within cycle. Work→Evaluation: work succeeded.
         (Work, Work | Evaluation | Escalated) => true,
-        // Evaluation→Evaluation: eval retry only (gate fan-out lives in WrapUp).
-        // Evaluation→Work: product-failure rework. Evaluation→WrapUp: eval passed,
-        // wrap_up: merge. Evaluation→Done: eval passed, wrap_up: none.
         (Evaluation, Evaluation | Work | WrapUp | Done | Escalated) => true,
-        // WrapUp→WrapUp: merge-gate fan-out. WrapUp→Work: squash conflict or
-        // gate failure (free rework). WrapUp→Done: clean squash / no-op.
-        // WrapUp→Escalated: unexpected hard wrap-up failure (git plumbing).
         (WrapUp, WrapUp | Work | Done | Escalated) => true,
-        // Post-work escalation resolution. Retry resumes at the phase that
-        // failed (#141): Work exhaustion→Work, eval exhaustion→Evaluation,
-        // wrap-up failure→WrapUp. Resolve→Evaluation (operator did the work).
         (Escalated, Work | Evaluation | WrapUp) => true,
-        // Pre-work (Stalled) escalation: Retry re-runs the failed step →Ready
-        // (or self-loops if re-validation still fails). Resolve is not in the
-        // table, so it is structurally impossible (§1.2).
         (Stalled, Ready | Stalled) => true,
-        // Revoked is reachable from any non-terminal state.
         (Done | Revoked, Revoked) => false,
         (_, Revoked) => true,
         _ => false,
@@ -115,21 +89,14 @@ mod tests {
             assert!(assert_transition(from, to).is_ok(), "{from:?}→{to:?}");
         }
         for (from, to) in [
-            // Draft leaves via release (Ready/Blocked), finalize (Frozen), or
-            // revoke — never straight into execution. Frozen is a one-way door
-            // out of it (release, not un-draft, is the only forward path once
-            // finalized).
             (Draft, Work),
             (Draft, Evaluation),
             (Frozen, Work),
             (Frozen, Done),
-            // Batched is invisible to scheduling: it never jumps into execution
-            // or evaluation, only to Done (merge), Frozen (revoke), or Revoked.
             (Batched, Work),
             (Batched, Ready),
             (Batched, Blocked),
             (Blocked, Work),
-            // Pre-work escalations use Stalled, never Escalated.
             (Blocked, Escalated),
             (Ready, Escalated),
             (Ready, Evaluation),
@@ -140,13 +107,10 @@ mod tests {
             (Done, Revoked),
             (Revoked, Revoked),
             (Escalated, Done),
-            // Post-work escalation resolves to Work/Evaluation, not Ready.
             (Escalated, Ready),
-            // Stalled (pre-work) may not jump into execution or evaluation.
             (Stalled, Work),
             (Stalled, Evaluation),
             (Stalled, Escalated),
-            // WrapUp only follows an eval pass; nothing re-enters Ready/Evaluation.
             (WrapUp, Ready),
             (WrapUp, Evaluation),
         ] {

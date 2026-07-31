@@ -16,12 +16,9 @@ export function TagsPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    setLoaded(false) // param change: back to skeletons until the new fetch lands
+    setLoaded(false)
     api
       .tags(owner, project)
-      // Read each tag back at the path the listing resolved to — the file
-      // endpoint reads verbatim, and a project that predates the config root
-      // still keeps its tags at the repo root (spec §1.1).
       .then((names) =>
         Promise.all(
           names.map(({ name, path }) =>

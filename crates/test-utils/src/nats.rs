@@ -69,7 +69,6 @@ fn sweep_stale_containers() {
         .lines()
         .filter_map(|l| {
             let (id, age) = l.split_once('\t')?;
-            // "About an hour ago", "2 hours ago", "35 minutes ago", "days"…
             let stale = age.contains("hour")
                 || age.contains("day")
                 || age
@@ -136,26 +135,16 @@ impl NatsTestServer {
         Self::start(Some(config), false).await
     }
 
-    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    )]
     async fn start(config: Option<&str>, shared: bool) -> Option<Self> {
-        // External-URL override — NAMESPACED (shared) callers only. The full
-        // gate (.chug/tasks/ci.sh) starts ONE communal server and points every
-        // binary's `shared()` at it; per-test namespaces make that safe. The
-        // private `spawn()`/`spawn_with_config()` suites are exactly the ones
-        // that use PRODUCTION names or bespoke server config (cli init, the
-        // worker daemon, channel stdio, auth config-mode) — routing them to a
-        // communal server would leak prod-named state across binaries, so
-        // they always get their own container regardless of the env.
         if shared
             && config.is_none()
             && let Ok(url) = std::env::var(URL_ENV)
             && !url.is_empty()
         {
-            // Trust but verify: a dead communal server would otherwise turn
-            // every tier-2 suite into connection-refused panics (learned the
-            // hard way, 2026-07-23). Unreachable ⇒ warn loudly and fall back
-            // to a self-managed container.
             if let Some(hostport) = url.strip_prefix("nats://")
                 && tokio::net::TcpStream::connect(hostport).await.is_ok()
             {
@@ -169,15 +158,6 @@ impl NatsTestServer {
             );
         }
 
-        // Otherwise: one NATS container per test binary/process (principle 2):
-        // the first `shared()`/`spawn()` in a binary creates it.
-        // Self-healing leak sweep. testcontainers-rs has NO ryuk reaper —
-        // cleanup is purely Drop-based — and `shared()`'s container lives in
-        // a `static`, which never drops: every test-binary run would leak one
-        // immortal NATS container (103 accumulated during #206's development
-        // and strangled the Docker daemon). Label ours and reap stale ones
-        // (>30 min — no honest test run lasts that long) before starting a
-        // new one. Best-effort by design: a failed sweep never blocks a test.
         sweep_stale_containers();
         let build = || {
             let image = GenericImage::new(IMAGE_NAME, IMAGE_TAG)
@@ -197,15 +177,11 @@ impl NatsTestServer {
             attempt += 1;
             match build().start().await {
                 Ok(c) => break c,
-                // A concurrent-startup Docker hiccup: back off and retry a few
-                // times before deciding NATS is unavailable.
                 Err(e) if attempt < 5 => {
                     tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
                     let _ = e;
                 }
                 Err(e) => {
-                    // The common cause is "Docker not available" — skip, as the
-                    // old harness did. Any other infra failure skips, but loudly.
                     eprintln!(
                         "skipping: NATS testcontainer could not start (is Docker running?): {e}"
                     );
@@ -230,9 +206,6 @@ impl NatsTestServer {
         };
         let url = format!("nats://{host}:{port}");
 
-        // The "Server is ready" log can precede the client port actually
-        // accepting under load; a short connect probe closes that gap so the
-        // first NatsStore::connect never races the listener.
         if !await_accept(&url).await {
             eprintln!("skipping: NATS at {url} never accepted a connection");
             return None;

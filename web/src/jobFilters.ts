@@ -80,10 +80,6 @@ function within(iso: string | null | undefined, ms: number): boolean {
   return Number.isFinite(t) && Date.now() - t <= ms
 }
 
-// A job is "mine/claimed" when a human has taken its next attempt. Without a
-// per-job claimed-by field we treat any active claim as the operator's (noted in
-// the redesign summary) — claim_next covers the pre-park window, a claimed
-// pending Work task the in-flight one.
 function quickPred(k: QuickKey, j: Job, claimed: Set<number>): boolean {
   switch (k) {
     case 'mine':
@@ -187,7 +183,6 @@ export function activityBuckets(jobs: Job[], days = 14): number[] {
   return buckets
 }
 
-// ── URL <-> filter serialisation, so a filtered view is shareable (#162). ──
 export function filtersToParams(f: JobFilters): URLSearchParams {
   const p = new URLSearchParams()
   if (f.q) p.set('q', f.q)

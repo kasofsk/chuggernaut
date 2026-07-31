@@ -13,7 +13,8 @@ those docs disagree, the docs win — read them before large changes.
 - Functions ≤ 70 lines. No `.unwrap()`/`.expect()` outside tests.
 - `rustfmt`/`prettier` defaults; `cargo clippy -D warnings` clean.
 - **No comments except doc comments, and a doc comment is ≤ 2 sentences**
-  (`.chug/tasks/check-comments.sh`, a ratchet over the lines a diff adds).
+  (`.chug/tasks/check-comments.sh`; the no-comment half covers the whole tree,
+  the sentence cap only the blocks a diff touches).
   Module headers (`//!`, `/*! */`, a TS file's first block) are exempt from
   the cap. Knowledge goes in a doc, rationale in the commit message; update
   the docs your change stales — `.chug/tasks/docs-update.md`.

@@ -18,7 +18,6 @@ export function Skeleton({
   return <span className="skel" style={{ width, height, ...style }} aria-hidden="true" />
 }
 
-// Varied line widths so stacked lines read as prose, not bars.
 const LINE_WIDTHS = ['100%', '92%', '74%', '86%', '58%']
 
 /** n stacked text-like lines of varied widths. */

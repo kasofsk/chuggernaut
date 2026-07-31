@@ -48,8 +48,6 @@ work:
 work_retries: 1
 "#;
 
-// Command work + agent eval: the shape where an agent evaluator can be parked
-// Pending under capacity pressure (§3.5, #140) and must be re-queued on restart.
 const AGENT_EVAL: &str = r#"
 name: agent-eval
 image: img:latest
@@ -70,9 +68,6 @@ work:
 job_deadline: 1s
 "#;
 
-// A command work type whose task_timeout is short enough for the timeout scan to
-// fire in a test — the deploy shape (ticket #270): one command task, no
-// evaluators, no retries, so a timeout escalates immediately.
 const CMD_WORK_SLOW: &str = r#"
 name: cmd-work-slow
 image: img:latest
@@ -83,9 +78,6 @@ resources:
   task_timeout: 1s
 "#;
 
-// Agent work + agent eval with a rework budget (job #155): a cycle-1 review can
-// fail and drive a rework, so a cycle-2 evaluator relaunched after a restart
-// must rebuild its re-review context from the persisted task log.
 const REWORK_AGENT: &str = r#"
 name: rework-agent
 image: img:latest
@@ -188,8 +180,6 @@ fn commit_on_run(provider: &FakeProvider, bare: std::path::PathBuf) {
     provider.on_run(move |cfg| async move {
         let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
         let clone = clone_branch_from(&bare, &branch).await;
-        // Branch-derived content so the commit always diffs, even when a prior
-        // job already merged this stub path to the base.
         let body = format!("// work produced on {branch}\n");
         clone
             .commit_file("src/work.rs", body.as_bytes(), "work")
@@ -199,7 +189,6 @@ fn commit_on_run(provider: &FakeProvider, bare: std::path::PathBuf) {
 }
 
 async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> Job {
-    // Watch-based wait (#206 principle 3): value-inspecting, hard timeout.
     test_utils::wait::job_state(store, "acme", "api", seq, want).await
 }
 
@@ -207,10 +196,11 @@ async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> Job {
 /// Running task, and no container exists. Reconciliation treats it as a
 /// failure, retries per `work_retries`, and the job completes.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn restart_recovers_orphaned_running_work_task() {
-    // Fresh infra WITHOUT spawning a core yet — the crash state comes first.
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
     };
@@ -290,7 +280,7 @@ async fn restart_recovers_orphaned_running_work_task() {
 
             pending_reason: None,
             queued_at: None,
-            session_id: None, // gone with the crashed dispatcher
+            session_id: None,
             reviewed_tip: None,
             result: None,
             created_at: Utc::now(),
@@ -300,9 +290,8 @@ async fn restart_recovers_orphaned_running_work_task() {
         .await
         .unwrap();
 
-    // "Restart": a fresh core reconciles and finishes the job.
-    let provider = Arc::new(FakeProvider::new()); // retry exits 0
-    commit_on_run(&provider, repo.bare_path()); // …producing output (§3.2 guard)
+    let provider = Arc::new(FakeProvider::new());
+    commit_on_run(&provider, repo.bare_path());
     let repos_root = repo
         .bare_path()
         .parent()
@@ -326,9 +315,6 @@ async fn restart_recovers_orphaned_running_work_task() {
     let (_handle, sink) = spawn_checked(core);
 
     wait_for_state(&store, 1, JobState::Done).await;
-    // No `Core` call to hang a check on: this scenario is driven entirely by
-    // reconciliation and the messages it fans out, so drain the actor's log once
-    // the wait above has let them all through.
     assert_invariants_of(&sink);
     let tasks = store
         .tasks()
@@ -338,9 +324,9 @@ async fn restart_recovers_orphaned_running_work_task() {
         .await
         .unwrap();
     assert_eq!(tasks.len(), 2);
-    assert_eq!(tasks[0].state, TaskState::Failed); // the orphan
+    assert_eq!(tasks[0].state, TaskState::Failed);
     assert_eq!((tasks[1].attempt, tasks[1].state), (2, TaskState::Done));
-    assert_eq!(provider.runs().len(), 1); // only the retry ran here
+    assert_eq!(provider.runs().len(), 1);
 }
 
 /// Job #155: the re-review context block is rebuilt from persisted records, not
@@ -351,8 +337,10 @@ async fn restart_recovers_orphaned_running_work_task() {
 /// whose prompt must still carry the prior findings, the last-reviewed SHA, and
 /// the delta — proving nothing depended on the crashed dispatcher's memory.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn restart_rebuilds_re_review_context_from_persisted_records() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -376,7 +364,6 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
     let head = repo.head().await;
     repo.create_job_branch(1, &head).await;
 
-    // Cycle-1 commit — the tip the cycle-1 reviewer saw (its `reviewed_tip`).
     let c1 = clone_branch_from(&repo.bare_path(), "job/1").await;
     c1.commit_file("src/a.rs", b"pub fn a() {}", "cycle 1")
         .await;
@@ -386,7 +373,6 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
         .resolve_ref("acme", "api", "job/1")
         .await
         .unwrap();
-    // Cycle-2 commit — the rework the restarted reviewer must diff as the delta.
     let c2 = clone_branch_from(&repo.bare_path(), "job/1").await;
     c2.commit_file("src/b.rs", b"pub fn b() {}", "cycle 2")
         .await;
@@ -458,7 +444,6 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
         started_at: Some(Utc::now()),
         completed_at: Some(Utc::now()),
     };
-    // Cycle-1 work (Done).
     tasks
         .put(&Task {
             result: Some(TaskResult::Work {
@@ -471,7 +456,6 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
         })
         .await
         .unwrap();
-    // Cycle-1 reviewer (Done, FAILED) — records the SHA it reviewed (tip1).
     tasks
         .put(&Task {
             phase: TaskPhase::Evaluation,
@@ -493,7 +477,6 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
         })
         .await
         .unwrap();
-    // Cycle-2 work (Done) — an eval-failure rework (linear, not a rebase).
     tasks
         .put(&Task {
             cycle: 2,
@@ -509,9 +492,6 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
         .await
         .unwrap();
 
-    // "Restart": a fresh core reconciles and launches the cycle-2 reviewer.
-    // The reviewer run needs no side effect — recording its prompt via runs()
-    // is enough; we assert on the prompt, not on the job reaching Done.
     let provider = Arc::new(FakeProvider::new());
     provider.on_run(|_cfg| async {});
     let repos_root = repo
@@ -536,19 +516,12 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
     .unwrap();
     let (_handle, sink) = spawn_checked(core);
 
-    // Wait for the reconciled dispatcher to launch the cycle-2 reviewer. This
-    // observes in-memory FakeProvider state, so it uses the tightened poll
-    // (#206 principle 3).
     let prompt = test_utils::wait::poll_default("cycle-2 reviewer to launch after restart", || {
         provider.runs().first().map(|r| r.prompt.clone())
     })
     .await;
-    // No `Core` call to hang a check on: this scenario is driven entirely by
-    // reconciliation and the messages it fans out, so drain the actor's log once
-    // the wait above has let them all through.
     assert_invariants_of(&sink);
 
-    // The re-review block was rebuilt entirely from the persisted task log.
     assert!(
         prompt.contains("Re-Review Context"),
         "re-review context missing after restart: {prompt}"
@@ -565,7 +538,6 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
         prompt.contains("```diff") && prompt.contains("src/b.rs"),
         "delta diff (tip1..tip2) not rebuilt from records: {prompt}"
     );
-    // Sanity: the delta really is tip1..tip2 and not a stale in-memory value.
     assert_ne!(tip1, tip2);
 }
 
@@ -577,8 +549,10 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
 /// distinguishing fact vs `restart_recovers_orphaned_running_work_task` is that
 /// a container id WAS recorded, so the container demonstrably existed.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn restart_infra_loss_relaunches_work_without_burning_budget() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -632,8 +606,6 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
         })
         .await
         .unwrap();
-    // Running work task with a recorded container id that the fresh backend has
-    // never heard of: inspect → not found → infra loss.
     store
         .tasks()
         .await
@@ -671,8 +643,8 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
         .await
         .unwrap();
 
-    let provider = Arc::new(FakeProvider::new()); // relaunch exits 0
-    commit_on_run(&provider, repo.bare_path()); // …producing output (§3.2 guard)
+    let provider = Arc::new(FakeProvider::new());
+    commit_on_run(&provider, repo.bare_path());
     let repos_root = repo
         .bare_path()
         .parent()
@@ -696,9 +668,6 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
     let (_handle, sink) = spawn_checked(core);
 
     wait_for_state(&store, 1, JobState::Done).await;
-    // No `Core` call to hang a check on: this scenario is driven entirely by
-    // reconciliation and the messages it fans out, so drain the actor's log once
-    // the wait above has let them all through.
     assert_invariants_of(&sink);
     let tasks = store
         .tasks()
@@ -708,17 +677,15 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
         .await
         .unwrap();
     assert_eq!(tasks.len(), 2);
-    // The orphan is retired as an infra loss, not a plain failure.
     assert_eq!(tasks[0].state, TaskState::Failed);
     assert!(tasks[0].infra_loss, "orphan carries the infra-loss marker");
-    // Budget UNCHANGED: the relaunch reuses attempt 1 (a real retry would be 2).
     assert_eq!(
         (tasks[1].attempt, tasks[1].state),
         (1, TaskState::Done),
         "infra relaunch keeps the same attempt: {tasks:?}"
     );
     assert!(!tasks[1].infra_loss);
-    assert_eq!(provider.runs().len(), 1); // only the relaunch ran
+    assert_eq!(provider.runs().len(), 1);
 }
 
 /// §3.6 infra-loss cap: an environment that keeps eating the container (a node
@@ -727,8 +694,10 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
 /// rather than a `work_retries`-exhausted failure. The prior losses are seeded
 /// directly (three restarts compressed into one crash state).
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -813,8 +782,6 @@ async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
         started_at: Some(Utc::now()),
         completed_at: None,
     };
-    // Three already-retired infra losses (INFRA_RELAUNCH_CAP), then a fourth
-    // attempt Running against a container the fresh backend has never seen.
     for id in 1..=3 {
         tasks
             .put(&mk(id, TaskState::Failed, true, None))
@@ -849,16 +816,12 @@ async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
     let (_handle, sink) = spawn_checked(core);
 
     let job = wait_for_state(&store, 1, JobState::Escalated).await;
-    // No `Core` call to hang a check on: this scenario is driven entirely by
-    // reconciliation and the messages it fans out, so drain the actor's log once
-    // the wait above has let them all through.
     assert_invariants_of(&sink);
     assert_eq!(
         job.escalation.as_ref().map(|e| e.reason.as_str()),
         Some("infra_loss"),
         "the cap escalates with reason=infra_loss, not work_retries_exhausted"
     );
-    // The fourth attempt is retired as an infra loss too — no relaunch beyond it.
     let log = tasks.list_for_job("acme", "api", 1).await.unwrap();
     let work: Vec<&Task> = log.iter().filter(|t| t.phase == TaskPhase::Work).collect();
     assert!(
@@ -877,8 +840,10 @@ async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
 /// failures. Here the container is present-and-exited(1), not gone, so the exit
 /// code is authoritative and the retry advances to attempt 2.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn restart_real_nonzero_exit_still_burns_budget() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -969,8 +934,6 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
         .await
         .unwrap();
 
-    // The container is still known to the backend and exited(1) — a real
-    // failure the crash merely lost, not a vanished container.
     let backend = Arc::new(FakeBackend::new());
     backend.seed_exited("exited-nonzero", 1);
     let repos_root = repo
@@ -980,8 +943,8 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
         .parent()
         .unwrap()
         .to_path_buf();
-    let provider = Arc::new(FakeProvider::new()); // the retry exits 0
-    commit_on_run(&provider, repo.bare_path()); // …producing output (§3.2 guard)
+    let provider = Arc::new(FakeProvider::new());
+    commit_on_run(&provider, repo.bare_path());
     let core = Core::new(
         store.clone(),
         vcs::RepoManager::new(repos_root),
@@ -998,9 +961,6 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
     let (_handle, sink) = spawn_checked(core);
 
     wait_for_state(&store, 1, JobState::Done).await;
-    // No `Core` call to hang a check on: this scenario is driven entirely by
-    // reconciliation and the messages it fans out, so drain the actor's log once
-    // the wait above has let them all through.
     assert_invariants_of(&sink);
     let tasks = store
         .tasks()
@@ -1010,8 +970,6 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
         .await
         .unwrap();
     assert_eq!(tasks.len(), 2);
-    // Budget SPENT: a real nonzero exit advances to attempt 2, not a same-attempt
-    // infra relaunch, and the orphan carries no infra-loss marker.
     assert_eq!(tasks[0].state, TaskState::Failed);
     assert!(!tasks[0].infra_loss, "a real exit is not an infra loss");
     assert_eq!((tasks[1].attempt, tasks[1].state), (2, TaskState::Done));
@@ -1023,8 +981,10 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
 /// now-available fleet accepts it, the *same* task launches and the job lands —
 /// no new attempt, no retry consumed.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn restart_requeues_queued_pending_work_task() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -1075,7 +1035,6 @@ async fn restart_requeues_queued_pending_work_task() {
         })
         .await
         .unwrap();
-    // The crash-time task: Pending, no container, not human — a queued launch.
     store
         .tasks()
         .await
@@ -1111,7 +1070,6 @@ async fn restart_requeues_queued_pending_work_task() {
         .await
         .unwrap();
 
-    // "Restart": a fresh core whose fleet now has capacity.
     let repos_root = repo
         .bare_path()
         .parent()
@@ -1135,9 +1093,6 @@ async fn restart_requeues_queued_pending_work_task() {
     let (_handle, sink) = spawn_checked(core);
 
     wait_for_state(&store, 1, JobState::Done).await;
-    // No `Core` call to hang a check on: this scenario is driven entirely by
-    // reconciliation and the messages it fans out, so drain the actor's log once
-    // the wait above has let them all through.
     assert_invariants_of(&sink);
     let tasks = store
         .tasks()
@@ -1159,8 +1114,6 @@ async fn restart_requeues_queued_pending_work_task() {
         (works[0].id, works[0].attempt, works[0].state),
         (1, 1, TaskState::Done),
     );
-    // The launch cleared the queued markers, so the record no longer reads as
-    // waiting (the UI badge disappears live).
     assert_eq!(works[0].pending_reason, None);
     assert_eq!(works[0].queued_at, None);
 }
@@ -1267,15 +1220,12 @@ async fn restart_relaunches_queued_tasks_in_persisted_fifo_order() {
     let head = repo.head().await;
 
     let now = Utc::now();
-    // seq 1 queued most recently, seq 3 the oldest.
     for (seq, age_secs) in [(1u64, 0i64), (2, 60), (3, 120)] {
         repo.create_job_branch(seq, &head).await;
         let queued_at = now - chrono::Duration::seconds(age_secs);
         seed_queued_command_work(&store, seq, &head, queued_at).await;
     }
 
-    // "Restart": a fresh core whose fleet has capacity, so the re-queued launches
-    // drain immediately — in whatever order reconciliation left them.
     let backend = Arc::new(FakeBackend::new());
     let repos_root = repo
         .bare_path()
@@ -1299,16 +1249,10 @@ async fn restart_relaunches_queued_tasks_in_persisted_fifo_order() {
     .unwrap();
     let (_handle, sink) = spawn_checked(core);
 
-    // Drain launches the queue front-to-back, so the first three launches are the
-    // three work commands in FIFO order. In-memory backend state → tightened
-    // poll (#206 principle 3).
     test_utils::wait::poll_default("3 launches to drain from the queue", || {
         (backend.launches().len() >= 3).then_some(())
     })
     .await;
-    // No `Core` call to hang a check on: this scenario is driven entirely by
-    // reconciliation and the messages it fans out, so drain the actor's log once
-    // the wait above has let them all through.
     assert_invariants_of(&sink);
     let branches: Vec<String> = backend
         .launches()
@@ -1350,8 +1294,6 @@ async fn restart_preserves_queue_wait_clock_for_timeout() {
     let queued_at = Utc::now() - chrono::Duration::minutes(25);
     seed_queued_command_work(&store, 1, &head, queued_at).await;
 
-    // Fleet stays full: the launch never gets a slot, so only the backstop can
-    // retire it.
     let backend = Arc::new(FakeBackend::new());
     backend.fail_launch_no_capacity_if(|_| Some("no free slots on any node".into()));
     let repos_root = repo
@@ -1369,7 +1311,6 @@ async fn restart_preserves_queue_wait_clock_for_timeout() {
         CoreConfig {
             repo_url_base: "file:///repos".into(),
             nats_url: server.url().into(),
-            // Below the 25m persisted wait, so a surviving clock fires at once.
             launch_queue_max_wait: Some(Duration::from_secs(20 * 60)),
             ..Default::default()
         },
@@ -1404,8 +1345,10 @@ async fn restart_preserves_queue_wait_clock_for_timeout() {
 /// the fleet has capacity the *same* task relaunches through the provider, the
 /// evaluator passes, and the job lands.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn restart_requeues_queued_pending_agent_eval() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -1460,7 +1403,6 @@ async fn restart_requeues_queued_pending_agent_eval() {
         .await
         .unwrap();
     let tasks = store.tasks().await.unwrap();
-    // Work already succeeded; only the eval remains.
     tasks
         .put(&Task {
             id: 1,
@@ -1496,8 +1438,6 @@ async fn restart_requeues_queued_pending_agent_eval() {
         })
         .await
         .unwrap();
-    // The crash-time eval: Pending agent evaluator, no container — a queued
-    // launch (§3.5), exactly what the agent NoCapacity path parks.
     tasks
         .put(&Task {
             id: 2,
@@ -1531,11 +1471,6 @@ async fn restart_requeues_queued_pending_agent_eval() {
         .await
         .unwrap();
 
-    // "Restart": a fresh core whose provider launches through the backend, so the
-    // agent eval's relaunch actually runs. The fleet stays full for agent
-    // launches until we free it — that keeps the eval from running before the
-    // submit_eval hook is wired (a queued-NoCapacity attempt consumes no hook),
-    // so the pass is deterministic regardless of when the startup drain fires.
     let repos_root = repo
         .bare_path()
         .parent()
@@ -1565,8 +1500,6 @@ async fn restart_requeues_queued_pending_agent_eval() {
     .await
     .unwrap();
     let (handle, sink) = spawn_checked(core);
-    // Wire the eval verdict now that the core exists: the relaunched agent run
-    // submits a pass for task 2.
     let h = handle.clone();
     provider.on_run(move |_| {
         let h = h.clone();
@@ -1589,9 +1522,6 @@ async fn restart_requeues_queued_pending_agent_eval() {
         }
     });
 
-    // Free the fleet; the re-queued eval drains, relaunches the same task, and
-    // passes. If reconciliation had dropped the queued agent eval, nothing
-    // launches and the job wedges in Evaluation — this wait would time out.
     full.store(false, std::sync::atomic::Ordering::SeqCst);
     handle.trigger_scan().await.unwrap();
     assert_invariants_of(&sink);
@@ -1622,8 +1552,10 @@ async fn restart_requeues_queued_pending_agent_eval() {
 /// This is the other half of the disk-leak fix: task-exit removal covers the
 /// happy path, the sweep covers containers orphaned by a crash before that ran.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -1643,8 +1575,6 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
     clone.push("main").await;
     let head = repo.head().await;
 
-    // An escalated job (recovery leaves it alone) with two tasks: one already
-    // terminal, one still live. Their containers exited when the process died.
     store
         .jobs()
         .await
@@ -1718,8 +1648,6 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
         .await
         .unwrap();
 
-    // The daemon reports three exited managed containers: the two above plus a
-    // pure orphan with no task record at all (a crash before the task write).
     let backend = Arc::new(FakeBackend::new());
     backend.seed_managed_exited([
         "local/c-terminal".to_string(),
@@ -1750,16 +1678,11 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
     .unwrap();
     let (_handle, sink) = spawn_checked(core);
 
-    // Reconciliation runs once at startup; wait for the sweep to settle
-    // (in-memory backend state → tightened poll, #206 principle 3).
     let mut removed = test_utils::wait::poll_default("2 containers reclaimed by the sweep", || {
         let removed = backend.removed();
         (removed.len() >= 2).then_some(removed)
     })
     .await;
-    // No `Core` call to hang a check on: this scenario is driven entirely by
-    // reconciliation and the messages it fans out, so drain the actor's log once
-    // the wait above has let them all through.
     assert_invariants_of(&sink);
     removed.sort();
     assert_eq!(
@@ -1774,8 +1697,10 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
 /// Escalated so step-2 recovery leaves it (and its tasks) untouched, isolating
 /// the running-container sweep. Returns the store, the spawned core handle, and
 /// the backend (already seeded by the caller before `spawn`).
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn fleet_sweep_core(
     tasks: Vec<Task>,
     backend: Arc<FakeBackend>,
@@ -1841,8 +1766,6 @@ async fn fleet_sweep_core(
     }
 
     let provider = Arc::new(FakeProvider::new());
-    // Any job a sweep test creates must produce output, or the §3.2 finish-line
-    // guard fails its empty work run instead of letting it reach Done.
     commit_on_run(&provider, repo.bare_path());
     let repos_root = repo
         .bare_path()
@@ -1902,7 +1825,6 @@ fn work_task(id: u64, state: TaskState, container_id: Option<&str>) -> Task {
 }
 
 async fn wait_killed(backend: &FakeBackend, want: usize) -> Vec<String> {
-    // In-memory backend call log → tightened poll (#206 principle 3).
     test_utils::wait::poll_default(format!("{want} killed container(s)"), || {
         let killed = backend.killed();
         (killed.len() >= want).then_some(killed)
@@ -1919,9 +1841,7 @@ async fn wait_killed(backend: &FakeBackend, want: usize) -> Vec<String> {
 #[tokio::test]
 async fn startup_fleet_sweep_reaps_orphan_running_container() {
     let backend = Arc::new(FakeBackend::new());
-    // The pre-upgrade task recovery already failed as container-gone.
     let tasks = vec![work_task(2, TaskState::Failed, Some("dev-air/c-orphan"))];
-    // Its container is still alive (identity resolves to job 51 / task 2).
     backend.seed_managed_running([container::RunningContainer {
         id: "dev-air/c-orphan".into(),
         project: Some("acme/api".into()),
@@ -1935,8 +1855,6 @@ async fn startup_fleet_sweep_reaps_orphan_running_container() {
     };
 
     let killed = wait_killed(&backend, 1).await;
-    // The sweep runs inside the actor with no `Core` call to hang a check on, so
-    // drain its log once the wait above has let it finish.
     assert_invariants_of(&sink);
     assert_eq!(
         killed,
@@ -1944,7 +1862,6 @@ async fn startup_fleet_sweep_reaps_orphan_running_container() {
         "the orphan container is reaped to free its slot"
     );
 
-    // The identity-bearing reap is attributed to its job as a platform event.
     let reaped: Vec<serde_json::Value> = store
         .read_stream("job-events", 100)
         .await
@@ -1983,14 +1900,12 @@ async fn startup_fleet_sweep_keeps_container_of_running_task() {
         work_task(3, TaskState::Running, Some("dev-air/c-live-legacy")),
     ];
     backend.seed_managed_running([
-        // Identity resolves to the live task 1 — kept.
         container::RunningContainer {
             id: "dev-air/c-live".into(),
             project: Some("acme/api".into()),
             job: Some(51),
             task: Some(1),
         },
-        // No identity labels, but its id is a live task's container_id — kept.
         container::RunningContainer {
             id: "dev-air/c-live-legacy".into(),
             project: None,
@@ -2004,10 +1919,7 @@ async fn startup_fleet_sweep_keeps_container_of_running_task() {
         return;
     };
 
-    // Give the sweep ample time to run, then assert it reaped nothing.
     tokio::time::sleep(Duration::from_millis(400)).await;
-    // The sweep runs inside the actor with no `Core` call to hang a check on, so
-    // drain its log once the wait above has let it finish.
     assert_invariants_of(&sink);
     assert!(
         backend.killed().is_empty(),
@@ -2026,7 +1938,6 @@ async fn startup_fleet_sweep_keeps_container_of_running_task() {
 #[tokio::test]
 async fn startup_fleet_sweep_spares_container_without_identity_labels() {
     let backend = Arc::new(FakeBackend::new());
-    // No live task owns it, so only the missing identity keeps it alive.
     let tasks = vec![work_task(2, TaskState::Failed, Some("dev-air/c-orphan"))];
     backend.seed_managed_running([container::RunningContainer {
         id: "dev-air/c-daemon".into(),
@@ -2040,10 +1951,7 @@ async fn startup_fleet_sweep_spares_container_without_identity_labels() {
         return;
     };
 
-    // Give the sweep ample time to run, then assert it reaped nothing.
     tokio::time::sleep(Duration::from_millis(400)).await;
-    // The sweep runs inside the actor with no `Core` call to hang a check on, so
-    // drain its log once the wait above has let it finish.
     assert_invariants_of(&sink);
     assert!(
         backend.killed().is_empty(),
@@ -2066,8 +1974,6 @@ async fn startup_fleet_sweep_tolerates_backend_error() {
         return;
     };
 
-    // The failing sweep must reap nothing and must not wedge the actor loop:
-    // a freshly created job still runs to completion.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
         backend.killed().is_empty(),
@@ -2087,8 +1993,10 @@ async fn startup_fleet_sweep_tolerates_backend_error() {
 /// on restart. Reconciliation re-enters it into the queue and it lands
 /// (§2.1 WrapUp; §3.6 step 3). No gate was in flight, so the fast path squashes.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn restart_lands_job_orphaned_in_wrapup() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -2107,7 +2015,6 @@ async fn restart_lands_job_orphaned_in_wrapup() {
         .await;
     clone.push("main").await;
     let head = repo.head().await;
-    // Job branch at HEAD: nothing to merge → squash is a NoOp that still lands.
     repo.create_job_branch(1, &head).await;
 
     store
@@ -2143,7 +2050,6 @@ async fn restart_lands_job_orphaned_in_wrapup() {
         })
         .await
         .unwrap();
-    // A completed work task so ensure_exec_state can rebuild cycle/submission.
     store
         .tasks()
         .await
@@ -2208,11 +2114,7 @@ async fn restart_lands_job_orphaned_in_wrapup() {
     .unwrap();
     let (_handle, sink) = spawn_checked(core);
 
-    // Recovery re-drives wrap-up and the job reaches Done.
     wait_for_state(&store, 1, JobState::Done).await;
-    // No `Core` call to hang a check on: this scenario is driven entirely by
-    // reconciliation and the messages it fans out, so drain the actor's log once
-    // the wait above has let them all through.
     assert_invariants_of(&sink);
 }
 
@@ -2223,8 +2125,10 @@ async fn restart_lands_job_orphaned_in_wrapup() {
 /// relaunch the pending publish, which then carries the job to Done. This is
 /// the correctness requirement that killed the first attempt as churn.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn restart_during_wrapup_relaunches_pending_publish() {
     const WEBPUB: &str = r#"
 name: webpub
@@ -2250,7 +2154,6 @@ wrap_up:
     clone
         .commit_file("prompts/impl.md", b"implement it", "prompt")
         .await;
-    // The squash already landed on main before the crash.
     clone
         .commit_file("web/src/app.tsx", b"<App/>", "job/1: webpub")
         .await;
@@ -2292,7 +2195,6 @@ wrap_up:
         .await
         .unwrap();
     let tasks = store.tasks().await.unwrap();
-    // Work completed before the crash.
     tasks
         .put(&Task {
             id: 1,
@@ -2331,8 +2233,6 @@ wrap_up:
         })
         .await
         .unwrap();
-    // The publish task was in flight when the dispatcher died: Running, with a
-    // container id that no longer exists in the fresh backend.
     tasks
         .put(&Task {
             id: 2,
@@ -2365,7 +2265,7 @@ wrap_up:
         .await
         .unwrap();
 
-    let backend = Arc::new(FakeBackend::new()); // relaunched publish exits 0
+    let backend = Arc::new(FakeBackend::new());
     let repos_root = repo
         .bare_path()
         .parent()
@@ -2388,14 +2288,9 @@ wrap_up:
     .unwrap();
     let (_handle, sink) = spawn_checked(core);
 
-    // Recovery relaunches the publish and lands the job.
     wait_for_state(&store, 1, JobState::Done).await;
-    // No `Core` call to hang a check on: this scenario is driven entirely by
-    // reconciliation and the messages it fans out, so drain the actor's log once
-    // the wait above has let them all through.
     assert_invariants_of(&sink);
 
-    // Exactly one relaunch happened — the publish, not a re-merge.
     let launches = backend.launches();
     assert_eq!(launches.len(), 1, "the pending publish is relaunched once");
     assert_eq!(
@@ -2404,7 +2299,6 @@ wrap_up:
         "the relaunched publish runs against merged main"
     );
 
-    // The orphaned Running publish is retired; a fresh attempt completed it.
     let log = tasks.list_for_job("acme", "api", 1).await.unwrap();
     let wrapups: Vec<&Task> = log
         .iter()
@@ -2428,8 +2322,6 @@ wrap_up:
 #[tokio::test]
 async fn restart_unblocks_dependent_whose_deps_completed() {
     let Some(rig) = rig().await else { return };
-    // Both the upstream and the dependent are agent work: each run must produce
-    // output to clear the §3.2 empty-output guard and reach Done.
     commit_on_run(&rig.provider, rig.repo.bare_path());
     commit_on_run(&rig.provider, rig.repo.bare_path());
 
@@ -2444,22 +2336,16 @@ async fn restart_unblocks_dependent_whose_deps_completed() {
         .await
         .unwrap();
     assert_invariants_of(&rig.invariants);
-    // Wire down ← up by rewriting the record before release (creation API has
-    // no input here because flaky declares none; use the graph as-is instead).
-    // Simpler: up runs to Done; down was Blocked behind it via a crash state.
     rig.handle.release_job("acme", "api", up.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, up.id, JobState::Done).await;
 
-    // Simulate: down was released Blocked before the crash (deps not Done yet),
-    // then upstream finished. Write the Blocked record directly.
     let jobs = rig.store.jobs().await.unwrap();
     let mut blocked = jobs.get("acme", "api", down.id).await.unwrap().unwrap();
     blocked.state = JobState::Blocked;
     blocked.deps = vec![up.id];
     jobs.put(&blocked).await.unwrap();
 
-    // Restart against the same store.
     let repos_root = rig
         .repo
         .bare_path()
@@ -2483,8 +2369,6 @@ async fn restart_unblocks_dependent_whose_deps_completed() {
     .unwrap();
     let (_handle2, sink2) = spawn_checked(core);
     wait_for_state(&rig.store, down.id, JobState::Done).await;
-    // Two sinks, two actors: the rig's covers the pre-crash core, `sink2` the
-    // restart core whose reconciliation is what this test is about.
     assert_invariants_of(&rig.invariants);
     assert_invariants_of(&sink2);
 }
@@ -2494,7 +2378,6 @@ async fn restart_unblocks_dependent_whose_deps_completed() {
 #[tokio::test]
 async fn task_timeout_kills_and_fails_hung_work() {
     let Some(rig) = rig().await else { return };
-    // The "agent" hangs forever.
     rig.provider.on_run(|_| async {
         futures::future::pending::<()>().await;
     });
@@ -2552,7 +2435,6 @@ async fn job_deadline_escalates_once_for_stalled_human_work() {
         matches!(&deadline_task.kind, TaskKind::Human { prompt } if prompt.starts_with("[deadline]"))
     );
 
-    // Operator retries; the deadline is now permanently disabled for this job.
     rig.handle
         .resolve_task(
             "acme",
@@ -2600,8 +2482,10 @@ async fn job_deadline_escalates_once_for_stalled_human_work() {
 /// The submission is now persisted to the task record on arrival and recovered
 /// from the task log on restart.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -2621,7 +2505,6 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
     clone.push("main").await;
     let head = repo.head().await;
 
-    // The agent's commit is already on the job branch, as it would be.
     repo.create_job_branch(1, &head).await;
     let work = repo.clone_branch("job/1").await;
     work.commit_file("src/f.rs", b"fn f() {}", "impl").await;
@@ -2660,8 +2543,6 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
         })
         .await
         .unwrap();
-    // Crash state: the work task finished and its submission was persisted,
-    // but the Work→Evaluation transition never happened.
     store
         .tasks()
         .await
@@ -2727,14 +2608,8 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
     let (_handle, sink) = spawn_checked(core);
 
     wait_for_state(&store, 1, JobState::Done).await;
-    // No `Core` call to hang a check on: this scenario is driven entirely by
-    // reconciliation and the messages it fans out, so drain the actor's log once
-    // the wait above has let them all through.
     assert_invariants_of(&sink);
 
-    // The summary survived the restart and reached the commit message *body*
-    // (`build_squash_commit` passes it as a second `-m`; RepoManager::log only
-    // formats `%s`, so read the full message here).
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(repo.bare_path())
@@ -2747,7 +2622,6 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
         "summary lost across restart: {message:?}"
     );
 
-    // And the session id is still there, so the transcript stays addressable.
     let tasks = store
         .tasks()
         .await
@@ -2773,8 +2647,10 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
 /// id from the live fleet. On restart the task re-attaches (same container, still
 /// Running) with zero reconcile-failure and zero synthetic -1.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -2800,8 +2676,6 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
         .unwrap()
         .to_path_buf();
 
-    // A live dispatcher whose work agent hangs, so its work task stays Running
-    // (with a real container id) while we drain it.
     let backend = Arc::new(FakeBackend::new());
     let provider = Arc::new(FakeProvider::with_backend(backend.clone()));
     provider.on_run(|_| async { futures::future::pending::<()>().await });
@@ -2826,8 +2700,6 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
     assert_invariants_of(&sink);
     wait_for_state(&store, job.id, JobState::Work).await;
 
-    // Wait until the work task is Running with its container id stamped
-    // (#206 principle 3: watch the job's task keys, inspecting each revision).
     let work = test_utils::wait::task_where(
         &store,
         "acme",
@@ -2840,9 +2712,6 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
     let real_cid = work.container_id.clone().unwrap();
     let tasks = store.tasks().await.unwrap();
 
-    // Simulate the in-flight race: its `TaskContainerStarted` had not landed, so
-    // the record carries no id — yet the fleet still reports the container
-    // running under its identity labels.
     let mut racing = work.clone();
     racing.container_id = None;
     tasks.put(&racing).await.unwrap();
@@ -2853,7 +2722,6 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
         task: Some(work.id),
     }]);
 
-    // Drain: the audit recovers the id, so the record is true at exit.
     handle.drain().await.unwrap();
     assert_invariants_of(&sink);
     let flushed = tasks
@@ -2868,7 +2736,6 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
         "drain stamped the running container's id back onto the task"
     );
 
-    // Restart: a fresh core whose fleet still reports the container running.
     let backend2 = Arc::new(FakeBackend::new());
     backend2.seed_running([real_cid.clone()]);
     let core2 = Core::new(
@@ -2886,8 +2753,6 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
     .unwrap();
     let (_handle2, sink2) = spawn_checked(core2);
 
-    // Reconciliation re-attaches the container: the task stays Running on the
-    // same id, with no retry, no reconcile-failure, and no synthetic -1.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let log = tasks.list_for_job("acme", "api", job.id).await.unwrap();
     let work_tasks: Vec<&Task> = log.iter().filter(|t| t.phase == TaskPhase::Work).collect();
@@ -2915,8 +2780,6 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
         .unwrap();
     assert_eq!(after.state, JobState::Work, "job stays in Work, mid-task");
     assert_eq!(backend2.killed(), Vec::<String>::new(), "nothing reaped");
-    // Two sinks, two actors: `sink` covers the drained pre-restart core, `sink2`
-    // the re-attaching one.
     assert_invariants_of(&sink);
     assert_invariants_of(&sink2);
 }
@@ -2929,8 +2792,10 @@ async fn drain_flushes_container_id_so_restart_reattaches_running_work() {
 /// fix the re-attach monitor threaded `structured: None`, so a self-deploy — which
 /// always spans its own dispatcher restart — lost its report every time.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn restart_reattach_harvests_command_work_deploy_report() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -2948,8 +2813,6 @@ async fn restart_reattach_harvests_command_work_deploy_report() {
     let head = repo.head().await;
     repo.create_job_branch(1, &head).await;
 
-    // The crash state: the OLD dispatcher had this command work task Running with
-    // a live container id when it was swapped out mid-task (a restart-verify).
     let cid = "reattach/deploy-1";
     store
         .jobs()
@@ -3018,8 +2881,6 @@ async fn restart_reattach_harvests_command_work_deploy_report() {
         .await
         .unwrap();
 
-    // The container is still Running (inspect re-attaches), its complete deploy
-    // stream is on stdout, and it exits 0 once the re-attached monitor waits.
     let backend = Arc::new(FakeBackend::new());
     backend.seed_running([cid.to_string()]);
     backend.put_logs(
@@ -3057,11 +2918,7 @@ async fn restart_reattach_harvests_command_work_deploy_report() {
     .unwrap();
     let (_handle, sink) = spawn_checked(core);
 
-    // cmd-work has no evaluators, so a passing work task carries the job to Done.
     wait_for_state(&store, 1, JobState::Done).await;
-    // No `Core` call to hang a check on: this scenario is driven entirely by
-    // reconciliation and the messages it fans out, so drain the actor's log once
-    // the wait above has let them all through.
     assert_invariants_of(&sink);
     let works: Vec<Task> = store
         .tasks()
@@ -3091,7 +2948,6 @@ async fn restart_reattach_harvests_command_work_deploy_report() {
     assert_eq!(report.to_sha.as_deref(), Some("abc123"));
     assert_eq!(report.health.as_deref(), Some("ok"));
     assert!(!report.rollback);
-    // The re-attached container was reclaimed once its report was out (§3.6).
     assert_eq!(backend.removed(), vec![cid.to_string()]);
 }
 
@@ -3279,8 +3135,6 @@ async fn restart_harvests_command_work_that_exited_during_the_downtime() {
     let cid = "exited/deploy-1";
     seed_command_work_crash_state(&store, &repo, "cmd-work", CMD_WORK, cid, Utc::now()).await;
 
-    // The container ran to completion while the dispatcher was down: `inspect`
-    // reports Exited, and its whole deploy stream is still readable off the node.
     let backend = Arc::new(FakeBackend::new());
     backend.seed_exited(cid, 0);
     backend.put_logs(DEPLOY_STDOUT.as_bytes().to_vec());
@@ -3288,14 +3142,9 @@ async fn restart_harvests_command_work_that_exited_during_the_downtime() {
     let (_handle, identity, sink) =
         spawn_core_capturing_artifacts(&store, &repo, backend.clone(), server.url()).await;
 
-    // cmd-work has no evaluators, so an exit-0 work task carries the job to Done.
     wait_for_state(&store, 1, JobState::Done).await;
-    // The sweep runs inside the actor with no `Core` call to hang a check on, so
-    // drain its log once the wait above has let it finish.
     assert_invariants_of(&sink);
 
-    // The operator-visible record: the container's own output, harvested before
-    // the container was reclaimed.
     let stdout = wait_for_stdout_artifact(&store, &identity, 1).await;
     let text = String::from_utf8_lossy(&stdout);
     assert!(
@@ -3304,8 +3153,6 @@ async fn restart_harvests_command_work_that_exited_during_the_downtime() {
         "harvested stdout.log missing the deploy's output: {text}"
     );
 
-    // …and the same bytes yield the structured report, exactly as on the launch
-    // and still-Running-re-attach paths.
     let works: Vec<Task> = store
         .tasks()
         .await
@@ -3353,7 +3200,6 @@ async fn task_timeout_harvests_the_container_log_before_giving_up() {
     store.ensure_topology().await.unwrap();
     let repo = TempRepo::create("acme", "api").await;
     let cid = "wedged/deploy-1";
-    // Started long before the type's 1s task_timeout, so the first scan expires it.
     seed_command_work_crash_state(
         &store,
         &repo,
@@ -3364,9 +3210,6 @@ async fn task_timeout_harvests_the_container_log_before_giving_up() {
     )
     .await;
 
-    // The container never exits: `inspect` says Running and `wait` parks forever,
-    // so the re-attached monitor never reaches its own harvest. Its logs — the
-    // deploy's story up to the point it wedged — are still readable.
     let backend = Arc::new(FakeBackend::new());
     backend.seed_running([cid.to_string()]);
     backend.put_logs(DEPLOY_STDOUT.as_bytes().to_vec());
@@ -3376,10 +3219,8 @@ async fn task_timeout_harvests_the_container_log_before_giving_up() {
     handle.trigger_scan().await.unwrap();
     assert_invariants_of(&sink);
 
-    // No retries on this type, so the timeout escalates the job…
     wait_for_state(&store, 1, JobState::Escalated).await;
     assert_eq!(backend.killed(), vec![cid.to_string()], "container killed");
-    // …and the log is captured anyway, which is the whole point.
     let stdout = wait_for_stdout_artifact(&store, &identity, 1).await;
     assert!(
         String::from_utf8_lossy(&stdout).contains("worker 'nuc' refresh NOT confirmed"),
@@ -3395,7 +3236,6 @@ async fn task_timeout_harvests_the_container_log_before_giving_up() {
 async fn drain_completes_promptly_with_a_busy_mailbox() {
     let Some(rig) = rig().await else { return };
 
-    // Flood the actor with in-flight requests, then drain immediately.
     let mut inflight = Vec::new();
     for _ in 0..64 {
         let h = rig.handle.clone();
@@ -3426,9 +3266,6 @@ async fn cut_short_drain_leaves_records_no_worse() {
     assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
-    // Wait for the in-flight work task itself to be Running — the job-state Work
-    // write can land a beat before the task record, and this test inspects the
-    // task, so gate on the task, not just the job state.
     test_utils::wait::task_where(
         &rig.store,
         "acme",
@@ -3439,11 +3276,9 @@ async fn cut_short_drain_leaves_records_no_worse() {
     )
     .await;
 
-    // Cut the drain short almost immediately.
     let _ = tokio::time::timeout(Duration::from_millis(1), rig.handle.drain()).await;
     assert_invariants_of(&rig.invariants);
 
-    // Records remain parseable and the Running task was not regressed.
     let log = rig
         .store
         .tasks()
@@ -3479,8 +3314,6 @@ async fn cut_short_drain_leaves_records_no_worse() {
 async fn restart_recreates_missing_escalation_task_from_stamped_record() {
     let Some(rig) = rig().await else { return };
 
-    // The crash state: a job committed to Stalled with WHY stamped, but the
-    // Human task write never landed (no tasks exist at all).
     let job = rig.handle.create_job(req("flaky")).await.unwrap();
     assert_invariants_of(&rig.invariants);
     let jobs = rig.store.jobs().await.unwrap();
@@ -3494,7 +3327,6 @@ async fn restart_recreates_missing_escalation_task_from_stamped_record() {
     });
     jobs.put(&stalled).await.unwrap();
 
-    // Restart against the same store.
     let repos_root = rig
         .repo
         .bare_path()
@@ -3518,8 +3350,6 @@ async fn restart_recreates_missing_escalation_task_from_stamped_record() {
     .unwrap();
     let (_handle2, sink2) = spawn_checked(core);
 
-    // The inbox artifact is re-derived: a Pending Human escalation task
-    // carrying the stamped detail as its prompt.
     let tasks_store = rig.store.tasks().await.unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let healed = loop {
@@ -3544,15 +3374,12 @@ async fn restart_recreates_missing_escalation_task_from_stamped_record() {
         "healed task must carry the stamped detail, got {:?}",
         healed.kind,
     );
-    // The job itself is untouched: still Stalled, WHY intact.
     let after = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
     assert_eq!(after.state, JobState::Stalled);
     assert_eq!(
         after.escalation.as_ref().unwrap().reason,
         "revalidation_failed"
     );
-    // Two sinks, two actors: the rig's covers the core that created the job,
-    // `sink2` the restart core that healed the missing escalation task.
     assert_invariants_of(&rig.invariants);
     assert_invariants_of(&sink2);
 }

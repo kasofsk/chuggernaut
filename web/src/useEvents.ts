@@ -8,9 +8,6 @@ export interface JobEvent {
   [key: string]: unknown
 }
 
-// SSE subscription (§6.4). EventSource reconnects itself and replays from
-// Last-Event-ID, so the handler just consumes. `onEvent` sees every event;
-// use it to refetch or merge.
 export function useProjectEvents(
   owner: string,
   project: string,
@@ -27,17 +24,12 @@ export function useProjectEvents(
       try {
         handler.current(JSON.parse(msg.data))
       } catch {
-        // ignore unparseable frames
       }
     }
     return () => source.close()
   }, [owner, project, jobSeq])
 }
 
-// Trailing-edge debounce. On page load the SSE stream replays the full event
-// history (no Last-Event-ID), so a naive per-event refetch fires hundreds of
-// GETs in a burst; wrapping the refetch here collapses each burst into a single
-// call ~delayMs after the last event.
 export function useDebouncedCallback(fn: () => void, delayMs: number) {
   const cb = useRef(fn)
   cb.current = fn

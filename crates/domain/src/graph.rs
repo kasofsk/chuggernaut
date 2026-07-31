@@ -22,11 +22,6 @@ pub struct JobGraph {
 
 impl JobGraph {
     pub fn insert(&mut self, job: Job) {
-        // Re-insert is idempotent on the reverse index: a Draft edit (spec §2.1)
-        // can drop or change a job's deps, so prune this job's id from every old
-        // upstream no longer in the new deps. Without this a stale edge would
-        // misdirect a later revoke cascade (§2.1 Revoked row), which trusts the
-        // reverse edges by state alone and does not re-check the dependent's deps.
         if let Some(old) = self.jobs.get(&job.id) {
             for &upstream in &old.deps {
                 if !job.deps.contains(&upstream)
@@ -177,21 +172,17 @@ mod tests {
         g.insert(job(1, &[], JobState::Frozen));
         g.insert(job(2, &[1], JobState::Frozen));
         g.insert(job(3, &[2], JobState::Frozen));
-        // Wiring 1 to depend on 3 closes 1→2→3→1.
         assert!(g.creates_cycle(1, &[3]));
         assert!(!g.creates_cycle(4, &[3]));
-        // Self-edge is a cycle of length one.
         assert!(g.creates_cycle(2, &[2]));
     }
 
     #[test]
     fn reinsert_prunes_stale_reverse_edges() {
         let mut g = JobGraph::default();
-        g.insert(job(1, &[], JobState::Frozen)); // upstream U
-        g.insert(job(2, &[1], JobState::Draft)); // dependent, deps=[U]
+        g.insert(job(1, &[], JobState::Frozen));
+        g.insert(job(2, &[1], JobState::Draft));
         assert_eq!(g.dependents(1), &[2]);
-        // Edit the draft to drop U (deps=[]) and re-insert: the reverse edge
-        // U→2 must disappear so a later revoke of U does not cascade to 2.
         g.insert(job(2, &[], JobState::Draft));
         assert!(g.dependents(1).is_empty());
         assert!(g.cascade_targets(1).is_empty());
@@ -203,10 +194,8 @@ mod tests {
         g.insert(job(1, &[], JobState::Work));
         g.insert(job(2, &[1], JobState::Blocked));
         g.insert(job(3, &[2], JobState::Frozen));
-        g.insert(job(4, &[1], JobState::Work)); // in flight — untouched
-        g.insert(job(5, &[4], JobState::Frozen)); // behind the in-flight edge
-        // 4 stays in Work per §2.1, and the cascade does not continue through
-        // a non-revoked node — 5's fate rides on 4's outcome, not on job 1.
+        g.insert(job(4, &[1], JobState::Work));
+        g.insert(job(5, &[4], JobState::Frozen));
         assert_eq!(g.cascade_targets(1), vec![2, 3]);
     }
 }

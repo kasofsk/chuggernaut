@@ -36,7 +36,6 @@ fn test_sources_never_use_nats_directly() {
             if path.extension().is_none_or(|e| e != "rs") {
                 continue;
             }
-            // The guard's own source holds the needles by necessity.
             if path.file_name().is_some_and(|n| n == "topology_guard.rs") {
                 continue;
             }

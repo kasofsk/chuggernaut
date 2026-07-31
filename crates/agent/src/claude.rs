@@ -82,7 +82,6 @@ impl ClaudeProvider {
         if let Some(system) = &config.system_prompt {
             command.push_str(&format!(" --append-system-prompt {}", shell_quote(system)));
         }
-        // Carries no credential, so unlike the MCP config it is world-readable.
         let mut files = vec![InjectedFile {
             container_path: SETTINGS_PATH.to_string(),
             contents: settings_json(config.permissions).into_bytes(),
@@ -129,13 +128,11 @@ impl AgentProvider for ClaudeProvider {
             cmd: bootstrap_cmd(&["sh".into(), "-c".into(), invocation.command]),
             env,
             files,
-            cpu_limit: None,    // resource limits ride on the dispatcher's
-            memory_limit: None, // command-container path; provider adds none yet
+            cpu_limit: None,
+            memory_limit: None,
             node: config.node.clone(),
         };
         let id = self.backend.launch(launch).await?;
-        // Hand the id back before we block on the container's exit, so the task
-        // record carries it while Running (#71/#72).
         on_launch.report(&id);
         let out = |exit_code| AgentOutput {
             exit_code,
@@ -143,11 +140,6 @@ impl AgentProvider for ClaudeProvider {
             session_id: Some(config.session_id.clone()),
         };
 
-        // The provider owns the timeout for its own container (§3.5's scan has
-        // historically had no id for agent tasks). A timeout still returns Ok:
-        // the container is killed, but the caller must be handed the id so it
-        // can harvest the transcript — a timed-out run is the one most worth
-        // reading. Exit -1 marks it, matching the dispatcher's failure encoding.
         match tokio::time::timeout(config.task_timeout, self.backend.wait(&id)).await {
             Ok(exit) => Ok(out(exit?)),
             Err(_elapsed) => {
@@ -239,8 +231,6 @@ pub fn parse_permission_denials(stdout: &[u8]) -> Vec<String> {
                 .get("tool_name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            // Bash is the interesting case — the command is what tells an
-            // operator whether the profile is wrong or the agent was.
             match d
                 .get("tool_input")
                 .and_then(|i| i.get("command"))
@@ -296,8 +286,6 @@ fn mcp_config_json(servers: &[McpServerConfig]) -> String {
 /// `submit_eval` looks exactly like a broken reviewer.
 pub fn settings_json(profile: PermissionProfile) -> String {
     let permissions = match profile {
-        // As permissive as the bypass flag it replaces — work agents edit,
-        // build, commit and push. Only the shape is new.
         PermissionProfile::Work => serde_json::json!({
             "defaultMode": "acceptEdits",
             "allow": [
@@ -323,12 +311,6 @@ pub fn settings_json(profile: PermissionProfile) -> String {
                 "Grep",
                 "TodoWrite",
                 "mcp__chuggernaut-channel",
-                // Reading the change under review. `git diff`/`log`/`show` are
-                // what .chug/tasks/review-*.md actually ask for. The task container
-                // clones `--single-branch` (crates/container), so the base ref
-                // is absent until fetched — `git fetch`/`merge-base`/`rev-parse`
-                // are what make the prompts' `git diff $BASE_BRANCH...HEAD`
-                // resolve at all, and none of them build or mutate the worktree.
                 "Bash(git diff:*)",
                 "Bash(git log:*)",
                 "Bash(git show:*)",
@@ -469,7 +451,6 @@ mod tests {
         ));
         assert!(inv.command.contains("--model 'claude-sonnet-4-6'"));
         assert!(inv.command.contains("--append-system-prompt 'KO facts'"));
-        // The MCP config travels by path, never inline.
         assert!(
             inv.command
                 .contains("--mcp-config /chuggernaut/mcp-config.json")
@@ -488,8 +469,6 @@ mod tests {
             "{cmd}"
         );
         assert!(cmd.contains("--output-format stream-json"), "{cmd}");
-        // `-p` with stream-json is rejected by the CLI unless `--verbose` is
-        // also passed; the two must travel together.
         assert!(cmd.contains("--verbose"), "{cmd}");
     }
 
@@ -506,7 +485,6 @@ mod tests {
              --output-format stream-json --verbose \
              --session-id 'da08d5f3-844e-430e-8363-39b4882f437b'"
         );
-        // The settings file is not optional — every run carries a profile.
         assert_eq!(inv.files.len(), 1);
         assert_eq!(inv.files[0].container_path, SETTINGS_PATH);
     }
@@ -551,8 +529,6 @@ mod tests {
             file.mode, 0o600,
             "credential file must not be world/group readable"
         );
-        // The payload is JSON, so newlines are escaped — assert on the NKEY seed
-        // and JWT marker, which survive serialization verbatim.
         let contents = String::from_utf8(file.contents.clone()).unwrap();
         assert!(
             contents.contains("SUAGC3DCT7DHY6TQKEPNXKVHTHULNVR7KE5G6QYWQ2Q4JW3AB2LG5UGXNU"),
@@ -572,8 +548,6 @@ mod tests {
             .iter()
             .find(|f| f.container_path == SETTINGS_PATH)
             .expect("settings file injected");
-        // Carries no credential — world-readable is correct, and a 0600 here
-        // would be cargo-culted from the MCP config next door.
         assert_eq!(file.mode, 0o644);
         assert!(file.artifact.is_none());
         serde_json::from_slice(&file.contents).expect("settings are valid JSON")
@@ -627,9 +601,6 @@ mod tests {
             "Grep",
             "Bash(git diff:*)",
             "Bash(git log:*)",
-            // The clone is `--single-branch`, so the base ref does not exist in
-            // the reviewer's worktree: without the fetch, every prompt's
-            // step-1 `git diff $BASE_BRANCH...HEAD` fails on a missing revision.
             "Bash(git fetch:*)",
             "Bash(git merge-base:*)",
         ] {
@@ -751,7 +722,6 @@ mod tests {
 
     #[test]
     fn parses_result_text_for_triage() {
-        // A success result object carries the agent's prose in `result`.
         let json = r#"{"type":"result","subtype":"success","is_error":false,"result":"The work task failed because the migration script referenced a dropped column. Recommend Revoke.","session_id":"x","usage":{"input_tokens":1,"output_tokens":2}}"#;
         assert_eq!(
             parse_result(json.as_bytes()).as_deref(),
@@ -759,11 +729,9 @@ mod tests {
                 "The work task failed because the migration script referenced a dropped column. Recommend Revoke."
             )
         );
-        // Past leading container noise.
         let mut stdout = b"Cloning into '/workspace'...\n".to_vec();
         stdout.extend_from_slice(json.as_bytes());
         assert!(parse_result(&stdout).is_some());
-        // Empty / missing result → None, never an empty assessment.
         assert!(parse_result(br#"{"type":"result","result":""}"#).is_none());
         assert!(parse_result(b"plain output").is_none());
     }

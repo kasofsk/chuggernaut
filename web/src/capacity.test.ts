@@ -2,12 +2,6 @@ import { describe, expect, it } from 'vitest'
 import type { FleetNode } from './api'
 import { CAPACITY_STALE_MS, capacityView, drainsFleetToZero } from './capacity'
 
-// Design #293 §10: the six display states must stay distinguishable — a generic
-// spinner or a bare number is what let the 2026-07-26 fleet run for weeks on an
-// unconfirmed boot seed. These pin the ranking (which state wins when several
-// apply), the over-cap drain case, and the fleet-wide-zero guard. Nodes are
-// built as the real wire type so a snapshot-shape change breaks the test.
-
 const NOW = Date.parse('2026-07-26T23:20:00Z')
 const FRESH = '2026-07-26T23:19:50Z'
 const OLD = '2026-07-26T23:05:00Z'
@@ -99,7 +93,6 @@ describe('capacityView — ranking when several states apply', () => {
     })
     const v = capacityView(n, NOW)
     expect(v.state).toBe('seed')
-    // …but the set still has to be acknowledged: outranked is not swallowed.
     expect(v.converging).toBe(true)
   })
 

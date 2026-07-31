@@ -348,8 +348,6 @@ pub fn provider_name(declared: Option<Provider>, platform_default: Option<&str>)
 /// chain interleaved is either a pre-read in the view or an [`Effect`] (or a
 /// [`WorkStep`]) the shim performs afterwards.
 pub fn decide(view: &WorkView<'_>, event: WorkEvent) -> (Vec<Transition>, Vec<Effect>, WorkStep) {
-    // `Job::project` is always "owner/name" (§1.1); every published subject and
-    // every escalation composite needs the halves.
     let (owner, project) = view
         .job
         .project
@@ -390,8 +388,6 @@ fn decide_entered(
     failure: Option<EntryFailure>,
 ) -> (Vec<Transition>, Vec<Effect>, WorkStep) {
     let job = view.job;
-    // Negative space (§2.1): terminal states are absorbing — a revoked job never
-    // enters Work, and `assert_transition` would reject the edge anyway.
     debug_assert!(
         !job.state.is_terminal(),
         "work entered for terminal job #{} in {:?}",
@@ -507,8 +503,6 @@ fn decide_attempt(
     attempt: u32,
     resume: bool,
 ) -> (Vec<Transition>, Vec<Effect>, WorkStep) {
-    // Draining (§3.6): initiate no new work container. Checked before the record
-    // is built — a task created here would have no monitor behind it.
     if view.draining {
         return (Vec::new(), Vec::new(), WorkStep::Hold);
     }
@@ -536,8 +530,6 @@ fn decide_attempt(
         },
         attempt,
         evaluator: None,
-        // A gate-fix work task carries its own label so the story reads
-        // `gate-fix` rather than a bare Work row (job #154/#146).
         label: (view.rework_reason == Some(ReworkReason::GateCompileFix))
             .then(|| "gate-fix".to_string()),
         stage: 0,
@@ -545,9 +537,6 @@ fn decide_attempt(
         container_id: None,
         rework_reason: view.rework_reason,
         infra_loss: false,
-        // Minted before launch and persisted with the task, so the transcript
-        // stays addressable even if the dispatcher restarts mid-run. A claimed
-        // attempt runs no agent, so it gets no session.
         session_id: (matches!(view.contract().work.r#type, WorkType::Agent) && !claimed)
             .then(|| view.session_id.to_string()),
         pending_reason: None,
@@ -555,9 +544,6 @@ fn decide_attempt(
         reviewed_tip: None,
         result: None,
         created_at: view.now,
-        // A claimed attempt starts now, humanly: the claim was the "I'm
-        // starting" declaration (§1.2), so the parked task reads as
-        // in-progress-by-human, not idle.
         started_at: (!pending_human).then_some(view.now),
         completed_at: None,
     };
@@ -570,9 +556,6 @@ fn decide_attempt(
         }),
     }];
     if claimed {
-        // Consume the claim — it covers exactly this one attempt. The next
-        // attempt (retry, rework) launches per the declared kind unless the
-        // human claims again.
         let mut consumed = job.clone();
         consumed.claim_next = false;
         effects.push(Effect::PutJob {
@@ -600,9 +583,6 @@ fn decide_attempt_kind(view: &WorkView<'_>) -> (TaskKind, bool) {
         WorkType::Agent => (
             TaskKind::Agent {
                 provider: provider_name(work.provider, view.agent_provider_default),
-                // §12.4 model resolution for the Work agent: per-job override →
-                // job type → project default (folded into work.model by
-                // `with_defaults`) → platform default.
                 model: view
                     .job
                     .model
@@ -644,9 +624,6 @@ fn decide_exited(
         "task {} is not a Work task",
         task.id,
     );
-    // Stale monitors (revoke, rework) report exits for attempts that already
-    // resolved; their exits are noise, and re-retiring one would resolve the
-    // same attempt twice.
     if task.state != TaskState::Running {
         return (Vec::new(), Vec::new(), WorkStep::Idle);
     }
@@ -656,9 +633,6 @@ fn decide_exited(
         decide_exited_zero(view, owner, project, task, exit)
     } else {
         task.state = TaskState::Failed;
-        // Assign only when the exit carries an account of its own: §4.2 lets a
-        // live container submit its result before dying, and overwriting that
-        // with `None` would erase the agent's only summary.
         if let Some(result) = decide_exited_failure_result(&exit) {
             task.result = Some(result);
         }
@@ -733,22 +707,15 @@ fn decide_exited_zero(
     mut task: Task,
     exit: WorkExit,
 ) -> (Vec<Transition>, Vec<Effect>, WorkStep) {
-    // Normally already written by `submit_result`; this covers an agent that
-    // exited 0 without submitting.
     if task.result.is_none() {
         let sub = view.submission;
         task.result = Some(TaskResult::Work {
             summary: sub.and_then(|s| s.summary.clone()),
-            // A command work task carries no submission; its structured result
-            // is the deploy report harvested from stdout (#187). An agent's own
-            // `structured` wins when present.
             structured: sub.and_then(|s| s.structured.clone()).or(exit.structured),
             cover_html: sub.and_then(|s| s.cover_html.clone()),
             token_usage: sub.and_then(|s| s.token_usage),
         });
     }
-    // Measured usage from the CLI's own JSON result wins over the agent's
-    // self-report, which it may omit or invent.
     if let (Some(measured), Some(TaskResult::Work { token_usage, .. })) =
         (exit.usage, task.result.as_mut())
     {
@@ -758,9 +725,6 @@ fn decide_exited_zero(
         &task.result,
         Some(TaskResult::Work { summary: Some(s), .. }) if !s.trim().is_empty()
     );
-    // Only a job still progressing from Work is guarded: a revoked (or otherwise
-    // terminal) job whose orphaned container exits late completes as before,
-    // no-opping on the invalid transition downstream.
     if !summary_present
         && view.job.state == JobState::Work
         && matches!(task.kind, TaskKind::Agent { .. })
@@ -948,8 +912,6 @@ fn decide_infra_lost(
         }];
         return (Vec::new(), effects, WorkStep::EscalatedDropExec);
     }
-    // Same attempt: budget untouched. The branch is recovered in case the lost
-    // attempt pushed commits before vanishing (§3.2).
     (
         Vec::new(),
         Vec::new(),
@@ -977,7 +939,6 @@ fn decide_retry_or_escalate(
 ) -> (Vec<Effect>, WorkStep) {
     let work_retries = view.contract().work_retries.unwrap_or(0);
     if task.attempt <= work_retries {
-        // §2.1/§3.2: a new task record, attempt++ — never a reused one.
         return (
             Vec::new(),
             WorkStep::Retry {
@@ -1137,8 +1098,6 @@ mod tests {
             other => panic!("expected PutTask, got {other:?}"),
         }
     }
-
-    // --- Entry (§3.2 steps 1–6, §14.2) ---
 
     /// A clean first entry moves the record to Work and announces the start.
     #[test]
@@ -1304,8 +1263,6 @@ mod tests {
         );
         assert_eq!(failing, None, "no task exists at launch time");
     }
-
-    // --- Attempt launch and claim parking (§1.2) ---
 
     /// An agent attempt: Running record, resolved provider/model, a minted
     /// session, and the launch handed to the shim.
@@ -1499,8 +1456,6 @@ mod tests {
         assert!(transitions.is_empty() && effects.is_empty());
         assert!(matches!(step, WorkStep::Hold));
     }
-
-    // --- Exit handling (§3.2 step 8) ---
 
     /// Exit 0 with a summary: the attempt is Done and the job goes to Evaluation.
     #[test]
@@ -1911,8 +1866,6 @@ mod tests {
         }
     }
 
-    // --- Operator decline (§1.2 claims) ---
-
     /// A declined attempt fails, keeps the branch, and carries the operator's
     /// notes into the next attempt's §4.3 context (#121).
     #[test]
@@ -1967,8 +1920,6 @@ mod tests {
         );
         assert!(step.drops_exec());
     }
-
-    // --- Infrastructure loss (§3.6) ---
 
     /// A lost container relaunches the SAME attempt: no budget spent, branch
     /// recovered in case the lost attempt pushed commits.
@@ -2030,8 +1981,6 @@ mod tests {
         );
         assert!(matches!(step, WorkStep::Retry { .. }));
     }
-
-    // --- Negative space (STYLE.md Tier 2 #2) ---
 
     /// A terminal job never enters Work — `assert_transition` would reject the
     /// edge anyway, but the decision is the earlier bug.

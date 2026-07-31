@@ -2,15 +2,6 @@ import { describe, expect, it } from 'vitest'
 import type { CommandResult, DeployReport, Task, TaskResult, TriageResult, WorkResult } from '../api'
 import { deployReportOf, deployReportOfTasks } from './DeployLegCard'
 
-// Ticket #275: a deploy's command work task records `TaskResult::Work` when it
-// succeeds and `TaskResult::Command` only when it fails, so a selector keyed on
-// `kind` sees exactly one of the two. These cases pin both, plus the shapes
-// that must keep returning null. Results are built as the real api.ts types so
-// a wire-shape change breaks the test rather than passing against a mock.
-
-// `satisfies` rather than an annotation: the literal type is what both
-// `WorkResult.structured` (a DeployReport) and `CommandResult.structured` (a
-// bare record) accept, so neither fixture needs a cast.
 const report = (to: string) =>
   ({
     from_sha: 'a'.repeat(40),

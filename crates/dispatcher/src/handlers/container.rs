@@ -51,8 +51,6 @@ async fn spawn_work_submit(store: &NatsStore, handle: CoreHandle) -> store::Resu
             };
             let submission: WorkSubmission =
                 serde_json::from_slice(&req.payload).unwrap_or_default();
-            // Reject an oversized cover at ingest, before the record is stored
-            // (job #143) — the text summary still lands only via a resubmission.
             let body = if let Some(err) = agent_cover_rejection(&submission.cover_html) {
                 format!(r#"{{"error":{}}}"#, serde_json::json!(err))
             } else {
@@ -86,8 +84,6 @@ async fn spawn_eval_submit(store: &NatsStore, handle: CoreHandle) -> store::Resu
                     .await;
                 continue;
             };
-            // §4.2: payload must include pass — malformed submissions are
-            // rejected, not defaulted.
             let body = match serde_json::from_slice::<EvalSubmission>(&req.payload) {
                 Err(e) => format!(r#"{{"error":{}}}"#, serde_json::json!(e.to_string())),
                 Ok(submission) => match agent_cover_rejection(&submission.cover_html) {
@@ -180,10 +176,8 @@ mod tests {
         assert!(agent_cover_rejection(&Some("x".repeat(AGENT_COVER_HTML_MAX_BYTES))).is_none());
         let err = agent_cover_rejection(&Some("x".repeat(AGENT_COVER_HTML_MAX_BYTES + 1)))
             .expect("over-limit cover rejected");
-        // The message names the field and the fact it's optional/presentational.
         assert!(err.contains("cover_html"), "{err}");
         assert!(err.contains("summary"), "{err}");
-        // The agent cap is tighter than a job brief's cover cap.
         const { assert!(AGENT_COVER_HTML_MAX_BYTES < COVER_HTML_MAX_BYTES) };
     }
 }

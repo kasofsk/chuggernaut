@@ -1,0 +1,1000 @@
+# Implementation notes — rationale hoisted out of comments
+
+**Audience:** anyone changing the modules listed below. This page is the
+**rationale archive**: when job #342 deleted every non-doc comment in the tree
+(STYLE.md Tier 1, `.chug/tasks/check-comments.sh`), the explanations that were
+load-bearing landed here rather than in `git log`.
+
+Read it as *notes about a module*, not as a specification. Normative behavior
+lives in [`spec.md`](../spec.md); the arguments behind a decision live in
+[`design.md`](../design.md) and [`docs/design/`](./design/); the contract of a
+module lives in its `//!` header and its [`MODULES.md`](../MODULES.md) row.
+Where this page and any of those disagree, they win and the entry here is
+stale.
+
+## How to use it
+
+- Entries are grouped by source file and, inside a file, tagged with the item
+  (`fn`, `struct`, `impl`, `const`) the note sat next to when it was a comment.
+  Items move; the tag is a hint for finding the code, not an anchor.
+- **Folding an entry into a better home is the point.** A note that belongs in
+  `spec.md`, in a design document, in a module `//!` header or in a two-sentence
+  doc comment should be moved there by the next `docs` job that touches the
+  area, and deleted from here.
+- What is *not* here: notes from test files and `#[cfg(test)]` modules (a test's
+  name carries what its comment said — `testing.md`), and one-line comments that
+  only restated the code beneath them. The full pre-strip text of every deleted
+  comment is in git history, at the commit before job #342.
+
+## The notes
+
+### `crates/agent/src/claude.rs`
+- **fn run** — Hand the id back before we block on the container's exit, so the task record carries it while Running (#71/#72).
+- **fn run** — The provider owns the timeout for its own container (§3.5's scan has historically had no id for agent tasks). A timeout still returns Ok: the container is killed, but the caller must be handed the id so it can harvest the transcript — a timed-out run is the one most worth reading. Exit -1 marks it, matching the dispatcher's failure encoding.
+- **fn parse_permission_denials** — Bash is the interesting case — the command is what tells an operator whether the profile is wrong or the agent was.
+- **fn settings_json** — As permissive as the bypass flag it replaces — work agents edit, build, commit and push. Only the shape is new.
+- **fn settings_json** — Reading the change under review. `git diff`/`log`/`show` are what .chug/tasks/review-*.md actually ask for. The task container clones `--single-branch` (crates/container), so the base ref is absent until fetched — `git fetch`/`merge-base`/`rev-parse` are what make the prompts' `git diff $BASE_BRANCH...HEAD` resolve at all, and none of them build or mutate the worktree.
+
+### `crates/api/src/lib.rs`
+- **fn router** — Operator capacity control (§3.1): the desired slot count for one worker node. 202 — the dispatcher records intent and converges.
+- **fn router** — Artifacts (§4.2): transcripts and container logs Live/paged container output for a running task, falling back to the harvested stdout.log artifact after exit (§4.2)
+- **fn router** — Raise the body cap above axum's 2MB default so a screenshot upload is not rejected before the handler runs.
+- **fn router** — Vite content-hashes everything under /assets, so a given URL's bytes never change — cache it forever and skip even the revalidation RTT. Everything else (index.html, sw.js, the manifest, icons) keeps the default no-cache behavior: those URLs are stable across builds, so a long TTL would pin operators to a stale shell.
+- **fn router** — Compress every response the client will take it on. The default predicate already skips SSE (`text/event-stream`), gRPC, images, and sub-32-byte bodies, so the live event stream still flushes per frame. Applied last so it wraps the static fallback too — the UI bundle is the single largest transfer the operator makes.
+
+### `crates/api/src/routes.rs`
+- **fn from_request_parts** — `Authorization: Bearer <jwt>` first (machine callers — CLI-minted tokens, §7.1), then the browser session cookie. Same JWT either way.
+- **fn health** — Only a genuine {"dispatcher":"ok",..} reply is healthy; anything else (e.g. the actor's 503 envelope) maps to 503, never 200.
+- **fn ssh_cert** — The dispatcher loads the caller's roles from their user record and signs; we forward only the authenticated email, never a client-supplied identity.
+- **fn project_config_get** — secrets — NAMES ONLY (the api holds no decryption key). Split the reserved origin credentials out into presence flags.
+- **fn platform_fleet_get** — Served verbatim rather than re-serialized through `types::FleetStatus`. The api and the dispatcher deploy at different moments (the reason `api_sha` exists at all), so a typed round-trip here would silently drop the per-node capacity fields a *newer* dispatcher writes — a capacity path failing invisibly, which is the exact class of failure design #293 exists to remove. This crate is a bridge and reads none of these fields.
+- **fn platform_fleet_get** — Cold start: the dispatcher has published nothing yet. An empty fleet, never a 404, so the UI needn't special-case it.
+- **fn diff** — Live task output (§4.2): cursor-paged container stdout/stderr A running task's container is tailed live via the dispatcher (a bounded req/reply, no held-open stream through the core actor); once it exits, this falls back to the harvested `stdout.log` artifact at the SAME byte offsets, so a poller never loses the tail when the container is removed (job #10).
+- **fn task_output** — The dispatcher signals errors (404 no container yet, 502 wedged node) in the §6.5 envelope — propagate its status verbatim.
+- **fn task_output** — Finished (or the container is already gone): serve the harvested stdout.log from `since` on, so a poller that had offset N off the live stream continues seamlessly into the artifact.
+- **fn task_output** — No artifact store configured: the task is finished with nothing to replay. Hold the cursor so a poller sees `running: false` and stops.
+- **fn task_output** — Artifacts (§4.2): session transcripts and container logs These stream from the object store rather than riding a req/reply through the dispatcher: a transcript routinely exceeds NATS's 1MB max_payload, which a reply cannot carry. Decryption happens here because the API holds the `age_artifacts` identity — a separate key from the secrets one, which stays dispatcher-only (§10.2).
+- **fn artifacts_list** — Job attachments (§1.6): operator-uploaded files Screenshots on a bug report, reference documents. Like transcripts, these stream directly from the object store rather than riding a req/reply through the dispatcher — a screenshot routinely exceeds NATS's 1MB max_payload — and the API encrypts on upload / decrypts on download with the `age_artifacts` identity it already holds. Presentational reference material: never injected into an agent prompt.
+
+### `crates/api/src/run.rs`
+- **fn run** — The artifacts identity — not `age_private.key`, which stays dispatcher-only (§10.2). Missing → the platform captures no artifacts, and the routes report that rather than failing startup.
+
+### `crates/api/src/sse.rs`
+- **fn project_events** — A fresh connect gets live events only. The project feed spans every job the project has ever run, so replaying it costs the operator a multi- megabyte download before the first live frame — and nothing needs it: the page's initial state comes from the jobs list (which now carries each live job's latest channel post), and this stream's job is to keep that state current. A reconnect still resumes exactly where it left off.
+- **fn job_events** — Unlike the project feed, one job's history is bounded and *is* the content: the detail page renders the event log itself. Replay it whole.
+
+### `crates/auth/src/nats.rs`
+- **fn resolver_config** — §7.4 allow-lists, mapped to the concrete NATS subjects behind each KV and stream operation the injected binaries perform (KV get = JetStream direct get; channel_check = ephemeral pull consumer on `channel-inbox`).
+- **fn common_container** — Deliberately no `kv_write` on CHANNELS: containers post through the dispatcher instead, keeping it the sole writer of the bucket and making each post durable event history rather than a last-write-wins overwrite.
+- **fn common_container** — Knowledge keys nest b64 segments (`global.{s}.{p}`, `{owner}.{s}.{p}`, `{owner}.{project}.{s}.{p}`): `{owner}.>` covers the §7.4 owner and project grants in one pattern.
+- **fn common_container** — channel_check: ephemeral pull consumer on the inbox stream. Unnamed ephemeral creation targets `CONSUMER.CREATE.{stream}` exactly (no trailing tokens, which `.>` would require), named/filtered creation appends `.{name}.{filter}`.
+
+### `crates/auth/src/ssh.rs`
+- **fn authorize_ref_push** — A platform admin (§7.3) pushes to any job branch in any project, but the default branch stays dispatcher-only for everyone.
+
+### `crates/chuggernaut-harness/src/main.rs`
+- **fn main** — Still unimplemented (`main` bails); spec §4.5 describes the loop it owes:
+  1. Load `HarnessConfig` from `/chuggernaut/harness.json`.
+  2. Loop, up to `config.iterations` rounds:
+     - Run the author (iteration 1: `author_cmd`; later: `author_continue_cmd` with
+       the findings block as the message). A non-zero exit exits non-zero — the
+       `work_retries` path.
+     - Run `reviewer_cmd` in a fresh session and read the verdict from
+       `/chuggernaut/review-result.json` (written by `submit_review`). A missing
+       verdict retries the review once, then records a failed step and proceeds to
+       submit.
+     - Report step-started/step-completed around each run via `req.step.report`
+       (bounded retry, non-fatal on failure).
+     - `pass=true` breaks; `pass=false` feeds the findings into the next round.
+  3. Send `req.work.submit` with the author's latest intercepted
+     `/chuggernaut/work-result.json` payload, merging
+     `structured.inline_review = { iterations, accepted, unresolved_findings }`.
+     Bounded retry until ack, then exit 0.
+
+### `crates/chuggernaut/src/main.rs`
+- **fn main** — SIGTERM (launchd `kickstart -k`) / SIGINT → graceful drain (§3.6): quiesce the actor and flush records to KV before exiting clean.
+
+### `crates/cli/src/admin.rs`
+- **fn run** — Operator-mode NATS requires the dispatcher credentials from init (§12.1); without them (open dev server) connect plain.
+- **fn run_worker_refresh** — The node has no git credential (spec §3.1 / #114): it could not even attempt the refresh. Surface it LOUDLY so a deploy never looks like a success that silently refreshed nothing. Non-fatal, like every other refresh outcome — the drift also shows in the fleet snapshot.
+- **fn run_worker_refresh** — A refresh is already in flight (converging to some SHA) — not a failure and not drift; nothing new to start or wait on.
+- **fn worker_refresh_wait** — Confirm against the SAME reported field the fleet snapshot shows (ticket #187): a swapped-in daemon carries the target SHA in its version, and the surviving daemon of a FAILED refresh reports a `Failed` outcome — so a broken refresh is surfaced immediately with its stage/error instead of waiting out the whole timeout.
+- **fn worker_refresh_wait** — Kept across polls so a timeout can still report the last thing we saw even when the final ping itself failed.
+- **fn worker_refresh_wait** — Only OUR refresh's progress is relayed or remembered: a node converging on some other SHA must not be reported as this deploy's, least of all in the timeout report below.
+- **fn worker_refresh_report_failed** — Stream the daemon-captured tail into the deploy task log so the real cause (deploy #212: docker disk pressure) is visible without ssh'ing the node.
+- **fn worker_refresh_report_failed** — A single-line, machine-readable detail line update.sh harvests into the failed leg's bounded `detail` field.
+- **fn worker_refresh_report_timeout** — No progress at all: the daemon never reported a phase — itself signal (an old daemon, or one that never started the script).
+- **fn run_project** — Repo before counter: a failed repo init leaves nothing behind, so the command can simply be re-run (§12.2).
+- **fn run_project** — §5.2 per-ref push authorization for SSH traffic; local access (no CHUGGERNAUT_PRINCIPAL env) passes through.
+- **fn run_project** — Preflight the origin credentials so the failure mode is a clear pointer at `admin secret set` instead of a dispatcher error.
+
+### `crates/cli/src/init.rs`
+- **fn run** — 2. NATS buckets + streams, VAPID public key at platform.vapid.public. Connect with the dispatcher credentials keygen just ensured — a plain (no-auth) dev server ignores them, an operator-mode server requires them.
+
+### `crates/cli/src/keygen.rs`
+- **fn ensure_all** — SSH CA (§7.4) — ssh-keygen writes both halves in one shot, so report the .pub as generated too rather than "skipped".
+- **fn ensure_all** — Artifacts (transcripts, container logs) — a *separate* age keypair from the secrets one above. §10.2 keeps the secrets identity dispatcher-only, but the API must decrypt artifacts to serve them, and proxying blobs through the dispatcher would reintroduce the NATS max_payload cap that the object store exists to avoid. Different key, different trust boundary: this one guards artifacts at rest, not from the API.
+- **fn ensure_all** — NATS decentralized auth (§7.4): operator + system + platform account nkey seeds, generated in-process (nkeys is already in the tree via the NATS client). Derived server/dispatcher artifacts: ensure_nats_artifacts.
+
+### `crates/cli/src/schema.rs`
+- **fn generate** — Not one root type but the whole wire vocabulary, so this arm builds its document rather than naming a single `schema_for!` root.
+- **fn api_bundle** — Responses describe what the server WRITES, so they take schemars' serialize contract: a `#[serde(default)]` field the record always emits (`Job::title`) is required, and only a `skip_serializing_if` field is optional. Under the deserialize contract — right for a config file the platform reads, and what `schema job-type` keeps — every defaulted field reads as optional, which would hand the generated client a `title?: string` the wire never omits and push a `?? ''` into every consumer.
+- **fn api_bundle** — Request bodies are the mirror image: they describe what the server READS, so a defaulted field is genuinely optional for the caller.
+- **fn api_bundle_job_records** — The two derived group reads (design #321 slice B): real types rather than `json!` envelopes precisely so they generate, like every other §6.2 response the UI is built on.
+
+### `crates/cli/src/validate.rs`
+- **fn validate_file** — Field rules for default evaluators are checked where they land: against each job type they merge into.
+- **fn validate_file** — Merge-time version-skew gate: a config that needs a newer dispatcher than the deployed one fails its own CI rather than merging and escalating at launch.
+
+### `crates/cli/src/wire_samples.rs`
+- **fn sample_job** — The effective set after the Ready-transition fill (§1.1, #311): a supplied value beside a materialized default, so the generated client's round-trip test sees a populated map rather than the empty common case.
+- **fn sample_job** — Two groups, one of each namespace (design #321 Decision 2): the wire shape a grouped record has, so the generated client's round-trip test sees a populated list rather than the empty common case.
+
+### `crates/container/src/docker.rs`
+- **fn wait** — A non-zero exit surfaces as ContainerWaitError on some daemons — the exit code rides in the error body.
+- **fn remove** — force=false — the caller only removes after the container has exited and its artifacts are harvested.
+- **fn remove** — Already gone (404) or a removal already in flight (409): the overlay is reclaimed either way, so removal is idempotent.
+- **fn list_managed_running** — One unreachable node must not blank the whole fleet sweep — the others' orphans still get reaped (§3.6).
+- **fn fleet_status** — A docker-endpoint node's capacity is static `DOCKER_NODES` config, not an observation: `DOCKER_NODES` remains its owner (design #293 §7), so it reports no capacity and no provenance and the roster's number stands.
+
+### `crates/dispatcher/src/capacity.rs`
+- **fn decide** — "Intent recorded, node not converging" is exactly what the display state means (design #293 §10), and a decommissioned node is the starkest case of it.
+- **fn decide** — A ledger for a *different* value is a previous ask; the operator has moved on, so nothing it remembers — least of all a rejection — applies here.
+- **fn set_node_capacity** — A fresh ask retires everything the old one recorded — a rejection is terminal for the value that was refused, never for the operator's next.
+- **fn set_node_capacity** — The §9 audit line: the record carries last-writer only, so the change itself lives in the platform's log collection until a retained `platform.events` stream exists.
+- **fn reconcile_capacity_intent** — What bounds this loop is the `in_fleet` test below, not the map: intent has one entry per node an operator ever set and entries are never dropped, so a decommissioned node's ask outlives the node itself — by design, since a dynamic node that has not re-announced since a dispatcher restart must not lose it.
+- **fn push_node_capacity** — No mailbox to answer into (a Core driven directly in a unit test): recording a push whose reply can never land would wedge the ledger `in_flight` forever, so decline instead.
+- **fn push_node_capacity** — A ledger from an older ask is retired rather than reused, so `first_pushed_at` always dates the value being pushed now.
+- **fn on_capacity_pushed** — An "accepted" reply naming a different number is a daemon we cannot take at its word; the next tick's divergence check re-asserts.
+- **fn capacity_display** — The common case (no operator has ever set capacity), and this runs on every occupancy-relevant message — so it costs nothing there.
+
+### `crates/dispatcher/src/channel.rs`
+- **fn on_channel_post** — Reject posts for jobs that do not exist: the subject is per-job and the container's credentials are scoped to it, but a stale container from a revoked job could still be talking.
+- **fn on_channel_post** — Stamp acceptance time here rather than trusting the container's clock; the jobs list ages the message against it.
+- **fn on_channel_post** — The event is the history; the KV write above is only the latest-value cache that `GET .../status` reads.
+
+### `crates/dispatcher/src/config.rs`
+- **fn from_env** — `DOCKER_NODES` present but empty is an explicit *zero-seed* dynamic fleet (spec §3.1 dynamic registration): the dispatcher boots with no capacity and gains it when workers announce. Unset (the `Err` arm) keeps the single local-socket default. A non-empty value parses as before.
+- **fn base_snapshot** — The number the fleet actually places on: observed if the boot probe pulled capacity from the node, the `DOCKER_NODES` seed as the fallback until then (design #293 §7). A docker-endpoint node reports no live slots, so its seed stands outright — and `capacity_source` below always describes *this* number, never the other.
+- **fn parse_docker_nodes** — Node names ride in container ids and (for worker nodes) NATS subjects — keep them to a safe token either way.
+- **fn parse_docker_nodes** — `worker` = NATS-proxied `chuggernaut worker` daemon (spec §3.1); unix/tcp/http = a Docker daemon driven directly.
+
+### `crates/dispatcher/src/core.rs`
+- The create spec is `types`' (refactor-plan F1a) so the pure authoring decider can read it; re-exported here because `core` is the surface every caller of [`Core::create_job`] already imports.
+- **fn spawn** — Publish live fleet occupancy once reconciliation settled the running set (re-attached survivors, reaped orphans) — the first snapshot is rebuilt from live containers, not stale state (spec §3.1/§3.6).
+- **fn new** — The operator's capacity asks outlive this process (design #293 §4): load them before the first scan tick can reconcile against them.
+- **fn new** — Restore merge-queue holds for Open origin releases before reconcile runs — recovered Evaluation jobs must re-enqueue without landing.
+- **fn with_fleet_roster** — The seed set is the boot roster's names: these stay ping-managed and are never heartbeat-gated (spec §3.1 dynamic registration).
+- **fn on_worker_announce** — Only a fleet-capable backend can route to an announced node. On a single-node Docker deployment (no announcing workers by design) a stray or misconfigured announce would otherwise insert a phantom worker into the roster that nothing can ever route to — and which would then show permanently "down" after the heartbeat scan. Drop it before it can touch the heartbeat table or the roster.
+- **fn on_worker_announce** — A worker (seed or previously-announced) of this name: the live announcement re-admits it and refreshes its version. Its slots stay the boot seed here — the pre-observation fallback the backend's observed number supersedes (design #293 §7).
+- **fn on_worker_announce** — The name is held by a docker-endpoint node — the backend already refused it; leave the roster untouched.
+- **fn on_worker_announce** — A node that was never seeded has no seed to fall back to, so its roster entry starts at what it just reported; provenance is filled from the backend when the snapshot is composed.
+- **fn on_worker_announce** — The observation moved (design #293 §4): a refreshed daemon comes back on its boot `WORKER_SLOTS`, so re-assert the operator's number now rather than waiting out a scan tick. Gated on `joined` — a node reporting the same wrong value every 15s is pushed by the tick alone, which is what keeps the one-push-per-tick bound honest. Deliberately **after** the roster merge above: the reconciler will not push to a node the roster does not hold, and a node announcing for the first time is inserted by that merge. Reconciling before it would silently no-op in exactly the case this fast path exists for, which is what the assert pins.
+- **fn run** — Graceful shutdown (spec §3.6 drain): quiesce and stop the loop. Handled here, not in `handle_msg`, because it needs the receiver to sweep the remaining mailbox.
+- **fn run** — Any message but a bare liveness ping can move fleet occupancy or the launch-queue depth (a launch, an exit, a queued/resumed launch); republish after the drains so the `platform` bucket stays current (spec §3.1). Pings are excluded so a busy health-check path never triggers a fleet recompute.
+- **fn run** — A just-handled container exit may have freed a fleet slot; retry any launches queued under capacity pressure (spec §3.5).
+- **fn run** — Check the data invariants once the message has fully settled — the drains and the fleet republish are part of handling it, and the queue is legitimately inconsistent midway through them (refactor-plan B1a). Only ever `Some` under test.
+- **fn drain** — Sweep the mailbox. `handle_msg` records exits and stamps container ids as normal; the launch paths it may reach are no-ops while draining.
+- **fn drain** — Audit + flush: a Running task whose container-start message was still in flight would carry no id and reconcile as a synthetic -1. Recover the id from the live fleet so restart re-attaches instead.
+- **fn flush_running_container_ids** — Index the live containers by the (project, job, task) identity their labels carry, so a task with no recorded id can be matched back.
+- **fn handle_msg** — Drain is intercepted by `run` (and by `drain`'s own sweep) because it needs the receiver; it never reaches here. Ack defensively.
+- **fn drain_queue** — Draining (spec §3.6): initiate no new work. Ready jobs stay enqueued in KV and are re-enqueued on restart, so nothing is lost.
+- **fn create_job** — A `members` payload creates a batch (spec §2.1 batches): it absorbs existing Frozen jobs rather than describing a fresh unit of work.
+- **fn create_job** — Supply path 1 of the two that ever write this field (§1.1, design #311 Decision 6); the other is the Ready-transition default fill.
+- **fn create_job** — Shape-checked at the wire edge (422); nothing here re-decides it, and nothing downstream reads it (design #321 Decision 3).
+- **fn create_job** — §10.3 audit trail: creation records what the originator *asked for*. The effective set — this plus the defaults the Ready transition materializes — rides the transition event that pins `base_ref`, and the difference between the two events is exactly the defaults (design #311 Decision 6).
+- **fn create_batch** — A Draft batch composes incrementally, so it may hold below the committable floor of 2 while members are added/removed; a non-draft batch is an atomic act over ≥2 existing jobs. Either way the per- candidate rules are enforced now (absorption at create only for the non-draft path).
+- **fn create_batch** — A draft holds a non-binding member list: its dep/eval unions and auto-description are (re)computed only at finalize/release, so the record carries an empty composition until then. A non-draft batch commits the composition at create.
+- **fn create_batch** — A batch supplies its own inputs like any job of its type; what it will not do is union its *members'* — see `validate_member`.
+- **fn create_batch** — A batch is a job with its own seq, so it carries its own groups (design #321 Decision 3, "not a batch"); members keep theirs.
+- **fn create_batch** — A non-draft batch pulls each member Frozen→Batched now; a Draft batch absorbs nothing until it leaves Draft.
+- **fn release_job** — Frozen and Draft both release; a Draft is finalized (its edited definition locked in) in the same step (§2.1). Any other state rejects.
+- **fn release_job** — A Draft batch commits its membership at release (spec §2.1): re- validate the members against current state and recompute the dep/eval unions + auto-description before the wiring/static pass runs on them. A stale member (or fewer than 2) fails here, leaving the batch Draft with nothing absorbed. Absorption itself is deferred to after the whole release validation succeeds. The recomputed record is inserted into the graph now so `wiring_errors`/`deps_done` see the union deps.
+- **fn release_job** — The validated release is the C4 decider's `Released` event: dependency satisfaction, the `base_ref` pin, the declared-default fill, queue admission, the batch's membership commit, and both announcements are its decision (§2.1, §2.2, §3.1).
+- **fn revoke_job** — Snapshot the record only after `close_pending_tasks`: closing a claimed attempt stamps `completed_at`, which refreshes the job's `task_time_ms`. A clone taken before that would carry the stale total and `set_state`'s write would revert it — permanently, as Revoked is terminal and no later task write can self-heal it.
+- **fn revoke_job** — Revoking a batch releases its members rather than dropping them (spec §2.1 batches): each returns Batched→Frozen with its `batch_id` cleared, so it is re-batchable and re-releasable on its own. Members are not graph dependents of the batch, so the cascade above never touched them. A Draft batch (never absorbed) leaves its would-be members untouched — `release_batch_members` skips non-Batched jobs.
+- **fn update_job** — Upstreams this edit drops — used to prune both the KV rdeps index (below) and, implicitly, the in-memory reverse edges when the graph re-inserts the job (see `JobGraph::insert`). Without pruning, a later revoke of a dropped upstream would cascade to this job by a stale edge.
+- **fn update_job** — Full-field replace; identity (id/branch/created_at) and lifecycle fields (state/base_ref/ready_at/claim_next) are untouched — a Draft holds no branch or base_ref, exactly like a Frozen job.
+- **fn update_job** — Still the creation-time writer: a Draft edit re-states what was supplied, and no default has been materialized yet (that happens at the Ready transition, which a Draft has not reached).
+- **fn update_job** — Prune the reverse edge for any upstream this edit dropped, so the KV index stays consistent (best-effort, §2.3 — rebuilt on startup).
+- **fn draft_job** — Reopening a batch for editing un-absorbs its members (spec §2.1): each Batched→Frozen with `batch_id` cleared, so membership can be edited before finalize/release re-absorbs. Mirrors the revoke un-absorb.
+- **fn edit_members** — Validate the adds against current state, rejecting duplicates and candidates already in the batch. A draft reserves nothing, so a removed member simply drops from the list.
+- **fn edit_groups** — Idempotent: re-adding a label the job already carries is a no-op, not a redundant write and a `job-updated` the UI would re-render on.
+- **fn edit_groups** — Negative space (STYLE.md Tier 2 #2): this verb annotates and nothing else — no transition, no scheduling, no second writer of job state.
+- **fn finalize_job** — A Draft batch commits its membership at finalize (spec §2.1): re- validate every member against current state and recompute the dep/ eval unions + auto-description, exactly as an atomic create would. A stale member (or fewer than 2) fails here, leaving the batch Draft with nothing absorbed. Absorption is deferred to after the field-rule validation below passes.
+- **fn finalize_job** — Validate the (possibly recomputed) definition against the current default HEAD: the job type's §1.1 field rules (via `load_job_type`) plus the additive evaluators' name-collision / field rules (`with_job_evaluators`, over the unioned eval for a batch). Any error returns before the state write, so the job stays Draft.
+- **fn finalize_job** — A batch now absorbs its members (Frozen→Batched) and indexes its newly-committed union deps (best-effort, §2.3).
+- **fn claim_job** — A Draft job has no work attempt to claim — it is invisible to scheduling until released (§2.1). Claim it after release, not before.
+- **fn claim_job** — A Batched member holds no work attempt of its own — its changes are produced on the batch's branch (spec §2.1 batches). Claim the batch.
+- **fn run_escalation** — 3. Commit the decision: transitions first (§2.1 record is the source of truth; a crash before the effects land is healed by restart reconciliation re-creating the task from the stamped WHY).
+- **fn run_escalation** — 4. The artifacts of the decision. Boxed: `interpret`'s composite arms (and the launch paths behind them) can re-enter `escalate`, and this call is the one new edge closing that async cycle — the indirection lives here so every arm stays plain. The runtime never actually recurses: this decider emits only PutTask/PublishEvent.
+- **fn set_state** — Stamp the completion moment once, at the terminal transition (Done or Revoked). This is the single funnel every job-state write flows through, so it covers the finalize (Evaluation/WrapUp→Done) and revoke paths uniformly. `get_or_insert_with` keeps it immutable — terminal states are absorbing, but be defensive.
+- **fn task_put** — Only a completion can move the total, and the other writes (a container-id stamp, a queue park, a state flip) are the frequent ones — so the extra list read is spent only where it can matter.
+- **fn task_put_time_refresh** — Take the record from the in-memory graph when it is loaded there: that is the working copy every other job write starts from, so writing a KV-read copy back could revert a field the graph is ahead on. A job absent from the graph (a project not loaded) still gets its total from KV.
+- **fn task_put_time_refresh** — A task whose job record is gone (revoked and swept) has nothing to stamp; the recompute is advisory, never a reason to fail the write.
+- **fn task_put_time_refresh** — Dual-write like `set_state`: KV is the truth and the graph is the copy the next transition is taken from — skip it and that transition writes the stale value straight back over this one.
+
+### `crates/dispatcher/src/eval.rs`
+- The round is a decider-owned value (refactor-plan C5); re-exported so the dispatcher-side readers of it — the merge gate's parked round, restart reconciliation's rebuild, the §3.6 infra-loss relaunch — keep one surface.
+- **fn enter_evaluation** — Draining (spec §3.6): the decider holds the job in Work — and the rebase is skipped for the same reason, since a drain launches no evaluator container to test the restacked branch anyway. Restart reconciliation re-enters here.
+- **fn run_eval** — No execution slice: a late container exit from a job that was revoked or completed. There is nothing to decide — and this is the guard class that once panicked the actor (§3.6).
+- **fn run_eval** — 3. Commit the decision: transitions first (§2.1 record is the source of truth; the task records and announcements are its artifacts, re-derived by restart reconciliation if a crash loses them).
+- **fn interpret_eval_effects** — The eval decider emits no repo or gate effect, so no landing outcome can reach this fold. Matched explicitly (not `_`) so a new variant breaks the build here.
+- **fn gather_eval_view** — The evidence-free relaunch budget (#167) counts one evaluator lineage's already-retired losses. Read on every exit rather than only where the branch needs it: a pure decision cannot read, so the count has to be in the view before the decider picks that branch. The exiting task is excluded — its own retirement is an effect that has not run yet, and the decider counts it in.
+- **fn launch_evaluator_task** — Agent evaluators get a transcript too — an eval that fails the job is exactly the reasoning an operator wants to read back.
+- **fn launch_evaluator_task** — Record the branch tip this evaluator round is judging (spec §3.3, job #155): a later cycle's re-review shows the reviewer "what you reviewed" and diffs `reviewed_tip..HEAD`. Best-effort — a resolve failure just omits the delta, never blocks the launch.
+- **fn launch_evaluator_task** — Mirror the evaluator name into the shared label field so the UI reads one label mechanism for every task kind (job #146). The `evaluator` field stays populated for back-compat.
+- **fn launch_evaluator_task** — Eval containers get vars but only the evaluator's own secrets (§4.1). Evaluators keep the job type's timeout — the per-job `Job.timeout` override is Work-scoped only (§1.1, §3.5).
+- **fn launch_evaluator_task** — No free slot: queue the launch and retry when one frees, rather than failing the slot and burning eval_retries (§3.5).
+- **fn launch_evaluator_task** — Any other launch failure is an infra failure of this slot (§3.3): report it through the exit fan-in so `on_eval_exited` marks the task Failed with the launch error and applies eval_retries → Infra → escalation. Without this the task stays `Running` and the job wedges in Evaluation forever (the dogfood-#1 bug).
+- **fn launch_evaluator_task** — Agent evaluators launch through the provider, whose `NoCapacity` is queued (not burned as a verdict-less exit) — shared with the launch-queue resume so a queued agent eval relaunches identically (§3.5, #140).
+- **fn prior_review_block** — Was the branch rebased since the prior review? A conflict/gate rework replays it onto a moved base, so the delta from the last-reviewed tip is not meaningful. Signalled by the current cycle's work `rework_reason` (persisted, restart-safe) and double-checked by an ancestry test below.
+- **fn spawn_eval_agent** — Re-review context (spec §3.3, job #155): on cycle N > 1, if this same evaluator ran on a prior cycle, prepend its prior verdict/findings, the SHA it reviewed, the delta since, and a compact job-history digest — so it focuses on what changed rather than re-deriving the whole review.
+- **fn spawn_eval_agent** — #168: a relaunched evaluator (a prior attempt in this same round died — #167 no-output invalid fail, container loss, crash) leads with the predecessor's partial output, so it doesn't re-review blind. Distinct from the cross-cycle re-review above (#155): this is same-round attempt-to-attempt continuity. Evaluators push no commits.
+- **fn spawn_eval_agent** — An evaluator reads the diff and judges it against the brief; the stage-1 `ci` gate owns building and testing (spec §4.3). Without this the reviewer re-runs a cold cargo build that CI is about to run anyway — minutes of shared Docker host for no added signal.
+- **fn spawn_eval_agent** — Fleet at capacity: queue this launch behind the freed-slot signal rather than reporting a verdict-less exit that would exhaust eval_retries in milliseconds (#140).
+- **fn handle_submit_eval** — abort implies fail — the verdicts are pass | fail | abort; a contradictory pass+abort submission normalizes to abort.
+- **fn resolve_eval_slot** — Precondition (contracts.md §1): the resolution must name an OPEN slot of the live round. Checked here, not decided: the operator gets an error back rather than a silently dropped verdict, and a `CoreError` is not something a pure decider can return.
+- **fn on_eval_exited** — The one read this exit owes the decision: `handle_submit_eval` marks an agent evaluator's task Done (with its verdict) BEFORE the container exits, so the record must be re-read — the snapshot the exit fan-in carries may predate the verdict.
+- **fn finalize_pass** — `finalize: none` is a view input (design-lifecycle.md): the work's effect is external and the branch is scratch.
+- **fn pump_merges** — Draining (spec §3.6): no gate starts, no landing. An Open origin release holds the queue the same way (the post-merge integration reset is lossless because of exactly this hold).
+- **fn gather_landing_view** — Was this landing's current cycle a gate-fix round (job #154)? Read from the persisted task log so it holds across a restart.
+- **fn gather_landing_view** — Audit trail (job #154): note the gate-fix round in the squash body so the landed commit records that a mechanical compile fix was applied after review, not that the branch was re-reviewed.
+- **fn gather_landing_view** — A batch lands as one squash that completes every member, so open the commit body with the member list — otherwise git history records only `job/{batchseq}: {type}` with no trace of which tickets it closed (spec §2.1 batches; mirrors the create_batch auto-index).
+- **fn run_landing** — Fold-local carry between rounds: the conflict files feeding the context composition, and the candidate commit a gate round parks (both arrive one round before the decision that consumes them).
+- **fn run_landing** — An escalation out of the landing releases the exec slice BEFORE its Escalate effect runs (parity with the pre-C2 order: the escalation task's cycle must not read the dropped exec state).
+- **fn run_landing** — Compose the rework brief: the conflict context read plus the rebase outcome folded in (§3.2 step 12).
+- **fn run_landing** — Park the gate round: the candidate commit from this round, the head it was built against, and the stages beyond the launched first (same pure grouping the decider used).
+- **fn run_landing** — The landing emits no Evaluation fan-out effect, so these cannot arrive here. Matched explicitly so a new variant breaks the build rather than falling into a wildcard.
+- **fn on_gate_exited** — The captured container output (compiler errors for a failed build stage) is the record of why the gate failed — a compile-class failure threads it into the gate-fix brief (job #154). A launch failure has no container output, so its reason stands in instead.
+- **fn on_gate_exited** — The gate threads its captured compiler output into the gate-fix brief from the task record directly (job #154), not via the slot.
+- **fn on_gate_exited** — The current gate stage completed. If it passed and a later stage is queued, launch it and keep waiting (job #154 staged gate). Only reduce when a stage fails, or the last stage passes.
+- **fn on_gate_exited** — Same triage rule as pump_merges: a hard error in gate resolution (promote, rework re-entry) escalates rather than wedging the queue.
+- **fn gate_reduce** — The classification input (job #154): the first stage failing while a distinct later stage was queued is the compile class. The decider owns the classification itself.
+- **fn gate_reduce** — The failed build stage's captured compiler output — the gate-fix brief's evidence; only a first-stage failure can need it.
+- **fn launch_gate_fix** — Scoped brief: the gate-fix framing, the exact compiler errors the gate build stage emitted (job #154 requirement), then the rebase/conflict context. Embedding the captured output means the agent sees the errors without having to reproduce the build first.
+- **fn launch_gate_fix** — Count this round against the gate-fix budget (in-memory; enter_work preserves it, and it is rebuilt from the task log on restart).
+- **fn run_wrapup** — 3. Commit the decision: transitions first (§2.1 record is the source of truth; the publish task and the announcements are its artifacts, re-derived by restart reconciliation if a crash loses them).
+- **fn run_wrapup** — The exec slice is released BEFORE the effects run (parity with the pre-C3 order, and with C2's `CompletedDropExec`): neither the escalation task's cycle nor the terminal announcement may read a slice the decision just ended.
+- **fn launch_wrapup_task** — Draining (spec §3.6): launch no wrap-up publish. The squash has already landed; restart reconciliation (recover_wrapup_command) relaunches it — the command is idempotent by contract (§3.2).
+- **fn launch_wrapup_task** — The publish ships merged main, so it runs against the default branch, not the (now-landed) scratch job branch.
+- **fn launch_wrapup_task** — The wrap-up task carries its configured/derived label so it renders as `Command · publish`, not a bare `Command` (job #146).
+- **fn launch_wrapup_task** — Any other launch failure surfaces through the exit fan-in like every other task (§3.2): `on_wrapup_exited` records it and escalates.
+
+### `crates/dispatcher/src/exec.rs`
+- The Work phase's vocabulary moved into the pure decider with C6; re-exported here so the eval and triage launch paths (which reuse the §12.4 provider resolution and the §3.6 relaunch bound) keep one import surface, exactly as `lib.rs` re-exports the domain modules.
+- **fn enter_work** — 1. Reads feed the view: the contract at base_ref and the §2.2 launch-time pass. Which park a failure earns is the decider's call.
+- **fn enter_work** — Cycle 1 (start_job) creates the branch; every rework re-entry finds it already present and PRESERVES the agent's commits — reworks are fix-in-place (spec §3.2 step 12). Eval-failure rework keeps base_ref, so the prior work carries forward untouched; conflict / gate-failure rework has already rebased the branch onto the new base with a WIP marker commit (see `conflict_rework` / `gate_reduce`), so we must not discard it either. Branch existence is what discriminates cycle 1 (absent) from all three rework callers (present). Container-failure retries reset the branch directly via `recover_or_reset_branch`, NOT through here.
+- **fn enter_work** — The execution slice is dispatcher state the pure crate cannot hold, so opening it is the entry's bookkeeping — and attempt 1 follows it, because the launch decision reads the slice it just opened.
+- **fn work_entry_contract** — The third and last pass over the job's inputs (§2.2, design #311 Decision 3): the shape floor only — charset, length, name form, count — re-checked immediately before injection and deliberately consulting no declaration, since the declaration was judged at release and at the Ready transition. Costs no I/O, so it decides before the KV round trip.
+- **fn run_work_entry** — Boxed: the escalation composites behind `interpret` can re-enter the Work phase, and this is the edge that closes that async cycle.
+- **fn open_exec_state** — §1.1 per-job override: parseability is validated at release, so a malformed string here is a stale record — fall back to the type default rather than failing the launch.
+- **fn launch_work_task** — 3. Commit the decision — an attempt decides no §2.1 transition of its own (Work entry already moved the record), so this is empty in practice.
+- **fn launch_work_task** — 5. The launch itself is I/O. A parked attempt (human work, or a claim) has none — the operator inbox drives it from here (§1.2).
+- **fn launch_work_task** — TODO(io-split): assembly and port calls the decider carve left behind — no decision logic here. `self.self_tx` is the core's own sender: every path that reaches a launch runs inside the spawned actor.
+- **fn launch_work_container** — §1.1 per-job override for Work-phase tasks (else type default). Drives the agent run timeout and the §7.4 credential TTLs so creds outlive a longer override.
+- **fn launch_work_container** — #168: a work retry (attempt > 1) leads with the predecessor's partial output. `resume` means the branch already carries the predecessor's pushed commits, so the block points the agent at both the log tail and those commits.
+- **fn launch_work_container** — §12.4 model resolution for the Work agent: per-job override → job type → project default (folded into work.model by `with_defaults`) → platform default.
+- **fn launch_work_container** — §4.4 upfront injection: tagged knowledge (tags/{tag}.md at base_ref) rides the system prompt, work agents only.
+- **fn launch_work_container** — Harvest before reporting the exit: once the task completes the job may advance, and the artifacts are the only record of how it got here.
+- **fn launch_work_container** — The placement window opens where the decision to launch does, not at the launch (design #293 §2): everything from here to `place_container` is the decision, and none of it may consult the operator's intent.
+- **fn launch_work_container** — Logs are the only record of what a command task printed — TaskResult::Command.output has never carried it.
+- **fn launch_work_container** — No free slot: queue the launch and retry when one frees, rather than failing the task and burning a retry (§3.5).
+- **fn launch_work_container** — Any other launch failure is a task failure (§3.2): report it through the exit fan-in so the exit decision marks the task Failed with the launch error and applies work_retries → escalation. The agent work path already gets this for free (`provider.run` errors surface as exit -1).
+- **fn launch_work_container** — A human work task parks Pending in the operator inbox; the decision never hands one to this launch half.
+- **fn harvester** — The core's own sender: `spawned core` holds for every path that can reach a launch, and there is no fallback that could report the failure instead.
+- **fn on_task_exited** — A revoked (or otherwise terminated) job has no exec state; a late exit from one of its containers is noise, not a state transition. Every phase handler except Triage assumes exec state exists, so without this guard a stale exit panics the core loop. Triage is advisory and passes through: it never reads exec state.
+- **fn on_task_exited** — Container gone at restart (§3.6): an infrastructure loss, not a real exit. Handled before the per-phase verdict logic so a Work retry budget is never spent and a command evaluator's vanished container is never misread as a failing verdict. Only ever set by `settle_running`, and only for a Running Work/Evaluation task.
+- **fn on_task_exited** — The exit verdict — including whether a stale monitor's exit for an already-resolved task is noise — is the C6 decider's (§3.2).
+- **fn on_task_exited** — Eval tasks can legitimately be Done already — submit_eval lands before the container exits, and the exit completes the slot. on_eval_exited drops anything not in the current round.
+- **fn on_task_exited** — Post-merge wrap-up command (§3.2): exit 0 lands the job Done, a non-zero exit escalates — the merge already landed.
+- **fn on_task_exited** — Escalation tasks are Human — they launch no container, so no TaskExited ever fires for one; nothing to do defensively.
+- **fn run_work** — A late exit from a job that was revoked or completed: there is nothing to decide, and this is the guard class that once panicked the actor (§3.6).
+- **fn run_work** — 3. Commit the decision: transitions first (§2.1 record is the source of truth; the task records and announcements are its artifacts).
+- **fn run_work** — 4. The artifacts of the decision. Boxed: the escalation and launch composites behind `interpret` can re-enter this phase.
+- **fn run_work_step** — The continuation hop (contracts.md §2): "did the branch move beyond base_ref?" is a ref read, so the decider gates it, this performs it, and the answer re-enters against a fresh view.
+- **fn run_work_step** — Idle/Hold end the fold; Begin/Launch/Park belong to the entry and attempt shims and never come back out of this fold.
+- **fn on_infra_loss** — Count infra losses for this task's lineage (same cycle + evaluator): the freshly-stamped attempt is included, so the Nth loss sees count N.
+- **fn on_infra_loss** — Relaunch-or-escalate is Work-phase policy, so it is the C6 decider's; only the retirement above is shared with Evaluation.
+- **fn handle_submit_result** — Persist it, not just cache it: the submission arrives while the container is still running (§4.2 ack-then-exit), so a dispatcher restart in that window used to lose the agent's summary entirely — ExecState rebuilds as None, and the commit message reads from it. The task is still Running; the exit handler fills in the rest.
+- **fn running_work_task** — TODO(io-split): the §1.2 resolution router — every arm's decision now lives in a decider (C1 escalation, C5 eval, C6 work); what is left is the routing itself.
+- **fn handle_resolve_task** — Resolvable: Pending Human-kind tasks (declared human work, human evaluators, escalations) and Pending claimed attempts of ANY kind — the claim made the human the performer without changing the kind (§1.2 claims).
+- **fn handle_resolve_task** — Post-work escalation task (§1.2): work executed, automation ran out. Retry resumes at the phase that exhausted (see `escalation_retry_phase`); Resolve re-enters Evaluation.
+- **fn handle_resolve_task** — Pre-work escalation task (§1.2): no work task exists. Retry re-runs the failed step (re-validation / re-enqueue) via prework_retry; Resolve is rejected — there is nothing to submit.
+- **fn handle_resolve_task** — Human-performed work attempt: declared human work (§1.1 work.type: human) or a claimed attempt of any kind (§1.2 claims). `abort` on Fail is an evaluator concept — ignored here.
+- **fn handle_resolve_task** — Persist the operator's completion summary on the task record too, so the Reports thread renders human-completed work like an agent's closing summary — not just in the squash body.
+- **fn handle_resolve_task** — The human's summary is this attempt's submit_result (§1.2 claims): it flows into the squash-merge commit body exactly like an agent's submission.
+- **fn handle_resolve_task** — Fail consumes the attempt through the normal work-failure path (§1.2 claims): retries remaining → the next attempt launches per the DECLARED kind (an agent picks the work right back up — no un-conversion), else escalation. A Fail resolution is a deliberate handoff at a clean commit boundary, so — unlike a container crash — the branch is PRESERVED and the operator's notes carry forward (#121).
+- **fn handle_resolve_task** — The slice has to exist before the decision reads its budget; rebuilding it is reads only, so nothing is written out of order.
+- **fn escalation_retry** — Work is Done and the branch intact: re-enter Evaluation. The round is rebuilt from the job type, so eval_retries is a fresh grant and the work attempt counter is untouched (#141).
+- **fn escalation_retry** — Only the publish re-runs: the squash already landed, so the C3 decider takes the job back to WrapUp and relaunches the command.
+- **fn retry_work** — Branch used as-is (§1.2); if it carries commits from the escalated attempt, tell the retry it is resuming so it builds on them (§3.2).
+- **fn prework_retry** — A pre-work Retry is a Ready transition (§2.1), so it obeys the same input rule: declared defaults materialize only if THIS is the write that first pins `base_ref` — a job that stalled from Blocked. One that already ran (a `job_deadline` stall) keeps the map it entered with; re-resolving would make its target mutable (design #311 Decision 6).
+- **fn prework_retry** — Effective set on the transition that pins `base_ref` — the same audit rule the other two Ready transitions follow (§10.3).
+- **fn ensure_exec_state** — Gate-fix rounds are counted from the persisted task log so the budget survives restart (job #154): one Work task per gate-fix round.
+- **fn ensure_exec_state** — Recover the submission from the task log rather than starting blank: it is what the squash-merge commit message is built from.
+- **fn build_prompt** — #168: the predecessor block leads the prompt so the agent sees it before the task instructions — attempt N knows a predecessor existed up front.
+- **fn container_env** — §7.4 credential TTL: the resolved timeout of the task these creds serve (work override or type default), so a longer-running task's credentials outlive it.
+- **fn container_env** — §6.3 task origin: the channel binary stamps these onto every post so the event carries which task produced it (no timestamp guessing).
+- **fn container_env** — Reserved names are rejected at release validation for vars as well as secrets (`release::static_errors_kv`, design #311 Decision 4); skipping them here too keeps a var written before that rule existed from shadowing an origin credential or a §6.3 task-origin stamp — the same defense in depth the secret loop below applies.
+- **fn container_env** — Reserved names (origin credentials) are rejected at release validation; skipping them here too keeps them out of containers even if a job record predates the rule.
+- **fn container_env_inputs** — Unreachable for a job that cleared the §2.2 launch-time pass; loud in the log because reaching it means a record predates a rule.
+- **fn ssh_credential_files** — §7.4 credential TTL: the resolved timeout of the task these creds serve (work override or type default).
+- **fn channel_mcp** — §4.2: the binary connects using NATS_URL/NATS_CREDS from McpServerConfig.env (the rest of its context rides on container env).
+- **fn channel_mcp** — Worker nodes hold their own (worker-arch) channel binary; the fleet backend sends this name instead of the bytes.
+- **fn rework_context_block** — #167: a command evaluator carries no structured findings — its captured output tail is the failure evidence the next work agent needs to fix against, so fence it clearly as the evaluator's output.
+
+### `crates/dispatcher/src/forge_ingest/origin.rs`
+- **fn link_project** — Credential preconditions, checked before any repo state exists so the request fails clean and retryable. The deploy key is exercised by the fetch below; the PAT only at first release — but requiring both up front makes onboarding failures immediate. file:// origins (tests, local mirrors) need neither.
+- **fn origin_release** — A gate in flight would land a commit on integration *after* the snapshot below, and the post-merge reset would silently discard it.
+- **fn origin_release** — Local pin first: after a later squash-merge reset, held jobs' base_refs are only reachable through this ref (gc + provenance).
+- **fn origin_release** — Non-GitHub origin: branch pushed, no PR. Sync resolves the release by watching origin main move (see `origin_sync`).
+- **fn origin_sync** — No PR to ask (non-GitHub origin): origin main moving off the release base is the only merge signal available.
+- **fn origin_sync** — No open release: keep integration on origin main while it has nothing unreleased (external commits flow in).
+
+### `crates/dispatcher/src/forge_ingest/triage.rs`
+- **fn triage_job** — Advisory tag: pin to the latest cycle so the task sorts with the run it is triaging. Triage is not part of the rework loop.
+- **fn triage_job** — Minimal launch env: clone the default branch (always present — a Stalled job may have no job branch) read-only for code context, plus the platform agent credentials so the CLI can authenticate. No channel MCP, no NATS credentials — the prompt is self-contained (§1.2).
+- **fn triage_job** — Read-only access, like an evaluator; triage runs no channel MCP (§1.2), so the evaluator-name origin is never read.
+- **fn triage_job** — triage runs on the platform image; no per-type pin Triage diagnoses a stalled job from a read-only clone and answers in its result text (§1.2) — it reads, it does not build or edit, so it shares the evaluator's profile.
+- **fn on_triage_exited** — Container died or produced no parseable result. Record the attempt so the operator sees it, rather than a silent no-op.
+- **fn build_triage_prompt** — Why the job stopped: the escalation/stall task summoning the human is the one still Pending (the operator dispatched triage instead of resolving it).
+
+### `crates/dispatcher/src/handlers/access.rs`
+- **fn spawn_ssh_handler** — SSH CA private key path (§7.3) for user-cert minting; None (no ssh_ca, or `file://` dev repos) → the subject replies 503.
+- **fn sign_user_cert** — A bad key that slipped past the API's structural check, or a CA failure — 500; the API validated parseability, so this is unexpected.
+
+### `crates/dispatcher/src/handlers/container.rs`
+- **fn spawn_work_submit** — Reject an oversized cover at ingest, before the record is stored (job #143) — the text summary still lands only via a resubmission.
+
+### `crates/dispatcher/src/handlers/fleet.rs`
+- **fn spawn_fleet_capacity_handler** — An unattributed change would leave the record's audit stamp lying; `unknown` says what actually happened instead.
+
+### `crates/dispatcher/src/handlers/groups.rs`
+- **fn group_docs** — Absent is the ordinary case, not an error: a group may name a design that has not been written yet (spec §4.4's posture for a knowledge tag with no file).
+- **fn design_docs** — Listed by the tree and gone by the read is not a state one resolved HEAD produces; treat it as a document with nothing in its head rather than failing the whole registry over one blob.
+
+### `crates/dispatcher/src/handlers/jobs.rs`
+- **fn jobs_transition** — #166 Draft → Frozen: finalize the edited definition (validate like release, park re-batchable). 409 in any non-Draft state.
+- **fn jobs_transition** — Operator-dispatched advisory triage (§1.2): launches a triage agent over the job state; never changes job state.
+
+### `crates/dispatcher/src/handlers/jobs_reply.rs`
+- **fn job_reply_with_awaiting** — A terminal job (Done/Revoked) asks nothing of a human, even if a stale Pending task record lingers in its log (a pre-fix zombie). Guard here so the derived field agrees with list_pending's terminal-job filter.
+- **fn job_reply_with_awaiting** — `claimed` marks a parked claimed attempt: a human is actively working it (§1.2 claims), vs. passively awaited human input.
+
+### `crates/dispatcher/src/handlers/jobtypes.rs`
+- **fn spawn_jobtypes_handlers** — req.jobtypes.get.{owner}.{project} — one type in full, for the library UI. Payload: { name }. Returns raw YAML plus the parsed type (defaults merged — the platform's view of what runs), or parse errors.
+- **fn get_job_type** — The path the definition resolved to, so the library UI labels the file it actually showed rather than assuming a layout.
+
+### `crates/dispatcher/src/handlers/mod.rs`
+- **fn spawn_api_handlers** — Binary path baked into new repos' pre-receive hooks (§5.2) — the path the binary has on the SSH host (`HOOK_BIN`); None → this process's own.
+- **fn spawn_api_handlers** — SSH CA private key path (§7.3) for user-cert minting; None (no ssh_ca, or `file://` dev repos) → `req.ssh.sign-user-cert` replies 503.
+- **fn spawn_api_handlers** — Container backend for the read-only live-output tail (`req.tasks.output`). Served off the core actor, so a slow node never wedges state transitions. Path-qualified: `container` names this directory's module here.
+
+### `crates/dispatcher/src/handlers/projects.rs`
+- **fn spawn_projects_create_handler** — Binary path baked into new repos' pre-receive hooks (§5.2) — the path the binary has on the SSH host (`HOOK_BIN`); None → this process's own.
+
+### `crates/dispatcher/src/handlers/tasks.rs`
+- **fn spawn_tasks_handler** — req.tasks.output.{owner}.{project}.{seq}.{task_id} — live output. Spawned with cloned handles so a wedged node's slow tail neither blocks other output reads nor the list/resolve legs of this loop.
+- **fn task_output** — The container vanished under a still-Running record (harvest then dispose, before the exit is recorded): fall back to the artifact.
+- **fn task_output** — A wedged/unreachable node: an error envelope, not a stall. This request fails; others are untouched (it runs off the actor).
+- **fn list_pending** — A Pending task whose owning job is terminal (revoked/done) is a zombie: resolving it is pointless because the job no longer exists to advance. Revoke now closes its own tasks (§2.1), but records predating that fix must still disappear from the inbox without a migration, so join against the job records already in KV and drop any terminal-job task here.
+- **fn list_pending** — Human-kind waits AND claimed attempts of any kind (§1.2 claims) the latter are in-progress-by-human, not passive waits; performed_by distinguishes them.
+
+### `crates/dispatcher/src/interpret.rs`
+- **fn interpret** — Dual-write like `set_state`: KV is the truth, the in-memory graph is the working copy every scheduling read consults — a record write that skips it leaves stale decisions behind (the C2 conflict-rework base pin found this).
+- **fn interpret** — Golden-trace label parity: Human escalation task writes are the one PutTask production callers recorded before the decider migration (B3 fixtures pin the exact string).
+- **fn interpret** — Boxed: the launch shim interprets its own `CreateTask` effect, closing an async cycle through this function.
+- **fn interpret** — Boxed for the same reason as `LaunchWorkTask`: the gate-fix launch runs the Work attempt shim, which interprets its own task-creation effect.
+- **fn interpret** — Branch deletion is best-effort cleanup everywhere it is decided (a missing scratch ref must not wedge a landing).
+- **fn interpret** — The Evaluation fan-out (§3.3). Deliberately NOT trace-recorded: the golden fixtures pin the pre-C5 effect list, where an eval launch was recorded only through the `task-created` events it publishes (unlike the gate stage, which always logged its own).
+- **fn interpret** — Boxed for the same reason as `LaunchWorkTask`: Work entry runs the C6 shim, which interprets its own effects.
+- **fn interpret** — No SSH front configured (file:// dev repos, tests) → nothing to mint, exactly as `ssh_credential_files` short-circuits.
+
+### `crates/dispatcher/src/launch_queue.rs`
+- **fn defer_launch** — Preserve the original enqueue time across *re-deferrals* (§3.5): when a resumed agent eval loses the slot race and signals `NoCapacity` back (its record still carries the first defer's `queued_at`), the wait must keep accumulating from that first defer rather than restarting the max-wait backstop clock — otherwise a churning-but-full fleet could reset the clock on every resume and never escalate. First defer: the task has no `queued_at` yet, so stamp now. (The command paths never re-enter here — they re-queue the same entry directly — so this only affects the agent re-defer path; command tasks always stamp now.)
+- **fn defer_launch** — The task-timeout clock starts when the container actually launches, so a queued task must carry no start time (§3.5 excludes Pending).
+- **fn defer_launch** — Surface *why* it is Pending and *since when*, both persisted: the UI shows a "queued" badge and queued-for duration, and the same `queued_at` anchors the FIFO order and the max-wait backstop across a dispatcher restart (§3.5).
+- **fn on_launch_deferred** — Only a live launch attempt defers; a resolved/failed record is stale (a duplicate signal, or a superseded round's leftover).
+- **fn drain_launch_queue** — Draining (spec §3.6): the launch queue simply holds its entries. They are re-derived from the Pending task records on restart (#51), so a held launch resumes then rather than starting a container as we exit.
+- **fn drain_launch_queue** — Backstop at resume time too (#202): an overdue entry escalates instead of burning another optimistic relaunch — the scan alone misses agent evals that are mid-relaunch whenever it fires.
+- **fn drain_launch_queue** — The agent launch is async and has claimed the freed slot; its own NoCapacity re-defers a fresh entry, so retire this one and stop draining (#140).
+- **fn drain_launch_queue** — Preserve queued_at so the backstop measures the total wait, and re-insert by priority (#140) so a re-queued finishing launch stays ahead of queued work rather than falling behind.
+- **fn resume_launch** — Everything from here — the admission checks, the rebuild, the launch — is one placement decision, and none of it may consult the operator's capacity intent (design #293 §2). This is the path that would most plausibly reach for it ("skip a node whose intent is 0"), so the window opens at the top rather than beside `place_container`.
+- **fn resume_launch** — An agent evaluator relaunches through the provider, not a command container (#140). Only the Evaluation fan-out ever queues an agent — the merge gate is command-only — so rebuild it from the persisted evaluator + session id against the job branch and re-spawn. The spawned run re-defers if the fleet is still full.
+- **fn resume_launch** — Off the queue → drop the "queued" badge the instant it launches (§3.5), matching the command path (`launch_resumed`). The launch is optimistic — the spawned run may re-hit `NoCapacity` and re-defer — so keep `queued_at` on the record: it is the anchor `defer_launch` preserves so the backstop clock accumulates rather than resetting.
+- **fn resume_launch** — Only command launches are ever queued; anything else is a bug or a superseded record — drop it rather than mis-launch.
+- **fn resume_launch** — Neither ever launches a queued command container: triage runs through the agent provider, escalation tasks are Human.
+- **fn launch_resumed** — The launch is off the queue: clear the queued markers so the UI drops the "queued" badge live and no stale reason lingers.
+- **fn scan_launch_queue_timeouts** — `queued_at` is the *persisted* enqueue time (`Task::queued_at`, restored into the queue entry by reconciliation), so the wait accumulates across dispatcher restarts. Under frequent auto-deploys a process-local clock would reset every restart and this backstop might never fire (§3.5).
+- **fn expire_queued_launch** — Only escalate a job still in an execution state; otherwise it was superseded and the stale entry just drops.
+
+### `crates/dispatcher/src/lib.rs`
+- **mod trace;** — The pure domain (refactor-plan C1) lives in `chuggernaut-domain`; re-exported here so existing `crate::{state,graph,queue,effects,escalation}::*` call sites stay stable. (`escalation` moved under the decider layer.)
+
+### `crates/dispatcher/src/platform_ops.rs`
+- **fn refresh_fleet_status** — Resolved here, so the context receives intent already reduced to what it displays and the record stays behind its two counted readers (design #293 §2).
+
+### `crates/dispatcher/src/ready.rs`
+- **fn try_unblock** — The fan-out is advisory: a dependent that vanished (revoked, unknown project) is not an error, it is nothing to decide.
+- **fn run_ready** — 3. Commit the decision: transitions first (§2.1 record is the source of truth; the announcements are its artifacts, and restart reconciliation re-drives `try_unblock` for anything a crash lost).
+- **fn run_ready** — Queue admission and a batch's membership commit are part of committing the decision, so they run BEFORE the effects (the same placement C3's `drops_exec` established, and the pre-C4 write order).
+- **fn run_ready** — The continuation hop (contracts.md §2): the §2.2 pass is ref-reading I/O, so its verdict re-enters the decider as the next event against a freshly gathered view. Boxed because that re-entry is a self-recursive future.
+- **fn ready_revalidation** — The declaration travels with the verdict: the type may have grown or dropped an input since release, and this HEAD is the one the run will use — so it is also the one whose defaults get materialized (§2.2 pass 2, design #311 Decision 3). A type that failed to load declares nothing, and the errors beside it mean nothing is admitted anyway.
+- **fn ready_revalidation** — KV names are re-checked at launch, not here (§2.2): a secret set after release must not strand a job that is otherwise ready.
+
+### `crates/dispatcher/src/reconcile.rs`
+- **fn reconcile** — Escalated/Stalled wait on the operator inbox; the only thing to recover is the inbox artifact itself (C1 heal below).
+- **fn reconcile** — §3.5: the in-flight recovery above re-queued capacity-deferred launches as it walked jobs in graph order, not enqueue order. Sort the whole launch queue by the persisted `queued_at` so FIFO fairness is restored exactly as it stood before the restart — the launch that waited longest resumes first, and the max-wait backstop stays honest.
+- **fn reconcile** — §3.6: reclaim exited containers orphaned by the crash/restart. Runs last so any container in-flight recovery still needs (Running tasks, re-attached monitors) has been settled and protected first.
+- **fn reconcile** — §3.6: reap *running* containers no live task owns. Runs after the in-flight recovery above — which may itself have relaunched fresh containers for the tasks it re-Ran — so the running set it reads already reflects every task this boot will resume. All of this is still before the message loop starts, so no concurrent launch can race the reap (single-writer ordering).
+- **fn heal_missing_escalation_task** — Sequential-within-job id (§1.2) and the cycle the failure happened in; the decision moment is the stamped one, so the healed task and the record still agree about when.
+- **fn sweep_orphan_running_containers** — The containers a live task will resume: their `(project, seq, task)` identity and any recorded container id. Matching either keeps a container for step-2 recovery to re-attach to.
+- **fn sweep_orphan_running_containers** — Can't prove these containers are disposable — skip the whole sweep rather than risk reaping a live one.
+- **fn sweep_orphan_running_containers** — The marker alone does not make a container ours to kill: a launch stamps the `(project, job, task)` identity labels alongside it, so a marker without an identity was not launched by this dispatcher. Anything that inherits the marker from its image lands here — the `chug-worker` daemon did, and reaping on the marker alone took the fleet down on every restart (#268). Leave it alone and say so.
+- **fn sweep_orphan_running_containers** — Orphan: kill it to free the slot. The task it belonged to was already failed by step-2 recovery; the work is lost either way, so reaping (not re-adoption) is the simple, safe choice.
+- **fn sweep_exited_containers** — Container ids we must not touch: those a live task may still resume. Only active (non-terminal) jobs can hold live tasks, and those are exactly the jobs in the graphs.
+- **fn sweep_exited_containers** — Can't prove these containers are disposable — skip the whole sweep rather than risk removing a live one.
+- **fn recover_work** — Crashed between Ready→Work and the first task write: relaunch. The branch may already carry commits if the crash was later than it looks — recover them rather than reset (§3.2).
+- **fn recover_work** — A command work task queued under capacity pressure (§3.5) — Pending, no container, not human-performed — re-queues so the launch resumes when a slot frees. A Pending human/claimed attempt (kind Human, or performed_by Human) waits on the inbox.
+- **fn recover_work** — Restore the persisted enqueue time (§3.5) so the queue's FIFO order and the max-wait clock survive this restart; fall back to now for records written before it existed.
+- **fn recover_work** — Crashed between marking Failed and launching the retry: replay the retry logic directly (the exit handler skips Failed tasks).
+- **fn recover_wrapup** — A gate in flight is superseded, whether its task was Running or queued under capacity pressure (§3.5): refinalize re-opens the gate fresh.
+- **fn recover_wrapup_command** — Publish ran and failed; the escalation was lost. Replay it — the merge stays (design-lifecycle.md wrap-up failure).
+- **fn recover_wrapup_command** — In flight at crash time. If the container is still alive, re-attach and let it finish (settle_running); otherwise it is dead or was never launched — relaunch a fresh attempt, the command is idempotent by contract (§3.2).
+- **fn recover_wrapup_command** — Retire the orphaned record so it does not linger as Running, then relaunch (the newer task's higher id wins any future scan).
+- **fn recover_evaluation** — Rebuild the staged round from the task log (§3.3). Stages are launched in order, so the started stages form a prefix: the last stage with any task this cycle is the one in flight (`slots`), earlier stages are `done`, later stages `pending` (no tasks yet). A single-stage job collapses to one group — identical to the pre-staging rebuild.
+- **fn recover_evaluation** — Earlier stages passed before we advanced: rebuild their terminal outcomes so the reduce sees the whole run. A non-terminal task here is structurally impossible; treat one as infra rather than panic.
+- **fn recover_evaluation** — The stage in flight: rebuild each slot, relaunching any evaluator that never got a task (crashed mid-fan-out).
+- **fn recover_evaluation** — An evaluator queued under capacity pressure (§3.5): Pending, no container — re-queue so the launch resumes when a slot frees; the slot stays open (outcome None) meanwhile. Covers command and agent evaluators alike (#140); a Pending Human evaluator waits on the inbox, not the launch queue.
+- **fn recover_evaluation** — Persisted enqueue time (§3.5): stable FIFO + clock across restarts. See recover_work for the rationale.
+- **fn recover_evaluation** — No Running tasks and every slot in the stage resolved before the crash: replay the advance-or-reduce decision — it may launch the next stage or run the (lost) reduce and merge.
+- **fn settle_running** — Persisted result + Running only happens for agent eval tasks whose submit_eval landed but whose exit event was lost — on_eval_exited reads the persisted verdict whatever exit code we synthesize.
+- **fn settle_running** — The container is still there — running, or exited while this dispatcher was down. Either way, re-attach the *same* monitor the launch path uses for this phase, so exit handling is byte-identical — not a bespoke inline monitor that drops the structured result. A command work / wrap-up task's `@chug:leg` deploy report (§3.6, #187) is then harvested from its logs at exit exactly as on the launch path (`spawn_logs_monitor`), instead of vanishing as `structured: None`. A SELF-deploy always spans its own dispatcher restart, so this re-attach is the only path its report can survive on — the report the Deploys page (#188) renders. Evaluators keep their eval-result.json monitor. An ALREADY-EXITED container takes the same path (ticket #270): the monitor's `wait` returns its recorded code at once, and the harvest that follows is what stores the task's `stdout.log` artifact. Synthesizing the exit inline instead — as this arm used to for `Exited` — skipped the harvest entirely, so a deploy whose work container exited in the seconds between restart-verify's `kickstart` and this reconcile (the common case: the ssh session ends as soon as update.sh returns) left NO record at all: empty artifacts, empty task output, no legs (deploy #267).
+- **fn settle_running** — An evaluator that exited during the downtime keeps the pre-#270 shape: a real exit the crash lost, whose code is authoritative and keeps burning budget exactly as it would have live. Only the work/wrap-up harvest — the deploy's paper trail — changed.
+- **fn settle_running** — The container is GONE — pruned, node rebooted, colima restarted (or the backend can't answer). We recorded an id, so the container did exist; its disappearance is an infrastructure loss, not a real nonzero exit. Relaunch without spending retry budget (§3.6), capped so a vanishing environment still escalates (`infra_loss`) rather than looping forever.
+- **fn settle_running** — No recorded container id (Human task, or a launch that never reported one): we can't prove a container ever ran, so keep the failure semantics — a -1 exit that burns budget as before.
+- **fn retry_or_escalate_failed_work** — §3.2 crash recovery: a task found Failed on restart may have pushed commits before dying — recover the branch instead of resetting.
+- **fn result_pass** — Triage is advisory (§1.2) — never an eval verdict, so this is never consulted; treat it as a non-failure for completeness.
+
+### `crates/dispatcher/src/release.rs`
+- **fn load_job_type** — Schema-tolerance (spec §14): unknown top-level fields are accepted, not rejected. Surface each loudly so a config that ran ahead of this dispatcher (a new section this binary predates) is visible platform-wide instead of silently ignored — but the job still launches. This is the 2026-07-22 incident's fix: a benign unknown field no longer escalates every job of the type.
+- **fn load_job_type** — Version-skew gate (spec §14): a config declaring a `min_dispatcher` newer than this binary's schema epoch is config-ahead-of-binary. Refuse it here with a clear, platform-level diagnostic naming the file, field, and needed version. At launch this parks the job pre-Work (Stalled) with the reason rather than burning a launch into a generic validation escalation; at release it blocks the same way. The merge-time CI check (`chuggernaut validate --deployed-epoch`) is the first line of defense so this rarely fires.
+- **fn static_errors** — §1.1 per-job timeout override: parseability validated at release (the string is on the Job, not pinned to a ref), consistent with "wiring validated at release, not creation".
+
+### `crates/dispatcher/src/run.rs`
+- **fn shutdown** — The snapshot is static for the process lifetime; re-publishing on exit keeps the platform record present and current at the last moment.
+- **fn run** — Operator-mode NATS requires the dispatcher credentials from init (§12.1); without them (open dev server) connect plain.
+- **fn run** — Mixed fleets (spec §3.1/§3.6) probe every node — docker or worker — mark each in/out-of-service, and apply the "no live capacity" hard-fail once across the whole fleet: capacity is a fleet-level property, so a placement-inert 0-slot node never vetoes a fleet with slots elsewhere. A plain Docker fleet (no worker nodes) keeps the exact single-backend path below. A worker-capable fleet is used whenever any node is a worker endpoint OR the seed list is empty — a zero-seed dynamic fleet (spec §3.1 dynamic registration) that gains capacity only from worker announcements.
+- **fn run** — Fleet-level rule: refuses only when a *configured* fleet has no reachable node with slots > 0; a zero-seed fleet starts and waits for announcements.
+- **fn run** — §3.1/§3.6: start as long as one node with slots responds; any unreachable node is logged and excluded until it answers again.
+- **fn run** — Per-node health and build version as of the boot probe, for the platform snapshot (spec §3.1). The scan tick keeps it fresh as nodes drop/recover and workers self-refresh (see `crate::platform_ops::cd`).
+- **fn run** — Publish a read-only snapshot of the runtime config (fleet + agent defaults + resolved paths + deploy drift) to the `platform` bucket so the api/UI can display it — this config otherwise lives only in this process's env. Best-effort: a failed write must not stop the dispatcher from starting. The returned state lets the scan tick republish it live (`crate::platform_ops::cd`).
+- **fn run** — The boot snapshot the graceful-shutdown drain (§3.6) re-publishes at exit; the live copy moves into the core, which republishes it from the scan tick.
+- **fn run** — §7.3 user-cert minting signs with the CA key directly (no job-record write), so it rides the API handlers rather than the single-writer core.
+- **fn run** — Kept for the read-only live-output tail (`req.tasks.output`), which reads the backend directly off the core actor.
+- **fn run** — Runtime dynamic worker registration (spec §3.1): merge worker announce heartbeats into the live fleet with no dispatcher restart.
+
+### `crates/dispatcher/src/scan.rs`
+- **fn run_scans** — Backstop for launches wedged in the capacity queue (§3.5). The periodic drain that retries them rides `Core::run` after this scan message, like every other slot-freed retry.
+- **fn run_scans** — Dynamically-announced workers whose heartbeat lapsed (§3.1): stop placing on them. Runs before the deadline scan so a lost node's queued launches simply wait for other capacity this same tick.
+- **fn run_scans** — Workers that answer RPCs but have never reported capacity (§8): the exact signature of the denied-publish bug, and the reason §5a's narrowed startup gate is a correct trade rather than a regression.
+- **fn run_scans** — Re-assert the operator's capacity intent wherever the fleet disagrees with it (design #293 §4): one push per node per tick, and a refused value is left alone. Runs beside the other fleet scans and never blocks each push is spawned.
+- **fn run_scans** — Keep the platform config snapshot fresh: republish only when live fleet state or deploy drift moved (spec §3.1, CD plan C). Best-effort never fails the scan.
+- **fn scan_never_observed_capacity** — Bounded: forget nodes that have since reported (or left the fleet), so the table can never outgrow the roster and a node that lapses again warns promptly rather than waiting out a stale interval.
+- **fn scan_task_timeouts** — The per-job override is Work-scoped (§1.1, §3.5): Work-phase tasks use it, every other phase uses the type default. Enforcing the split here — at kill time — is what keeps the override work-scoped.
+- **fn scan_job_deadlines** — Deadline from Ready is a pre-work escalation (no work task): Stalled, resolved Retry/Revoke only. From Work/Evaluation it is post-work: Escalated, where Resolve is also available (§1.2, §3.5).
+
+### `crates/domain/src/decide/authoring.rs`
+- **fn validate_member** — Batch × inputs is excluded in v1 (design #311 Decision 3): a batch collapses N members into ONE branch and one run, and values do not union the way `deps` and `eval` do — two members asking for different services have no defensible single answer. Reject with a clear field error rather than inventing one, or silently dropping a member's target.
+
+### `crates/domain/src/decide/escalation.rs`
+- **fn decide** — Negative space (STYLE.md Tier 2 #2): terminal states are absorbing (§2.1) — deciding an escalation for a Done/Revoked job is a caller bug, and `assert_transition` would reject the transition anyway.
+- **fn decide** — Record WHY on the job itself (§1.2), so operators see the reason in the header instead of digging through dispatcher logs (#69).
+
+### `crates/domain/src/decide/eval.rs`
+- **fn decide_entered** — Draining (§3.6): launch no evaluator containers and do not move the record — the job stays in Work with its Done work task and restart reconciliation re-enters here. (The shim skips the pre-eval rebase for the same reason: a drain performs no git work either.)
+- **fn decide_entered** — Negative space (§2.1): terminal states are absorbing, so a job that was revoked out from under its work task never enters evaluation.
+- **fn decide_entered** — Staged fan-out (§3.3): create stage 0 now and hold the rest until each prior stage passes. A single-stage job launches everything at once.
+- **fn decide_stage_launched** — The slice was released while the stage launched (a revoke): the launched tasks' exits will find no open slot and be ignored in turn.
+- **fn decide_slot_exited** — The container never launched: an infra failure whatever the evaluator's type (a command exit code or an agent verdict needs a container that ran). Record why, then route through the same `eval_retries` path an agent's missing verdict uses — without this the task stays Running and the job wedges in Evaluation forever (the dogfood-#1 bug).
+- **fn decide_slot_exited** — A Human evaluator launches no container, so no exit is its verdict — the inbox resolution is (`SlotResolved`).
+- **fn decide_command_exit** — The captured tail (last ~8 KB, harvested by the eval monitor) is the failure evidence for the job page, the rework brief and #155's re-review.
+- **fn decide_command_exit** — A non-empty output on a fail is what the next work agent reads to see WHY the evaluator failed; an empty one carries no evidence to thread.
+- **fn decide_agent_exit** — `submit_eval` could only self-report usage; now the container is gone we have the CLI's measured figure — prefer it, as the work path does.
+- **fn decide_agent_exit** — #167: an agent evaluator that ended without a `submit_eval` verdict produced no evidence — the same invalid-fail class as a command with an empty stream. Route it through the evidence-free path (no `eval_retries` burned, escalates `evaluator_no_output`) rather than a plain infra retry, so the reason distinguishes "no verdict" from a real infra loss and the round is never failed on nothing.
+- **fn decide_no_output** — The loss being decided is not in `infra_losses_prior` (its record is retired by an effect that has not run yet), so the Nth loss sees N — the same count the pre-C5 read-after-write produced.
+- **fn decide_settled** — Draining (§3.6): don't advance to the next stage, run the reduce, or open the merge gate. The resolved slots are kept; restart reconciliation rebuilds the round from the task log and replays this decision.
+- **fn decide_reduce** — The round is spent but kept: the landing reads no slots, and the execution slice (round included) is released when the job completes.
+- **fn decide_reduce** — Abort verdict: rework can't fix this — skip the remaining budget and hand the evaluators' findings to a human (design-lifecycle.md).
+
+### `crates/domain/src/decide/merge_gate.rs`
+- **fn decide** — Negative space (STYLE.md Tier 2 #2): a landing decision only ever runs for the seq the serializer popped or parked — never a queued one.
+- **fn decide** — Revoked-while-queued staleness guard: the §2.1 record is the truth; anything not WrapUp by now does not land.
+- **fn decide** — head == base_ref makes a conflict impossible by construction; treat one as the conflict path anyway rather than crash.
+- **fn decide** — Nothing to re-run; the candidate promotes directly. The CAS cannot be refused here in practice (nothing else lands between the candidate build and this promote — single writer), but the outcome still re-enters.
+- **fn decide** — Pin the job to the new base, announce the rework, re-enter Work with the context (§3.2 step 12, §3.3).
+- **fn decide** — Promote: the candidate commit IS the merge (§3.3). The CAS outcome re-enters (`PromoteRefused` on a moved HEAD).
+- **fn decide** — Deterministic classification (§3.3, job #154): compile iff the FIRST stage failed with later stages still pending — never by parsing output.
+- **fn decide** — Gate-fix fast path: a scoped fix task returns straight to the gate — no re-review, no eval CI. The fix rebases the branch itself (`launch_gate_fix` owns that composite).
+- **fn decide** — Integration failure: rework on the new base, budget NOT consumed — same treatment as a merge conflict (§3.3). The rebase outcome re-enters as `Rebased`, which reads the flavor (and these failures) from the continuation memory.
+- **fn decide** — HEAD moved under the parked candidate (an origin-release reset, or restart-race leftovers): re-enqueue for finalization against the new HEAD instead of escalating — FIFO order, exactly the old `refinalize` re-entry.
+
+### `crates/domain/src/decide/ready.rs`
+- **fn decide** — `Job::project` is always "owner/name" (§1.1); every published subject and the `Stall` composite need the halves.
+- **fn decide_released** — Negative space (§2.1): terminal states are absorbing — releasing a Done/Revoked job is a caller bug, and `assert_transition` would reject the transition anyway.
+- **fn decide_released** — Leaving Draft finalizes the edited definition — announced separately from the release so the UI can tell the two apart (§2.1).
+- **fn decide_released** — §10.3: the Ready transition's event carries the **effective** input set — the supplied values plus the defaults `admitted_record` just materialized so "what actually ran" is in the event stream beside `job-created`'s "what was asked for" (design #311 Decision 6). A release that parks `Blocked` pinned nothing and so resolved nothing; its event carries the supplied set, and the `job-unblocked` that does pin carries the effective one.
+- **fn admitted_record** — Negative space: a job that already carried a pinned base keeps the exact input map it entered with — the immutability half of the contract.
+
+### `crates/domain/src/decide/work.rs`
+- **fn decide** — `Job::project` is always "owner/name" (§1.1); every published subject and every escalation composite needs the halves.
+- **fn decide_entered** — Negative space (§2.1): terminal states are absorbing — a revoked job never enters Work, and `assert_transition` would reject the edge anyway.
+- **fn decide_attempt** — Draining (§3.6): initiate no new work container. Checked before the record is built — a task created here would have no monitor behind it.
+- **fn decide_attempt** — A gate-fix work task carries its own label so the story reads `gate-fix` rather than a bare Work row (job #154/#146).
+- **fn decide_attempt** — Minted before launch and persisted with the task, so the transcript stays addressable even if the dispatcher restarts mid-run. A claimed attempt runs no agent, so it gets no session.
+- **fn decide_attempt** — A claimed attempt starts now, humanly: the claim was the "I'm starting" declaration (§1.2), so the parked task reads as in-progress-by-human, not idle.
+- **fn decide_attempt** — Consume the claim — it covers exactly this one attempt. The next attempt (retry, rework) launches per the declared kind unless the human claims again.
+- **fn decide_attempt_kind** — §12.4 model resolution for the Work agent: per-job override → job type → project default (folded into work.model by `with_defaults`) → platform default.
+- **fn decide_exited** — Stale monitors (revoke, rework) report exits for attempts that already resolved; their exits are noise, and re-retiring one would resolve the same attempt twice.
+- **fn decide_exited** — Assign only when the exit carries an account of its own: §4.2 lets a live container submit its result before dying, and overwriting that with `None` would erase the agent's only summary.
+- **fn decide_exited_zero** — A command work task carries no submission; its structured result is the deploy report harvested from stdout (#187). An agent's own `structured` wins when present.
+- **fn decide_exited_zero** — Measured usage from the CLI's own JSON result wins over the agent's self-report, which it may omit or invent.
+- **fn decide_exited_zero** — Only a job still progressing from Work is guarded: a revoked (or otherwise terminal) job whose orphaned container exits late completes as before, no-opping on the invalid transition downstream.
+- **fn decide_infra_lost** — Same attempt: budget untouched. The branch is recovered in case the lost attempt pushed commits before vanishing (§3.2).
+
+### `crates/domain/src/decide/wrapup.rs`
+- **fn decide** — `Job::project` is always "owner/name" (§1.1); the publish subject and every repo-scoped effect need the halves.
+- **fn decide_retry** — Negative space (§2.1): terminal states are absorbing — a Retry decided for a Done/Revoked job is a caller bug, and `assert_transition` would reject the transition anyway.
+
+### `crates/domain/src/graph.rs`
+- **fn insert** — Re-insert is idempotent on the reverse index: a Draft edit (spec §2.1) can drop or change a job's deps, so prune this job's id from every old upstream no longer in the new deps. Without this a stale edge would misdirect a later revoke cascade (§2.1 Revoked row), which trusts the reverse edges by state alone and does not re-check the dependent's deps.
+
+### `crates/domain/src/inputs.rs`
+- **fn input_errors** — Negative space (STYLE.md Tier 2 #2): every error this function produces is addressed to one named input, so a caller can route it to a form field.
+- **fn fill_input_defaults** — A supplied value wins by being left alone; only an absent key is written. The two lines are deliberately in this order so the assert below is about the write that just happened.
+- **fn inject_input_env** — Negative space (STYLE.md Tier 2 #2): no other source inserts into this namespace. Asserted before the first write, so the diagnostic names the foreign* key rather than an input that arrived second.
+- **fn inject_input_env** — Covers both halves of the invariant at one line: nothing else claimed this key, and no two input names map onto it (the injectivity the lowercase-only name rule buys).
+- **fn inject_input_env** — Postcondition: exactly one key per accepted input, and no key for anything else — the env grew by nothing but inputs.
+
+### `crates/domain/src/state.rs`
+- **fn assert_transition** — Draft→Ready|Blocked: release finalizes the edited definition in one step (same as a Frozen release). Draft→Frozen: finalize parks the edited definition Frozen (re-batchable) instead of scheduling it (#166). Frozen→Draft: a never-released job moves back to Draft for editing (§2.1). Draft→Revoked is covered by the generic Revoked row below (Draft is non-terminal).
+- **fn assert_transition** — Batches (spec §2.1). Frozen→Batched: a member is absorbed at batch creation. Batched→Frozen: the batch was revoked/failed, so the member is returned (re-batchable). Batched→Done: the batch merged, fanning completion out to each member. Batched→Revoked via the generic row.
+- **fn assert_transition** — Evaluation→Evaluation: eval retry only (gate fan-out lives in WrapUp). Evaluation→Work: product-failure rework. Evaluation→WrapUp: eval passed, wrap_up: merge. Evaluation→Done: eval passed, wrap_up: none.
+- **fn assert_transition** — WrapUp→WrapUp: merge-gate fan-out. WrapUp→Work: squash conflict or gate failure (free rework). WrapUp→Done: clean squash / no-op. WrapUp→Escalated: unexpected hard wrap-up failure (git plumbing).
+- **fn assert_transition** — Post-work escalation resolution. Retry resumes at the phase that failed (#141): Work exhaustion→Work, eval exhaustion→Evaluation, wrap-up failure→WrapUp. Resolve→Evaluation (operator did the work).
+- **fn assert_transition** — Pre-work (Stalled) escalation: Retry re-runs the failed step →Ready (or self-loops if re-validation still fails). Resolve is not in the table, so it is structurally impossible (§1.2).
+
+### `crates/platform-ops/src/cd.rs`
+- **fn refresh** — Reconcile the snapshot's node list with the live fleet: per-node health/version from the backend probe, and slots/membership from the announce roster (spec §3.1 dynamic registration).
+
+### `crates/platform-ops/src/fleet.rs`
+- **fn phase_kind** — Escalation tasks are Human (#141) and never occupy a fleet slot, so this arm is only for match exhaustiveness.
+- **fn fleet_node** — Provenance travels with the number (design #293 §7/§8): a node still serving a boot seed reads as such in the fleet view instead of being indistinguishable from one whose daemon confirmed it.
+- **fn fleet_node** — Intent, for display only (design #293 §2). It arrives already resolved by the dispatcher, so this composer — which sits on the occupancy path — never reads the intent record itself.
+- **fn compute** — Occupied slots grouped by node. A backend that cannot list (an unreachable node) yields an empty occupancy rather than an error, like the §3.6 sweep — occupancy degrades, it never wedges the loop.
+- **fn compute** — Nodes whose containers could not be listed this pass (spec §3.1): a worker that answers ping but whose `list_running` failed. Their slots are unknown, so they must show out-of-service, not falsely idle.
+- **fn compose_node** — Observed capacity wins over the boot seed (design #293 §7): the backend reports the number it actually places on — announced or ping-pulled — and the `DOCKER_NODES` roster value is only the pre-observation fallback. A docker-endpoint node reports no live slots, so its roster number stands.
+- **fn compose_node** — The live ping-reported outcome (ticket #187) wins; fall back to the roster's last-known so a failed refresh stays visible across the occasional probe miss.
+
+### `crates/platform-ops/src/harvest.rs`
+- **fn collect_agent** — Both come from the logs, not the transcript: the CLI's JSON result is a documented interface, while the transcript format is internal and version-unstable.
+- **fn collect_agent** — Permission denials are the feedback loop on the §4.3 profiles: a too-tight policy degrades an agent silently (it is told "denied" and carries on with less), so an unreported denial shows up only as mysteriously worse work. WARN — an agent hitting its policy is either a prompt that asks for the wrong thing or a profile that needs widening, and both want a human to look.
+- **fn collect_agent** — Absent whenever the CLI never started — a bad image, a failed clone. Worth a line: it also fires if the CLI ever changes where it writes transcripts.
+- **fn parse_deploy_report** — The single deploy envelope: from/to SHAs, rollback, health. Parsed into a DeployReport (its `legs` default empty) so we reuse one type.
+
+### `crates/store/src/artifacts.rs`
+- **fn get** — Same tombstone hazard as `get_attachment` (#196): a DELETEd object's reader has no chunks and `read_to_end` awaits forever. Nothing deletes transcripts today, but the guard costs nothing and the hang is fatal.
+- **fn get** — Job attachments (operator-uploaded files) A job attachment is an operator-uploaded file carried alongside a job — a screenshot on a bug report, a reference document. Unlike task artifacts, it is per-*job*, has an arbitrary filename, and carries a client-supplied content type. It reuses this store's object bucket and crypto: the bytes are gzipped + age-encrypted at rest, dodging the 1MB `max_payload` cap exactly as transcripts do. Like a transcript, an attachment is presentational reference material — served to the UI, never injected into an agent prompt.
+- **fn get_attachment** — A DELETEd object is a tombstone: `get` succeeds but the reader has no chunks and `read_to_end` awaits forever (reproduced 2026-07-23 — GET-after-DELETE hung http_bridge_end_to_end and a prod CI task). Deleted ⇒ absent.
+- **fn delete_attachment** — `info` on a DELETEd object still succeeds (tombstone) — treat it as already-gone, same as missing, so double-delete reports false.
+- **fn list_for_task** — Tombstones read as absent, same as get()/list_attachments (#196): nothing deletes task artifacts today, but a deleted one must never resurface as a live kind (#207 review, cycle 2).
+
+### `crates/store/src/lib.rs`
+- **fn connect_namespaced** — A namespaced (test) connection tolerates a momentarily-busy shared server: under a `cargo test --workspace` fan-out the handshake can drop ("expected INFO, got nothing"), so retry a few times before giving up. Production (empty prefix) connects once, unchanged.
+- **fn connect_namespaced** — A non-empty prefix is a test sharing one server with many other namespaces (#206). Under a `cargo test --workspace` fan-out the server is momentarily busy, so lift the JetStream request timeout well above the 5s default — a slow bucket-create should wait, not spuriously fail.
+- **fn ensure_topology_inner** — Production (empty prefix) uses File storage — durable, and byte-for- byte unchanged from before (#206). A namespaced handle is a test on a shared server, where many namespaces are created concurrently: Memory storage keeps every JetStream request off the disk, so a `cargo test --workspace` fan-out of NATS containers does not saturate the host's fsync path and time bucket creation out.
+- **fn ensure_topology_inner** — Blobs live in an object store, not KV: transcripts routinely exceed the 1MB max_payload. 90d matches `job-events`, the trail they pair with. Deletion stays allowed — unlike the streams — because artifacts are observability data an operator may need to purge.
+
+### `crates/store/src/stores.rs`
+- **fn scan_prefix** — Subject filters match whole tokens, but `prefix` is a string prefix and callers may end mid-token. Narrow to the token-aligned part and let the `starts_with` check below do the rest, so the filter is an optimization and never changes which keys are returned.
+- **fn scan_prefix** — Ephemeral consumers only disappear once the server's inactivity threshold reaps them, so an un-deleted one lingers per list call. Best-effort on both paths: the scan's own result is what callers asked for, and the reaper is still the backstop if this fails.
+- **fn scan_prefix_drain** — The consumer ended early (transport dropped) — return what we have rather than hanging; callers re-read on the next request.
+- **fn scan_prefix_drain** — LastPerSubject delivers a delete/purge tombstone as the latest revision of a removed key. Its payload is empty, so keeping it would surface a deleted record as a deserialization failure.
+- **fn watch** — A transport error ends the stream, so a bounded wait falls through to its own named timeout instead of looping on errors.
+
+### `crates/store/src/subjects.rs`
+- **fn ssh_sign_user_cert** — Fleet (spec §3.1 operator capacity control) Published by the api, handled by the dispatcher's actor. Fleet-scoped, not project-scoped: a node belongs to the platform, so nothing owner/project rides in the subject.
+- **fn fleet_capacity_set** — Worker-node protocol (spec §3.1) Published by the dispatcher's fleet backend, served by the `chuggernaut worker` daemon on the node. Node names are validated subject-safe at DOCKER_NODES parse time.
+
+### `crates/types/src/groups.rs`
+- **fn check_name** — Characters, not bytes: the charset is ASCII-only, so a multi-byte character is out of it regardless, and the count is what an operator can act on.
+- **fn check_name** — Postcondition, negative space (STYLE.md Tier 2 #2): an accepted name is ASCII, which is what lets the length bound double as a byte bound.
+- **fn check_groups** — Postcondition: an accepted list is exactly as long as its distinct set, which is what lets every reader treat `groups` as a set without sorting it.
+
+### `crates/types/src/inputs.rs`
+- **fn check_value_charset** — Characters, not bytes: the charset is ASCII-only, so a multi-byte character is out of it regardless, and reporting the character is what an author can act on.
+- **fn check_value_charset** — Postcondition, negative space (STYLE.md Tier 2 #2): an accepted value is ASCII, which is what lets the length bound double as a byte bound and what every downstream env/prompt consumer relies on.
+
+### `crates/types/src/job_type.rs`
+- **fn validate** — v1: the resolved review provider must be claude. Only statically resolvable here; a None-None chain falls back to platform config, checked by the dispatcher at release.
+- **fn validate** — `resources.memory` is an opaque string until the container backend parses it at launch; validate the format here so `chuggernaut validate` and release validation reject a bad limit (e.g. "5g") offline instead of wedging the job when the eval container fails to launch. `resources.cpu` needs no such check — serde already enforces it is a float, and it is never re-parsed from a string downstream.
+- **fn validate** — Wrap-up command hook (spec §3.2): the post-merge `run` only makes sense for a merge job (there is no merge to follow otherwise), needs an image from somewhere, and its `image`/`secrets` are meaningless without it.
+- **fn validate** — The wrap-up task label (job #146) is validated like an evaluator name: a bad token would render as a broken task row / event field.
+- **fn validate** — Placement is shape-validated only (spec §3.1): the fleet node list lives in the dispatcher's env and is not knowable offline, so a bad node token is the only thing catchable here. An unknown-but-valid name surfaces at launch as a placement error.
+- **fn validate_inputs** — Skew gate (spec §14.1): an N-1 dispatcher tolerates `inputs:` as an unknown top-level field, so without this the config would run with required-input validation skipped and no value reaching the container. Declaring `min_dispatcher` is what makes that refusal happen in a dispatcher that cannot see `inputs:` at all.
+- **fn validate_inputs_declaration** — A declared value outside the charset is a value no supply path could ever match — the enum's own version of an unsatisfiable default.
+
+### `crates/types/src/resources.rs`
+- **fn parse_memory** — Only a bare non-negative integer is a legal numeric part; this rejects signs, decimals, and stray unit letters (the "g" in "5g", "GB" in "4GB").
+
+### `crates/types/src/rollup.rs`
+- **fn group_rollups** — Ascending seq, so every group's member list reads in filing order regardless of the order the records arrived in.
+
+### `crates/types/src/task.rs`
+- **fn task_time_ms** — A span that runs backwards is host clock skew, not negative work: count it as no span rather than letting it subtract from the total.
+
+### `crates/types/src/worker.rs`
+- **fn confirm** — The swapped-in daemon reports `{pkg}+{sha}` — a `+{short_sha}` needle proves the swap landed even before any outcome field would.
+- **fn apply** — Keep the last ceiling the node named: a report that omits it says nothing about the ceiling, and forgetting it would un-bound the UI's stepper for no reason.
+
+### `crates/vcs/src/lib.rs`
+- **fn seed_files** — Always detach the worktree — a stale registration would block the next seed. The temp dir itself is cleaned by its guard.
+- **fn rebase_branch** — A real conflict leaves unmerged (`U`) paths; anything else (e.g. a merge commit) is a genuine git error, not a conflict to route through rework.
+- **fn rebase_branch** — CAS on the branch tip: the single-writer dispatcher makes a race impossible, so a surprise is a logic bug, not a silent stomp.
+- **fn build_squash_commit** — §3.2 step 12 guard: a clean merge-tree can still carry conflict markers if the branch holds an UNRESOLVED WIP-rebase commit (merge-base == new base → the branch's blob, markers and all, is taken verbatim). A no-evaluator job would otherwise squash them straight onto the default branch.
+- **fn build_squash_commit** — Line 1: toplevel tree OID; then conflicted file names until a blank line separates the informational messages.
+- **fn rebase_onto_with_conflict** — Build the commit message, then commit the merged tree as one commit parented on the new base and move the branch ref onto it (CAS on the old tip: the single-writer dispatcher makes a race impossible, so a surprise is a logic bug).
+- **fn diff_for_job** — Draft/Stalled/Batched are pre-work: no branch of their own to diff (§1.2, §2.1) — a batch member's changes live on the batch branch, and the batch itself diffs under Work/Evaluation/etc.
+- **fn is_ancestor** — Exit 0 = ancestor, exit 1 = not an ancestor; anything else (e.g. a bad rev) is also treated as "not an ancestor" so re-review degrades to the full diff rather than failing the whole eval launch.
+
+### `crates/worker/src/backend.rs`
+- **enum NodeHandle** — Boxed: the bollard-backed variant is much larger than Worker (clippy::large_enum_variant), and nodes are few and long-lived.
+- **fn ingest_capacity** — Poisoning cannot corrupt the record — nothing between the lock and the unlock can panic — so recover rather than propagate and keep the fleet ingesting capacity.
+- **fn evaluate_startup** — Zero live capacity, but a reachable worker means it is observed state that can still arrive or be commanded, so the fleet starts.
+- **fn new** — An empty node set is legal: a dynamic fleet may boot with zero seeds (`DOCKER_NODES` empty) and gain capacity when workers announce (spec §3.1 dynamic registration). Launches queue via the NoCapacity path until the first announce arrives (`startup_check` permits it).
+- **fn startup_check** — Zero seeds is a dynamic fleet awaiting announcements (spec §3.1): start successfully and let launches queue via NoCapacity until the first worker announces. Only a *configured* fleet with no live capacity is a fatal misconfiguration (the crash-loop guard `evaluate_startup` keeps).
+- **fn startup_check** — ORDER IS LOAD-BEARING (design #293 §1): the probe applies any ping-reported capacity to the slot cell on its reply path, and only THEN is the cell read into the gate. Read first and the gate would see the boot seed — which, with the seed demoted to a pre-observation fallback (§7), turns the startup capacity check into a seed-only check.
+- **fn startup_check** — The §5a trade — a warning where there used to be a crash — is only correct because the warning happens. The dispatcher's §8 scan then keeps naming the nodes responsible at a bounded cadence.
+- **fn probe_worker** — Heartbeat lapsed (spec §3.1 dynamic registration): skip placement without even pinging. `route` ignores this flag, so containers already running on the node keep being waited on.
+- **fn probe_worker** — Record the reported version for the platform snapshot. A refreshed daemon reports the new SHA here, which both clears the drift warning below and flows to the UI.
+- **fn probe_worker** — Record the last refresh outcome (ticket #187) so a failed refresh surfaces in the fleet snapshot rather than staying a node-local log line. Only overwrite when the node reports one; a swapped-in daemon reports `None`, and we keep the last known outcome until it does.
+- **fn probe_worker** — The pull half of the capacity source, applied before the load below reads `slots` — and before the startup gate does. A pre-field daemon reports no `slots` and so supplies nothing; the seed keeps standing in and §8's warning surfaces it.
+- **fn place** — Hold the placement lock across read-loads → choose → reserve: two launches placed back-to-back (agent launches each run on their own spawned task) otherwise both read the pre-reservation counts and tie onto the same node. Serialized, the second sees the first's reservation and busyness sends it to the idle node (spec §3.1).
+- **fn place** — Reserve before releasing the lock so the next placement counts this launch even though its container does not exist yet.
+- **fn node_load** — Fold in launches already placed on this node whose containers the live count can't see yet (spec §3.1): they occupy the slot for placement purposes, so busyness and the free-slot check both treat a reserved slot as busy.
+- **fn availability** — A worker counts as available only while both reachable (ping) and schedulable (heartbeat live) — a deregistered node shows down in the UI, matching that placement skips it.
+- **fn launch** — `_reservation` is held until this method returns — i.e. across the launch RPC. Once the RPC completes the container exists and the node's live count reports it, so releasing the reservation then hands the accounting back to the live count with no gap and no double-count.
+- **fn wait** — Transport blips (worker restart, NATS reconnect) are survivable — the container is still running on the node; keep polling. Op-level errors are real.
+- **fn list_managed_exited** — An unreachable worker must not fail the whole sweep — its exited containers get reclaimed on a later pass.
+- **fn list_managed_running** — An unreachable worker must not fail the whole sweep — its orphans get reaped on a later pass. Record the failure so the occupancy snapshot can show the node out-of-service rather than falsely idle (spec §3.1; job/181): the node may still answer ping/launch, so nothing else marks it down.
+- **fn fleet_status** — `None` here means a docker-endpoint node: `DOCKER_NODES` still owns its capacity outright, so it reports no provenance and the roster's static number stands (design #293 §7).
+- **fn register_worker** — Liveness is unconditional — an announce that lost the ordering race still proves the node is up — while its slot count goes through the watermark. Only a slot change (or re-admitting a heartbeat-dropped node) is "capacity moved" for the drain.
+- **fn register_worker** — A joining node has no watermark yet, so its announce is its first observation and lands by the same rule.
+
+### `crates/worker/src/capacity.rs`
+- **fn set_slots** — Read, decide, and bump under one guard: the reply names the pair this call installed, which is what lets the dispatcher order two racing adoptions by generation and land on the number the node is running.
+
+### `crates/worker/src/daemon.rs`
+- **fn run** — Single-node backend named after this node so returned container ids are already `{node}/{docker_id}` — the fleet backend routes on that prefix.
+- **fn run** — The dispatcher owns slot *policy* (it schedules against the number this node reports, and lowering below occupancy drains rather than kills); the worker only reports usage and its own capacity ceiling.
+- **fn run** — Node-local build cache: a worker-side property, added here from the worker's own config — never from the launch message (spec §3.1). The daemon owns creating/owning the host dir; concurrent containers share it, which sccache handles by locking.
+- **fn run** — Announce heartbeat (spec §3.1 dynamic registration): tell the dispatcher this node is live — name, self-advertised capacity, build version — so it joins the live fleet with no dispatcher restart. Fire-and-forget on a plain subject; a missed one is covered by the next tick, and losing the stream is what marks the node unschedulable dispatcher-side.
+- **fn spawn_announce** — An adopted capacity change re-announces immediately: waiting out the tick would leave the fleet view showing the old number for up to ANNOUNCE_INTERVAL after the operator's command was accepted. `Notify` holds a permit, so a change during the publish above is not lost. `Interval::tick` is cancel-safe, so the ~15s heartbeat cadence survives an interruption.
+- **fn launch** — Drain guarantee (spec §3.1): once the daemon is quiescing for a self-refresh swap, refuse new launches with NoCapacity — a transient* signal the dispatcher queues and retries, so no task fails. The permit is held until the container exists, so the swap never lands mid-launch.
+- **fn launch** — The worker runs a single-node local backend; the fleet already chose this node, so no further pin applies.
+- **fn logs_tail** — The local backend already caps the chunk at MAX_LOG_TAIL, so the base64 reply fits max_payload — no extra tailing needed here.
+- **fn ping** — The pull half of the one capacity source (spec §3.1): the same fields the announce carries, from the same owner. A ping cannot be stale, so this is what makes any ordering anomaly self-healing dispatcher-side.
+- **fn refresh** — No git credential ⇒ the refresh would fetch nothing. Report the skip in the reply LOUDLY (spec §3.1 / #114) rather than accepting and no-oping in the background — the deploy then shows the skip instead of a silent "success".
+- **fn refresh** — A refresh is already converging — not an error, and not drift: report it as not-accepted so the caller skips the swap-wait rather than logging a scary "not accepted (drift remains)".
+- **fn refresh** — Record the accepted refresh as in-progress (ticket #187): a later ping carries this, and `run_refresh` overwrites it with the terminal verdict on failure (a success swaps the daemon away).
+- **fn refresh** — Open the live progress record for this refresh (ticket #253) at accept time, so the deploy's very first poll already reads a phase rather than an empty wait. Replaces any previous refresh's record: progress is live state, not history.
+- **fn run_refresh** — Cancellation is checked BEFORE the build's own verdict: a cancel kills the build, so the build error it produces is a CONSEQUENCE of the cancel, not the cause. Attributing it to `build` would put "the node's build broke" in a deploy leg for a node the deploy itself stopped (ticket #254).
+- **fn run_refresh** — Drain guarantee: refuse new launches, then wait for accepted-but-not-yet- created launches to finish before swapping (spec §3.1).
+- **fn run_refresh** — Last cancellable instant: past `begin_swap` the node is going onto the new images and a cancel is refused, so this is where a cancel that arrived during the build or the drain actually stops the refresh.
+- **fn run_refresh** — The swap spawns a detached replacement, so on success this process is simply removed and never returns here. Reaching this arm means the swap itself failed to launch — reopen so the node keeps serving.
+- **fn record_refresh_failure** — `error` already carries the script's captured tail on a build/swap failure; bound it the same way the daemon streams so the ping reply and the durable outcome stay small.
+- **fn refresh_cancel** — Only OUR target may be cancelled: a node converging on some other SHA (a concurrent deploy, a hand-run refresh) is none of this deploy's business.
+- **fn run_script_stream** — Feed both streams' lines into one channel; a single consumer prints and buffers them so stdout/stderr interleave in arrival order.
+- **fn run_script_stream** — Keep only the last REFRESH_TAIL_LINES lines so a long build log stays memory-bounded; each line is streamed out immediately as it arrives.
+
+### `web/src/api.ts`
+- Typed client for the §6.2 HTTP surface. Cookies ride automatically (same-origin); a 401 anywhere bounces to /login via the caller. The wire types are GENERATED: `web/src/api/types.gen.ts` comes from the Rust `types` crate via `.chug/schemas/api.schema.json` (NORTH-STAR §2), so a backend field that changes shape is a TypeScript error here instead of an `undefined` at runtime. Regenerate with `npm run codegen`; CI fails on a stale file. What stays hand-written: the fetch methods below, and the reply envelopes in `web/src/api/envelopes.ts` — the ones the dispatcher assembles with `serde_json::json!`, which no Rust type describes and so no schema covers. This module re-exports both halves under one name, so a consumer imports from `../api` without caring which side a type came from.
+
+### `web/src/api/envelopes.ts`
+- The part of the §6.2 wire surface that is still hand-mirrored, and why. Everything the Rust `types` crate names is generated into `types.gen.ts`. These shapes are not in it because no Rust type describes them: the dispatcher assembles each of these replies with `serde_json::json!` at the handler, so `chuggernaut schema api` has nothing to derive a schema from. They are the remaining drift surface — the compiler cannot tell you when the backend changes one — and the fix for any entry here is to name it in Rust and cover it in `cli::schema::api_bundle`, not to transcribe it more carefully. Where an envelope merely *wraps* a covered type, it wraps the generated one: `JobTypeDetail.job_type` is the generated `JobType`, `OriginStatus.origin` is the generated `OriginLink`.
+
+### `web/src/capacity.ts`
+- **function capacityState** — No provenance at all: a docker-endpoint node (`DOCKER_NODES` still owns its capacity, design #293 §7) or a dispatcher older than the capacity fields. Say nothing rather than infer a state from an absence.
+
+### `web/src/components/ActivityChart.tsx`
+- **const bar** — Rounded top only: rect with rx would round the baseline too, so bars use a path — up, arc the two top corners, down — anchored flat on the baseline.
+
+### `web/src/components/Attachments.tsx`
+- **function safeAttachmentName** — The API rejects '/', '\', control chars, empty, '.' and '..' (path-traversal guard, routes.rs valid_attachment_name). Sanitize a picked/pasted/shot file's name to something it will accept, giving pastes (which arrive as "image.png" or blank) a unique-ish stem so several in a row don't clobber each other.
+- **function AttachControls** — No accept filter: docs and other files are allowed too (they render as name+size rows). Multiple so a whole camera-roll selection lands at once.
+- **function AttachControls** — accept=image/* + capture: on a phone this opens the camera directly for a fresh screenshot/photo; on desktop it falls back to a file picker.
+- **const runUpload** — Run one upload entry to completion, driving its progress/error. On success it drops from the in-flight list and the job's attachment list refetches.
+- **function JobAttachments** — Paste-from-clipboard: a screenshot pasted anywhere on the job page attaches here. Ignore pastes into a text field so typing isn't hijacked.
+- **function AttachmentComposer** — AttachmentComposer: pick/paste/shoot files while composing a new job Used before the job exists (New Job form, share-to-job screen). It owns nothing durable — the parent holds the File[] and PUTs them once the job is created (see uploadFiles). Images preview from object URLs, revoked on change.
+
+### `web/src/components/CapacityWidget.tsx`
+- **function loadBand** — Load band → a data attribute the stylesheet maps onto the app's state hues: comfortable (green) → busy (blue) → full/queued (orange). Kept out of the component so colours stay in styles.css (no hard-coded hex here).
+- **const newJobButton** — The launch button always renders and leads the pill; the capacity readout is grafted on to its right inside the same pill only when the feed has real numbers.
+- **const sized** — Feed down, non-admin, or nothing published yet → readout hidden (never zeros), but the launch button still floats on its own.
+- **const dotCount** — One dot per slot (capped so a big fleet can't overflow the card); the first `busy` read as filled. `busy` can exceed `total` — lowering a node's cap below its live occupancy drains rather than kills (design #293 §5), so a fleet at 3/2 is a legitimate state — hence the clamp instead of a dot row that runs past its own length.
+- **function CapacityWidget** — Hover scope for the breakdown is the readout only — the breakdown is a child so moving into it never counts as a leave, and hovering the launch button next door doesn't pop it open.
+
+### `web/src/components/ConsistEditor.tsx`
+- **function ConsistEditor** — A membership change (new `members` prop) may name a job we haven't loaded yet — refresh the roster so its title/state resolve in the manifest.
+- **function guarded** — Finalize/release need at least two cars to leave the yard; short of that the locomotive shakes (or, under reduced motion, just the message).
+- **const candidates** — Candidate rows for the picker: every non-member, non-self job matching the query, each tagged with why it can't couple (null = eligible). Ineligible rows render greyed with the reason as a tooltip. Eligible first.
+
+### `web/src/components/CoverWidget.tsx`
+- **const sandboxed** — Presentational-only CSP (job #143): no network of any kind, inline styles and data: images/fonts only. Prepended so it is parsed before any resource.
+- **function CoverWidget** — Presentational only (spec §4.3). Fully sandboxed: no scripts, no same-origin, no forms. The injected CSP blocks all network fetches (job #143). Content rides in via srcDoc. Same policy popped out.
+- **function CoverWidget** — Transparent full-preview hit target: click anywhere on the collapsed preview to expand. The iframe below never receives the click.
+
+### `web/src/components/DeployLegCard.tsx`
+- A deploy job's structured leg report (ticket #187) as a checklist card: the from→to SHA header with a rollback/health badge, then one row per leg — green ✓ ok, red ✕ failed (with the short reason), grey · skipped. A deploy is a checklist, not a conversation, so it reads as one. Shared by JobDetail (in a deploy job's command task) and the per-project Deploys page — one renderer, no duplication.
+- **function deployReportOf** — A deploy job's structured payload carries a `legs` array (the envelope fields are optional). Detect that shape on a task result's `structured` — tolerant of either an object or a JSON string — so a deploy renders as a checklist rather than a raw JSON block. Returns null for anything else.
+- **function deployReportOfTasks** — The deploy leg report for a whole job, harvested from its tasks. Which result kind carries it depends on how the deploy ended — a command work task records `Work` when it succeeds and `Command` only when it fails — so discriminating on `kind` would see exactly one of the two (ticket #275: every successful deploy read as "no leg report"). The honest predicate is "this result carries a legs-shaped `structured`", which `deployReportOf` already decides. Scans newest-first so a re-deploy's latest attempt wins.
+
+### `web/src/components/DocMarkdown.tsx`
+- A whole repo document, rendered. The difference from plain `Markdown` is the links: a document's hrefs are written relative to the document's own place in the tree (ESCAPED(./309-host-native-execution.md)`), not to the SPA route it happens to be displayed under. Left verbatim the browser resolves them against the current URL and the operator lands on a route that does not exist — a silent bounce to the projects home. Cross-document links are the browsable half of the docs wiki (job #88), so they resolve here instead.
+- **const REHYPE_PLUGINS** — The other half of an intra-document link: `docs/design/321-job-groups.md` links its own decisions as `#decision-7-the-api-surface`, written against GitHub's heading slugs. `rehype-slug` uses the same github-slugger, so the anchors those documents already contain land where they were written to.
+- **const hash** — The fragment names a heading in the *target* document, not a path segment, so it rides along after the query rather than through `encodeURIComponent` the file browser renders through this same component, so it lands.
+- **const parts** — A leading slash means repo root; otherwise start from the document's own directory and let `..` walk up, the way git resolves the same text.
+- **const kind** — No extension on the final segment (or a trailing slash) reads as a directory, and the browser takes those on `?dir=` instead.
+- **function DocMarkdown** — Anything not a repo path — an absolute URL, a `#section` anchor — renders exactly as the default renderer would.
+
+### `web/src/components/DraftEditor.tsx`
+- **type Field** — The editable fields, used as keys for focus/dirty/flash tracking. `eval` is not edited here — it round-trips unchanged on the full-replace PATCH. The declared inputs track as one field: they are one map on the record, and the operator edits one of them at a time.
+- **const groups** — What the job is part of (design #321): part of the full-replace PATCH like every other creation field while the job is a Draft. After it leaves Draft the field stays writable — through the job page's add/remove editor.
+- **const inputs** — A Draft's `inputs` is what its creator supplied — declared defaults are materialized at the Ready transition, not here (#311 Decision 6), so this is the operator's own set and it is editable while the job is a Draft.
+- **const jobTypes** — Pickers: the type vocabulary, the tag vocabulary, and existing jobs (for the dependency picker), fetched once for the editor.
+- **const typeDetail** — The selected type's declaration — refetched when the operator (or the chat side) changes `type`, since the inputs a draft may carry are the new type's.
+- **const focusedRef** — Which field the operator is editing (never adopt a server value over it), which fields have a local edit not yet echoed by the server (don't let a stale refetch revert it), and which just flashed after adopting a remote change. focus/dirty are refs — read inside the reconcile effect, no re-render.
+- **const textActive** — Remote-edit animation: text fields type the delta in (typewriter hook), select/multi-select fields pulse the control and flash the newly chosen value(s). A small wizard indicator rides the label of any animating field. All motion is skipped under prefers-reduced-motion (the flash wash stays).
+- **function DraftEditor** — Merge an incoming server snapshot. Per field: if the server matches local, our edit landed — clear its dirty flag. Otherwise adopt the remote value and flash — unless the operator is on that field, or it holds an un-echoed local edit (dirty), in which case we keep the operator's version.
+- **const adoptText** — Text field: type the delta in (the hook degrades to an instant set under reduced motion), then flash the field so the change is legible.
+- **const adoptChoice** — Select / multi-select: snap the value (we don't drive dropdown internals), flash the field, pulse the control, and flash the newly chosen value(s).
+- **const buildPayload** — Build the full PATCH payload from the latest state (this closure is recreated each render, so the debounced call reads current values at fire time). `eval` rides along unchanged so the full replace doesn't wipe per-job evaluators.
+- **function DraftEditor** — Until the declaration has loaded the stored map rides along unchanged: narrowing to an empty `declaredInputs` would wipe the draft's inputs on the first blur. Once loaded it narrows to what the type declares, so switching the draft's type drops values the new type doesn't accept.
+- **const edit** — A local edit: mark the field dirty (so a stale refetch won't revert it) and schedule the debounced full PATCH.
+- **function toggleTag** — Discrete edits (tags, deps, type) go through the debounced PATCH, not an immediate one: the debounced call fires after the state update has re-rendered, so buildPayload reads the new value rather than the stale closure. `edit()` marks the field dirty and schedules that debounced PATCH.
+- **function editGroups** — A group edit is a discrete edit like a tag: state first, then the debounced full PATCH, which reads the new value once the re-render has landed.
+- **function DraftEditor** — The type's declared inputs (spec §1.1): editable while the job is a Draft and frozen the moment it leaves it (#311 Decision 6), so this is the only place they are ever an editable control. Nothing renders for a type that declares none.
+- **function DraftEditor** — Beside the knowledge tags because they look alike and are not: a tag is an execution input, a group changes nothing about the run (#321 Decision 3).
+- **function DraftEditor** — On a Draft the attachments are editable like the rest of the draft (spec §1.6). The job already exists, so uploads PUT straight to it.
+- **function DraftEditor** — A Draft batch's finalize/release/revoke live in the ConsistEditor below, beside the cars they act on — only the autosave hint stays here.
+
+### `web/src/components/JobInputs.tsx`
+- **function inputValueError** — An unknown kind carries no narrowing this build understands; the charset above is the whole check, and the server applies the rest.
+- **function JobInputFields** — A <label> for the text field (clicking the name focuses it); a <div> for the enum, whose RichSelect is a button — wrapping one in a label would make the label's own click open the menu.
+
+### `web/src/components/Markdown.tsx`
+- Agent/operator prose (channel posts, work/review/human summaries) is written markdown-ish — lists, code spans, the occasional heading. Render it safely: react-markdown escapes raw HTML by default (no rehype-raw here, so no HTML passthrough), and we drop images so nothing auto-loads a remote URL. Headings are scaled down in styles.css so an h1 inside a card doesn't read as a page title, and code blocks scroll inside their own container.
+- GFM is not on by default (react-markdown dropped it in v5), and everything we render is written as GitHub-flavored markdown — every document under `docs/design/` has a pipe table, which CommonMark parses as one reflowed paragraph. The plugin also restores task lists, strikethrough and autolink literals, which agent prose uses freely.
+- **class MarkdownBoundary** — Malformed input never blanks a panel: on any parse/render throw we fall back to the raw source as plain (pre-wrapped) text.
+
+### `web/src/components/NodeCapacity.tsx`
+- **function NodeCapacity** — Follow the record again once the snapshot catches up with what we asked for, so a change made elsewhere isn't masked by a stale local draft.
+- **const TONE** — Tone per state: `bad` for the two the operator has to act on, `warn` for a number nobody is confirming, plain for the two healthy ones. Colours live in styles.css — this only names the tone.
+- **function CapacityState** — Converged or converging: quiet, and the observed number stays primary because it is the only one placement reads.
+- **function CapacityState** — A seed or stale node still has to acknowledge a set in flight — without this the flagship case (raising a seed-sourced node) answers 202 and shows the operator nothing but a disabled button.
+
+### `web/src/components/ResolveForm.tsx`
+- Human-task resolution (§1.2). Post-work escalation tasks (job Escalated) take Retry/Resolve/Revoke; pre-work escalations (job Stalled) take only Retry/Revoke — there is nothing to submit for evaluation. Work/eval Human tasks take Pass/Fail. Fail requires structured findings; else it's optional.
+
+### `web/src/components/StateBadge.tsx`
+- Declared in lifecycle order — `stateRank` reads the key order, so keep new states where the state machine puts them rather than appending.
+- **function StateBadge** — Draft is pre-release and editable: a dashed pill sets it apart from the solid Frozen/terminal badges so a work-in-progress ticket reads at a glance.
+- **function StateBadge** — Batched: inert member absorbed into a batch — a dashed gray pill sets it apart from a solid Frozen, mirroring the Draft treatment for pre-scheduling.
+
+### `web/src/components/StatusFooter.tsx`
+- **function StatusFooter** — Health is a dispatcher round-trip (NATS req/reply), so probe on mount and a slow visible-tab interval rather than on every project event.
+- **const sized** — Fleet segment: same graceful-degrade rule as the capacity widget — hidden when the feed is unavailable or nothing sized has been published.
+
+### `web/src/components/TaskLogs.tsx`
+- Poll cadence while a container runs, and the ceiling a network-error backoff climbs to. The buffer is capped so a multi-hundred-megabyte cargo build log can't balloon the tab — we keep the tail and flag the truncation.
+- **const ANSI** — cargo/agent output carries ANSI colour + cursor escapes. Strip the common CSI/OSC sequences (rendering colour is a non-goal) rather than pull in a terminal library. Lone carriage returns (progress-bar redraws) collapse to newlines so a redrawn line doesn't run on forever.
+- **const view** — Default to the formatted claude transcript; `raw` is the debugging escape hatch that shows the untouched byte stream.
+- **function TaskLogPane** — The tail loop. Keyed on the task identity only: a Running→Done transition arrives through the endpoint's `running` flag, not a prop change, so the loop doesn't need to restart when the parent re-renders the task.
+- **function TaskLogPane** — Observed the container exit — one final sweep of the harvested tail, then stop. The endpoint keeps the same offsets across the switch.
+- **function TaskLogPane** — No container yet (parked human / Pending launch). Muted, and keep a slow watch only while one might still spawn.
+- **function TaskLogPane** — Stick to the bottom on append while pinned (and when the view mode flips, since the two renderings have different heights).
+
+### `web/src/components/TrainHeader.tsx`
+- **const FALLBACK** — Ships even if the manifest fetch fails (offline dev, missing file): the same three built-in scenes the manifest declares.
+- **function builtinLayers** — Built-in code-generated layer sets (far -> near). Real art overrides these by supplying `layers` in the manifest, so the loop stays content-agnostic.
+- **const GLYPHS** — The Matrix: THE green digital-glyph rain (distinct from the abstract source dimension). Columns fall on staggered loops; transform/opacity-only.
+
+### `web/src/components/Transcript.tsx`
+- Renders a claude `--output-format stream-json` transcript the way watching claude in a terminal reads: assistant prose as markdown, tool calls as compact expandable headers, tool results collapsed with a size hint, the final result as a highlighted completion block. Bootstrap/shell output (git clone chatter, cargo lines) isn't JSON — it stays inline as raw monospace, in sequence. Everything is drift-tolerant: an unknown event shape collapses to raw JSON, a line that doesn't parse falls back to raw text, and a JSON line split across tail chunks (the trailing, newline-less line) is left raw until it completes.
+- **function tryParseEvent** — A claude event is a JSON object carrying a string `type`. Fast-path out of the common case (a plain shell line) before spending a JSON.parse.
+- **function parseTranscript** — The final element sits after the last '\n': it is either '' (buffer ended cleanly) or a partial, still-arriving line. Never parse it.
+- **function toolSummary** — One-line gist of a tool call's input — the command for Bash, the path for a file tool, etc. Falls back to compact JSON. Newlines collapse so it stays a single header line (CSS ellipsizes the overflow).
+- **function resultText** — Tool results arrive as a string, an array of content blocks, or (rarely) some other shape. Flatten to text, marking non-text parts rather than dropping them.
+- **type ThinkMember** — One member of a thinking run: a `thinking` content-block segment, or a thinking-flavored `system` event (a `thinking_tokens` heartbeat). Both are "thinking noise" that shouldn't drown the readable rows, so they bundle together; the raw event is kept so a heartbeat stays individually inspectable.
+- **function isThinkingSystem** — A `system` event is thinking-flavored when its subtype names thinking (e.g. `thinking_tokens` heartbeats emitted while an agent reasons). Matching on the substring tolerates variants without enumerating them.
+- **function ThinkingRun** — A run of one or more consecutive thinking-flavored members, rendered as a single collapsed entry so a long stream of thinking (content blocks *and* `thinking_tokens` heartbeats alike) doesn't drown the readable rows. The summary carries the member count and total size; expanding reveals the members in order, each still individually expandable. A lone plain segment renders like an ordinary thinking block (no bundle chrome).
+- **type Item** — A flat, ordered render item. Flattening events into this list is what lets a thinking run span content-block *and* event boundaries: consecutive thinking segments coalesce into one item regardless of how the stream chunked them.
+- **function flattenBlocks** — Flatten blocks into render items, coalescing runs of consecutive thinking- flavored members — `thinking` content blocks and `thinking_tokens` system heartbeats alike — into a single item. Any non-thinking item (assistant text, tool_use, tool_result, result, ordinary system, shell output) breaks the run; a later thinking member opens a fresh bundle.
+- **function flattenBlocks** — A thinking-flavored heartbeat joins the current thinking bundle; ordinary system events render on their own and break the run.
+
+### `web/src/components/icons.tsx`
+- Hand-rolled inline SVG icons for the snazzy redesign (#161). Stroke-based, currentColor, 20px grid — no icon library (web/CLAUDE.md: no component libs). Each takes an optional size; colour comes from the parent's `color`.
+
+### `web/src/jobFilters.ts`
+- **function quickPred** — A job is "mine/claimed" when a human has taken its next attempt. Without a per-job claimed-by field we treat any active claim as the operator's (noted in the redesign summary) — claim_next covers the pre-park window, a claimed pending Work task the in-flight one.
+
+### `web/src/main.tsx`
+- Every page is code-split. Imported eagerly they were one 479 KB chunk on every load, and the markdown renderer — the biggest slice of it — is only needed by the three pages that render agent prose. Now the entry chunk is the shell, router and theme; a route's code (and whatever only it depends on) arrives when you navigate to it. Pages export named components, so each import maps its export onto `default` for lazy().
+- **const JobDetail** — Register the service worker so the UI is installable as a PWA (Android/Chrome require a registered SW) and gets a basic offline app-shell. Dev runs skip it to avoid the SW caching HMR assets.
+- **function RouteFallback** — Shown while a route's chunk is in flight. It has to render the *same chrome* the arriving page renders, not just a card: a project page opens with ProjectHeader (masthead + tabs), so a headerless fallback would float its first card at the top of the viewport and then drop it a header's height when the chunk lands — a layout shift on exactly the cold, slow load that code-splitting introduced, and worst on a phone. So the fallback carries the header whenever the URL is project-scoped, and the card skeleton below it is the page → card → heading + lines shape every page already skeletons with. Nothing here has an intrinsic width, so it can't scroll a narrow viewport sideways. ProjectHeader lands in the entry chunk by being imported here; it is small and every project route needs it anyway.
+- **function RouteFallback** — Deploys are per-project now; the old platform drift/freshness view folded into Cluster. Redirect stale bookmarks there.
+
+### `web/src/pages/Cluster.tsx`
+- **const POLL_MS** — Poll cadence for the occupancy snapshot. The top-level cluster view has no per-project SSE to ride, so it polls; the running counters tick every second regardless (below).
+- **const tick** — Bumped after a capacity command so convergence shows up immediately rather than on the next poll — the 202 means "recorded and converging", so the interesting snapshot is the next one, not the reply.
+- **function ClusterPage** — The api node's own build SHA, read from the (unauthenticated) health probe so it is independent of the dispatcher's version. A 503 leaves it null and the node degrades to its role label — never an error on the graph.
+- **const loading** — Initial load only: skeleton until both the occupancy snapshot and the config roster have answered once. Poll refreshes never re-skeleton.
+- **const now** — The clock behind every elapsed-time readout on this page. It ticks once a second while slots are busy so the running-duration counters advance, and keeps ticking coarsely when nothing runs — an idle fleet is exactly the shape a broken capacity path leaves behind, so that is when the staleness window (`capacity.ts`) most needs to keep moving. Gating the interval on occupancy instead pinned `now` at mount: no node could ever age into `stale`, and once a fresh `capacity_observed_at` overtook the frozen `now` the clamped difference rendered as "reported 0s ago" — asserting freshness precisely where there was none.
+- **const workers** — Worker nodes: the live occupancy feed is the source of truth; before the dispatcher has published anything, fall back to the static configured roster rendered idle so the graph still draws.
+- **function ClusterPage** — Provenance rides along from the static roster too, so a seed-sourced node reads as one before the dispatcher has published an occupancy snapshot.
+- **const isWorkerEndpoint** — Capacity is settable only on worker-endpoint nodes: `DOCKER_NODES` still owns a `unix://`/`tcp://` node's slot count and the command answers 409 for one (design #293 §7). A node absent from the static roster joined by announce, which only a worker does.
+- **const commonVersion** — Version drift: if the workers report more than one distinct build, flag the ones off the most common version with a subtle hint.
+- **const deployedSha** — Deploy freshness: the deployed platform SHA the fleet is measured against. A node drifts if it's behind that SHA (stale vs main) OR simply disagrees with its peers — a uniformly-stale fleet (every node behind the deployed platform) is invisible to peer comparison alone, which the audit flags.
+- **const apiSha** — The three platform deployables' baked build SHAs, each surfaced separately so the graph shows what commit every component actually runs: the dispatcher from its config snapshot, the api from its health probe, the web bundle from its own build-time define. Absent (local/dev, or an unreached health probe) renders as the role label rather than an error.
+- **const shaSkew** — A component is skewed when its baked SHA disagrees with the deployed dispatcher SHA (the baseline) — an api/web that restarted or republished onto a different commit. Unknown either side ⇒ not flagged (never a false alarm), consistent with the fleet-freshness rule.
+- **function DriftBanner** — prod-vs-main drift: deployed SHA, main tip, and commits-behind. Green when in sync, amber when prod trails main, neutral when the dispatcher hasn't reported the CD fields (a local/dev build, an older snapshot, or SELF_REPO unset). Platform-scoped, so it lives on Cluster alongside the fleet graph.
+- **function FreshnessRow** — One worker's freshness: fresh (green) when its build carries the deployed SHA, stale (red) when it demonstrably does not, unknown (grey) when either side is unreported. Any refresh outcome (a failed or in-flight self-refresh) rides alongside so a wedged refresh is visible, not just a stale version.
+- **function RefreshChip** — The node's last self-refresh outcome, when it carries signal: a failed refresh (red, naming the stage) or one still in flight. A clean `ok` is left implicit — the version chip already shows the node landed the build.
+- **function Node** — A platform tier node (api, dispatcher, web). Shows the deployable's short build SHA when known; a skewed/behind component is marked amber with a tooltip, reusing the drift-banner's presentation language (#188) rather than duplicating its page.
+- **const overCap** — Running above the cap is a drain in progress, not a rendering bug: lowering a cap never kills a container (design #293 §5), so the node finishes what it holds and takes nothing new. The cells past the cap are marked as such.
+
+### `web/src/pages/Deploys.tsx`
+- How many deploys are shown (and have their leg report fetched) at a time. A report costs one request per deploy job — it rides that job's command work task — so an unbounded fan-out grows a round trip per deploy for the whole history. The page renders the newest slice and extends on demand.
+- **const scope** — The deploy jobs, stamped with the project they were loaded for so a navigation between projects can't leave the previous project's rows (and their in-flight report fetches) on screen.
+- **const reports** — Leg reports as they land, keyed by job seq; a present-but-null entry is "fetched, no report", an absent one is "still coming".
+- **const reportScope** — The scope in-flight report fetches were started for. Job ids are per-project seq numbers, so a response arriving after a project switch would otherwise land under a colliding id in the new project's map; settling checks this instead. Deliberately *not* an effect-cleanup flag — revealing older deploys re-runs the report effect, and tearing down on that would discard the newest page's in-flight fetches, which `requested` then never re-issues.
+- **function DeploysPage** — Newest first by seq. The rows render from this alone — each leg report fills in behind its own row as it answers (effect below), rather than holding the page back until the slowest one lands.
+- **const settleReport** — One row's report, recorded the moment it answers. Per-row rather than one Promise.all barrier so a slow deploy holds up only its own shimmer, and so no batch of results can be discarded wholesale.
+- **function DeploysPage** — Leg reports for the visible slice only, in parallel, each fetched once. `shown` is what bounds the fan-out: revealing older deploys costs one more page of requests, not a request per deploy that ever happened — and the pages already in flight keep running, since `requested` would never re-issue a fetch this effect abandoned.
+- **function DeployEntryReport** — A row's leg report: the checklist once its fetch answers, a short shimmer while it is still in flight (the row itself is already on screen), and the muted note when the deploy job carried no report at all.
+- **function fmtWhen** — Compact local timestamp: time-only when the moment is today, date prepended otherwise (mirrors the jobs table's convention).
+
+### `web/src/pages/Designs.tsx`
+- The designs registry (design #321 Decision 7/8): every document under `docs/design/` at default HEAD, joined to the `design/{slug}` group its jobs carry. The question the index answers at a glance is which designs are outstanding, which are done, and which are lying about it — a design whose jobs are all terminal, its own authoring job aside, while its `Status:` line still says PROPOSED is the `status_stale` row, and it is the whole motivation for the view.
+- **function interestRank** — Default order: the rows that want a human first. A stale status leads (the design says PROPOSED and every job it has is finished), then work in flight, then designs nobody has ticketed; a design that is filed, finished and honest about it sinks to the bottom. Ties break on seq, newest first.
+- **const STATUS_COLORS** — The hue a status token reads as. Three entries on purpose — the words the tree writes today — and the hues claim no meaning the documents have not earned. Anything else takes the neutral badge: a design is free to write any word on that line, job #86 owns the vocabulary and has not landed a schema, so an unknown token is normal rather than an error. Grow this when the tree grows a word, never ahead of it.
+- **function DesignsPage** — Status and roll-up share one wrapping row: the sentence the operator is reading is "PROPOSED · 6/6 done".
+
+### `web/src/pages/FileView.tsx`
+- **function FileViewPage** — The docs tree reads as a wiki (job #88): markdown goes through the renderer the job pages already use, rather than a <pre>, and its relative links stay inside the browser.
+
+### `web/src/pages/Home.tsx`
+- Project chooser: lists the projects visible to the caller (platform admins see the whole registry), plus a free-form owner/project field.
+
+### `web/src/pages/JobDetail.tsx`
+- **function bestEffort** — A fetch the page can do without: its failure resolves to null instead of rejecting, so it can be awaited alongside the required ones without taking the page down with it.
+- **const MEMBER_DETAIL_MAX** — How many of a batch's members get their detail fetched. Fetching each member directly beats pulling the project's whole job list for the handful a batch normally holds, but it costs a request per member on *every* refresh and the spec puts no ceiling on `members` — so the fan-out is bounded, and a batch past the bound renders its remaining members as bare ids with a note saying so rather than issuing an unbounded burst per SSE event.
+- **const members** — When this job is a batch, the member jobs it absorbs — fetched from the project list so the Members section can show their titles and live states.
+- **const queue** — Capacity launch-queue snapshot (spec §3.5): drives the "queued" badge's "position N of M". Best-effort — null when the dispatcher can't answer, in which case the badge still renders, just without a position.
+- **const loading** — Initial load only: skeleton until the first fetch answers. SSE-driven refreshes never re-skeleton; a seq/project change resets it (effect below).
+- **const openLogs** — The one task whose live-log pane is expanded, if any. Kept to a single open pane so at most one tail loop polls at a time.
+- **const triageImage** — The platform's triage image (from the config snapshot): a string when triage is available, null when it isn't (dispatcher rejects triage with 422), and undefined while unknown — snapshot not yet loaded, offline, or forbidden. We only disable the button on a confirmed null, so an unknown state keeps the current behavior (the 422 mapping below still catches a live rejection).
+- **const releasing** — True while the run (release) request is in flight. Disables the run button and shows a working label so a tap reads as acknowledged — and so a stray second tap can't land on the revoke button that wraps directly below it.
+- **const groupChoices** — The group vocabulary the picker suggests, and whether a groups write is in flight. `groups` is mutable in every state including Done and Revoked (design #321 Decision 5) — a finished job is the case this exists for — so the editor is offered here, on the read view, not only on a Draft.
+- **const refresh** — Everything the page needs, in one round trip. Nothing here depends on another's result, so nothing may be chained: at operator latency (~240ms RTT over the tailnet) each serialized fetch is another quarter second on every load *and* every SSE-triggered refresh. `criteria` and `queue` stay best-effort — bestEffort() turns their failure into null so they can ride the same Promise.all without ever failing the page — which leaves job/tasks/diff as the only rejectors, so the 401 → /login bounce below is unchanged.
+- **const memberIds** — A batch: fetch its member jobs directly — one small request each, in parallel — rather than the project's entire job list to filter a handful of rows out of it. Best-effort: a member that fails to load just renders as its id. Non-batches clear any stale members.
+- **const debouncedRefresh** — Keep the per-event log immediate, but debounce the refetch: the SSE stream replays the full history on load, so a naive refresh() per event fires a storm of GETs. Coalesce that (and any live burst) into one refetch.
+- **const now** — Live-ticking durations: a single shared clock that re-renders the duration cells once a second while any visible task is Running or capacity-queued, and is torn down otherwise (and on unmount). Finished tasks compute from completed_at, so they don't tick — only the elapsed-since-start (or queued-for) cells move.
+- **const triageUnavailable** — Triage is unavailable when the platform has no TRIAGE_IMAGE configured; the dispatcher enforces this with a 422, so don't offer the action.
+- **const onTriageError** — A 422 means the config changed under us (race): show the friendly message and reflect the now-known-unavailable state so the button disables too.
+- **const editGroups** — Add/remove one group label. The endpoint is add/remove rather than a whole-list replace, so two operators grouping the same job from two tabs both land; the refetch adopts whatever the dispatcher ended up holding.
+- **const isDraft** — A Draft renders the live edit form in place of the read-only info card; its task/criteria/diff sections are empty (nothing has run) so they're hidden.
+- **const isDraftBatch** — A Draft *batch* (§2.1 draft batches): its members are edited as a consist (train of cars) rather than the plain deps picker. A non-empty members list is the batch marker.
+- **const escalationBand** — Tasks banded with an escalation resolution: the resolving Human task and the failed attempts in the same cycle above it. They share an amber left edge in the table so the story reads "these failed → a human stepped in".
+- **function JobDetail** — The job's EFFECTIVE inputs (spec §1.1, #311 Decision 6): supplied values plus the type's declared defaults, which the Ready transition materializes onto the record. A released job can therefore show a value its creator never typed — that is the audit surface, so defaulted entries are shown, not hidden. Immutable after that transition, hence read-only here.
+- **function JobDetail** — Editable in every state, terminal included (design #321 Decision 5): a group is an operator annotation, inert to what ran, and every job the feature was designed for is already finished.
+- **function JobDetail** — Attachments (spec §1.6): screenshots and reference files. The Draft editor renders its own copy, so only the read view shows it here.
+- **const PHASE_HUE** — Per-phase hue so the task table reads as a sequence of distinct phases at a glance rather than near-uniform rows. Hues match the app-wide state badges (Work=blue, Evaluation=purple) so the phase language is consistent everywhere. Merge gate is the evaluation family — a CI re-run against the squash candidate — so it shares evaluation's purple, set apart by its label + tooltip. WrapUp/Triage are the muted housekeeping/advisory phases. Escalation is amber and handled separately (see PhaseLabel's escalation branch).
+- **function PhaseLabel** — The task's phase, as a hued pill. An escalation resolution (a human stepping in to decide a run of failed attempts) renders as an amber `escalation` pill regardless of the phase the record was stamped under — old records carry the resolution under Work; see isEscalationResolution. MergeGate keeps its "why is a CI task running after evaluation passed?" tooltip. Unknown/future phases fall back to a neutral pill so they still read as a phase.
+- **function isEscalationResolution** — Whether a task record is a human resolving an escalation, rather than an attempt of its stamped phase. The code side stamps these under a dedicated `Escalation` phase; older records carry them as a Human-kind result whose `action` (Retry/Resolve/Revoke) is the resolving decision — both are treated as escalation events so the table tells the story consistently.
+- **function escalationDetail** — The escalation-event detail line: the resolving action and the operator who made the call, e.g. "escalation resolved: Retry — david@…".
+- **function neverLaunched** — A Failed task that never got a container is a launch that never happened (no free slot, rejected before spawn) — 0s and no output, otherwise identical to a real agent crash (which spawns a container that then dies). Human tasks never spawn a container, so exclude them.
+- **function resultSummary** — One-line gloss for the tasks table's detail column; the full report renders in the Reports thread below. Triage prose lives in its own section.
+- **function TaskReportBody** — Dispatches on the result's discriminant; an absent result is the crashed / never-ran case (e.g. a launch that found no free slot) — say so plainly rather than rendering blank. Unknown kinds fall through to raw JSON.
+- **type ParsedStructured** — A structured payload as it arrives on the wire: an object, a JSON-encoded string (agent evaluators emit this), or absent. Parsing is tolerant — a string that is valid JSON *object* unwraps; anything else (parse failure, a bare string, an array/number) is surfaced verbatim rather than dropped.
+- **function FindingList** — Findings list: each finding tappable to reveal its issue + suggestion. Every field is optional, so an unexpected finding shape degrades to a bare row rather than crashing.
+- **function StructuredBody** — Renders a parsed structured payload generically, keys open-ended: a `summary`/`notes` string becomes the readable body up front, a `findings` array becomes the expandable finding list, and every remaining key (verdict, scope_check, how_checked, anything unknown) collapses into a small details JSON block. An unparseable payload shows its raw text in the same block.
+- **function EvalReport** — Agent evaluator (e.g. review): the verdict badge, then the structured payload rendered generically — the reviewer's summary is readable without expanding, findings stay tappable, and scope-check/verdict/unknown keys tuck into a collapsed details block. Handles both object and JSON-string wire shapes.
+- **function CommandReport** — Command / CI evaluator: pass/fail + exit code, with the (long) output in a collapsed details that scrolls inside its own box — never widens the page.
+- **function HumanReport** — A human resolution mirrored back as a result: the verdict, an operator note (render-if-present — backend persistence is landing separately), and any structured payload rendered the same generic way as an agent report.
+- **function fmtTime** — A task's start time as a compact local HH:MM:SS; blank until it starts. The full ISO timestamp rides along as the cell's title tooltip (set by caller).
+- **function isQueued** — A task parked Pending by the capacity launch queue (spec §3.5) — waiting for a fleet slot, not idle. It carries no container and no start time; `queued_at` anchors the queued-for duration.
+- **function queuedTooltip** — The "queued" badge's tooltip: names the wait and, when the queue snapshot is available, this launch's position. Degrades gracefully to just the reason when the snapshot is missing (dispatcher unreachable) or the entry has already drained out of it.
+- **function taskDuration** — Finished tasks show completed_at − started_at; Running shows elapsed since started_at; a capacity-queued task shows how long it has waited (now − queued_at). All live cells are measured against the caller's shared `now` clock so they tick (JobDetail drives a 1s interval while any task is Running or queued); an idle Pending is blank.
+- **function hasLogs** — Whether the logs button shows for a task. Gate on state, not container_id: the record carries no container_id while an agent task is Running, so gating on it hides the button for the very case the log viewer exists to serve (tailing a live agent). Any container-backed run — Running ('live'), or a finished Done/Failed ('logs') — offers logs; the pane handles a not-yet- spawned container gracefully (404 → muted note, slow re-checks). Human tasks (claimed attempts, human-kind) never spawn a container, so they keep the dash.
+- **function DiffView** — Plain unified-diff render with line coloring; react-diff-view lands with the full PWA pass (Part 11).
+- **const open** — Collapsed by default; the header toggles. While collapsed, a dot flags posts that arrived after the page was opened — the SSE stream replays the durable history on load, so replayed posts (ts before mount) never count as "new", and opening the section acknowledges everything seen so far.
+- **const text** — channel-reply is the operator/platform replying to the agent; channel-update is the agent's own progress note.
+- **function channelOrigin** — Attribution for a channel post, straight from the event. Channel frames now carry their originating task's identity end to end (spec §6.3): `task_id`, an optional `phase`, and the evaluator name when the post came from an evaluator. We render a compact chip consistent with the Reports thread headers ("task 3 · review"). Legacy posts carry none of this → null (no chip), which is why the old timestamp-window guessing is gone.
+- **function performerLabel** — Who ran the task: the agent model (kind.model on Agent tasks) or, for a human-claimed/human-kind task, the operator's email if the result carries it.
+- **function fmtStamp** — A timestamp as compact local time, prefixed with the date when it isn't today (channel history can span days). The full ISO value rides as a tooltip.
+
+### `web/src/pages/Library.tsx`
+- **const anchor** — Cards render after the fetch, so a #type anchor (e.g. the create form's peek links) must scroll once they exist.
+
+### `web/src/pages/NewJob.tsx`
+- **const loading** — Initial pickers fetch: the form itself renders immediately; only the type/deps pickers skeleton while this is in flight.
+- **const declaredInputs** — Values for the type's declared inputs (spec §1.1), and the messages a rejected create keyed back onto their fields. Both are cleared when the type changes: a value for `sha` means nothing under a type that doesn't declare it, and the server would refuse it as undeclared at release.
+- **const groups** — What the job is part of (design #321): a creation field like any other, and one the picker suggests known names for — the project's groups plus its design documents.
+- **const files** — Files picked/pasted/shot while composing (spec §1.6): held locally and PUT to the job's attachments once it's created, before navigating to it.
+- **const submitting** — State, not a ref: the button has to re-render to disable itself. It stays true through a successful create — the page navigates away rather than returning to an armed form.
+- **function CreateJob** — Pre-validation is a courtesy, not the gate: it repeats exactly what the creation pass would 422 on (charset, length) plus the declaration's own narrowing, so the operator sees it here instead of after a round trip. The fields already render these messages — the banner only says where.
+- **function CreateJob** — Attach composed files before release/navigation so they're present when work starts. Best-effort: a failed upload warns but doesn't block — it can be retried from the job page.
+- **const fields** — A rejection naming `inputs.{name}` belongs on that field, not in one opaque banner — the operator has to know which value to fix.
+- **function CreateJob** — The type's declared inputs (spec §1.1): nothing at all for a type that declares none, which is most of them.
+- **function CreateJob** — The server spoke about the old value; editing it makes that stale, so the field falls back to the live client verdict.
+- **function CreateJob** — Beside the knowledge tags because they look alike and are not: a tag is an execution input the work agent is told about, a group changes nothing about the run (design #321 Decision 3).
+- **function CreateJob** — Frozen while a create is in flight: the release step reads `mode` after the POST resolves, so a mid-flight switch would change what happens to an already-created job.
+
+### `web/src/pages/Project.tsx`
+- **const FILTER_STATES** — The states the state-filter dropdown offers, lifecycle-ordered. The default ("Active") is no filter at all — the finished-hiding gate in matchesFilters is what makes the unfiltered view active-only.
+- **const sortDirDefault** — Which direction a freshly picked sort key opens in: the numeric/temporal keys read newest-first, the categorical ones A→Z.
+- **const SORT_OPTIONS** — The toolbar's sort-by control. It offers exactly the sortable columns, because on phones the table header — and with it the click-to-sort affordance — is not on screen: the rows render as two-line item widgets, not columns.
+- **function fmtStamp** — Compact local timestamp for the jobs table (reuses JobDetail's #57 conventions): time-only when the moment is today, date prepended otherwise. Callers pass the raw ISO string as the cell's `title` for the full tooltip.
+- **function completedTip** — Tooltip for the completed cell: the full ISO instant plus the humanized created→completed WALL-CLOCK span. Deliberately not what the cell shows — the gap between this and the task time below is the queueing and waiting the job did while Frozen and Blocked. Undefined for live jobs so the cell has no tooltip.
+- **function taskTimeHint** — The completed cell's muted hint: how long the job spent *working* — the sum of its own tasks' spans, carried on the jobs-list record (`task_time_ms`) so the table reads it straight off the row instead of fetching tasks per job. Null when no task carried a usable span, which the cell renders as no hint at all rather than a misleading '0s'; a real zero total still shows.
+- **function fmtAge** — Compact "N ago" for a channel post's age. Coarse on purpose — the exact instant rides in the tooltip; here we only want a cheap glance ('2m ago').
+- **function oneLine** — Collapse a channel message to a single line for the muted under-title glance (the full multi-line text rides in the tooltip). Runs of whitespace — including the newlines in markdown prose — become single spaces.
+- **const CHANNEL_STATES** — Jobs whose latest channel-update is worth surfacing under the title: the two live, agent-driven phases. Evaluation shares Work's channel stream, so it costs nothing extra to include (per the brief).
+- **const RANK_UNKNOWN** — State-column sort order. Alphabetical scatters related states, so rank them by lifecycle instead: inert pre-release first, terminal history next, live activity, then attention-needed at the very end — so the default descending click surfaces Escalated/Failed on top and sinks Frozen/Revoked to the bottom. Unknown/future states rank after everything (RANK_UNKNOWN) and still render their name as-is.
+- **const loading** — Initial load only: skeleton until the first jobs fetch answers. SSE-driven refreshes never re-skeleton; a project change resets it (effect below).
+- **const sort** — Jobs table controls: column sort (default state-descending, so live and attention-needed jobs surface on top). The filter model (#162) lives in the URL so a filtered view is shareable.
+- **const qDraft** — The URL owns the filters (a filtered view is shareable, #162), but writing `q` there on every keystroke re-runs the filter/sort/batch-grouping pipeline over every job for each letter typed. So type into local state and push to the URL once typing settles. `qPending` also tracks what we last wrote, so the sync below can tell a URL change we caused from one we didn't (back/forward, a shared link) and only adopt the latter.
+- **function ProjectPage** — Seed/refresh the progress lines from the list. A live SSE event is always newer than the snapshot it raced, so let the existing ts guard decide rather than clobbering: only fill in what we don't already hold at an equal-or-newer stamp.
+- **function ProjectPage** — Best-effort capacity-queue snapshot (spec §3.5): the seqs with a launch waiting for a fleet slot, for the subtle "queued" chip. Never blocks the list — an unreachable dispatcher just drops the chip.
+- **const channelMsgs** — Latest channel-update message per job, surfaced muted under the title for live jobs. Seeded from the jobs list itself (each live job carries its latest post), then kept current from live SSE events. It used to be seeded from the SSE history replay, which meant every page load downloaded the project's entire event history — ~900 KB to annotate a handful of rows. Reset on project change so stale rows don't bleed across navigations.
+- **const debouncedRefresh** — The SSE stream is the source of truth (Part 11): any event → refetch. On page load the stream replays the full history, so debounce to collapse that burst (and any live burst) into a single refetch.
+- **const fleetTick** — Live fleet capacity readout (#148). Every occupancy change rides a task lifecycle event already on this stream, so bump a tick (debounced against the load-time replay burst) to refetch the snapshot. Admin-only feed: the widget hides itself when unavailable. The tick only fires on *this* project's events, but the fleet is shared across projects (#177) — so also poll on an interval, catching a sibling project's occupancy changes and the end-of-burst quiescence after which no further event fires. Same-project activity still updates instantly.
+- **const onEvent** — Every event both feeds the debounced refetch and, when it's a channel-update, updates the latest-message-per-job map. Guard on ts so an out-of-order frame can't overwrite a newer message with an older one.
+- **const depGate** — Release readiness of a Frozen job's deps, resolved client-side from the same jobs fetch (the list already holds every job). Releasing before every dep is Done is at best a Blocked transition; a dep that is Revoked/Failed can never satisfy it, so the job is un-runnable. Gate the run button accordingly and surface which deps are the holdup instead of silently offering a bad action.
+- **const claimedInWork** — Jobs whose Work attempt is parked for a human (a claim materialized: a human is doing the work locally, no agent launched). The jobs LIST reply carries `claim_next` but not the derived `awaiting_human`, so we read this off the pending tasks the page already loads for the Inbox — a parked claimed attempt is a Pending Work task with performed_by='human'. No extra fetch, no API change: `claim_next` covers the pre-park window, this covers the in-Work window, so the claimed badge persists for the whole life of the claim.
+- **const inbox** — A terminal job's pending tasks are zombies — revoke doesn't (yet) close them out server-side, and there is nothing valid to resolve. Hide them so the inbox never offers actions the dispatcher will reject.
+- **const askKind** — What the card is asking of the operator — the resolution vocabulary differs (escalations take retry/resolve/revoke, the rest pass/fail).
+- **const filterKey** — Filter + stickiness. The default view hides finished jobs, but a job that was on screen must not vanish mid-view when the SSE refresh flips it to Done/Revoked. `pinnedRef` remembers the ids currently shown and unions them with the filter result on the next refresh, so a live transition stays put; a job that is already finished the first time we see it is filtered out as usual. Changing the filter resets the pins (finished rows then disappear).
+- **const ta** — Only terminal jobs have a completion moment; non-terminal jobs sink to the bottom regardless of direction (nothing to order them by), so the default descending click surfaces the most-recently-finished job first.
+- **const byId** — Group batch members under their batch so they always travel as one unit: while a batch is on screen its members never float free in the list — they render indented directly beneath it, and only when the batch is expanded (members come from the full jobs list, so expanding shows all of them even if the current filter would hide Batched rows). A member whose batch is filtered out falls back to an ordinary top-level row.
+- **const groupChoices** — The group filter's vocabulary is whatever the loaded rows carry (design #321 Decision 7 — decidable from a list row). A group named in the URL that no loaded row carries still shows as the selected option, so a shared link to a filter reads as filtered rather than as unfiltered.
+- **function ProjectPage** — What the job is part of (design #321). In the title cell rather than a column of its own: the table has no width to spend on an eighth column, and on a phone the title cell claims the whole line, so the chips wrap under the title instead of squeezing the metadata line.
+- **function ProjectPage** — A live job has no completion moment: the table wants a placeholder in the column, the mobile item layout drops it.
+
+### `web/src/pages/Share.tsx`
+- **function SharePage** — Pull the shared file the SW stashed, then clear it so a later manual visit doesn't resurrect a stale screenshot (one-shot handoff).
+
+### `web/src/pages/Stats.tsx`
+- **const byType** — Per-type rollup: counts plus mean wall-clock duration of Done jobs (ready_at → completed_at; created_at stands in for pre-release records).
+
+### `web/src/pages/Tags.tsx`
+- **function TagsPage** — Read each tag back at the path the listing resolved to — the file endpoint reads verbatim, and a project that predates the config root still keeps its tags at the repo root (spec §1.1).
+
+### `web/src/theme.tsx`
+- Names must match the [data-theme='...'] blocks in styles.css. 'cosmos' is the snazzy-redesign dark-first identity (#161); 'aurora' its light sibling. 'bauhaus'/'bauhaus-dark' are the brutalist pair — the chrome they share hangs off a [data-theme^='bauhaus'] prefix selector, so keep both on that prefix.
+
+### `web/src/useEvents.ts`
+- **function useProjectEvents** — SSE subscription (§6.4). EventSource reconnects itself and replays from Last-Event-ID, so the handler just consumes. `onEvent` sees every event; use it to refetch or merge.
+- **function useDebouncedCallback** — Trailing-edge debounce. On page load the SSE stream replays the full event history (no Last-Event-ID), so a naive per-event refetch fires hundreds of GETs in a burst; wrapping the refetch here collapses each burst into a single call ~delayMs after the last event.
+
+### `web/src/useFleet.ts`
+- **function useFleet** — Only hide when we have never had data; a blip after a good load keeps the last snapshot so the widget doesn't flicker out.
+
+### `web/src/useTypewriter.ts`
+- Typewriter feel: type the delta at tens of ms/char, but never run longer than ~1.5s or animate more than the first ~200 chars — past that we snap the tail so a big remote paste doesn't crawl across the screen for seconds.
+
+### `web/vite.config.ts`
+- Dev server proxies API + auth to a running `chuggernaut api` — a local one by default (bind 0.0.0.0:8080), or any reachable deployment via CHUG_API (e.g. `CHUG_API=https://gumbo-mini-0.tail20c474.ts.net npm run dev` to iterate with HMR against prod data). Production serves the built dist/ from the same axum server (UI_DIST), so no proxy is involved.
+- **const webSha** — The bundle's own build SHA, baked in at build time so the cluster view can show which commit the published web UI is on (and flag skew against the dispatcher/api). Populated by CHUG_GIT_SHA in the deploy web-publish leg (deploy/prod/update.sh) and the self-publish flow (.chug/tasks/web-publish.sh); an empty string for a local/dev build, which the UI renders as a dash.

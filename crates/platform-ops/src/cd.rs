@@ -90,13 +90,9 @@ pub async fn refresh(
 ) {
     let mut next = snap.base.clone();
 
-    // Reconcile the snapshot's node list with the live fleet: per-node
-    // health/version from the backend probe, and slots/membership from the
-    // announce roster (spec §3.1 dynamic registration).
     merge_live_fleet(&mut next.nodes, fleet, roster);
     next.dispatcher_sha = snap.deployed_sha.clone();
 
-    // Self-repo deploy drift: current `main` tip and commits-behind.
     if let Some((owner, project)) = snap.self_repo.clone() {
         match resolve_main_tip(repos, &owner, &project).await {
             Ok(tip) => {
@@ -181,9 +177,6 @@ mod tests {
     fn worker(name: &str, slots: u32) -> WorkerNode {
         WorkerNode {
             name: name.into(),
-            // The worker-daemon endpoint (`worker::backend::WORKER_ENDPOINT`),
-            // spelled out so this leaf crate keeps no edge to `worker`; the
-            // field is inert for both tests below.
             endpoint: "worker".into(),
             slots,
             available: true,
@@ -200,9 +193,7 @@ mod tests {
     /// and carries the provenance that says which of the two it is showing.
     #[test]
     fn observed_capacity_updates_snapshot_slots() {
-        // Snapshot node still carries the boot slot count of 4.
         let mut nodes = vec![worker("air", 4)];
-        // Backend probe reports it healthy at 5 slots, observed from the node.
         let observed_at = chrono::Utc::now();
         let fleet = vec![NodeStatus {
             name: "air".into(),
@@ -216,7 +207,6 @@ mod tests {
                 observed_at: Some(observed_at),
             }),
         }];
-        // The roster still holds the boot seed — it is the fallback, not truth.
         let roster = vec![worker("air", 4)];
         merge_live_fleet(&mut nodes, &fleet, &roster);
 
@@ -244,7 +234,6 @@ mod tests {
             available: true,
             version: Some("0.1.0+air".into()),
             refresh_outcome: None,
-            // Reachable, answering pings — and never once reported capacity.
             slots: Some(2),
             capacity: Some(types::worker::ObservedCapacity::default()),
         }];

@@ -246,8 +246,6 @@ resources:
                 ("service".to_string(), "worker".to_string()),
                 ("sha".to_string(), "4f9c1ab".to_string()),
             ]),
-            // Values a substitution engine would notice: an image, an evaluator
-            // name, a secret name, a path. None of them may reach resolution.
             BTreeMap::from([
                 ("image".to_string(), "attacker/img:latest".to_string()),
                 ("eval".to_string(), "ci".to_string()),
@@ -255,8 +253,6 @@ resources:
                 ("prompt".to_string(), "prompts/other.md".to_string()),
             ]),
         ];
-        // Both a type-only job and one carrying an additive evaluator, so the
-        // property covers the merge path as well as the pass-through.
         for base in [job_with_extra_eval(), {
             let mut plain = job_with_extra_eval();
             plain.eval.clear();

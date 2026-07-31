@@ -92,7 +92,6 @@ impl Core {
             })?;
         let dir = tempfile::tempdir().map_err(CoreError::from_io("origin key tempdir"))?;
         let path = dir.path().join("deploy_key");
-        // OpenSSH refuses keys without a trailing newline or with open modes.
         let mut contents = key;
         if !contents.ends_with('\n') {
             contents.push('\n');
@@ -118,8 +117,10 @@ impl Core {
     /// existence and credentials, creates the repo fetched from the origin
     /// with `HEAD` → `integration`, installs the hook, seeds the chuggernaut
     /// config surface (skip-existing), and writes the project record.
-    // TODO(track-C8): dissolved by the named-contexts regroup.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "TODO(track-C8): dissolved by the named-contexts regroup."
+    )]
     pub async fn link_project(
         &mut self,
         owner: &str,
@@ -135,11 +136,6 @@ impl Core {
             )));
         }
 
-        // Credential preconditions, checked before any repo state exists so
-        // the request fails clean and retryable. The deploy key is exercised
-        // by the fetch below; the PAT only at first release — but requiring
-        // both up front makes onboarding failures immediate. file:// origins
-        // (tests, local mirrors) need neither.
         let needs_ssh = origin_url.starts_with("ssh://") || origin_url.contains('@');
         let github_repo = types::github_repo_from_url(origin_url);
         let mut missing = Vec::new();
@@ -231,8 +227,10 @@ impl Core {
     /// push, so a crash mid-release burns `n` (an orphan branch on the origin
     /// is harmless) instead of ever reusing it; `ReleaseState` + hold commit
     /// last, atomically with respect to the single-writer actor.
-    // TODO(track-C8): dissolved by the named-contexts regroup.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "TODO(track-C8): dissolved by the named-contexts regroup."
+    )]
     pub async fn origin_release(&mut self, owner: &str, project: &str) -> Result<ProjectRecord> {
         let (mut record, link) = self.linked_record(owner, project).await?;
         let slug = format!("{owner}/{project}");
@@ -242,8 +240,6 @@ impl Core {
                 "origin release {n} is already open"
             )));
         }
-        // A gate in flight would land a commit on integration *after* the
-        // snapshot below, and the post-merge reset would silently discard it.
         if self
             .merge_gates
             .get(&slug)
@@ -273,8 +269,6 @@ impl Core {
 
         let integration_sha = self.repos.resolve_ref(owner, project, &integration).await?;
         let release_branch = format!("chug/release-{n}");
-        // Local pin first: after a later squash-merge reset, held jobs'
-        // base_refs are only reachable through this ref (gc + provenance).
         self.repos
             .update_ref(
                 owner,
@@ -314,8 +308,6 @@ impl Core {
                     .map_err(|e| CoreError::Config(e.to_string()))?;
                 (pr.number, pr.url)
             }
-            // Non-GitHub origin: branch pushed, no PR. Sync resolves the
-            // release by watching origin main move (see `origin_sync`).
             None => (0, String::new()),
         };
 
@@ -415,8 +407,6 @@ impl Core {
                         None
                     }
                 } else {
-                    // No PR to ask (non-GitHub origin): origin main moving off
-                    // the release base is the only merge signal available.
                     (origin_main_sha != release.base_main_sha).then_some(ReleaseStatus::Merged)
                 };
 
@@ -447,8 +437,6 @@ impl Core {
                 }
             }
             _ => {
-                // No open release: keep integration on origin main while it
-                // has nothing unreleased (external commits flow in).
                 let integration = self.repos.default_branch(owner, project).await?;
                 let integration_sha = self.repos.resolve_ref(owner, project, &integration).await?;
                 if integration_sha != origin_main_sha
@@ -472,7 +460,6 @@ impl Core {
         project: &str,
         record: ProjectRecord,
     ) -> Result<OriginStatusResponse> {
-        // Re-read: sync paths above may have updated the record.
         let record = self.projects.get(owner, project).await?.unwrap_or(record);
         let integration = self.repos.default_branch(owner, project).await?;
         let integration_sha = self

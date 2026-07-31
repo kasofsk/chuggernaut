@@ -282,8 +282,10 @@ fn refresh_phase_marker(line: &str) -> Option<&str> {
 /// Fold one line of script output into the live progress: it always joins the
 /// bounded recent-lines window, and a phase marker additionally advances the
 /// phase (restarting the in-phase clock). No-op when no refresh is in flight.
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 fn refresh_progress_note(slot: &std::sync::Mutex<Option<RefreshProgressState>>, line: &str) {
     let mut guard = slot.lock().unwrap();
     let Some(progress) = guard.as_mut() else {
@@ -304,8 +306,10 @@ fn refresh_progress_note(slot: &std::sync::Mutex<Option<RefreshProgressState>>, 
 /// Advance the phase from the DAEMON's own side of the refresh (the drain and
 /// swap stages it runs between script invocations), so the deploy log never
 /// shows a stale build phase while the daemon is quiescing.
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 fn refresh_progress_phase(slot: &std::sync::Mutex<Option<RefreshProgressState>>, phase: &str) {
     let mut guard = slot.lock().unwrap();
     if let Some(progress) = guard.as_mut() {
@@ -336,8 +340,11 @@ fn refresh_skip_reason(git_url: Option<&str>, git_key: &Path) -> Option<String> 
 
 /// Run the daemon until ctrl-c. Containers it launched keep running after
 /// shutdown; the dispatcher re-attaches.
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::expect_used, clippy::too_many_lines)]
+#[allow(
+    clippy::expect_used,
+    clippy::too_many_lines,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
     let store = match &config.nats_creds {
         Some(path) => {
@@ -349,20 +356,11 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         None => NatsStore::connect(&config.nats_url).await?,
     };
 
-    // Single-node backend named after this node so returned container ids are
-    // already `{node}/{docker_id}` — the fleet backend routes on that prefix.
     let mut backend = DockerBackend::new(vec![DockerNodeConfig {
         name: config.node.clone(),
         endpoint: config.docker_endpoint.clone(),
-        // The dispatcher owns slot *policy* (it schedules against the number
-        // this node reports, and lowering below occupancy drains rather than
-        // kills); the worker only reports usage and its own capacity ceiling.
         slots: u32::MAX,
     }])?;
-    // Node-local build cache: a worker-side property, added here from the
-    // worker's own config — never from the launch message (spec §3.1). The
-    // daemon owns creating/owning the host dir; concurrent containers share it,
-    // which sccache handles by locking.
     let cache_enabled = config.cache_dir.is_some();
     if let Some(dir) = &config.cache_dir {
         std::fs::create_dir_all(dir).map_err(|e| {
@@ -428,11 +426,6 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
     let report = capacity.report();
     tracing::info!(node = %config.node, nats = %config.nats_url, version = %state.version, slots = report.slots, slots_max = report.slots_max, capacity_epoch = report.epoch_ms, "worker up");
 
-    // Announce heartbeat (spec §3.1 dynamic registration): tell the dispatcher
-    // this node is live — name, self-advertised capacity, build version — so it
-    // joins the live fleet with no dispatcher restart. Fire-and-forget on a
-    // plain subject; a missed one is covered by the next tick, and losing the
-    // stream is what marks the node unschedulable dispatcher-side.
     spawn_announce(
         store.clone(),
         config.node.clone(),
@@ -455,7 +448,6 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
                     let body = handle(&state, &req.subject, &req.payload).await;
                     req.respond(body).await;
                 });
-                // Reap finished handlers opportunistically.
                 while tasks.try_join_next().is_some() {}
             }
             _ = tokio::signal::ctrl_c() => {
@@ -464,7 +456,6 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
             }
         }
     }
-    // Bounded grace for in-flight ops; containers keep running regardless.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while tasks.join_next().await.is_some() {}
     })
@@ -532,12 +523,6 @@ fn spawn_announce(
                 }
                 Err(e) => tracing::warn!(node = %node, "worker announce serialize failed: {e}"),
             }
-            // An adopted capacity change re-announces immediately: waiting out
-            // the tick would leave the fleet view showing the old number for up
-            // to ANNOUNCE_INTERVAL after the operator's command was accepted.
-            // `Notify` holds a permit, so a change during the publish above is
-            // not lost. `Interval::tick` is cancel-safe, so the ~15s heartbeat
-            // cadence survives an interruption.
             tokio::select! {
                 _ = interval.tick() => {}
                 () = announce_now.notified() => {}
@@ -602,11 +587,6 @@ fn reply<T>(r: Result<T, WorkerError>) -> WorkerReply<T> {
 async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
     reply(
         async {
-            // Drain guarantee (spec §3.1): once the daemon is quiescing for a
-            // self-refresh swap, refuse new launches with NoCapacity — a
-            // *transient* signal the dispatcher queues and retries, so no task
-            // fails. The permit is held until the container exists, so the swap
-            // never lands mid-launch.
             let _permit = state
                 .refresh
                 .try_launch()
@@ -650,8 +630,6 @@ async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
                     files,
                     cpu_limit: req.cpu_limit,
                     memory_limit: req.memory_limit,
-                    // The worker runs a single-node local backend; the fleet
-                    // already chose this node, so no further pin applies.
                     node: None,
                 })
                 .await
@@ -745,8 +723,6 @@ async fn logs_tail(state: &WorkerState, payload: &[u8]) -> WorkerReply<LogsTailO
     reply(
         async {
             let req: LogsTailRequest = parse(payload)?;
-            // The local backend already caps the chunk at MAX_LOG_TAIL, so the
-            // base64 reply fits max_payload — no extra tailing needed here.
             let tail = state
                 .backend
                 .logs_tail(&req.id, req.since)
@@ -808,8 +784,10 @@ async fn list_running(state: &WorkerState) -> WorkerReply<types::worker::ListRun
     )
 }
 
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 async fn ping(state: &WorkerState) -> WorkerReply<PingOk> {
     reply(
         async {
@@ -821,10 +799,6 @@ async fn ping(state: &WorkerState) -> WorkerReply<PingOk> {
             let capacity = state.capacity.report();
             Ok(PingOk {
                 running,
-                // The pull half of the one capacity source (spec §3.1): the same
-                // fields the announce carries, from the same owner. A ping cannot
-                // be stale, so this is what makes any ordering anomaly
-                // self-healing dispatcher-side.
                 slots: Some(capacity.slots),
                 slots_max: Some(capacity.slots_max),
                 capacity_epoch: Some(capacity.epoch_ms),
@@ -888,8 +862,10 @@ fn set_slots_decide(state: &WorkerState, payload: &[u8]) -> Result<SetSlotsOk, W
 /// only the brief swap window quiesces launches. Returns the version we are
 /// refreshing away from — the new one shows up on a later `ping`, clearing the
 /// dispatcher's version-drift warning.
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 async fn refresh(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<RefreshOk> {
     reply(
         async {
@@ -903,10 +879,6 @@ async fn refresh(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<Refres
                 });
             };
             let from_version = state.version.clone();
-            // No git credential ⇒ the refresh would fetch nothing. Report the
-            // skip in the reply LOUDLY (spec §3.1 / #114) rather than accepting
-            // and no-oping in the background — the deploy then shows the skip
-            // instead of a silent "success".
             if let Some(reason) =
                 refresh_skip_reason(state.refresh_git_url.as_deref(), &state.refresh_git_key)
             {
@@ -918,18 +890,12 @@ async fn refresh(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<Refres
                 });
             }
             if !state.refresh.begin_refresh() {
-                // A refresh is already converging — not an error, and not drift:
-                // report it as not-accepted so the caller skips the swap-wait
-                // rather than logging a scary "not accepted (drift remains)".
                 return Ok(RefreshOk {
                     accepted: false,
                     skipped: None,
                     from_version,
                 });
             }
-            // Record the accepted refresh as in-progress (ticket #187): a later
-            // ping carries this, and `run_refresh` overwrites it with the
-            // terminal verdict on failure (a success swaps the daemon away).
             *state.refresh_outcome.lock().unwrap() = Some(RefreshOutcome {
                 accepted_at: chrono::Utc::now(),
                 finished_at: None,
@@ -937,10 +903,6 @@ async fn refresh(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<Refres
                 from_sha: from_version.clone(),
                 to_sha: req.sha.clone(),
             });
-            // Open the live progress record for this refresh (ticket #253) at
-            // accept time, so the deploy's very first poll already reads a phase
-            // rather than an empty wait. Replaces any previous refresh's record:
-            // progress is live state, not history.
             *state.refresh_progress.lock().unwrap() =
                 Some(RefreshProgressState::new(&req.sha, "accepted"));
             let st = state.clone();
@@ -970,10 +932,6 @@ async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshReque
         Some(&state.refresh_pgid),
     )
     .await;
-    // Cancellation is checked BEFORE the build's own verdict: a cancel kills the
-    // build, so the build error it produces is a CONSEQUENCE of the cancel, not
-    // the cause. Attributing it to `build` would put "the node's build broke" in
-    // a deploy leg for a node the deploy itself stopped (ticket #254).
     if state.refresh.is_cancelled() {
         refresh_end_cancelled(&state, "build");
         return;
@@ -985,8 +943,6 @@ async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshReque
         return;
     }
 
-    // Drain guarantee: refuse new launches, then wait for accepted-but-not-yet-
-    // created launches to finish before swapping (spec §3.1).
     refresh_progress_phase(progress, "drain");
     state.refresh.quiesce();
     if !drain(&state.refresh, DRAIN_TIMEOUT).await {
@@ -997,9 +953,6 @@ async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshReque
         return;
     }
 
-    // Last cancellable instant: past `begin_swap` the node is going onto the new
-    // images and a cancel is refused, so this is where a cancel that arrived
-    // during the build or the drain actually stops the refresh.
     if !state.refresh.begin_swap() {
         refresh_end_cancelled(&state, "drain");
         return;
@@ -1007,9 +960,6 @@ async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshReque
     tracing::info!(node = %state.node, "worker refresh: swapping daemon (job containers survive)");
     refresh_progress_phase(progress, "daemon-swap");
     if let Err(e) = run_script(&script, &["swap", &req.tag], Some(progress), None).await {
-        // The swap spawns a detached replacement, so on success this process is
-        // simply removed and never returns here. Reaching this arm means the
-        // swap itself failed to launch — reopen so the node keeps serving.
         tracing::error!(node = %state.node, "worker refresh: swap failed: {e}");
         record_refresh_failure(&state, "swap", &e);
         state.refresh.abort();
@@ -1020,12 +970,11 @@ async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshReque
 /// the next `ping` reports it and the failure becomes durable, queryable fleet
 /// state rather than only this node's log. The error tail is trimmed for the
 /// operator; the swapped-in daemon (on success) never reaches here.
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 fn record_refresh_failure(state: &WorkerState, stage: &str, error: &str) {
-    // `error` already carries the script's captured tail on a build/swap
-    // failure; bound it the same way the daemon streams so the ping reply and
-    // the durable outcome stay small.
     let error_tail = bounded_tail(error, REFRESH_TAIL_LINES, REFRESH_TAIL_BYTES);
     let mut slot = state.refresh_outcome.lock().unwrap();
     if let Some(outcome) = slot.as_mut() {
@@ -1056,15 +1005,14 @@ fn refresh_end_cancelled(state: &WorkerState, during: &str) {
 /// `sha`. Soft by construction — a cancel races the build it aborts, so "no
 /// refresh in flight", "a different SHA", and "already swapping" are reported
 /// outcomes, not errors.
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 async fn refresh_cancel(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<RefreshCancelOk> {
     reply(
         async {
             let req: RefreshCancelRequest = parse(payload)?;
-            // Only OUR target may be cancelled: a node converging on some other
-            // SHA (a concurrent deploy, a hand-run refresh) is none of this
-            // deploy's business.
             let target = state
                 .refresh_outcome
                 .lock()
@@ -1111,8 +1059,10 @@ async fn refresh_cancel(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply
 ///
 /// A missing pgid is normal — the cancel landed between scripts (during the
 /// drain); the `cancelled` flag alone stops the refresh at the next checkpoint.
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 fn signal_refresh_build(state: &Arc<WorkerState>, pgid: Option<i32>) {
     let Some(pgid) = pgid else {
         tracing::info!(node = %state.node, "worker refresh cancel: no build process running");
@@ -1136,8 +1086,7 @@ fn signal_refresh_build(state: &Arc<WorkerState>, pgid: Option<i32>) {
 /// an outage.
 fn kill_process_group(pgid: i32, signal: i32) {
     debug_assert!(pgid > 1, "pgid {pgid} must be a real process group");
-    // SAFETY: `kill` is async-signal-safe and takes no pointers; the only
-    // failure mode is ESRCH (the group already exited), which is a no-op.
+    // SAFETY: `kill` is async-signal-safe and takes no pointers; its only failure mode is ESRCH — the group already exited, which the branch below treats as a no-op.
     let rc = unsafe { libc::kill(-pgid, signal) };
     if rc != 0 {
         tracing::info!(
@@ -1181,8 +1130,10 @@ async fn drain(gate: &RefreshGate, timeout: Duration) -> bool {
 /// OWN group for exactly that reason — the daemon must never be able to signal
 /// itself — and the slot is cleared before this returns, so a cancel arriving
 /// after the script exits signals nothing.
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 async fn run_script(
     script: &Path,
     args: &[&str],
@@ -1199,8 +1150,6 @@ async fn run_script(
         .process_group(0)
         .spawn()
         .map_err(|e| format!("spawning {}: {e}", script.display()))?;
-    // With `process_group(0)` the child leads its own group, so its pid IS the
-    // group id.
     let pgid = child.id().map(|pid| pid as i32);
     if let Some(slot) = pgid_slot {
         *slot.lock().unwrap() = pgid;
@@ -1231,8 +1180,10 @@ async fn run_script(
 /// Pump the child's stdout+stderr until both close, streaming every line to the
 /// daemon's log and into `progress`, and return the bounded tail. Split out of
 /// [`run_script`] so each stays one readable unit.
-// TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-#[allow(clippy::expect_used)]
+#[allow(
+    clippy::expect_used,
+    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+)]
 async fn run_script_stream(
     child: &mut tokio::process::Child,
     phase: &str,
@@ -1240,8 +1191,6 @@ async fn run_script_stream(
 ) -> std::collections::VecDeque<String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
-    // Feed both streams' lines into one channel; a single consumer prints and
-    // buffers them so stdout/stderr interleave in arrival order.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
@@ -1259,8 +1208,6 @@ async fn run_script_stream(
         }
     });
 
-    // Keep only the last REFRESH_TAIL_LINES lines so a long build log stays
-    // memory-bounded; each line is streamed out immediately as it arrives.
     let mut tail: std::collections::VecDeque<String> =
         std::collections::VecDeque::with_capacity(REFRESH_TAIL_LINES);
     while let Some(line) = rx.recv().await {
@@ -1306,28 +1253,22 @@ mod tests {
     fn refresh_gate_quiesce_and_drain() {
         let gate = RefreshGate::default();
 
-        // Normal operation: launches are admitted.
         let p1 = gate.try_launch().expect("admitted before quiescing");
         assert!(!gate.drained(), "a live launch means not drained");
 
-        // First refresh claims the slot; a concurrent one is refused.
         assert!(gate.begin_refresh());
         assert!(!gate.begin_refresh(), "only one refresh at a time");
 
-        // Swap window opens: new launches are refused so the swap can't land
-        // between accepting a launch and the container existing.
         gate.quiesce();
         assert!(
             gate.try_launch().is_none(),
             "launches refused while quiescing"
         );
 
-        // The swap must wait for the launch already in flight to finish.
         assert!(!gate.drained());
         drop(p1);
         assert!(gate.drained(), "drained once the in-flight launch releases");
 
-        // Aborting reopens the node (build/drain failure path).
         gate.abort();
         assert!(gate.try_launch().is_some(), "launches admitted after abort");
         assert!(gate.begin_refresh(), "refresh slot freed after abort");
@@ -1349,8 +1290,6 @@ mod tests {
             "a cancelled refresh must never swap the daemon"
         );
 
-        // The cancel belongs to the refresh that just ended — a leftover flag
-        // would poison the node's NEXT refresh into cancelling itself.
         gate.abort();
         assert!(!gate.is_cancelled(), "abort clears the cancel");
         assert!(gate.begin_refresh(), "refresh slot freed after abort");
@@ -1386,7 +1325,6 @@ mod tests {
             env.get("SCCACHE_DIR").map(String::as_str),
             Some(container::docker::CACHE_MOUNT_PATH)
         );
-        // Untouched request env survives.
         assert_eq!(env.get("JOB_ID").map(String::as_str), Some("7"));
     }
 
@@ -1396,7 +1334,6 @@ mod tests {
     /// skip in the RPC reply.
     #[test]
     fn refresh_skips_without_git_credential() {
-        // No git URL ⇒ skipped, whatever the key.
         let reason = refresh_skip_reason(None, Path::new("/data/keys/worker_git"));
         assert!(
             reason
@@ -1405,8 +1342,6 @@ mod tests {
             "unexpected: {reason:?}"
         );
 
-        // URL set but the key file is absent ⇒ still skipped (the #114 prod
-        // condition: empty URL AND no /data/keys/worker_git).
         let missing = Path::new("/definitely/not/a/real/worker_git");
         let reason = refresh_skip_reason(Some("ssh://git@front:2222/acme/chug.git"), missing);
         assert!(
@@ -1416,8 +1351,6 @@ mod tests {
             "unexpected: {reason:?}"
         );
 
-        // URL set and the key file exists (this test binary is a real file) ⇒
-        // no skip: the refresh may proceed.
         let present = std::env::current_exe().unwrap();
         assert_eq!(
             refresh_skip_reason(Some("ssh://git@front:2222/acme/chug.git"), &present),
@@ -1441,7 +1374,6 @@ mod tests {
     /// (deploy #212). Both caps and the char-boundary guard are exercised.
     #[test]
     fn bounded_tail_caps_lines_then_bytes() {
-        // Line cap: 200 lines in, keep the last 50.
         let big = (0..200)
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
@@ -1454,20 +1386,16 @@ mod tests {
         assert!(tail.ends_with("line 199"));
         assert_eq!(tail.lines().count(), 50);
 
-        // Byte cap: a single very long line is trimmed to its most-recent bytes.
         let long = "x".repeat(10_000);
         let tail = bounded_tail(&long, 50, 100);
         assert_eq!(tail.len(), 100);
         assert!(long.ends_with(&tail));
 
-        // Char-boundary safety: cutting mid-multibyte never panics and yields
-        // valid UTF-8 no longer than the cap.
-        let unicode = "😀".repeat(100); // 4 bytes each
+        let unicode = "😀".repeat(100);
         let tail = bounded_tail(&unicode, 50, 10);
         assert!(tail.len() <= 10);
         assert!(tail.chars().all(|c| c == '😀'));
 
-        // Short input is returned whole.
         assert_eq!(bounded_tail("boom", 50, 4096), "boom");
         assert_eq!(bounded_tail("", 50, 4096), "");
     }
@@ -1502,7 +1430,6 @@ mod tests {
             "captures stdout too: {err:?}"
         );
 
-        // A script that succeeds is Ok with no error text.
         let ok = dir.join("ok.sh");
         std::fs::write(&ok, "#!/bin/sh\necho fine\nexit 0\n").unwrap();
         std::fs::set_permissions(&ok, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1520,14 +1447,10 @@ mod tests {
             refresh_phase_marker("worker-refresh: phase build-image 3/3 agent-rust"),
             Some("build-image 3/3 agent-rust")
         );
-        // The daemon reads the script's stdout through a line reader, so a
-        // trailing \r (or leading indent) must not hide a phase.
         assert_eq!(
             refresh_phase_marker("  worker-refresh: phase swap-daemon\r"),
             Some("swap-daemon")
         );
-        // Near-misses are not phases: an ordinary log line, and a marker with no
-        // name at all.
         assert_eq!(
             refresh_phase_marker("worker-refresh: pruned after a successful refresh"),
             None
@@ -1546,7 +1469,6 @@ mod tests {
     fn refresh_progress_tracks_phases_and_bounds_recent_lines() {
         let slot = std::sync::Mutex::new(None);
 
-        // No refresh in flight ⇒ nothing recorded, nothing reported.
         refresh_progress_note(&slot, "worker-refresh: phase build-image 1/3 worker");
         assert!(slot.lock().unwrap().is_none());
 
@@ -1558,7 +1480,6 @@ mod tests {
         assert_eq!(wire.phase, "build-image 1/3 worker");
         assert_eq!(wire.recent.len(), 2, "both lines kept: {:?}", wire.recent);
 
-        // The recent window is bounded — a long build cannot grow the ping.
         for i in 0..50 {
             refresh_progress_note(&slot, &format!("build line {i}"));
         }
@@ -1568,12 +1489,9 @@ mod tests {
             wire.recent.last().map(String::as_str),
             Some("build line 49")
         );
-        // A phase set by the daemon's own stages (drain/swap) shows too.
         refresh_progress_phase(&slot, "drain");
         assert_eq!(slot.lock().unwrap().as_ref().unwrap().wire().phase, "drain");
 
-        // Individual lines are capped, so one pathological build line cannot
-        // blow the ping reply either.
         refresh_progress_note(&slot, &"x".repeat(10_000));
         let wire = slot.lock().unwrap().as_ref().unwrap().wire();
         assert_eq!(

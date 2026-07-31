@@ -6,7 +6,7 @@ never launched as its own container). Its counterpart in the Evaluation phase
 is `.chug/tasks/review-docs-updated.md`.
 
 Knowledge in this repo lives in **docs, not comments**. `.chug/tasks/check-comments.sh`
-rejects every non-doc comment a diff adds and caps doc comments at two
+rejects every non-doc comment in the tree and caps doc comments at two
 sentences, so the explanation a comment used to carry has exactly one place to
 go — a doc. Docs are intentional and organized: one place to look, one place to
 update, one job type (`docs`) that maintains them.
@@ -33,6 +33,7 @@ update, one job type (`docs`) that maintains them.
    | `STYLE.md` | changes a rule or the machinery enforcing one |
    | `CLAUDE.md` | changes a convention that bites someone who misses it |
    | `docs/` (the wiki) | changes something a reader is being taught — the operator-facing behavior of a feature |
+   | `docs/implementation-notes.md` | invalidates a note there, or gives one a better home — fold it into the real doc and delete the entry |
    | `design.md`, `docs/design/*.md` | supersedes a decision one of them argues |
 
 3. **Prefer editing a doc to adding one.** A new page that duplicates an

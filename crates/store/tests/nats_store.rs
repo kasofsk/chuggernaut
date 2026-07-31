@@ -93,10 +93,8 @@ async fn topology_and_typed_stores_round_trip() {
         .await
         .unwrap();
     store.ensure_topology().await.unwrap();
-    // Idempotent: second call must not fail.
     store.ensure_topology().await.unwrap();
 
-    // Jobs
     let jobs = store.jobs().await.unwrap();
     jobs.put(&job(1)).await.unwrap();
     jobs.put(&job(2)).await.unwrap();
@@ -106,7 +104,6 @@ async fn topology_and_typed_stores_round_trip() {
     let listed = jobs.list("acme", "api").await.unwrap();
     assert_eq!(listed.iter().map(|j| j.id).collect::<Vec<_>>(), vec![1, 2]);
 
-    // Tasks
     let tasks = store.tasks().await.unwrap();
     tasks.put(&task(1, 1)).await.unwrap();
     tasks.put(&task(1, 2)).await.unwrap();
@@ -114,20 +111,16 @@ async fn topology_and_typed_stores_round_trip() {
     assert_eq!(log.len(), 2);
     assert_eq!(log[1].id, 2);
 
-    // Counters: sequential per project
     let counters = store.counters().await.unwrap();
     assert_eq!(counters.next("acme", "api").await.unwrap(), 1);
     assert_eq!(counters.next("acme", "api").await.unwrap(), 2);
     assert_eq!(counters.next("acme", "web").await.unwrap(), 1);
 
-    // Rdeps: append is idempotent per dependent
     let rdeps = store.rdeps().await.unwrap();
     rdeps.append("acme", "api", 1, 43).await.unwrap();
     rdeps.append("acme", "api", 1, 77).await.unwrap();
     rdeps.append("acme", "api", 1, 43).await.unwrap();
     assert_eq!(rdeps.get("acme", "api", 1).await.unwrap(), vec![43, 77]);
-    // remove drops the given dependent (a Draft edit dropping an upstream);
-    // removing an absent one is a no-op.
     rdeps.remove("acme", "api", 1, 43).await.unwrap();
     rdeps.remove("acme", "api", 1, 999).await.unwrap();
     assert_eq!(rdeps.get("acme", "api", 1).await.unwrap(), vec![77]);
@@ -138,8 +131,10 @@ async fn topology_and_typed_stores_round_trip() {
 /// This asserts a >1MB blob survives the full gzip+age+chunking round trip, and
 /// that a handle without the identity cannot read it back.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn artifacts_round_trip_a_blob_larger_than_max_payload() {
     let server = require_nats!();
     let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
@@ -149,8 +144,6 @@ async fn artifacts_round_trip_a_blob_larger_than_max_payload() {
 
     let (identity, public) = store::secrets::generate_age_keypair();
 
-    // Incompressible, so the stored bytes really do exceed max_payload —
-    // transcript-shaped JSONL would gzip small enough to hide the problem.
     let mut big = Vec::with_capacity(3 * 1024 * 1024);
     let mut x: u32 = 0x1234_5678;
     while big.len() < 3 * 1024 * 1024 {
@@ -187,7 +180,6 @@ async fn artifacts_round_trip_a_blob_larger_than_max_payload() {
         .unwrap();
     assert_eq!(got.as_deref(), Some(big.as_slice()));
 
-    // Missing artifacts read as None, not an error — human tasks have none.
     assert!(
         reader
             .get("acme", "api", 42, 7, store::ArtifactKind::Stdout)
@@ -196,7 +188,6 @@ async fn artifacts_round_trip_a_blob_larger_than_max_payload() {
             .is_none()
     );
 
-    // Listing is scoped to the task.
     writer
         .put(
             "acme",
@@ -229,7 +220,6 @@ async fn artifacts_round_trip_a_blob_larger_than_max_payload() {
         ]
     );
 
-    // A handle without the identity can fetch bytes but must not read them.
     let blind = store
         .artifacts(store::ArtifactCrypto::encrypt_only(&public).unwrap())
         .await
@@ -247,8 +237,10 @@ async fn artifacts_round_trip_a_blob_larger_than_max_payload() {
 /// content type and original size without opening the blob, are scoped per job,
 /// and can be deleted. A larger-than-`max_payload` blob confirms chunking.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn job_attachments_round_trip_list_and_delete() {
     let server = require_nats!();
     let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
@@ -266,8 +258,6 @@ async fn job_attachments_round_trip_list_and_delete() {
         .await
         .unwrap();
 
-    // A screenshot-shaped (incompressible) blob over max_payload, so the
-    // attachment path really exercises object-store chunking.
     let mut png = Vec::with_capacity(2 * 1024 * 1024);
     let mut x: u32 = 0x9e37_79b9;
     while png.len() < 2 * 1024 * 1024 {
@@ -293,13 +283,11 @@ async fn job_attachments_round_trip_list_and_delete() {
         )
         .await
         .unwrap();
-    // A different job's attachment must not leak into #42's listing.
     writer
         .put_attachment("acme", "api", 43, "other.txt", "text/plain", b"unrelated")
         .await
         .unwrap();
 
-    // Download returns the bytes decrypted plus the stored metadata.
     let (meta, bytes) = reader
         .get_attachment("acme", "api", 42, "mobile-bug.png")
         .await
@@ -309,8 +297,6 @@ async fn job_attachments_round_trip_list_and_delete() {
     assert_eq!(meta.content_type, "image/png");
     assert_eq!(meta.size, png.len() as u64);
 
-    // Listing reports content type + original size without opening the blob,
-    // scoped to the job, sorted by name.
     let list = reader.list_attachments("acme", "api", 42).await.unwrap();
     assert_eq!(
         list,
@@ -328,7 +314,6 @@ async fn job_attachments_round_trip_list_and_delete() {
         ]
     );
 
-    // A missing attachment reads as None, not an error.
     assert!(
         reader
             .get_attachment("acme", "api", 42, "nope.png")
@@ -337,7 +322,6 @@ async fn job_attachments_round_trip_list_and_delete() {
             .is_none()
     );
 
-    // Delete removes it; a second delete reports it was already gone.
     assert!(
         reader
             .delete_attachment("acme", "api", 42, "notes.txt")
@@ -399,7 +383,6 @@ async fn job_attachments_stress_cycle() {
                 .await
                 .unwrap()
         );
-        // The exact prod hang: GET after DELETE must read as absent, not park.
         assert!(
             arts.get_attachment("acme", "api", 7, &name)
                 .await
@@ -431,10 +414,8 @@ async fn step_log_upserts_by_step_number() {
     store.ensure_topology().await.unwrap();
     let steps = store.steps().await.unwrap();
 
-    // No entry → empty log (task without an inline review loop).
     assert!(steps.list("acme", "api", 1, 1).await.unwrap().is_empty());
 
-    // step-started appends…
     steps
         .upsert("acme", "api", 1, 1, step(1, StepKind::AuthorIteration))
         .await
@@ -443,7 +424,6 @@ async fn step_log_upserts_by_step_number() {
         .upsert("acme", "api", 1, 1, step(2, StepKind::InlineReview))
         .await
         .unwrap();
-    // …and the matching step-completed overwrites in place.
     let mut done = step(2, StepKind::InlineReview);
     done.status = StepStatus::Done;
     done.pass = Some(false);
@@ -459,16 +439,11 @@ async fn step_log_upserts_by_step_number() {
 #[tokio::test]
 async fn request_with_retry_survives_late_responder() {
     let server = require_nats!();
-    // Both ends share one namespace so the prefixed subject lines up (#206).
     let prefix = test_utils::unique_prefix();
     let store = NatsStore::connect_namespaced(server.url(), &prefix)
         .await
         .unwrap();
 
-    // Responder comes up only after the first attempt has failed — the §4.2
-    // bounded-retry contract is that the submit eventually lands. It subscribes
-    // through the namespaced store so the harness prefix is applied on both
-    // ends (a raw `client().subscribe` would miss it).
     let responder_store = NatsStore::connect_namespaced(server.url(), &prefix)
         .await
         .unwrap();
@@ -513,7 +488,6 @@ async fn namespaces_isolate_and_reserve_prod_names() {
     b.ensure_topology().await.unwrap();
 
     a.jobs().await.unwrap().put(&job(1)).await.unwrap();
-    // b, a different namespace, must not see a's write.
     assert!(
         b.jobs()
             .await
@@ -523,7 +497,6 @@ async fn namespaces_isolate_and_reserve_prod_names() {
             .unwrap()
             .is_none()
     );
-    // a sees its own.
     assert!(
         a.jobs()
             .await
@@ -534,9 +507,6 @@ async fn namespaces_isolate_and_reserve_prod_names() {
             .is_some()
     );
 
-    // A namespaced store must not have created the bare, production-named `jobs`
-    // bucket: a plain (empty-prefix) handle finds no such bucket until real
-    // `ensure_topology` runs for prod. This reserves prod names for prod.
     let prod = NatsStore::connect(server.url()).await.unwrap();
     assert!(
         prod.jobs().await.is_err(),
@@ -569,8 +539,6 @@ async fn prefix_scan_scopes_by_project_and_skips_tombstones() {
     jobs.put(&job(1)).await.unwrap();
     jobs.put(&job(2)).await.unwrap();
     jobs.put(&job(3)).await.unwrap();
-    // A second project in the same bucket, and a third whose name shares a
-    // prefix with the first ("api" vs "apiary") — the token-alignment case.
     let other = Job {
         project: "acme/web".into(),
         ..job(1)
@@ -589,8 +557,6 @@ async fn prefix_scan_scopes_by_project_and_skips_tombstones() {
         "the scan must return this project's jobs and only this project's"
     );
 
-    // Delete one and confirm it disappears rather than erroring: `delete` is a
-    // purge, whose tombstone LastPerSubject would otherwise hand back.
     let bucket = store.raw_bucket(store::buckets::JOBS).await.unwrap();
     bucket.delete("acme.api.2").await.unwrap();
 
@@ -607,12 +573,8 @@ async fn prefix_scan_scopes_by_project_and_skips_tombstones() {
         "the headers-only spelling must drop tombstones too"
     );
 
-    // The adjacent project is still intact — proof the scan scoped rather than
-    // over-matched in either direction.
     assert_eq!(jobs.list("acme", "apiary").await.unwrap().len(), 1);
     assert_eq!(jobs.list("acme", "web").await.unwrap().len(), 1);
-    // A project with nothing stored scans clean rather than hanging on a
-    // consumer that never delivers.
     assert!(jobs.list("acme", "absent").await.unwrap().is_empty());
 }
 
@@ -650,9 +612,6 @@ async fn prefix_scan_returns_every_key_past_the_ack_pending_cap() {
         "every stored key must come back exactly once"
     );
 
-    // The scan's ephemeral consumer is deleted by the scan itself, not left for
-    // the server's inactivity reaper — a dozen were live at once on prod. Only
-    // scans touch this bucket in this test, so anything left is a leak.
     let mut stream = store
         .jetstream()
         .get_stream(format!("KV_{}{}", store.prefix(), store::buckets::TASKS))

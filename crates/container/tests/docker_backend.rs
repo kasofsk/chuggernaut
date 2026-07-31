@@ -31,7 +31,6 @@ fn one_up_one_down() -> Option<DockerBackend> {
             slots: 8,
         },
         DockerNodeConfig {
-            // Refuses connections immediately — the out-of-service node.
             name: "down".into(),
             endpoint: "tcp://127.0.0.1:1".into(),
             slots: 8,
@@ -78,17 +77,14 @@ async fn remove_reclaims_exited_container_and_is_idempotent() {
     let id = be.launch(suite::cfg("exit 0")).await.unwrap();
     assert_eq!(be.wait(&id).await.unwrap(), 0);
 
-    // While exited-but-present it is a sweep candidate.
     assert!(
         be.list_managed_exited().await.unwrap().contains(&id),
         "exited managed container should show up for the startup sweep"
     );
 
     be.remove(&id).await.unwrap();
-    // Gone: inspect no longer finds it, and it drops out of the sweep list.
     assert!(be.inspect(&id).await.unwrap().is_none());
     assert!(!be.list_managed_exited().await.unwrap().contains(&id));
-    // Removing an already-gone container is a no-op, not an error.
     be.remove(&id).await.unwrap();
 }
 
@@ -99,22 +95,18 @@ async fn remove_reclaims_exited_container_and_is_idempotent() {
 async fn startup_degrades_and_placement_excludes_down_node() {
     let Some(be) = one_up_one_down() else { return };
 
-    // One node down, one up ⇒ startup succeeds (does not error).
     be.ping_all()
         .await
         .expect("degrade: start with one node up");
-    // The down node is marked out of service in the snapshot.
     let avail = be.availability();
     assert!(!avail.iter().find(|(n, _)| n == "down").unwrap().1);
     assert!(avail.iter().find(|(n, _)| n == "local").unwrap().1);
 
-    // Unpinned launch skips the down node and lands on local.
     let id = be.launch(suite::cfg("exit 0")).await.unwrap();
     assert!(id.starts_with("local/"), "placed off the down node: {id}");
     assert_eq!(be.wait(&id).await.unwrap(), 0);
     be.remove(&id).await.unwrap();
 
-    // A pin to the out-of-service node fails without spillover to local.
     let err = be
         .launch(pinned("exit 0", "down"))
         .await
@@ -122,7 +114,6 @@ async fn startup_degrades_and_placement_excludes_down_node() {
         .to_string();
     assert!(err.contains("no free slots on node down"), "{err}");
 
-    // A pin to an unknown node names the known nodes.
     let err = be
         .launch(pinned("exit 0", "mini"))
         .await
@@ -130,7 +121,6 @@ async fn startup_degrades_and_placement_excludes_down_node() {
         .to_string();
     assert!(err.contains("unknown node \"mini\""), "{err}");
 
-    // A pin to the healthy node places (and routes) there.
     let id = be.launch(pinned("exit 0", "local")).await.unwrap();
     assert!(id.starts_with("local/"), "{id}");
     assert_eq!(be.wait(&id).await.unwrap(), 0);

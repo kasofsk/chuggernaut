@@ -82,8 +82,9 @@ Two consequences worth knowing:
 ## Comments: tests are in scope
 
 The comment lint (`.chug/tasks/check-comments.sh`, STYLE.md Tier 1) covers every
-Rust and TypeScript source in the diff, `tests/` included — no non-doc comment on
-a line the change adds, and doc comments capped at two sentences. A test that
+tracked Rust and TypeScript source, `tests/` included — no non-doc comment
+anywhere in the tree, and doc comments capped at two sentences on the blocks a
+change touches. A test that
 needs a paragraph to explain what it pins is telling you the *test name* is
 wrong: `escalates_when_eval_retries_are_exhausted` carries what a comment above
 it would have said, and it carries it into the failure output.

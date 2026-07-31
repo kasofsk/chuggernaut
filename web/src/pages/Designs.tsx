@@ -7,14 +7,6 @@ import { StateBadge, stateColor, stateRank } from '../components/StateBadge'
 import { SkeletonLines } from '../components/Skeleton'
 import { IconSearch } from '../components/icons'
 
-// The designs registry (design #321 Decision 7/8): every document under
-// `docs/design/` at default HEAD, joined to the `design/{slug}` group its jobs
-// carry. The question the index answers at a glance is which designs are
-// outstanding, which are done, and which are lying about it — a design whose
-// jobs are all terminal, its own authoring job aside, while its `Status:` line
-// still says PROPOSED is the `status_stale` row, and it is the whole motivation
-// for the view.
-
 type SortKey = 'interesting' | 'seq' | 'title' | 'open'
 type Lens = 'all' | 'stale' | 'inflight' | 'untouched'
 
@@ -32,10 +24,6 @@ const LENS_OPTIONS: { key: Lens; label: string }[] = [
   { key: 'untouched', label: 'No jobs' },
 ]
 
-// Default order: the rows that want a human first. A stale status leads (the
-// design says PROPOSED and every job it has is finished), then work in flight,
-// then designs nobody has ticketed; a design that is filed, finished and honest
-// about it sinks to the bottom. Ties break on seq, newest first.
 export function interestRank(d: DesignEntry): number {
   if (d.status_stale) return 0
   if (d.open > 0) return 1
@@ -82,12 +70,6 @@ export function splitStatus(status: string): { token: string; detail: string } {
   return { token, detail: text.slice(token.length).replace(/^[\s.,;:]+/, '') }
 }
 
-// The hue a status token reads as. Three entries on purpose — the words the
-// tree writes today — and the hues claim no meaning the documents have not
-// earned. Anything else takes the neutral badge: a design is free to write any
-// word on that line, job #86 owns the vocabulary and has not landed a schema,
-// so an unknown token is normal rather than an error. Grow this when the tree
-// grows a word, never ahead of it.
 const STATUS_COLORS: Record<string, string> = {
   PROPOSED: 'blue',
   DRAFT: 'purple',
@@ -110,7 +92,6 @@ function DesignStatusBadge({ entry }: { entry: DesignEntry }) {
   if (!token) return <span className="dim">status line has no leading word</span>
   return (
     <span className="design-status-flag">
-      {/* The whole line on hover, so the badge never hides what the doc said. */}
       <span className={`badge badge-${statusColor(token)}`} title={entry.status}>
         {token}
       </span>
@@ -170,7 +151,7 @@ export function DesignsPage() {
   const [sort, setSort] = useState<SortKey>('interesting')
 
   useEffect(() => {
-    setLoaded(false) // param change: back to skeletons until the new fetch lands
+    setLoaded(false)
     api.designs(owner, project).then(
       (ds) => {
         setDesigns(ds)
@@ -255,8 +236,6 @@ export function DesignsPage() {
                     {d.title}
                   </Link>
                 </div>
-                {/* Status and roll-up share one wrapping row: the sentence the
-                    operator is reading is "PROPOSED · 6/6 done". */}
                 <div className="design-meta">
                   <DesignStatusBadge entry={d} />
                   <DesignHistogram entry={d} />
@@ -299,7 +278,7 @@ export function DesignPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    setEntry(null) // param change: back to skeletons until the new fetches land
+    setEntry(null)
     setDoc(null)
     api
       .designs(owner, project)

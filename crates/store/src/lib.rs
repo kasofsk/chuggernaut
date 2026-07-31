@@ -88,10 +88,6 @@ impl NatsStore {
     /// legal in both KV bucket names and subject tokens; test callers use
     /// [`crate::unique_prefix`]-style values such as `"t9f3a2c1-"`.
     pub async fn connect_namespaced(url: &str, prefix: &str) -> Result<Self> {
-        // A namespaced (test) connection tolerates a momentarily-busy shared
-        // server: under a `cargo test --workspace` fan-out the handshake can drop
-        // ("expected INFO, got nothing"), so retry a few times before giving up.
-        // Production (empty prefix) connects once, unchanged.
         let client = if prefix.is_empty() {
             async_nats::connect(url).await.map_err(nats_err)?
         } else {
@@ -109,10 +105,6 @@ impl NatsStore {
             }
         };
         let mut js = jetstream::new(client.clone());
-        // A non-empty prefix is a test sharing one server with many other
-        // namespaces (#206). Under a `cargo test --workspace` fan-out the server
-        // is momentarily busy, so lift the JetStream request timeout well above
-        // the 5s default — a slow bucket-create should wait, not spuriously fail.
         if !prefix.is_empty() {
             js.set_timeout(Duration::from_secs(30));
         }
@@ -189,12 +181,6 @@ impl NatsStore {
     }
 
     async fn ensure_topology_inner(&self) -> Result<()> {
-        // Production (empty prefix) uses File storage — durable, and byte-for-
-        // byte unchanged from before (#206). A namespaced handle is a test on a
-        // shared server, where many namespaces are created concurrently: Memory
-        // storage keeps every JetStream request off the disk, so a
-        // `cargo test --workspace` fan-out of NATS containers does not saturate
-        // the host's fsync path and time bucket creation out.
         let storage = if self.prefix.is_empty() {
             jetstream::stream::StorageType::File
         } else {
@@ -203,7 +189,7 @@ impl NatsStore {
         for &bucket in buckets::ALL_BUCKETS {
             let max_age = match bucket {
                 buckets::CHANNELS => 7 * DAY,
-                _ => Duration::ZERO, // no TTL
+                _ => Duration::ZERO,
             };
             self.js
                 .create_key_value(jetstream::kv::Config {
@@ -235,10 +221,6 @@ impl NatsStore {
                 .map_err(nats_err)?;
         }
 
-        // Blobs live in an object store, not KV: transcripts routinely exceed
-        // the 1MB max_payload. 90d matches `job-events`, the trail they pair
-        // with. Deletion stays allowed — unlike the streams — because artifacts
-        // are observability data an operator may need to purge.
         self.js
             .create_object_store(jetstream::object_store::Config {
                 bucket: self.ns(buckets::OBJECT_ARTIFACTS),

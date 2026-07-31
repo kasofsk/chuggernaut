@@ -25,7 +25,7 @@ export function PromptsPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    setLoaded(false) // param change: back to skeletons until the new fetch lands
+    setLoaded(false)
     async function load() {
       const summaries = await api.jobTypes(owner, project)
       const details = await Promise.all(summaries.map((s) => api.jobType(owner, project, s.name)))

@@ -45,9 +45,6 @@ pub async fn spawn_tasks_handler(
     tokio::spawn(async move {
         while let Some(req) = tasks_sub.next().await {
             let parts: Vec<&str> = req.subject.split('.').collect();
-            // req.tasks.output.{owner}.{project}.{seq}.{task_id} — live output.
-            // Spawned with cloned handles so a wedged node's slow tail neither
-            // blocks other output reads nor the list/resolve legs of this loop.
             if parts.get(2) == Some(&"output") {
                 let coords = (
                     parts.get(3).copied().map(String::from),
@@ -89,14 +86,12 @@ async fn tasks_dispatch(
     payload: &[u8],
 ) -> Vec<u8> {
     match parts.get(2).copied() {
-        // req.tasks.list.pending.{owner}.{project}
         Some("list") if parts.get(3) == Some(&"pending") => {
             match (parts.get(4).copied(), parts.get(5).copied()) {
                 (Some(owner), Some(project)) => list_pending(store, owner, project).await,
                 _ => bad_request("malformed subject"),
             }
         }
-        // req.tasks.list.{owner}.{project}.{job_seq}
         Some("list") => match (
             parts.get(3).copied(),
             parts.get(4).copied(),
@@ -111,7 +106,6 @@ async fn tasks_dispatch(
             },
             _ => bad_request("malformed subject"),
         },
-        // req.tasks.resolve.{owner}.{project}.{job_seq}.{task_id}
         Some("resolve") => match (
             parts.get(3).copied(),
             parts.get(4).copied(),
@@ -171,16 +165,10 @@ async fn task_output(
                 "data": String::from_utf8_lossy(&tail.data),
                 "running": true,
             })),
-            // The container vanished under a still-Running record (harvest then
-            // dispose, before the exit is recorded): fall back to the artifact.
             Err(container::BackendError::NotFound(_)) => finished_reply(),
-            // A wedged/unreachable node: an error envelope, not a stall. This
-            // request fails; others are untouched (it runs off the actor).
             Err(e) => bad_gateway(&format!("container output unavailable: {e}")),
         },
-        // Finished → the api serves the harvested stdout.log at the same offsets.
         _ if task.state != TaskState::Running => finished_reply(),
-        // Running, but no container yet (agent pre-launch, human/claimed attempt).
         _ => NOT_FOUND.to_vec(),
     }
 }
@@ -200,11 +188,6 @@ async fn list_pending(store: &NatsStore, owner: &str, project: &str) -> Vec<u8> 
         },
         Err(e) => return error_reply(&e.into()),
     };
-    // A Pending task whose owning job is terminal (revoked/done) is a zombie:
-    // resolving it is pointless because the job no longer exists to advance.
-    // Revoke now closes its own tasks (§2.1), but records predating that fix
-    // must still disappear from the inbox without a migration, so join against
-    // the job records already in KV and drop any terminal-job task here.
     let terminal: std::collections::HashSet<u64> = match store.jobs().await {
         Ok(jobs) => match jobs.list(owner, project).await {
             Ok(jobs) => jobs
@@ -219,9 +202,6 @@ async fn list_pending(store: &NatsStore, owner: &str, project: &str) -> Vec<u8> 
     let pending: Vec<_> = all
         .into_iter()
         .filter(|t| {
-            // Human-kind waits AND claimed attempts of any kind (§1.2 claims)
-            // — the latter are in-progress-by-human, not passive waits;
-            // performed_by distinguishes them.
             t.state == types::TaskState::Pending
                 && (matches!(t.kind, types::TaskKind::Human { .. })
                     || t.performed_by == Some(types::Performer::Human))

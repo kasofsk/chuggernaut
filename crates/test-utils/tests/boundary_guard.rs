@@ -43,9 +43,6 @@ struct Graph {
 }
 
 fn load_graph() -> Graph {
-    // Reuse the same cargo that launched the test; `cargo metadata` reads the
-    // committed `Cargo.lock`, so the resolve graph is deterministic and needs
-    // no network.
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let out = Command::new(cargo)
         .args(["metadata", "--format-version", "1"])
@@ -90,8 +87,6 @@ fn load_graph() -> Graph {
                 .iter()
                 .map(|d| {
                     let pkg = d["pkg"].as_str().expect("dep pkg").to_string();
-                    // A dep is dev-only when every edge to it is `kind: "dev"`
-                    // (normal/build edges carry `kind: null`/`"build"`).
                     let dev_only = d["dep_kinds"]
                         .as_array()
                         .expect("dep_kinds")
@@ -270,9 +265,6 @@ fn platform_ops_declares_only_its_charter_edges() {
          (NORTH-STAR §1, refactor-plan C9) but also depends on: {unexpected:?}"
     );
 
-    // Dev-deps are held to the same rule: a test fixture reaching back into
-    // `dispatcher` would make the context untestable on its own, which is the
-    // property the crate split bought.
     assert!(
         !dev.contains("dispatcher"),
         "`chuggernaut-platform-ops` must not depend on `dispatcher`, dev-deps \
@@ -324,8 +316,6 @@ fn domain_crate_has_zero_await() {
     for path in files {
         let src = std::fs::read_to_string(&path).expect("read domain source file");
         for (i, line) in src.lines().enumerate() {
-            // Skip comment lines — doc headers may name `.await` to state the
-            // guarantee this test enforces.
             if line.trim_start().starts_with("//") {
                 continue;
             }

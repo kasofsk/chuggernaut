@@ -10,8 +10,10 @@ use std::collections::HashMap;
 use std::process::Command;
 
 /// True when a local Docker daemon answers; pulls the alpine test image.
-// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-#[allow(clippy::expect_used)]
+#[allow(
+    clippy::expect_used,
+    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+)]
 pub fn docker_available() -> bool {
     let up = Command::new("docker")
         .args(["info", "--format", "{{.ServerVersion}}"])
@@ -46,8 +48,10 @@ pub fn cfg(cmd: &str) -> ContainerLaunchConfig {
 }
 
 /// Remove a test container by its `{node}/{docker_id}` id.
-// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+)]
 pub fn rm(id: &str) {
     let cid = id.split_once('/').unwrap().1;
     let _ = Command::new("docker").args(["rm", "-f", cid]).output();
@@ -55,8 +59,10 @@ pub fn rm(id: &str) {
 
 /// Log capture is the only window into a failed command task. Both streams
 /// must come back; within-stream order holds (cross-stream order is Docker's).
-// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+)]
 pub async fn logs_capture_both_streams_after_exit(be: &dyn ContainerBackend, node: &str) {
     let id = be
         .launch(cfg(
@@ -74,7 +80,6 @@ pub async fn logs_capture_both_streams_after_exit(be: &dyn ContainerBackend, nod
         "within-stream order broken: {text:?}"
     );
 
-    // Idempotent, like wait — reconciliation may re-read.
     assert_eq!(be.logs(&id).await.unwrap(), be.logs(&id).await.unwrap());
 
     let unknown = format!("{node}/deadbeefdeadbeef");
@@ -86,10 +91,11 @@ pub async fn logs_capture_both_streams_after_exit(be: &dyn ContainerBackend, nod
 /// the container is still RUNNING (the whole point of the /output endpoint),
 /// and keep serving the same offsets after exit so a poller never loses the
 /// tail. `follow: false`, so no call ever hangs.
-// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+)]
 pub async fn logs_tail_grows_while_running(be: &dyn ContainerBackend, node: &str) {
-    // A line every 100ms, then exit — output accrues across polls.
     let id = be
         .launch(cfg(
             "i=0; while [ $i -lt 15 ]; do echo line-$i; i=$((i+1)); sleep 0.1; done",
@@ -97,8 +103,6 @@ pub async fn logs_tail_grows_while_running(be: &dyn ContainerBackend, node: &str
         .await
         .unwrap();
 
-    // Read from the cursor while it runs: output appears, the cursor advances,
-    // and it never goes backwards.
     let mut cursor = 0u64;
     let mut seen = String::new();
     for _ in 0..60 {
@@ -117,7 +121,6 @@ pub async fn logs_tail_grows_while_running(be: &dyn ContainerBackend, node: &str
     );
     let mid = cursor;
 
-    // Let it finish and drain the rest from the same cursor.
     assert_eq!(be.wait(&id).await.unwrap(), 0);
     for _ in 0..60 {
         let tail = be.logs_tail(&id, cursor).await.unwrap();
@@ -133,38 +136,38 @@ pub async fn logs_tail_grows_while_running(be: &dyn ContainerBackend, node: &str
         seen.contains("line-14"),
         "tail after exit incomplete: {seen:?}"
     );
-    // The reconstructed stream is contiguous and ordered per stream.
     assert!(
         seen.find("line-0") < seen.find("line-14"),
         "reassembled output out of order: {seen:?}"
     );
 
-    // Caught up: a cursor at the end yields empty data and the same offset.
     let at_end = be.logs_tail(&id, cursor).await.unwrap();
     assert!(at_end.data.is_empty(), "caught-up read should be empty");
     assert_eq!(at_end.offset, cursor);
 
-    // Unknown container errors, like `logs`.
     let unknown = format!("{node}/deadbeefdeadbeef");
     assert!(be.logs_tail(&unknown, 0).await.is_err());
     rm(&id);
 }
 
-// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+)]
 pub async fn exit_codes_round_trip(be: &dyn ContainerBackend) {
     let ok = be.launch(cfg("exit 0")).await.unwrap();
     let fail = be.launch(cfg("exit 7")).await.unwrap();
     assert_eq!(be.wait(&ok).await.unwrap(), 0);
     assert_eq!(be.wait(&fail).await.unwrap(), 7);
-    // wait after exit is idempotent (§3.6 reconciliation relies on this)
     assert_eq!(be.wait(&fail).await.unwrap(), 7);
     rm(&ok);
     rm(&fail);
 }
 
-// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+)]
 pub async fn env_file_injection_and_copy_out(be: &dyn ContainerBackend) {
     let mut config = cfg(
         "cat /chuggernaut/prompt.md > /out.txt && printf %s \"$FOO\" >> /out.txt && \
@@ -197,8 +200,10 @@ pub async fn env_file_injection_and_copy_out(be: &dyn ContainerBackend) {
     rm(&id);
 }
 
-// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+)]
 pub async fn inspect_kill_and_not_found(be: &dyn ContainerBackend, node: &str) {
     let id = be.launch(cfg("sleep 30")).await.unwrap();
     assert_eq!(
@@ -207,12 +212,11 @@ pub async fn inspect_kill_and_not_found(be: &dyn ContainerBackend, node: &str) {
     );
     be.kill(&id).await.unwrap();
     let exit = be.wait(&id).await.unwrap();
-    assert_ne!(exit, 0); // SIGKILL → 137
+    assert_ne!(exit, 0);
     assert!(matches!(
         be.inspect(&id).await.unwrap(),
         Some(ContainerStatus::Exited { exit_code }) if exit_code == exit
     ));
-    // kill on an exited container is idempotent
     be.kill(&id).await.unwrap();
     rm(&id);
 
@@ -227,8 +231,10 @@ pub async fn inspect_kill_and_not_found(be: &dyn ContainerBackend, node: &str) {
 /// occupancy snapshot (#138) and busyness placement (#153) read, so every
 /// backend — including the NATS-proxied worker fleet — must report it faithfully
 /// (the DockerBackend's own list is unit-covered, but the proxy path was not).
-// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+)]
 pub async fn running_count_reflects_launch_and_exit(be: &dyn ContainerBackend, node: &str) {
     let mut config = cfg("sleep 30");
     config.env.insert("JOB_PROJECT".into(), "acme/api".into());
@@ -236,9 +242,6 @@ pub async fn running_count_reflects_launch_and_exit(be: &dyn ContainerBackend, n
     config.env.insert("CHUG_TASK_ID".into(), "7".into());
     let id = be.launch(config).await.unwrap();
 
-    // Visible to the accounting while running, carrying its launch identity —
-    // asserted on the specific id so a concurrent test's container never flakes
-    // this (the node's list is fleet-wide).
     let running = be.list_managed_running().await.unwrap();
     let mine = running
         .iter()
@@ -249,7 +252,6 @@ pub async fn running_count_reflects_launch_and_exit(be: &dyn ContainerBackend, n
     assert_eq!(mine.task, Some(7));
     assert!(id.starts_with(node), "id {id} should carry node {node}");
 
-    // The freed slot: once killed and reaped it no longer occupies the node.
     be.kill(&id).await.unwrap();
     assert_ne!(be.wait(&id).await.unwrap(), 0);
     be.remove(&id).await.unwrap();

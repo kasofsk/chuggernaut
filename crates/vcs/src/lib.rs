@@ -199,8 +199,6 @@ impl RepoManager {
         Ok(())
     }
 
-    // ── Project lifecycle (spec §12.2) ──────────────────────────────────────
-
     /// Init a bare repo with `HEAD` → `refs/heads/{default_branch}` and an
     /// initial empty commit so HEAD is a valid ref.
     pub async fn create_project(
@@ -246,8 +244,10 @@ impl RepoManager {
 
     /// Write `hooks/pre-receive` into a bare repo (body from `auth::ssh`,
     /// §5.2/§12.2), mode 0755.
-    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-    #[allow(clippy::unwrap_used)]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+    )]
     pub async fn install_pre_receive_hook(
         &self,
         owner: &str,
@@ -314,15 +314,11 @@ impl RepoManager {
             Ok(())
         }
         .await;
-        // Always detach the worktree — a stale registration would block the
-        // next seed. The temp dir itself is cleaned by its guard.
         let _ = self
             .run(&repo, &["worktree", "remove", "--force", &wt_str])
             .await;
         result
     }
-
-    // ── Linked-origin projects ──────────────────────────────────────────────
 
     /// Create a project whose canonical default branch lives on an external
     /// origin: init a bare repo, register `origin` with a single-branch fetch
@@ -386,7 +382,6 @@ impl RepoManager {
         }
         .await;
         if result.is_err() {
-            // A half-linked repo would block a retry on the RepoExists guard.
             let _ = tokio::fs::remove_dir_all(&repo).await;
         }
         result
@@ -397,7 +392,6 @@ impl RepoManager {
         let out = self
             .run_origin(repo, &["ls-remote", "--symref", "origin", "HEAD"], env)
             .await?;
-        // First line: "ref: refs/heads/{main}\tHEAD"
         out.lines()
             .find_map(|l| {
                 l.strip_prefix("ref: ")
@@ -530,8 +524,6 @@ impl RepoManager {
         Ok(sha.trim().to_string())
     }
 
-    // ── Branch operations (spec §3.2, §5.1) ─────────────────────────────────
-
     pub async fn create_branch(
         &self,
         owner: &str,
@@ -577,8 +569,10 @@ impl RepoManager {
     /// commit whose change already landed on `new_base` as an empty commit
     /// rather than stopping — that is not a conflict. Only a real content
     /// conflict (`--diff-filter=U`) yields [`RebaseOutcome::Conflict`].
-    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+    )]
     pub async fn rebase_branch(
         &self,
         owner: &str,
@@ -600,7 +594,6 @@ impl RepoManager {
             .filter(|l| !l.is_empty())
             .map(String::from)
             .collect();
-        // No commits of our own: the branch collapses onto the new base.
         if commits.is_empty() {
             self.create_branch(owner, project, branch, new_base).await?;
             return Ok(RebaseOutcome::Rebased {
@@ -640,9 +633,6 @@ impl RepoManager {
                     )
                     .await?;
                 if !out.status.success() {
-                    // A real conflict leaves unmerged (`U`) paths; anything else
-                    // (e.g. a merge commit) is a genuine git error, not a
-                    // conflict to route through rework.
                     let conflicted = self
                         .run(&wt, &["diff", "--name-only", "--diff-filter=U"])
                         .await?;
@@ -667,8 +657,6 @@ impl RepoManager {
                 .await?
                 .trim()
                 .to_string();
-            // CAS on the branch tip: the single-writer dispatcher makes a race
-            // impossible, so a surprise is a logic bug, not a silent stomp.
             self.run(
                 &repo,
                 &[
@@ -683,14 +671,11 @@ impl RepoManager {
         }
         .await;
 
-        // Always detach the worktree — a stale registration would block reuse.
         let _ = self
             .run(&repo, &["worktree", "remove", "--force", &wt_str])
             .await;
         result
     }
-
-    // ── Content reads (spec §2.2, §3.2, §6.2) ───────────────────────────────
 
     /// Job type and prompt resolution at `base_ref`. None if the path does not
     /// exist at that ref.
@@ -750,7 +735,6 @@ impl RepoManager {
             .await?;
         out.lines()
             .map(|line| {
-                // "<mode> <type> <oid> <size>\t<path>" — size is "-" for trees.
                 let (meta, path) = line.split_once('\t').ok_or_else(|| VcsError::Parse {
                     context: "ls-tree",
                     detail: line.to_string(),
@@ -819,8 +803,6 @@ impl RepoManager {
             })
             .collect()
     }
-
-    // ── Squash-merge (spec §3.2 step 12, §5.1) ──────────────────────────────
 
     pub async fn has_commits_beyond(
         &self,
@@ -899,11 +881,6 @@ impl RepoManager {
         match out.status.code() {
             Some(0) => {
                 let tree = stdout.trim().to_string();
-                // §3.2 step 12 guard: a clean merge-tree can still carry conflict
-                // markers if the branch holds an UNRESOLVED WIP-rebase commit
-                // (merge-base == new base → the branch's blob, markers and all,
-                // is taken verbatim). A no-evaluator job would otherwise squash
-                // them straight onto the default branch.
                 let unresolved = self
                     .residual_conflict_markers(owner, project, base_ref, &branch, &tree)
                     .await?;
@@ -922,8 +899,6 @@ impl RepoManager {
                 })
             }
             Some(1) => {
-                // Line 1: toplevel tree OID; then conflicted file names until a
-                // blank line separates the informational messages.
                 let mut files: Vec<String> = stdout
                     .lines()
                     .skip(1)
@@ -979,14 +954,9 @@ impl RepoManager {
             )
             .await?;
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-        // Line 0 is the merged tree OID in BOTH exit 0 and exit 1.
         let tree = stdout.lines().next().unwrap_or_default().trim().to_string();
         let short = &new_base[..new_base.len().min(7)];
 
-        // Build the commit message, then commit the merged tree as one commit
-        // parented on the new base and move the branch ref onto it (CAS on the
-        // old tip: the single-writer dispatcher makes a race impossible, so a
-        // surprise is a logic bug).
         let (msg, result) = match out.status.code() {
             Some(0) => (
                 format!("job/{seq}: rebased onto {short}"),
@@ -1048,7 +1018,6 @@ impl RepoManager {
         tree: &str,
     ) -> Result<Vec<String>> {
         let repo = self.repo_path(owner, project);
-        // %B (full body) of each commit unique to the branch, record-separated.
         let bodies = self
             .run(
                 &repo,
@@ -1078,7 +1047,7 @@ impl RepoManager {
                 .exec(&repo, &["cat-file", "blob", &format!("{tree}:{f}")], None)
                 .await?;
             if !out.status.success() {
-                continue; // path gone from the merged tree — nothing to land
+                continue;
             }
             let content = String::from_utf8_lossy(&out.stdout);
             if content.contains("<<<<<<< ") && content.contains(">>>>>>> ") {
@@ -1195,8 +1164,6 @@ impl RepoManager {
         Ok(ctx)
     }
 
-    // ── Diff API (spec §6.2) ────────────────────────────────────────────────
-
     /// Diff behavior by job state (spec §6.2). `Done` recovers the squash-merge
     /// commit via an anchored `--grep` on the default branch.
     pub async fn diff_for_job(&self, job: &Job) -> Result<DiffResponse> {
@@ -1207,9 +1174,6 @@ impl RepoManager {
             });
         };
         match job.state {
-            // Draft/Stalled/Batched are pre-work: no branch of their own to
-            // diff (§1.2, §2.1) — a batch member's changes live on the batch
-            // branch, and the batch itself diffs under Work/Evaluation/etc.
             JobState::Draft
             | JobState::Frozen
             | JobState::Batched
@@ -1260,7 +1224,6 @@ impl RepoManager {
                 let (a, d, path) = (parts.next()?, parts.next()?, parts.next()?);
                 Some(FileStat {
                     path: path.to_string(),
-                    // "-" for binary files
                     additions: a.parse().unwrap_or(0),
                     deletions: d.parse().unwrap_or(0),
                 })
@@ -1305,13 +1268,8 @@ impl RepoManager {
                 None,
             )
             .await?;
-        // Exit 0 = ancestor, exit 1 = not an ancestor; anything else (e.g. a bad
-        // rev) is also treated as "not an ancestor" so re-review degrades to the
-        // full diff rather than failing the whole eval launch.
         Ok(out.status.success())
     }
-
-    // ── git plumbing ────────────────────────────────────────────────────────
 
     async fn run(&self, repo: &Path, args: &[&str]) -> Result<String> {
         let out = self.exec(repo, args, None).await?;
@@ -1353,8 +1311,10 @@ impl RepoManager {
         self.exec_with(repo, args, stdin, None, env).await
     }
 
-    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+    )]
     async fn exec_with(
         &self,
         repo: &Path,
@@ -1365,14 +1325,11 @@ impl RepoManager {
     ) -> Result<Output> {
         let mut cmd = Command::new("git");
         cmd.arg("-C").arg(repo).args(args);
-        // Deterministic identity; ignore host-level git config (gpg signing,
-        // init.defaultBranch, etc.).
         cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null");
         for (k, v) in GIT_IDENTITY {
             cmd.env(k, v);
         }
-        // Layered last so callers can override the default identity per commit.
         for (k, v) in extra_env {
             cmd.env(k, v);
         }

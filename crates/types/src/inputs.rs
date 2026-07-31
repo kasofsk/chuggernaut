@@ -117,9 +117,6 @@ pub fn check_value_charset(value: &str) -> Result<(), InputValueError> {
     if value.is_empty() {
         return Err(InputValueError::Empty);
     }
-    // Characters, not bytes: the charset is ASCII-only, so a multi-byte
-    // character is out of it regardless, and reporting the character is what an
-    // author can act on.
     let len = value.chars().count();
     if len > INPUT_VALUE_LEN_MAX {
         return Err(InputValueError::TooLong { len });
@@ -127,9 +124,6 @@ pub fn check_value_charset(value: &str) -> Result<(), InputValueError> {
     if let Some(ch) = value.chars().find(|c| !value_char_allowed(*c)) {
         return Err(InputValueError::Charset { ch });
     }
-    // Postcondition, negative space (STYLE.md Tier 2 #2): an accepted value is
-    // ASCII, which is what lets the length bound double as a byte bound and what
-    // every downstream env/prompt consumer relies on.
     debug_assert!(value.is_ascii(), "an accepted input value is ASCII");
     Ok(())
 }
@@ -271,8 +265,6 @@ mod tests {
 
     #[test]
     fn charset_matches_the_documented_pattern() {
-        // The hand-rolled predicate and the regex the JSON Schema advertises are
-        // two statements of one rule; this is what keeps them one rule.
         let re = regex::Regex::new(INPUT_VALUE_PATTERN).unwrap();
         for c in (0u8..=127).map(char::from).chain(['é', 'λ', '\u{1F600}']) {
             assert_eq!(
@@ -326,10 +318,6 @@ mod tests {
         assert_eq!(keys.len(), names.len(), "{keys:?} collapsed {names:?}");
         assert_eq!(input_env_key("image_tag"), "CHUG_INPUT_IMAGE_TAG");
         assert!(keys.iter().all(|k| k.starts_with(INPUT_ENV_PREFIX)));
-        // …and why the name rule excludes uppercase: without it these two
-        // distinct names would map to the one key. `name_is_well_formed` is what
-        // keeps the second out of any declaration, so `input_env_key` never sees
-        // it (hence the raw mapping here rather than the function).
         assert!(!name_is_well_formed("IMAGE_TAG"));
         assert_eq!("image_tag".to_uppercase(), "IMAGE_TAG".to_uppercase());
     }
@@ -346,8 +334,6 @@ mod tests {
         ] {
             assert_eq!(check_value_charset(good), Ok(()), "should accept {good:?}");
         }
-        // Every excluded class from design #311 Decision 5 layer 2: whitespace,
-        // quotes, backtick, backslash, and the shell metacharacters.
         for bad in [
             "a b", "a\nb", "a\tb", "a'b", "a\"b", "a`b", "a\\b", "a$b", "a;b", "a|b", "a&b", "a<b",
             "a>b", "a(b", "a)b", "a{b", "a}b", "a*b", "a?b", "a!b", "a#b", "a%b", "a=b", "a,b",
@@ -366,7 +352,6 @@ mod tests {
 
     #[test]
     fn length_bound_is_a_hard_error_at_the_boundary() {
-        // The advertised pattern carries the same bound as the constant.
         assert!(
             INPUT_VALUE_PATTERN.contains(&format!("{{1,{INPUT_VALUE_LEN_MAX}}}")),
             "{INPUT_VALUE_PATTERN} does not advertise the {INPUT_VALUE_LEN_MAX} bound"
@@ -385,15 +370,11 @@ mod tests {
 
     #[test]
     fn pattern_narrows_the_charset_and_can_never_widen_it() {
-        // A wide-open pattern does not buy back a metacharacter: the charset is
-        // checked first, unconditionally.
         let permissive = string_input(Some(".*"));
         assert!(matches!(
             check_value(&permissive, "a;rm -rf"),
             Err(InputValueError::Charset { .. })
         ));
-        // The rollback case: a hex SHA and nothing else, which is what rules out
-        // the leading `-` and `/` the charset alone permits.
         let sha = string_input(Some("^[0-9a-f]{7,40}$"));
         assert_eq!(check_value(&sha, "4f9c1ab"), Ok(()));
         for bad in ["-rf", "/etc/shadow", "4F9C1AB", "4f9c1"] {
@@ -409,8 +390,6 @@ mod tests {
 
     #[test]
     fn pattern_must_match_the_whole_value() {
-        // Unanchored by the author, anchored by the platform — a partial match
-        // is not a match, and an alternation still means the whole value.
         let unanchored = string_input(Some("[0-9a-f]{7}"));
         assert_eq!(check_value(&unanchored, "4f9c1ab"), Ok(()));
         assert!(check_value(&unanchored, "4f9c1abzz").is_err());
@@ -446,7 +425,6 @@ mod tests {
         assert_eq!(check_supplied(&ok), Ok(()));
         assert_eq!(check_supplied(&BTreeMap::new()), Ok(()));
 
-        // A name no declaration could ever have (uppercase, leading digit, dash).
         for bad_name in ["SHA", "1sha", "image-tag", ""] {
             assert_eq!(
                 check_supplied(&BTreeMap::from([(bad_name.to_string(), "x".to_string())])),
@@ -456,8 +434,6 @@ mod tests {
             );
         }
 
-        // A metacharacter and an over-long value are both refused, naming the
-        // input so the operator knows which field to fix.
         assert_eq!(
             check_supplied(&BTreeMap::from([("sha".into(), "a;rm -rf".into())])),
             Err(SuppliedInputError::Value {
@@ -476,7 +452,6 @@ mod tests {
             })
         );
 
-        // The count bound is a hard error at the boundary, not a truncation.
         let at_limit: BTreeMap<String, String> = (0..INPUTS_COUNT_MAX)
             .map(|i| (format!("input_{i}"), "v".to_string()))
             .collect();
@@ -491,8 +466,6 @@ mod tests {
             })
         );
 
-        // Semantics are NOT this pass's job: an undeclared name of legal shape
-        // is accepted here and rejected at release.
         assert_eq!(
             check_supplied(&BTreeMap::from([("nobody_declared_me".into(), "x".into())])),
             Ok(())
@@ -510,8 +483,6 @@ mod tests {
                 values: vec!["web".into(), "worker".into(), "bot".into()],
             })
         );
-        // An enum with nothing declared admits nothing — the field rules reject
-        // the declaration, and the value check agrees.
         assert!(check_value(&enum_input(&[]), "web").is_err());
     }
 }

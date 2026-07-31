@@ -130,25 +130,10 @@ impl Core {
         task: &mut Task,
         reason: String,
     ) -> Result<()> {
-        // Preserve the original enqueue time across *re-deferrals* (§3.5): when a
-        // resumed agent eval loses the slot race and signals `NoCapacity` back
-        // (its record still carries the first defer's `queued_at`), the wait must
-        // keep accumulating from that first defer rather than restarting the
-        // max-wait backstop clock — otherwise a churning-but-full fleet could
-        // reset the clock on every resume and never escalate. First defer: the
-        // task has no `queued_at` yet, so stamp now. (The command paths never
-        // re-enter here — they re-queue the same entry directly — so this only
-        // affects the agent re-defer path; command tasks always stamp now.)
         let queued_at = task.queued_at.unwrap_or_else(Utc::now);
         task.state = TaskState::Pending;
         task.container_id = None;
-        // The task-timeout clock starts when the container actually launches,
-        // so a queued task must carry no start time (§3.5 excludes Pending).
         task.started_at = None;
-        // Surface *why* it is Pending and *since when*, both persisted: the UI
-        // shows a "queued" badge and queued-for duration, and the same
-        // `queued_at` anchors the FIFO order and the max-wait backstop across a
-        // dispatcher restart (§3.5).
         task.pending_reason = Some(types::PendingReason::QueuedForCapacity);
         task.queued_at = Some(queued_at);
         self.task_put(task).await?;
@@ -170,6 +155,31 @@ impl Core {
             priority: launch_priority(task.phase),
             queued_at,
         });
+        Ok(())
+    }
+
+    /// Place a command task's container and record the outcome on its record
+    /// (spec §3.5): `NoCapacity` defers the launch, any other error fails the task.
+    pub(crate) async fn place_or_defer_launch(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task: &mut Task,
+        launch: DecidedLaunch,
+    ) -> Result<()> {
+        let task_id = task.id;
+        match self.place_container(launch).await {
+            Ok(id) => {
+                task.container_id = Some(id.clone());
+                self.task_put(task).await?;
+                self.spawn_logs_monitor(owner, project, seq, task_id, id);
+            }
+            Err(BackendError::NoCapacity(reason)) => {
+                self.defer_launch(owner, project, seq, task, reason).await?;
+            }
+            Err(e) => self.report_launch_failure(owner, project, seq, task_id, e),
+        }
         Ok(())
     }
 
@@ -213,13 +223,11 @@ impl Core {
     ) -> Result<()> {
         let key = (owner.to_string(), project.to_string(), seq);
         if !self.active.contains_key(&key) {
-            return Ok(()); // job escalated/revoked out from under the launch
+            return Ok(());
         }
         let Some(mut task) = self.tasks.get(owner, project, seq, task_id).await? else {
-            return Ok(()); // task record vanished
+            return Ok(());
         };
-        // Only a live launch attempt defers; a resolved/failed record is stale
-        // (a duplicate signal, or a superseded round's leftover).
         if task.state != TaskState::Running {
             return Ok(());
         }
@@ -245,9 +253,6 @@ impl Core {
     /// re-queue means the fleet is still full, so draining stops — the remaining
     /// entries would only re-queue; the freed slot is spoken for.
     pub(crate) async fn drain_launch_queue(&mut self) -> Result<()> {
-        // Draining (spec §3.6): the launch queue simply holds its entries. They
-        // are re-derived from the Pending task records on restart (#51), so a
-        // held launch resumes then rather than starting a container as we exit.
         if self.draining {
             return Ok(());
         }
@@ -257,9 +262,6 @@ impl Core {
             let Some(q) = self.launch_queue.pop_front() else {
                 break;
             };
-            // Backstop at resume time too (#202): an overdue entry escalates
-            // instead of burning another optimistic relaunch — the scan alone
-            // misses agent evals that are mid-relaunch whenever it fires.
             let now = Utc::now();
             let max_wait = self.config.launch_queue_max_wait.unwrap_or(MAX_QUEUE_WAIT);
             if q.is_expired(now, max_wait) {
@@ -268,14 +270,8 @@ impl Core {
             }
             match self.resume_launch(&q).await? {
                 ResumeOutcome::Settled | ResumeOutcome::Discarded => continue,
-                // The agent launch is async and has claimed the freed slot; its
-                // own NoCapacity re-defers a fresh entry, so retire this one and
-                // stop draining (#140).
                 ResumeOutcome::SpawnedAgent => break,
                 ResumeOutcome::NoCapacity => {
-                    // Preserve queued_at so the backstop measures the total wait,
-                    // and re-insert by priority (#140) so a re-queued finishing
-                    // launch stays ahead of queued work rather than falling behind.
                     self.enqueue_launch(q);
                     break;
                 }
@@ -287,33 +283,24 @@ impl Core {
     /// Re-attempt one queued command launch against the current fleet. Rebuilds
     /// the launch from the persisted task and live exec state, so a restart or a
     /// slot freeing drives it exactly like the initial attempt.
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::expect_used, clippy::too_many_lines)]
+    #[allow(
+        clippy::expect_used,
+        clippy::too_many_lines,
+        reason = "TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider."
+    )]
     async fn resume_launch(&mut self, q: &QueuedLaunch) -> Result<ResumeOutcome> {
-        // Everything from here — the admission checks, the rebuild, the launch —
-        // is one placement decision, and none of it may consult the operator's
-        // capacity intent (design #293 §2). This is the path that would most
-        // plausibly reach for it ("skip a node whose intent is 0"), so the window
-        // opens at the top rather than beside `place_container`.
         let placement = self.placement_guard();
         let (owner, project, seq, task_id) = (&q.owner, &q.project, q.seq, q.task_id);
         let Some(task) = self.tasks.get(owner, project, seq, task_id).await? else {
-            return Ok(ResumeOutcome::Discarded); // task record vanished
+            return Ok(ResumeOutcome::Discarded);
         };
-        // Resolved, revoked, or superseded while it waited.
         if task.state != TaskState::Pending {
             return Ok(ResumeOutcome::Discarded);
         }
         let key = (owner.clone(), project.clone(), seq);
-        // The job left execution (escalated / revoked): drop the stale entry.
         if !self.active.contains_key(&key) {
             return Ok(ResumeOutcome::Discarded);
         }
-        // An agent evaluator relaunches through the provider, not a command
-        // container (#140). Only the Evaluation fan-out ever queues an agent —
-        // the merge gate is command-only — so rebuild it from the persisted
-        // evaluator + session id against the job branch and re-spawn. The
-        // spawned run re-defers if the fleet is still full.
         if let TaskKind::Agent { .. } = &task.kind {
             let job = self.must_get(owner, project, seq)?.clone();
             let job_type = self.active.get(&key).expect("checked").job_type.clone();
@@ -323,17 +310,12 @@ impl Core {
                 .find(|e| Some(&e.name) == task.evaluator.as_ref())
                 .cloned()
             else {
-                return Ok(ResumeOutcome::Discarded); // evaluator no longer declared
+                return Ok(ResumeOutcome::Discarded);
             };
             let mut task = task;
             let session_id = task.session_id.clone();
             task.state = TaskState::Running;
             task.started_at = Some(Utc::now());
-            // Off the queue → drop the "queued" badge the instant it launches
-            // (§3.5), matching the command path (`launch_resumed`). The launch is
-            // optimistic — the spawned run may re-hit `NoCapacity` and re-defer —
-            // so keep `queued_at` on the record: it is the anchor `defer_launch`
-            // preserves so the backstop clock accumulates rather than resetting.
             task.pending_reason = None;
             self.task_put(&task).await?;
             self.publish(
@@ -360,8 +342,6 @@ impl Core {
         }
         let run = match &task.kind {
             TaskKind::Command { run } => run.clone(),
-            // Only command launches are ever queued; anything else is a bug or a
-            // superseded record — drop it rather than mis-launch.
             _ => return Ok(ResumeOutcome::Discarded),
         };
         let job = self.must_get(owner, project, seq)?.clone();
@@ -383,7 +363,7 @@ impl Core {
                     .find(|e| Some(&e.name) == task.evaluator.as_ref())
                     .cloned()
                 else {
-                    return Ok(ResumeOutcome::Discarded); // evaluator no longer declared
+                    return Ok(ResumeOutcome::Discarded);
                 };
                 let branch = if task.phase == TaskPhase::MergeGate {
                     format!("merge-gate/{seq}")
@@ -415,8 +395,6 @@ impl Core {
                 task_timeout(&job_type),
                 MonitorKind::Logs,
             ),
-            // Neither ever launches a queued command container: triage runs
-            // through the agent provider, escalation tasks are Human.
             TaskPhase::Triage | TaskPhase::Escalation => {
                 return Ok(ResumeOutcome::Discarded);
             }
@@ -455,8 +433,6 @@ impl Core {
                 task.container_id = Some(id.clone());
                 task.state = TaskState::Running;
                 task.started_at = Some(Utc::now());
-                // The launch is off the queue: clear the queued markers so the
-                // UI drops the "queued" badge live and no stale reason lingers.
                 task.pending_reason = None;
                 task.queued_at = None;
                 self.task_put(&task).await?;
@@ -518,8 +494,10 @@ impl Core {
     /// wait/dispose/report skeleton in one place is what guarantees a
     /// `MonitorKind` can never quietly skip the overlay reclaim or the report,
     /// which would leak disk and wedge the task at `Running` forever.
-    // TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(track-C): pre-existing debt, dissolved as this path moves to a pure decider."
+    )]
     fn spawn_exit_monitor(
         &self,
         kind: MonitorKind,
@@ -575,10 +553,6 @@ impl Core {
     pub(crate) async fn scan_launch_queue_timeouts(&mut self) -> Result<()> {
         let now = Utc::now();
         let max_wait = self.config.launch_queue_max_wait.unwrap_or(MAX_QUEUE_WAIT);
-        // `queued_at` is the *persisted* enqueue time (`Task::queued_at`, restored
-        // into the queue entry by reconciliation), so the wait accumulates across
-        // dispatcher restarts. Under frequent auto-deploys a process-local clock
-        // would reset every restart and this backstop might never fire (§3.5).
         let expired: Vec<QueuedLaunch> = self
             .launch_queue
             .iter()
@@ -613,10 +587,8 @@ impl Core {
             return Ok(());
         };
         if task.state != TaskState::Pending {
-            return Ok(()); // resumed or resolved in the meantime
+            return Ok(());
         }
-        // Only escalate a job still in an execution state; otherwise it was
-        // superseded and the stale entry just drops.
         let Ok(job) = self.must_get(&q.owner, &q.project, q.seq) else {
             return Ok(());
         };
@@ -629,7 +601,6 @@ impl Core {
         let waited = q.waited(now);
         task.state = TaskState::Failed;
         task.completed_at = Some(now);
-        // No longer queued — drop the markers so nothing reads it as waiting.
         task.pending_reason = None;
         task.queued_at = None;
         task.result = Some(TaskResult::Command {

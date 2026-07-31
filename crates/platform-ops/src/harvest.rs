@@ -73,7 +73,7 @@ impl Harvester {
         out: &AgentOutput,
     ) -> (Option<String>, Option<TokenUsage>) {
         let Some(id) = &out.container_id else {
-            return (None, None); // provider without a container (fakes, stubs)
+            return (None, None);
         };
 
         let logs = match self.backend.logs(id).await {
@@ -84,21 +84,12 @@ impl Harvester {
             }
         };
 
-        // Both come from the logs, not the transcript: the CLI's JSON result is
-        // a documented interface, while the transcript format is internal and
-        // version-unstable.
         let usage = logs.as_deref().and_then(agent::claude::parse_usage);
         if usage.is_none() {
             tracing::debug!("job {seq} task {task_id}: no usage in agent stdout");
         }
         let result = logs.as_deref().and_then(agent::claude::parse_result);
 
-        // Permission denials are the feedback loop on the §4.3 profiles: a
-        // too-tight policy degrades an agent silently (it is told "denied" and
-        // carries on with less), so an unreported denial shows up only as
-        // mysteriously worse work. WARN — an agent hitting its policy is either
-        // a prompt that asks for the wrong thing or a profile that needs
-        // widening, and both want a human to look.
         let denials = logs
             .as_deref()
             .map(agent::claude::parse_permission_denials)
@@ -130,9 +121,6 @@ impl Harvester {
                     )
                     .await;
                 }
-                // Absent whenever the CLI never started — a bad image, a failed
-                // clone. Worth a line: it also fires if the CLI ever changes
-                // where it writes transcripts.
                 Ok(None) => tracing::warn!(
                     "job {seq} task {task_id}: no transcript at {path} \
                      (agent may not have started)"
@@ -190,7 +178,7 @@ impl Harvester {
         bytes: &[u8],
     ) {
         let Some(artifacts) = &self.artifacts else {
-            return; // artifact storage not configured
+            return;
         };
         if bytes.is_empty() {
             return;
@@ -225,22 +213,19 @@ pub fn parse_deploy_report(logs: &str) -> Option<types::DeployReport> {
     let mut found = false;
     for line in logs.lines() {
         let line = line.trim();
-        // Order matters only in that neither marker is a prefix of the other.
         if let Some(rest) = line.strip_prefix(LEG_MARKER) {
             if let Ok(leg) = serde_json::from_str::<types::DeployLeg>(rest.trim()) {
                 report.legs.push(leg);
                 found = true;
             }
-        } else if let Some(rest) = line.strip_prefix(REPORT_MARKER) {
-            // The single deploy envelope: from/to SHAs, rollback, health. Parsed
-            // into a DeployReport (its `legs` default empty) so we reuse one type.
-            if let Ok(env) = serde_json::from_str::<types::DeployReport>(rest.trim()) {
-                report.from_sha = env.from_sha.or(report.from_sha.take());
-                report.to_sha = env.to_sha.or(report.to_sha.take());
-                report.rollback = env.rollback;
-                report.health = env.health.or(report.health.take());
-                found = true;
-            }
+        } else if let Some(rest) = line.strip_prefix(REPORT_MARKER)
+            && let Ok(env) = serde_json::from_str::<types::DeployReport>(rest.trim())
+        {
+            report.from_sha = env.from_sha.or(report.from_sha.take());
+            report.to_sha = env.to_sha.or(report.to_sha.take());
+            report.rollback = env.rollback;
+            report.health = env.health.or(report.health.take());
+            found = true;
         }
     }
     found.then_some(report)

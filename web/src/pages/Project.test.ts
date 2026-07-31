@@ -2,10 +2,6 @@ import { describe, expect, it } from 'vitest'
 import type { Job } from '../api'
 import { completedTip, taskTimeHint } from './Project'
 
-// Ticket #291: the jobs table used to show `completed_at - created_at`, which is
-// mostly the waiting a job does while Frozen and Blocked. The cell's hint is now
-// the job's own task time off the record; the wall clock moved to the tooltip.
-
 function job(over: Partial<Job>): Job {
   return {
     id: 1,
@@ -35,7 +31,6 @@ describe('taskTimeHint', () => {
   })
 
   it('shows no hint when the record carries no task time', () => {
-    // Records written before the field existed, and jobs no task ever ran for.
     expect(taskTimeHint(job({}))).toBeNull()
     expect(taskTimeHint(job({ task_time_ms: null }))).toBeNull()
   })

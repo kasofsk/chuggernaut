@@ -20,8 +20,6 @@ use store::NatsStore;
 /// plus the submitted public key; we sign a 24h cert with the CA key.
 pub(super) async fn spawn_ssh_handler(
     store: &NatsStore,
-    // SSH CA private key path (§7.3) for user-cert minting; None (no ssh_ca, or
-    // `file://` dev repos) → the subject replies 503.
     ssh_ca: Option<std::path::PathBuf>,
 ) -> store::Result<()> {
     let mut ssh_sub = store
@@ -53,12 +51,7 @@ pub(super) async fn spawn_members_handler(store: &NatsStore) -> store::Result<()
     let members_store = store.clone();
     tokio::spawn(async move {
         while let Some(req) = members_sub.next().await {
-            let parts: Vec<&str> = req.subject.split('.').collect();
-            let (Some(verb), Some(owner), Some(project)) = (
-                parts.get(2).copied(),
-                parts.get(3).copied(),
-                parts.get(4).copied(),
-            ) else {
+            let Some((verb, owner, project)) = super::subject_target(&req.subject) else {
                 req.respond(bad_request("malformed subject")).await;
                 continue;
             };
@@ -112,7 +105,6 @@ async fn manage_members(
         Err(e) => return error_reply(&e.into()),
     };
 
-    // list: no target email — enumerate members holding a role on this project.
     if verb == "list" {
         let keys = match users.keys_with_prefix("").await {
             Ok(k) => k,
@@ -206,8 +198,6 @@ async fn sign_user_cert(
         .await
     {
         Ok(certificate) => ok_reply(&serde_json::json!({ "certificate": certificate })),
-        // A bad key that slipped past the API's structural check, or a CA
-        // failure — 500; the API validated parseability, so this is unexpected.
         Err(e) => error_reply(&CoreError::Config(e.to_string())),
     }
 }

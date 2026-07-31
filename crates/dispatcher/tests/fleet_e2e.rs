@@ -70,7 +70,6 @@ async fn worker_fleet(
     let config = WorkerConfig {
         node: "w1".into(),
         slots: 4,
-        // Above the boot slot count, so the daemon boots at 4 (spec §3.1).
         slots_max: 8,
         nats_url: server.url().to_string(),
         nats_creds: None,
@@ -219,8 +218,6 @@ async fn stale_list_running_worker(store: &NatsStore, node: &str) -> tokio::task
                 })
                 .unwrap()
             } else {
-                // list_running (and anything else) is unsupported on this stale
-                // daemon — exactly the op that returns empty/errors in prod.
                 serde_json::to_vec(&types::worker::WorkerReply::<()>::Err {
                     error: types::worker::WorkerError::Other {
                         message: "unknown op (stale daemon)".into(),
@@ -286,13 +283,10 @@ async fn worker_that_cannot_list_shows_out_of_service_not_idle() {
     }]);
     let (_handle, sink) = spawn_checked(core);
 
-    // The node is present (not dropped) but shown out of service, not idle.
     let fleet_status = read_fleet(&store, |f| {
         f.nodes.iter().any(|n| n.name == "air" && !n.available)
     })
     .await;
-    // No `Core` call to hang a check on: the republish the scan drove is the whole
-    // scenario, so drain the actor's log once the wait above let it through.
     assert_invariants_of(&sink);
     let air = fleet_status.nodes.iter().find(|n| n.name == "air").unwrap();
     assert!(
@@ -326,8 +320,10 @@ async fn read_fleet(store: &NatsStore, pred: impl Fn(&FleetStatus) -> bool) -> F
 /// `platform` KV exactly as the api serves it. Rebuilt from the live containers
 /// the worker reports, never from in-memory state (a fresh process has none).
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn occupancy_reflects_worker_rpc_launch_and_exit_through_the_store() {
     let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
         return;
@@ -338,14 +334,11 @@ async fn occupancy_reflects_worker_rpc_launch_and_exit_through_the_store() {
     let store = NatsStore::connect(server.url()).await.unwrap();
     store.ensure_topology().await.unwrap();
 
-    // A real container running on the worker, launched over the NATS proxy.
     let cid = fleet
         .launch(labeled_sleep("acme/api", 51, 1))
         .await
         .unwrap();
 
-    // Seed the crash state: an Escalated job (reconciliation leaves it and its
-    // tasks alone) whose Running work task owns that live container.
     let repo = test_utils::repo::TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
     clone
@@ -378,8 +371,6 @@ async fn occupancy_reflects_worker_rpc_launch_and_exit_through_the_store() {
         .await
         .unwrap();
 
-    // A *fresh* core over the live fleet — the restart re-attach path (§3.6): it
-    // rebuilds occupancy from the container the worker still reports.
     let core = Core::new(
         store.clone(),
         vcs::RepoManager::new(repos_root),
@@ -405,8 +396,6 @@ async fn occupancy_reflects_worker_rpc_launch_and_exit_through_the_store() {
     }]);
     let (handle, sink) = spawn_checked(core);
 
-    // Occupancy rebuilt on re-attach: w1 shows one busy slot running job 51 /
-    // task 1, served through the store the api reads.
     let fleet_status = read_fleet(&store, |f| {
         f.nodes.iter().any(|n| n.name == "w1" && n.occupied == 1)
     })
@@ -418,10 +407,7 @@ async fn occupancy_reflects_worker_rpc_launch_and_exit_through_the_store() {
     assert_eq!((slot.job_seq, slot.task_id), (51, 1));
     assert_eq!(slot.task_kind, "work");
 
-    // The container exits (force-removed on the node): the next transition
-    // republishes the freed slot.
     test_utils::backend_suite::rm(&cid);
-    // Nudge a republish; a scan is occupancy-relevant.
     for _ in 0..50 {
         handle.trigger_scan().await.ok();
         assert_invariants_of(&sink);

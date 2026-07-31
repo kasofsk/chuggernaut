@@ -122,7 +122,6 @@ export function GroupPicker({
             setDraft(e.target.value)
             setError(null)
           }}
-          // Enter adds rather than submitting the create form around it.
           onKeyDown={(e) => {
             if (e.key !== 'Enter') return
             e.preventDefault()

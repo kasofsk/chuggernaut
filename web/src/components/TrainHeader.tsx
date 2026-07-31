@@ -17,8 +17,6 @@ type Layer = { src?: string; builtin?: string; speed?: number; y?: number }
 type Scene = { name: string; layers?: Layer[]; builtin?: string; tint?: number; duration?: number }
 type Manifest = { locomotive?: { src?: string | null }; sceneDurationMs?: number; scenes: Scene[] }
 
-// Ships even if the manifest fetch fails (offline dev, missing file): the same
-// three built-in scenes the manifest declares.
 const FALLBACK: Manifest = {
   sceneDurationMs: 78000,
   scenes: [
@@ -50,7 +48,6 @@ export function TrainHeader() {
     const n = Number(localStorage.getItem(SCENE_KEY))
     return Number.isFinite(n) && n >= 0 ? n : 0
   })
-  // The outgoing scene, kept mounted briefly so the incoming one crossfades over it.
   const [prev, setPrev] = useState<number | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const reduced = usePrefersReducedMotion()
@@ -66,7 +63,6 @@ export function TrainHeader() {
         if (ok && Array.isArray(m?.scenes) && m.scenes.length) setManifest(m)
       })
       .catch(() => {
-        /* keep FALLBACK */
       })
     return () => {
       ok = false
@@ -87,7 +83,6 @@ export function TrainHeader() {
     })
   }, [count])
 
-  // Scene cycling — only while active (never under reduced-motion / hidden / offscreen).
   useEffect(() => {
     if (paused || count < 2) return
     const dwell = scenes[cur]?.duration ?? manifest.sceneDurationMs ?? 78000
@@ -95,7 +90,6 @@ export function TrainHeader() {
     return () => window.clearInterval(id)
   }, [paused, count, cur, scenes, manifest.sceneDurationMs, advance])
 
-  // Retire the crossfading-out scene once the fade completes.
   useEffect(() => {
     if (prev === null) return
     const id = window.setTimeout(() => setPrev(null), 1500)
@@ -155,16 +149,13 @@ function SceneView({ scene, fading }: { scene: Scene; fading?: boolean }) {
   )
 }
 
-// Built-in code-generated layer sets (far -> near). Real art overrides these by
-// supplying `layers` in the manifest, so the loop stays content-agnostic.
 function builtinLayers(kind: string): Layer[] {
   if (kind === 'matrix') return [{ builtin: 'matrix', speed: 0.15 }]
   if (kind === 'sourcecode') return [{ speed: 0.1 }, { speed: 0.3 }, { speed: 0.6 }]
-  return [{ speed: 0.08 }, { speed: 0.22 }, { speed: 0.5 }] // space
+  return [{ speed: 0.08 }, { speed: 0.22 }, { speed: 0.5 }]
 }
 
 function ParallaxLayer({ layer, depth, builtin }: { layer: Layer; depth: number; builtin?: string }) {
-  // Slower layer -> longer scroll period (far things drift; near things rush).
   const speed = layer.speed ?? 0.3
   const dur = Math.max(8, 120 * (1 - speed))
   const style = { ['--dur']: `${dur}s`, top: layer.y ?? 0 } as CSSProperties
@@ -183,8 +174,6 @@ function ParallaxLayer({ layer, depth, builtin }: { layer: Layer; depth: number;
   )
 }
 
-// The Matrix: THE green digital-glyph rain (distinct from the abstract source
-// dimension). Columns fall on staggered loops; transform/opacity-only.
 const GLYPHS = 'ｦｱｳｴｵｶｷｸｹｺｻｼｽｾﾀﾁﾂﾃ01ﾊﾋﾌﾍﾎ<>{}=;/'
 function MatrixRain() {
   const [cols] = useState(() => {

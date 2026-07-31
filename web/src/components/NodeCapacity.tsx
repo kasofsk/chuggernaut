@@ -48,8 +48,6 @@ export function NodeCapacity({
   const [confirming, setConfirming] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Follow the record again once the snapshot catches up with what we asked for,
-  // so a change made elsewhere isn't masked by a stale local draft.
   useEffect(() => {
     if (draft != null && view.desired === draft) setDraft(null)
   }, [draft, view.desired])
@@ -141,9 +139,6 @@ export function NodeCapacity({
   )
 }
 
-// Tone per state: `bad` for the two the operator has to act on, `warn` for a
-// number nobody is confirming, plain for the two healthy ones. Colours live in
-// styles.css — this only names the tone.
 const TONE: Record<CapacityStateKind, 'bad' | 'warn' | null> = {
   rejected: 'bad',
   unacknowledged: 'bad',
@@ -196,8 +191,6 @@ function CapacityState({ view, controllable }: { view: CapacityView; controllabl
   }
 
   if (tone == null) {
-    // Converged or converging: quiet, and the observed number stays primary
-    // because it is the only one placement reads.
     return (
       <div className="cap-line">
         <span className="cap-now">{observed ?? '?'}</span>
@@ -222,9 +215,6 @@ function CapacityState({ view, controllable }: { view: CapacityView; controllabl
         </span>
         <span className="cap-now">{observed ?? '?'}</span>
         <span className="dim"> {plural(observed)} in use by the scheduler</span>
-        {/* A seed or stale node still has to acknowledge a set in flight —
-            without this the flagship case (raising a seed-sourced node) answers
-            202 and shows the operator nothing but a disabled button. */}
         {converging && <ConvergingChip desired={desired} />}
       </div>
       <div className="cap-alarm-body">

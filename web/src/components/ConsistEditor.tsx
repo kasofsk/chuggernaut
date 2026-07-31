@@ -40,7 +40,6 @@ export function ConsistEditor({
   const [query, setQuery] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  // The just-coupled car (soft-clunk bump) and the car drifting to the siding.
   const [bumpId, setBumpId] = useState<number | null>(null)
   const [driftId, setDriftId] = useState<number | null>(null)
   const [shake, setShake] = useState(false)
@@ -51,8 +50,6 @@ export function ConsistEditor({
     reload()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [owner, project])
-  // A membership change (new `members` prop) may name a job we haven't loaded
-  // yet — refresh the roster so its title/state resolve in the manifest.
   useEffect(() => {
     reload()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -91,14 +88,11 @@ export function ConsistEditor({
     if (prefersReducedMotion()) {
       commit()
     } else {
-      // Let the car drift to the siding, then remove it server-side.
       setDriftId(id)
       setTimeout(commit, 380)
     }
   }
 
-  // Finalize/release need at least two cars to leave the yard; short of that
-  // the locomotive shakes (or, under reduced motion, just the message).
   function guarded(action: () => void) {
     if (members.length < 2) {
       setError('a consist needs at least two cars to leave the yard — couple one more')
@@ -112,9 +106,6 @@ export function ConsistEditor({
     action()
   }
 
-  // Candidate rows for the picker: every non-member, non-self job matching the
-  // query, each tagged with why it can't couple (null = eligible). Ineligible
-  // rows render greyed with the reason as a tooltip. Eligible first.
   const candidates = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return []

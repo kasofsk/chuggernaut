@@ -40,7 +40,6 @@ function highlightLine(line: string): ReactNode {
 }
 
 function highlightValue(value: string): ReactNode {
-  // Trailing comment, only when the value carries no quotes (heuristic).
   if (!value.includes('"') && !value.includes("'")) {
     const hash = value.search(/(^| )#/)
     if (hash >= 0) {

@@ -2,17 +2,10 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ApiError, api, type Task } from '../api'
 import { Transcript } from './Transcript'
 
-// Poll cadence while a container runs, and the ceiling a network-error backoff
-// climbs to. The buffer is capped so a multi-hundred-megabyte cargo build log
-// can't balloon the tab — we keep the tail and flag the truncation.
 const POLL_MS = 2000
 const MAX_BACKOFF_MS = 15000
-const BUFFER_CAP = 2_000_000 // ~2MB of tail
+const BUFFER_CAP = 2_000_000
 
-// cargo/agent output carries ANSI colour + cursor escapes. Strip the common
-// CSI/OSC sequences (rendering colour is a non-goal) rather than pull in a
-// terminal library. Lone carriage returns (progress-bar redraws) collapse to
-// newlines so a redrawn line doesn't run on forever.
 // eslint-disable-next-line no-control-regex
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[@-Z\\-_]/g
 function stripAnsi(s: string): string {
@@ -66,8 +59,6 @@ export function TaskLogPane({
   const [status, setStatus] = useState<LogStatus>('loading')
   const [truncated, setTruncated] = useState(false)
   const [pinned, setPinned] = useState(true)
-  // Default to the formatted claude transcript; `raw` is the debugging escape
-  // hatch that shows the untouched byte stream.
   const [view, setView] = useState<'transcript' | 'raw'>('transcript')
 
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -76,9 +67,6 @@ export function TaskLogPane({
     pinnedRef.current = pinned
   }, [pinned])
 
-  // The tail loop. Keyed on the task identity only: a Running→Done transition
-  // arrives through the endpoint's `running` flag, not a prop change, so the
-  // loop doesn't need to restart when the parent re-renders the task.
   useEffect(() => {
     const cancelled = { current: false }
     let timer: number | null = null
@@ -91,7 +79,7 @@ export function TaskLogPane({
       buffer += stripAnsi(chunk)
       if (buffer.length > BUFFER_CAP) {
         buffer = buffer.slice(buffer.length - BUFFER_CAP)
-        const nl = buffer.indexOf('\n') // trim the partial leading line
+        const nl = buffer.indexOf('\n')
         if (nl >= 0) buffer = buffer.slice(nl + 1)
         setTruncated(true)
       }
@@ -111,7 +99,6 @@ export function TaskLogPane({
 
     const tick = async (final: boolean) => {
       if (cancelled.current) return
-      // Pause while the tab is backgrounded — re-check shortly rather than poll.
       if (document.hidden) return schedule(POLL_MS, final)
       try {
         const r = await api.taskOutput(owner, project, seq, task.id, offset)
@@ -124,8 +111,6 @@ export function TaskLogPane({
           setStatus('live')
           schedule(POLL_MS)
         } else if (wasRunning && !final) {
-          // Observed the container exit — one final sweep of the harvested tail,
-          // then stop. The endpoint keeps the same offsets across the switch.
           setStatus('live')
           schedule(POLL_MS, true)
         } else {
@@ -134,8 +119,6 @@ export function TaskLogPane({
       } catch (e) {
         if (cancelled.current) return
         if (e instanceof ApiError && e.status === 404) {
-          // No container yet (parked human / Pending launch). Muted, and keep a
-          // slow watch only while one might still spawn.
           setStatus('nocontainer')
           if (task.state === 'Pending' || task.state === 'Running') schedule(POLL_MS, final)
           return
@@ -148,7 +131,6 @@ export function TaskLogPane({
 
     void tick(false)
     const onVisible = () => {
-      // Resume promptly when the tab comes back and the loop is idle-waiting.
       if (!document.hidden && timer == null && !cancelled.current) void tick(false)
     }
     document.addEventListener('visibilitychange', onVisible)
@@ -159,8 +141,6 @@ export function TaskLogPane({
     }
   }, [owner, project, seq, task.id, task.state])
 
-  // Stick to the bottom on append while pinned (and when the view mode flips,
-  // since the two renderings have different heights).
   useLayoutEffect(() => {
     if (pinnedRef.current && bodyRef.current) {
       bodyRef.current.scrollTop = bodyRef.current.scrollHeight

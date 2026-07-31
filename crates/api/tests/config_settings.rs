@@ -74,8 +74,10 @@ async fn get(router: &axum::Router, path: &str, bearer: &str) -> (StatusCode, se
 }
 
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn config_endpoints() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -85,8 +87,6 @@ async fn config_endpoints() {
         .unwrap();
     store.ensure_topology().await.unwrap();
 
-    // Seed KV directly. Secret VALUES here are arbitrary — the api lists names
-    // and never decrypts, so their content must never surface.
     let secrets = store.raw_bucket(store::buckets::SECRETS).await.unwrap();
     secrets
         .put_json("acme.api.STRIPE_KEY", &"sk_live_TOPSECRET")
@@ -156,7 +156,6 @@ async fn config_endpoints() {
         .await
         .unwrap();
 
-    // JWT signer + router (no Core — these routes are pure KV reads).
     let keys_dir = tempfile::tempdir().unwrap();
     let (private, public) = gen_jwt_keys(keys_dir.path());
     let signer = auth::jwt::JwtSigner::from_pem(&private).unwrap();
@@ -189,35 +188,28 @@ async fn config_endpoints() {
     );
     let admin = token("root@example.com", &[], true);
 
-    // ── Project config (Viewer+) ────────────────────────────────────────────
     let (status, cfg) = get(&router, "/api/v1/projects/acme/api/config", &member).await;
     assert_eq!(status, StatusCode::OK, "{cfg}");
 
-    // vars: name + value.
     assert_eq!(
         cfg["vars"],
         serde_json::json!([{ "name": "RUST_LOG", "value": "debug" }])
     );
 
-    // secrets: NAMES only, and the origin credential is NOT among them.
     assert_eq!(cfg["secrets"], serde_json::json!(["STRIPE_KEY"]));
-    // The value must appear nowhere in the response.
     assert!(
         !cfg.to_string().contains("TOPSECRET"),
         "secret value leaked into config response: {cfg}"
     );
 
-    // origin link + credential presence (deploy key set, PAT absent).
     assert_eq!(cfg["origin"]["url"], "ssh://git@github.com/acme/api.git");
     assert_eq!(cfg["origin_credentials"]["deploy_key"], true);
     assert_eq!(cfg["origin_credentials"]["pat"], false);
 
-    // A user with no role on the project is refused.
     let stranger = token("nobody@example.com", &[], false);
     let (status, _) = get(&router, "/api/v1/projects/acme/api/config", &stranger).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // ── Platform config (admin only) ────────────────────────────────────────
     let (status, _) = get(&router, "/api/v1/platform/config", &member).await;
     assert_eq!(
         status,
@@ -249,8 +241,10 @@ async fn config_endpoints() {
 /// verbatim, and returns an empty fleet (never a 404) before the dispatcher has
 /// published anything.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn platform_fleet_endpoint() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
         return;
@@ -260,7 +254,6 @@ async fn platform_fleet_endpoint() {
         .unwrap();
     store.ensure_topology().await.unwrap();
 
-    // JWT signer + router (no Core — this route is a pure KV read).
     let keys_dir = tempfile::tempdir().unwrap();
     let (private, public) = gen_jwt_keys(keys_dir.path());
     let signer = auth::jwt::JwtSigner::from_pem(&private).unwrap();
@@ -286,13 +279,11 @@ async fn platform_fleet_endpoint() {
             .unwrap()
     };
 
-    // Before any publish: an admin gets an empty fleet, not a 404.
     let admin = token(true);
     let (status, fleet) = get(&router, "/api/v1/platform/fleet", &admin).await;
     assert_eq!(status, StatusCode::OK, "{fleet}");
     assert_eq!(fleet, serde_json::json!({ "nodes": [], "queue_depth": 0 }));
 
-    // Seed a snapshot as the dispatcher would, then read it back verbatim.
     let platform = store.raw_bucket(store::buckets::PLATFORM).await.unwrap();
     platform
         .put_json(
@@ -334,7 +325,6 @@ async fn platform_fleet_endpoint() {
     assert_eq!(fleet["nodes"][0]["running"][0]["job_seq"], 42);
     assert_eq!(fleet["nodes"][0]["running"][0]["task_kind"], "work");
 
-    // A non-admin is refused, like the platform config view.
     let member = token(false);
     let (status, _) = get(&router, "/api/v1/platform/fleet", &member).await;
     assert_eq!(status, StatusCode::FORBIDDEN);

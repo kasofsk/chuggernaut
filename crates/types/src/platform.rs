@@ -123,19 +123,13 @@ mod tests {
             "secrets_encryption": true
         }"#;
         let snap: DispatcherConfigSnapshot = serde_json::from_str(old).unwrap();
-        // Pre-existing optional fields default.
         assert!(snap.nodes[0].available);
         assert_eq!(snap.nodes[0].version, None);
-        // A snapshot predating the refresh-outcome field (ticket #187) defaults it.
         assert_eq!(snap.nodes[0].refresh_outcome, None);
-        // New CD fields default to None.
         assert_eq!(snap.dispatcher_sha, None);
         assert_eq!(snap.main_tip_sha, None);
         assert_eq!(snap.commits_behind, None);
-        // Snapshots predating the configurable policy default to the old
-        // hardcoded behavior (headroom), not the new busyness default.
         assert_eq!(snap.placement_policy, "headroom");
-        // Snapshots predating the schema-epoch field default to epoch 1.
         assert_eq!(snap.schema_epoch, 1);
     }
 }
@@ -445,12 +439,8 @@ mod fleet_tests {
                     available: false,
                     version: None,
                     refresh_outcome: None,
-                    // Never reported: the boot seed is standing in, and the
-                    // snapshot says so rather than looking healthy (§293 §8).
                     capacity_source: Some(crate::worker::CapacitySource::Seed),
                     capacity_observed_at: None,
-                    // Refused above the node's ceiling: the reason rides the
-                    // snapshot so the UI can show it (design #293 §4/§10).
                     slots_desired: Some(8),
                     capacity_state: Some(CapacityState::Rejected),
                     capacity_note: Some("node max is 2".into()),

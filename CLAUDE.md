@@ -21,6 +21,8 @@ Don't re-derive these — read them:
   audit), `contracts.md` (extracting the dispatcher's interfaces), and
   `ts-rewrite-plan.md` (the TypeScript dispatcher rewrite). Read before
   module-scoped restructuring work.
+- `docs/implementation-notes.md` — per-module rationale, hoisted out of the comments
+  job #342 deleted. Notes, not norms: `spec.md` and the design docs still win.
 - Each `crates/*/src/lib.rs` opens with a `//!` doc comment pointing at its spec section.
 
 ## Build & test
@@ -60,11 +62,12 @@ the absence of a workflow file.
   ~30ms for the whole repo, so it is unconditional) — and
   `.chug/tasks/check-comments.sh`, the comment lint. Any clone fails the gate.
 - **Comments are banned; docs are not.** `.chug/tasks/check-comments.sh` rejects
-  every non-doc comment a diff *adds* to a Rust or TypeScript source and caps
-  doc comments at two sentences (module headers exempt) — STYLE.md Tier 1. It is
-  a ratchet over added lines, so the tree's existing comments are pre-existing
-  debt, not a wall. The knowledge a comment would have carried goes in a doc and
-  the rationale in the commit message; `.chug/tasks/docs-update.md` is the work
+  every non-doc comment in any Rust or TypeScript source and caps doc comments at
+  two sentences (module headers exempt) — STYLE.md Tier 1. The tree holds **zero**
+  non-doc comments since job #342, so rule 1 is enforced over every tracked source
+  rather than only the lines a diff adds; only the two-sentence cap is still a
+  ratchet. The knowledge a comment would have carried goes in a doc and the
+  rationale in the commit message; `.chug/tasks/docs-update.md` is the work
   task that keeps the docs in step, and `.chug/tasks/review-docs-updated.md` is
   its (currently inert) evaluator.
 - Per-type **stage-0 agent reviewers** run first (`.chug/tasks/review-*.md`), so the

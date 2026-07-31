@@ -47,8 +47,6 @@ pub(super) async fn spawn_fleet_capacity_handler(
                     continue;
                 }
             };
-            // An unattributed change would leave the record's audit stamp lying;
-            // `unknown` says what actually happened instead.
             let by = body.by.unwrap_or_else(|| "unknown".to_string());
             let reply = match handle.set_node_capacity(&body.node, body.slots, &by).await {
                 Ok(ack) => ok_reply(&ack),

@@ -87,11 +87,6 @@ pub fn validate_member(
             format!("member #{m} is itself a batch; batches do not nest"),
         ));
     }
-    // Batch × inputs is excluded in v1 (design #311 Decision 3): a batch
-    // collapses N members into ONE branch and one run, and values do not
-    // union the way `deps` and `eval` do — two members asking for different
-    // services have no defensible single answer. Reject with a clear field
-    // error rather than inventing one, or silently dropping a member's target.
     if !job.inputs.is_empty() {
         errs.push(ValidationError::new(
             Some(m),
@@ -169,7 +164,7 @@ pub fn plan_batch(
                         e.name
                     ),
                 )),
-                Some(_) => {} // identical: deduped
+                Some(_) => {}
                 None => eval.push(e.clone()),
             }
         }

@@ -76,10 +76,7 @@ pub fn generate(kind: SchemaKind) -> anyhow::Result<String> {
         SchemaKind::Defaults => {
             serde_json::to_string_pretty(&schemars::schema_for!(types::ProjectDefaults))?
         }
-        // Not one root type but the whole wire vocabulary, so this arm builds
-        // its document rather than naming a single `schema_for!` root.
         SchemaKind::Api => serde_json::to_string_pretty(&api_bundle()?)?,
-        // Payloads, not a schema (see `crate::wire_samples`).
         SchemaKind::ApiSamples => serde_json::to_string_pretty(&crate::wire_samples::bundle()?)?,
     };
     pretty.push('\n');
@@ -114,21 +111,12 @@ macro_rules! cover {
 /// update/members, project create/link). Naming those in Rust is its own
 /// change; until then they stay hand-mirrored in TypeScript.
 fn api_bundle() -> anyhow::Result<schemars::Schema> {
-    // Responses describe what the server WRITES, so they take schemars'
-    // serialize contract: a `#[serde(default)]` field the record always emits
-    // (`Job::title`) is required, and only a `skip_serializing_if` field is
-    // optional. Under the deserialize contract — right for a config file the
-    // platform reads, and what `schema job-type` keeps — every defaulted field
-    // reads as optional, which would hand the generated client a `title?:
-    // string` the wire never omits and push a `?? ''` into every consumer.
     let mut responses = schemars::generate::SchemaSettings::default()
         .for_serialize()
         .into_generator();
     api_bundle_job_records(&mut responses);
     api_bundle_platform_records(&mut responses);
     api_bundle_job_config(&mut responses);
-    // Request bodies are the mirror image: they describe what the server
-    // READS, so a defaulted field is genuinely optional for the caller.
     let mut requests = schemars::SchemaGenerator::default();
     api_bundle_request_bodies(&mut requests);
 
@@ -201,9 +189,6 @@ fn api_bundle_job_records(generator: &mut schemars::SchemaGenerator) {
         types::EscalationAction,
         types::QueueSnapshot,
         types::QueueEntry,
-        // The two derived group reads (design #321 slice B): real types rather
-        // than `json!` envelopes precisely so they generate, like every other
-        // §6.2 response the UI is built on.
         types::GroupEntry,
         types::DesignEntry,
         types::GroupRollup,
@@ -401,9 +386,6 @@ mod tests {
         ] {
             assert!(defs.contains_key(name), "$defs is missing {name}");
         }
-        // The list projection drops the two heavy prose fields (spec §6.1); the
-        // single-job record keeps them. A schema that showed them on both would
-        // hand the UI a type that lies about the payload.
         assert!(defs["Job"]["properties"].get("description").is_some());
         assert!(
             defs["JobSummary"]["properties"]
@@ -424,18 +406,11 @@ mod tests {
     fn job_type_schema_shape() {
         let v: serde_json::Value =
             serde_json::from_str(&generate(SchemaKind::JobType).unwrap()).unwrap();
-        // Top level tolerates unknown fields (no `additionalProperties: false`)
-        // so a config that runs ahead of the dispatcher is a warning, not a
-        // hard editor error.
         assert_ne!(v["additionalProperties"], serde_json::json!(false));
-        // The Evaluator block, by contrast, stays strict: an unknown key there
-        // could silently skip a gate.
         assert_eq!(
             v["$defs"]["Evaluator"]["additionalProperties"],
             serde_json::json!(false)
         );
-        // Same for a declared input: an ignored key there could drop a `pattern`,
-        // which is a validation control (#311 Decision 2).
         assert_eq!(
             v["$defs"]["Input"]["additionalProperties"],
             serde_json::json!(false)

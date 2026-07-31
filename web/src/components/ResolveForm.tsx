@@ -1,10 +1,6 @@
 import { useState } from 'react'
 import type { TaskResolution } from '../api'
 
-// Human-task resolution (§1.2). Post-work escalation tasks (job Escalated) take
-// Retry/Resolve/Revoke; pre-work escalations (job Stalled) take only
-// Retry/Revoke — there is nothing to submit for evaluation. Work/eval Human
-// tasks take Pass/Fail. Fail requires structured findings; else it's optional.
 export function ResolveForm({
   escalation,
   preWork = false,

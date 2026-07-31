@@ -176,7 +176,6 @@ impl DockerBackend {
         if probes.iter().any(|p| p.error.is_none() && p.slots > 0) {
             Ok(())
         } else {
-            // The last unreachable node's error, else the all-reachable-but-no-slots case.
             let last_err = probes.iter().rev().find_map(|p| p.error.clone());
             Err(BackendError::Unavailable(
                 last_err.unwrap_or_else(|| "no node has slots > 0".into()),
@@ -280,7 +279,6 @@ impl DockerBackend {
         include_stopped: bool,
     ) -> Result<Vec<bollard::models::ContainerSummary>, BackendError> {
         let opts = ListContainersOptionsBuilder::default()
-            // `all(true)` is required to see anything but running containers.
             .all(include_stopped)
             .filters(&HashMap::from([
                 ("label".to_string(), vec![format!("{MANAGED_LABEL}=true")]),
@@ -339,7 +337,7 @@ impl DockerBackend {
     async fn place(&self, pin: Option<&str>) -> Result<&Node, BackendError> {
         let mut candidates = Vec::with_capacity(self.nodes.len());
         for (i, node) in self.nodes.iter().enumerate() {
-            let load = self.probe_load(node).await; // None ⇒ out of service
+            let load = self.probe_load(node).await;
             candidates.push(PlacementCandidate {
                 index: i,
                 name: &node.name,
@@ -424,8 +422,6 @@ impl ContainerBackend for DockerBackend {
             .wait_container(cid, None::<bollard::query_parameters::WaitContainerOptions>);
         match stream.next().await {
             Some(Ok(resp)) => Ok(resp.status_code as i32),
-            // A non-zero exit surfaces as ContainerWaitError on some daemons —
-            // the exit code rides in the error body.
             Some(Err(bollard::errors::Error::DockerContainerWaitError { code, .. })) => {
                 Ok(code as i32)
             }
@@ -444,7 +440,6 @@ impl ContainerBackend for DockerBackend {
             .await
         {
             Ok(()) => Ok(()),
-            // Already exited: kill is idempotent from the dispatcher's view.
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 409, ..
             }) => Ok(()),
@@ -538,15 +533,11 @@ impl ContainerBackend for DockerBackend {
 
     async fn remove(&self, id: &ContainerId) -> Result<(), BackendError> {
         let (node, cid) = self.route(id)?;
-        // force=false — the caller only removes after the container has exited
-        // and its artifacts are harvested.
         let opts = RemoveContainerOptionsBuilder::default()
             .force(false)
             .build();
         match node.docker.remove_container(cid, Some(opts)).await {
             Ok(()) => Ok(()),
-            // Already gone (404) or a removal already in flight (409): the
-            // overlay is reclaimed either way, so removal is idempotent.
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404 | 409,
                 ..
@@ -568,8 +559,6 @@ impl ContainerBackend for DockerBackend {
         for node in &self.nodes {
             match self.managed_running_list(node).await {
                 Ok(cs) => out.extend(cs),
-                // One unreachable node must not blank the whole fleet sweep —
-                // the others' orphans still get reaped (§3.6).
                 Err(e) => tracing::warn!(node = %node.name, "list_managed_running skipped: {e}"),
             }
         }
@@ -577,7 +566,6 @@ impl ContainerBackend for DockerBackend {
     }
 
     fn fleet_status(&self) -> Vec<NodeStatus> {
-        // Docker endpoints carry no chuggernaut version — health only.
         self.availability()
             .into_iter()
             .map(|(name, available)| NodeStatus {
@@ -585,10 +573,6 @@ impl ContainerBackend for DockerBackend {
                 available,
                 version: None,
                 refresh_outcome: None,
-                // A docker-endpoint node's capacity is static `DOCKER_NODES`
-                // config, not an observation: `DOCKER_NODES` remains its owner
-                // (design #293 §7), so it reports no capacity and no provenance
-                // and the roster's number stands.
                 slots: None,
                 capacity: None,
             })
@@ -737,8 +721,8 @@ mod tests {
     #[test]
     fn parse_memory_agrees_with_types_grammar() {
         for case in [
-            "5Gi", "512Mi", "4Ki", "1048576", // legal
-            "5g", "4GB", "", "  ", "-5", "0", "1.5Gi", "Gi", "5gi", // illegal
+            "5Gi", "512Mi", "4Ki", "1048576", "5g", "4GB", "", "  ", "-5", "0", "1.5Gi", "Gi",
+            "5gi",
         ] {
             assert_eq!(
                 parse_memory(case).ok(),
@@ -749,8 +733,6 @@ mod tests {
     }
 
     fn cand<'a>(name: &'a str, free: Option<i64>, index: usize) -> PlacementCandidate<'a> {
-        // running is irrelevant under Headroom (these tests exercise it); model
-        // a node with `free` slots and no running load.
         PlacementCandidate {
             index,
             name,
@@ -768,14 +750,11 @@ mod tests {
             cand("nuc", Some(4), 1),
             cand("aaa", Some(4), 2),
         ];
-        // Most free wins; the 4==4 tie breaks to the lexicographically-first name.
         assert_eq!(choose_placement(hr, &nodes, None).unwrap(), 2);
 
-        // An out-of-service node (free = None) is skipped even with more slots.
         let nodes = [cand("local", Some(2), 0), cand("nuc", None, 1)];
         assert_eq!(choose_placement(hr, &nodes, None).unwrap(), 0);
 
-        // No free slots anywhere ⇒ the unchanged fleet-wide message.
         let nodes = [cand("local", Some(0), 0), cand("nuc", None, 1)];
         let err = choose_placement(hr, &nodes, None).unwrap_err().to_string();
         assert!(err.contains("no free slots on any node"), "{err}");
@@ -787,24 +766,20 @@ mod tests {
     fn choose_pin_honored_and_never_falls_back() {
         let hr = PlacementPolicy::Headroom;
         let nodes = [cand("local", Some(1), 0), cand("nuc", Some(4), 1)];
-        // `nuc` has more slots, but the pin to `local` wins.
         assert_eq!(choose_placement(hr, &nodes, Some("local")).unwrap(), 0);
 
-        // Pinned node full ⇒ launch error naming it, no fallback to `nuc`.
         let nodes = [cand("local", Some(0), 0), cand("nuc", Some(4), 1)];
         let err = choose_placement(hr, &nodes, Some("local"))
             .unwrap_err()
             .to_string();
         assert!(err.contains("no free slots on node local"), "{err}");
 
-        // Pinned node out of service ⇒ same "no free slots" shape.
         let nodes = [cand("local", None, 0), cand("nuc", Some(4), 1)];
         let err = choose_placement(hr, &nodes, Some("local"))
             .unwrap_err()
             .to_string();
         assert!(err.contains("no free slots on node local"), "{err}");
 
-        // Unknown pin ⇒ error naming the known nodes.
         let nodes = [cand("local", Some(1), 0), cand("nuc", Some(4), 1)];
         let err = choose_placement(hr, &nodes, Some("mini"))
             .unwrap_err()
@@ -834,7 +809,6 @@ mod tests {
     fn host_config_without_cache_has_no_binds() {
         let hc = build_host_config(&launch_config(), None).unwrap();
         assert!(hc.binds.is_none(), "dispatcher path must add no binds");
-        // The pre-existing limits are still translated.
         assert_eq!(hc.nano_cpus, Some(2_000_000_000));
         assert_eq!(hc.memory, Some(4 * 1024 * 1024 * 1024));
     }

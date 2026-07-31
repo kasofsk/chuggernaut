@@ -212,8 +212,6 @@ impl GroupRollup {
 pub fn group_rollups<'a>(jobs: impl IntoIterator<Item = &'a Job>) -> BTreeMap<String, GroupRollup> {
     let mut rollups: BTreeMap<String, GroupRollup> = BTreeMap::new();
     let mut jobs: Vec<&Job> = jobs.into_iter().collect();
-    // Ascending seq, so every group's member list reads in filing order
-    // regardless of the order the records arrived in.
     jobs.sort_by_key(|job| job.id);
     for job in jobs {
         for name in &job.groups {
@@ -407,7 +405,6 @@ mod tests {
             "zero states are omitted, not emitted as 0"
         );
         assert_eq!(inputs.open, 1);
-        // The two-group job is a full member of the second group too.
         assert_eq!(rollups["beacon"].jobs.len(), 1);
         assert_eq!(rollups["beacon"].open, 1);
     }

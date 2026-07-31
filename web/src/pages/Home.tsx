@@ -3,8 +3,6 @@ import { Link, useNavigate } from 'react-router-dom'
 import { api, type Identity } from '../api'
 import { Skeleton, SkeletonLines } from '../components/Skeleton'
 
-// Project chooser: lists the projects visible to the caller (platform
-// admins see the whole registry), plus a free-form owner/project field.
 export function Home() {
   const [identity, setIdentity] = useState<Identity | null>(null)
   const [projects, setProjects] = useState<string[]>([])
@@ -24,7 +22,6 @@ export function Home() {
       .finally(() => setLoading(false))
   }, [navigate])
 
-  // Identity gates the whole page (admin links, roles), so skeleton until it lands.
   if (!identity)
     return (
       <div className="page">

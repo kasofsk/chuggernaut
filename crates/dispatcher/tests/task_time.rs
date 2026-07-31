@@ -148,41 +148,32 @@ async fn completing_a_task_recomputes_the_job_total_and_never_accumulates() {
     let Some((store, mut core, seq)) = setup().await else {
         return;
     };
-    // A fresh job has run nothing, so it has no total to show.
     assert_eq!(stored_task_time(&store, seq).await, None);
 
-    // Cycle 1's work task: 10 minutes of work.
     core.task_put(&task(1, seq, 1, Some(0), Some(10)))
         .await
         .unwrap();
     assert_invariants(&core);
     assert_eq!(stored_task_time(&store, seq).await, Some(10 * MIN_MS));
 
-    // A rework cycle 30 minutes later adds its own 5 minutes — the gap between
-    // the two is waiting, and must not appear in the total.
     core.task_put(&task(2, seq, 2, Some(40), Some(45)))
         .await
         .unwrap();
     assert_invariants(&core);
     assert_eq!(stored_task_time(&store, seq).await, Some(15 * MIN_MS));
 
-    // Writing an already-counted task again is a recompute, not a `+=`: the
-    // total is stable. This is the property that lets a lost write self-heal.
     core.task_put(&task(1, seq, 1, Some(0), Some(10)))
         .await
         .unwrap();
     assert_invariants(&core);
     assert_eq!(stored_task_time(&store, seq).await, Some(15 * MIN_MS));
 
-    // A task that never started contributes nothing.
     let mut parked = task(3, seq, 3, None, None);
     parked.state = TaskState::Pending;
     core.task_put(&parked).await.unwrap();
     assert_invariants(&core);
     assert_eq!(stored_task_time(&store, seq).await, Some(15 * MIN_MS));
 
-    // The in-memory graph — the copy every later job write starts from — moved
-    // with the record, so the next transition cannot revert the total.
     assert_eq!(
         core.graph("acme", "api")
             .unwrap()
@@ -202,8 +193,6 @@ async fn task_time_survives_the_terminal_transition() {
         .await
         .unwrap();
     assert_invariants(&core);
-    // Revoke is the shortest public path to a terminal state-write; the stamp
-    // it sets must not carry the job's total away with it.
     core.revoke_job("acme", "api", seq).await.unwrap();
     assert_invariants(&core);
     let job = store
@@ -229,10 +218,6 @@ async fn revoking_keeps_the_span_of_the_attempt_it_closes() {
         .unwrap();
     assert_invariants(&core);
 
-    // A claimed human attempt: Pending, but with a real `started_at`, so the
-    // revoke path's own `close_pending_tasks` stamps it with a span rather
-    // than closing an empty record. Nothing is written for this job after the
-    // revoke — Revoked is terminal — so a total lost here is lost for good.
     let mut claimed = task(2, seq, 2, None, None);
     claimed.state = TaskState::Pending;
     claimed.performed_by = Some(types::Performer::Human);
@@ -244,13 +229,11 @@ async fn revoking_keeps_the_span_of_the_attempt_it_closes() {
     core.revoke_job("acme", "api", seq).await.unwrap();
     assert_invariants(&core);
 
-    // 10 minutes of finished work plus the ~5 minutes the closed attempt ran.
     let total = stored_task_time(&store, seq).await.unwrap();
     assert!(
         (15 * MIN_MS..16 * MIN_MS).contains(&total),
         "expected ~15 min, got {total} ms"
     );
-    // `set_state` dual-writes KV and the graph, so both must carry the total.
     assert_eq!(
         core.graph("acme", "api")
             .unwrap()

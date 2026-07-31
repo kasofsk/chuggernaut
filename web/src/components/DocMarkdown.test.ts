@@ -1,11 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { docLinkTarget } from './DocMarkdown'
 
-// Relative hrefs in a rendered document are written against the document's
-// place in the repo, not the SPA route it is shown under. Left alone the
-// browser resolves `./309-x.md` against `/p/o/p/designs/321-y` and the operator
-// lands nowhere — so these are the cases that keep the docs tree browsable.
-
 const base = '/p/acme/chug/files'
 const doc = 'docs/design/321-job-groups.md'
 const target = (href: string) => docLinkTarget(base, doc, href)
@@ -31,7 +26,6 @@ describe('docLinkTarget', () => {
     expect(target('./309-host-native-execution.md#decision-4')).toBe(
       `${base}?path=docs%2Fdesign%2F309-host-native-execution.md#decision-4`,
     )
-    // …but not onto a directory listing, which has no headings to land on.
     expect(target('../adr#index')).toBe(`${base}?dir=docs%2Fadr`)
   })
 

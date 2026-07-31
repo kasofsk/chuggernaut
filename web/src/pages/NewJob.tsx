@@ -34,8 +34,6 @@ export function NewJobPage() {
   const [jobTypes, setJobTypes] = useState<JobTypeSummary[]>([])
   const [availableTags, setAvailableTags] = useState<string[]>([])
   const [jobs, setJobs] = useState<Job[]>([])
-  // Initial pickers fetch: the form itself renders immediately; only the
-  // type/deps pickers skeleton while this is in flight.
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -44,7 +42,7 @@ export function NewJobPage() {
     Promise.all([api.jobTypes(owner, project), api.tags(owner, project), api.jobs(owner, project)])
       .then(([types, tags, js]) => {
         setJobTypes(types)
-        setAvailableTags(tags.map((t) => t.name)) // the picker names tags; the paths are for readers
+        setAvailableTags(tags.map((t) => t.name))
         setJobs(js)
         setError(null)
       })
@@ -117,10 +115,6 @@ function CreateJob({
   }, [jobTypes, type, initialType])
 
   const typeDetail = useJobTypeDetail(owner, project, type)
-  // Values for the type's declared inputs (spec §1.1), and the messages a
-  // rejected create keyed back onto their fields. Both are cleared when the
-  // type changes: a value for `sha` means nothing under a type that doesn't
-  // declare it, and the server would refuse it as undeclared at release.
   const declaredInputs = typeDetail?.job_type?.inputs ?? []
   const [inputValues, setInputValues] = useState<Record<string, string>>({})
   const [inputErrors, setInputErrors] = useState<Record<string, string>>({})
@@ -136,24 +130,15 @@ function CreateJob({
   const [evalRows, setEvalRows] = useState<EvalRow[]>([])
   const [selectedTags, setSelectedTags] = useState<string[]>([])
   const [tags, setTags] = useState('')
-  // What the job is part of (design #321): a creation field like any other, and
-  // one the picker suggests known names for — the project's groups plus its
-  // design documents.
   const [groups, setGroups] = useState<string[]>([])
   const groupChoices = useGroupOptions(owner, project)
   const [timeout, setTimeout] = useState('')
-  // Files picked/pasted/shot while composing (spec §1.6): held locally and PUT
-  // to the job's attachments once it's created, before navigating to it.
   const [files, setFiles] = useState<File[]>([])
   const typeTimeout = typeDetail?.job_type?.resources?.task_timeout ?? null
   const [model, setModel] = useState('')
   const typeModel = typeDetail?.job_type?.work?.model ?? null
-  // Departure switch: 'release' schedules the run; 'draft' parks it on the siding.
   const [mode, setMode] = useState<JobMode>('frozen')
   const [error, setError] = useState<string | null>(null)
-  // State, not a ref: the button has to re-render to disable itself. It stays
-  // true through a successful create — the page navigates away rather than
-  // returning to an armed form.
   const [submitting, setSubmitting] = useState(false)
 
   function toggleTag(tag: string) {
@@ -194,10 +179,6 @@ function CreateJob({
       setError('pick a job type')
       return
     }
-    // Pre-validation is a courtesy, not the gate: it repeats exactly what the
-    // creation pass would 422 on (charset, length) plus the declaration's own
-    // narrowing, so the operator sees it here instead of after a round trip.
-    // The fields already render these messages — the banner only says where.
     if (Object.keys(inputValueErrors(declaredInputs, inputValues)).length) {
       setInputErrors({})
       setError('fix the flagged inputs above')
@@ -221,23 +202,17 @@ function CreateJob({
       })
       .then(
         async (job) => {
-          // Attach composed files before release/navigation so they're present
-          // when work starts. Best-effort: a failed upload warns but doesn't
-          // block — it can be retried from the job page.
           if (files.length) {
             const failed = await uploadFiles(owner, project, job.id, files)
             if (failed.length)
               onError(`some attachments didn't upload (${failed.join(', ')}) — retry on the job page`)
           }
-          // Ready = create + immediate release; Frozen parks; Draft stays editable.
           if (mode === 'ready') await api.release(owner, project, job.id).catch(() => {})
           navigate(`/p/${owner}/${project}/jobs/${job.id}`)
         },
         (e) => {
           setSubmitting(false)
           const msg = e instanceof Error ? e.message : 'create failed'
-          // A rejection naming `inputs.{name}` belongs on that field, not in one
-          // opaque banner — the operator has to know which value to fix.
           const fields = inputFieldErrors(e)
           setInputErrors(fields)
           if (Object.keys(fields).length) {
@@ -254,7 +229,6 @@ function CreateJob({
     e.preventDefault()
     build(mode === 'draft')
   }
-  // ⌘/Ctrl-Enter submits per the current switch position.
   function onKey(e: KeyboardEvent) {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault()
@@ -344,16 +318,12 @@ function CreateJob({
           )}
         </div>
 
-        {/* The type's declared inputs (spec §1.1): nothing at all for a type
-            that declares none, which is most of them. */}
         <JobInputFields
           declared={declaredInputs}
           values={inputValues}
           serverErrors={inputErrors}
           onChange={(name, value) => {
             setInputValues((vs) => ({ ...vs, [name]: value }))
-            // The server spoke about the old value; editing it makes that stale,
-            // so the field falls back to the live client verdict.
             setInputErrors(({ [name]: _dropped, ...rest }) => rest)
           }}
         />
@@ -499,9 +469,6 @@ function CreateJob({
           </datalist>
         </div>
 
-        {/* Beside the knowledge tags because they look alike and are not: a tag
-            is an execution input the work agent is told about, a group changes
-            nothing about the run (design #321 Decision 3). */}
         <GroupPicker
           value={groups}
           options={groupChoices}
@@ -553,9 +520,6 @@ function CreateJob({
                 aria-checked={mode === m}
                 className={`mode-seg-opt${mode === m ? ' mode-seg-on' : ''}`}
                 title={tip}
-                // Frozen while a create is in flight: the release step reads
-                // `mode` after the POST resolves, so a mid-flight switch would
-                // change what happens to an already-created job.
                 disabled={submitting}
                 onClick={() => setMode(m)}
               >

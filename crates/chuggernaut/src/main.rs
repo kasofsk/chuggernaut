@@ -65,8 +65,6 @@ async fn main() -> anyhow::Result<()> {
         Command::Dispatcher => {
             let config = dispatcher::config::DispatcherConfig::from_env()?;
             let dispatcher = dispatcher::run::run(config).await?;
-            // SIGTERM (launchd `kickstart -k`) / SIGINT → graceful drain (§3.6):
-            // quiesce the actor and flush records to KV before exiting clean.
             dispatcher::run::wait_for_signal().await;
             eprintln!("draining dispatcher for graceful shutdown");
             dispatcher.shutdown().await;

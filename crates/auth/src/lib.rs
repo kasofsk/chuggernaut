@@ -23,7 +23,7 @@ pub enum AuthError {
 pub enum Action {
     ReadProject { project: String },
     ResolveTask { project: String },
-    ManageProjectConfig { project: String }, // vars, secrets, knowledge
+    ManageProjectConfig { project: String },
     PlatformConfig,
     IssueSshCert,
 }

@@ -19,9 +19,6 @@ use types::{Evaluator, EvaluatorType, JobState};
 mod common;
 use common::{assert_invariants_of, spawn_checked};
 
-// A plain agent job with no evaluators: a clean work exit takes the job (or
-// batch) straight to Done, so the harness can assert lifecycle without
-// scripting eval verdicts.
 const WEB: &str = r#"
 name: web
 image: img:latest
@@ -30,8 +27,6 @@ work:
   prompt: prompts/impl.md
 "#;
 
-// An agent job with an agent evaluator and a single rework cycle: used to show
-// the batch gets ONE rework budget for the whole thing, like any other job.
 const REVIEW: &str = r#"
 name: review
 image: img:latest
@@ -45,8 +40,6 @@ eval:
     prompt: prompts/eval.md
 "#;
 
-// A second type, distinct from `web`, so the "type must match" rule can be
-// exercised with a real member of the wrong type.
 const CODE: &str = r#"
 name: code
 image: img:latest
@@ -218,7 +211,6 @@ async fn event_types(store: &NatsStore) -> Vec<String> {
 }
 
 async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::Job {
-    // Watch-based wait (#206 principle 3): value-inspecting, hard timeout.
     test_utils::wait::job_state(store, "acme", "api", seq, want).await
 }
 
@@ -237,8 +229,6 @@ fn commit_work(rig: &Rig) {
         clone.push(&branch).await;
     });
 }
-
-// ── Creation validation matrix ───────────────────────────────────────────
 
 /// A batch absorbs its members: each goes Frozen→Batched with `batch_id` set,
 /// the batch lands Frozen carrying the member list, and its description defaults
@@ -280,14 +270,12 @@ async fn batch_creation_validation_rejects() {
     let a = create_checked(&rig, member("web", &[], "", "")).await;
     let b = create_checked(&rig, member("web", &[], "", "")).await;
 
-    // Fewer than 2 members.
     assert!(matches!(
         rig.handle.create_job(batch("web", &[a.id], "", "")).await,
         Err(CoreError::Validation(_))
     ));
     assert_invariants_of(&rig.invariants);
 
-    // Wrong type: a `code` member cannot join a `web` batch.
     let c = create_checked(&rig, member("code", &[], "", "")).await;
     assert!(matches!(
         rig.handle
@@ -297,7 +285,6 @@ async fn batch_creation_validation_rejects() {
     ));
     assert_invariants_of(&rig.invariants);
 
-    // Non-Frozen member: release `a` (→ Ready, no deps), then it cannot batch.
     rig.handle.release_job("acme", "api", a.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
     assert_ne!(state_of(&rig.store, a.id).await, JobState::Frozen);
@@ -309,7 +296,6 @@ async fn batch_creation_validation_rejects() {
     ));
     assert_invariants_of(&rig.invariants);
 
-    // Already-batched member: batch [b, d], then try to reuse b.
     let d = create_checked(&rig, member("web", &[], "", "")).await;
     let e = create_checked(&rig, member("web", &[], "", "")).await;
     let real = create_checked(&rig, batch("web", &[b.id, d.id], "", "")).await;
@@ -321,8 +307,6 @@ async fn batch_creation_validation_rejects() {
     ));
     assert_invariants_of(&rig.invariants);
 
-    // Batch-of-a-batch: the batch job itself (Frozen, type web) cannot be a
-    // member of another batch.
     assert!(matches!(
         rig.handle
             .create_job(batch("web", &[real.id, e.id], "", ""))
@@ -338,15 +322,12 @@ async fn batch_creation_validation_rejects() {
 async fn batch_unions_external_deps_and_drops_internal() {
     let Some(rig) = rig().await else { return };
 
-    // An external upstream both members transitively depend on.
     let ext = create_checked(&rig, member("web", &[], "", "")).await;
-    // m1 depends on the external job; m2 depends on m1 (member-on-member).
     let m1 = create_checked(&rig, member("web", &[ext.id], "", "")).await;
     let m2 = create_checked(&rig, member("web", &[m1.id], "", "")).await;
 
     let b = create_checked(&rig, batch("web", &[m1.id, m2.id], "", "")).await;
 
-    // Only the external dep survives; the intra-batch m1→m2 edge is dropped.
     assert_eq!(
         b.deps,
         vec![ext.id],
@@ -366,7 +347,6 @@ async fn batch_eval_union_collision_is_error() {
     m1.eval = vec![cmd_eval("ci", "./a.sh")];
     let m1 = create_checked(&rig, m1).await;
 
-    // Same-name, different definition → collision.
     let mut m2 = member("web", &[], "", "");
     m2.eval = vec![cmd_eval("ci", "./b.sh")];
     let m2 = create_checked(&rig, m2).await;
@@ -379,7 +359,6 @@ async fn batch_eval_union_collision_is_error() {
     ));
     assert_invariants_of(&rig.invariants);
 
-    // Same-name, IDENTICAL definition → deduped to one, batch created clean.
     let mut m3 = member("web", &[], "", "");
     m3.eval = vec![cmd_eval("ci", "./a.sh")];
     let m3 = create_checked(&rig, m3).await;
@@ -388,8 +367,6 @@ async fn batch_eval_union_collision_is_error() {
     assert_eq!(b.eval[0].name, "ci");
     assert_invariants_of(&rig.invariants);
 }
-
-// ── Prompt ────────────────────────────────────────────────────────────────
 
 /// The batch work agent sees the batch-aware brief: the preamble plus every
 /// member's ticket under its own numbered heading.
@@ -426,22 +403,18 @@ async fn batch_prompt_has_preamble_and_all_briefs() {
     assert_invariants_of(&rig.invariants);
 }
 
-// ── Completion fan-out ──────────────────────────────────────────────────────
-
 /// The batch's single completion lands every member Done and unblocks a
 /// dependent that waited on one of them — exactly as if the member had run
 /// individually.
 #[tokio::test]
 async fn batch_completion_fans_out_and_unblocks_dependent() {
     let Some(rig) = rig().await else { return };
-    // Two work runs: the batch's own agent, then the unblocked dependent's.
     commit_work(&rig);
     commit_work(&rig);
 
     let m1 = create_checked(&rig, member("web", &[], "", "")).await;
     let m2 = create_checked(&rig, member("web", &[], "", "")).await;
 
-    // An external dependent on m1 (a single member), released → Blocked.
     let dep = create_checked(&rig, member("web", &[m1.id], "", "")).await;
 
     let b = create_checked(&rig, batch("web", &[m1.id, m2.id], "", "")).await;
@@ -454,7 +427,6 @@ async fn batch_completion_fans_out_and_unblocks_dependent() {
         "dep on a Batched member waits"
     );
 
-    // Run the batch to completion; its merge completes both members.
     rig.handle.release_job("acme", "api", b.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, b.id, JobState::Done).await;
@@ -464,8 +436,6 @@ async fn batch_completion_fans_out_and_unblocks_dependent() {
     assert!(m1j.completed_at.is_some() && m2j.completed_at.is_some());
     assert_eq!(m1j.batch_id, Some(b.id), "provenance kept after completion");
 
-    // The single squash's commit body opens with the member list, so git
-    // history records which tickets this one merge closed (spec §2.1 batches).
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(rig._repo.bare_path())
@@ -478,12 +448,9 @@ async fn batch_completion_fans_out_and_unblocks_dependent() {
         "squash body must open with the member list: {body:?}"
     );
 
-    // The dependent unblocks off the individual member's Done and runs itself.
     wait_for_state(&rig.store, dep.id, JobState::Done).await;
     assert_invariants_of(&rig.invariants);
 }
-
-// ── Revoke ──────────────────────────────────────────────────────────────────
 
 /// Revoking a batch returns its members to Frozen with `batch_id` cleared, so
 /// they can be re-batched; the batch itself is Revoked.
@@ -509,15 +476,12 @@ async fn revoke_batch_returns_members_frozen_and_rebatchable() {
         assert_eq!(mj.batch_id, None, "batch_id cleared");
     }
 
-    // Re-batchable: the freed members form a fresh batch.
     let b2 = create_checked(&rig, batch("web", &[m1.id, m2.id], "", "")).await;
     assert!(b2.is_batch());
     assert_eq!(state_of(&rig.store, m1.id).await, JobState::Batched);
     assert_eq!(get_job(&rig.store, m1.id).await.batch_id, Some(b2.id));
     assert_invariants_of(&rig.invariants);
 }
-
-// ── Rework budget ───────────────────────────────────────────────────────────
 
 /// The batch is an ordinary job downstream of creation: it gets ONE rework
 /// budget for the whole thing. A first eval fail reworks (budget 1), the rework
@@ -533,9 +497,7 @@ async fn batch_has_one_rework_budget() {
     let b = create_checked(&rig, batch("review", &[m1.id, m2.id], "", "")).await;
     let batch_seq = b.id;
 
-    // Run order (task ids sequential within the batch job): work c1 (task 1),
-    // eval c1 fails (task 2), work c2 (task 3), eval c2 passes (task 4).
-    commit_work(&rig); // work cycle 1 commits
+    commit_work(&rig);
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -554,7 +516,7 @@ async fn batch_has_one_rework_budget() {
         .await
         .unwrap();
     });
-    rig.provider.on_run(|_| async {}); // work cycle 2 (rework)
+    rig.provider.on_run(|_| async {});
     let h = handle.clone();
     rig.provider.on_run(move |_| async move {
         h.submit_eval(
@@ -578,11 +540,8 @@ async fn batch_has_one_rework_budget() {
     assert_invariants_of(&rig.invariants);
     wait_for_state(&rig.store, b.id, JobState::Done).await;
 
-    // One work agent per cycle (2 total) plus one evaluator per cycle (2) — the
-    // budget is the batch's, not per-member.
     let runs = rig.provider.runs();
     assert_eq!(runs.len(), 4, "work c1, eval c1, work c2, eval c2");
-    // The rework work run carried the batch brief AND the prior eval findings.
     assert!(
         runs[2].prompt.contains("This is a job batch"),
         "{}",
@@ -591,13 +550,10 @@ async fn batch_has_one_rework_budget() {
     assert_eq!(runs[2].eval_context.len(), 1);
     assert!(!runs[2].eval_context[0].pass);
 
-    // Both members completed via the batch.
     wait_for_state(&rig.store, m1.id, JobState::Done).await;
     wait_for_state(&rig.store, m2.id, JobState::Done).await;
     assert_invariants_of(&rig.invariants);
 }
-
-// ── Draft batches (spec §2.1 draft batches) ─────────────────────────────────
 
 /// A `draft:true` batch stages its member list WITHOUT absorbing it: the batch
 /// lands Draft carrying the members, but each member stays Frozen (claimable /
@@ -620,7 +576,6 @@ async fn draft_batch_stages_without_absorbing() {
     );
     assert!(d.deps.is_empty(), "unions deferred to finalize/release");
 
-    // Members are NOT absorbed: still Frozen, no batch_id, no job-batched event.
     assert_eq!(state_of(&rig.store, m1.id).await, JobState::Frozen);
     assert_eq!(state_of(&rig.store, m2.id).await, JobState::Frozen);
     assert!(get_job(&rig.store, m1.id).await.batch_id.is_none());
@@ -638,8 +593,10 @@ async fn draft_batch_stages_without_absorbing() {
 /// batch-of-batch all reject and leave the list unchanged) and emitting
 /// `job-updated` for the changes that stick.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn draft_batch_edit_members_validates_adds() {
     let Some(rig) = rig().await else { return };
 
@@ -647,7 +604,6 @@ async fn draft_batch_edit_members_validates_adds() {
     let m2 = create_checked(&rig, member("web", &[], "", "")).await;
     let d = create_checked(&rig, draft_batch("web", &[m1.id], "", "")).await;
 
-    // Add m2, then remove m1: the membership edits stick.
     rig.handle
         .edit_members("acme", "api", d.id, vec![m2.id], vec![])
         .await
@@ -667,7 +623,6 @@ async fn draft_batch_edit_members_validates_adds() {
         "membership edits emit job-updated"
     );
 
-    // Validation matrix on adds — each rejects and leaves membership == [m2].
     let wrong_type = create_checked(&rig, member("code", &[], "", "")).await;
     let released = create_checked(&rig, member("web", &[], "", "")).await;
     rig.handle
@@ -675,7 +630,6 @@ async fn draft_batch_edit_members_validates_adds() {
         .await
         .unwrap();
     assert_invariants_of(&rig.invariants);
-    // An already-batched member: absorbed by a separate real batch.
     let bm1 = create_checked(&rig, member("web", &[], "", "")).await;
     let bm2 = create_checked(&rig, member("web", &[], "", "")).await;
     let other = create_checked(&rig, batch("web", &[bm1.id, bm2.id], "", "")).await;
@@ -698,7 +652,6 @@ async fn draft_batch_edit_members_validates_adds() {
         );
     }
 
-    // Emptying the batch is refused — it would erase batch identity (§2.1).
     assert!(matches!(
         rig.handle
             .edit_members("acme", "api", d.id, vec![], vec![m2.id])
@@ -717,7 +670,6 @@ async fn edit_members_on_non_draft_conflicts() {
     let m1 = create_checked(&rig, member("web", &[], "", "")).await;
     let m2 = create_checked(&rig, member("web", &[], "", "")).await;
     let extra = create_checked(&rig, member("web", &[], "", "")).await;
-    // A non-draft (Frozen) batch.
     let b = create_checked(&rig, batch("web", &[m1.id, m2.id], "", "")).await;
 
     assert!(matches!(
@@ -773,7 +725,6 @@ async fn draft_batch_finalize_stale_member_stays_draft() {
     let m2 = create_checked(&rig, member("web", &[], "", "")).await;
     let d = create_checked(&rig, draft_batch("web", &[m1.id, m2.id], "", "")).await;
 
-    // m1 is released (→ Ready) while the draft composes: it can no longer batch.
     rig.handle.release_job("acme", "api", m1.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
 
@@ -827,11 +778,9 @@ async fn frozen_draft_edit_finalize_round_trip() {
     let ext = create_checked(&rig, member("web", &[], "", "")).await;
     let m3 = create_checked(&rig, member("web", &[ext.id], "", "")).await;
 
-    // A committed batch [m1, m2] — both absorbed.
     let b = create_checked(&rig, batch("web", &[m1.id, m2.id], "", "")).await;
     assert_eq!(state_of(&rig.store, m1.id).await, JobState::Batched);
 
-    // Reopen for editing: members return to Frozen (un-absorbed).
     rig.handle.draft_job("acme", "api", b.id).await.unwrap();
     assert_invariants_of(&rig.invariants);
     assert_eq!(state_of(&rig.store, b.id).await, JobState::Draft);
@@ -839,7 +788,6 @@ async fn frozen_draft_edit_finalize_round_trip() {
     assert_eq!(state_of(&rig.store, m2.id).await, JobState::Frozen);
     assert_eq!(get_job(&rig.store, m1.id).await.batch_id, None);
 
-    // Swap m2 for m3 (which carries an external dep).
     rig.handle
         .edit_members("acme", "api", b.id, vec![m3.id], vec![m2.id])
         .await

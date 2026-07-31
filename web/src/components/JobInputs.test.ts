@@ -1,14 +1,3 @@
-// The pure half of declared-input handling (design #311 slice B): the rules
-// that decide what the form flags and what it sends.
-//
-// These are here rather than as a rendering test because they are where the
-// client mirrors the *server's* vocabulary — the creation-time 422's charset and
-// length bound, a declaration's `pattern`/`values`, and the two §6.5 error
-// envelopes. A drift between this and `types::inputs` is exactly the bug the
-// tests can catch cheaply, and the two constraints the brief names as
-// load-bearing (a client check never blocks a submit the server would accept; a
-// type declaring no inputs sends today's body) are statements about these
-// functions, not about the DOM.
 
 import { describe, expect, it } from 'vitest'
 import { ApiError, type Input } from '../api'
@@ -43,18 +32,14 @@ describe('inputValueError', () => {
     const sha = declare({ pattern: '[0-9a-f]{7,40}' })
     expect(inputValueError(sha, '4f9c1ab')).toBeNull()
     expect(inputValueError(sha, 'zzz')).toMatch(/does not match/)
-    // Anchored by the platform, so a prefix match is still a rejection.
     expect(inputValueError(sha, '4f9c1abZZ')).toMatch(/does not match/)
   })
 
   it('applies a declared pattern only ON TOP of the charset, never instead of it', () => {
-    // A pattern may only narrow the floor: a permissive one cannot widen it.
     expect(inputValueError(declare({ pattern: '.*' }), 'rm -rf /')).toMatch(/identifiers/)
   })
 
   it('skips a pattern JavaScript cannot compile rather than inventing a verdict', () => {
-    // The server's dialect is Rust's `regex`; an unparseable-here pattern is a
-    // check this client declines, not a value it refuses.
     expect(inputValueError(declare({ pattern: '(?<' }), 'anything')).toBeNull()
   })
 
@@ -71,8 +56,6 @@ describe('inputValueError', () => {
   })
 
   it('never flags an empty value, including a required one', () => {
-    // A missing `required` input is a release-time rejection; refusing the
-    // submit here would block a create the server accepts.
     expect(inputValueError(declare({ required: true, pattern: '[0-9a-f]{7}' }), '')).toBeNull()
   })
 })
@@ -94,8 +77,6 @@ describe('suppliedInputs', () => {
   })
 
   it('drops a value the selected type does not declare', () => {
-    // Switching the type mid-compose leaves stale values behind; release would
-    // reject them as undeclared, so they are never sent.
     expect(suppliedInputs(declared, { sha: '4f9c1ab', region: 'eu' })).toEqual({ sha: '4f9c1ab' })
   })
 

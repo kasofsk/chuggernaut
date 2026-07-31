@@ -26,7 +26,6 @@ pub(super) async fn spawn_jobtypes_handlers(
     store: &NatsStore,
     repos: Arc<RepoManager>,
 ) -> store::Result<()> {
-    // ── req.jobtypes.list.{owner}.{project} — String[] (spec §1.1) ──────
     let mut jobtypes_sub = store.subscribe_requests("req.jobtypes.list.>").await?;
     let jobtypes_repos = repos.clone();
     tokio::spawn(async move {
@@ -45,9 +44,6 @@ pub(super) async fn spawn_jobtypes_handlers(
         }
     });
 
-    // ── req.jobtypes.get.{owner}.{project} — one type in full, for the
-    // library UI. Payload: { name }. Returns raw YAML plus the parsed type
-    // (defaults merged — the platform's view of what runs), or parse errors.
     let mut jobtype_get_sub = store.subscribe_requests("req.jobtypes.get.>").await?;
     tokio::spawn(async move {
         while let Some(req) = jobtype_get_sub.next().await {
@@ -76,7 +72,6 @@ pub(super) async fn spawn_jobtypes_handlers(
 /// back as `errors` alongside the raw YAML — a broken type should still be
 /// inspectable in the library.
 async fn get_job_type(repos: &RepoManager, owner: &str, project: &str, name: &str) -> Vec<u8> {
-    // Same shape rules as list_job_types: top-level stems only.
     if name.is_empty() || name.contains('/') || name.starts_with('_') {
         return bad_request("invalid job type name");
     }
@@ -114,8 +109,6 @@ async fn get_job_type(repos: &RepoManager, owner: &str, project: &str, name: &st
     ok_reply(&serde_json::json!({
         "name": name,
         "ref": head,
-        // The path the definition resolved to, so the library UI labels the
-        // file it actually showed rather than assuming a layout.
         "path": file.path,
         "yaml": file.content,
         "job_type": job_type,
@@ -138,7 +131,6 @@ async fn list_job_types(
     let stems: Vec<String> = crate::project_config::entries(&tree, "jobs", ".yaml")
         .into_iter()
         .map(|entry| entry.stem)
-        // skip _defaults.yaml and other `_`-prefixed helpers — not job types
         .filter(|stem| !stem.starts_with('_'))
         .collect();
 

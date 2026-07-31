@@ -4,9 +4,6 @@ import type { FleetStatus } from '../api'
 
 const COLLAPSE_KEY = 'chug-capacity-collapsed'
 
-// Load band → a data attribute the stylesheet maps onto the app's state hues:
-// comfortable (green) → busy (blue) → full/queued (orange). Kept out of the
-// component so colours stay in styles.css (no hard-coded hex here).
 function loadBand(busy: number, total: number, queue: number): 'ok' | 'high' | 'full' {
   if (queue > 0 || (total > 0 && busy >= total)) return 'full'
   if (total > 0 && busy / total >= 0.75) return 'high'
@@ -44,17 +41,12 @@ export function CapacityWidget({
     if (v) setExpanded(false)
   }
 
-  // The launch button always renders and leads the pill; the capacity readout is
-  // grafted on to its right inside the same pill only when the feed has real
-  // numbers.
   const newJobButton = (
     <Link to={newJobHref} className="capacity-newjob" title="start a new job">
       + new job
     </Link>
   )
 
-  // Feed down, non-admin, or nothing published yet → readout hidden (never zeros),
-  // but the launch button still floats on its own.
   const sized = fleet?.nodes.filter((n) => n.slots != null) ?? []
   const total = sized.reduce((n, x) => n + (x.slots ?? 0), 0)
   if (unavailable || !fleet || total === 0) {
@@ -81,11 +73,6 @@ export function CapacityWidget({
     )
   }
 
-  // One dot per slot (capped so a big fleet can't overflow the card); the first
-  // `busy` read as filled. `busy` can exceed `total` — lowering a node's cap
-  // below its live occupancy drains rather than kills (design #293 §5), so a
-  // fleet at 3/2 is a legitimate state — hence the clamp instead of a dot row
-  // that runs past its own length.
   const dotCount = Math.min(total, 16)
   const filled = Math.min(dotCount, Math.round((busy / total) * dotCount))
   const overCap = busy > total
@@ -94,9 +81,6 @@ export function CapacityWidget({
     <div className="capacity-widget" data-band={band}>
       <div className="capacity-card">
         {newJobButton}
-        {/* Hover scope for the breakdown is the readout only — the breakdown is a
-            child so moving into it never counts as a leave, and hovering the
-            launch button next door doesn't pop it open. */}
         <div
           className="capacity-gauge"
           onMouseEnter={() => setExpanded(true)}

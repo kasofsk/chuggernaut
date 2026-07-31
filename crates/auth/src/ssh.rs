@@ -153,8 +153,6 @@ pub fn authorize_ref_push(
             project: p,
             seq,
         } => o == owner && p == project && refname == format!("refs/heads/job/{seq}"),
-        // A platform admin (§7.3) pushes to any job branch in any project, but
-        // the default branch stays dispatcher-only for everyone.
         Principal::User { .. } => {
             (admin || roles.get(&format!("{owner}/{project}")) >= Some(&ProjectRole::Member))
                 && is_job_branch(refname)
@@ -199,8 +197,8 @@ fn is_job_branch(refname: &str) -> bool {
 /// The two git services reachable over SSH.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitService {
-    UploadPack,  // pull / clone
-    ReceivePack, // push
+    UploadPack,
+    ReceivePack,
 }
 
 impl GitService {
@@ -384,7 +382,6 @@ impl SshCa {
             .await
             .map_err(internal)?;
 
-        // Repo-scoped read-only pull, identical to an eval cert's authorization.
         let principal = crate::job_ssh_principal(owner, project, NODE_CERT_SEQ);
         let force_command = format!(
             "chuggernaut ssh-shell --kind job --principal {principal} --access {}",
@@ -393,8 +390,6 @@ impl SshCa {
         let certificate = self
             .sign(
                 &public_key,
-                // key_id names the node so audit logs read `node-{node}`, not a
-                // fake job number.
                 &format!("node-{node}"),
                 &principal,
                 validity,
@@ -458,8 +453,6 @@ impl SshCa {
 /// `ssh-keygen` verifies.
 pub fn valid_public_key_line(line: &str) -> bool {
     use base64::Engine;
-    // OpenSSH public-key algorithm names (the leading token, and the blob's
-    // first embedded string).
     const ALGOS: &[&str] = &[
         "ssh-ed25519",
         "ssh-rsa",
@@ -480,7 +473,6 @@ pub fn valid_public_key_line(line: &str) -> bool {
     let Ok(blob) = base64::engine::general_purpose::STANDARD.decode(b64) else {
         return false;
     };
-    // First field: u32 big-endian length, then that many bytes = the algo name.
     let Some(len_bytes) = blob.get(0..4) else {
         return false;
     };
@@ -538,7 +530,6 @@ mod tests {
                 email: "david@example.com".into()
             }
         );
-        // Malformed job principals fall through to user (deny-by-role).
         assert!(matches!(
             Principal::parse("job:acme:nope"),
             Principal::User { .. }
@@ -598,7 +589,6 @@ mod tests {
             "api"
         ));
         assert!(!authorize_pull(&user, false, &none, "acme", "api"));
-        // Platform admin reads any project with no role grants at all.
         assert!(authorize_pull(&user, true, &none, "acme", "api"));
         assert!(authorize_pull(&user, true, &none, "other", "repo"));
     }
@@ -610,7 +600,6 @@ mod tests {
         let ok = |p: &Principal, a, r: &HashMap<_, _>, refname| {
             authorize_ref_push(p, a, false, r, "acme", "api", refname, "main")
         };
-        // Job: own branch only, own project only, rw only.
         assert!(ok(&job, CertAccess::ReadWrite, &none, "refs/heads/job/42"));
         assert!(!ok(&job, CertAccess::ReadWrite, &none, "refs/heads/job/43"));
         assert!(!ok(&job, CertAccess::ReadWrite, &none, "refs/heads/main"));
@@ -625,7 +614,6 @@ mod tests {
             "refs/heads/job/42",
             "main"
         ));
-        // Dispatcher: protected refs allowed.
         assert!(ok(
             &Principal::Dispatcher,
             CertAccess::ReadWrite,
@@ -638,7 +626,6 @@ mod tests {
             &none,
             "refs/tags/v1"
         ));
-        // Users: job branches only, Member+ only.
         let user = Principal::parse("d@e.com");
         assert!(ok(
             &user,
@@ -676,7 +663,6 @@ mod tests {
     fn platform_admin_push_bypass() {
         let none = HashMap::new();
         let user = Principal::parse("d@e.com");
-        // admin=true: push to a job branch in any project, no role grant needed.
         let admin_push = |owner, project, refname, default| {
             authorize_ref_push(
                 &user,
@@ -691,12 +677,9 @@ mod tests {
         };
         assert!(admin_push("acme", "api", "refs/heads/job/7", "main"));
         assert!(admin_push("other", "repo", "refs/heads/job/99", "main"));
-        // ...but never the default branch, even for an admin, and even when the
-        // default is not literally "main".
         assert!(!admin_push("acme", "api", "refs/heads/main", "main"));
         assert!(!admin_push("acme", "api", "refs/heads/trunk", "trunk"));
         assert!(!admin_push("acme", "api", "refs/tags/v1", "main"));
-        // Entry gate: an admin may push *something* to any project.
         assert!(authorize_push_entry(
             &user,
             CertAccess::ReadWrite,
@@ -705,7 +688,6 @@ mod tests {
             "other",
             "repo"
         ));
-        // A read-only cert stays read-only even with the admin flag.
         assert!(!authorize_ref_push(
             &user,
             CertAccess::ReadOnly,
@@ -746,7 +728,6 @@ mod tests {
                 .starts_with("ssh-ed25519-cert-v01@openssh.com")
         );
 
-        // ssh-keygen -L pretty-prints the cert; assert principal + forced command.
         let cert_path = dir.path().join("cert.pub");
         tokio::fs::write(&cert_path, &cred.certificate)
             .await
@@ -787,14 +768,10 @@ mod tests {
             .await
             .unwrap();
         let listing = ssh_keygen_list(&cert_path).await;
-        // The node is labeled for forensics, scoped to exactly the platform
-        // repo, and read-only.
         assert!(listing.contains("node-air"), "{listing}");
         assert!(listing.contains("job:acme/platform:0"), "{listing}");
         assert!(listing.contains("--access ro"), "{listing}");
 
-        // The authorization it grants: pull the platform repo, nothing else,
-        // and never push.
         let principal = Principal::parse("job:acme/platform:0");
         let none = HashMap::new();
         assert!(authorize_pull(&principal, false, &none, "acme", "platform"));
@@ -838,7 +815,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Non-admin: forced command carries roles but no --admin flag.
         let cert = SshCa::new(&ca)
             .sign_user_cert(
                 &pubkey,
@@ -856,7 +832,6 @@ mod tests {
         assert!(listing.contains("--kind user"), "{listing}");
         assert!(!listing.contains("--admin"), "{listing}");
 
-        // Platform admin: the forced command carries the --admin flag.
         let admin_cert = SshCa::new(&ca)
             .sign_user_cert(
                 &pubkey,
@@ -885,20 +860,15 @@ mod tests {
 
     #[test]
     fn public_key_line_validation() {
-        // A real ed25519 public key (algo token matches the embedded name).
         let ed25519 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ3BSouHtkAsuz5DdZynOoj3uotqptzsQ+Ws0Huk+jIS me@host";
         assert!(valid_public_key_line(ed25519));
-        // Trailing comment is optional.
         assert!(valid_public_key_line(
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ3BSouHtkAsuz5DdZynOoj3uotqptzsQ+Ws0Huk+jIS"
         ));
-        // Junk: not two whitespace fields, unknown algo, non-base64 body, or a
-        // blob whose embedded algo name disagrees with the token.
         assert!(!valid_public_key_line(""));
         assert!(!valid_public_key_line("not-a-key"));
         assert!(!valid_public_key_line("ssh-magic AAAAC3NzaC1lZDI1NTE5AAAA"));
         assert!(!valid_public_key_line("ssh-ed25519 @@@not-base64@@@"));
-        // Valid base64, but the embedded name is `ssh-rsa`, not `ssh-ed25519`.
         assert!(!valid_public_key_line("ssh-ed25519 AAAAB3NzaC1yc2E="));
     }
 }

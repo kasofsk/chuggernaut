@@ -20,8 +20,10 @@ pub struct TempRepo {
 impl TempRepo {
     /// Create a `{owner}/{project}` bare repo with default branch `main` in a
     /// fresh temp dir.
-    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    )]
     pub async fn create(owner: &str, project: &str) -> Self {
         let root = tempfile::tempdir().expect("tempdir");
         let manager = RepoManager::new(root.path());
@@ -41,8 +43,10 @@ impl TempRepo {
         self.manager.repo_path(&self.owner, &self.project)
     }
 
-    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    )]
     pub async fn head(&self) -> String {
         self.manager
             .resolve_ref(&self.owner, &self.project, "main")
@@ -51,8 +55,10 @@ impl TempRepo {
     }
 
     /// Create `job/{seq}` at the given sha (as the dispatcher does on Ready→Work).
-    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    )]
     pub async fn create_job_branch(&self, seq: u64, sha: &str) {
         self.manager
             .create_branch(&self.owner, &self.project, &format!("job/{seq}"), sha)
@@ -70,8 +76,11 @@ impl TempRepo {
 /// Standalone form of [`TempRepo::clone_branch`] for contexts that only hold a
 /// bare-repo path — e.g. a `FakeProvider` run hook standing in for an agent
 /// container committing to its job branch.
-// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+)]
 pub async fn clone_branch_from(bare_path: &Path, branch: &str) -> WorkClone {
     let dir = tempfile::tempdir().expect("tempdir");
     let target = dir.path().join("workspace");
@@ -104,8 +113,10 @@ impl WorkClone {
     }
 
     /// Write (or overwrite) a file and commit it.
-    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    )]
     pub async fn commit_file(&self, rel_path: &str, contents: &[u8], message: &str) {
         let file = self.path.join(rel_path);
         if let Some(parent) = file.parent() {
@@ -136,16 +147,16 @@ pub struct FakeOrigin {
 
 impl FakeOrigin {
     /// Bare repo with default branch `main` and one initial commit.
-    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    )]
     pub async fn create() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("upstream.git");
         tokio::fs::create_dir_all(&path).await.expect("mkdir");
         git(&path, &["init", "--bare", "--initial-branch", "main", "."]).await;
         let origin = Self { _dir: dir, path };
-        // Seed via a clone: an empty bare repo has no refs to clone from, so
-        // build the first commit with plumbing.
         let empty = git_out(&origin.path, &["mktree"], Some(b"")).await;
         let commit = git_out(
             &origin.path,
@@ -213,8 +224,10 @@ impl FakeOrigin {
         clone.push("main").await;
     }
 
-    // TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    )]
     pub async fn branch_exists(&self, branch: &str) -> bool {
         Command::new("git")
             .current_dir(&self.path)
@@ -231,8 +244,10 @@ async fn git(cwd: &Path, args: &[&str]) {
     git_out(cwd, args, None).await;
 }
 
-// TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed.
-#[allow(clippy::expect_used)]
+#[allow(
+    clippy::expect_used,
+    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+)]
 async fn git_out(cwd: &Path, args: &[&str], stdin: Option<&[u8]>) -> String {
     let mut cmd = Command::new("git");
     cmd.current_dir(cwd)

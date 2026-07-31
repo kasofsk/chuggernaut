@@ -22,7 +22,7 @@ use common::{assert_invariants, assert_invariants_of, spawn_checked};
 /// Scripted PR API: `create_pr` mints PR #1 open; `get_pr` returns whatever
 /// the test last scripted.
 struct FakePr {
-    created: Mutex<Vec<(String, String, String)>>, // (repo, head, base)
+    created: Mutex<Vec<(String, String, String)>>,
     current: Mutex<PrInfo>,
 }
 
@@ -158,8 +158,6 @@ async fn commit_to_integration(rig: &Rig, files: &[(&str, &str)]) {
 #[tokio::test]
 async fn link_seeds_config_without_clobbering_and_leaves_origin_untouched() {
     let Some(rig) = rig().await else { return };
-    // The origin already carries its own jobs/code.yaml — seeding must not
-    // overwrite it.
     rig.origin
         .commit_to_main("jobs/code.yaml", b"name: custom", "user's own job type")
         .await;
@@ -174,15 +172,13 @@ async fn link_seeds_config_without_clobbering_and_leaves_origin_untouched() {
 
     let link = record.origin.expect("linked");
     assert_eq!(link.main_branch, "main");
-    assert_eq!(link.github_repo, None); // file:// origin
+    assert_eq!(link.github_repo, None);
     let repos = rig.repos();
     assert_eq!(
         repos.default_branch("acme", "api").await.unwrap(),
         "integration"
     );
-    // Origin untouched by linking.
     assert_eq!(rig.origin.main_sha().await, origin_main_before);
-    // Existing file preserved; missing template files seeded.
     let integration_yaml = repos
         .read_file_at("acme", "api", "integration", "jobs/code.yaml")
         .await
@@ -197,7 +193,6 @@ async fn link_seeds_config_without_clobbering_and_leaves_origin_untouched() {
             .is_some(),
         "template prompt seeded"
     );
-    // Integration is ahead of origin main by exactly the seed commit.
     let origin_sha = repos.origin_main_sha("acme", "api").await.unwrap();
     assert_eq!(
         repos
@@ -207,7 +202,6 @@ async fn link_seeds_config_without_clobbering_and_leaves_origin_untouched() {
         1
     );
 
-    // Double-link is a conflict.
     assert!(matches!(
         core.link_project("acme", "api", &rig.origin.url(), None)
             .await,
@@ -260,14 +254,12 @@ async fn release_pushes_branch_opens_pr_and_holds() {
         rig.origin.branch_exists("chug/release-1").await,
         "branch pushed to origin"
     );
-    // Local pin at the snapshot.
     let pin = rig
         .repos()
         .resolve_ref("acme", "api", "refs/chug/release-1")
         .await
         .unwrap();
     assert_eq!(pin, release.integration_sha);
-    // PR opened head → base.
     let created = rig.pr.created.lock().unwrap().clone();
     assert_eq!(
         created,
@@ -277,12 +269,10 @@ async fn release_pushes_branch_opens_pr_and_holds() {
             "main".into()
         )]
     );
-    // Status reflects the hold.
     let status = core.origin_status("acme", "api").await.unwrap();
     assert_invariants(&core);
     assert!(status.held);
 
-    // Second release while open → 409.
     assert!(matches!(
         core.origin_release("acme", "api").await,
         Err(CoreError::Conflict(_))
@@ -298,8 +288,7 @@ async fn release_with_nothing_ahead_is_a_conflict() {
         .await
         .unwrap();
     assert_invariants(&core);
-    // Merge the seed commit upstream so integration == origin main.
-    let record = core.origin_release("acme", "api").await.unwrap(); // seed commit is releasable
+    let record = core.origin_release("acme", "api").await.unwrap();
     assert_invariants(&core);
     rig.origin
         .merge_branch_to_main("chug/release-1", false)
@@ -312,7 +301,6 @@ async fn release_with_nothing_ahead_is_a_conflict() {
         "file:// origin releases without a PR"
     );
 
-    // Now integration has nothing beyond origin main.
     let err = core.origin_release("acme", "api").await.unwrap_err();
     assert_invariants(&core);
     assert!(matches!(err, CoreError::Conflict(_)), "{err}");
@@ -332,7 +320,6 @@ async fn merged_pr_resets_integration_and_clears_hold() {
     core.origin_release("acme", "api").await.unwrap();
     assert_invariants(&core);
 
-    // GitHub squash-merges the PR (worst case: shared trees, no shared commits).
     rig.origin
         .merge_branch_to_main("chug/release-1", true)
         .await;
@@ -350,7 +337,6 @@ async fn merged_pr_resets_integration_and_clears_hold() {
         status.integration_sha.as_deref(),
         Some(rig.origin.main_sha().await.as_str())
     );
-    // The pre-reset history stays reachable through the pin.
     assert!(
         rig.repos()
             .resolve_ref("acme", "api", "refs/chug/release-1")
@@ -358,7 +344,6 @@ async fn merged_pr_resets_integration_and_clears_hold() {
             .is_ok()
     );
 
-    // A fresh release afterward gets n=2.
     commit_to_integration(&rig, &[("src/more.py", "print('job 2')")]).await;
     let record = core.origin_release("acme", "api").await.unwrap();
     assert_invariants(&core);
@@ -380,7 +365,7 @@ async fn closed_unmerged_pr_clears_hold_without_reset() {
     assert_invariants(&core);
     let integration_before = record.release.as_ref().unwrap().integration_sha.clone();
 
-    rig.pr.script("closed", false); // closed without merging
+    rig.pr.script("closed", false);
 
     let status = core.origin_sync("acme", "api").await.unwrap();
     assert_invariants(&core);
@@ -389,7 +374,6 @@ async fn closed_unmerged_pr_clears_hold_without_reset() {
         ReleaseStatus::Closed
     );
     assert!(!status.held);
-    // No reset: unreleased work stays on integration.
     assert_eq!(
         status.integration_sha.as_deref(),
         Some(integration_before.as_str())
@@ -405,7 +389,6 @@ async fn sync_fast_forwards_external_commits_when_nothing_unreleased() {
         .await
         .unwrap();
     assert_invariants(&core);
-    // Ship the seed so integration == origin main.
     core.origin_release("acme", "api").await.unwrap();
     assert_invariants(&core);
     rig.origin
@@ -414,7 +397,6 @@ async fn sync_fast_forwards_external_commits_when_nothing_unreleased() {
     core.origin_sync("acme", "api").await.unwrap();
     assert_invariants(&core);
 
-    // A human pushes to GitHub main directly.
     rig.origin
         .commit_to_main("docs/human.md", b"external", "human commit")
         .await;
@@ -442,7 +424,6 @@ async fn restart_restores_hold_for_open_release() {
     assert_invariants(&core);
     drop(core);
 
-    // A fresh Core (restart) must come up held.
     let mut core = rig.core().await;
     let status = core.origin_status("acme", "api").await.unwrap();
     assert_invariants(&core);
@@ -464,8 +445,10 @@ work:
 /// (integration unmoved); after the PR squash-merges and sync runs, the held
 /// job lands on the reset integration.
 #[tokio::test]
-// TODO(style): oversized tier-2 test — split when this file is next touched.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
 async fn held_job_lands_after_merged_release_sync() {
     let Some(rig) = rig().await else { return };
     let mut core = rig.core().await;
@@ -485,7 +468,6 @@ async fn held_job_lands_after_merged_release_sync() {
     )
     .await;
 
-    // Fake agent: commit to the job branch.
     let bare = rig.repos().repo_path("acme", "api");
     rig.provider.on_run(move |cfg| {
         let bare = bare.clone();
@@ -507,7 +489,6 @@ async fn held_job_lands_after_merged_release_sync() {
     assert!(release.held);
     let integration_at_release = release.integration_sha.clone().unwrap();
 
-    // Run a job to eval-pass while the release is open.
     let job = handle
         .create_job(CreateSpec {
             owner: "acme".into(),
@@ -533,11 +514,7 @@ async fn held_job_lands_after_merged_release_sync() {
     handle.release_job("acme", "api", job.id).await.unwrap();
     assert_invariants_of(&sink);
 
-    // The job passes evaluation and enters WrapUp but cannot land: it parks in
-    // the merge queue behind the release hold and integration does not move.
     let jobs = rig.store.jobs().await.unwrap();
-    // Watch until WrapUp; the Done guard fires inside the check so a wrong
-    // landing panics loudly (#206 principle 3).
     test_utils::wait::job_where(
         &rig.store,
         "acme",
@@ -550,7 +527,7 @@ async fn held_job_lands_after_merged_release_sync() {
         },
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(300)).await; // let any wrong landing surface
+    tokio::time::sleep(Duration::from_millis(300)).await;
     let j = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
     assert_eq!(j.state, JobState::WrapUp, "held in the merge queue");
     assert_eq!(
@@ -562,7 +539,6 @@ async fn held_job_lands_after_merged_release_sync() {
         "integration unmoved during the hold"
     );
 
-    // GitHub squash-merges; sync resets integration and pumps the queue.
     rig.origin
         .merge_branch_to_main("chug/release-1", true)
         .await;
@@ -573,7 +549,6 @@ async fn held_job_lands_after_merged_release_sync() {
     test_utils::wait::job_state(&rig.store, "acme", "api", job.id, JobState::Done).await;
     let j = jobs.get("acme", "api", job.id).await.unwrap().unwrap();
     assert_eq!(j.state, JobState::Done, "held job landed after sync");
-    // The job's work is on integration, on top of the reset base.
     let repos = rig.repos();
     assert!(
         repos

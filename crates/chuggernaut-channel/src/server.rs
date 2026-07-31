@@ -67,8 +67,10 @@ impl Server {
         Self { ctx, store: None }
     }
 
-    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-    #[allow(clippy::unwrap_used)]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+    )]
     async fn store(&mut self) -> Result<&NatsStore, String> {
         if self.store.is_none() {
             let store = if self.ctx.nats_creds.is_empty() {
@@ -86,7 +88,6 @@ impl Server {
     pub async fn handle(&mut self, msg: &Value) -> Option<Value> {
         let method = msg.get("method")?.as_str()?;
         let id = msg.get("id").cloned();
-        // Notifications (no id) get no response.
         id.as_ref()?;
 
         let result = match method {
@@ -180,8 +181,10 @@ impl Server {
         tools
     }
 
-    // TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched.
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
+    )]
     async fn call_tool(&mut self, name: &str, args: Value) -> Result<String, String> {
         let (owner, project, seq) = (
             self.ctx.owner.clone(),
@@ -200,8 +203,6 @@ impl Server {
                         .get("percent")
                         .and_then(|p| p.as_u64())
                         .map(|p| p as u8),
-                    // Stamped by the dispatcher on accept, not here — the
-                    // container's clock is not the platform's.
                     at: None,
                     origin: self.ctx.origin.clone(),
                 };
@@ -309,9 +310,6 @@ mod tests {
 
     #[test]
     fn origin_is_stamped_onto_posts_as_flat_wire_fields() {
-        // The binary stamps its container origin onto every post; it must
-        // serialize to the flat `task_id`/`phase`/`evaluator` keys the
-        // dispatcher parses back off `req.channel.>` (spec §6.3).
         let origin = ChannelOrigin {
             task_id: Some(3),
             phase: Some("Evaluation".into()),
@@ -339,8 +337,6 @@ mod tests {
 
     #[test]
     fn legacy_post_without_origin_omits_the_fields() {
-        // A default (empty) origin stamps nothing — old consumers see exactly
-        // today's `{message, percent}` shape.
         let update = ChannelUpdate {
             message: "hi".into(),
             percent: None,
@@ -362,7 +358,6 @@ mod tests {
             .unwrap();
         assert_eq!(init["result"]["serverInfo"]["name"], "chuggernaut-channel");
 
-        // Notification: no response.
         assert!(
             server
                 .handle(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
@@ -409,7 +404,6 @@ mod tests {
             .unwrap();
         assert_eq!(call["result"]["isError"], true);
 
-        // submit_eval without pass is rejected before any NATS traffic.
         let call = server
             .handle(&json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call",
                 "params": { "name": "submit_eval", "arguments": {} } }))

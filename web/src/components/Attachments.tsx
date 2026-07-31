@@ -9,8 +9,6 @@ import {
 } from 'react'
 import { ApiError, MAX_ATTACHMENT_BYTES, api, type Attachment } from '../api'
 
-// ── Shared helpers ──────────────────────────────────────────────────────────
-
 /** Attachments the UI previews inline as thumbnails; everything else renders as
  *  a name + size row with a generic file glyph. */
 export function isImage(contentType: string): boolean {
@@ -24,16 +22,11 @@ export function fmtBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 1 : 0)} MB`
 }
 
-// The API rejects '/', '\', control chars, empty, '.' and '..' (path-traversal
-// guard, routes.rs valid_attachment_name). Sanitize a picked/pasted/shot file's
-// name to something it will accept, giving pastes (which arrive as "image.png"
-// or blank) a unique-ish stem so several in a row don't clobber each other.
 let nameCounter = 0
 export function safeAttachmentName(raw: string | undefined, contentType: string): string {
   let name = (raw ?? '').replace(/[/\\]/g, '-').replace(/[\x00-\x1f]/g, '').trim()
   if (!name || name === '.' || name === '..') {
     const ext = contentType.split('/')[1]?.split('+')[0] || 'bin'
-    // Date.now + a counter keeps a burst of pasted screenshots distinct.
     name = `pasted-${Date.now()}-${nameCounter++}.${ext}`
   }
   return name.slice(0, 255)
@@ -65,8 +58,6 @@ function uploadErrorMessage(e: unknown): string {
   return e instanceof Error ? e.message : 'upload failed'
 }
 
-// ── Image lightbox (reuses the cover pop-out overlay pattern) ────────────────
-
 function ImageLightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -92,8 +83,6 @@ function ImageLightbox({ src, alt, onClose }: { src: string; alt: string; onClos
   )
 }
 
-// ── Picker controls (add / camera), shared by both flows ─────────────────────
-
 function AttachControls({
   onFiles,
   busy,
@@ -107,15 +96,11 @@ function AttachControls({
   const onChange = (e: ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files ? Array.from(e.target.files) : []
     if (files.length) onFiles(files)
-    e.target.value = '' // allow re-picking the same file
+    e.target.value = ''
   }
   return (
     <div className="attach-controls">
-      {/* No accept filter: docs and other files are allowed too (they render as
-          name+size rows). Multiple so a whole camera-roll selection lands at once. */}
       <input ref={addRef} type="file" multiple hidden onChange={onChange} />
-      {/* accept=image/* + capture: on a phone this opens the camera directly for
-          a fresh screenshot/photo; on desktop it falls back to a file picker. */}
       <input
         ref={camRef}
         type="file"
@@ -139,8 +124,6 @@ function AttachControls({
     </div>
   )
 }
-
-// ── JobAttachments: the card on an existing job (JobDetail, Draft editor) ─────
 
 type Upload = { id: number; name: string; file: File; progress: number; error: string | null }
 
@@ -185,8 +168,6 @@ export function JobAttachments({
     refresh()
   }, [refresh])
 
-  // Run one upload entry to completion, driving its progress/error. On success
-  // it drops from the in-flight list and the job's attachment list refetches.
   const runUpload = useCallback(
     (up: Upload) => {
       const setEntry = (patch: Partial<Upload>) =>
@@ -239,8 +220,6 @@ export function JobAttachments({
     )
   }
 
-  // Paste-from-clipboard: a screenshot pasted anywhere on the job page attaches
-  // here. Ignore pastes into a text field so typing isn't hijacked.
   useEffect(() => {
     if (!canEdit) return
     const onPaste = (e: ClipboardEvent) => {
@@ -381,12 +360,6 @@ export function JobAttachments({
   )
 }
 
-// ── AttachmentComposer: pick/paste/shoot files while composing a new job ──────
-//
-// Used before the job exists (New Job form, share-to-job screen). It owns
-// nothing durable — the parent holds the File[] and PUTs them once the job is
-// created (see uploadFiles). Images preview from object URLs, revoked on change.
-
 export function AttachmentComposer({
   files,
   onChange,
@@ -401,7 +374,6 @@ export function AttachmentComposer({
   const [dragOver, setDragOver] = useState(false)
   const [lightbox, setLightbox] = useState<number | null>(null)
 
-  // One object URL per file, rebuilt when the set changes and revoked on cleanup.
   const urls = useMemo(() => files.map((f) => (isImage(f.type) ? URL.createObjectURL(f) : null)), [files])
   useEffect(() => () => urls.forEach((u) => u && URL.revokeObjectURL(u)), [urls])
 
