@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ApiError,
@@ -190,6 +190,8 @@ export function JobDetail() {
   const isDraft = job.state === 'Draft'
   const isDraftBatch = isDraft && (job.members ?? []).length > 0
   const inputEntries = Object.entries(job.inputs ?? {})
+
+  const openLogTask = tasks.find((t) => t.id === openLogs) ?? null
 
   const escalationBand = new Set<number>()
   for (const t of tasks) {
@@ -495,8 +497,7 @@ export function JobDetail() {
                   .filter(Boolean)
                   .join(' ') || undefined
               return (
-              <Fragment key={t.id}>
-              <tr className={rowClass}>
+              <tr key={t.id} className={rowClass}>
                 <td>{t.id}</td>
                 <td><PhaseLabel phase={t.phase} escalation={esc} /></td>
                 <td>
@@ -551,20 +552,6 @@ export function JobDetail() {
                   )}
                 </td>
               </tr>
-              {openLogs === t.id && (
-                <tr className="log-row">
-                  <td colSpan={10}>
-                    <TaskLogPane
-                      owner={owner}
-                      project={project}
-                      seq={jobSeq}
-                      task={t}
-                      onClose={() => setOpenLogs(null)}
-                    />
-                  </td>
-                </tr>
-              )}
-              </Fragment>
               )
             })}
             {tasks.length === 0 && (
@@ -577,6 +564,16 @@ export function JobDetail() {
           </tbody>
           </table>
         </div>
+        {openLogTask && (
+          <TaskLogPane
+            key={openLogTask.id}
+            owner={owner}
+            project={project}
+            seq={jobSeq}
+            task={openLogTask}
+            onClose={() => setOpenLogs(null)}
+          />
+        )}
       </section>
       )}
 

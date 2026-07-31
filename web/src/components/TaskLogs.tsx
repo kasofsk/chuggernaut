@@ -31,16 +31,10 @@ const STATUS_TEXT: Record<LogStatus, string> = {
 
 /**
  * A task's stdout, tailed live and then seamlessly continued from the harvested
- * artifact at the same byte offsets (see {@link api.taskOutput}). Renders as a
- * self-contained pane (mount it in an expandable table row): monospace, dark
- * via CSS variables, scrolling inside its own bounded box so it never widens the
- * page. Auto-scrolls to the bottom while pinned; scrolling up pauses that and a
- * jump-to-bottom control resumes it.
- *
- * Polling runs only while mounted (the pane is open) and the tab is visible, and
- * tears down on unmount — it never touches the page's SSE refresh. A 404 (no
- * container yet — a parked human task or Pending launch) shows a muted note, not
- * an error; network/502 errors show a subtle retrying state and back off.
+ * artifact at the same byte offsets (see {@link api.taskOutput}). Mount it in a
+ * width-bounded container — never a table cell, which sizes to its widest line —
+ * and key it on `task.id`, since the tailed text is component state
+ * (docs/implementation-notes.md).
  */
 export function TaskLogPane({
   owner,
@@ -61,11 +55,16 @@ export function TaskLogPane({
   const [pinned, setPinned] = useState(true)
   const [view, setView] = useState<'transcript' | 'raw'>('transcript')
 
+  const paneRef = useRef<HTMLDivElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
   useEffect(() => {
     pinnedRef.current = pinned
   }, [pinned])
+
+  useEffect(() => {
+    paneRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [])
 
   useEffect(() => {
     const cancelled = { current: false }
@@ -168,7 +167,7 @@ export function TaskLogPane({
         : '(no output)'
 
   return (
-    <div className="log-pane">
+    <div className="log-pane" ref={paneRef}>
       <div className="log-head">
         <strong>
           task {task.id} · logs

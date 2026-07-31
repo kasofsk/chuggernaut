@@ -1384,14 +1384,14 @@ table.jobs tbody tr.row-draft td:first-child {
   line-height: 1.4;
 }
 
-/* Live task logs: the tailed stdout pane, expanded inline under a task row. */
+/* Live task logs: the tailed stdout pane, expanded below the tasks table. */
 .logs-cell {
   white-space: nowrap;
 }
-.log-row > td {
-  padding: 0.3rem 0.6rem;
-}
+/* The pane sits under the table, not inside it: a table cell is sized by its
+   content, so a wide log line stretched the whole table sideways. */
 .log-pane {
+  margin-top: var(--sp-3);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   background: var(--inset);

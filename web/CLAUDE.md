@@ -19,6 +19,9 @@ wide (or use the device toolbar) and verify:
 - **The page never scrolls horizontally.** Wide content (tables, diffs, code, long slugs)
   scrolls *inside its own card* — wrap tables in `<div className="table-scroll">`, and let
   code/diff blocks use `overflow-x: auto`. The `<body>` must not move sideways.
+- **Wrapping content never goes in a table cell.** A cell is sized by its content, so a
+  wide line (a log, a diff, a long slug) stretches the whole table and its own
+  `pre-wrap`/`overflow` never applies — mount such a panel outside the table (#353).
 - **Header rows don't collide.** Anything using `.row-head` / `space-between` (title + action
   buttons) should wrap, not overflow. The `@media (max-width: 640px)` block handles the common
   cases — confirm your new element is covered.
