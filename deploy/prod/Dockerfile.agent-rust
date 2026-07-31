@@ -1,17 +1,18 @@
 # syntax=docker/dockerfile:1
 # Rust agent image for the chuggernaut-on-chuggernaut dogfood project
-# (.chug/jobs/code.yaml `image:`): full Rust toolchain + the claude CLI. Built with
-# the repo root as context so the whole workspace can be compiled at image-build
-# time — the image bakes the toolchain plus a prebuilt target/ (the warm-target
-# seed below, #123) so agent containers start from "latest main already built".
-# The node-local sccache below (worker-provisioned, spec §3.1) adds cross-job
-# compile reuse on top, catching what the seed's fingerprints miss.
+# (.chug/jobs/code.yaml `image:`): full Rust toolchain, sccache, nats-server and
+# the claude CLI. Nothing of this workspace is compiled here — compile reuse is
+# the node-local sccache's job alone (worker-provisioned, spec §3.1).
 #
-# The `# syntax` directive (line 1) + `DOCKER_BUILDKIT=1` (build-worker.sh /
-# worker-refresh.sh) enable the RUN --mount=type=cache mounts on the warm-target
-# seed build below, so a SHA bump recompiles only the changed crates instead of
-# the whole graph from cold (~10 min observed cold on dev-air, #115). Ignored
-# (safe, cold) on a legacy non-BuildKit builder.
+# It used to ALSO bake a prebuilt target/ (the warm-target seed, #123/#347), on
+# the premise that sccache could not cover the dependency graph. #350 made
+# sccache native on arm64 and #352 then measured the two head to head on air
+# against the real .chug/tasks/ci.sh command set: seeded 141s vs unseeded-on-a-
+# warm-cache 186s. The seed bought 45s per task for 2.26GB in every image, ~600s
+# on every worker-refresh leg, and a ~32GB refresh disk peak — while the cache
+# it duplicates is 479MB, shared by all four concurrent containers instead of
+# copy-on-written per container, and stays warm between deploys instead of going
+# stale until the next image rebuild. Deleted; see deploy/prod/README.md.
 FROM rust:1.96-bookworm
 
 RUN apt-get update \
@@ -26,6 +27,11 @@ RUN apt-get update \
 # lock-protected cache dir. Installed from the released binary (a `cargo
 # install` here would itself be an uncached cold build). If it is ever absent,
 # RUSTC_WRAPPER=sccache degrades to an uncached build rather than failing.
+#
+# Since #352 deleted the warm-target seed this cache is the ONLY compile reuse
+# the image has, so a degraded run is a fully cold one: 275s against 186s warm,
+# measured on air with the ci.sh command set. .chug/tasks/ci.sh reports the
+# per-run hit rate on every exit and shouts when it is 0%.
 #
 # The tarball is selected from `dpkg --print-architecture`, never hardcoded
 # (deploy #347): the fleet is mixed — gumbo-nuc-0 is amd64, dev-air's colima is
@@ -71,82 +77,21 @@ RUN arch="$(dpkg --print-architecture)" \
 RUN rustup component add rustfmt clippy \
  && npm install -g @anthropic-ai/claude-code
 
-# ── Warm-target seeding (#123) ───────────────────────────────────────────────
-# Bake a prebuilt target/ so agent containers start from "latest main already
-# built" instead of compiling the whole workspace cold every task (minutes
-# each). sccache (above) caches compiler *invocations* but not linking, crate
-# metadata, or dependency .rlibs; this seeds exactly those artifacts so the
-# fresh clone reuses them straight from the image's read-only layer. The two
-# stack — sccache still catches what fingerprinting misses.
+# ── Where the agent's cargo writes (#352) ────────────────────────────────────
+# An EMPTY out-of-tree target dir. Nothing prebuilds it; the point is only that
+# it is not inside the git clone. Agents commit from /workspace (spec §4.1), and
+# a ~10GB target/ inside the worktree slows `git status` and invites an
+# accidental `git add`.
 #
-# Path discipline is the whole trick:
-#  - CARGO_TARGET_DIR points OUTSIDE the workspace, at a canonical /opt path, so
-#    the source tree can be deleted after the build while the artifacts survive
-#    into the final image — and so the runtime clone (which needs /workspace
-#    empty) reuses them without a copy. Baked as ENV, it also steers the agent's
-#    own cargo at runtime.
-#  - The seed builds at /workspace, the SAME path the bootstrap clones to
-#    (spec §4.1), so workspace-crate fingerprints (which are keyed on the
-#    package's manifest path) line up with the runtime tree instead of being
-#    invalidated wholesale by a path change.
-#
-# Empirical shape (measured for #123, see the merge summary): registry-
-# dependency artifacts are keyed by checksum and are reused regardless of the
-# fresh clone's mtimes — that is the large, reliable win (369 locked deps).
-# Workspace crates are mtime-sensitive and DO recompile against a fresh clone
-# (its files carry the checkout's mtime); that residual is intentionally left to
-# sccache + the warm dep graph rather than mtime-rewriting in the shared
-# bootstrap, which every image would inherit. Debug profile only: agent tasks
-# and .chug/tasks/ci.sh run `cargo test` / `cargo clippy` (debug), never `--release`,
-# so a release target would only bloat the image for no reuse.
-#
-# Per-container privacy is free: each container's cargo writes land on its own
-# overlay (copy-on-write), so the shared seed is never mutated or raced. The
-# target is as fresh as the last agent-image rebuild — the worker self-refresh
-# on every deploy (spec §3.1) keeps it warm with no per-job machinery.
-ENV CARGO_TARGET_DIR=/opt/chug-prebuilt-target
-COPY . /workspace
-# BuildKit cache mounts (#115) warm the IMAGE build across SHA bumps; the seed
-# is still BAKED into the image (#123) so runtime clones reuse it. The trick:
-# compile into a cache-mounted /build-target (persists across builds, not into
-# the layer), then `cp -a` the result into the baked /opt seed the runtime
-# reads. The registry/git caches are shared-safe (cargo locks them); the target
-# cache gets a per-image id + sharing=locked so concurrent node builds (worker
-# vs agent-rust) never collide on it. On a non-BuildKit builder the mounts are
-# ignored and this behaves exactly as before (cold, seed still baked).
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/build-target,id=chug-agent-rust-target,sharing=locked \
-    cd /workspace \
- && export CARGO_TARGET_DIR=/build-target \
- && cargo fetch --locked \
- && cargo build --workspace --all-targets --locked \
- && cargo test --workspace --no-run --locked \
- && cargo clippy --workspace --all-targets --locked \
- && mkdir -p /opt/chug-prebuilt-target \
- && cp -a /build-target/. /opt/chug-prebuilt-target/ \
- # Both prunes run in THIS layer, right after the `cp -a`: a later RUN would
- # reclaim nothing, because the bytes are already committed to this layer.
- #
- # incremental/ is session-bound rustc state (query caches keyed to this
- # build's mtimes) — a fresh runtime clone can't reuse it, and it's ~2.2G of
- # the baked seed (the 2026-07-23 air ENOSPC). The .rlib/dep reuse the seed
- # exists for lives in deps/ and build/, which stay.
- && rm -rf /opt/chug-prebuilt-target/debug/incremental \
- # Same reasoning, same measurement, one step further (deploy #347): the LINKED
- # executables — the workspace binaries and the `--all-targets` / `--no-run`
- # test harnesses — are 8.9GiB of the 11GB seed, and they are exactly the
- # artifacts the header above records as NOT reused (workspace crates are
- # mtime-sensitive and recompile against a fresh clone, so cargo relinks them
- # regardless). Deleting an output makes cargo rebuild that unit and nothing
- # else, so the dependency .rlib/.rmeta in deps/ and the build/ script outputs —
- # the reliable win — are kept, and the build PROFILE is untouched, so seed and
- # runtime fingerprints still match. `-perm /111` is what distinguishes a linked
- # binary from an .rlib/.rmeta/.d; proc-macro dylibs (.so) are dependency
- # artifacts and stay, and build/ is excluded so build-script binaries survive.
- && find /opt/chug-prebuilt-target/debug -maxdepth 2 -type f -perm /111 \
-      -not -path '*/build/*' -not -name '*.so' -delete \
- && cd / && rm -rf /workspace
+# The path must be STABLE across images and containers, and that is not
+# cosmetic: sccache's hash covers the target-derived paths cargo passes rustc
+# (`-L dependency=$CARGO_TARGET_DIR/debug/deps`), so two containers building the
+# same source under two different target paths share nothing. Measured on air
+# 2026-07-31, same source and same warm cache, cold target both times: same path
+# 100% hits / 22s, different path 0% hits / 54s. A per-job or per-container
+# target path would silently turn the node cache off.
+ENV CARGO_TARGET_DIR=/opt/chug-cargo-target
+RUN mkdir -p /opt/chug-cargo-target
 
 # Headless agents run as root inside a disposable container. Kept for the CLI's
 # root checks now that the launch passes `--settings` with a per-role permission
@@ -170,7 +115,6 @@ RUN git config --system user.name "Chuggernaut Agent" \
 # reapable and the startup sweep killed the fleet on every dispatcher restart
 # (#268). deploy/managed-label.test.sh enforces the separation.
 #
-# Kept LAST, below the warm-target seed: a LABEL is its own layer, so anything
-# above it would be invalidated by an edit here — and above the seed that costs
-# the 10+ minute workspace bake on every subsequent build.
+# Kept LAST: a LABEL is its own layer, so anything above it would be
+# invalidated by an edit here.
 LABEL chug.managed="true"

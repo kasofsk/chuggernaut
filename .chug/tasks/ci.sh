@@ -19,11 +19,18 @@ export CARGO_TERM_COLOR=always
 # compiler wrapper, wedging the whole CI task with zero CPU. Probe the server
 # once with a hard timeout; if it cannot answer, compile WITHOUT the wrapper
 # (slower, never wedged). Loud either way.
+#
+# What "slower" means changed with #352: the agent-rust image no longer bakes a
+# warm-target seed, so this no longer degrades to a prebuilt dep graph — it
+# degrades to a fully cold compile (measured on air: 275s against 186s warm).
+# Still the right trade against a wedged task, but a trip is now expensive
+# enough that it must never pass unnoticed, hence the shout below.
 if [ -n "${RUSTC_WRAPPER:-}" ] && command -v sccache >/dev/null 2>&1; then
 	if timeout 15 sccache --start-server >/dev/null 2>&1 || timeout 5 sccache --show-stats >/dev/null 2>&1; then
 		echo "ci: sccache server answering — wrapper enabled"
 	else
-		echo "ci: WARNING sccache server did not answer within 15s (emulated/broken binary?) — disabling RUSTC_WRAPPER for this run"
+		echo "!!! ci: sccache server did not answer within 15s (emulated/broken binary?) — disabling RUSTC_WRAPPER"
+		echo "!!!     this run compiles COLD end to end; nothing else caches since #352 removed the warm-target seed"
 		unset RUSTC_WRAPPER
 	fi
 fi
@@ -60,8 +67,15 @@ print_sccache_stats() {
 			total = hits + misses
 			rate = (total > 0) ? sprintf("%d", (hits * 100) / total) : "0"
 			if (size == "") size = "empty"
-			printf "sccache: %s hits / %s misses (%s%% hit rate), cache size %s", \
+			printf "sccache: %s hits / %s misses (%s%% hit rate), cache size %s\n", \
 				hits, misses, rate, size
+			# A run that compiled and hit NOTHING is the shape of a broken
+			# cache, not of a busy one — since #352 there is no warm-target
+			# seed underneath it, so this is the whole difference between a
+			# 186s gate and a 275s one. Shout it in the "!!!" idiom the tier-2
+			# partition warning uses, so it survives a skim of the log.
+			if (hits + 0 == 0 && misses + 0 > 0)
+				printf "!!! ci: sccache hit NOTHING (%s misses) — cold or unusable node cache;\n!!!     expect a fully cold compile (SCCACHE_DIR unwritable / first build on this node / toolchain or dep bump)", misses
 		}
 	' || true)"
 

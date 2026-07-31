@@ -661,13 +661,16 @@ Notes:
 
 ### Fast image builds (BuildKit dependency caching, #115)
 
-The worker/agent-rust image builds are the slow leg of a deploy: `Dockerfile.worker`
-and `Dockerfile.agent-rust` compile the whole Rust workspace, so a cold Docker
-build rebuilds all dependencies on every SHA change (~10 min observed on
-dev-air). Both Dockerfiles now use **BuildKit `RUN --mount=type=cache`** mounts
-for the cargo registry/git and the compiled target, so a SHA bump recompiles
-only the changed crates. `CHUG_GIT_SHA` in `Dockerfile.worker` is placed *after*
-the dependency layer so a SHA-only change never invalidates the deps.
+The worker image build is the slow leg of a deploy: `Dockerfile.worker` compiles
+the Rust workspace's binaries, so a cold Docker build rebuilds all dependencies
+on every SHA change (~10 min observed on dev-air). It uses **BuildKit `RUN
+--mount=type=cache`** mounts for the cargo registry/git and the compiled target,
+so a SHA bump recompiles only the changed crates. `CHUG_GIT_SHA` is placed
+*after* the dependency layer so a SHA-only change never invalidates the deps.
+
+`Dockerfile.agent-rust` used to compile the workspace too, to bake a warm-target
+seed; #352 deleted that (below), so it now only fetches binaries and has no
+cache mounts.
 
 - **Enable BuildKit on the node.** `build-worker.sh` and `worker-refresh.sh`
   both prefix the build with `DOCKER_BUILDKIT=1`, which turns on the engine's
@@ -678,27 +681,58 @@ the dependency layer so a SHA-only change never invalidates the deps.
   ignored (build stays cold, still correct) on a legacy builder, so this
   degrades safely.
 - **Cache safety.** The registry/git caches are shared-safe (cargo locks them);
-  each target cache uses a per-image `id` (`chug-worker-target`,
-  `chug-agent-rust-target`) with `sharing=locked` so concurrent node builds
-  never collide. `agent-rust` still **bakes** its warm-target seed (#123) into
-  the image — it compiles into the cache mount, then `cp -a`s the result into
-  the baked `/opt/chug-prebuilt-target`.
-- **The baked seed is pruned in the `cp -a`'s own layer** (#123, #347). A prune
-  in a later `RUN` reclaims nothing — the bytes are already committed — so the
-  `rm -rf debug/incremental` and the `find … -perm /111 … -delete` that drops
-  the linked executables both sit in that same instruction. Measured on the
-  2026-07-31 prod image: an 11GB seed of which 8.9GiB was linked binaries and
-  test harnesses that a fresh clone relinks anyway, leaving ~2.1GB of
-  dependency `.rlib`/`.rmeta` and `build/` — the artifacts the seed exists for.
-  What must never change is the build *profile*: seed and runtime fingerprints
-  have to match or cargo ignores the seed and the image is pure dead weight.
+  the worker's target cache uses a per-image `id` (`chug-worker-target`) with
+  `sharing=locked` so concurrent node builds never collide.
+- **The warm-target seed is gone** (#123, #347, deleted by #352). `agent-rust`
+  baked a prebuilt `target/` on the premise that sccache could not cover the
+  dependency graph. #350 made sccache native on arm64 — before it, this
+  workspace's Rust units had never once been cached on air — and #352 then
+  measured the two head to head on air against the real `.chug/tasks/ci.sh`
+  command set (`cargo clippy --workspace --all-targets` + `cargo test
+  --workspace --no-run`), same source, nothing else on the node:
+
+  | arm | target dir | clippy | test `--no-run` | total | Rust cache hits |
+  |---|---|---|---|---|---|
+  | A — seeded (status quo) | 2.1GB baked seed | 16s | 125s | **141s** | 0 / 14 |
+  | B — unseeded, cold cache | empty | 44s | 231s | **275s** | 0 / 674 |
+  | C — unseeded, warm cache | empty | 22s | 164s | **186s** | **674 / 674** |
+
+  Clippy caches (100% hits, 22s against 44s cold), so the residual 45s of A-vs-C
+  is linking, which no compiler cache covers. That 45s/task was buying a 2.26GB
+  layer in every image, ~600s on air's `worker-refresh` leg, and the bulk of the
+  ~32GB refresh disk peak — against a ~479MB node cache that is *shared* by all
+  four concurrent containers rather than copy-on-written per container, and that
+  stays warm between deploys instead of going stale until the next image
+  rebuild. Deleted.
+- **The target path must stay literal and stable.** sccache's hash covers the
+  target-derived paths cargo passes rustc (`-L dependency=$CARGO_TARGET_DIR/…`).
+  Measured in the same run: identical source and cache, cold target both times,
+  **same path 100% hits / 22s, different path 0% hits / 54s**. `agent-rust`
+  bakes `CARGO_TARGET_DIR=/opt/chug-cargo-target` — out-of-tree so a ~10GB
+  `target/` never lands in the clone agents commit from, and a literal so the
+  node cache keeps working. A per-container path would silently turn it off.
+- **The cache is now the only reuse there is.** `.chug/tasks/ci.sh`'s sccache
+  liveness guard used to degrade to the seed; it now degrades to a fully cold
+  compile (arm B: +89s), so both the guard and a 0%-hit run shout in the `!!!`
+  idiom rather than logging a quiet warning.
+- **A refresh deliberately does NOT pre-warm the node cache.** Running one build
+  after the swap to populate `SCCACHE_DIR` was considered (#352 item 5) and
+  rejected on its own numbers: it would cost 186–275s on *every* refresh of
+  *every* node to save the +89s a cold cache costs *once*, which is most of the
+  refresh time item 1 just reclaimed. `SCCACHE_DIR` is a host dir that survives
+  deploys, so cold is the rare case — a new node, a toolchain or dependency
+  bump, or an evicted cache — and the first job after one warms it for the rest.
+  Revisit if the `!!!` 0%-hit line starts showing up in ordinary job logs.
 - **Both downloaded binaries are arch-selected** (#347). `sccache` and
   `nats-server` pick their tarball from `dpkg --print-architecture`, because the
   fleet is mixed (gumbo-nuc-0 amd64, dev-air's colima arm64) and a foreign-arch
   binary runs under qemu rather than failing — an emulated `RUSTC_WRAPPER` on
   every rustc call, and an emulated `nats-server` under the tier-2 tests
   `.chug/tasks/ci.sh` reports as executed. An unrecognised arch fails the build.
-  `deploy/prod/agent-rust-seed.test.sh` asserts both statically.
+  `deploy/prod/agent-rust-image.test.sh` asserts both statically — along with
+  the absence of any workspace build and the `CARGO_TARGET_DIR` shape above. It
+  is the only gate that reads `Dockerfile.agent-rust` at all: nothing in CI
+  builds a container image, and agent reviewers run read-only (spec §4.3).
 - **Prune protection.** All three images (`worker`, `agent`, `agent-rust`) carry
   `LABEL chug.managed="true"`. A host-level `docker system prune --all`
   (gumbo-nuc-0 runs one on a daily timer) removes every image not backing a

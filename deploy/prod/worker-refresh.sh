@@ -64,13 +64,27 @@ refresh_phase() {
 #     does not move (the cache mount still holds the fat pre-prune target);
 #   * ~23GB expected peak, rounded up to 30 for the volatility below.
 #
+# That 30 was then measured TOO LOW: deploy #351 sampled air at ~32GB consumed
+# (68.8GB -> 36.8GB minimum), so a node sitting at exactly 30GB free would have
+# passed this pre-flight and then run out. #352 removed the cause rather than
+# raising the number — the agent-rust warm-target seed and, with it, the
+# /build-target cache mount that held the full unpruned debug target and drove
+# both halves of that peak. What is left to hold twice is a ~3.7GB (air) /
+# ~2.25GB (nuc) agent-rust image instead of a 5.86GB / 4.51GB one, and the only
+# surviving target cache mount is the worker image's release build.
+#
+# 30 is therefore kept as-is: it was tight against the old peak and is slack
+# against the new one, and lowering it on a projection is how #347 got burned.
+# The next refresh prints its own consumption (`disk: … consumed …GB` below, from
+# the same free-space samples this pre-flight reads) — re-derive from THAT
+# number, not from this paragraph.
 # Free space at refresh time is NOT stable: it swung 47.8GB -> 72GB across two
 # runs an hour apart on the same node, because job-container overlays (agents
 # running cargo in their own containers) and the BuildKit cache both move it
 # under us. This constant is a FLOOR checked once before the build, not a
 # guarantee that the space is still there ten minutes later.
 #
-# Revisit it if the seed changes size again. Env-overridable so a node with a
+# Revisit it if the image sizes change again. Env-overridable so a node with a
 # different disk shape can tune it: build-worker.sh puts the knob in the
 # daemon's environment at node creation and the swap phase below carries it
 # forward, so an override survives self-refreshes instead of reverting to this
@@ -81,9 +95,13 @@ DISK_FREE_GB_MIN="${WORKER_REFRESH_DISK_FREE_GB_MIN:-30}"
 # statfs on it reports exactly the pool images and the BuildKit cache compete
 # for.
 DISK_PATH="${WORKER_REFRESH_DISK_PATH:-/}"
-# BuildKit cache cap for the prune pair. 15G keeps the hot #115 cache mounts
-# warm across SHA bumps.
-BUILDER_KEEP_STORAGE="15GB"
+# BuildKit cache cap for the prune pair. 15G was sized for the #115 cache mounts
+# when agent-rust compiled the whole workspace into one; #352 deleted that build,
+# leaving only the worker image's release target plus the shared registry/git
+# caches, so the ceiling comes down to keep those hot and nothing else. A cap
+# below what is live evicts the coldest entries — a slower next build, never a
+# wrong one.
+BUILDER_KEEP_STORAGE="8GB"
 
 # Free space on $DISK_PATH in 1K blocks; empty when df cannot report it.
 refresh_disk_free_kb() {
@@ -117,6 +135,7 @@ refresh_disk_preflight() {
     echo "worker-refresh: disk pre-flight: df cannot read $DISK_PATH — proceeding unchecked"
     return 0
   fi
+  DISK_FREE_KB_BEFORE="$_free_kb"
   _free_gb="$(refresh_disk_gb "$_free_kb")"
   echo "worker-refresh: disk pre-flight: ${_free_gb}GB free on $DISK_PATH, need ${DISK_FREE_GB_MIN}GB"
   if [ "$(( _free_kb / 1048576 ))" -lt "$DISK_FREE_GB_MIN" ]; then
@@ -124,6 +143,22 @@ refresh_disk_preflight() {
     return 1
   fi
   return 0
+}
+
+# What the build actually cost, sampled the same way the pre-flight samples it
+# and printed BEFORE the prune reclaims anything. This is the number
+# DISK_FREE_GB_MIN above must be re-derived from: every past derivation
+# (#248, #347, #351) needed an operator sampling `df` over ssh through a live
+# refresh, and #351's showed the floor had drifted below the real peak.
+# Under-reports a transient mid-build peak — it is two samples, not a watcher —
+# but it is the only one that costs nothing and appears in every deploy leg.
+refresh_disk_report_build_cost() {
+  [ -n "${DISK_FREE_KB_BEFORE:-}" ] || return 0
+  _after_kb="$(refresh_disk_free_kb)"
+  [ -n "$_after_kb" ] || return 0
+  _used_kb=$(( DISK_FREE_KB_BEFORE - _after_kb ))
+  [ "$_used_kb" -ge 0 ] || _used_kb=0
+  echo "worker-refresh: disk: build consumed $(refresh_disk_gb "$_used_kb")GB on $DISK_PATH ($(refresh_disk_gb "$DISK_FREE_KB_BEFORE")GB -> $(refresh_disk_gb "$_after_kb")GB free, pre-prune; floor is ${DISK_FREE_GB_MIN}GB)"
 }
 
 # The sanctioned safe prune pair (#183) plus the reclaim it won, reported so an
@@ -268,8 +303,11 @@ build)
   docker build -q -t "chuggernaut/agent:$NEW" -f Dockerfile.agent - < "$TMP/agent.tar"
   git -C "$TMP" archive --format=tar FETCH_HEAD > "$TMP/agent-rust.tar"
   [ -s "$TMP/agent-rust.tar" ] || { echo "worker-refresh: empty agent-rust context — aborting (live images untouched)" >&2; exit 1; }
-  # The long pole: this image bakes the #123 warm-target seed, so a cold cache
-  # here is the 10+ minute leg the deploy log used to show nothing during.
+  # Was the long pole while this image baked the #123 warm-target seed (air 673s,
+  # nuc 332s, nearly all of it the workspace compile). #352 deleted the seed, and
+  # with it the `COPY . /workspace` that made every SHA bump invalidate the
+  # layers below — so on a node that has built this image before, a refresh is
+  # now layer-cache hits down to the binary fetches.
   refresh_phase "build-image 3/3 agent-rust"
   docker build -q -t "chuggernaut/agent-rust:$NEW" \
       -f deploy/prod/Dockerfile.agent-rust - < "$TMP/agent-rust.tar"
@@ -297,7 +335,9 @@ build)
   # Bound the node's docker disk after every refresh (the 2026-07-23 air
   # ENOSPC incident): the retag-swap just stranded the previous generation as
   # dangling — prune those (NEVER -a: live tags must survive, #183) and cap
-  # the BuildKit cache at 15G, keeping the hot #115 cache-mounts warm.
+  # the BuildKit cache at $BUILDER_KEEP_STORAGE. Report the build's own disk
+  # cost first, while the generation it built is still unpruned.
+  refresh_disk_report_build_cost
   refresh_phase "prune"
   refresh_disk_prune "a successful refresh"
 

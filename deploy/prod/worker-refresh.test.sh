@@ -70,6 +70,11 @@ case "\$*" in
   # A prune frees space: move the fake df reading to \$FREE_KB_AFTER_PRUNE so the
   # script's reclaim report is computed from a real before/after difference.
   *prune*) [ -z "\${FREE_KB_AFTER_PRUNE:-}" ] || echo "\$FREE_KB_AFTER_PRUNE" > "$FREE_FILE" ;;
+  # A build CONSUMES space: same trick as the prune above, in the other
+  # direction, so the script's build-cost report is computed from a real
+  # before/after difference. Listed after *prune* — \`builder prune\` also
+  # starts with "build" and must keep matching that arm.
+  build*) [ -z "\${FREE_KB_AFTER_BUILD:-}" ] || echo "\$FREE_KB_AFTER_BUILD" > "$FREE_FILE" ;;
 esac
 # Build-failure injection: FAIL_BUILD names an image (e.g. agent-rust) whose
 # \`docker build -t chuggernaut/<img>:...\` should fail, to exercise the atomic
@@ -162,7 +167,7 @@ echo "ok: build announces each phase before it runs (deploy-log progress markers
 # dangling images + BuildKit cache above the keep threshold, NEVER `-a`.
 grep_out "disk pre-flight: 57.2GB free on /, need 30GB"
 grep_log "docker image prune -f"
-grep_log "docker builder prune -f --keep-storage 15GB"
+grep_log "docker builder prune -f --keep-storage 8GB"
 grep_out "pruned after a successful refresh"
 if grep -qE "prune (-a|.* -a)" "$LOG"; then
   fail "prune must never use -a (it would delete the live :prod images)"
@@ -205,6 +210,26 @@ PATH="$BIN:$PATH" \
 grep_out "df cannot read"
 grep_log "docker build -q -t chuggernaut/worker:prod-refresh"
 echo "ok: disk pre-flight fails open when df cannot report"
+
+# ── Case 1f2: the build reports what it actually cost, BEFORE the prune ──────
+# DISK_FREE_GB_MIN is a constant every past derivation (#248, #347, #351) got
+# from an operator sampling `df` over ssh through a live refresh — and #351's
+# sample showed it had drifted BELOW the real peak. The refresh now prints its
+# own consumption into the deploy leg so the next derivation reads off a number
+# instead of a projection. Pre-prune on purpose: after the prune the reading
+# describes the cleanup, not the build.
+: > "$LOG"
+set_free_kb 60000000
+PATH="$BIN:$PATH" \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  WORKER_GIT_KEY="$KEY" \
+  FAKE_FETCH_HEAD=abc123 \
+  FREE_KB_AFTER_BUILD=40000000 \
+  sh "$SUT" build abc123 prod > "$OUT" 2>&1 \
+  || fail "build should succeed with ample space"
+grep_out "disk: build consumed 19.0GB on / (57.2GB -> 38.1GB free, pre-prune; floor is 30GB)"
+echo "ok: build reports its own disk cost, so the floor is re-derived from a measurement"
+set_free_kb 60000000
 
 # ── Case 1g: a CANCELLED build cleans up after itself (ticket #254) ──────────
 # The parallel deploy fan-out cancels the nodes still building as soon as one
@@ -330,7 +355,7 @@ fi
 # sanctioned pair reclaims them — dangling images only, never `-a`.
 grep_log "docker rmi -f chuggernaut/worker:prod-refresh"
 grep_log "docker image prune -f"
-grep_log "docker builder prune -f --keep-storage 15GB"
+grep_log "docker builder prune -f --keep-storage 8GB"
 if grep -qE "prune (-a|.* -a)" "$LOG"; then
   fail "the failure-path prune must never use -a (live :prod images must survive)"
 fi

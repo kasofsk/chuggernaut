@@ -1,7 +1,7 @@
 #!/bin/sh
 # Contract test for the `chug.managed` image label on the three built images —
 # no Docker, no build; a static assertion over the Dockerfile text, in the same
-# spirit as prod/agent-rust-seed.test.sh / prod/worker-refresh.test.sh.
+# spirit as prod/agent-rust-image.test.sh / prod/worker-refresh.test.sh.
 #
 # A host `docker system prune --all` on a daily timer removes every image not
 # backing a RUNNING container. The agent images back nothing between jobs by
@@ -21,9 +21,9 @@
 #      drifting.
 #   3. The LABEL sits in the FINAL build stage — one placed in an earlier stage
 #      of Dockerfile.worker would be silently absent from the shipped image.
-#   4. In Dockerfile.agent-rust it stays BELOW the warm-target seed: a LABEL is
-#      its own layer, and above the seed every future build would pay the 10+
-#      minute workspace bake (#123).
+#   4. In Dockerfile.agent-rust it stays LAST: a LABEL is its own layer, so
+#      anything above it is invalidated by an edit here. It used to be phrased
+#      as "below the warm-target seed", which #352 deleted.
 #
 # Run:  deploy/managed-label.test.sh   (exits 0 iff all cases pass)
 set -eu
@@ -68,13 +68,12 @@ for df in $DOCKERFILES; do
   echo "ok: $name carries ${KEY}=\"true\" in its final stage"
 done
 
-# 4. agent-rust: below the warm-target seed, so an edit here never busts it.
+# 4. agent-rust: LAST instruction, so an edit here busts no layer above it.
 DF_RUST="$HERE/prod/Dockerfile.agent-rust"
-seed_line="$(line_of "$DF_RUST" "cargo build --workspace --all-targets")"
-[ -n "$seed_line" ] || fail "Dockerfile.agent-rust: warm-target seed build not found"
 rust_label_line="$(line_of "$DF_RUST" "^LABEL ${KEY_RE}=\"true\"$")"
-[ "$rust_label_line" -gt "$seed_line" ] \
-  || fail "Dockerfile.agent-rust: LABEL must stay BELOW the warm-target seed"
-echo "ok: Dockerfile.agent-rust LABEL sits below the warm-target seed"
+last_instr_line="$(line_of "$DF_RUST" "^[A-Z]+ ")"
+[ "$rust_label_line" -eq "$last_instr_line" ] \
+  || fail "Dockerfile.agent-rust: LABEL must be the LAST instruction (a LABEL is its own layer)"
+echo "ok: Dockerfile.agent-rust LABEL is the last instruction"
 
 echo "PASS: ${KEY} image-label contract holds"
