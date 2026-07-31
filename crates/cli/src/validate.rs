@@ -2,7 +2,9 @@
 //! the same parse + §1.1 field rules the platform applies at release. For
 //! contributors and CI: catch a broken `jobs/*.yaml` before a job trips over
 //! it. Repo-dependent checks (prompt-file existence, secret/var presence)
-//! still run at release — this is the static slice only.
+//! still run at release — this is the static slice only. The file kind follows
+//! the path: a file under a `schedules/` directory is a `.chug/schedules/*.yaml`
+//! schedule (design #310), anything else a job type or its `_defaults.yaml`.
 //!
 //! It also carries the **merge-time version-skew gate** (spec §14): job-type
 //! config is read live from the default branch, so a config that needs a
@@ -16,14 +18,15 @@
 
 use clap::Parser;
 use std::path::{Path, PathBuf};
-use types::{JobType, ProjectDefaults};
+use types::{JobType, ProjectDefaults, Schedule, WorkType};
 
 #[derive(Parser)]
 pub struct ValidateArgs {
-    /// YAML files to validate: .chug/jobs/{type}.yaml and/or
-    /// .chug/jobs/_defaults.yaml.
+    /// YAML files to validate: .chug/jobs/{type}.yaml, .chug/jobs/_defaults.yaml
+    /// and/or .chug/schedules/{name}.yaml.
     /// A job type with a `_defaults.yaml` sibling is validated post-merge,
-    /// exactly as the dispatcher loads it.
+    /// exactly as the dispatcher loads it; a schedule is validated against the
+    /// job type it names when that file sits in the same config root.
     #[arg(required = true)]
     pub files: Vec<PathBuf>,
 
@@ -82,6 +85,14 @@ fn validate_file(path: &Path, deployed_epoch: u32) -> Outcome {
         Err(e) => return Outcome::err(format!("read error: {e}")),
     };
 
+    if path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|d| d == types::SCHEDULES_DIR)
+    {
+        return validate_schedule(path, &content, deployed_epoch);
+    }
+
     if path.file_name().is_some_and(|n| n == "_defaults.yaml") {
         return match ProjectDefaults::parse(&content) {
             Ok(_) => Outcome {
@@ -106,11 +117,7 @@ fn validate_file(path: &Path, deployed_epoch: u32) -> Outcome {
     let mut errors = Vec::new();
 
     if let Some(needed) = job_type.requires_dispatcher(deployed_epoch) {
-        errors.push(format!(
-            "requires dispatcher schema epoch >= {needed} but the deployed dispatcher is at \
-             {deployed_epoch}: deploy the dispatcher first, or land this behind a version gate \
-             (coordinated deploy)"
-        ));
+        errors.push(skew_error(needed, deployed_epoch));
     }
 
     let merged = match sibling_defaults(path) {
@@ -131,6 +138,65 @@ fn validate_file(path: &Path, deployed_epoch: u32) -> Outcome {
     warnings.sort();
     warnings.dedup();
     Outcome { errors, warnings }
+}
+
+/// The §14 skew diagnostic, shared by every config kind that carries
+/// `min_dispatcher`.
+fn skew_error(needed: u32, deployed_epoch: u32) -> String {
+    format!(
+        "requires dispatcher schema epoch >= {needed} but the deployed dispatcher is at \
+         {deployed_epoch}: deploy the dispatcher first, or land this behind a version gate \
+         (coordinated deploy)"
+    )
+}
+
+/// A `.chug/schedules/{name}.yaml` file (design #310): the §1.1 field rules,
+/// the skew gate, and — when the target job type sits in the same config root —
+/// the rule that an agent target needs a `description`.
+fn validate_schedule(path: &Path, content: &str, deployed_epoch: u32) -> Outcome {
+    let schedule = match Schedule::parse(content) {
+        Ok(s) => s,
+        Err(e) => return Outcome::err(format!("parse error: {e}")),
+    };
+    let Some(stem) = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+    else {
+        return Outcome::err("cannot read a schedule name from this path".to_string());
+    };
+    let warnings = schedule
+        .config_warnings()
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+    let mut errors: Vec<String> = schedule
+        .validate(&stem)
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+    if let Some(needed) = schedule.requires_dispatcher(deployed_epoch) {
+        errors.push(skew_error(needed, deployed_epoch));
+    }
+    if let Some(target) = sibling_job_type(path, &schedule.job_type) {
+        errors.extend(
+            schedule
+                .validate_against_target(target)
+                .iter()
+                .map(std::string::ToString::to_string),
+        );
+    }
+    Outcome { errors, warnings }
+}
+
+/// The work type of the job type a schedule names, when its file sits in the
+/// same config root. A missing or unparseable target is not reported here — the
+/// existence check is release-time, like a prompt file's.
+fn sibling_job_type(path: &Path, job_type: &str) -> Option<WorkType> {
+    let root = path.parent()?.parent()?;
+    let target = root.join("jobs").join(format!("{job_type}.yaml"));
+    let content = std::fs::read_to_string(target).ok()?;
+    Some(JobType::parse(&content).ok()?.work.r#type)
 }
 
 fn sibling_defaults(path: &Path) -> Option<Result<ProjectDefaults, serde_yaml::Error>> {
@@ -273,5 +339,70 @@ mod tests {
             "{errs:?}"
         );
         assert_eq!(errors(&ahead, 3), Vec::<String>::new());
+    }
+
+    /// A config root holding one agent job type and one schedule file, the
+    /// layout `.chug/` gives CI.
+    fn config_root(schedule: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("jobs")).unwrap();
+        std::fs::create_dir(dir.path().join("schedules")).unwrap();
+        std::fs::write(
+            dir.path().join("jobs/code.yaml"),
+            "name: code\nimage: img:latest\nwork:\n  type: agent\n  prompt: p.md\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("schedules/nightly.yaml"), schedule).unwrap();
+        dir
+    }
+
+    fn schedule_errors(dir: &tempfile::TempDir, epoch: u32) -> Vec<String> {
+        errors(&dir.path().join("schedules/nightly.yaml"), epoch)
+    }
+
+    #[test]
+    fn validate_accepts_a_schedule_file() {
+        let dir = config_root(
+            "name: nightly\njob_type: code\ncron: '0 2 * * *'\ndescription: Nightly suite.\n",
+        );
+        assert_eq!(
+            schedule_errors(&dir, types::CONFIG_SCHEMA_EPOCH),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_schedule_reports_its_field_rules_and_skew() {
+        let dir = config_root("name: other\njob_type: code\ncron: '0 2 * *'\n");
+        let errs = schedule_errors(&dir, types::CONFIG_SCHEMA_EPOCH);
+        for expected in ["'name'", "'cron'", "'description' is required"] {
+            assert!(errs.iter().any(|e| e.contains(expected)), "{errs:?}");
+        }
+
+        let ahead = config_root(
+            "name: nightly\njob_type: code\ncron: '0 2 * * *'\ndescription: d\nmin_dispatcher: 9\n",
+        );
+        assert!(
+            schedule_errors(&ahead, 1)
+                .iter()
+                .any(|e| e.contains("requires dispatcher schema epoch >= 9")),
+        );
+    }
+
+    #[test]
+    fn a_schedule_unknown_field_is_a_warning_and_a_missing_target_is_neither() {
+        let dir = config_root(
+            "name: nightly\njob_type: absent\ncron: '0 2 * * *'\ntimezone: Europe/Berlin\n",
+        );
+        let outcome = validate_file(
+            &dir.path().join("schedules/nightly.yaml"),
+            types::CONFIG_SCHEMA_EPOCH,
+        );
+        assert_eq!(outcome.errors, Vec::<String>::new());
+        assert!(
+            outcome.warnings.iter().any(|w| w.contains("timezone")),
+            "{:?}",
+            outcome.warnings
+        );
     }
 }

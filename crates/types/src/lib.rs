@@ -4,6 +4,7 @@
 
 pub mod channel;
 pub mod config_paths;
+pub mod cron;
 pub mod deploy;
 pub mod duration;
 pub mod groups;
@@ -17,6 +18,7 @@ pub mod project;
 pub mod queue;
 pub mod resources;
 pub mod rollup;
+pub mod schedule;
 pub mod step;
 pub mod task;
 pub mod user;
@@ -27,6 +29,7 @@ pub use channel::{
     AgentReply, ChannelEntry, ChannelOrigin, ChannelStatus, ChannelUpdate, OperatorMessage,
 };
 pub use config_paths::{CONFIG_DIR, config_entry_name, config_path, config_path_candidates};
+pub use cron::{CRON_FIELD_COUNT, CronExpr, CronParseError};
 pub use deploy::{DeployLeg, DeployReport, LegStatus};
 pub use duration::{DurationParseError, parse_duration};
 pub use groups::{
@@ -58,6 +61,7 @@ pub use rollup::{
     GroupJob, GroupRollup, design_doc_head, design_group_name, design_seq, design_slug,
     group_rollups,
 };
+pub use schedule::{SCHEDULES_DIR, SCHEDULES_MAX, Schedule};
 pub use step::{StepKind, StepRecord, StepStatus};
 pub use task::{
     EscalationAction, EvalResult, PendingReason, Performer, ReworkReason, Task, TaskKind,

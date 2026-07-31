@@ -140,3 +140,5 @@ dispatcher, domain and context trees and not this one.
 | --- | --- | --- |
 | `inputs` | What a job-*input value* may be: the charset floor a declared `pattern` can only narrow, shared by release validation, the Blocked→Ready re-check and the launch-time re-check. | §1.1, §2.2, §5.3 |
 | `groups` | What a *group name* may be, and the `docs/design/` path a `design/`-namespaced one refers to; hard bounds, never truncation, shared by all three write paths into `Job.groups`. | §1.1, §6.2 |
+| `cron` | What a *cron expression* may be: the five-field UTC subset (`*`, `N`, `N-M`, `*/S`, comma-lists) and the day-of-month/day-of-week OR rule, shared by schedule validation and (design #310 slice 2) the dispatcher tick. | §1.1 |
+| `schedule` | What a `.chug/schedules/{name}.yaml` file may declare: the §1.1 field rules, §14 schema tolerance and the agent-target `description` rule, shared by `chuggernaut validate` and (design #310 slice 2) the loader. | §1.1, §14 |

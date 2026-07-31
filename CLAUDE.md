@@ -102,7 +102,7 @@ the absence of a workflow file.
 ## Conventions that bite if you miss them
 
 - **`.chug/` is the config root.** Everything the platform reads out of a project repo —
-  `jobs/`, `prompts/`, `tasks/`, `tags/` (plus this repo's `schemas/`) — lives under `.chug/`,
+  `jobs/`, `prompts/`, `tasks/`, `tags/`, `schedules/` (plus this repo's `schemas/`) — lives under `.chug/`,
   not the repo root (spec §1.1). Reads fall back to the bare repo-root path for refs and
   projects that predate the move, so both layouts resolve; only `.chug/` is ever written.
   Resolution lives in `types::config_paths` and `dispatcher::project_config` — don't hand-roll

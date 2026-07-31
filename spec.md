@@ -82,7 +82,7 @@ IDs are sequential integers scoped per project, maintained via a counter at `cou
 
 #### The config root
 
-Everything the platform reads out of a project repo — job types, prompts, reusable tasks, knowledge tags — lives under one directory, **`.chug/`**, the way `.github/` holds a repo's GitHub config. A project's chuggernaut config is therefore one tree to find, review, and copy between projects, not five directories scattered through the repo root.
+Everything the platform reads out of a project repo — job types, prompts, reusable tasks, knowledge tags, schedules — lives under one directory, **`.chug/`**, the way `.github/` holds a repo's GitHub config. A project's chuggernaut config is therefore one tree to find, review, and copy between projects, not five directories scattered through the repo root.
 
 Every config read resolves two candidate paths in order: `.chug/{path}` first, then the bare repo-root `{path}`. The second is the layout that predates the config root; it stays readable because a job pins its `base_ref` at launch, so a job released before a project migrated must still load the config that ref carries. Writes (the §12.2 starter template) only ever use `.chug/`. A file present at both locations resolves to the `.chug/` copy — never a merge of the two.
 
@@ -357,10 +357,11 @@ The YAML schema above is machine-derived from the platform's own parse types
   ...
   ```
 
-- `chuggernaut validate .chug/jobs/*.yaml` runs the static slice offline (parse +
-  the field-rules matrices below, with a sibling `_defaults.yaml` merged) —
-  for contributors and CI. Repo-dependent checks (prompt files exist,
-  secrets/vars set) still run at release (§2.2).
+- `chuggernaut validate .chug/jobs/*.yaml .chug/schedules/*.yaml` runs the static
+  slice offline (parse + the field-rules matrices below, with a sibling
+  `_defaults.yaml` merged) — for contributors and CI. The file kind follows the
+  path: a file under `schedules/` is a schedule. Repo-dependent checks (prompt
+  files exist, secrets/vars set) still run at release (§2.2).
 
 #### Project Defaults
 
@@ -382,6 +383,30 @@ Semantics:
 - A default evaluator with no `image` falls back to the job's top-level `image`; for `work.type: human` jobs (no top-level image) the default evaluator's `image` is required — validated at release.
 - Required `command` default evaluators participate in the merge gate (see §3.3) like any other required command evaluator.
 - `model` is folded in as a fallback for every agent that does not declare its own `model` — the work agent and each agent evaluator (the same reach as the platform default, §12.4). It sits **below** a job type's own `model` and **above** the platform default. Command/human work and evaluators take no model and are untouched.
+
+#### Schedules
+
+A **schedule** is time-triggered job creation: one file per schedule under `.chug/schedules/`, resolved from default-branch HEAD like every other config directory (design [#310](docs/design/310-scheduled-jobs.md)). It is repo-versioned so a schedule change ships in the same commit as the job type it fires and clears the same gates.
+
+```yaml
+# .chug/schedules/nightly-integration.yaml
+name: nightly-integration     # required; unique within the repo, and equal to the file stem
+job_type: code                # required; the .chug/jobs/{job_type}.yaml this schedule creates a job of
+cron: "0 2 * * *"             # required; five-field UTC cron (below)
+enabled: true                 # optional; default true — a disabled schedule loads and validates but never fires
+title: Nightly integration    # optional; the created job's title; defaults to `name`
+description: |                # required when the target declares `work.type: agent` (the §4.3 job brief); optional otherwise
+  Run the nightly integration suite.
+min_dispatcher: 5             # optional; §14.2 skew gate, same meaning as on a job type
+```
+
+**Cron is a deliberate subset**, evaluated in **UTC**: five whitespace-separated fields (`minute hour day-of-month month day-of-week`), each `*`, `N`, `N-M`, `*/S`, or a comma-list of the last three. Day-of-week is `0`–`6`, Sunday first. No `@daily` aliases, no `L`/`W`/`#`, no month or weekday names, no seconds and no year field — an expression is a copy of a GitHub Actions `schedule:` string, so anything the two sides would read differently is rejected. **When day-of-month and day-of-week are *both* restricted (neither is `*`), an occurrence matches if *either* matches** — the POSIX OR rule; when one is `*`, both must match. "Restricted" means anything other than a bare `*`, so a stepped day field such as `*/3` is restricted and participates in the OR rule — Vixie cron instead exempts any field *beginning* with `*` and would AND the same expression, which is the one case where the two readings of a copied string diverge. There is no `timezone:` field: a schedule's meaning must not depend on where the dispatcher runs, and UTC is also why DST never arises.
+
+**Schema tolerance follows §14** exactly as a job type's does — a file read live from HEAD can merge ahead of the binary that parses it, so unknown *top-level* fields are tolerated with a warning and `min_dispatcher` gates a file that genuinely needs a newer dispatcher.
+
+**Validation** runs at two layers. At **merge time**, `chuggernaut validate .chug/schedules/*.yaml` applies the field rules offline and `.chug/tasks/ci.sh` gates every changed schedule file; the `description` rule is checked against the target job type when its file sits in the same config root, and its existence is otherwise a release-time check like a prompt file's. At **reload time** an invalid file is **skipped** and the project's remaining schedules load normally — an invalid trigger file never blocks dispatch. A project loads at most 64 schedule files; entries beyond the cap are refused and reported, never silently truncated.
+
+Dispatcher-side origination — the tick, the anchor and coalescing rules, the at-most-one-in-flight skip, `Job.schedule` provenance and the `schedule-*` events — is specified by design #310 and **not yet implemented**; the config format and the cron grammar above are.
 
 ---
 

@@ -315,11 +315,13 @@ run_full_ci() {
 # that requires an epoch newer than the code it ships beside. It never blocks on
 # an unreachable API.
 config_schema_gate() {
-	# The job-type files to gate: the changed ones when the diff is known, else
-	# every .chug/jobs/*.yaml as a safe superset.
+	# The config files to gate: the changed ones when the diff is known, else
+	# every .chug/jobs/*.yaml and .chug/schedules/*.yaml as a safe superset. A
+	# schedule (design #310) carries `min_dispatcher` with the same meaning and
+	# is read live from HEAD the same way, so it is gated the same way.
 	_files=""
 	if [ "${1:-}" = "all" ]; then
-		for f in .chug/jobs/*.yaml; do
+		for f in .chug/jobs/*.yaml .chug/schedules/*.yaml; do
 			[ -f "$f" ] && _files="$_files$f
 "
 		done
@@ -328,7 +330,7 @@ config_schema_gate() {
 '
 		for f in $changed; do
 			case "$f" in
-			.chug/jobs/*.yaml) [ -f "$f" ] && _files="$_files$f
+			.chug/jobs/*.yaml | .chug/schedules/*.yaml) [ -f "$f" ] && _files="$_files$f
 " ;;
 			esac
 		done
@@ -376,6 +378,43 @@ config_schema_gate() {
 	done
 	unset IFS
 	[ "$_gate_failed" -eq 0 ] || exit 1
+}
+
+# --- schedule config gate (design #310) --------------------------------------
+# `.chug/schedules/*.yaml` is read live from default-branch HEAD, so a malformed
+# cron or a name that disagrees with its file stem would merge and then simply
+# never fire. `chuggernaut validate` owns the rules (crates/types/src/schedule.rs
+# is the single implementation every consumer shares), so the gate runs the CLI
+# rather than re-deriving them in shell. When the diff is known it fires only if
+# a schedule file is in it; in the `all` fallback (no usable diff) it gates every
+# schedule file the repo has. Either way a repo with no schedules pays nothing,
+# and a diff touching none pays nothing on the diff-known path.
+schedules_gate() {
+	_scheds=""
+	if [ "${1:-}" = "all" ]; then
+		for f in .chug/schedules/*.yaml; do
+			[ -f "$f" ] && _scheds="$_scheds$f
+"
+		done
+	else
+		IFS='
+'
+		for f in $changed; do
+			case "$f" in
+			.chug/schedules/*.yaml) [ -f "$f" ] && _scheds="$_scheds$f
+" ;;
+			esac
+		done
+		unset IFS
+	fi
+	[ -n "$_scheds" ] || return 0
+	echo "ci: schedule gate — chuggernaut validate over the changed .chug/schedules/*.yaml"
+	cargo_ran=1
+	IFS='
+'
+	set -- $_scheds
+	unset IFS
+	cargo run --quiet -p chuggernaut -- validate "$@"
 }
 
 # --- MODULES.md registry-completeness gate (refactor-plan A3) -----------------
@@ -449,11 +488,13 @@ if [ "$diff_ok" -eq 1 ] && [ -z "$changed" ]; then
 fi
 # Run the config/binary version-skew gate before the Rust early-exit, so a
 # config-only change (which skips the cargo build) is still gated. Gate the
-# changed job yamls when the diff is known, else every .chug/jobs/*.yaml.
+# changed job/schedule yamls when the diff is known, else every one of them.
 if [ "$diff_ok" -eq 1 ]; then
 	config_schema_gate
+	schedules_gate
 else
 	config_schema_gate all
+	schedules_gate all
 fi
 # Registry-completeness runs unconditionally and before the Rust early-exit:
 # a docs-only diff (which skips cargo) is exactly what breaks it.

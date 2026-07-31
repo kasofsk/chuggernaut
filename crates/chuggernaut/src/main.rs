@@ -52,8 +52,9 @@ enum Command {
     /// jobs/_defaults.yaml) — commit it and point yaml-language-server at it
     /// for in-editor validation.
     Schema(cli::SchemaArgs),
-    /// Statically validate job type YAML files (parse + §1.1 field rules,
-    /// with a sibling _defaults.yaml merged). Repo checks happen at release.
+    /// Statically validate repo-authored YAML — jobs/{type}.yaml with a
+    /// sibling _defaults.yaml merged, and schedules/{name}.yaml (parse + §1.1
+    /// field rules). Repo checks happen at release.
     Validate(cli::ValidateArgs),
 }
 
