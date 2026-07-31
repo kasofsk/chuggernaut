@@ -186,10 +186,23 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   return json as T
 }
 
+/** Progress hooks for a paged diff read: `onPartial` sees every prefix as it
+ *  lands, and a true `cancelled()` between pages abandons the rest. */
+export interface DiffReadHooks {
+  /** the diff read so far, plus whether the read reached the end */
+  onPartial?: (partial: DiffResponse, done: boolean) => void
+  /** polled between pages; true stops the read at the prefix already read */
+  cancelled?: () => boolean
+}
+
 /** One cursor pass for {@link api.diff}, or null when the diff changed under
  *  the cursor — every page carries a digest of the whole diff, and pages of two
  *  different diffs must never be concatenated. */
-async function diffPagesRead(base: string, seq: number): Promise<DiffResponse | null> {
+async function diffPagesRead(
+  base: string,
+  seq: number,
+  hooks?: DiffReadHooks,
+): Promise<DiffResponse | null> {
   let files: DiffResponse['files'] = []
   const chunks: string[] = []
   let since = 0
@@ -203,7 +216,9 @@ async function diffPagesRead(base: string, seq: number): Promise<DiffResponse | 
       return null
     }
     chunks.push(p.data)
-    if (p.done) return { files, diff: chunks.join('') }
+    const read = { files, diff: chunks.join('') }
+    hooks?.onPartial?.(read, p.done)
+    if (p.done || hooks?.cancelled?.()) return read
     if (p.offset <= since) throw new Error(`diff for job ${seq} stopped advancing at byte ${since}`)
     since = p.offset
   }
@@ -334,14 +349,20 @@ export const api = {
   resolve: (owner: string, project: string, seq: number, taskId: number, resolution: TaskResolution) =>
     req<unknown>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/tasks/${taskId}/resolve`, resolution),
 
-  /** A job's whole diff, read as {@link DiffPage} chunks until `done`, and
-   *  re-read from the start when the job branch moves mid-read. Bounded by
-   *  {@link DIFF_PAGES_MAX} and {@link DIFF_RESTARTS_MAX} — never silently cut
-   *  short, never spliced from two diffs. */
-  diff: async (owner: string, project: string, seq: number): Promise<DiffResponse> => {
+  /** A job's whole diff, read as {@link DiffPage} chunks until `done` and
+   *  re-read from the start when the job branch moves mid-read; bounded by
+   *  {@link DIFF_PAGES_MAX} and {@link DIFF_RESTARTS_MAX}. `hooks` render a
+   *  long diff progressively — each prefix reaches `onPartial`, and a true
+   *  `cancelled()` ends the read at the prefix read so far. */
+  diff: async (
+    owner: string,
+    project: string,
+    seq: number,
+    hooks?: DiffReadHooks,
+  ): Promise<DiffResponse> => {
     const base = `/api/v1/projects/${owner}/${project}/diff/${seq}`
     for (let attempt = 0; attempt < DIFF_RESTARTS_MAX; attempt++) {
-      const whole = await diffPagesRead(base, seq)
+      const whole = await diffPagesRead(base, seq, hooks)
       if (whole) return whole
     }
     throw new Error(`diff for job ${seq} kept changing while it was read`)

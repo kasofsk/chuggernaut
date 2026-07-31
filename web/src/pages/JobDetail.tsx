@@ -32,6 +32,7 @@ import { GroupPicker, useGroupOptions } from '../components/JobGroups'
 import { ProjectHeader } from '../components/ProjectHeader'
 import { Skeleton, SkeletonLines } from '../components/Skeleton'
 import { DeployLegCard, deployReportOf } from '../components/DeployLegCard'
+import { DiffFiles } from '../components/DiffFiles'
 import { fmtDuration } from '../format'
 
 function bestEffort<T>(p: Promise<T>): Promise<T | null> {
@@ -51,6 +52,8 @@ export function JobDetail() {
   const [members, setMembers] = useState<Job[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [diff, setDiff] = useState<DiffResponse | null>(null)
+  const [diffDone, setDiffDone] = useState(false)
+  const diffRun = useRef(0)
   const [queue, setQueue] = useState<QueueSnapshot | null>(null)
   const [criteria, setCriteria] = useState<JobCriteria | null>(null)
   const [events, setEvents] = useState<JobEvent[]>([])
@@ -69,18 +72,32 @@ export function JobDetail() {
     )
   }, [])
 
+  const refreshDiff = useCallback(() => {
+    const run = ++diffRun.current
+    setDiffDone(false)
+    bestEffort(
+      api.diff(owner, project, jobSeq, {
+        onPartial: (partial, done) => {
+          if (run !== diffRun.current) return
+          setDiff(partial)
+          setDiffDone(done)
+        },
+        cancelled: () => run !== diffRun.current,
+      }),
+    )
+  }, [owner, project, jobSeq])
+
   const refresh = useCallback(() => {
+    refreshDiff()
     Promise.all([
       api.job(owner, project, jobSeq),
       api.tasks(owner, project, jobSeq),
-      api.diff(owner, project, jobSeq),
       bestEffort(api.criteria(owner, project, jobSeq)),
       bestEffort(api.queue(owner, project)),
     ])
-      .then(([j, ts, d, c, q]) => {
+      .then(([j, ts, c, q]) => {
         setJob(j)
         setTasks(ts)
-        setDiff(d)
         setCriteria(c)
         setQueue(q)
         setError(null)
@@ -98,7 +115,7 @@ export function JobDetail() {
         else setError(e instanceof Error ? e.message : 'load failed')
       })
       .finally(() => setLoading(false))
-  }, [owner, project, jobSeq, navigate])
+  }, [owner, project, jobSeq, navigate, refreshDiff])
 
   useEffect(() => setLoading(true), [owner, project, jobSeq])
   useEffect(refresh, [refresh])
@@ -567,7 +584,7 @@ export function JobDetail() {
 
       <TaskReports tasks={tasks} />
 
-      {diff && diff.diff && (
+      {diff && (diff.files.length > 0 || diff.diff) && (
         <section className="card">
           <h2>
             Diff{' '}
@@ -577,7 +594,7 @@ export function JobDetail() {
               {diff.files.reduce((n, f) => n + f.deletions, 0)}
             </span>
           </h2>
-          <DiffView diff={diff.diff} />
+          <DiffFiles key={jobSeq} files={diff.files} diff={diff.diff} done={diffDone} />
         </section>
       )}
 
@@ -976,32 +993,6 @@ function hasLogs(t: Task): boolean {
   if (t.performed_by === 'human') return false
   return t.state === 'Running' || t.state === 'Done' || t.state === 'Failed'
 }
-
-function DiffView({ diff }: { diff: string }) {
-  return (
-    <pre className="diff">
-      {diff.split('\n').map((line, i) => (
-        <div
-          key={i}
-          className={
-            line.startsWith('+') && !line.startsWith('+++')
-              ? 'diff-add'
-              : line.startsWith('-') && !line.startsWith('---')
-                ? 'diff-del'
-                : line.startsWith('@@')
-                  ? 'diff-hunk'
-                  : line.startsWith('diff ') || line.startsWith('+++') || line.startsWith('---')
-                    ? 'diff-file'
-                    : undefined
-          }
-        >
-          {line || ' '}
-        </div>
-      ))}
-    </pre>
-  )
-}
-
 
 /**
  * The agent's narrative, reconstructed from the event stream.

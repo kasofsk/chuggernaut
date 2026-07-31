@@ -1169,6 +1169,73 @@ table.jobs tbody tr.row-draft td:first-child {
   color: var(--dim);
 }
 
+/* Per-file diff: a manifest of rows (path + ±counts), each expanding its own
+   hunks. The path wraps and the counts stay on one line, so a row never
+   widens the card — only the expanded `.diff` block scrolls sideways. */
+.diff-files-actions {
+  display: flex;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-2);
+}
+.diff-files-actions .linklike {
+  margin-right: 0;
+}
+.diff-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.diff-file-list > li {
+  border-top: 1px solid var(--border);
+}
+.diff-file-list > li:last-child {
+  border-bottom: 1px solid var(--border);
+}
+.diff-file-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 0.3rem 0.2rem;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.diff-file-row:hover:not(:disabled) {
+  background: var(--inset);
+  border: none;
+}
+.diff-file-caret {
+  color: var(--dim);
+  flex: none;
+}
+.diff-file-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.diff-file-stat {
+  flex: none;
+  white-space: nowrap;
+}
+.diff-stat-add {
+  color: var(--green);
+}
+.diff-stat-del {
+  color: var(--red);
+}
+.diff-file-list .diff {
+  margin: 0 0 var(--sp-2);
+}
+.diff-file-pending {
+  margin: 0 0 var(--sp-2);
+  padding: 0 0.2rem;
+  font-size: var(--fs-xs);
+}
+
 .events {
   list-style: none;
   margin: 0;
