@@ -1,9 +1,24 @@
 # Design #311 — Job inputs (parameterizing a run without rewriting it)
 
-Status: PROPOSED. Written against the tree at `acdb2c6`. Every claim about
-current behavior below was read out of `spec.md` and the source in this repo;
-where the brief and the tree disagree, the tree wins and the disagreement is
-recorded in [Corrections](#corrections-verified-against-the-tree).
+Status: IMPLEMENTED IN PART — slice A shipped in jobs #314–#319.
+
+[Slice A](#minimum-useful-version) — the recommended first ship — landed end to
+end and is deployed: `CONFIG_SCHEMA_EPOCH` is 2 in
+`crates/types/src/version.rs`, `crates/types/src/inputs.rs` holds the shared
+rules and `crates/domain/src/inputs.rs` the pure decider, `CHUG_INPUT_*` is
+injected into work, eval and wrap-up containers, and `.chug/jobs/rollback.yaml`
+plus `.chug/tasks/rollback.sh` are the first consumer (#314–#317, with the
+deploy #318 carrying the epoch bump to prod). Slice B's web half — declared
+inputs rendered on the create form, the Draft editor and the job header —
+shipped in #319. **Still open:** slice B's `### Inputs` block in
+`job_brief_block` (`crates/dispatcher/src/exec.rs`) and the squash-body
+`Inputs:` line, which is what agent jobs need; and slice C (`inputs:` on a
+schedule file), blocked on [#310](./310-scheduled-jobs.md) landing.
+
+Written against the tree at `acdb2c6`. Every claim about current behavior below
+was read out of `spec.md` and the source in this repo; where the brief and the
+tree disagree, the tree wins and the disagreement is recorded in
+[Corrections](#corrections-verified-against-the-tree).
 
 Doc 3 of 4 extracting implementable specs from
 [design #308](./308-gha-port.md). Gap 1 of that doc is the motivation

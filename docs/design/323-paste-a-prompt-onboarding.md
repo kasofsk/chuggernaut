@@ -1,10 +1,11 @@
 # Design — paste-a-prompt onboarding: stand up an instance and onboard your own repo
 
-Status: PROPOSED. Written against the tree at `470cc0c` (2026-07-30). Every
-claim about current behaviour below was read out of the source or out of
-[spec.md](../../spec.md); where this document and the job brief disagree, the
-tree wins and the disagreement is recorded in
-§[1](#1-what-the-tree-actually-says).
+Status: PROPOSED.
+
+Written against the tree at `470cc0c` (2026-07-30). Every claim about current
+behaviour below was read out of the source or out of [spec.md](../../spec.md);
+where this document and the job brief disagree, the tree wins and the
+disagreement is recorded in §[1](#1-what-the-tree-actually-says).
 
 **The problem.** A person who has heard of Chuggernaut has no checkout, no
 tailnet access, and possibly no Claude Code. They should be able to paste a

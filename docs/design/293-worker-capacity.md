@@ -1,9 +1,20 @@
 # Design #293 — Worker capacity: one source of truth, changeable from the UI
 
-Status: PROPOSED. Written against the tree at `a90d660`; every claim about
-current behavior below was read out of the source, not inferred from the
-docs. Prompted by the 2026-07-26 prod incident described under
-[Problem](#problem).
+Status: IMPLEMENTED — shipped in jobs #295–#301.
+
+All seven jobs of the [implementation plan](#implementation-plan-sliced-into-jobs)
+below are merged and deployed: the spec §3.1 capacity-ownership amendment
+(#295), the worker daemon's capacity cell and the dispatcher's observation,
+intent and reconciliation halves (#296–#298), `PUT
+/api/v1/platform/fleet/{node}/capacity` in `crates/api/src/routes.rs` (#299),
+the cluster view's capacity control in `web/src/pages/Cluster.tsx` (#300), and
+the ops documentation, now at
+[`docs/runbooks/worker-capacity.md`](../runbooks/worker-capacity.md) (#301).
+What follows is the record of the argument, not a live proposal.
+
+Written against the tree at `a90d660`; every claim about current behavior below
+was read out of the source, not inferred from the docs. Prompted by the
+2026-07-26 prod incident described under [Problem](#problem).
 
 Revised after review: the capacity ordering key now survives a daemon restart
 (§1 — a counter alone would have frozen a node's capacity after every deploy),

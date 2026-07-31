@@ -1,9 +1,10 @@
 # Design #169 — Task-handoff continuity: the matrix
 
-Status: DRAFT (interactive session 2026-07-24, operator + Claude). Produced
-from a code-level audit of the dispatcher at `0c6ad52` — every claim about
-current behavior below was verified against the source, not inferred from
-older docs.
+Status: DRAFT.
+
+Produced in an interactive session (2026-07-24, operator + Claude) from a
+code-level audit of the dispatcher at `0c6ad52` — every claim about current
+behavior below was verified against the source, not inferred from older docs.
 
 ## Problem
 

@@ -1,10 +1,11 @@
 # Design — Host-native execution (node kind, selector, capabilities, exclusive resources)
 
-Status: PROPOSED. Written against the tree at `b801b76`. Every claim about
-current behavior was read out of the source and out of [spec.md](../../spec.md),
-not inferred from the docs; where the job brief and the tree disagree, the tree
-wins and the disagreement is recorded under
-[Corrections](#corrections-to-the-brief).
+Status: PROPOSED.
+
+Written against the tree at `b801b76`. Every claim about current behavior was
+read out of the source and out of [spec.md](../../spec.md), not inferred from
+the docs; where the job brief and the tree disagree, the tree wins and the
+disagreement is recorded under [Corrections](#corrections-to-the-brief).
 
 This is doc 1 of 4 extracting implementable specs from
 [design #308](./308-gha-port.md). Section H of that doc (H.1–H.6) argues *why*

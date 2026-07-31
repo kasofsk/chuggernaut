@@ -1,9 +1,29 @@
 # Design #321 — Job groups (tying a job to the thing it belongs to)
 
-Status: PROPOSED. Written against the tree at `00dd0dc`. Every claim about
-current behavior below was read out of `spec.md` and the source in this repo;
-where the brief and the tree disagree, the tree wins and the disagreement is
-recorded in [Corrections](#corrections-verified-against-the-tree).
+Status: IMPLEMENTED — shipped in jobs #324, #330, #331 and #332.
+
+All three slices landed: slice A — `crates/types/src/groups.rs`, `Job.groups`
+and the write paths — in #324; slice B — `crates/types/src/rollup.rs`,
+`req.groups.list`/`req.designs.list` in
+`crates/dispatcher/src/handlers/groups.rs`, and `GET .../groups` and
+`GET .../designs` — in #330; slice C — the Designs view
+(`web/src/pages/Designs.tsx`) in #331, and the group chips, filter and picker
+in #332. The **Deferred** list under
+[Minimum useful version](#minimum-useful-version) is untouched and still
+describes what has not been built.
+
+Note that the survey in
+[Corrections](#corrections-verified-against-the-tree) and the worked example
+under [Decision 8](#decision-8-status-hygiene-without-a-second-writer) quote the
+`Status:` lines as they read at `00dd0dc`; several have since been amended —
+including this one, and the `design/311-job-inputs` case Decision 8 uses as its
+example. They are left as written, because the argument is the record of what
+the tree said when it was made.
+
+Written against the tree at `00dd0dc`. Every claim about current behavior below
+was read out of `spec.md` and the source in this repo; where the brief and the
+tree disagree, the tree wins and the disagreement is recorded in
+[Corrections](#corrections-verified-against-the-tree).
 
 This doc deliberately reopens a decided direction. Job **#185** (Frozen,
 `design`) records a settled shape — an implementation ticket carrying

@@ -1,13 +1,15 @@
 # Design #308 — Porting beacon's GitHub Actions onto Chuggernaut
 
-Status: PROPOSED, **amended 2026-07-30** (job #320). The original was written
-against the tree at `0346a80`; the amendment against `00dd0dc`. **Four
-corrections to this doc's own claims** — one retraction, one overstatement, one
-finding it was missing entirely, one made stale by shipped code — **plus one
-added phase**: see [What #308 got wrong](#what-308-got-wrong), which is where a
-downstream reader should look first. Every claim about *Chuggernaut's* current
-behavior, at both dates, was read out of `spec.md` and the source in this repo,
-not inferred from the docs; the corrections in
+Status: PROPOSED, amended 2026-07-30 (job #320).
+
+The original was written against the tree at `0346a80`; the amendment against
+`00dd0dc`. **Four corrections to this doc's own claims** — one retraction, one
+overstatement, one finding it was missing entirely, one made stale by shipped
+code — **plus one added phase**: see
+[What #308 got wrong](#what-308-got-wrong), which is where a downstream reader
+should look first. Every claim about *Chuggernaut's* current behavior, at both
+dates, was read out of `spec.md` and the source in this repo, not inferred from
+the docs; the corrections in
 [What the brief got wrong](#what-the-brief-got-wrong) are the ones the original
 survey found.
 

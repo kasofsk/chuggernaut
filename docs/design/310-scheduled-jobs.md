@@ -1,7 +1,9 @@
 # Design #310 — Scheduled jobs (time-triggered job creation)
 
-Status: PROPOSED. Written against the tree at `55f6595`. Every claim about
-current behavior below was read out of `spec.md` and the source in this repo;
+Status: PROPOSED.
+
+Written against the tree at `55f6595`. Every claim about current behavior below
+was read out of `spec.md` and the source in this repo;
 where the brief and the tree disagree, the tree wins and the disagreement is
 recorded in [Corrections](#corrections-verified-against-the-tree).
 

@@ -1,9 +1,11 @@
 # Design #313 — Workload identity (OIDC issuer) and image build/push
 
-Status: PROPOSED. Written against the tree at `d7ebfae`. Every claim about
-current behavior below was read out of [spec.md](../../spec.md) and the source
-in this repo; where the brief or a sibling doc disagrees with the tree, the tree
-wins and the disagreement is recorded in
+Status: PROPOSED.
+
+Written against the tree at `d7ebfae`. Every claim about current behavior below
+was read out of [spec.md](../../spec.md) and the source in this repo; where the
+brief or a sibling doc disagrees with the tree, the tree wins and the
+disagreement is recorded in
 [Corrections](#corrections-verified-against-the-tree). Every claim about Google
 Cloud's Workload Identity Federation was fetched from current provider
 documentation and is cited inline — see

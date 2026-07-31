@@ -28,17 +28,30 @@ Then:
    sections and code paths you rely on — write repo paths in backticks (e.g.
    `crates/dispatcher/src/state.rs`) so they read as references. Link related
    docs with **relative** links.
-2. Keep the change to the design at hand — do not edit code or unrelated docs.
-3. `.chug/tasks/doc-lint.sh` runs on your output: relative links must resolve and the
+2. **Open it with the header contract** — an `# ` title on line 1, then a
+   `Status:` line carrying the **status and nothing else**: one short, complete
+   phrase (`Status: PROPOSED.`), no markdown, ending in a period. The platform
+   serves that line verbatim and truncates it at 120 characters, so a status
+   that runs on into a sentence is displayed cut mid-word in the Designs view.
+   The provenance preamble — *written against the tree at `<sha>`, every claim
+   below verified against the source, not inferred from the docs* — belongs in
+   the **paragraph after** it, along with anything else about the document.
+   State that provenance: it is what makes the document's claims checkable
+   later. When you amend a shipped design, say so in the status and name the
+   jobs (`Status: IMPLEMENTED — shipped in jobs #295–#301.`). Full reference,
+   including the vocabulary in use and how the document reaches the Designs
+   view: [`docs/design-docs.md`](../../../docs/design-docs.md).
+3. Keep the change to the design at hand — do not edit code or unrelated docs.
+4. `.chug/tasks/doc-lint.sh` runs on your output: relative links must resolve and the
    markdown must be well-formed (closed code fences, spaced headings).
    Backtick'd code paths are checked best-effort — keep them accurate.
-4. Commit to the current branch (you are already on the job branch) with a clear
+5. Commit to the current branch (you are already on the job branch) with a clear
    message, and push.
-5. Narrate as you go with the `update_status` tool — it streams live to the
+6. Narrate as you go with the `update_status` tool — it streams live to the
    operator. Call it at least three times: your one-line plan right after
    reading the brief (`update_status("plan: ...")`), after the draft is written,
    and just before you submit.
-6. When done, call `submit_result` with:
+7. When done, call `submit_result` with:
    - `summary`: a short markdown report of what you wrote (this becomes the
      merge commit body). Structure it:
      - Open with **one plain sentence** stating the outcome — markdown-free; it
@@ -54,7 +67,7 @@ Then:
      or visual summary — shown beside the summary in the UI. Only if it helps
      tell the story; never required, presentational only, never a substitute for
      `summary`. Keep it compact (rejected over 64KB).
-7. Exit 0.
+8. Exit 0.
 
 A reviewer will judge your document against the same brief — does it address the
 brief, are the alternatives and tradeoffs honest, is it consistent with `spec.md`

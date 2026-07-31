@@ -1,9 +1,11 @@
 # Design — a native (macOS) execution runtime for iOS/Xcode jobs
 
-Status: PROPOSED. Written against the tree at `61b721d` (2026-07-30). Every
-claim about current behavior was read out of the source or out of
-[spec.md](../../spec.md); where this document and the job brief disagree, the
-tree wins and the disagreement is recorded under
+Status: PROPOSED.
+
+Written against the tree at `61b721d` (2026-07-30). Every claim about current
+behavior was read out of the source or out of [spec.md](../../spec.md); where
+this document and the job brief disagree, the tree wins and the disagreement is
+recorded under
 [Corrections](#corrections-to-the-brief-and-to-309).
 
 **Relationship to the existing docs — read this first.** Host-native execution

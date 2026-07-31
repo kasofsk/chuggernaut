@@ -12,6 +12,12 @@ cite it.
 2. Judge the document on three things:
    - **Does it address the brief?** It should resolve the question the brief
      poses, not an easier adjacent one.
+   - **Does its header follow the contract?** An `# ` title, then a `Status:`
+     line carrying the status and nothing else — one short, complete phrase, no
+     markdown — with the "written against the tree at `<sha>`" provenance in the
+     paragraph *after* it. The platform truncates that line at 120 characters
+     and serves it verbatim, so a run-on status renders cut mid-sentence. See
+     [`docs/design-docs.md`](../../docs/design-docs.md).
    - **Are the alternatives and tradeoffs honest?** A design that argues one
      option while ignoring the obvious competitor, or that lists only upsides,
      is not done. The rejected options and their real costs must be on the page.

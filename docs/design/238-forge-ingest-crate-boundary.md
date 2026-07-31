@@ -1,8 +1,10 @@
 # Design #238 — forge-ingest stays in the dispatcher (for now)
 
-Status: FINDING. Written against the tree at `01624fd`, the parent of the C9
-commit that moved platform-ops out. Every claim below was read out of the
-source, not inferred from the docs.
+Status: FINDING.
+
+Written against the tree at `01624fd`, the parent of the C9 commit that moved
+platform-ops out. Every claim below was read out of the source, not inferred
+from the docs.
 
 C9 asked for two context crates. One landed: `crates/platform-ops` holds
 `fleet`/`cd`/`harvest`/`seed`, and `crates/dispatcher/src/platform_ops.rs` is
