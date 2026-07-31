@@ -62,24 +62,77 @@ export function compareDesigns(a: DesignEntry, b: DesignEntry, sort: SortKey): n
   return interestRank(a) - interestRank(b) || (b.seq ?? 0) - (a.seq ?? 0)
 }
 
-/** The document's own words about itself — the `Status:` line verbatim and
- *  unparsed (the platform compares it to nothing), plus the flag for when the
- *  jobs say otherwise. Shared by the index row and the detail header so the two
- *  cannot drift on what "stale" looks like. */
-function DesignStatus({ entry }: { entry: DesignEntry }) {
+/**
+ * The `Status:` line split into the word an operator scans for and the rest of
+ * the document's sentence. The token runs to the first delimiter — period,
+ * comma, opening parenthesis or whitespace — because the tree writes all of
+ * them: `PROPOSED. Written against…`, `PROPOSED, **amended 2026-07-30**…`
+ * (#308), `DRAFT (interactive session…)` (#169). Splitting on the period alone
+ * would hand #308 its whole sentence as a badge.
+ *
+ * This is presentation, not a schema: the platform hands the line over
+ * unparsed and compares it to nothing (design #321 Decision 8), and the status
+ * vocabulary belongs to job #86. A line that leads with a delimiter has no
+ * token, and reads as detail alone rather than as an empty badge.
+ */
+export function splitStatus(status: string): { token: string; detail: string } {
+  const text = status.trim()
+  const token = text.match(/^[^\s.,(]+/)?.[0] ?? ''
+  return { token, detail: text.slice(token.length).replace(/^[\s.,;:]+/, '') }
+}
+
+// The hue a status token reads as. Three entries on purpose — the words the
+// tree writes today — and the hues claim no meaning the documents have not
+// earned. Anything else takes the neutral badge: a design is free to write any
+// word on that line, job #86 owns the vocabulary and has not landed a schema,
+// so an unknown token is normal rather than an error. Grow this when the tree
+// grows a word, never ahead of it.
+const STATUS_COLORS: Record<string, string> = {
+  PROPOSED: 'blue',
+  DRAFT: 'purple',
+  FINDING: 'green',
+}
+
+export function statusColor(token: string): string {
+  return STATUS_COLORS[token.toUpperCase()] ?? 'gray'
+}
+
+/** The document's own words about itself, as a badge: the line's leading token,
+ *  plus the warning for when its jobs say otherwise. The warning rides against
+ *  the badge so the two read as one claim beside the jobs roll-up — "PROPOSED
+ *  ⚠ stale · 6/6 done" — rather than as a second unrelated chip. Shared by the
+ *  index row and the detail header so the two cannot drift on what "stale"
+ *  looks like. */
+function DesignStatusBadge({ entry }: { entry: DesignEntry }) {
+  if (!entry.status) return <span className="dim">no status line</span>
+  const { token } = splitStatus(entry.status)
+  if (!token) return <span className="dim">status line has no leading word</span>
   return (
-    <div className="design-status">
-      <span className="dim">{entry.status ? `Status: ${entry.status}` : 'no status line'}</span>
+    <span className="design-status-flag">
+      {/* The whole line on hover, so the badge never hides what the doc said. */}
+      <span className={`badge badge-${statusColor(token)}`} title={entry.status}>
+        {token}
+      </span>
       {entry.status_stale && (
         <span
           className="badge badge-orange design-stale"
           title="every job filed against this design is terminal, and the status line still says otherwise — the repo stays the source of truth, so an amendment job resolves it"
         >
-          status stale
+          ⚠ stale
         </span>
       )}
-    </div>
+    </span>
   )
+}
+
+/** The rest of the status line, muted and literal — never markdown: #308's
+ *  remainder carries `**amended 2026-07-30**`, and inline-bolding a fragment
+ *  the API already truncated reads worse than showing it as written. It is the
+ *  only place the document's own qualification lives, so it is never dropped. */
+function DesignStatusDetail({ entry }: { entry: DesignEntry }) {
+  const detail = entry.status ? splitStatus(entry.status).detail : ''
+  if (!detail) return null
+  return <div className="dim design-status-detail">{detail}</div>
 }
 
 /** The member jobs as a per-state histogram, in the `StateBadge` colors — so a
@@ -201,8 +254,13 @@ export function DesignsPage() {
                     {d.title}
                   </Link>
                 </div>
-                <DesignStatus entry={d} />
-                <DesignHistogram entry={d} />
+                {/* Status and roll-up share one wrapping row: the sentence the
+                    operator is reading is "PROPOSED · 6/6 done". */}
+                <div className="design-meta">
+                  <DesignStatusBadge entry={d} />
+                  <DesignHistogram entry={d} />
+                </div>
+                <DesignStatusDetail entry={d} />
               </li>
             ))}
           </ul>
@@ -278,7 +336,12 @@ export function DesignPage() {
               </div>
             </div>
           </div>
-          {entry && <DesignStatus entry={entry} />}
+          {entry && (
+            <div className="design-status">
+              <DesignStatusBadge entry={entry} />
+              <DesignStatusDetail entry={entry} />
+            </div>
+          )}
           {doc && entry ? (
             <DocMarkdown owner={owner} project={project} path={entry.path} text={doc} />
           ) : (

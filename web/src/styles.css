@@ -4935,18 +4935,44 @@ table.type-stats .num {
   font-variant-numeric: tabular-nums;
   font-weight: 400;
 }
-/* The status line is the document's own prose and can be a whole sentence, so
-   it wraps, and the staleness flag rides beside it rather than claiming a row. */
+/* Status: the line's leading word as a badge, the rest of the document's own
+   sentence as a muted line under it. The badge stacks over its detail rather
+   than sitting beside it, so a 120-character remainder can never squeeze the
+   badge into two lines of one letter. */
 .design-status {
   display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 0.4rem;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
   font-size: var(--fs-sm);
-  overflow-wrap: anywhere;
+}
+/* Badge and staleness warning are one claim: they never break apart mid-pair,
+   the row they sit on wraps around them instead. */
+.design-status-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  white-space: nowrap;
+  flex: none;
 }
 .design-stale {
   flex: none;
+}
+/* The document's own qualification, rendered literally (it can carry markdown).
+   It wraps at any width — the row never scrolls sideways for it. */
+.design-status-detail {
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+/* Index row: the status badge and the jobs roll-up read as one sentence
+   ("PROPOSED · 6/6 done"), wrapping onto a second line on a phone rather than
+   widening the row. */
+.design-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.6rem;
 }
 /* Histogram: the pills wrap instead of pushing the row sideways, so a design in
    six states is three lines at 375px and the card still never scrolls. */
