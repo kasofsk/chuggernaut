@@ -2,19 +2,29 @@
 //! ticker in `core::spawn` (and `CoreHandle::trigger_scan` in tests); both
 //! scans run inside the single-writer loop like any other message.
 //!
+//! The schedule tick rides the same message (design #310 Decision 8): a
+//! separate timer would still have to send into the actor, and riding
+//! `run_scans` is what makes a restart unable to double-fire and what makes a
+//! §3.6 drain suppress origination by construction.
+//!
 //! - **Accepts:** the periodic scan tick (or `CoreHandle::trigger_scan` in
 //!   tests).
 //! - **Emits:** task-timeout escalations and one-shot job-deadline
-//!   transitions; also drives the launch-queue drain and config republish.
+//!   transitions, and the jobs due schedules originate; also drives the
+//!   launch-queue drain and config republish.
 //! - **Guarantees:** every scan runs inside the single-writer loop; every wait
 //!   is bounded.
-//! - **Spec:** §3.5.
+//! - **Spec:** §3.5, §1.1 (schedules).
 
 use crate::core::{Core, Result, TaskExit};
 use crate::exec::task_timeout;
 use crate::release;
+use crate::schedules::SCHEDULE_REFRESH_TICKS;
 use chrono::{DateTime, Utc};
-use types::{JobState, TaskKind, TaskPhase, TaskResult, TaskState, parse_duration};
+use chuggernaut_domain::decide::schedule::{
+    ScheduleDecision, ScheduleLatest, ScheduleVerdict, ScheduleView,
+};
+use types::{CreateSpec, JobState, TaskKind, TaskPhase, TaskResult, TaskState, parse_duration};
 
 /// Prompt marker identifying deadline escalation tasks — the one-shot rule
 /// (§3.5) excludes jobs whose task log contains a *resolved* one.
@@ -74,6 +84,47 @@ fn capacity_warning_due(
     }
 }
 
+/// The most recent job carrying `name`'s provenance, by creation — the value
+/// design #310 Decision 5 derives the anchor from, so no last-fired record
+/// exists to drift from the job records.
+fn latest_scheduled_job(graph: &crate::graph::JobGraph, name: &str) -> Option<ScheduleLatest> {
+    graph
+        .jobs()
+        .filter(|job| job.schedule.as_deref() == Some(name))
+        .max_by_key(|job| (job.created_at, job.id))
+        .map(|job| ScheduleLatest {
+            seq: job.id,
+            state: job.state,
+            created_at: job.created_at,
+            completed_at: job.completed_at,
+        })
+}
+
+/// What one occurrence asks `Core::create_job` for. Every occurrence of a
+/// schedule asks for the same job — a static title and ticket body, no deps and
+/// no inputs (design #310 Decision 10 keeps parameterization out of v1).
+fn schedule_create_spec(owner: &str, project: &str, schedule: &types::Schedule) -> CreateSpec {
+    CreateSpec {
+        owner: owner.to_string(),
+        project: project.to_string(),
+        r#type: schedule.job_type.clone(),
+        title: schedule.job_title().to_string(),
+        description: schedule.description.clone().unwrap_or_default(),
+        cover_html: None,
+        deps: vec![],
+        members: vec![],
+        knowledge_tags: vec![],
+        eval: vec![],
+        timeout: None,
+        model: None,
+        inputs: std::collections::BTreeMap::new(),
+        groups: vec![],
+        factory: None,
+        schedule: Some(schedule.name.clone()),
+        draft: false,
+    }
+}
+
 impl Core {
     pub(crate) async fn run_scans(&mut self) -> Result<()> {
         self.scan_task_timeouts().await?;
@@ -82,8 +133,149 @@ impl Core {
         self.scan_never_observed_capacity();
         self.reconcile_capacity_intent();
         self.scan_job_deadlines().await?;
+        self.scan_schedules().await?;
         self.refresh_config_snapshot().await;
         Ok(())
+    }
+
+    /// Originate the jobs due schedules ask for (spec §1.1 schedules): gather
+    /// one view per loaded schedule, call the pure decider, perform what it
+    /// decided. Nothing fires while draining (§3.6), and the reload every
+    /// [`SCHEDULE_REFRESH_TICKS`] is the table's backstop.
+    async fn scan_schedules(&mut self) -> Result<()> {
+        if self.draining {
+            return Ok(());
+        }
+        self.schedule_ticks = self.schedule_ticks.wrapping_add(1);
+        if self.schedule_ticks.is_multiple_of(SCHEDULE_REFRESH_TICKS) {
+            self.refresh_schedules().await;
+        }
+
+        let now = Utc::now();
+        let slugs: Vec<String> = self.schedules.keys().cloned().collect();
+        for slug in slugs {
+            let Some((owner, project)) = slug.split_once('/') else {
+                continue;
+            };
+            let (owner, project) = (owner.to_string(), project.to_string());
+            let (decisions, effects) = self.decide_schedules(&slug, &owner, &project, now);
+            for effect in effects {
+                self.interpret(effect).await?;
+            }
+            for decision in decisions {
+                match decision.verdict {
+                    ScheduleVerdict::Skip => self.record_schedule_skip(&slug, &decision),
+                    ScheduleVerdict::Fire => {
+                        self.fire_schedule(&owner, &project, &decision).await;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Gather one project's schedule views off the in-memory table and graph,
+    /// and decide them. Split out so the borrows the view holds end before the
+    /// origination that follows writes anything.
+    fn decide_schedules(
+        &self,
+        slug: &str,
+        owner: &str,
+        project: &str,
+        now: DateTime<Utc>,
+    ) -> (Vec<ScheduleDecision>, Vec<chuggernaut_domain::Effect>) {
+        let Some(table) = self.schedules.get(slug) else {
+            return (Vec::new(), Vec::new());
+        };
+        let graph = self.graphs.get(slug);
+        let views: Vec<ScheduleView<'_>> = table
+            .values()
+            .map(|entry| ScheduleView {
+                schedule: &entry.schedule,
+                latest: graph.and_then(|g| latest_scheduled_job(g, &entry.schedule.name)),
+                first_seen_at: entry.first_seen_at,
+                last_skipped_occurrence: entry.last_skipped_occurrence,
+            })
+            .collect();
+        chuggernaut_domain::decide::schedule::decide(owner, project, &views, now)
+    }
+
+    /// Remember the occurrence a `schedule-skipped` just reported, so a blocked
+    /// schedule reports it once rather than once every 30 seconds.
+    fn record_schedule_skip(&mut self, slug: &str, decision: &ScheduleDecision) {
+        if let Some(entry) = self
+            .schedules
+            .get_mut(slug)
+            .and_then(|table| table.get_mut(&decision.schedule))
+        {
+            entry.last_skipped_occurrence = Some(decision.occurrence_at);
+        }
+    }
+
+    /// Create and release the job one due occurrence asks for, publishing
+    /// `schedule-fired` on it. Every failure here is logged and left for the
+    /// next occurrence — a broken project must not wedge the scan.
+    async fn fire_schedule(&mut self, owner: &str, project: &str, decision: &ScheduleDecision) {
+        let slug = format!("{owner}/{project}");
+        let Some(schedule) = self
+            .schedules
+            .get(&slug)
+            .and_then(|table| table.get(&decision.schedule))
+            .map(|entry| entry.schedule.clone())
+        else {
+            return;
+        };
+        debug_assert!(
+            !self.graphs.get(&slug).is_some_and(|g| {
+                g.jobs().any(|j| {
+                    j.schedule.as_deref() == Some(&schedule.name) && !j.state.is_terminal()
+                })
+            }),
+            "schedule '{}' fired with a live job already in flight",
+            schedule.name
+        );
+
+        let job = match self
+            .create_job(schedule_create_spec(owner, project, &schedule))
+            .await
+        {
+            Ok(job) => job,
+            Err(e) => {
+                tracing::warn!(
+                    "schedule '{}' for {slug}: creating the job failed: {e}",
+                    schedule.name
+                );
+                return;
+            }
+        };
+        assert_eq!(
+            job.schedule.as_deref(),
+            Some(schedule.name.as_str()),
+            "a scheduled job is created carrying its provenance"
+        );
+
+        if let Err(e) = self
+            .publish(
+                owner,
+                project,
+                job.id,
+                "schedule-fired",
+                serde_json::json!({
+                    "schedule": schedule.name,
+                    "occurrence_at": decision.occurrence_at,
+                }),
+            )
+            .await
+        {
+            tracing::warn!("schedule '{}' for {slug}: {e}", schedule.name);
+        }
+        if let Err(e) = self.release_job(owner, project, job.id).await {
+            tracing::warn!(
+                "schedule '{}' for {slug}: job {} stays Frozen — release failed: {e}",
+                schedule.name,
+                job.id
+            );
+        }
     }
 
     /// Mark dynamically-announced workers whose announce heartbeat lapsed past

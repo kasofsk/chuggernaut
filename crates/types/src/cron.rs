@@ -13,18 +13,28 @@
 //! the deployment moved hosts, and UTC is also the answer to DST: the ambiguous
 //! and non-existent local times never arise.
 //!
-//! - **Accepts:** a cron string, and the instant to test it against.
+//! - **Accepts:** a cron string, the instant to test it against, and the
+//!   half-open window a backward search may look through.
 //! - **Emits:** [`CronExpr`], or [`CronParseError`] naming the field and the
 //!   term that broke a rule.
 //! - **Guarantees:** pure and total — no I/O, no async, no panics; parsing is
-//!   bounded by the expression's own length, matching is constant time.
+//!   bounded by the expression's own length, matching is constant time, and the
+//!   backward search is bounded by [`CRON_LOOKBACK_DAYS_MAX`].
 //! - **Spec:** §1.1 (`.chug/schedules/{name}.yaml`).
 
-use chrono::{DateTime, Datelike, Timelike, Utc};
+use chrono::{DateTime, Datelike, Days, NaiveDate, TimeDelta, Timelike, Utc};
 use thiserror::Error;
 
 /// How many whitespace-separated fields an accepted expression carries.
 pub const CRON_FIELD_COUNT: usize = 5;
+
+/// How far back [`CronExpr::latest_occurrence`] looks (STYLE.md Tier 2 #3:
+/// everything is bounded). A dispatcher down longer than this does not catch up
+/// on the occurrences it missed — it arms for the next one.
+pub const CRON_LOOKBACK_DAYS_MAX: u64 = 366;
+
+/// Minutes in a day — the span of one day's backward minute scan.
+const MINUTES_PER_DAY: u32 = 24 * 60;
 
 const MINUTE: usize = 0;
 const HOUR: usize = 1;
@@ -133,17 +143,81 @@ impl CronExpr {
     /// which the unrestricted `*` satisfies for free.
     #[must_use]
     pub fn matches(&self, at: DateTime<Utc>) -> bool {
-        let by_month_day = self.field_matches(DAY_OF_MONTH, at.day());
-        let by_week_day = self.field_matches(DAY_OF_WEEK, at.weekday().num_days_from_sunday());
+        self.matches_day(at.date_naive())
+            && self.field_matches(MINUTE, at.minute())
+            && self.field_matches(HOUR, at.hour())
+    }
+
+    /// The newest occurrence in `(after, at]`, or None when the expression has
+    /// none there — the half-open bound is what makes an occurrence consumable,
+    /// and asking for the newest is what coalesces missed ones into a single
+    /// answer (spec §1.1 schedules).
+    ///
+    /// Bounded by [`CRON_LOOKBACK_DAYS_MAX`]: an older `after` is raised to it.
+    #[must_use]
+    pub fn latest_occurrence(
+        &self,
+        at: DateTime<Utc>,
+        after: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        let floor = after.max(at - TimeDelta::days(i64::try_from(CRON_LOOKBACK_DAYS_MAX).ok()?));
+        if at <= floor {
+            return None;
+        }
+        let mut day = at.date_naive();
+        let mut days_scanned = 0u64;
+        while day >= floor.date_naive() && days_scanned <= CRON_LOOKBACK_DAYS_MAX {
+            days_scanned += 1;
+            if self.matches_day(day)
+                && let Some(found) = self.latest_minute_of_day(day, at, floor)
+            {
+                assert!(
+                    found > floor && found <= at,
+                    "occurrence is inside (after, at]"
+                );
+                return Some(found);
+            }
+            day = day.checked_sub_days(Days::new(1))?;
+        }
+        None
+    }
+
+    /// The newest matching minute of `day` inside `(floor, at]`, scanning the
+    /// day backwards. A day the date fields match still yields nothing when the
+    /// window covers only part of it.
+    fn latest_minute_of_day(
+        &self,
+        day: NaiveDate,
+        at: DateTime<Utc>,
+        floor: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        for minute_of_day in (0..MINUTES_PER_DAY).rev() {
+            let candidate = day
+                .and_hms_opt(minute_of_day / 60, minute_of_day % 60, 0)?
+                .and_utc();
+            if candidate > at || candidate <= floor {
+                continue;
+            }
+            if self.field_matches(MINUTE, candidate.minute())
+                && self.field_matches(HOUR, candidate.hour())
+            {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    /// Whether `date` is a day this expression can occur on: the month field,
+    /// and the day-of-month / day-of-week pair under the POSIX OR rule.
+    fn matches_day(&self, date: NaiveDate) -> bool {
+        let by_month_day = self.field_matches(DAY_OF_MONTH, date.day());
+        let by_week_day = self.field_matches(DAY_OF_WEEK, date.weekday().num_days_from_sunday());
         let day_matches = if self.restricted[DAY_OF_MONTH] && self.restricted[DAY_OF_WEEK] {
             by_month_day || by_week_day
         } else {
             by_month_day && by_week_day
         };
-        day_matches
-            && self.field_matches(MINUTE, at.minute())
-            && self.field_matches(HOUR, at.hour())
-            && self.field_matches(MONTH, at.month())
+        day_matches && self.field_matches(MONTH, date.month())
     }
 
     fn field_matches(&self, index: usize, value: u32) -> bool {
@@ -328,6 +402,82 @@ mod tests {
         assert!(stepped.matches(at(2026, 7, 15, 0, 0)));
         assert!(stepped.matches(at(2026, 7, 5, 0, 0)));
         assert!(!stepped.matches(at(2026, 7, 7, 0, 0)));
+    }
+
+    /// The search reports the NEWEST occurrence in `(after, at]`, which is what
+    /// turns a run of missed occurrences into one fire (design #310 Decision 5).
+    #[test]
+    fn latest_occurrence_coalesces_a_window_to_its_newest_match() {
+        let hourly = parse("0 * * * *");
+        assert_eq!(
+            hourly.latest_occurrence(at(2026, 7, 31, 8, 30), at(2026, 7, 31, 2, 20)),
+            Some(at(2026, 7, 31, 8, 0)),
+            "six missed hours collapse to the most recent one"
+        );
+        assert_eq!(
+            hourly.latest_occurrence(at(2026, 7, 31, 8, 30), at(2026, 7, 31, 8, 0)),
+            None,
+            "the bound is exclusive, so an honored occurrence is consumed"
+        );
+        assert_eq!(
+            hourly.latest_occurrence(at(2026, 7, 31, 8, 0), at(2026, 7, 31, 7, 59)),
+            Some(at(2026, 7, 31, 8, 0)),
+            "`at` itself is inside the window"
+        );
+    }
+
+    /// A window with no occurrence in it, and a window that crosses days,
+    /// months and a year boundary — the day scan, not a minute walk.
+    #[test]
+    fn latest_occurrence_spans_days_or_finds_nothing() {
+        let nightly = parse("0 2 * * *");
+        assert_eq!(
+            nightly.latest_occurrence(at(2026, 7, 31, 1, 59), at(2026, 7, 31, 0, 0)),
+            None
+        );
+        assert_eq!(
+            nightly.latest_occurrence(at(2026, 7, 31, 1, 59), at(2026, 7, 20, 0, 0)),
+            Some(at(2026, 7, 30, 2, 0))
+        );
+
+        let new_year = parse("0 0 1 1 *");
+        assert_eq!(
+            new_year.latest_occurrence(at(2026, 7, 31, 12, 0), at(2025, 12, 31, 0, 0)),
+            Some(at(2026, 1, 1, 0, 0))
+        );
+
+        let weekdays = parse("0 9 * * 1-5");
+        assert_eq!(
+            weekdays.latest_occurrence(at(2026, 8, 2, 23, 0), at(2026, 8, 1, 0, 0)),
+            None,
+            "a weekend window matches no weekday occurrence"
+        );
+    }
+
+    /// The bound is a real bound: an `after` older than
+    /// [`CRON_LOOKBACK_DAYS_MAX`] is raised to it, so an ancient anchor costs
+    /// the same search as a recent one and skips what it cannot reach.
+    #[test]
+    fn latest_occurrence_is_bounded_by_the_lookback() {
+        let leap_day = parse("0 0 29 2 *");
+        let now = at(2026, 7, 31, 12, 0);
+        assert_eq!(
+            leap_day.latest_occurrence(at(2024, 3, 1, 0, 0), at(2020, 1, 1, 0, 0)),
+            Some(at(2024, 2, 29, 0, 0)),
+            "within the lookback, the newest match still wins"
+        );
+        assert_eq!(
+            leap_day.latest_occurrence(now, at(2020, 1, 1, 0, 0)),
+            None,
+            "the last leap day is years back, past the bound"
+        );
+        let yearly = parse("0 0 1 1 *");
+        assert_eq!(yearly.latest_occurrence(now, now), None, "an empty window");
+        assert_eq!(
+            yearly.latest_occurrence(now, now + chrono::Duration::hours(1)),
+            None,
+            "a backwards window is empty, not a panic"
+        );
     }
 
     #[test]

@@ -201,6 +201,7 @@ resources:
             claim_next: false,
             escalation: None,
             factory: None,
+            schedule: None,
             created_at: Utc::now(),
             ready_at: None,
             completed_at: None,

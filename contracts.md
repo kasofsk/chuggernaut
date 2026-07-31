@@ -177,6 +177,9 @@ a comment. The invariants enforced (each named, with its spec §):
   structural (the `gating` map is keyed by slug).
 - `terminal_is_absorbing` (§2.1) — no terminal (Done/Revoked) job is still
   referenced by the ready queue, active set, merge queue, or gating map.
+- `one_live_job_per_schedule` (§1.1 schedules) — at most one non-terminal job
+  carries a given schedule's provenance in a project; the backpressure the skip
+  rule exists to provide, stated as data.
 
 ## Mining intent from the existing code
 

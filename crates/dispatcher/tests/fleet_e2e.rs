@@ -144,6 +144,7 @@ fn job(id: u64, state: JobState, base_ref: &str) -> Job {
         claim_next: false,
         escalation: None,
         factory: None,
+        schedule: None,
         created_at: Utc::now(),
         ready_at: Some(Utc::now()),
         completed_at: None,

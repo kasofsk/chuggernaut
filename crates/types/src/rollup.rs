@@ -365,6 +365,7 @@ mod tests {
             claim_next: false,
             escalation: None,
             factory: None,
+            schedule: None,
             created_at: "2026-07-30T09:00:00Z".parse().unwrap(),
             ready_at: None,
             completed_at: None,

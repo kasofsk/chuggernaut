@@ -36,6 +36,7 @@ pub mod reconcile;
 pub mod release;
 pub mod run;
 pub mod scan;
+pub mod schedules;
 pub mod trace;
 
 pub use chuggernaut_domain::decide::escalation;

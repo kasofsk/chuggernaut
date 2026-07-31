@@ -1,6 +1,13 @@
 # Design #310 — Scheduled jobs (time-triggered job creation)
 
-Status: PROPOSED.
+Status: IMPLEMENTED — the [Minimum useful version](#minimum-useful-version)
+shipped in jobs #359 (items 1, 2 and 6: the config format, the cron parser and
+the `chuggernaut validate` gate) and #360 (items 3, 4 and 5: `Job.schedule`
+provenance, `domain::decide::schedule`, `dispatcher::schedules`, the
+`scan_schedules` tick and the `schedule-fired`/`schedule-skipped` events).
+Everything this doc lists as deferred — `auto_release: false`, the platform
+health surface `schedule-invalid` needs, a UI badge, `timezone:`, `inputs:` —
+is still deferred.
 
 Written against the tree at `55f6595`. Every claim about current behavior below
 was read out of `spec.md` and the source in this repo;

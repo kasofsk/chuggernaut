@@ -197,31 +197,8 @@ mod tests {
 
     fn job(state: JobState) -> Job {
         Job {
-            id: 1,
-            project: "acme/api".into(),
-            r#type: "t".into(),
-            title: String::new(),
-            description: String::new(),
-            cover_html: None,
-            deps: vec![],
-            members: vec![],
-            batch_id: None,
             state,
-            branch: "job/1".into(),
-            base_ref: None,
-            knowledge_tags: vec![],
-            eval: vec![],
-            timeout: None,
-            model: None,
-            claim_next: false,
-            escalation: None,
-            factory: None,
-            created_at: Utc::now(),
-            ready_at: None,
-            completed_at: None,
-            inputs: Default::default(),
-            groups: vec![],
-            task_time_ms: None,
+            ..test_utils::fixture::job("acme/api", 1)
         }
     }
 

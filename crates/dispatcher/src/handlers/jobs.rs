@@ -290,6 +290,7 @@ async fn jobs_create(ctx: &JobsCtx, owner: &str, project: &str, payload: &[u8]) 
                     inputs: b.inputs,
                     groups: b.groups,
                     factory: None,
+                    schedule: None,
                     draft: b.draft,
                 };
                 match ctx.handle.create_job(create).await {

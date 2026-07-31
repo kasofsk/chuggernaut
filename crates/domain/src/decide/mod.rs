@@ -38,6 +38,7 @@ pub mod escalation;
 pub mod eval;
 pub mod merge_gate;
 pub mod ready;
+pub mod schedule;
 pub mod work;
 pub mod wrapup;
 

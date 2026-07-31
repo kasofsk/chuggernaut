@@ -187,6 +187,7 @@ fn req(r#type: &str) -> CreateSpec {
         timeout: None,
         model: None,
         factory: None,
+        schedule: None,
         members: vec![],
         inputs: Default::default(),
         groups: vec![],

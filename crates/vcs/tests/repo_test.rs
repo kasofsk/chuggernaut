@@ -41,6 +41,7 @@ fn job(repo: &TempRepo, id: u64, state: JobState, base_ref: Option<String>) -> J
         claim_next: false,
         escalation: None,
         factory: None,
+        schedule: None,
         created_at: chrono::Utc::now(),
         ready_at: None,
         completed_at: None,

@@ -149,6 +149,15 @@ pub struct Job {
     /// Factory name when created by a factory triage agent (spec §13); None for
     /// operator-created jobs.
     pub factory: Option<String>,
+    /// Schedule name when an occurrence of `.chug/schedules/{name}.yaml`
+    /// created this job (spec §1.1 schedules); None for every other origin,
+    /// written only by the origination path, immutable after creation.
+    ///
+    /// It is also the key the at-most-one-in-flight rule reads — the most
+    /// recent job carrying a schedule's name IS that schedule's anchor, so no
+    /// last-fired state is stored anywhere (spec §1.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
     pub created_at: DateTime<Utc>,
     /// Set once (immutably) when job first enters Ready; anchor for `job_deadline`.
     pub ready_at: Option<DateTime<Utc>>,
@@ -228,6 +237,11 @@ pub struct JobSummary<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub escalation: Option<&'a Escalation>,
     pub factory: Option<&'a str>,
+    /// The schedule that created the job ([`Job::schedule`]). Carried by the
+    /// list because trigger provenance is what tells a scheduled run apart from
+    /// an operator's, and it is one short name rather than prose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<&'a str>,
     pub created_at: DateTime<Utc>,
     pub ready_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -273,6 +287,7 @@ impl<'a> From<&'a Job> for JobSummary<'a> {
             claim_next: job.claim_next,
             escalation: job.escalation.as_ref(),
             factory: job.factory.as_deref(),
+            schedule: job.schedule.as_deref(),
             created_at: job.created_at,
             ready_at: job.ready_at,
             completed_at: job.completed_at,
@@ -415,6 +430,10 @@ pub struct CreateSpec {
     /// added later in any state.
     pub groups: Vec<String>,
     pub factory: Option<String>,
+    /// The schedule whose occurrence is creating this job ([`Job::schedule`],
+    /// design #310). Set only by the dispatcher's own origination path — an
+    /// operator's `POST jobs` never carries it.
+    pub schedule: Option<String>,
     /// Land the job in [`JobState::Draft`] instead of Frozen (spec §2.1): its
     /// definition can be edited (the dispatcher's `update_job`) before release.
     /// Default false preserves today's behavior (created jobs land Frozen).
@@ -887,6 +906,7 @@ mod tests {
                 at: "2026-07-24T10:00:00Z".parse().unwrap(),
             }),
             factory: Some("triage".into()),
+            schedule: Some("nightly-integration".into()),
             created_at: "2026-07-24T09:00:00Z".parse().unwrap(),
             ready_at: Some("2026-07-24T09:30:00Z".parse().unwrap()),
             completed_at: Some("2026-07-24T11:00:00Z".parse().unwrap()),

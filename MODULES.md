@@ -51,6 +51,7 @@ one surface.
 | `decide/ready` | The C4 Ready-phase decider: dependency satisfaction at release, the `base_ref` pin, queue admission both ends (enqueue on Ready, still-eligible on dequeue), and the Blocked→Ready re-validation fork — a continuation machine whose §2.2 pass re-enters as an event. | §2.1, §2.2, §3.1 |
 | `decide/wrapup` | The C3 wrap-up decider: the post-merge fork (`wrap_up.run` publish vs straight to Done), the publish exit verdict, the operator's publish-only Retry, and terminal stamping incl. a batch's Done fan-out. | §3.2, §2.1 |
 | `decide/work` | The C6 Work-phase decider: the launch-time validation fork (skew parks pre-work, everything else escalates), one attempt's task record incl. claim parking and claim consumption, the exit verdict with the finish-line guard, and the one retry policy every Work failure spends. | §3.2, §1.2 |
+| `decide/schedule` | The schedule decider (design #310): the anchor rule per schedule — never fired / blocked / terminal — the coalescing of missed occurrences to one fire, and the at-most-one-in-flight skip with its once-per-occurrence event. | §1.1, §3.5 |
 | `decide/eval` | The C5 evaluation decider: the staged fan-out (later stages uncreated when one fails), each evaluator type's verdict incl. the verdict-less/evidence-free class, the `eval_retries` + evidence-free + `rework_budget` budgets, and the reduce's pass / rework / abort / escalate fork. Owns the round as a value. | §3.3, §3.2 |
 
 ## `dispatcher` — `crates/dispatcher/src/`
@@ -68,7 +69,8 @@ one surface.
 | `interpret` | The effect interpreter: `Core::interpret` executes one `Effect` through the port it names; the sole `&mut Core` coupling deciders keep. | contracts.md §2 |
 | `trace` | Test-only golden-trace recorder: an inert-in-prod `TraceSink` a test attaches via `Core::attach_trace` to capture every `set_state` transition and `publish`/escalation effect as YAML fixtures (`tests/traces/`, regen `UPDATE_TRACES=1`); pins decisions during Track C. | refactor-plan B3 |
 | `launch_queue` | Capacity-aware launch queue: park on `NoCapacity`, drain on slot-freed, escalate past `MAX_QUEUE_WAIT`. | §3.5 |
-| `scan` | Task-timeout and one-shot job-deadline scans; run inside the single-writer loop; also drains the launch queue. | §3.5 |
+| `scan` | Task-timeout and one-shot job-deadline scans, plus the schedule tick that drives `decide/schedule` and originates the jobs it fires; run inside the single-writer loop; also drains the launch queue. | §3.5, §1.1 |
+| `schedules` | The in-memory schedule table: `.chug/schedules/*.yaml` read at default-branch HEAD (invalid files skipped and logged, capped per project), refreshed at startup, after a squash-merge and on the periodic backstop, holding the two in-memory values the decider reads. | §1.1, §14 |
 | `reconcile` | Restart reconciliation of jobs left mid-execution, incl. re-deriving a parked job's missing escalation task from its stamped record; runs in the actor before the message loop. | §3.6 |
 | `channel` | Agent → operator channel posts: dispatcher writes `channels` KV and publishes each post to `job-events`. | §4.2 |
 | `run` | Production startup: wire store, repos, Docker fleet, provider into a spawned core; fail fast. | §3.6, §12.4 |
@@ -140,5 +142,5 @@ dispatcher, domain and context trees and not this one.
 | --- | --- | --- |
 | `inputs` | What a job-*input value* may be: the charset floor a declared `pattern` can only narrow, shared by release validation, the Blocked→Ready re-check and the launch-time re-check. | §1.1, §2.2, §5.3 |
 | `groups` | What a *group name* may be, and the `docs/design/` path a `design/`-namespaced one refers to; hard bounds, never truncation, shared by all three write paths into `Job.groups`. | §1.1, §6.2 |
-| `cron` | What a *cron expression* may be: the five-field UTC subset (`*`, `N`, `N-M`, `*/S`, comma-lists) and the day-of-month/day-of-week OR rule, shared by schedule validation and (design #310 slice 2) the dispatcher tick. | §1.1 |
-| `schedule` | What a `.chug/schedules/{name}.yaml` file may declare: the §1.1 field rules, §14 schema tolerance and the agent-target `description` rule, shared by `chuggernaut validate` and (design #310 slice 2) the loader. | §1.1, §14 |
+| `cron` | What a *cron expression* may be: the five-field UTC subset (`*`, `N`, `N-M`, `*/S`, comma-lists) and the day-of-month/day-of-week OR rule, shared by schedule validation and the dispatcher's schedule tick, plus the bounded backward search that finds the newest occurrence in a window. | §1.1 |
+| `schedule` | What a `.chug/schedules/{name}.yaml` file may declare: the §1.1 field rules, §14 schema tolerance and the agent-target `description` rule, shared by `chuggernaut validate` and the dispatcher's schedule loader. | §1.1, §14 |

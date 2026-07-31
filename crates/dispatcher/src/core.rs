@@ -996,6 +996,14 @@ pub struct Core {
     /// [`Core::attach_trace`] to capture every transition and effect. Inert
     /// otherwise: a single `Option` check per `set_state`/`publish`.
     pub(crate) trace: Option<crate::trace::TraceSink>,
+    /// Every project's loaded schedules by slug (spec §1.1 schedules,
+    /// [`crate::schedules`]). Held in memory so the 30-second tick does no git
+    /// I/O; refreshed at startup, after a squash-merge lands, and on the
+    /// periodic backstop.
+    pub(crate) schedules: HashMap<String, crate::schedules::ScheduleTable>,
+    /// Scan ticks since startup, for that periodic backstop — the one bound
+    /// that decides how stale a schedule table may get.
+    pub(crate) schedule_ticks: u64,
     /// Invariant-violation log (refactor-plan B1a, [`crate::invariants`]). `None`
     /// in production — a test attaches an
     /// [`InvariantSink`](crate::invariants::InvariantSink) via
@@ -1036,6 +1044,7 @@ pub fn spawn(mut core: Core) -> CoreHandle {
         if let Err(e) = core.drain_launch_queue().await {
             tracing::error!("post-reconcile launch drain: {e}");
         }
+        core.refresh_schedules().await;
         core.refresh_fleet_status().await;
         core.run(rx).await
     });
@@ -1118,6 +1127,8 @@ impl Core {
             capacity_intent: crate::capacity::CapacityIntent::default(),
             capacity_pushes: HashMap::new(),
             capacity_intent_warned_at: HashMap::new(),
+            schedules: HashMap::new(),
+            schedule_ticks: 0,
             trace: None,
             invariant_sink: None,
         };
@@ -1712,6 +1723,7 @@ impl Core {
             claim_next: false,
             escalation: None,
             factory: req.factory,
+            schedule: req.schedule,
             created_at: Utc::now(),
             ready_at: None,
             completed_at: None,
@@ -1730,6 +1742,7 @@ impl Core {
             .insert(job.clone());
         let mut extra = serde_json::json!({});
         inputs::stamp_event_inputs(&mut extra, &job.inputs);
+        stamp_event_schedule(&mut extra, job.schedule.as_deref());
         self.publish(&req.owner, &req.project, seq, "job-created", extra)
             .await?;
         Ok(job)
@@ -1793,6 +1806,7 @@ impl Core {
             claim_next: false,
             escalation: None,
             factory: req.factory,
+            schedule: req.schedule,
             created_at: Utc::now(),
             ready_at: None,
             completed_at: None,
@@ -1808,6 +1822,7 @@ impl Core {
             .insert(batch.clone());
         let mut extra = serde_json::json!({});
         inputs::stamp_event_inputs(&mut extra, &batch.inputs);
+        stamp_event_schedule(&mut extra, batch.schedule.as_deref());
         self.publish(&owner, &project, seq, "job-created", extra)
             .await?;
 
@@ -2849,6 +2864,23 @@ impl Core {
             .insert(job);
         Ok(())
     }
+}
+
+/// Stamp trigger provenance onto a `job-created` payload (spec §6.3): the
+/// schedule that originated the job, omitted entirely for every other origin.
+fn stamp_event_schedule(extra: &mut serde_json::Value, schedule: Option<&str>) {
+    let Some(name) = schedule else {
+        return;
+    };
+    let Some(object) = extra.as_object_mut() else {
+        debug_assert!(false, "an event payload is a JSON object, got {extra}");
+        return;
+    };
+    let previous = object.insert("schedule".to_string(), serde_json::json!(name));
+    debug_assert!(
+        previous.is_none(),
+        "the event payload already carried a 'schedule' field"
+    );
 }
 
 fn split_slug(slug: &str) -> Result<(String, String)> {

@@ -112,6 +112,7 @@ fn req(groups: &[&str]) -> CreateSpec {
         timeout: None,
         model: None,
         factory: None,
+        schedule: None,
         members: vec![],
         inputs: BTreeMap::new(),
         groups: names(groups),

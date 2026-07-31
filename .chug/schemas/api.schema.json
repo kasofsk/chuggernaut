@@ -1050,6 +1050,13 @@
           ],
           "format": "date-time"
         },
+        "schedule": {
+          "description": "Schedule name when an occurrence of `.chug/schedules/{name}.yaml`\ncreated this job (spec §1.1 schedules); None for every other origin,\nwritten only by the origination path, immutable after creation.\n\nIt is also the key the at-most-one-in-flight rule reads — the most\nrecent job carrying a schedule's name IS that schedule's anchor, so no\nlast-fired state is stored anywhere (spec §1.1).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "state": {
           "$ref": "#/$defs/JobState"
         },
@@ -1266,6 +1273,13 @@
             "null"
           ],
           "format": "date-time"
+        },
+        "schedule": {
+          "description": "The schedule that created the job ([`Job::schedule`]). Carried by the\nlist because trigger provenance is what tells a scheduled run apart from\nan operator's, and it is one short name rather than prose.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "state": {
           "$ref": "#/$defs/JobState"

@@ -1050,6 +1050,16 @@ export interface Job {
    * Set once (immutably) when job first enters Ready; anchor for `job_deadline`.
    */
   ready_at: string | null;
+  /**
+   * Schedule name when an occurrence of `.chug/schedules/{name}.yaml`
+   * created this job (spec §1.1 schedules); None for every other origin,
+   * written only by the origination path, immutable after creation.
+   *
+   * It is also the key the at-most-one-in-flight rule reads — the most
+   * recent job carrying a schedule's name IS that schedule's anchor, so no
+   * last-fired state is stored anywhere (spec §1.1).
+   */
+  schedule?: string | null;
   state: JobState;
   /**
    * How long the job spent **working**: the sum of its own tasks' spans, per
@@ -1152,6 +1162,12 @@ export interface JobSummary {
   model: string | null;
   project: string;
   ready_at: string | null;
+  /**
+   * The schedule that created the job ([`Job::schedule`]). Carried by the
+   * list because trigger provenance is what tells a scheduled run apart from
+   * an operator's, and it is one short name rather than prose.
+   */
+  schedule?: string | null;
   state: JobState;
   task_time_ms?: number | null;
   timeout: string | null;

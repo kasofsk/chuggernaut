@@ -114,6 +114,7 @@ fn sample_job() -> types::Job {
             at: at("2026-07-24T18:30:00Z"),
         }),
         factory: None,
+        schedule: Some("nightly-integration".into()),
         created_at: at("2026-07-24T17:00:00Z"),
         ready_at: Some(at("2026-07-24T17:05:00Z")),
         completed_at: Some(at("2026-07-24T19:00:00Z")),

@@ -152,7 +152,32 @@ pub fn check_invariants(state: &CoreState) -> Vec<Violation> {
     check_active_is_executing(state, &mut out);
     check_merge_queue_is_wrapup(state, &mut out);
     check_terminal_is_absorbing(state, &mut out);
+    check_one_live_job_per_schedule(state, &mut out);
     out
+}
+
+/// Design #310 Decision 4: at most one **non-terminal** job per
+/// `(project, schedule)`. A second live job means the at-most-one-in-flight
+/// backpressure failed and the schedule is multiplying, so this is the negative
+/// space the skip rule exists to protect.
+fn check_one_live_job_per_schedule(state: &CoreState, out: &mut Vec<Violation>) {
+    for (slug, graph) in state.graphs {
+        let mut live: HashMap<&str, u64> = HashMap::new();
+        for job in graph.jobs() {
+            let Some(name) = job.schedule.as_deref().filter(|_| !job.state.is_terminal()) else {
+                continue;
+            };
+            if let Some(first) = live.insert(name, job.id) {
+                out.push(Violation::new(
+                    "one_live_job_per_schedule",
+                    format!(
+                        "{slug}: schedule '{name}' has live jobs #{first} and #{}",
+                        job.id
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 /// §3.1: the ready queue holds only jobs that exist and are `Ready`.
@@ -392,6 +417,32 @@ mod tests {
             v.iter().any(|x| x.invariant == "ready_queue_only_ready"),
             "{v:?}"
         );
+    }
+
+    /// Design #310 Decision 4: a schedule's finished runs stack up freely, but
+    /// two live ones mean the skip rule stopped holding.
+    #[test]
+    fn a_second_live_job_for_one_schedule_is_flagged() {
+        let scheduled = |id: u64, state: JobState| Job {
+            schedule: Some("nightly".into()),
+            ..job("acme/api", id, &[], state)
+        };
+        let clean = Fixture::new(vec![
+            scheduled(1, JobState::Done),
+            scheduled(2, JobState::Revoked),
+            scheduled(3, JobState::Work),
+            job("acme/api", 4, &[], JobState::Work),
+        ]);
+        assert_eq!(clean.check(), vec![]);
+
+        let doubled = Fixture::new(vec![
+            scheduled(1, JobState::Work),
+            scheduled(2, JobState::Ready),
+        ]);
+        let v = doubled.check();
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].invariant, "one_live_job_per_schedule");
+        assert!(v[0].detail.contains("nightly"), "{v:?}");
     }
 
     #[test]

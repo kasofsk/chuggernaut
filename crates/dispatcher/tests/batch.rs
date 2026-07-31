@@ -136,6 +136,7 @@ fn member(r#type: &str, deps: &[u64], title: &str, description: &str) -> CreateS
         timeout: None,
         model: None,
         factory: None,
+        schedule: None,
         inputs: Default::default(),
         groups: vec![],
         draft: false,

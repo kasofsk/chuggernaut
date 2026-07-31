@@ -43,6 +43,7 @@ pub fn job(project: &str, id: u64) -> types::Job {
         claim_next: false,
         escalation: None,
         factory: None,
+        schedule: None,
         created_at: chrono::Utc::now(),
         ready_at: None,
         completed_at: None,

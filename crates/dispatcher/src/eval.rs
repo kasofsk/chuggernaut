@@ -1704,6 +1704,7 @@ impl Core {
         project: &str,
         seq: u64,
     ) -> Result<()> {
+        self.refresh_project_schedules(owner, project).await;
         self.run_wrapup(owner, project, seq, wrapup::WrapUpEvent::Landed)
             .await
     }

@@ -174,7 +174,10 @@ dispatcher/
   invariants.rs  — executable invariant checker over the read-only CoreState view (B1)
   trace.rs       — test-only golden-trace recorder pinning decisions (B3)
   launch_queue.rs— capacity-aware launch queue: park on NoCapacity, drain on slot-freed (§3.5)
-  scan.rs        — task-timeout and one-shot job-deadline scans (§3.5)
+  scan.rs        — task-timeout and one-shot job-deadline scans, plus the schedule tick
+                   driving decide/schedule and originating the jobs it fires (§3.5, §1.1)
+  schedules.rs   — the in-memory schedule table: .chug/schedules/*.yaml read at
+                   default-branch HEAD, invalid files skipped and logged (§1.1)
   reconcile.rs   — restart reconciliation of mid-execution jobs, incl. the escalation
                    inbox heal (§3.6)
   channel.rs     — agent → operator channel posts: writes `channels` KV + job-events (§4.2)

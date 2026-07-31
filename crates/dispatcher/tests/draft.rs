@@ -103,6 +103,7 @@ fn create(draft: bool, deps: &[u64], description: &str) -> CreateSpec {
         timeout: None,
         model: None,
         factory: None,
+        schedule: None,
         members: vec![],
         inputs: Default::default(),
         groups: vec![],

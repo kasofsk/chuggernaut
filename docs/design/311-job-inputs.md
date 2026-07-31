@@ -26,9 +26,10 @@ Doc 3 of 4 extracting implementable specs from
 case (`rollback` needs an `image_tag`). #308 fixes the frame — an input
 "parameterizes a run without rewriting it" — and defers everything else here.
 
-Sibling docs 1 and 2 — [host-native execution](./309-host-native-execution.md) and
-[scheduled jobs](./310-scheduled-jobs.md) — are **also PROPOSED and not
-implemented**. Nothing below assumes any field, epoch or mechanism either of
+Sibling doc 1 — [host-native execution](./309-host-native-execution.md) — is
+**still PROPOSED and not implemented**; sibling doc 2 —
+[scheduled jobs](./310-scheduled-jobs.md) — has since shipped its minimum
+useful version. Nothing below assumes any field, epoch or mechanism either of
 them proposes exists; where sequencing matters it is called out explicitly
 (see [Skew](#skew-what-a-new-field-costs)).
 
