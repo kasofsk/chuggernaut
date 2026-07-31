@@ -12,9 +12,11 @@ import { IconSearch } from '../components/icons'
 import { SkeletonTable } from '../components/Skeleton'
 import { useFleet } from '../useFleet'
 import { fmtDuration } from '../format'
+import { GroupChips } from '../components/JobGroups'
 import {
   filtersFromParams,
   filtersToParams,
+  groupOptions,
   matchesFilters,
   type JobFilters,
 } from '../jobFilters'
@@ -389,6 +391,16 @@ export function ProjectPage() {
   const stateDropdownValue =
     filters.states.length === 1 ? filters.states[0] : filters.states.length ? '__multi' : ''
 
+  // The group filter's vocabulary is whatever the loaded rows carry (design
+  // #321 Decision 7 — decidable from a list row). A group named in the URL that
+  // no loaded row carries still shows as the selected option, so a shared link
+  // to a filter reads as filtered rather than as unfiltered.
+  const groupChoices = groupOptions(jobs)
+  const groupSelectable =
+    filters.group && !groupChoices.includes(filters.group)
+      ? [filters.group, ...groupChoices]
+      : groupChoices
+
   return (
     <div className="page">
       <ProjectHeader owner={owner} project={project} />
@@ -473,6 +485,21 @@ export function ProjectPage() {
                   </option>
                 ))}
               </select>
+              {groupSelectable.length > 0 && (
+                <select
+                  className="state-filter group-filter"
+                  value={filters.group}
+                  onChange={(e) => setFilters({ ...filters, group: e.target.value })}
+                  aria-label="Filter by group"
+                >
+                  <option value="">All groups</option>
+                  {groupSelectable.map((g) => (
+                    <option key={g} value={g}>
+                      {g}
+                    </option>
+                  ))}
+                </select>
+              )}
               <div className="sort-field">
                 <select
                   className="sort-select"
@@ -566,6 +593,12 @@ export function ProjectPage() {
                     <span className="col-title-num">#{j.id}</span>
                     {j.title || <span className="dim">—</span>}
                   </Link>
+                  {/* What the job is part of (design #321). In the title cell
+                      rather than a column of its own: the table has no width to
+                      spend on an eighth column, and on a phone the title cell
+                      claims the whole line, so the chips wrap under the title
+                      instead of squeezing the metadata line. */}
+                  <GroupChips owner={owner} project={project} groups={j.groups} />
                   {CHANNEL_STATES.has(j.state) && channelMsgs.has(j.id) && (
                     <div className="job-channel dim" title={channelMsgs.get(j.id)!.message}>
                       <span className="job-channel-msg">{oneLine(channelMsgs.get(j.id)!.message)}</span>

@@ -666,17 +666,23 @@ td.actions button {
   flex-direction: column;
   gap: var(--sp-4);
 }
-.create-job .field {
+/* `.job-groups` rides these: the group editor is the same field, rendered on the
+   job page's read card rather than inside a form (design #321 Decision 5 — the
+   field is writable in every state, so it is not the draft editor's alone). */
+.create-job .field,
+.job-groups {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
 }
-.create-job .field > span {
+.create-job .field > span,
+.job-groups > span {
   color: var(--text);
   font-weight: 600;
   font-size: var(--fs-md);
 }
-.create-job .field > span .dim {
+.create-job .field > span .dim,
+.job-groups > span .dim {
   font-weight: 400;
   font-size: var(--fs-sm);
 }
@@ -5009,5 +5015,83 @@ table.type-stats .num {
   .design-row,
   .design-note {
     padding: var(--sp-3) var(--sp-4);
+  }
+}
+
+/* ── Job groups (design #321) ────────────────────────────────────────────────
+   What a job is part of: read-only chips on a jobs-table row, and the add/remove
+   picker on the job page, the create form and the draft editor. */
+
+/* Chips under a row's title. They wrap rather than widening the title column,
+   and each name is capped and ellipsized — a name may be 128 characters, and a
+   row is not the place to read one in full (the full text is the link's title).
+   Muted on purpose: on a grouped project this renders on most rows, so it must
+   read as an annotation rather than compete with the title above it. */
+.group-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.2rem;
+}
+.group-chip {
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0.05rem 0.45rem;
+  border-radius: var(--r-full);
+  border: 1px solid var(--border);
+  background: var(--inset);
+  color: var(--dim);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 1.5;
+}
+.group-chip:hover {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* The toolbar's group filter. A select is as wide as its widest option and a
+   group name runs to 128 characters, so it is bounded and left to ellipsize. */
+.group-filter {
+  max-width: 14rem;
+}
+
+/* The picker's input line: the name field takes the room, the add button stays
+   beside it at its own width. */
+.group-add {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.group-add input {
+  flex: 1;
+  min-width: 0;
+}
+.group-add button {
+  flex: none;
+}
+/* On the job page the editor follows the meta list, so it needs the separation
+   a form's field gap gives it there. */
+.job-groups {
+  margin-top: var(--sp-4);
+}
+
+@media (max-width: 640px) {
+  /* A group name is long and a select is sized by its widest option, so the
+     unconstrained control pushed the toolbar — and with it the page — sideways.
+     Bounded here and ellipsized by the control itself. */
+  .group-filter {
+    max-width: 100%;
+    min-width: 0;
+  }
+  /* The title cell claims the whole line on a phone, so chips wrap under the
+     title with room to spare; they only need to stop inheriting its weight. */
+  .jobs-list .group-chips {
+    font-weight: 400;
+  }
+  .group-chip {
+    max-width: 100%;
   }
 }

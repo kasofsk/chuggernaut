@@ -13,6 +13,7 @@ import { Markdown } from './Markdown'
 import { RichSelect } from './RichSelect'
 import { JobAttachments } from './Attachments'
 import { JobInputFields, inputsOrUndefined, suppliedInputs, useJobTypeDetail } from './JobInputs'
+import { GroupPicker, useGroupOptions } from './JobGroups'
 import { depCandidates } from '../jobFilters'
 
 // The editable fields, used as keys for focus/dirty/flash tracking. `eval` is
@@ -24,6 +25,7 @@ type Field =
   | 'description'
   | 'type'
   | 'knowledge_tags'
+  | 'groups'
   | 'deps'
   | 'timeout'
   | 'model'
@@ -73,6 +75,10 @@ export function DraftEditor({
   const [description, setDescription] = useState(job.description)
   const [type, setType] = useState(job.type)
   const [tags, setTags] = useState<string[]>(job.knowledge_tags)
+  // What the job is part of (design #321): part of the full-replace PATCH like
+  // every other creation field while the job is a Draft. After it leaves Draft
+  // the field stays writable — through the job page's add/remove editor.
+  const [groups, setGroups] = useState<string[]>(job.groups ?? [])
   const [deps, setDeps] = useState<number[]>(job.deps)
   const [timeout, setTimeoutVal] = useState(job.timeout ?? '')
   const [model, setModel] = useState(job.model ?? '')
@@ -89,6 +95,7 @@ export function DraftEditor({
   // dependency picker), fetched once for the editor.
   const [jobTypes, setJobTypes] = useState<JobTypeSummary[]>([])
   const [availTags, setAvailTags] = useState<string[]>([])
+  const groupChoices = useGroupOptions(owner, project)
   const [allJobs, setAllJobs] = useState<Job[]>([])
   // The selected type's declaration — refetched when the operator (or the chat
   // side) changes `type`, since the inputs a draft may carry are the new type's.
@@ -107,8 +114,8 @@ export function DraftEditor({
   // change. focus/dirty are refs — read inside the reconcile effect, no re-render.
   const focusedRef = useRef<Field | null>(null)
   const dirtyRef = useRef<Set<Field>>(new Set())
-  const localRef = useRef({ title, description, type, tags, deps, timeout, model, inputs })
-  localRef.current = { title, description, type, tags, deps, timeout, model, inputs }
+  const localRef = useRef({ title, description, type, tags, groups, deps, timeout, model, inputs })
+  localRef.current = { title, description, type, tags, groups, deps, timeout, model, inputs }
   const [flash, setFlash] = useState<Set<Field>>(new Set())
   const flashField = (f: Field) => {
     setFlash((s) => new Set(s).add(f))
@@ -188,6 +195,12 @@ export function DraftEditor({
       job.knowledge_tags.filter((t) => !cur.tags.includes(t)).map((t) => `tag:${t}`),
     )
     adoptChoice(
+      'groups',
+      sameStrs(job.groups ?? [], cur.groups),
+      () => setGroups(job.groups ?? []),
+      [],
+    )
+    adoptChoice(
       'deps',
       sameNums(job.deps, cur.deps),
       () => setDeps(job.deps),
@@ -206,6 +219,7 @@ export function DraftEditor({
     description,
     deps,
     knowledge_tags: tags,
+    groups,
     eval: job.eval,
     timeout: timeout.trim() || null,
     model: model.trim() || null,
@@ -265,6 +279,13 @@ export function DraftEditor({
   function removeDep(id: number) {
     setDeps((ds) => ds.filter((x) => x !== id))
     edit('deps')
+  }
+
+  // A group edit is a discrete edit like a tag: state first, then the debounced
+  // full PATCH, which reads the new value once the re-render has landed.
+  function editGroups(next: string[]) {
+    setGroups(next)
+    edit('groups')
   }
 
   const depMatches = depCandidates(allJobs, deps, depQuery, job.id)
@@ -430,6 +451,18 @@ export function DraftEditor({
           <span className="dim">no tags defined in this project</span>
         )}
       </div>
+
+      {/* Beside the knowledge tags because they look alike and are not: a tag is
+          an execution input, a group changes nothing about the run (#321
+          Decision 3). */}
+      <GroupPicker
+        value={groups}
+        options={groupChoices}
+        fieldClassName={fieldClass('groups')}
+        labelExtra={wiz('groups')}
+        onAdd={(name) => editGroups([...groups, name])}
+        onRemove={(name) => editGroups(groups.filter((g) => g !== name))}
+      />
 
       <details className="draft-advanced">
         <summary>Advanced <span className="dim">(work model and timeout overrides)</span></summary>

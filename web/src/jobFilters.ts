@@ -18,11 +18,19 @@ export interface JobFilters {
   states: JobState[]
   /** active quick filters (all must hold) */
   quick: QuickKey[]
+  /** one group label the job must carry; '' = no group constraint (design #321) */
+  group: string
   /** fold in the finished jobs the default view hides (Done/Revoked) */
   showFinished: boolean
 }
 
-export const EMPTY_FILTERS: JobFilters = { q: '', states: [], quick: [], showFinished: false }
+export const EMPTY_FILTERS: JobFilters = {
+  q: '',
+  states: [],
+  quick: [],
+  group: '',
+  showFinished: false,
+}
 
 /** JOBS OVERVIEW rows (#162): lifecycle buckets, each a one-click state filter. */
 export const OVERVIEW_GROUPS: { key: string; label: string; color: string; states: JobState[] }[] = [
@@ -90,17 +98,33 @@ function quickPred(k: QuickKey, j: Job, claimed: Set<number>): boolean {
 }
 
 /**
- * The composed jobs-table predicate. Search AND state-group AND every active
- * quick filter; the finished-hiding gate applies only when nothing explicit is
- * selected, so choosing "Completed" or "Failed" reveals its terminal jobs.
+ * The composed jobs-table predicate. Search AND state-group AND group label AND
+ * every active quick filter; the finished-hiding gate applies only when nothing
+ * explicit is selected, so choosing "Completed" or "Failed" reveals its terminal
+ * jobs.
+ *
+ * A group counts as explicit for that gate, and deliberately: the jobs a group
+ * collects are mostly finished ones — annotating a Done job is the case #321 was
+ * designed for — so a group filter that hid them would show an empty table.
  */
 export function matchesFilters(j: Job, f: JobFilters, claimed: Set<number>): boolean {
   if (!textMatch(j, f.q)) return false
   if (f.states.length && !f.states.includes(j.state)) return false
+  if (f.group && !(j.groups ?? []).includes(f.group)) return false
   if (!f.quick.every((k) => quickPred(k, j, claimed))) return false
-  const explicit = f.states.length > 0 || f.quick.length > 0
+  const explicit = f.states.length > 0 || f.quick.length > 0 || !!f.group
   if (!explicit && !f.showFinished && isTerminal(j.state)) return false
   return true
+}
+
+/**
+ * The group names the filter dropdown offers: every label the loaded rows carry,
+ * deduped and sorted. Read off the list rather than fetched — the projection
+ * carries `groups` on every row precisely so the filter is decidable from a
+ * jobs-*list* row (design #321 Decision 7).
+ */
+export function groupOptions(jobs: Job[]): string[] {
+  return [...new Set(jobs.flatMap((j) => j.groups ?? []))].sort((a, b) => a.localeCompare(b))
 }
 
 export function countQuick(jobs: Job[], k: QuickKey, claimed: Set<number>): number {
@@ -169,6 +193,7 @@ export function filtersToParams(f: JobFilters): URLSearchParams {
   if (f.q) p.set('q', f.q)
   if (f.states.length) p.set('state', f.states.join(','))
   if (f.quick.length) p.set('quick', f.quick.join(','))
+  if (f.group) p.set('group', f.group)
   if (f.showFinished) p.set('finished', '1')
   return p
 }
@@ -179,10 +204,11 @@ export function filtersFromParams(p: URLSearchParams): JobFilters {
     q: p.get('q') ?? '',
     states: (p.get('state') ?? '').split(',').filter(Boolean) as JobState[],
     quick: (p.get('quick') ?? '').split(',').filter((k): k is QuickKey => QUICK_KEYS.includes(k as QuickKey)),
+    group: p.get('group') ?? '',
     showFinished: p.get('finished') === '1',
   }
 }
 
 export function filtersActive(f: JobFilters): boolean {
-  return !!f.q || f.states.length > 0 || f.quick.length > 0 || f.showFinished
+  return !!f.q || f.states.length > 0 || f.quick.length > 0 || !!f.group || f.showFinished
 }

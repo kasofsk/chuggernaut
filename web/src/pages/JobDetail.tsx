@@ -28,6 +28,7 @@ import { DraftEditor } from '../components/DraftEditor'
 import { ConsistEditor } from '../components/ConsistEditor'
 import { CoverWidget } from '../components/CoverWidget'
 import { JobAttachments } from '../components/Attachments'
+import { GroupPicker, useGroupOptions } from '../components/JobGroups'
 import { ProjectHeader } from '../components/ProjectHeader'
 import { Skeleton, SkeletonLines } from '../components/Skeleton'
 import { DeployLegCard, deployReportOf } from '../components/DeployLegCard'
@@ -84,6 +85,12 @@ export function JobDetail() {
   // and shows a working label so a tap reads as acknowledged — and so a stray
   // second tap can't land on the revoke button that wraps directly below it.
   const [releasing, setReleasing] = useState(false)
+  // The group vocabulary the picker suggests, and whether a groups write is in
+  // flight. `groups` is mutable in every state including Done and Revoked
+  // (design #321 Decision 5) — a finished job is the case this exists for — so
+  // the editor is offered here, on the read view, not only on a Draft.
+  const groupChoices = useGroupOptions(owner, project)
+  const [groupBusy, setGroupBusy] = useState(false)
 
   useEffect(() => {
     api.platformConfig().then(
@@ -211,6 +218,17 @@ export function JobDetail() {
       setTriageImage(null)
       setError(triageMessage)
     } else setActionError(setError)(e)
+  }
+
+  // Add/remove one group label. The endpoint is add/remove rather than a
+  // whole-list replace, so two operators grouping the same job from two tabs
+  // both land; the refetch adopts whatever the dispatcher ended up holding.
+  const editGroups = (body: { add?: string[]; remove?: string[] }) => {
+    setGroupBusy(true)
+    api
+      .jobGroups(owner, project, job.id, body)
+      .then(refresh, setActionError(setError))
+      .finally(() => setGroupBusy(false))
   }
 
   // A Draft renders the live edit form in place of the read-only info card; its
@@ -344,6 +362,17 @@ export function JobDetail() {
             </>
           )}
         </dl>
+        {/* Editable in every state, terminal included (design #321 Decision 5):
+            a group is an operator annotation, inert to what ran, and every job
+            the feature was designed for is already finished. */}
+        <GroupPicker
+          value={job.groups ?? []}
+          options={groupChoices}
+          disabled={groupBusy}
+          fieldClassName="field job-groups"
+          onAdd={(name) => editGroups({ add: [name] })}
+          onRemove={(name) => editGroups({ remove: [name] })}
+        />
         {job.state === 'Batched' ? (
           <p className="batch-note dim">
             Absorbed into{' '}

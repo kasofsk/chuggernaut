@@ -180,6 +180,11 @@ export interface JobPatch {
   description: string
   deps: number[]
   knowledge_tags: string[]
+  /** What the job is part of (design #321). Part of the full replace like every
+   *  other field, so it is required here: a PATCH that omits it clears the
+   *  draft's groups. Outside Draft the field is still writable — through
+   *  `jobGroups`, which is add/remove rather than a replace. */
+  groups: string[]
   eval: EvaluatorInput[]
   /** duration string override, or null for the type default */
   timeout: string | null

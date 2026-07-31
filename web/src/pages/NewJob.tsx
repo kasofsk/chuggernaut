@@ -19,6 +19,7 @@ import {
   suppliedInputs,
   useJobTypeDetail,
 } from '../components/JobInputs'
+import { GroupPicker, useGroupOptions } from '../components/JobGroups'
 import { depCandidates } from '../jobFilters'
 
 /**
@@ -135,6 +136,11 @@ function CreateJob({
   const [evalRows, setEvalRows] = useState<EvalRow[]>([])
   const [selectedTags, setSelectedTags] = useState<string[]>([])
   const [tags, setTags] = useState('')
+  // What the job is part of (design #321): a creation field like any other, and
+  // one the picker suggests known names for — the project's groups plus its
+  // design documents.
+  const [groups, setGroups] = useState<string[]>([])
+  const groupChoices = useGroupOptions(owner, project)
   const [timeout, setTimeout] = useState('')
   // Files picked/pasted/shot while composing (spec §1.6): held locally and PUT
   // to the job's attachments once it's created, before navigating to it.
@@ -206,6 +212,7 @@ function CreateJob({
         description: description.trim() || undefined,
         deps: deps.length ? deps : undefined,
         knowledge_tags: allTags.length ? allTags : undefined,
+        groups: groups.length ? groups : undefined,
         eval: evals.length ? evals : undefined,
         timeout: timeout.trim() || undefined,
         model: model.trim() || undefined,
@@ -491,6 +498,16 @@ function CreateJob({
               ))}
           </datalist>
         </div>
+
+        {/* Beside the knowledge tags because they look alike and are not: a tag
+            is an execution input the work agent is told about, a group changes
+            nothing about the run (design #321 Decision 3). */}
+        <GroupPicker
+          value={groups}
+          options={groupChoices}
+          onAdd={(name) => setGroups((gs) => [...gs, name])}
+          onRemove={(name) => setGroups((gs) => gs.filter((g) => g !== name))}
+        />
 
         <label className="field">
           <span>
