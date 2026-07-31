@@ -22,6 +22,11 @@ pub struct WorkerConfig {
     /// memory or disk heuristics. Also clamps [`Self::slots`], so the node never
     /// advertises capacity its own `set_slots` would refuse.
     pub slots_max: u32,
+    /// Execution runtimes this node offers (`WORKER_MODES`, design #322),
+    /// defaulting to [`WorkerMode::Container`]. A node property provisioned
+    /// exactly as [`Self::cache_dir`] is — worker-side, never on the wire or the
+    /// dispatcher's launch config (spec §3.1).
+    pub modes: Vec<WorkerMode>,
     pub nats_url: String,
     /// `.creds` file minted by `chuggernaut admin worker-creds`; None connects
     /// plain (open dev server).
@@ -57,6 +62,35 @@ pub struct WorkerConfig {
     pub refresh_git_key: PathBuf,
 }
 
+/// One execution runtime a worker node can offer (design #322 W1). The node
+/// declares the list it serves in `WORKER_MODES`; `container` is the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerMode {
+    /// Containers on the node's local Docker daemon.
+    Container,
+    /// Host processes on the node itself (design #322 W2).
+    Host,
+}
+
+impl WorkerMode {
+    /// The canonical name, as it is written in `WORKER_MODES` and reported back
+    /// in errors.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Container => "container",
+            Self::Host => "host",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "container" => Some(Self::Container),
+            "host" => Some(Self::Host),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("worker config: {0}")]
 pub struct ConfigError(String);
@@ -81,10 +115,12 @@ impl WorkerConfig {
             });
         let slots = parse_slots(std::env::var("WORKER_SLOTS").ok())?;
         let slots_max = parse_slots_max(std::env::var("WORKER_SLOTS_MAX").ok(), node_cpu_count())?;
+        let modes = parse_modes(std::env::var("WORKER_MODES").ok())?;
         Ok(Self {
             node,
             slots,
             slots_max,
+            modes,
             nats_url,
             nats_creds,
             docker_endpoint: std::env::var("WORKER_DOCKER_ENDPOINT")
@@ -142,6 +178,37 @@ fn parse_slots(raw: Option<String>) -> Result<u32, ConfigError> {
             .map_err(|_| ConfigError(format!("WORKER_SLOTS must be a number, got {s:?}"))),
         None => Ok(SLOTS_DEFAULT),
     }
+}
+
+/// Parse `WORKER_MODES` into the runtimes this node offers, in the order
+/// declared; absent or empty ⇒ `[WorkerMode::Container]`, today's behavior. An
+/// unknown name, a blank entry, or a repeat is a hard config error rather than a
+/// silently dropped mode — pure over its input for unit testing.
+fn parse_modes(raw: Option<String>) -> Result<Vec<WorkerMode>, ConfigError> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(vec![WorkerMode::Container]);
+    };
+    let mut modes = Vec::new();
+    for entry in raw.split(',') {
+        let name = entry.trim();
+        let mode = WorkerMode::parse(name).ok_or_else(|| {
+            ConfigError(format!(
+                "WORKER_MODES entry {name:?} is not a mode (expected container | host)"
+            ))
+        })?;
+        if modes.contains(&mode) {
+            return Err(ConfigError(format!(
+                "WORKER_MODES lists {} more than once",
+                mode.as_str()
+            )));
+        }
+        modes.push(mode);
+    }
+    debug_assert!(
+        !modes.is_empty(),
+        "a parsed mode list always names at least one runtime"
+    );
+    Ok(modes)
 }
 
 /// Parse `WORKER_SLOTS_MAX` into the node's runtime ceiling. Absent or empty ⇒
@@ -260,6 +327,53 @@ mod tests {
         assert!(parse_slots_max(Some("some".into()), 6).is_err());
         assert_eq!(parse_slots_max(None, SLOTS_DEFAULT).unwrap(), SLOTS_DEFAULT);
         assert!(node_cpu_count() >= 1);
+    }
+
+    /// `WORKER_MODES` (design #322 W1): unset is container-only — today's
+    /// behavior — a list is taken in the order declared, and every malformed
+    /// shape is refused rather than partially adopted.
+    #[test]
+    fn modes_parse_default_list_and_rejections() {
+        assert_eq!(parse_modes(None).unwrap(), vec![WorkerMode::Container]);
+        assert_eq!(
+            parse_modes(Some(String::new())).unwrap(),
+            vec![WorkerMode::Container]
+        );
+        assert_eq!(
+            parse_modes(Some(" \t".into())).unwrap(),
+            vec![WorkerMode::Container]
+        );
+        assert_eq!(
+            parse_modes(Some("host".into())).unwrap(),
+            vec![WorkerMode::Host]
+        );
+        assert_eq!(
+            parse_modes(Some(" container , host ".into())).unwrap(),
+            vec![WorkerMode::Container, WorkerMode::Host]
+        );
+        assert_eq!(
+            parse_modes(Some("host,container".into())).unwrap(),
+            vec![WorkerMode::Host, WorkerMode::Container]
+        );
+
+        for bad in [
+            "vm",
+            "Container",
+            "container,",
+            ",container",
+            "container,,host",
+        ] {
+            assert!(
+                parse_modes(Some(bad.into())).is_err(),
+                "must reject {bad:?}"
+            );
+        }
+        let err = parse_modes(Some("container,container".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("more than once"), "{err}");
+        let err = parse_modes(Some("kvm".into())).unwrap_err().to_string();
+        assert!(err.contains("container | host"), "{err}");
     }
 
     #[test]

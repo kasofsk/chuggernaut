@@ -9,7 +9,7 @@ use container::PlacementPolicy;
 use container::docker::DockerNodeConfig;
 use test_utils::backend_suite as suite;
 use test_utils::nats::NatsTestServer;
-use worker::{FleetBackend, WorkerConfig};
+use worker::{FleetBackend, WorkerConfig, WorkerMode};
 
 /// The `WORKER_SLOTS_MAX` every daemon spawned here boots with (spec §3.1): above
 /// the boot `slots: 4`, so the boot value is never clamped, and low enough that a
@@ -43,6 +43,7 @@ async fn setup(
         node: "w1".into(),
         slots: 4,
         slots_max: DAEMON_SLOTS_MAX,
+        modes: vec![WorkerMode::Container],
         nats_url: server.url().to_string(),
         nats_creds: None,
         docker_endpoint: local_docker_endpoint(),
@@ -547,6 +548,7 @@ fn spawn_daemon(
         node: node.into(),
         slots: 4,
         slots_max: DAEMON_SLOTS_MAX,
+        modes: vec![WorkerMode::Container],
         nats_url: server.url().to_string(),
         nats_creds: None,
         docker_endpoint: local_docker_endpoint(),
@@ -868,6 +870,7 @@ async fn refresh_reports_skip_without_git_credential() {
         node: "w1".into(),
         slots: 4,
         slots_max: DAEMON_SLOTS_MAX,
+        modes: vec![WorkerMode::Container],
         nats_url: server.url().to_string(),
         nats_creds: None,
         docker_endpoint: local_docker_endpoint(),
@@ -1033,4 +1036,32 @@ async fn set_slots_adopts_re_announces_and_refuses_above_the_ceiling() {
     let ping = rpc.ping().await.unwrap();
     assert_eq!((ping.slots, ping.capacity_generation), (Some(2), Some(1)));
     daemon.abort();
+}
+
+/// A node that declares a runtime this build has no backend for refuses to come
+/// up, naming the mode (design #322 W1). `build_backend` is the only place a
+/// `WORKER_MODES` entry becomes a backend, so a mode the node cannot serve must
+/// fail there rather than advertising capacity it would then reject launches on.
+#[tokio::test]
+async fn declared_mode_without_a_backend_refuses_to_start() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let config = WorkerConfig {
+        node: "w1".into(),
+        slots: 4,
+        slots_max: DAEMON_SLOTS_MAX,
+        modes: vec![WorkerMode::Container, WorkerMode::Host],
+        nats_url: server.url().to_string(),
+        nats_creds: None,
+        docker_endpoint: local_docker_endpoint(),
+        channel_binary: "/nonexistent/chuggernaut-channel".into(),
+        cache_dir: None,
+        refresh_script: None,
+        refresh_git_url: None,
+        refresh_git_key: "/data/keys/worker_git".into(),
+    };
+    let err = worker::run(config).await.unwrap_err().to_string();
+    assert!(err.contains("WORKER_MODES"), "unexpected: {err}");
+    assert!(err.contains("host"), "must name the mode: {err}");
 }

@@ -259,15 +259,6 @@ impl DockerBackend {
         Ok(out)
     }
 
-    /// Running `chuggernaut.managed` containers across all nodes.
-    pub async fn managed_running_total(&self) -> Result<u32, BackendError> {
-        let mut total = 0;
-        for node in &self.nodes {
-            total += self.managed_running(node).await?;
-        }
-        Ok(total)
-    }
-
     /// Managed containers on one node in a single docker `status`, through the
     /// `chuggernaut.managed` label filter every fleet query shares. One place
     /// to state that filter: a query that forgot the label would count (or
@@ -563,6 +554,18 @@ impl ContainerBackend for DockerBackend {
             }
         }
         Ok(out)
+    }
+
+    /// The cheap override of the trait's derived count: one label-filtered
+    /// docker `status` query per node, counted without materializing each
+    /// container's identity. A node that cannot be listed fails the whole count
+    /// rather than shrinking it, so the ping never under-reports occupancy.
+    async fn managed_running_total(&self) -> Result<u32, BackendError> {
+        let mut total = 0;
+        for node in &self.nodes {
+            total += self.managed_running(node).await?;
+        }
+        Ok(total)
     }
 
     fn fleet_status(&self) -> Vec<NodeStatus> {

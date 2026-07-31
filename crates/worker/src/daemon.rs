@@ -11,7 +11,7 @@
 //! (fleet backend) re-attaches via `inspect` on the existing container id.
 
 use crate::capacity::Capacity;
-use crate::config::WorkerConfig;
+use crate::config::{WorkerConfig, WorkerMode};
 use container::docker::{DockerBackend, DockerNodeConfig};
 use container::{
     BackendError, ContainerBackend, ContainerLaunchConfig, ContainerStatus, InjectedFile,
@@ -195,7 +195,10 @@ pub enum WorkerRunError {
 
 struct WorkerState {
     node: String,
-    backend: DockerBackend,
+    /// The node's execution backend behind the trait (design #322 W1), so every
+    /// op handler below routes through one interface and a second runtime is a
+    /// construction-time choice rather than a branch per op.
+    backend: Arc<dyn ContainerBackend>,
     /// The node's live capacity (spec §3.1 slot source): the one number reported
     /// over both transports, and the ceiling `set_slots` is validated against.
     /// Shared with the announce loop — one owner, two transports.
@@ -356,20 +359,8 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         None => NatsStore::connect(&config.nats_url).await?,
     };
 
-    let mut backend = DockerBackend::new(vec![DockerNodeConfig {
-        name: config.node.clone(),
-        endpoint: config.docker_endpoint.clone(),
-        slots: u32::MAX,
-    }])?;
+    let backend = build_backend(&config).await?;
     let cache_enabled = config.cache_dir.is_some();
-    if let Some(dir) = &config.cache_dir {
-        std::fs::create_dir_all(dir).map_err(|e| {
-            WorkerRunError::Config(format!("creating WORKER_CACHE_DIR {}: {e}", dir.display()))
-        })?;
-        backend = backend.with_cache_dir(dir.clone());
-        tracing::info!(cache_dir = %dir.display(), "node-local build cache enabled (sccache)");
-    }
-    backend.ping_all().await?;
 
     let mut artifacts = HashMap::new();
     match tokio::fs::read(&config.channel_binary).await {
@@ -461,6 +452,34 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
     })
     .await;
     Ok(())
+}
+
+/// Build the backend for the runtimes the node declares (design #322 W1) — the
+/// one construction site, so the docker backend's inherent `with_cache_dir` /
+/// `ping_all` wiring happens here and nowhere else. A declared mode this build
+/// has no backend for is refused by name: a node never advertises a runtime it
+/// cannot serve.
+async fn build_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend>, WorkerRunError> {
+    if let Some(mode) = config.modes.iter().find(|m| **m != WorkerMode::Container) {
+        return Err(WorkerRunError::Config(format!(
+            "WORKER_MODES names {mode}, which this build has no backend for (design #322 W2)",
+            mode = mode.as_str()
+        )));
+    }
+    let mut backend = DockerBackend::new(vec![DockerNodeConfig {
+        name: config.node.clone(),
+        endpoint: config.docker_endpoint.clone(),
+        slots: u32::MAX,
+    }])?;
+    if let Some(dir) = &config.cache_dir {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            WorkerRunError::Config(format!("creating WORKER_CACHE_DIR {}: {e}", dir.display()))
+        })?;
+        backend = backend.with_cache_dir(dir.clone());
+        tracing::info!(cache_dir = %dir.display(), "node-local build cache enabled (sccache)");
+    }
+    backend.ping_all().await?;
+    Ok(Arc::new(backend))
 }
 
 /// The node's own capacity cell, stamped with this process's epoch (spec §3.1):

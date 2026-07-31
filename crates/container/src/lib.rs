@@ -220,6 +220,15 @@ pub trait ContainerBackend: Send + Sync {
     /// rather than failing the whole sweep, so one unreachable node never blocks
     /// the others' reap.
     async fn list_managed_running(&self) -> Result<Vec<RunningContainer>, BackendError>;
+    /// How many managed containers are running across every node — the count a
+    /// worker's `ping` reports (spec §3.1 slot source). Derived from
+    /// [`list_managed_running`](ContainerBackend::list_managed_running) so the
+    /// count and the listing can never disagree; a backend whose runtime answers
+    /// it more cheaply overrides this.
+    async fn managed_running_total(&self) -> Result<u32, BackendError> {
+        Ok(self.list_managed_running().await?.len() as u32)
+    }
+
     /// Live per-node fleet status for the platform config snapshot (spec §3.1):
     /// health and last-reported build version per node. Empty by default —
     /// backends without fleet-health tracking (e.g. the test fake) report
@@ -545,6 +554,80 @@ mod tests {
                 "{policy:?}: {err}"
             );
         }
+    }
+
+    /// A runtime with no cheap count of its own: it answers the listing and
+    /// inherits everything derived from it. Every other op is out of this test's
+    /// reach.
+    struct ListingOnly(Result<Vec<RunningContainer>, String>);
+
+    #[async_trait]
+    impl ContainerBackend for ListingOnly {
+        async fn launch(&self, _: ContainerLaunchConfig) -> Result<ContainerId, BackendError> {
+            unimplemented!()
+        }
+        async fn wait(&self, _: &ContainerId) -> Result<i32, BackendError> {
+            unimplemented!()
+        }
+        async fn kill(&self, _: &ContainerId) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        async fn inspect(&self, _: &ContainerId) -> Result<Option<ContainerStatus>, BackendError> {
+            unimplemented!()
+        }
+        async fn copy_file(
+            &self,
+            _: &ContainerId,
+            _: &str,
+        ) -> Result<Option<Vec<u8>>, BackendError> {
+            unimplemented!()
+        }
+        async fn logs(&self, _: &ContainerId) -> Result<Vec<u8>, BackendError> {
+            unimplemented!()
+        }
+        async fn logs_tail(&self, _: &ContainerId, _: u64) -> Result<LogTail, BackendError> {
+            unimplemented!()
+        }
+        async fn remove(&self, _: &ContainerId) -> Result<(), BackendError> {
+            unimplemented!()
+        }
+        async fn list_managed_exited(&self) -> Result<Vec<ContainerId>, BackendError> {
+            unimplemented!()
+        }
+        async fn list_managed_running(&self) -> Result<Vec<RunningContainer>, BackendError> {
+            self.0
+                .clone()
+                .map_err(|e| BackendError::Unavailable(e.clone()))
+        }
+    }
+
+    fn running(task: u64) -> RunningContainer {
+        RunningContainer {
+            id: format!("w1/c{task}"),
+            project: Some("acme/chug".into()),
+            job: Some(7),
+            task: Some(task),
+        }
+    }
+
+    /// The trait's derived running count (design #322 W1): a backend that
+    /// implements only the listing gets a total that cannot disagree with it,
+    /// and a listing failure stays a failure rather than reading as an idle node
+    /// (job/181).
+    #[tokio::test]
+    async fn managed_running_total_defaults_to_the_listing() {
+        let empty = ListingOnly(Ok(Vec::new()));
+        assert_eq!(empty.managed_running_total().await.unwrap(), 0);
+
+        let busy = ListingOnly(Ok(vec![running(1), running(2), running(3)]));
+        assert_eq!(
+            busy.managed_running_total().await.unwrap(),
+            busy.list_managed_running().await.unwrap().len() as u32
+        );
+
+        let blind = ListingOnly(Err("node w1 unreachable".into()));
+        let err = blind.managed_running_total().await.unwrap_err();
+        assert!(err.to_string().contains("unreachable"), "{err}");
     }
 
     #[test]

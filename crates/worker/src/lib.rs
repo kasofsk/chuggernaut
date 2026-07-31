@@ -15,5 +15,5 @@ pub mod config;
 pub mod daemon;
 
 pub use backend::FleetBackend;
-pub use config::WorkerConfig;
+pub use config::{WorkerConfig, WorkerMode};
 pub use daemon::run;

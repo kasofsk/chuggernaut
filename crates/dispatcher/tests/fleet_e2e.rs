@@ -22,7 +22,7 @@ use store::NatsStore;
 use test_utils::FakeProvider;
 use test_utils::nats::NatsTestServer;
 use types::{FleetStatus, Job, JobState, Task, TaskKind, TaskPhase, TaskState, WorkerNode};
-use worker::{FleetBackend, WorkerConfig};
+use worker::{FleetBackend, WorkerConfig, WorkerMode};
 
 mod common;
 use common::{assert_invariants_of, spawn_checked};
@@ -71,6 +71,7 @@ async fn worker_fleet(
         node: "w1".into(),
         slots: 4,
         slots_max: 8,
+        modes: vec![WorkerMode::Container],
         nats_url: server.url().to_string(),
         nats_creds: None,
         docker_endpoint: local_docker_endpoint(),
