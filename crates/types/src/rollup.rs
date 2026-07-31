@@ -136,10 +136,16 @@ pub struct DesignEntry {
     /// `DRAFT`, one `FINDING`, under no schema and no enforcement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    /// The design has members, **every** member is terminal, and the status
-    /// line is non-empty — so the text beside this flag may no longer describe
-    /// the design. Reported, never acted on: the repo stays the source of truth
-    /// for a design's status and the operator resolves a discrepancy with an
+    /// The design has a member that did not write it, **every** member is
+    /// terminal, and the status line is non-empty — so the text beside this
+    /// flag may no longer describe the design. The design's own authoring job
+    /// is excluded from the first half: a design belongs to its own group
+    /// (design #321 Decision 4), so counting it would call every design stale
+    /// the moment the job that wrote it landed, with no implementation work
+    /// having happened at all.
+    ///
+    /// Reported, never acted on: the repo stays the source of truth for a
+    /// design's status and the operator resolves a discrepancy with an
     /// ordinary `design` amendment job (design #321 Decision 8). Deliberately
     /// not a machine-checked `implemented` — that needs the front-matter
     /// vocabulary, which is #86's to define.
@@ -289,8 +295,21 @@ pub fn design_doc_head(text: &str) -> DesignDocHead {
 impl DesignEntry {
     /// Join one document to its group. The title falls back to the slug (a
     /// document with no heading still needs a label), and `status_stale` is the
-    /// discrepancy the platform reports and never resolves: members exist,
-    /// none is open, and the document still says something.
+    /// discrepancy the platform reports and never resolves: a member other than
+    /// the design's own authoring job exists, none of the members is open, and
+    /// the document still says something.
+    ///
+    /// The authoring job is the member whose seq **is** the design's number —
+    /// `#321`'s doc is written by job #321, which then joins `design/321-…`
+    /// like any other member. Excluding it is why this lives here rather than
+    /// on [`GroupRollup`], which must stay design-agnostic: an ordinary group
+    /// has no authoring job to exclude. A design with no seq in its slug, or
+    /// one whose authoring job predates groups and is simply absent, has no
+    /// member to exclude either — every member counts, and the group can go
+    /// stale on the strength of its implementation jobs alone.
+    ///
+    /// The open half deliberately still counts the authoring job: a design
+    /// whose own job is in flight is work in flight, not a stale document.
     #[must_use]
     pub fn new(path: String, slug: &str, head: DesignDocHead, group: GroupRollup) -> Self {
         debug_assert_eq!(
@@ -298,10 +317,16 @@ impl DesignEntry {
             Some(slug),
             "a design entry's slug is its path's"
         );
-        let status_stale = !group.jobs.is_empty() && group.open == 0 && head.status.is_some();
+        let seq = design_seq(slug);
+        let implemented = group.jobs.iter().any(|job| Some(job.id) != seq);
+        debug_assert!(
+            !implemented || !group.jobs.is_empty(),
+            "an implemented design has members"
+        );
+        let status_stale = implemented && group.open == 0 && head.status.is_some();
         Self {
             path,
-            seq: design_seq(slug),
+            seq,
             title: head.title.unwrap_or_else(|| slug.to_string()),
             status: head.status,
             status_stale,
@@ -538,8 +563,10 @@ mod tests {
         );
     }
 
-    /// The flag the whole staleness feature is: members, all terminal, and a
-    /// status line that still says something. One open member clears it.
+    /// The flag the whole staleness feature is: a member that did not write the
+    /// document, all terminal, and a status line that still says something. One
+    /// open member clears it. (Neither #1 nor #2 is design #311's own job, so
+    /// both count as implementation.)
     #[test]
     fn status_is_stale_when_every_member_is_terminal() {
         let done = vec![
@@ -564,6 +591,92 @@ mod tests {
             rollup(&open, "design/311-job-inputs"),
         );
         assert!(!entry.status_stale, "an open member is work in flight");
+    }
+
+    /// The design entry for `slug` against the group its jobs derive, with a
+    /// document that always carries a status — so the only thing under test is
+    /// which members count.
+    fn design_entry(slug: &str, jobs: &[Job]) -> DesignEntry {
+        let name = design_group_name(slug);
+        let group = group_rollups(jobs)
+            .remove(&name)
+            .unwrap_or_else(|| GroupRollup::empty(name));
+        DesignEntry::new(
+            format!("{DESIGN_DOC_DIR}{slug}.md"),
+            slug,
+            design_doc_head("# A design\nStatus: PROPOSED\n"),
+            group,
+        )
+    }
+
+    /// A design's own authoring job is not implementation of it. #333 grouped
+    /// every design job under its own design (Decision 4), so a design with
+    /// only that member is the shape of one the day it merges — and counting it
+    /// called every design in the repo stale with no work having happened.
+    #[test]
+    fn a_design_whose_only_member_is_its_authoring_job_is_not_stale() {
+        let authored = design_entry(
+            "310-scheduled-jobs",
+            &[job(310, JobState::Done, &["design/310-scheduled-jobs"])],
+        );
+        assert_eq!(
+            authored.group.jobs.len(),
+            1,
+            "the authoring job is a member"
+        );
+        assert_eq!(authored.group.open, 0);
+        assert!(
+            !authored.status_stale,
+            "the job that wrote the doc did not implement it"
+        );
+    }
+
+    /// …and one non-authoring member is all it takes, once every member —
+    /// authoring job included — is terminal.
+    #[test]
+    fn a_design_goes_stale_on_its_first_terminal_non_authoring_member() {
+        let mut jobs = vec![job(293, JobState::Done, &["design/293-worker-capacity"])];
+        jobs.push(job(298, JobState::Done, &["design/293-worker-capacity"]));
+        assert!(
+            design_entry("293-worker-capacity", &jobs).status_stale,
+            "seven non-authoring members Done is the case #337 is about"
+        );
+
+        jobs.push(job(304, JobState::Work, &["design/293-worker-capacity"]));
+        assert!(
+            !design_entry("293-worker-capacity", &jobs).status_stale,
+            "an open member is work in flight"
+        );
+    }
+
+    /// The two boundaries of the exclusion: a group whose authoring job is
+    /// absent entirely still goes stale on its implementation jobs, and the
+    /// `open` half still counts the authoring job.
+    #[test]
+    fn only_a_member_whose_seq_is_the_designs_own_is_excluded() {
+        assert!(
+            design_entry(
+                "293-worker-capacity",
+                &[job(298, JobState::Done, &["design/293-worker-capacity"])]
+            )
+            .status_stale,
+            "a design whose own job predates groups has no member to exclude"
+        );
+        assert!(
+            design_entry("scratch", &[job(1, JobState::Done, &["design/scratch"])]).status_stale,
+            "a slug with no seq names no authoring job either"
+        );
+        assert!(
+            !design_entry(
+                "321-job-groups",
+                &[
+                    job(321, JobState::Work, &["design/321-job-groups"]),
+                    job(325, JobState::Done, &["design/321-job-groups"]),
+                ]
+            )
+            .status_stale,
+            "the authoring job still counts as open: an amendment in flight"
+        );
     }
 
     /// Both reply rows flatten the roll-up, so a design's group and a group row

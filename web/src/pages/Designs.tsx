@@ -11,8 +11,9 @@ import { IconSearch } from '../components/icons'
 // `docs/design/` at default HEAD, joined to the `design/{slug}` group its jobs
 // carry. The question the index answers at a glance is which designs are
 // outstanding, which are done, and which are lying about it — a design whose
-// jobs are all terminal while its `Status:` line still says PROPOSED is the
-// `status_stale` row, and it is the whole motivation for the view.
+// jobs are all terminal, its own authoring job aside, while its `Status:` line
+// still says PROPOSED is the `status_stale` row, and it is the whole motivation
+// for the view.
 
 type SortKey = 'interesting' | 'seq' | 'title' | 'open'
 type Lens = 'all' | 'stale' | 'inflight' | 'untouched'
@@ -116,7 +117,7 @@ function DesignStatusBadge({ entry }: { entry: DesignEntry }) {
       {entry.status_stale && (
         <span
           className="badge badge-orange design-stale"
-          title="every job filed against this design is terminal, and the status line still says otherwise — the repo stays the source of truth, so an amendment job resolves it"
+          title="every job filed against this design is terminal — at least one of them a job other than the one that wrote the document — and the status line still says otherwise; the repo stays the source of truth, so an amendment job resolves it"
         >
           ⚠ stale
         </span>

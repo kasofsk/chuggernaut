@@ -604,6 +604,35 @@ async fn seed_grouped_jobs(rig: &mut Rig) -> Vec<u64> {
     seqs
 }
 
+/// The design that wrote itself: a job whose seq **is** its document's number,
+/// grouped under its own design exactly as #333's backfill grouped every design
+/// job (Decision 4). Seeded in that order — job, then doc, then label — because
+/// the group name is only knowable once the seq is. Returns the seq.
+///
+/// The group ends fully terminal, and the document still carries a status: the
+/// exact shape #337 was, where every design in the repo read stale the moment
+/// the job that wrote it landed.
+async fn seed_self_authored_design(rig: &mut Rig) -> u64 {
+    let seq = rig.core.create_job(req(&[])).await.unwrap().id;
+    let slug = format!("{seq}-self-authored");
+    let clone = rig.repo.clone_branch("main").await;
+    clone
+        .commit_file(
+            &format!("docs/design/{slug}.md"),
+            b"# A design that wrote itself\n\nStatus: PROPOSED\n",
+            "design doc",
+        )
+        .await;
+    clone.push("main").await;
+    rig.core
+        .edit_groups("acme", "api", seq, vec![format!("design/{slug}")], vec![])
+        .await
+        .unwrap();
+    rig.core.revoke_job("acme", "api", seq).await.unwrap();
+    assert_invariants(&rig.core);
+    seq
+}
+
 /// Request one derived read and parse its rows. Both subjects answer a JSON
 /// array with no payload, so the two calls differ only in the subject.
 async fn derived_read(store: &NatsStore, subject: &str) -> Vec<serde_json::Value> {
@@ -629,18 +658,24 @@ fn row<'a>(rows: &'a [serde_json::Value], key: &str, value: &str) -> &'a serde_j
 /// `GET .../groups`: the group set is `distinct(job.groups)` and nothing else,
 /// each group carrying its members, its histogram, its open count and — for a
 /// `design/` name only — the document it resolves to at default HEAD.
-fn assert_groups_rollup(groups: &[serde_json::Value], seqs: &[u64]) {
+fn assert_groups_rollup(groups: &[serde_json::Value], seqs: &[u64], self_seq: u64) {
+    // Sorted rather than written out, because the self-authored design's name
+    // embeds a seq the rig allocates: where it falls in name order is not a
+    // property this test is about.
+    let mut expected = names(&[
+        "beacon-import",
+        "design/238-finding",
+        "design/311-job-inputs",
+        "ops/fleet-refresh",
+    ]);
+    expected.push(format!("design/{self_seq}-self-authored"));
+    expected.sort();
     assert_eq!(
         groups
             .iter()
-            .map(|g| g["name"].as_str().unwrap_or_default())
+            .map(|g| g["name"].as_str().unwrap_or_default().to_string())
             .collect::<Vec<_>>(),
-        vec![
-            "beacon-import",
-            "design/238-finding",
-            "design/311-job-inputs",
-            "ops/fleet-refresh"
-        ],
+        expected,
         "distinct(job.groups), and no group nobody is in: {groups:?}"
     );
 
@@ -695,18 +730,21 @@ fn assert_groups_rollup(groups: &[serde_json::Value], seqs: &[u64]) {
 /// `GET .../designs`: every document under `docs/design/` in path order,
 /// including the one with no jobs, each with its verbatim status line, its
 /// staleness flag and the same roll-up shape `/groups` serves.
-fn assert_designs_registry(designs: &[serde_json::Value]) {
+fn assert_designs_registry(designs: &[serde_json::Value], self_seq: u64) {
+    let mut expected = names(&[
+        "docs/design/238-finding.md",
+        "docs/design/311-job-inputs.md",
+        "docs/design/313-workload-identity.md",
+        "docs/design/scratch.md",
+    ]);
+    expected.push(format!("docs/design/{self_seq}-self-authored.md"));
+    expected.sort();
     assert_eq!(
         designs
             .iter()
-            .map(|d| d["path"].as_str().unwrap_or_default())
+            .map(|d| d["path"].as_str().unwrap_or_default().to_string())
             .collect::<Vec<_>>(),
-        vec![
-            "docs/design/238-finding.md",
-            "docs/design/311-job-inputs.md",
-            "docs/design/313-workload-identity.md",
-            "docs/design/scratch.md",
-        ],
+        expected,
         "every doc at default HEAD, jobs or no jobs: {designs:?}"
     );
 
@@ -733,25 +771,53 @@ fn assert_designs_registry(designs: &[serde_json::Value]) {
         "with no members, 'every member is terminal' is vacuous"
     );
 
-    // The discrepancy the platform reports and never resolves: every member
-    // terminal, and the document still says FINDING.
-    let stale = row(designs, "slug", "238-finding");
-    assert_eq!(stale["jobs"].as_array().unwrap().len(), 1);
-    assert_eq!(stale["open"], serde_json::json!(0));
-    assert_eq!(stale["status"], serde_json::json!("FINDING"));
-    assert_eq!(stale["status_stale"], serde_json::json!(true));
-
-    // Work still in flight is not stale, whatever the line says.
-    let live = row(designs, "slug", "311-job-inputs");
-    assert_eq!(live["status_stale"], serde_json::json!(false));
-    assert_eq!(live["jobs"].as_array().unwrap().len(), 2);
-
     // No `Status:` line and no seq in the name: both absent, neither an error.
     let scratch = row(designs, "slug", "scratch");
     assert!(scratch.get("status").is_none(), "{scratch:?}");
     assert!(scratch.get("seq").is_none(), "{scratch:?}");
     assert_eq!(scratch["title"], serde_json::json!("Scratch"));
     assert_eq!(scratch["status_stale"], serde_json::json!(false));
+}
+
+/// `status_stale` over the records: which member closed decides it, not just how
+/// many closed (#337). The rule is pinned pure in `types::rollup`; what this
+/// tier adds is that the seq the flag compares against is the seq the dispatcher
+/// actually allocated, joined to the document the repo actually holds.
+fn assert_designs_staleness(designs: &[serde_json::Value], self_seq: u64) {
+    // The discrepancy the platform reports and never resolves: every member
+    // terminal, the one member is not #238's own job, and the document still
+    // says FINDING.
+    let stale = row(designs, "slug", "238-finding");
+    assert_eq!(stale["jobs"].as_array().unwrap().len(), 1);
+    assert_ne!(stale["jobs"][0]["id"], serde_json::json!(238));
+    assert_eq!(stale["open"], serde_json::json!(0));
+    assert_eq!(stale["status"], serde_json::json!("FINDING"));
+    assert_eq!(stale["status_stale"], serde_json::json!(true));
+
+    // …and the design whose only member is the job that WROTE it is not: the
+    // group is fully terminal and the status line still says something, but no
+    // implementation work has happened. Every design in the repo read stale
+    // under the rule that counted the authoring job.
+    let authored = row(designs, "slug", &format!("{self_seq}-self-authored"));
+    assert_eq!(
+        authored["jobs"],
+        serde_json::json!([{
+            "id": self_seq, "type": "code", "title": "Ship the thing", "state": "Revoked"
+        }]),
+        "grouped under its own design, exactly as #333 backfilled"
+    );
+    assert_eq!(authored["open"], serde_json::json!(0));
+    assert_eq!(authored["status"], serde_json::json!("PROPOSED"));
+    assert_eq!(
+        authored["status_stale"],
+        serde_json::json!(false),
+        "the job that wrote the doc is not implementation of it"
+    );
+
+    // Work still in flight is not stale, whatever the line says.
+    let live = row(designs, "slug", "311-job-inputs");
+    assert_eq!(live["status_stale"], serde_json::json!(false));
+    assert_eq!(live["jobs"].as_array().unwrap().len(), 2);
 }
 
 /// **Slice B end to end** (design #321 Decisions 4, 7 and 8): both derived reads
@@ -761,14 +827,16 @@ fn assert_designs_registry(designs: &[serde_json::Value]) {
 /// this tier is the wiring — that the two subjects answer, that the roll-up is
 /// computed from the records the dispatcher actually wrote (there being no
 /// stored aggregate to compute it from), and that the `docs/design/` join
-/// resolves at default-branch HEAD. It carries the two cases that exist only
+/// resolves at default-branch HEAD. It carries the three cases that exist only
 /// where the repo and the records meet: a design with **no** jobs, which
-/// `/groups` cannot represent, and a document with no `Status:` line.
+/// `/groups` cannot represent, a document with no `Status:` line, and a design
+/// whose one member is the job whose seq the document is named after.
 #[tokio::test]
 async fn the_derived_reads_roll_up_groups_and_the_design_registry() {
     let Some(mut rig) = rig().await else { return };
     seed_design_docs(&rig).await;
     let seqs = seed_grouped_jobs(&mut rig).await;
+    let self_seq = seed_self_authored_design(&mut rig).await;
 
     let store = rig.store.clone();
     let repos = Arc::new(vcs::RepoManager::new(
@@ -787,8 +855,9 @@ async fn the_derived_reads_roll_up_groups_and_the_design_registry() {
         .unwrap();
 
     let groups = derived_read(&store, &store::subjects::groups_list("acme", "api")).await;
-    assert_groups_rollup(&groups, &seqs);
+    assert_groups_rollup(&groups, &seqs, self_seq);
     let designs = derived_read(&store, &store::subjects::designs_list("acme", "api")).await;
-    assert_designs_registry(&designs);
+    assert_designs_registry(&designs, self_seq);
+    assert_designs_staleness(&designs, self_seq);
     assert_invariants_of(&sink);
 }

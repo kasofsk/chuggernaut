@@ -369,10 +369,16 @@ export interface DesignEntry {
    */
   status?: string | null;
   /**
-   * The design has members, **every** member is terminal, and the status
-   * line is non-empty — so the text beside this flag may no longer describe
-   * the design. Reported, never acted on: the repo stays the source of truth
-   * for a design's status and the operator resolves a discrepancy with an
+   * The design has a member that did not write it, **every** member is
+   * terminal, and the status line is non-empty — so the text beside this
+   * flag may no longer describe the design. The design's own authoring job
+   * is excluded from the first half: a design belongs to its own group
+   * (design #321 Decision 4), so counting it would call every design stale
+   * the moment the job that wrote it landed, with no implementation work
+   * having happened at all.
+   *
+   * Reported, never acted on: the repo stays the source of truth for a
+   * design's status and the operator resolves a discrepancy with an
    * ordinary `design` amendment job (design #321 Decision 8). Deliberately
    * not a machine-checked `implemented` — that needs the front-matter
    * vocabulary, which is #86's to define.
