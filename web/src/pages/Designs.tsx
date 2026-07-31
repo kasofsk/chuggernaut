@@ -70,6 +70,16 @@ export function splitStatus(status: string): { token: string; detail: string } {
   return { token, detail: text.slice(token.length).replace(/^[\s.,;:]+/, '') }
 }
 
+/** Whether the document's own status line calls the work finished: the
+ *  `IMPLEMENTED` token, minus `IMPLEMENTED IN PART`, which shares that token
+ *  (`splitStatus` returns the leading word) but which `docs/design-docs.md`
+ *  defines as live work with slices still open. */
+export function isImplemented(d: DesignEntry): boolean {
+  if (!d.status) return false
+  const { token, detail } = splitStatus(d.status)
+  return token.toUpperCase() === 'IMPLEMENTED' && !/^\W*in part\b/i.test(detail)
+}
+
 const STATUS_COLORS: Record<string, string> = {
   PROPOSED: 'blue',
   DRAFT: 'purple',
@@ -148,6 +158,7 @@ export function DesignsPage() {
   const [error, setError] = useState<string | null>(null)
   const [q, setQ] = useState('')
   const [lens, setLens] = useState<Lens>('all')
+  const [hideImplemented, setHideImplemented] = useState(false)
   const [sort, setSort] = useState<SortKey>('interesting')
 
   useEffect(() => {
@@ -165,10 +176,12 @@ export function DesignsPage() {
     )
   }, [owner, project, navigate])
 
-  const visible = designs
-    .filter((d) => matchesLens(d, lens) && matchesQuery(d, q))
+  const matching = designs.filter((d) => matchesLens(d, lens) && matchesQuery(d, q))
+  const visible = matching
+    .filter((d) => !hideImplemented || !isImplemented(d))
     .sort((a, b) => compareDesigns(a, b, sort))
   const stale = designs.filter((d) => d.status_stale).length
+  const hidden = matching.length - visible.length
 
   return (
     <ProjectPage owner={owner} project={project} error={error}>
@@ -180,6 +193,7 @@ export function DesignsPage() {
               <div className="dim design-count">
                 {designs.length} under <code>docs/design/</code>
                 {stale > 0 && ` · ${stale} with a stale status`}
+                {hidden > 0 && ` · ${hidden} implemented hidden`}
               </div>
             )}
           </div>
@@ -206,6 +220,17 @@ export function DesignsPage() {
                 </option>
               ))}
             </select>
+            <label
+              className="design-hide-implemented"
+              title="hide designs whose status line says IMPLEMENTED — IMPLEMENTED IN PART still has open slices, so it stays"
+            >
+              <input
+                type="checkbox"
+                checked={hideImplemented}
+                onChange={(e) => setHideImplemented(e.target.checked)}
+              />
+              hide implemented
+            </label>
             <select
               className="sort-select"
               value={sort}

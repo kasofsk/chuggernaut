@@ -113,6 +113,24 @@ never an action: the platform will not edit your document. (The derivation is
 deliberately broad — a design with one closed job and nine unwritten slices
 trips it too.)
 
+### Hiding finished designs
+
+The index has a **hide implemented** toggle beside the lens and sort controls.
+It composes with the lens rather than replacing it — "hide finished" is
+orthogonal to "show stale" — and it is client-side only: the API sends every
+row, and the choice is not remembered across reloads.
+
+What it hides is the row whose status line *leads* with `IMPLEMENTED`, read
+from the same leading token the status badge shows. `IMPLEMENTED IN PART` is
+never hidden: the vocabulary above defines it as live work with open slices,
+and it shares that leading token. A design with no `Status:` line is never
+hidden either.
+
+This is why a finished design can carry `status stale` and still be filtered
+away: the flag and the toggle read different things — the flag reads the jobs
+(the rule above never looks at the status token), the toggle reads the word the
+document wrote about itself.
+
 ## Related
 
 - [`spec.md`](../spec.md) §9.4 — documentation jobs and the docs tree; §1.1

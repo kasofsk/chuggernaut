@@ -5072,6 +5072,28 @@ table.type-stats .num {
   font-size: var(--fs-sm);
   margin-top: 0.15rem;
 }
+/* "hide implemented" composes with the lens select rather than replacing it, so
+   it sits beside the selects as a checkbox at their height, and wraps with them
+   on a phone (.jobs-controls is already flex-wrap). The label is the tap
+   target — the box itself is well under a usable one. */
+.design-hide-implemented {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2rem;
+  padding: 0 0.2rem;
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.design-hide-implemented input {
+  margin: 0;
+  padding: 0;
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+}
 .design-list {
   list-style: none;
   margin: 0;

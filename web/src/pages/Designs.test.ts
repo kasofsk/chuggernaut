@@ -3,6 +3,7 @@ import type { DesignEntry } from '../api'
 import {
   compareDesigns,
   interestRank,
+  isImplemented,
   matchesLens,
   matchesQuery,
   splitStatus,
@@ -73,6 +74,93 @@ describe('the designs index', () => {
     expect(matchesQuery(stale, 'proposed')).toBe(true)
     expect(matchesQuery(stale, '  ')).toBe(true)
     expect(matchesQuery(finished, 'proposed')).toBe(false)
+  })
+})
+
+describe('hiding implemented designs', () => {
+  const implemented = design({
+    slug: '293-worker-capacity',
+    seq: 293,
+    status: 'IMPLEMENTED — shipped in jobs #295–#301.',
+    status_stale: true,
+    jobs: [job],
+    counts: { Done: 1 },
+  })
+  const inPart = design({
+    slug: '311-job-inputs',
+    seq: 311,
+    status: 'IMPLEMENTED IN PART — slice A shipped; slice B is still open.',
+    status_stale: true,
+    jobs: [job],
+    counts: { Done: 1 },
+  })
+  const noStatus = design({ slug: '294-quiet', seq: 294, status: null })
+
+  it('reads IMPLEMENTED as finished, whatever the delimiter or case', () => {
+    for (const status of [
+      'IMPLEMENTED — shipped in jobs #295–#301.',
+      'IMPLEMENTED. Shipped in jobs #324, #330, #331 and #332.',
+      'IMPLEMENTED, shipped 2026-07-30.',
+      'IMPLEMENTED (job #332)',
+      'implemented — lowercase counts too',
+    ]) {
+      expect(isImplemented(design({ slug: 'x', status })), status).toBe(true)
+    }
+  })
+
+  it('never reads IMPLEMENTED IN PART as finished — those slices are live work', () => {
+    for (const status of [
+      'IMPLEMENTED IN PART — slice A shipped; slice B is still open.',
+      'IMPLEMENTED IN PART. Slice A shipped.',
+      'implemented in part, slice B open',
+      'IMPLEMENTED (in part)',
+    ]) {
+      expect(isImplemented(design({ slug: 'x', status })), status).toBe(false)
+    }
+  })
+
+  it('leaves every other status token, and a missing status line, visible', () => {
+    for (const status of ['PROPOSED. Written against…', 'DRAFT (session)', 'FINDING. Written']) {
+      expect(isImplemented(design({ slug: 'x', status })), status).toBe(false)
+    }
+    expect(isImplemented(noStatus)).toBe(false)
+    expect(isImplemented(design({ slug: 'x', status: '(no idea yet) — see #86' }))).toBe(false)
+  })
+
+  it('hides only the finished rows when on, and nothing when off', () => {
+    const all = [implemented, inPart, stale, inflight, untouched, noStatus]
+    const under = (hide: boolean) =>
+      all.filter((d) => !hide || !isImplemented(d)).map((d) => d.slug)
+    expect(under(false)).toEqual(all.map((d) => d.slug))
+    expect(under(true)).toEqual([
+      '311-job-inputs',
+      '311-inputs',
+      '321-groups',
+      '313-identity',
+      '294-quiet',
+    ])
+  })
+
+  it('composes with each lens rather than replacing it', () => {
+    const implementedInflight = design({
+      slug: '330-shipping',
+      seq: 330,
+      status: 'IMPLEMENTED. Shipped.',
+      jobs: [job],
+      counts: { Work: 1 },
+      open: 1,
+    })
+    const implementedUntouched = design({ slug: '331-quiet', seq: 331, status: 'IMPLEMENTED.' })
+    const all = [implemented, inPart, inflight, implementedInflight, untouched, implementedUntouched]
+    const under = (lens: 'stale' | 'inflight' | 'untouched' | 'all', hide: boolean) =>
+      all.filter((d) => matchesLens(d, lens) && (!hide || !isImplemented(d))).map((d) => d.slug)
+    expect(under('stale', false)).toEqual(['293-worker-capacity', '311-job-inputs'])
+    expect(under('stale', true)).toEqual(['311-job-inputs'])
+    expect(under('inflight', false)).toEqual(['321-groups', '330-shipping'])
+    expect(under('inflight', true)).toEqual(['321-groups'])
+    expect(under('untouched', false)).toEqual(['313-identity', '331-quiet'])
+    expect(under('untouched', true)).toEqual(['313-identity'])
+    expect(under('all', true)).toEqual(['311-job-inputs', '321-groups', '313-identity'])
   })
 })
 
