@@ -39,14 +39,31 @@
 # pragmas. Put a directive's justification on the directive line itself; put a
 # change's rationale in the commit message (STYLE.md Tier 2 rule 5).
 #
+# The scanner runs under LC_ALL=C, so the gate's verdict is the same on every
+# host: it works on `//`, `/*`, quotes and backticks — all ASCII — and byte
+# semantics keep it from aborting on the astral-plane characters and the odd
+# non-UTF-8 byte the tree contains (macOS's BWK awk fails `towc` on those in a
+# UTF-8 locale). A file the scanner cannot finish is a LINTER ERROR, reported
+# and counted separately from violations: "the linter crashed" and "this file is
+# dirty" are different answers, and a crash mid-file silently drops the lines
+# after it, so its findings are not a verdict.
+#
 # Usage:
 #   .chug/tasks/check-comments.sh            # rule 1 tree-wide, rule 2 on added lines
 #   .chug/tasks/check-comments.sh <file>...  # explicit: lint every line of these files
 #
-# Exit: 0 = clean. 1 = violations (each is reported as file:line).
+# Exit: 0 = clean. 1 = violations (each is reported as file:line). 2 = the linter
+# itself failed on at least one file; the gate cannot vouch for the tree.
 set -eu
 
 root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+# Printed by the scanner's END block, so the caller can tell a completed scan
+# from an aborted one without trusting awk's exit status to be portable.
+scan_marker="SCANNED"
+
+awk_stderr="$(mktemp)"
+trap 'rm -f "$awk_stderr"' EXIT HUP INT TERM
 
 # The awk linter. Reads one source file and prints one `file:line: message` per
 # violation; `added` is either the literal ALL or a space-separated list of the
@@ -57,7 +74,8 @@ root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 # lines only where the language allows a literal to (Rust `"…"`, TS templates),
 # so a stray apostrophe in JSX text cannot swallow the rest of a file.
 check_comments_lint_file() { # <file> <lang> <added> <all_lines>
-	awk -v file="$1" -v lang="$2" -v added="$3" -v all_lines="$4" '
+	LC_ALL=C awk -v file="$1" -v lang="$2" -v added="$3" -v all_lines="$4" \
+		-v marker="$scan_marker" '
 	function is_added(n) { return added == "ALL" || index(addedset, " " n " ") > 0 }
 	function in_scope(n) { return all_lines == "1" || is_added(n) }
 
@@ -210,6 +228,7 @@ check_comments_lint_file() { # <file> <lang> <added> <all_lines>
 
 	END {
 		doc_flush()
+		printf "%s %s %d\n", marker, file, violations
 		exit violations > 0 ? 1 : 0
 	}
 	' "$1"
@@ -230,7 +249,7 @@ check_comments_lang_of() { # <path>
 # The line numbers this diff adds to one file, as awk wants them: the `+a,b`
 # side of each unified-diff hunk header, expanded.
 check_comments_added_lines() { # <base> <file>
-	git diff -U0 "$1"...HEAD -- "$2" 2>/dev/null | awk '
+	git diff -U0 "$1"...HEAD -- "$2" 2>/dev/null | LC_ALL=C awk '
 		/^@@/ {
 			for (i = 1; i <= NF; i++) if ($i ~ /^\+[0-9]/) {
 				split(substr($i, 2), a, ",")
@@ -242,6 +261,7 @@ check_comments_added_lines() { # <base> <file>
 }
 
 violations=0
+linter_errors=0
 files=""
 mode="ratchet"
 base=""
@@ -289,13 +309,31 @@ for f in $files; do
 	fi
 	checked=$((checked + 1))
 	set +e
-	out="$(check_comments_lint_file "$f" "$lang" "$lines" "$all_lines")"
+	out="$(check_comments_lint_file "$f" "$lang" "$lines" "$all_lines" 2>"$awk_stderr")"
 	rc=$?
 	set -e
-	[ -n "$out" ] && echo "$out"
-	[ "$rc" -eq 0 ] || violations=$((violations + 1))
+	findings="$(printf '%s\n' "$out" | grep -v "^$scan_marker " || true)"
+	if [ -n "$findings" ]; then
+		echo "$findings"
+	fi
+	if printf '%s\n' "$out" | grep -q "^$scan_marker "; then
+		[ "$rc" -eq 0 ] || violations=$((violations + 1))
+	else
+		linter_errors=$((linter_errors + 1))
+		echo "!!! check-comments: LINTER ERROR on $f — awk exited $rc without finishing"
+		echo "!!!     the file. This is not a comment violation; any finding printed above"
+		echo "!!!     it is partial, and the rest of the file went unscanned."
+		sed 's/^/!!!     awk: /' "$awk_stderr"
+	fi
 done
 unset IFS
+
+if [ "$linter_errors" -ne 0 ]; then
+	echo "!!! check-comments: $linter_errors file(s) the linter could not scan."
+	echo "!!!     The gate fails because it cannot vouch for those files, NOT because they"
+	echo "!!!     carry comments. An awk that aborts on valid input is a bug in the gate or"
+	echo "!!!     an unsupported awk — report the message above with your platform."
+fi
 
 if [ "$violations" -ne 0 ]; then
 	echo "!!! check-comments: $violations file(s) with comment violations (STYLE.md Tier 1)."
@@ -303,7 +341,9 @@ if [ "$violations" -ne 0 ]; then
 	echo "!!!     said in a doc under docs/ (or the module's MODULES.md row), or in the"
 	echo "!!!     commit message if it is rationale. Doc comments stay under 2 sentences."
 	echo "!!!     Reproduce locally with: .chug/tasks/check-comments.sh"
-	exit 1
 fi
+
+[ "$linter_errors" -eq 0 ] || exit 2
+[ "$violations" -eq 0 ] || exit 1
 
 echo "check-comments: clean ($checked source file(s) checked)"

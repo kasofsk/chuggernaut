@@ -69,7 +69,10 @@ the absence of a workflow file.
   ratchet. The knowledge a comment would have carried goes in a doc and the
   rationale in the commit message; `.chug/tasks/docs-update.md` is the work
   task that keeps the docs in step, and `.chug/tasks/review-docs-updated.md` is
-  its (currently inert) evaluator.
+  its (currently inert) evaluator. Its scanner runs under `LC_ALL=C`, so the
+  verdict is the same on every host and every awk (macOS's BWK awk aborts on the
+  tree's astral-plane characters in a UTF-8 locale); a file the scanner cannot
+  finish exits **2** as a `LINTER ERROR`, never as a comment violation.
 - Per-type **stage-0 agent reviewers** run first (`.chug/tasks/review-*.md`), so the
   slow gate is spent only on changes the reviewer accepts; `docs`/`design`
   jobs additionally gate on `.chug/tasks/doc-lint.sh` at stage 1.

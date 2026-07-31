@@ -15,6 +15,12 @@
 # Plus: an undeterminable diff drops the doc-length ratchet (loud) but still
 # enforces rule 1 — the tree has no non-doc comments to grandfather.
 #
+# Plus the gate's own failure modes, which must never read as "this file is
+# dirty": a source file holding an astral-plane character lints clean (macOS
+# BWK awk aborts on one in a UTF-8 locale, hence the LC_ALL=C pin), non-ASCII
+# prose counts the same sentences as ASCII prose does, and an awk that exits
+# non-zero is reported as a LINTER ERROR with exit 2, not as a violation.
+#
 # Run:  .chug/tasks/check-comments.test.sh   (exits 0 if all cases pass)
 set -eu
 
@@ -117,6 +123,28 @@ run_sut "$WORK/mod.ts"
 check        "ts item doc over the cap is rejected" 1 "$RC" "$OUT" "mod.ts:10: doc comment is 3 sentences"
 check_absent "ts module header is exempt"           1 "$RC" "$OUT" "mod.ts:1:"
 
+cat >"$WORK/astral.rs" <<'EOF'
+/// Every trailing byte of the chunk is the marker.
+pub fn astral(tail: &str) -> bool {
+    assert!(tail.chars().all(|c| c == '🚀'));
+    let banner = "— shipped ✅";
+    banner.contains('✅')
+}
+EOF
+run_sut "$WORK/astral.rs"
+check "an astral-plane character lints clean" 0 "$RC" "$OUT" "check-comments: clean"
+
+cat >"$WORK/prose.rs" <<'EOF'
+/// Retries the fetch — the caller’s “budget” is already spent. Ok?
+pub fn two() {}
+
+/// First — with an em-dash. Second, with “curly” quotes. Third is too many.
+pub fn three() {}
+EOF
+run_sut "$WORK/prose.rs"
+check        "non-ASCII prose counts sentences the same" 1 "$RC" "$OUT" "prose.rs:4: doc comment is 3 sentences"
+check_absent "a 2-sentence doc of non-ASCII prose passes" 1 "$RC" "$OUT" "prose.rs:1:"
+
 cat >"$WORK/gen.gen.ts" <<'EOF'
 // generated files are not linted
 export const x = 1
@@ -201,6 +229,25 @@ git -C "$REPO" checkout -q HEAD~1 -- crates/demo/src/lib.rs
 git -C "$REPO" commit -qm "revert the dirty addition"
 run_baseless
 check "an undeterminable diff reports the doc-length ratchet as unenforced" 0 "$RC" "$OUT" "NOT enforced"
+
+# --- the linter's own failure is not a violation -----------------------------
+
+mkdir -p "$WORK/fakebin"
+cat >"$WORK/fakebin/awk" <<'EOF'
+#!/bin/sh
+echo "awk: towc: multibyte conversion failure on: 'x'" >&2
+exit 2
+EOF
+chmod +x "$WORK/fakebin/awk"
+
+OUT="$WORK/out"
+set +e
+PATH="$WORK/fakebin:$PATH" "$SUT" "$WORK/clean.rs" >"$OUT" 2>&1
+RC=$?
+set -e
+check        "an aborted scan exits 2 as a linter error" 2 "$RC" "$OUT" "LINTER ERROR on $WORK/clean.rs"
+check        "the awk message is surfaced"               2 "$RC" "$OUT" "multibyte conversion failure"
+check_absent "an aborted scan is not a comment violation" 2 "$RC" "$OUT" "comment violations"
 
 echo
 echo "check-comments.test: $pass passed, $fail failed"
