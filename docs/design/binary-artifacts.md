@@ -660,7 +660,7 @@ is recorded so the next author starts from the constraints:
 
 | Slice | What | Gate on |
 | --- | --- | --- |
-| **S0** | Cap the worker `copy_file` reply and name the error; one sentence in `spec.md` §3.1 | Nothing — it is a defect fix and should land next ([Decision 1](#decision-1-fix-the-copy_file-bound-first-as-a-defect)) |
+| **S0** | Cap the worker `copy_file` reply and name the error; one sentence in `spec.md` §3.1 | **Landed** (job #363), as the defect fix of [Decision 1](#decision-1-fix-the-copy_file-bound-first-as-a-defect); the `copy_file` rows and [C3](#c3-the-real-size-regime-is-copy_file-on-a-worker-node-not-the-object-store) above describe the tree before it |
 | **S1** | `ArtifactKind::Output`; a `Harvester::collect_output` reading `/workspace/chug-output.tar.gz` before `dispose`, wired to the **work-side** monitors only ([scope](#which-containers-are-read-and-what-that-actually-costs)); the 16 MiB cap, refused with a named error and warned rather than failing the task ([why](#the-size-band-with-numbers)); a chunked `copy_file` op | A first consumer existing — see below |
 | **S2** | The `outputs` bucket with its own `max_age` + byte ceiling; revoke-time GC | Lands with S1; S1 without it re-creates the 2026-07-21 disk class |
 | **S3** | Declared `outputs:` schema, cross-job reads, per-attempt selection | A **second** consumer with per-output addressing needs. Deferred, deliberately |

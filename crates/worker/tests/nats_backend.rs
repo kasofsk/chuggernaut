@@ -915,6 +915,60 @@ async fn refresh_reports_skip_without_git_credential() {
     daemon.abort();
 }
 
+/// The `copy_file` reply bound over the real wire (design `binary-artifacts.md`
+/// S0): a file over [`store::worker::MAX_COPY_FILE_BYTES`] comes back PROMPTLY
+/// as a named error where it used to publish a reply nothing could carry and
+/// block the caller for the full 60s `OP_TIMEOUT`, and a file AT the bound
+/// still round-trips whole.
+#[tokio::test]
+async fn oversized_copy_file_fails_fast_with_a_named_error() {
+    use store::worker::{COPY_FILE_TOO_LARGE, MAX_COPY_FILE_BYTES};
+
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let Some((fleet, daemon)) = setup(&server, b"x").await else {
+        return;
+    };
+    let over = MAX_COPY_FILE_BYTES + 1;
+    let id = fleet
+        .launch(suite::cfg(&format!(
+            "head -c {MAX_COPY_FILE_BYTES} /dev/zero > /at-bound; head -c {over} /dev/zero > /over"
+        )))
+        .await
+        .unwrap();
+    assert_eq!(fleet.wait(&id).await.unwrap(), 0);
+
+    let at_bound = fleet.copy_file(&id, "/at-bound").await.unwrap().unwrap();
+    assert_eq!(
+        at_bound.len(),
+        MAX_COPY_FILE_BYTES,
+        "a file at the bound must still round-trip whole"
+    );
+
+    let started = std::time::Instant::now();
+    let err = fleet.copy_file(&id, "/over").await.unwrap_err();
+    let elapsed = started.elapsed();
+    let message = err.to_string();
+    assert!(
+        message.contains(COPY_FILE_TOO_LARGE),
+        "the error must be named: {message}"
+    );
+    for expected in ["/over", &over.to_string(), &MAX_COPY_FILE_BYTES.to_string()] {
+        assert!(
+            message.contains(expected),
+            "the error must carry {expected}: {message}"
+        );
+    }
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "an oversized copy_file must fail fast, not wait out OP_TIMEOUT: {elapsed:?}"
+    );
+
+    suite::rm(&id);
+    daemon.abort();
+}
+
 #[tokio::test]
 async fn payload_guard_rejects_bulk_inline_files() {
     let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {

@@ -43,6 +43,10 @@ pub(crate) const MAX_QUEUE_WAIT: Duration = Duration::from_secs(30 * 60);
 /// error output lands; bounding it keeps the gate-fix brief (job #154) small.
 const GATE_LOG_TAIL_BYTES: usize = 8_000;
 
+/// The well-known path a command evaluator writes its structured verdict to
+/// (spec §3.3).
+const EVAL_RESULT_PATH: &str = "/workspace/eval-result.json";
+
 /// Escalation reason for a launch that outwaited the queue (spec §3.5). A
 /// stable, clear code a later structured-escalation pass (job #76) can adopt.
 pub(crate) const QUEUE_TIMEOUT_REASON: &str = "no_free_slots_timeout";
@@ -520,12 +524,7 @@ impl Core {
                     ..TaskExit::code(exit_code)
                 },
                 MonitorKind::Eval => {
-                    let eval_json = backend
-                        .copy_file(&id, "/workspace/eval-result.json")
-                        .await
-                        .ok()
-                        .flatten()
-                        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+                    let eval_json = monitor_copy_eval_json(&backend, seq, task_id, &id).await;
                     TaskExit {
                         eval_json,
                         log_tail: monitor_harvest_log_tail(&harvest, &o, &p, seq, task_id, &id)
@@ -663,6 +662,35 @@ async fn monitor_harvest_deploy_report(
             crate::platform_ops::harvest::parse_deploy_report(&String::from_utf8_lossy(&bytes))
         })
         .and_then(|report| serde_json::to_value(report).ok())
+}
+
+/// Extract an evaluator / merge-gate container's structured verdict (§3.3).
+/// Every failure warns rather than being swallowed: an unreadable or oversized
+/// file must be diagnosable from the logs instead of reading as an evaluator
+/// that emitted no verdict at all.
+async fn monitor_copy_eval_json(
+    backend: &std::sync::Arc<dyn container::ContainerBackend>,
+    seq: u64,
+    task_id: u64,
+    id: &container::ContainerId,
+) -> Option<serde_json::Value> {
+    match backend.copy_file(id, EVAL_RESULT_PATH).await {
+        Ok(None) => None,
+        Ok(Some(bytes)) => match serde_json::from_slice(&bytes) {
+            Ok(json) => Some(json),
+            Err(e) => {
+                tracing::warn!(
+                    "job {seq} task {task_id}: {EVAL_RESULT_PATH} ({} bytes) is not valid JSON: {e}",
+                    bytes.len()
+                );
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!("job {seq} task {task_id}: reading {EVAL_RESULT_PATH} failed: {e}");
+            None
+        }
+    }
 }
 
 /// Harvest an evaluator / merge-gate container's logs and keep a tail of them on

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use store::worker::{encode_reply, op_from_subject};
+use store::worker::{copy_file_over_bound, encode_reply, op_from_subject};
 use store::{NatsStore, StoreError};
 use types::worker::{
     ContainerRef, CopyFileOk, CopyFileRequest, FileSource, InspectOk, LaunchOk, LogsOk, LogsTailOk,
@@ -701,6 +701,9 @@ async fn inspect(state: &WorkerState, payload: &[u8]) -> WorkerReply<InspectOk> 
     )
 }
 
+/// Copy one file out of a container, bounded by [`copy_file_over_bound`]. A
+/// file whose reply could not be published comes back as a named error instead
+/// of a reply the caller waits out its op timeout for.
 async fn copy_file(state: &WorkerState, payload: &[u8]) -> WorkerReply<CopyFileOk> {
     reply(
         async {
@@ -710,6 +713,9 @@ async fn copy_file(state: &WorkerState, payload: &[u8]) -> WorkerReply<CopyFileO
                 .copy_file(&req.id, &req.path)
                 .await
                 .map_err(backend_err)?;
+            if let Some(e) = copy_file_over_bound(&req.path, data.as_ref().map_or(0, Vec::len)) {
+                return Err(e);
+            }
             Ok(CopyFileOk {
                 data_b64: data.map(|d| b64_encode(&d)),
             })

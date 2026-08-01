@@ -15,6 +15,32 @@ use types::worker::{
 /// this guard means bulk bytes leaked back into the launch path.
 pub const MAX_REQUEST_BYTES: usize = 900 * 1024;
 
+/// The largest file `copy_file` may return over the worker RPC. Requests and
+/// replies ride the same `max_payload`, so it is [`MAX_REQUEST_BYTES`] less a
+/// JSON envelope, scaled down by base64's 4/3 cost.
+pub const MAX_COPY_FILE_BYTES: usize = (MAX_REQUEST_BYTES - COPY_FILE_ENVELOPE_BYTES) / 4 * 3;
+
+/// Headroom left for the `CopyFileOk` JSON around the base64 payload.
+const COPY_FILE_ENVELOPE_BYTES: usize = 1024;
+
+/// Marker the daemon stamps on the [`WorkerError::Other`] it returns for a file
+/// over [`MAX_COPY_FILE_BYTES`]. Carried inside `Other` rather than as its own
+/// variant because [`WorkerError`] has no `#[serde(other)]` fallback, so a new
+/// variant would fail to decode on an N-1 dispatcher (spec §14.1).
+pub const COPY_FILE_TOO_LARGE: &str = "copy_file_too_large";
+
+/// The `copy_file` bound check the daemon applies before encoding its reply
+/// (spec §3.1). Returns the named error for a file the reply could not carry,
+/// so an oversized read fails fast instead of stalling the caller until its op
+/// timeout.
+pub fn copy_file_over_bound(path: &str, len: usize) -> Option<WorkerError> {
+    (len > MAX_COPY_FILE_BYTES).then(|| WorkerError::Other {
+        message: format!(
+            "{COPY_FILE_TOO_LARGE}: {path} is {len} bytes, over the {MAX_COPY_FILE_BYTES}-byte worker RPC reply bound"
+        ),
+    })
+}
+
 /// Ops that just execute a container action.
 const OP_TIMEOUT: Duration = Duration::from_secs(60);
 /// Liveness probe — placement blocks on this, keep it tight.
@@ -238,6 +264,71 @@ impl From<StoreError> for WorkerRpcError {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// The `copy_file` bound exists for exactly one reason: a reply carrying a
+    /// file at the bound must still be publishable under NATS's default 1MB
+    /// `max_payload`, base64 and JSON envelope included.
+    #[test]
+    fn copy_file_bound_keeps_the_reply_publishable() {
+        const NATS_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
+        let reply: WorkerReply<CopyFileOk> = WorkerReply::Ok {
+            value: CopyFileOk {
+                data_b64: Some(types::worker::b64_encode(&vec![0u8; MAX_COPY_FILE_BYTES])),
+            },
+        };
+        let encoded = serde_json::to_vec(&reply).unwrap().len();
+        assert!(
+            encoded <= MAX_REQUEST_BYTES,
+            "a reply at the bound is {encoded} bytes, over the {MAX_REQUEST_BYTES}-byte guard"
+        );
+        assert!(
+            encoded < NATS_MAX_PAYLOAD_BYTES,
+            "a reply at the bound is {encoded} bytes and cannot be published"
+        );
+    }
+
+    /// The bound refuses rather than truncates, and the refusal is diagnosable:
+    /// a partial file is worthless where a partial log tail is not, so the
+    /// message names the marker, the path, the size and the bound.
+    #[test]
+    fn copy_file_over_bound_refuses_with_a_diagnosable_error() {
+        assert_eq!(copy_file_over_bound("/workspace/eval-result.json", 0), None);
+        assert_eq!(
+            copy_file_over_bound("/workspace/eval-result.json", MAX_COPY_FILE_BYTES),
+            None,
+            "a file AT the bound still fits"
+        );
+
+        let over = MAX_COPY_FILE_BYTES + 1;
+        let Some(WorkerError::Other { message }) =
+            copy_file_over_bound("/workspace/eval-result.json", over)
+        else {
+            panic!("a file over the bound must be refused as WorkerError::Other");
+        };
+        for expected in [
+            COPY_FILE_TOO_LARGE,
+            "/workspace/eval-result.json",
+            &over.to_string(),
+            &MAX_COPY_FILE_BYTES.to_string(),
+        ] {
+            assert!(message.contains(expected), "missing {expected}: {message}");
+        }
+    }
+
+    /// `Other` round-trips on an N-1 dispatcher, which is why the refusal is
+    /// carried in it rather than in a new [`WorkerError`] variant: the enum has
+    /// no `#[serde(other)]` fallback, so a new variant would fail to decode.
+    #[test]
+    fn copy_file_refusal_decodes_as_a_pre_existing_variant() {
+        let error = copy_file_over_bound("/big", MAX_COPY_FILE_BYTES + 1).unwrap();
+        let reply: WorkerReply<CopyFileOk> = WorkerReply::Err { error };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert!(json.contains("\"kind\":\"other\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<WorkerReply<CopyFileOk>>(&json).unwrap(),
+            reply
+        );
+    }
 
     #[test]
     fn op_parses_from_subject() {

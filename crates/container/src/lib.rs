@@ -171,6 +171,9 @@ pub trait ContainerBackend: Send + Sync {
     /// Query current container status; None if container is not found.
     async fn inspect(&self, id: &ContainerId) -> Result<Option<ContainerStatus>, BackendError>;
     /// Copy a single file out of the container filesystem; None if not found.
+    /// A worker-proxied node bounds the reply to `store::worker::MAX_COPY_FILE_BYTES`
+    /// and errors above it (spec §3.1); a Docker-endpoint node reads in-process
+    /// and is unbounded.
     async fn copy_file(
         &self,
         id: &ContainerId,
