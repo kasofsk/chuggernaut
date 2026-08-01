@@ -1,6 +1,6 @@
 #!/bin/sh
 # Shared documentation lint for the `design` and `docs` job types (wired as a
-# stage-1 command evaluator in .chug/jobs/design.yaml and .chug/jobs/docs.yaml). Three
+# stage-1 command evaluator in .chug/jobs/design.yaml and .chug/jobs/docs.yaml). Four
 # checks over the changed markdown, no external tooling required (POSIX sh +
 # awk, both in the agent image):
 #
@@ -15,6 +15,18 @@
 #      root. Best-effort: a missing path is a WARNING only (a doc may cite a
 #      path a sibling job will create), and bare symbols (`JobType::validate`,
 #      no slash) are not checked at all.
+#   4. Design filenames — a `.md` directly under `docs/design/` must be named
+#      `{seq}-{slug}.md`: leading digits, a hyphen, then a lowercase-kebab slug.
+#      That is the shape the Designs view sorts and labels by and the shape the
+#      `design/{stem}` group name joins on (crates/types/src/groups.rs), so a
+#      malformed name is an ERROR (fail). The match anchors on the repo-relative
+#      path — a path merely *ending* in `docs/design/x.md` is some other repo's
+#      file, and a nested subdirectory is out of scope. Its character classes
+#      are spelled out rather than written as `a-z` ranges: range membership in
+#      shell patterns follows the locale's collation order, so under
+#      en_US.UTF-8 `a-z` also spans the uppercase letters and the rule would
+#      quietly stop rejecting them. Same reason .chug/tasks/check-comments.sh
+#      pins LC_ALL=C — the verdict must be the same on every host.
 #
 # Diff-aware, mirroring .chug/tasks/ci.sh: it lints only the markdown the change
 # touches and self-skips cheaply when the diff has no `.md` files. Fail-safe —
@@ -109,6 +121,25 @@ IFS='
 '
 for f in $files; do
 	[ -f "$f" ] || continue # a deleted doc shows in the diff but has no content
+	# Rule 4. Unanchored `*docs/design/*` would match an absolute path too.
+	case "$f" in
+	docs/design/*/*) : ;; # a nested subdirectory is not a design doc
+	docs/design/*.md)
+		base="${f##*/}"
+		seq="${base%%-*}"   # everything before the first hyphen
+		slug="${base#*-}"   # ...and everything after it, minus the extension
+		slug="${slug%.md}"
+		name_ok=1
+		case "$seq" in
+		"" | *[!0123456789]*) name_ok=0 ;;
+		esac
+		case "$slug" in
+		*[!abcdefghijklmnopqrstuvwxyz0123456789-]*) name_ok=0 ;;
+		esac
+		[ "$name_ok" -eq 1 ] \
+			|| report_err "$f: design doc filename must be {seq}-{slug}.md, e.g. 309-host-native-execution.md"
+		;;
+	esac
 	dir="$(dirname "$f")"
 	out="$(extract "$f")"
 	while IFS= read -r rec; do

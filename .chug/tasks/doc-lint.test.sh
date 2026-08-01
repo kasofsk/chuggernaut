@@ -3,9 +3,15 @@
 #
 # It drives doc-lint.sh in explicit-file mode (paths as positional args, which
 # bypass the diff selection) over fixtures written to a temp dir, and asserts
-# the three behaviours the brief calls out: a clean doc passes, a broken
-# relative link fails, and a nonexistent code path only warns (still passes).
-# A `.txt` argument exercises the self-skip (no markdown to lint).
+# the behaviours the brief calls out: a clean doc passes, a broken relative link
+# fails, and a nonexistent code path only warns (still passes). A `.txt`
+# argument exercises the self-skip (no markdown to lint).
+#
+# The design-filename rule (rule 4) matches on the *repo-relative* path, so its
+# cases run the script from inside $WORK with relative arguments (`run_sut_rel`)
+# — that is the only way the temp-dir harness can present a path the rule sees
+# as `docs/design/<name>.md`. The absolute-path cases double as the anchoring
+# guard: they must stay unaffected by the rule.
 #
 # Run:  .chug/tasks/doc-lint.test.sh   (exits 0 if all cases pass)
 set -eu
@@ -34,6 +40,14 @@ run_sut() { # <file>... -> writes rc to $RC, output to $OUT
 	OUT="$WORK/out"
 	set +e
 	"$SUT" "$@" >"$OUT" 2>&1
+	RC=$?
+	set -e
+}
+
+run_sut_rel() { # <repo-relative file>... — same, but run from $WORK as the root
+	OUT="$WORK/out"
+	set +e
+	(cd "$WORK" && "$SUT" "$@") >"$OUT" 2>&1
 	RC=$?
 	set -e
 }
@@ -78,6 +92,44 @@ check "missing code path warns, does not fail" 0 "$RC" "$OUT" \
 printf 'not markdown\n' > "$WORK/notes.txt"
 run_sut "$WORK/notes.txt"
 check "no markdown self-skips" 0 "$RC" "$OUT" "nothing to lint, skipping"
+
+# 5. A conforming design filename -> pass.
+printf '# Something\n\nContent.\n' > "$WORK/docs/design/366-something.md"
+run_sut_rel docs/design/366-something.md
+check "conforming design filename passes" 0 "$RC" "$OUT" "0 error(s)"
+
+# 6. A design doc missing its `{seq}-` prefix -> fail, naming file and shape.
+printf '# Something\n\nContent.\n' > "$WORK/docs/design/something.md"
+run_sut_rel docs/design/something.md
+check "design filename without a seq prefix fails" 1 "$RC" "$OUT" \
+	"docs/design/something.md: design doc filename must be {seq}-{slug}.md"
+
+# 7. A slug with a character outside the class is just as wrong as a missing
+#    prefix. Underscore is out of class under every locale.
+printf '# Shouty\n\nContent.\n' > "$WORK/docs/design/366-shouty_slug.md"
+run_sut_rel docs/design/366-shouty_slug.md
+check "design filename with an underscore in the slug fails" 1 "$RC" "$OUT" \
+	"docs/design/366-shouty_slug.md: design doc filename must be {seq}-{slug}.md"
+
+# 7b. Uppercase alone, with nothing else out of class — this is the case that
+#     regresses if the slug pattern goes back to a collation-dependent `a-z`
+#     range, which under en_US.UTF-8 spans the uppercase letters too.
+printf '# Shouty\n\nContent.\n' > "$WORK/docs/design/366-ShoutySlug.md"
+run_sut_rel docs/design/366-ShoutySlug.md
+check "design filename with an uppercase slug fails" 1 "$RC" "$OUT" \
+	"docs/design/366-ShoutySlug.md: design doc filename must be {seq}-{slug}.md"
+
+# 8. Only files *directly* under docs/design/ are design docs.
+mkdir -p "$WORK/docs/design/notes"
+printf '# Scratch\n\nContent.\n' > "$WORK/docs/design/notes/scratch.md"
+run_sut_rel docs/design/notes/scratch.md
+check "nested subdirectory is out of the filename rule's scope" 0 "$RC" "$OUT" "0 error(s)"
+
+# 9. The rule anchors on the repo-relative path: an absolute path that merely
+#    ends in docs/design/<name>.md belongs to some other tree (this is what
+#    keeps the sibling.md fixture and case 1 working).
+run_sut "$WORK/docs/design/something.md"
+check "absolute docs/design path is not gated by the filename rule" 0 "$RC" "$OUT" "0 error(s)"
 
 echo
 echo "passed $pass, failed $fail"

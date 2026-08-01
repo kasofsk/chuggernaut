@@ -91,6 +91,10 @@ Two independent joins, both derived at read time — nothing is stored:
   ([`crates/types/src/groups.rs`](../crates/types/src/groups.rs),
   `DESIGN_GROUP_PREFIX`). The leading `<seq>-` is what the view sorts and labels
   by; it is a convention, not an identity — the path is the identity.
+  [`.chug/tasks/doc-lint.sh`](../.chug/tasks/doc-lint.sh) rejects a new
+  `docs/design/*.md` whose basename is not `{seq}-{slug}.md` (leading digits, a
+  hyphen, a lowercase-kebab slug), so the sort key and the label are always
+  there to derive.
 - **Group name → jobs.** Every job whose `groups` list names that group is a
   member, and the roll-up (`counts`, `open`) is one pass over the project's job
   records. A design nobody has filed a job against is still a row, with an empty

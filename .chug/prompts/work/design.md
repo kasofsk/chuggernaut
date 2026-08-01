@@ -7,7 +7,7 @@ ticket was provided, and exit non-zero.
 
 A `design` job produces **one markdown document** — an architecture/plan that
 argues a decision and its tradeoffs and sets direction — under
-`docs/design/<slug>.md`. It writes prose, not code: the implementation lands in
+`docs/design/{seq}-{slug}.md`. It writes prose, not code: the implementation lands in
 the `code`/`web` jobs that depend on this one and cite it. The repo's `docs/`
 tree is the project wiki (`spec.md` §9.4); design docs live under `docs/design/`.
 
@@ -21,8 +21,10 @@ Before writing, orient yourself — don't re-derive what's documented:
 
 Then:
 
-1. Write `docs/design/<slug>.md` — pick a short kebab-case `<slug>` from the
-   brief. Argue the decision, don't just assert it: state the problem, lay out
+1. Write `docs/design/{seq}-{slug}.md` — `{seq}` is **this job's number**, and
+   `{slug}` a short lowercase-kebab name from the brief (`361-per-run-placement.md`).
+   The filename is the registry key the Designs view joins on, so `doc-lint`
+   fails a name of any other shape. Argue the decision, don't just assert it: state the problem, lay out
    the options you weighed, give each option's tradeoffs **honestly** (including
    the one you rejected and why), and recommend a direction. Cite the spec
    sections and code paths you rely on — write repo paths in backticks (e.g.
@@ -42,9 +44,10 @@ Then:
    including the vocabulary in use and how the document reaches the Designs
    view: [`docs/design-docs.md`](../../../docs/design-docs.md).
 3. Keep the change to the design at hand — do not edit code or unrelated docs.
-4. `.chug/tasks/doc-lint.sh` runs on your output: relative links must resolve and the
-   markdown must be well-formed (closed code fences, spaced headings).
-   Backtick'd code paths are checked best-effort — keep them accurate.
+4. `.chug/tasks/doc-lint.sh` runs on your output: the filename must be
+   `{seq}-{slug}.md`, relative links must resolve, and the markdown must be
+   well-formed (closed code fences, spaced headings). Backtick'd code paths are
+   checked best-effort — keep them accurate.
 5. Commit to the current branch (you are already on the job branch) with a clear
    message, and push. `.githooks/pre-commit` runs the doc lint on your staged
    markdown as an advisory pass — it prints what a `design` job's stage-1 gate

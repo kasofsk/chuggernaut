@@ -1,12 +1,13 @@
 # A `design` job produces one architecture/plan document — not code. The agent
-# writes `docs/design/<slug>.md` arguing a decision and its tradeoffs; later
+# writes `docs/design/{seq}-{slug}.md` arguing a decision and its tradeoffs; later
 # `code`/`web` jobs depend on it and cite it. Two stages gate the markdown
 # through the normal merge path:
 #   stage 0 — an agent reviewer (.chug/tasks/review-design.md) judges whether the doc
 #             addresses the brief, weighs alternatives honestly, and stays
 #             consistent with spec.md and the codebase as they exist.
 #   stage 1 — the shared doc lint (.chug/tasks/doc-lint.sh: markdown well-formedness,
-#             intra-repo link resolution, best-effort code-path existence) runs
+#             intra-repo link resolution, best-effort code-path existence, and the
+#             docs/design/{seq}-{slug}.md filename shape) runs
 #             alongside the appended project `ci` default (.chug/jobs/_defaults.yaml).
 #             `ci` self-skips a doc-only diff in seconds via its .chug/tasks/ci.sh glob
 #             matcher (no crates/** change → no cargo build), so stage 1 is cheap.
