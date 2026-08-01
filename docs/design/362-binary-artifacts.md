@@ -170,7 +170,7 @@ Three consequences, in ascending order of severity:
 1. **It is placement-dependent.** `NodeHandle::Docker` calls the backend
    in-process, with no NATS hop and no bound but memory. The identical file
    harvests fine on the dispatcher's own Docker node and fails on a worker —
-   and per [per-run-placement.md](per-run-placement.md), *not one job type in
+   and per [361-per-run-placement.md](361-per-run-placement.md), *not one job type in
    this repo sets `placement:`*, so which node a container lands on is not
    controlled by anyone.
 2. **It is already live, on a shipped path.** `eval-result.json` extraction
@@ -717,7 +717,7 @@ Stated plainly, because a FINDING that cannot be falsified is an opinion:
   not a substitution" precedent this document applies to the output direction
 - [#309](309-host-native-execution.md) — host-native execution, which redefines
   what harvesting means for mobile
-- [per-run-placement.md](per-run-placement.md) — the model for handling a brief
+- [361-per-run-placement.md](361-per-run-placement.md) — the model for handling a brief
   that overstates its case, and the source for "no job type sets `placement:`"
 - `spec.md` §1.6, §3.1, §3.3, §5.1, §14; Appendix: Deferred
 - `crates/store/src/artifacts.rs`, `crates/store/src/lib.rs`,

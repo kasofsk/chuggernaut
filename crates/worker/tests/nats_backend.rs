@@ -915,8 +915,9 @@ async fn refresh_reports_skip_without_git_credential() {
     daemon.abort();
 }
 
-/// The `copy_file` reply bound over the real wire (design `binary-artifacts.md`
-/// S0): a file over [`store::worker::MAX_COPY_FILE_BYTES`] comes back PROMPTLY
+/// The `copy_file` reply bound over the real wire (design
+/// `362-binary-artifacts.md` S0): a file over
+/// [`store::worker::MAX_COPY_FILE_BYTES`] comes back PROMPTLY
 /// as a named error where it used to publish a reply nothing could carry and
 /// block the caller for the full 60s `OP_TIMEOUT`, and a file AT the bound
 /// still round-trips whole.
