@@ -23,8 +23,8 @@
 		{"id":"2d60a2b5f4cd37f9","type":"text","text":"done","x":1760,"y":-220,"width":250,"height":60},
 		{"id":"df4eb9371695ce36","type":"text","text":"triage","x":1145,"y":-450,"width":80,"height":60},
 		{"id":"85ebbad968e4bc42","type":"text","text":"triage","x":1490,"y":-450,"width":80,"height":60},
-		{"id":"d3d13aedf984f822","type":"text","text":"Coding Task\n- variable iteration limit","x":730,"y":-100,"width":250,"height":140},
-		{"id":"743734c0483dd2af","type":"text","text":"Deploy Task\n- iteration limit of 1 ?\n\n\nDeploy Eval Criteria\n- if anything looks abnormal, fail the deploy and triage a new task to rollback / debug etc","x":1060,"y":-100,"width":250,"height":280}
+		{"id":"d3d13aedf984f822","type":"text","text":"Coding Task\n- variable iteration limit","x":1420,"y":430,"width":250,"height":140},
+		{"id":"743734c0483dd2af","type":"text","text":"Deploy Task\n- iteration limit of 1 ?\n\n\nDeploy Eval Criteria\n- if anything looks abnormal, fail the deploy and triage a new task to rollback / debug etc","x":1750,"y":430,"width":250,"height":280}
 	],
 	"edges":[
 		{"id":"bf012fe3a0c88b59","fromNode":"d93fb9cb7a9d470a","fromSide":"right","toNode":"5e72b262b103e707","toSide":"left"},
