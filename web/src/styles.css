@@ -1900,9 +1900,6 @@ table.jobs tbody tr.row-draft td:first-child {
   .job-heading .job-num {
     font-size: var(--fs-lg);
   }
-  .ov-layout {
-    grid-template-columns: minmax(0, 1fr); /* stack: states above the chart */
-  }
   input,
   select,
   textarea {
@@ -4890,6 +4887,11 @@ tr[data-state='Batched'] {
    tokens; everything textual wears text tokens, never a series color. */
 .activity-chart {
   position: relative;
+  min-width: 0;
+}
+.activity-chart svg {
+  display: block;
+  max-width: 100%;
 }
 .ac-legend {
   display: flex;
@@ -4924,7 +4926,7 @@ tr[data-state='Batched'] {
 }
 .ac-label {
   fill: var(--dim);
-  font-size: 10px;
+  font-size: 12px;
 }
 .ac-col-hi {
   fill: var(--stripe);
@@ -4977,6 +4979,17 @@ table.type-stats .num {
 }
 .tabs-spacer { flex: 1; }
 .tabs-platform { opacity: 0.7; }
+
+/* The stats overview is defined below the file's first phone block, so its
+   phone rules live here (see that block's header). A phone has no room for a
+   sidebar beside a chart, so the chart joins the single stacked column and
+   takes the card's full width rather than a squeezed column it overflows. */
+@media (max-width: 640px) {
+  .ov-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--sp-4);
+  }
+}
 
 /* ── Skeleton loading (src/components/Skeleton.tsx) ────────────────────────
    Initial-load placeholders: card-toned rounded rects with a subtle

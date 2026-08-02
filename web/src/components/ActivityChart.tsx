@@ -1,5 +1,24 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 
+const DAY_LABEL_WIDTH_PX = 54
+
+/**
+ * Indexes of the day columns that get a tick label, thinned until consecutive
+ * labels are at least `labelWidth` apart so none can collide at any width.
+ */
+export function dayLabelIndexes(n: number, plotWidth: number, labelWidth: number): number[] {
+  if (n <= 0) return []
+  const every = Math.max(1, Math.ceil(labelWidth / Math.max(1, plotWidth / n)))
+  const out = [0]
+  for (let i = every; i < n; i += every) out.push(i)
+  const tail = out[out.length - 1]
+  if (tail !== n - 1) {
+    if (n - 1 - tail >= every) out.push(n - 1)
+    else if (out.length > 1) out[out.length - 1] = n - 1
+  }
+  return out
+}
+
 /**
  * The stats page's daily-activity chart: grouped bars of jobs created vs
  * completed per day. Hand-rolled SVG like Sparkline — no chart library — but
@@ -27,16 +46,16 @@ export function ActivityChart({
   useLayoutEffect(() => {
     const el = wrapRef.current
     if (!el) return
-    const ro = new ResizeObserver(([e]) => setWidth(Math.max(280, e.contentRect.width)))
+    const ro = new ResizeObserver(([e]) => setWidth(Math.max(200, e.contentRect.width)))
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
 
   const n = starts.length
-  const pad = { top: 10, right: 8, bottom: 22, left: 26 }
+  const max = Math.max(1, ...created, ...completed)
+  const pad = { top: 10, right: 8, bottom: 24, left: 10 + String(max).length * 8 }
   const plotW = width - pad.left - pad.right
   const plotH = height - pad.top - pad.bottom
-  const max = Math.max(1, ...created, ...completed)
   const step = max <= 4 ? 1 : Math.ceil(max / 4)
   const ticks: number[] = []
   for (let v = step; v <= max; v += step) ticks.push(v)
@@ -50,8 +69,11 @@ export function ActivityChart({
 
   const fmtDay = (t: number) =>
     new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-  const labelEvery = Math.max(1, Math.round(n / 5))
-  const labeled = (i: number) => i === 0 || i === n - 1 || i % labelEvery === 0
+  const labeled = new Set(dayLabelIndexes(n, plotW, DAY_LABEL_WIDTH_PX))
+  const labelX = (i: number) => {
+    const inset = DAY_LABEL_WIDTH_PX / 2
+    return Math.min(width - inset, Math.max(inset, pad.left + i * colW + colW / 2))
+  }
 
   const bar = (bx: number, v: number) => {
     const ty = y(v)
@@ -85,7 +107,7 @@ export function ActivityChart({
         {ticks.map((v) => (
           <g key={v}>
             <line className="ac-grid" x1={pad.left} x2={width - pad.right} y1={y(v)} y2={y(v)} />
-            <text className="ac-label" x={pad.left - 5} y={y(v) + 3} textAnchor="end">
+            <text className="ac-label" x={pad.left - 5} y={y(v) + 4} textAnchor="end">
               {v}
             </text>
           </g>
@@ -104,8 +126,13 @@ export function ActivityChart({
             )}
             <path className="ac-bar ac-created" d={bar(x0(i), created[i])} />
             <path className="ac-bar ac-completed" d={bar(x0(i) + barW + barGap, completed[i])} />
-            {labeled(i) && (
-              <text className="ac-label" x={pad.left + i * colW + colW / 2} y={height - 6} textAnchor="middle">
+            {labeled.has(i) && (
+              <text
+                className="ac-label"
+                x={labelX(i)}
+                y={height - 6}
+                textAnchor="middle"
+              >
                 {fmtDay(t)}
               </text>
             )}

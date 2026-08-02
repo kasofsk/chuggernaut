@@ -740,6 +740,9 @@ stale.
 - **function capacityState** — No provenance at all: a docker-endpoint node (`DOCKER_NODES` still owns its capacity, design #293 §7) or a dispatcher older than the capacity fields. Say nothing rather than infer a state from an absence.
 
 ### `web/src/components/ActivityChart.tsx`
+- **function dayLabelIndexes** — Which day columns get a tick label, decided from the plot's actual width rather than a fixed "about five of them": a column narrower than a date label means fewer labels, so the axis stays readable on a phone. It always labels the first day, and takes the last only when it clears the previous label by a full label width — otherwise it replaces that one, which is what stops the old `i % every` + "always label n-1" rule from printing two adjacent dates on top of each other at 14 days.
+- **const width** — The floor is 200px, below any real card, because the SVG is sized in CSS pixels and a floor above the container is horizontal page scroll, not a wider chart. Everything narrower than that is a degenerate box (a hidden tab, a zero-width parent), where the bars' arithmetic matters more than their legibility.
+- **const pad** — The y-axis gutter grows with the digit count of the largest value, so a three-digit day does not print into the plot.
 - **const bar** — Rounded top only: rect with rx would round the baseline too, so bars use a path — up, arc the two top corners, down — anchored flat on the baseline.
 
 ### `web/src/components/Attachments.tsx`
