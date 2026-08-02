@@ -980,6 +980,75 @@ async fn oversized_copy_file_fails_fast_with_a_named_error() {
     daemon.abort();
 }
 
+/// The chunked read over the real wire (design `362-binary-artifacts.md` S1):
+/// an output archive several single-shot replies long comes back whole and
+/// byte-exact, one past the caller's own ceiling is refused with the same named
+/// error, and an absent path is still `None` rather than a failure.
+#[tokio::test]
+async fn chunked_copy_file_carries_a_multi_reply_archive() {
+    use store::worker::{COPY_FILE_TOO_LARGE, MAX_COPY_FILE_BYTES};
+
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let Some((fleet, daemon)) = setup(&server, b"x").await else {
+        return;
+    };
+    let whole = MAX_COPY_FILE_BYTES * 3 + 17;
+    let cap = whole + 1;
+    let id = fleet
+        .launch(suite::cfg(&format!(
+            "head -c {whole} /dev/urandom > /out.tar.gz; sha256sum /out.tar.gz > /out.sha"
+        )))
+        .await
+        .unwrap();
+    assert_eq!(fleet.wait(&id).await.unwrap(), 0);
+
+    let got = fleet
+        .copy_file_chunked(&id, "/out.tar.gz", cap)
+        .await
+        .unwrap()
+        .expect("the archive is present");
+    assert_eq!(
+        got.len(),
+        whole,
+        "a file spanning several replies must come back whole"
+    );
+    let expected = String::from_utf8(fleet.copy_file(&id, "/out.sha").await.unwrap().unwrap())
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&got)),
+        expected,
+        "the reassembled archive must be byte-identical, not merely the right length"
+    );
+
+    let err = fleet
+        .copy_file_chunked(&id, "/out.tar.gz", whole - 1)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains(COPY_FILE_TOO_LARGE) && err.contains(&whole.to_string()),
+        "a file past the caller's ceiling must be refused by name: {err}"
+    );
+
+    assert!(
+        fleet
+            .copy_file_chunked(&id, "/no-such-output.tar.gz", cap)
+            .await
+            .unwrap()
+            .is_none(),
+        "an absent archive is a silent None, never an error"
+    );
+
+    suite::rm(&id);
+    daemon.abort();
+}
+
 #[tokio::test]
 async fn payload_guard_rejects_bulk_inline_files() {
     let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {

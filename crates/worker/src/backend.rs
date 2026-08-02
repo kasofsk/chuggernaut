@@ -32,7 +32,7 @@ use container::{
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use store::NatsStore;
-use store::worker::{WorkerRpc, WorkerRpcError};
+use store::worker::{MAX_COPY_FILE_BYTES, WorkerRpc, WorkerRpcError};
 use types::worker::{
     FileSource, RefreshOutcome, WireFile, WireStatus, WorkerError, WorkerLaunchRequest, b64_decode,
     b64_encode,
@@ -604,6 +604,46 @@ impl FleetBackend {
     }
 }
 
+/// Read one container file off a worker node in [`MAX_COPY_FILE_BYTES`] slices
+/// (design #362 S1), so an output archive past a single reply's bound still
+/// travels. Bounded by construction: `max_bytes` fixes the slice count, so a
+/// node returning short chunks forever hits the cap instead of looping.
+async fn copy_file_chunked_rpc(
+    rpc: &WorkerRpc,
+    id: &ContainerId,
+    path: &str,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, BackendError> {
+    debug_assert!(max_bytes > 0, "a zero-byte ceiling reads nothing");
+    let chunks_max = max_bytes.div_ceil(MAX_COPY_FILE_BYTES) + 1;
+    let mut out: Vec<u8> = Vec::new();
+    for _ in 0..chunks_max {
+        let ok = rpc
+            .copy_file_chunk(id, path, out.len() as u64, max_bytes as u64)
+            .await
+            .map_err(|e| rpc_err(Some(id), e))?;
+        let Some(b64) = ok.data_b64 else {
+            return Ok(None);
+        };
+        let chunk = b64_decode(&b64).map_err(BackendError::Other)?;
+        let advanced = chunk.len();
+        out.extend_from_slice(&chunk);
+        if out.len() as u64 >= ok.total_len {
+            return Ok(Some(out));
+        }
+        if advanced == 0 {
+            return Err(BackendError::Other(format!(
+                "{path}: worker returned an empty slice at offset {} of {} bytes",
+                out.len(),
+                ok.total_len
+            )));
+        }
+    }
+    Err(BackendError::Other(format!(
+        "{path}: still incomplete after {chunks_max} slice reads bounded by {max_bytes} bytes"
+    )))
+}
+
 fn rpc_err(id: Option<&ContainerId>, e: WorkerRpcError) -> BackendError {
     match e {
         WorkerRpcError::Op(WorkerError::NotFound { id }) => BackendError::NotFound(id),
@@ -721,6 +761,19 @@ impl ContainerBackend for FleetBackend {
                     None => Ok(None),
                 }
             }
+        }
+    }
+
+    async fn copy_file_chunked(
+        &self,
+        id: &ContainerId,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, BackendError> {
+        let node = self.route(id)?;
+        match &node.handle {
+            NodeHandle::Docker { backend } => backend.copy_file_chunked(id, path, max_bytes).await,
+            NodeHandle::Worker { rpc, .. } => copy_file_chunked_rpc(rpc, id, path, max_bytes).await,
         }
     }
 

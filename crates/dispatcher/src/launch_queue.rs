@@ -55,9 +55,13 @@ pub(crate) const QUEUE_TIMEOUT_REASON: &str = "no_free_slots_timeout";
 /// monitor shapes the initial launch paths spawn.
 #[derive(Clone, Copy)]
 pub(crate) enum MonitorKind {
-    /// Work / wrap-up: harvest logs, report the exit.
+    /// Work / wrap-up: harvest logs and any output archive, report the exit.
+    /// The output half is work-side only (design #362), which is exactly the
+    /// line this enum draws.
     Logs,
-    /// Evaluation / merge gate: additionally extract `eval-result.json`.
+    /// Evaluation / merge gate: additionally extract `eval-result.json`, and
+    /// never an output archive — an evaluator's structured verdict already has
+    /// its own channel.
     Eval,
 }
 
@@ -464,9 +468,9 @@ impl Core {
         }
     }
 
-    /// Monitor for a command work / wrap-up container: wait, harvest logs,
-    /// reclaim the overlay, report the exit. Shared by the initial launch paths
-    /// and the queue resume so both behave identically.
+    /// Monitor for a command work / wrap-up container: wait, harvest logs and
+    /// any output archive, reclaim the overlay, report the exit. Shared by the
+    /// initial launch paths and the queue resume so both behave identically.
     pub(crate) fn spawn_logs_monitor(
         &self,
         owner: &str,
@@ -518,11 +522,16 @@ impl Core {
         tokio::spawn(async move {
             let exit_code = backend.wait(&id).await.unwrap_or(-1);
             let exit = match kind {
-                MonitorKind::Logs => TaskExit {
-                    structured: monitor_harvest_deploy_report(&harvest, &o, &p, seq, task_id, &id)
+                MonitorKind::Logs => {
+                    harvest.collect_output(&o, &p, seq, task_id, &id).await;
+                    TaskExit {
+                        structured: monitor_harvest_deploy_report(
+                            &harvest, &o, &p, seq, task_id, &id,
+                        )
                         .await,
-                    ..TaskExit::code(exit_code)
-                },
+                        ..TaskExit::code(exit_code)
+                    }
+                }
                 MonitorKind::Eval => {
                     let eval_json = monitor_copy_eval_json(&backend, seq, task_id, &id).await;
                     TaskExit {

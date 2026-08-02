@@ -31,6 +31,9 @@ pub enum ArtifactKind {
     SessionTranscript,
     /// Captured container stdout+stderr.
     Stdout,
+    /// The archive a work container left at `/workspace/chug-output.tar.gz`
+    /// (design #362 Decision 2). Lives in its own bucket, on its own clock.
+    Output,
 }
 
 impl ArtifactKind {
@@ -38,6 +41,7 @@ impl ArtifactKind {
         match self {
             ArtifactKind::SessionTranscript => "session.jsonl",
             ArtifactKind::Stdout => "stdout.log",
+            ArtifactKind::Output => "output.tar.gz",
         }
     }
 
@@ -45,10 +49,16 @@ impl ArtifactKind {
         match s {
             "session.jsonl" => Some(ArtifactKind::SessionTranscript),
             "stdout.log" => Some(ArtifactKind::Stdout),
+            "output.tar.gz" => Some(ArtifactKind::Output),
             _ => None,
         }
     }
 }
+
+/// The largest blob the platform accepts anywhere: an operator attachment
+/// (§1.6) and a harvested output archive (design #362) share it, so the size
+/// band has one number rather than two.
+pub const MAX_BLOB_BYTES: usize = 16 * 1024 * 1024;
 
 /// Fallback content type for an attachment whose type is unknown or whose
 /// stored metadata is unreadable.
@@ -191,12 +201,29 @@ async fn bound<T, E: std::fmt::Display>(
 
 pub struct ArtifactStore {
     obj: ObjectStore,
+    /// The `outputs` bucket (design #362 R1) — its own retention and its own
+    /// byte ceiling, so a build byproduct can never displace a transcript.
+    outputs: ObjectStore,
     crypto: ArtifactCrypto,
 }
 
 impl ArtifactStore {
-    pub fn new(obj: ObjectStore, crypto: ArtifactCrypto) -> Self {
-        Self { obj, crypto }
+    pub fn new(obj: ObjectStore, outputs: ObjectStore, crypto: ArtifactCrypto) -> Self {
+        Self {
+            obj,
+            outputs,
+            crypto,
+        }
+    }
+
+    /// Which bucket a kind lives in. Outputs are isolated from the audit record
+    /// (transcripts, stdout, attachments) precisely so their pressure stays
+    /// theirs (design #362 R1).
+    fn bucket_for(&self, kind: ArtifactKind) -> &ObjectStore {
+        match kind {
+            ArtifactKind::Output => &self.outputs,
+            ArtifactKind::SessionTranscript | ArtifactKind::Stdout => &self.obj,
+        }
     }
 
     pub async fn put(
@@ -212,7 +239,8 @@ impl ArtifactStore {
         let name = keys::artifact_key(owner, project, job_seq, task_id, kind.as_str());
         bound(
             "artifact put",
-            self.obj.put(name.as_str(), &mut sealed.as_slice()),
+            self.bucket_for(kind)
+                .put(name.as_str(), &mut sealed.as_slice()),
         )
         .await?;
         Ok(())
@@ -229,8 +257,8 @@ impl ArtifactStore {
         kind: ArtifactKind,
     ) -> crate::Result<Option<Vec<u8>>> {
         let name = keys::artifact_key(owner, project, job_seq, task_id, kind.as_str());
-        let mut object = match tokio::time::timeout(OBJ_OP_BOUND, self.obj.get(name.as_str())).await
-        {
+        let obj = self.bucket_for(kind);
+        let mut object = match tokio::time::timeout(OBJ_OP_BOUND, obj.get(name.as_str())).await {
             Ok(Err(_)) => return Ok(None),
             Ok(Ok(o)) => o,
             Err(_) => {
@@ -350,7 +378,7 @@ impl ArtifactStore {
         Ok(true)
     }
 
-    /// Kinds present for a task.
+    /// Kinds present for a task, across both buckets.
     pub async fn list_for_task(
         &self,
         owner: &str,
@@ -358,17 +386,55 @@ impl ArtifactStore {
         job_seq: u64,
         task_id: u64,
     ) -> crate::Result<Vec<ArtifactKind>> {
-        use futures::TryStreamExt as _;
         let prefix = keys::artifact_task_prefix(owner, project, job_seq, task_id);
-        let list = bound("artifact list", self.obj.list()).await?;
-        let infos: Vec<_> = bound("artifact list collect", list.try_collect()).await?;
-        Ok(infos
-            .iter()
-            .filter(|i| !i.deleted)
-            .filter_map(|i| i.name.strip_prefix(&prefix))
-            .filter_map(ArtifactKind::parse)
-            .collect())
+        let mut kinds = Vec::new();
+        for obj in [&self.obj, &self.outputs] {
+            for name in list_names(obj).await? {
+                if let Some(kind) = name.strip_prefix(&prefix).and_then(ArtifactKind::parse) {
+                    kinds.push(kind);
+                }
+            }
+        }
+        Ok(kinds)
     }
+
+    /// Drop every output a job produced and nothing else (spec §3.2,
+    /// revoke-time GC) — a revoked job is still an audit record, so its
+    /// transcripts, stdout and attachments stay.
+    ///
+    /// Returns how many were removed.
+    pub async fn delete_outputs_for_job(
+        &self,
+        owner: &str,
+        project: &str,
+        job_seq: u64,
+    ) -> crate::Result<usize> {
+        let prefix = format!("{}.", keys::job_key(owner, project, job_seq));
+        let suffix = format!(".{}", ArtifactKind::Output.as_str());
+        let mut removed = 0;
+        for name in list_names(&self.outputs).await? {
+            if !name.starts_with(&prefix) || !name.ends_with(&suffix) {
+                continue;
+            }
+            bound("output delete", self.outputs.delete(name.as_str())).await?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+}
+
+/// Live object names in a bucket. Both listings are metadata-only reads — no
+/// blob is opened — and both are bounded by [`OBJ_OP_BOUND`].
+async fn list_names(obj: &ObjectStore) -> crate::Result<Vec<String>> {
+    use futures::TryStreamExt as _;
+    let list = bound("artifact list", obj.list()).await?;
+    let infos: Vec<async_nats::jetstream::object_store::ObjectInfo> =
+        bound("artifact list collect", list.try_collect()).await?;
+    Ok(infos
+        .into_iter()
+        .filter(|i| !i.deleted)
+        .map(|i| i.name)
+        .collect())
 }
 
 #[cfg(test)]
@@ -378,10 +444,30 @@ mod tests {
 
     #[test]
     fn kind_round_trips() {
-        for k in [ArtifactKind::SessionTranscript, ArtifactKind::Stdout] {
+        for k in [
+            ArtifactKind::SessionTranscript,
+            ArtifactKind::Stdout,
+            ArtifactKind::Output,
+        ] {
             assert_eq!(ArtifactKind::parse(k.as_str()), Some(k));
         }
         assert_eq!(ArtifactKind::parse("passwd"), None);
+        assert_eq!(ArtifactKind::parse("output.tar"), None);
+    }
+
+    /// The output kind carries two dots, so the key layout has to survive a
+    /// multi-dot trailing segment the same way `session.jsonl` does — the
+    /// listing and the revoke-time GC both key off exactly this shape.
+    #[test]
+    fn output_key_layout() {
+        let key = keys::artifact_key("acme", "api", 42, 7, ArtifactKind::Output.as_str());
+        assert_eq!(key, "acme.api.42.7.output.tar.gz");
+        let prefix = keys::artifact_task_prefix("acme", "api", 42, 7);
+        assert_eq!(
+            key.strip_prefix(&prefix).and_then(ArtifactKind::parse),
+            Some(ArtifactKind::Output)
+        );
+        assert!(key.starts_with(&format!("{}.", keys::job_key("acme", "api", 42))));
     }
 
     /// The kind carries a dot, so it must remain the trailing segment and the

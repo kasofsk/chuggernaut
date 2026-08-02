@@ -295,6 +295,21 @@ fn commit_work(rig: &Rig) {
     });
 }
 
+/// The output archive stored against one task, `None` when that container's
+/// [`OUTPUT_PATH`](dispatcher::platform_ops::harvest::OUTPUT_PATH) was never
+/// read. Design #362 S1's scope tests ask this of a work task and of every
+/// evaluator in the same job.
+async fn stored_output(
+    artifacts: &store::ArtifactStore,
+    seq: u64,
+    task_id: u64,
+) -> Option<Vec<u8>> {
+    artifacts
+        .get("acme", "api", seq, task_id, store::ArtifactKind::Output)
+        .await
+        .unwrap()
+}
+
 async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::Job {
     test_utils::wait::job_where(
         store,
@@ -2329,6 +2344,208 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
         removed.len(),
         rig.backend.launches().len(),
         "every launched container should be removed after its task exits"
+    );
+    assert_invariants_of(&rig.invariants);
+}
+
+/// Design #362 S1, the scope decision: a **work** container's
+/// `/workspace/chug-output.tar.gz` is harvested and listed on its task, and
+/// neither evaluator container — both of which this fake backend shows the very
+/// same path — is read. The `staged` job type carries both evaluator shapes, so
+/// the agent evaluator fails this the moment the hook moves inside the
+/// `collect_agent` that the agent-work and agent-eval paths share, and the
+/// command evaluator fails it the moment `MonitorKind::Eval` grows the call.
+#[tokio::test]
+async fn agent_work_output_is_harvested_and_neither_evaluator_is() {
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let Some(rig) = rig_with_artifacts(Some(identity.clone())).await else {
+        return;
+    };
+    rig.backend.put_file(
+        dispatcher::platform_ops::harvest::OUTPUT_PATH,
+        b"gzipped-coverage-tree".to_vec(),
+    );
+
+    commit_work(&rig);
+    let h = rig.handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: true,
+                abort: false,
+                structured: None,
+                token_usage: None,
+                cover_html: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let job = rig.handle.create_job(req("staged")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig.store.tasks().await.unwrap();
+    let log = tasks.list_for_job("acme", "api", job.id).await.unwrap();
+    let work = log.iter().find(|t| t.phase == TaskPhase::Work).unwrap();
+    let evaluator = |name: &str| {
+        log.iter()
+            .find(|t| t.evaluator.as_deref() == Some(name))
+            .unwrap()
+            .id
+    };
+
+    let artifacts = rig
+        .store
+        .artifacts(store::ArtifactCrypto::with_identity(&identity).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        stored_output(&artifacts, job.id, work.id).await.as_deref(),
+        Some(b"gzipped-coverage-tree".as_slice()),
+    );
+    assert!(
+        artifacts
+            .list_for_task("acme", "api", job.id, work.id)
+            .await
+            .unwrap()
+            .contains(&store::ArtifactKind::Output),
+        "the output must appear in the work task's artifact listing"
+    );
+    for (shape, id) in [("agent", evaluator("review")), ("command", evaluator("ci"))] {
+        assert!(
+            stored_output(&artifacts, job.id, id).await.is_none(),
+            "a {shape} evaluator's output archive must NOT be harvested"
+        );
+    }
+    assert_invariants_of(&rig.invariants);
+}
+
+/// The other half of #362 S1's scope: command work reaches the archive through
+/// `MonitorKind::Logs`, which read only `logs` before this. The agent evaluator
+/// in the same job is still not read.
+#[tokio::test]
+async fn command_work_output_is_harvested_and_the_agent_evaluator_is_not() {
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let Some(rig) = rig_with_artifacts(Some(identity.clone())).await else {
+        return;
+    };
+    rig.backend.put_file(
+        dispatcher::platform_ops::harvest::OUTPUT_PATH,
+        b"coverage.lcov + coverage-html".to_vec(),
+    );
+    let h = rig.handle.clone();
+    rig.provider.on_run(move |_| async move {
+        h.submit_eval(
+            "acme",
+            "api",
+            1,
+            2,
+            EvalSubmission {
+                pass: true,
+                abort: false,
+                structured: None,
+                token_usage: None,
+                cover_html: None,
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let job = rig.handle.create_job(req("cmd-agent-eval")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig.store.tasks().await.unwrap();
+    let log = tasks.list_for_job("acme", "api", job.id).await.unwrap();
+    let work = log.iter().find(|t| t.phase == TaskPhase::Work).unwrap();
+    let eval = log
+        .iter()
+        .find(|t| t.phase == TaskPhase::Evaluation)
+        .unwrap();
+
+    let artifacts = rig
+        .store
+        .artifacts(store::ArtifactCrypto::with_identity(&identity).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        stored_output(&artifacts, job.id, work.id).await.as_deref(),
+        Some(b"coverage.lcov + coverage-html".as_slice()),
+    );
+    assert!(
+        stored_output(&artifacts, job.id, eval.id).await.is_none(),
+        "an agent evaluator's output archive must NOT be harvested"
+    );
+    assert_invariants_of(&rig.invariants);
+}
+
+/// Design #362 R2: revoking a job drops its outputs and leaves the audit
+/// record. A revoked job is still evidence of what an agent did.
+#[tokio::test]
+async fn revoke_deletes_outputs_and_keeps_the_audit_record() {
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let Some(rig) = rig_with_artifacts(Some(identity.clone())).await else {
+        return;
+    };
+    rig.backend.put_file(
+        dispatcher::platform_ops::harvest::OUTPUT_PATH,
+        b"byproduct".to_vec(),
+    );
+    rig.backend
+        .put_logs(b"Cloning into '/workspace'...".to_vec());
+    rig.backend.script_exits([1, 1]);
+
+    let job = rig.handle.create_job(req("cmd-work")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    let tasks = rig.store.tasks().await.unwrap();
+    let log = tasks.list_for_job("acme", "api", job.id).await.unwrap();
+    let work = log.iter().find(|t| t.phase == TaskPhase::Work).unwrap();
+    let artifacts = rig
+        .store
+        .artifacts(store::ArtifactCrypto::with_identity(&identity).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        artifacts
+            .get("acme", "api", job.id, work.id, store::ArtifactKind::Output)
+            .await
+            .unwrap()
+            .is_some(),
+        "output stored before the revoke"
+    );
+
+    rig.handle.revoke_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Revoked).await;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let gone = artifacts
+            .get("acme", "api", job.id, work.id, store::ArtifactKind::Output)
+            .await
+            .unwrap()
+            .is_none();
+        if gone || std::time::Instant::now() >= deadline {
+            assert!(gone, "revoke must delete the job's outputs");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        artifacts
+            .get("acme", "api", job.id, work.id, store::ArtifactKind::Stdout)
+            .await
+            .unwrap()
+            .is_some(),
+        "revoke must NOT touch the audit record"
     );
     assert_invariants_of(&rig.invariants);
 }

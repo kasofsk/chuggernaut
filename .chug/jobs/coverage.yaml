@@ -4,11 +4,12 @@
 # workflow into exactly this: "coverage is a thing you ask for, not a thing that
 # runs on every push").
 #
-# The deliverable is the task's stdout: .chug/tasks/coverage.sh prints the human
-# summary last, and the dispatcher harvests a command task's container logs into
-# its stdout.log artifact (crates/platform-ops/src/harvest.rs), readable from the
-# UI and the API. coverage.lcov and coverage-html/ have nowhere to go yet — that
-# is docs/design/362-binary-artifacts.md S1, and this job type is its trigger.
+# The deliverable is the task's stdout plus its output archive:
+# .chug/tasks/coverage.sh prints the human summary last and tars coverage.lcov +
+# coverage-html/ to /workspace/chug-output.tar.gz. The dispatcher harvests a
+# command work task's logs into its stdout.log artifact and that path into its
+# output.tar.gz artifact (crates/platform-ops/src/harvest.rs, spec §3.2), both
+# readable from the UI and the API.
 name: coverage
 display_name: Coverage
 description: Instrumented cargo llvm-cov run over the whole workspace; the summary is the task's stdout. Nothing is merged.

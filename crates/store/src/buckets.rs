@@ -44,3 +44,9 @@ pub const STREAM_INGEST: &str = "ingest";
 /// container logs). Not a KV bucket: object store chunks internally, so blobs
 /// are not bound by the 1MB `max_payload` a req/reply route would hit.
 pub const OBJECT_ARTIFACTS: &str = "artifacts";
+
+/// JetStream **Object** Store for harvested work-container output archives
+/// (design #362 R1). Separate from [`OBJECT_ARTIFACTS`] so it carries its own,
+/// shorter retention and its own byte ceiling: transcripts are the audit record
+/// of what an agent did and must not be displaceable by a build byproduct.
+pub const OBJECT_OUTPUTS: &str = "outputs";

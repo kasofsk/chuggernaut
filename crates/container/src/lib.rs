@@ -179,6 +179,26 @@ pub trait ContainerBackend: Send + Sync {
         id: &ContainerId,
         path: &str,
     ) -> Result<Option<Vec<u8>>, BackendError>;
+    /// Copy a file out of the container in bounded slices, so an output archive
+    /// past one worker RPC reply still travels (spec §3.1); a file over
+    /// `max_bytes` is refused with [`types::worker::COPY_FILE_TOO_LARGE`]
+    /// rather than truncated.
+    ///
+    /// The default reads in one shot, correct for any in-process backend; a
+    /// worker-proxying backend overrides it with a chunked read.
+    async fn copy_file_chunked(
+        &self,
+        id: &ContainerId,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, BackendError> {
+        match self.copy_file(id, path).await? {
+            Some(bytes) if bytes.len() > max_bytes => Err(BackendError::Other(
+                types::worker::copy_file_too_large(path, bytes.len(), max_bytes),
+            )),
+            found => Ok(found),
+        }
+    }
     /// Captured stdout and stderr. Read after exit; this does not follow.
     /// Call before [`remove`](ContainerBackend::remove): the container's logs
     /// and filesystem vanish with it.
@@ -559,13 +579,32 @@ mod tests {
         }
     }
 
-    /// A runtime with no cheap count of its own: it answers the listing and
-    /// inherits everything derived from it. Every other op is out of this test's
-    /// reach.
-    struct ListingOnly(Result<Vec<RunningContainer>, String>);
+    /// A runtime that answers exactly the two ops these tests reach — the
+    /// managed-container listing and a single-file read — so each exercises what
+    /// the trait *derives* from them. Every other op is out of reach.
+    struct StubBackend {
+        listing: Result<Vec<RunningContainer>, String>,
+        file: Option<Vec<u8>>,
+    }
+
+    impl StubBackend {
+        fn listing(listing: Result<Vec<RunningContainer>, String>) -> Self {
+            Self {
+                listing,
+                file: None,
+            }
+        }
+
+        fn file(file: Option<Vec<u8>>) -> Self {
+            Self {
+                listing: Ok(Vec::new()),
+                file,
+            }
+        }
+    }
 
     #[async_trait]
-    impl ContainerBackend for ListingOnly {
+    impl ContainerBackend for StubBackend {
         async fn launch(&self, _: ContainerLaunchConfig) -> Result<ContainerId, BackendError> {
             unimplemented!()
         }
@@ -583,7 +622,7 @@ mod tests {
             _: &ContainerId,
             _: &str,
         ) -> Result<Option<Vec<u8>>, BackendError> {
-            unimplemented!()
+            Ok(self.file.clone())
         }
         async fn logs(&self, _: &ContainerId) -> Result<Vec<u8>, BackendError> {
             unimplemented!()
@@ -598,7 +637,7 @@ mod tests {
             unimplemented!()
         }
         async fn list_managed_running(&self) -> Result<Vec<RunningContainer>, BackendError> {
-            self.0
+            self.listing
                 .clone()
                 .map_err(|e| BackendError::Unavailable(e.clone()))
         }
@@ -619,18 +658,55 @@ mod tests {
     /// (job/181).
     #[tokio::test]
     async fn managed_running_total_defaults_to_the_listing() {
-        let empty = ListingOnly(Ok(Vec::new()));
+        let empty = StubBackend::listing(Ok(Vec::new()));
         assert_eq!(empty.managed_running_total().await.unwrap(), 0);
 
-        let busy = ListingOnly(Ok(vec![running(1), running(2), running(3)]));
+        let busy = StubBackend::listing(Ok(vec![running(1), running(2), running(3)]));
         assert_eq!(
             busy.managed_running_total().await.unwrap(),
             busy.list_managed_running().await.unwrap().len() as u32
         );
 
-        let blind = ListingOnly(Err("node w1 unreachable".into()));
+        let blind = StubBackend::listing(Err("node w1 unreachable".into()));
         let err = blind.managed_running_total().await.unwrap_err();
         assert!(err.to_string().contains("unreachable"), "{err}");
+    }
+
+    /// The chunked read's ceiling is a refusal at the boundary, never a cut
+    /// (design #362): a partial archive carries nothing, so an over-band file
+    /// comes back as the named error and no bytes at all.
+    #[tokio::test]
+    async fn copy_file_chunked_refuses_past_the_cap_and_never_truncates() {
+        let id = ContainerId::from("w1/c1");
+        let path = "/workspace/chug-output.tar.gz";
+        let cap = 1024;
+
+        for len in [cap - 1, cap] {
+            let got = StubBackend::file(Some(vec![7u8; len]))
+                .copy_file_chunked(&id, path, cap)
+                .await
+                .unwrap();
+            assert_eq!(got, Some(vec![7u8; len]), "{len} bytes must survive whole");
+        }
+
+        let err = StubBackend::file(Some(vec![7u8; cap + 1]))
+            .copy_file_chunked(&id, path, cap)
+            .await
+            .unwrap_err()
+            .to_string();
+        for expected in [types::worker::COPY_FILE_TOO_LARGE, path, "1025"] {
+            assert!(err.contains(expected), "missing {expected}: {err}");
+        }
+    }
+
+    /// No archive is the ordinary case — a work container that produced none is
+    /// silent, not an error, so nothing anywhere reads it as a failure.
+    #[tokio::test]
+    async fn copy_file_chunked_absent_is_not_an_error() {
+        let got = StubBackend::file(None)
+            .copy_file_chunked(&ContainerId::from("w1/c1"), "/workspace/nope.tar.gz", 1024)
+            .await;
+        assert_eq!(got.unwrap(), None);
     }
 
     #[test]

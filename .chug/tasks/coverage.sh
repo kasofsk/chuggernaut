@@ -3,16 +3,15 @@
 # a `coverage` job (.chug/jobs/coverage.yaml), on demand: a coverage job carries
 # no commits, so HEAD == the main it was released from and the branch is scratch.
 #
-# WHAT SURVIVES THIS RUN IS STDOUT, AND ONLY STDOUT. The dispatcher harvests a
-# command task's container logs into its `stdout.log` artifact
-# (crates/platform-ops/src/harvest.rs), which the UI and the API serve.
-# `coverage.lcov` and `coverage-html/` are written into this container's
-# workspace and are destroyed with it when harvest calls `dispose`. Keeping them
-# needs ArtifactKind::Output — docs/design/362-binary-artifacts.md S1, whose
-# stated trigger is this job type. Do NOT invent a substitute here: not a commit
-# of the files to the job branch, not an attachment upload. #362 decided the
-# mechanism; this script is the consumer that motivates it, not the place to
-# pre-empt it.
+# TWO THINGS SURVIVE THIS RUN: stdout, and /workspace/chug-output.tar.gz. The
+# dispatcher harvests a command work task's container logs into its `stdout.log`
+# artifact and that one well-known path into its `output.tar.gz` artifact
+# (crates/platform-ops/src/harvest.rs, spec §3.2), both readable from the UI and
+# the API. Everything else in this workspace is destroyed with the container when
+# harvest calls `dispose`, so anything worth keeping goes in the tarball. Do NOT
+# invent a substitute: not a commit of the files to the job branch, not an
+# attachment upload. The archive is capped at 16 MiB and an over-cap archive is
+# refused whole rather than truncated (docs/design/362-binary-artifacts.md).
 #
 # Stdout is TAILED, not headed: a worker node caps a `logs` reply at the LAST
 # 700 KiB (LOGS_CAP, crates/worker/src/daemon.rs). So the human summary is
@@ -146,10 +145,10 @@ cargo llvm-cov --workspace --all-features --no-report --no-fail-fast || test_sta
 
 cargo llvm-cov report --lcov --output-path coverage.lcov
 cargo llvm-cov report --html --output-dir coverage-html
-echo "coverage: wrote coverage.lcov and coverage-html/ into this container's workspace."
-echo "coverage:   Both are DISCARDED when the container is removed — there is nowhere"
-echo "coverage:   to put them yet (docs/design/362-binary-artifacts.md S1). The summary"
-echo "coverage:   below is the whole deliverable."
+tar czf /workspace/chug-output.tar.gz coverage.lcov coverage-html
+echo "coverage: wrote coverage.lcov and coverage-html/ into this task's output.tar.gz"
+echo "coverage:   artifact ($(wc -c </workspace/chug-output.tar.gz) bytes), alongside the"
+echo "coverage:   summary below. Download it from the task's artifact list."
 
 # LAST, deliberately: see the LOGS_CAP note in the header.
 cargo llvm-cov report

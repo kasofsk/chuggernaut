@@ -22,14 +22,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use store::worker::{copy_file_over_bound, encode_reply, op_from_subject};
+use store::worker::{
+    MAX_COPY_FILE_BYTES, copy_file_over_bound, copy_file_over_size, encode_reply, op_from_subject,
+};
 use store::{NatsStore, StoreError};
 use types::worker::{
-    ContainerRef, CopyFileOk, CopyFileRequest, FileSource, InspectOk, LaunchOk, LogsOk, LogsTailOk,
-    LogsTailRequest, PingOk, REFRESH_STAGE_CANCELLED, RefreshCancelOk, RefreshCancelRequest,
-    RefreshOk, RefreshOutcome, RefreshProgress, RefreshRequest, RefreshResult, SetSlotsOk,
-    SetSlotsRequest, WireStatus, WorkerError, WorkerLaunchRequest, WorkerReply, b64_decode,
-    b64_encode,
+    ContainerRef, CopyFileChunkOk, CopyFileChunkRequest, CopyFileOk, CopyFileRequest, FileSource,
+    InspectOk, LaunchOk, LogsOk, LogsTailOk, LogsTailRequest, PingOk, REFRESH_STAGE_CANCELLED,
+    RefreshCancelOk, RefreshCancelRequest, RefreshOk, RefreshOutcome, RefreshProgress,
+    RefreshRequest, RefreshResult, SetSlotsOk, SetSlotsRequest, WireStatus, WorkerError,
+    WorkerLaunchRequest, WorkerReply, b64_decode, b64_encode,
 };
 
 /// Logs are tailed to fit the reply under NATS's 1MB max_payload after
@@ -602,6 +604,7 @@ async fn handle(state: &Arc<WorkerState>, subject: &str, payload: &[u8]) -> Vec<
         Some("kill") => encode_reply(&kill(state, payload).await),
         Some("inspect") => encode_reply(&inspect(state, payload).await),
         Some("copy_file") => encode_reply(&copy_file(state, payload).await),
+        Some("copy_file_chunk") => encode_reply(&copy_file_chunk(state, payload).await),
         Some("logs") => encode_reply(&logs(state, payload).await),
         Some("logs_tail") => encode_reply(&logs_tail(state, payload).await),
         Some("ping") => encode_reply(&ping(state).await),
@@ -775,6 +778,39 @@ async fn copy_file(state: &WorkerState, payload: &[u8]) -> WorkerReply<CopyFileO
             }
             Ok(CopyFileOk {
                 data_b64: data.map(|d| b64_encode(&d)),
+            })
+        }
+        .await,
+    )
+}
+
+/// One bounded slice of a container file (design #362 S1), so an output archive
+/// past [`copy_file`]'s single-reply bound still travels. The whole file is
+/// measured first: one over the caller's `max_bytes` is refused with the same
+/// named error rather than sliced, since a partial archive carries nothing.
+async fn copy_file_chunk(state: &WorkerState, payload: &[u8]) -> WorkerReply<CopyFileChunkOk> {
+    reply(
+        async {
+            let req: CopyFileChunkRequest = parse(payload)?;
+            let Some(data) = state
+                .backend
+                .copy_file(&req.id, &req.path)
+                .await
+                .map_err(backend_err)?
+            else {
+                return Ok(CopyFileChunkOk {
+                    data_b64: None,
+                    total_len: 0,
+                });
+            };
+            if let Some(e) = copy_file_over_size(&req.path, data.len(), req.max_bytes as usize) {
+                return Err(e);
+            }
+            let start = (req.offset as usize).min(data.len());
+            let end = start.saturating_add(MAX_COPY_FILE_BYTES).min(data.len());
+            Ok(CopyFileChunkOk {
+                data_b64: Some(b64_encode(&data[start..end])),
+                total_len: data.len() as u64,
             })
         }
         .await,

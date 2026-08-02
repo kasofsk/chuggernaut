@@ -568,13 +568,27 @@ coverage) map onto exactly this shape — two buckets, not a policy language —
 if a third class is ever wanted it is a third bucket, which is a much better
 scaling story than a per-object retention field would have been.
 
-Suggested starting values, to be tuned by the operator rather than fixed here:
-`outputs` at **14 days** and a byte ceiling sized from the node's free disk.
-Whether `async-nats` 0.38 exposes the ceiling as `max_bytes` on
-`jetstream::object_store::Config` was **not** verifiable in this workspace (the
-crate source is not vendored here) — confirm it against the crate when
-implementing, and if it is absent, R1 falls back to the sweeper and this
-decision should be revisited rather than worked around.
+Starting values, tuned by the operator rather than fixed here: `outputs` at
+**14 days** and a byte ceiling sized from the node's free disk, both read from
+`CHUG_OUTPUTS_MAX_AGE_DAYS` / `CHUG_OUTPUTS_MAX_BYTES` at `chuggernaut init`
+and re-applied to the live bucket each time it runs.
+
+`async-nats` 0.38 **does** expose the ceiling: `jetstream::object_store::Config`
+has `max_bytes: i64` beside `max_age: Duration` (confirmed against
+`async-nats 0.38.0`, which the workspace resolves). The sweeper fallback is not
+needed.
+
+**The ceiling refuses; it does not evict.** `Context::create_object_store`
+builds the backing stream with `discard: DiscardPolicy::New`, so a bucket at
+`max_bytes` rejects new writes and keeps what it holds. That is the *better* of
+the two behaviors and the implementation keeps it: evicting old messages from an
+object store's stream would drop an object's oldest *chunks* while its newer
+metadata survived, turning a stored archive into a corrupt read rather than a
+clean absence. So the failure at the ceiling is a refused `put`, logged at
+`warn!` with the dial to raise — [R3](#r3-who-pays-and-how-loudly)'s "never
+discovered as a 404", reached by refusal rather than by eviction. The isolation
+property R1 exists for is unaffected: the two buckets are separate streams, so
+output pressure cannot touch a transcript either way.
 
 ### R2. Lifecycle GC deletes outputs, never transcripts
 
@@ -601,9 +615,9 @@ without building an accounting system:
 1. The per-task cap (16 MiB, above) bounds the worst case per task, and the
    bucket ceiling bounds the worst case in aggregate. Both are hard bounds that
    fail loudly.
-2. The eviction is loggable: a bucket at its ceiling evicting an object is a
-   fact worth a `tracing::warn!`, because "old outputs vanished early" should
-   never be discovered by a 404.
+2. The ceiling is loggable: a bucket at its ceiling turning an output away is a
+   fact worth a `tracing::warn!` naming the dial to raise, because "my output
+   isn't there" should never be discovered by a 404.
 
 A per-project quota is **not** proposed. It needs an accounting surface, an
 enforcement point and an operator UI, and the two bounds above cover the failure
@@ -661,8 +675,8 @@ is recorded so the next author starts from the constraints:
 | Slice | What | Gate on |
 | --- | --- | --- |
 | **S0** | Cap the worker `copy_file` reply and name the error; one sentence in `spec.md` §3.1 | **Landed** (job #363), as the defect fix of [Decision 1](#decision-1-fix-the-copy_file-bound-first-as-a-defect); the `copy_file` rows and [C3](#c3-the-real-size-regime-is-copy_file-on-a-worker-node-not-the-object-store) above describe the tree before it |
-| **S1** | `ArtifactKind::Output`; a `Harvester::collect_output` reading `/workspace/chug-output.tar.gz` before `dispose`, wired to the **work-side** monitors only ([scope](#which-containers-are-read-and-what-that-actually-costs)); the 16 MiB cap, refused with a named error and warned rather than failing the task ([why](#the-size-band-with-numbers)); a chunked `copy_file` op | **Gate met** (job #375): the consumer exists — `.chug/jobs/coverage.yaml` + `.chug/tasks/coverage.sh`, which write `coverage.lcov` and `coverage-html/` into a work container that then discards them. See below |
-| **S2** | The `outputs` bucket with its own `max_age` + byte ceiling; revoke-time GC | Lands with S1; S1 without it re-creates the 2026-07-21 disk class |
+| **S1** | `ArtifactKind::Output`; a `Harvester::collect_output` reading `/workspace/chug-output.tar.gz` before `dispose`, wired to the **work-side** monitors only ([scope](#which-containers-are-read-and-what-that-actually-costs)); the 16 MiB cap, refused with a named error and warned rather than failing the task ([why](#the-size-band-with-numbers)); a chunked `copy_file` op | **Landed** (job #381), on the gate job #375 met: the consumer is `.chug/jobs/coverage.yaml` + `.chug/tasks/coverage.sh`. See below |
+| **S2** | The `outputs` bucket with its own `max_age` + byte ceiling; revoke-time GC | **Landed** (job #381), with S1 as required — S1 without it re-creates the 2026-07-21 disk class |
 | **S3** | Declared `outputs:` schema, cross-job reads, per-attempt selection | A **second** consumer with per-output addressing needs. Deferred, deliberately |
 | — | S3/Minio artifact store (`spec.md` Appendix: Deferred) | Stays deferred; nothing here needs it |
 

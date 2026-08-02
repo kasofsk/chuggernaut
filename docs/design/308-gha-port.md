@@ -656,9 +656,11 @@ that outlived its bug), `rust-coverage` (becomes an ordinary job — coverage is
 thing you ask for, not a thing that runs on every push).
 
 **Landed** (job #375) for `rust-coverage`: `.chug/jobs/coverage.yaml` is that
-ordinary job, released by hand and wired into no default. Its report has nowhere
-durable to go until [#362](362-binary-artifacts.md) S1, which named this job type
-as the consumer that triggers it.
+ordinary job, released by hand and wired into no default. Its lcov file and HTML
+tree became durable with [#362](362-binary-artifacts.md) S1 (job #381), which
+named this job type as the consumer that triggers it: the run tars them to
+`/workspace/chug-output.tar.gz` and the dispatcher harvests that into the task's
+`output.tar.gz` artifact.
 
 ## H. Host-native workers
 

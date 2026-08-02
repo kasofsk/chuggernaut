@@ -13,9 +13,10 @@
 //! the actor record it, preserving the single-writer rule.
 //!
 //! - **Accepts:** an exited container's handles (logs, session transcript,
-//!   `eval-result.json`).
+//!   `eval-result.json`, a work container's `chug-output.tar.gz`).
 //! - **Emits:** the harvested artifacts back to the actor; overlay-layer
-//!   disposal (`dispose`) once collection is done.
+//!   disposal (`dispose`) once collection is done; revoke-time deletion of a
+//!   job's outputs (`delete_outputs`).
 //! - **Guarantees:** runs off the actor thread on cloned handles; writes no
 //!   job/task state (single-writer preserved).
 //! - **Spec:** §3.2 (container removal after harvest); §3.6 (crash sweep).
@@ -25,6 +26,12 @@ use container::ContainerBackend;
 use std::sync::Arc;
 use store::{ArtifactKind, ArtifactStore};
 use types::TokenUsage;
+
+/// The one well-known path a work container leaves an output archive at
+/// (design #362 Decision 2). A convention, not a schema field: no `outputs:`
+/// declaration, no config epoch, and the producing script decides what goes in
+/// it and whether to write it at all.
+pub const OUTPUT_PATH: &str = "/workspace/chug-output.tar.gz";
 
 /// Handles needed to collect artifacts, cloneable into a spawned task.
 #[derive(Clone)]
@@ -129,6 +136,89 @@ impl Harvester {
             }
         }
         (result, usage)
+    }
+
+    /// Collect the output archive a **work-side** container left at
+    /// [`OUTPUT_PATH`] (spec §3.2): harvested if present, before `dispose`,
+    /// absent without complaint, over-band refused without storing.
+    ///
+    /// Its own method rather than a line in
+    /// [`collect_agent`](Harvester::collect_agent), which the agent-work and
+    /// agent-eval paths share — the scope rule is spec §3.2's.
+    pub async fn collect_output(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task_id: u64,
+        id: &container::ContainerId,
+    ) {
+        let bytes = match self
+            .backend
+            .copy_file_chunked(id, OUTPUT_PATH, store::MAX_BLOB_BYTES)
+            .await
+        {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return,
+            Err(e) => {
+                let (actionable, message) = Self::output_copy_failure(seq, task_id, &e.to_string());
+                if actionable {
+                    tracing::error!("{message}");
+                } else {
+                    tracing::warn!("{message}");
+                }
+                return;
+            }
+        };
+        let Some(artifacts) = &self.artifacts else {
+            return;
+        };
+        if let Err(e) = artifacts
+            .put(owner, project, seq, task_id, ArtifactKind::Output, &bytes)
+            .await
+        {
+            tracing::warn!(
+                "job {seq} task {task_id}: storing {OUTPUT_PATH} failed: {e} — the outputs \
+                 bucket may be at its byte ceiling, which refuses new outputs until older \
+                 ones age out (raise CHUG_OUTPUTS_MAX_BYTES)"
+            );
+        }
+    }
+
+    /// The log line for an output copy that failed, and whether it names an
+    /// operator action. Only the size-band refusal does — a transport miss or an
+    /// N-1 worker that does not know the chunked op is an ordinary reporting
+    /// miss, and telling its operator to move the output to a bucket would send
+    /// them to the wrong action.
+    fn output_copy_failure(seq: u64, task_id: u64, error: &str) -> (bool, String) {
+        if error.contains(types::worker::COPY_FILE_TOO_LARGE) {
+            return (
+                true,
+                format!(
+                    "job {seq} task {task_id}: {OUTPUT_PATH} was NOT stored: {error} — an output \
+                     over {} bytes belongs in a bucket, not in the artifact store",
+                    store::MAX_BLOB_BYTES
+                ),
+            );
+        }
+        (
+            false,
+            format!("job {seq} task {task_id}: {OUTPUT_PATH} could not be read: {error}"),
+        )
+    }
+
+    /// Drop a job's outputs when it is revoked (design #362 R2). Best-effort and
+    /// outputs-only: a revoked job is still an audit record, so its transcripts,
+    /// stdout and attachments stay.
+    pub async fn delete_outputs(&self, owner: &str, project: &str, seq: u64) {
+        let Some(artifacts) = &self.artifacts else {
+            return;
+        };
+        match artifacts.delete_outputs_for_job(owner, project, seq).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("job {seq}: revoked — deleted {n} output archive(s)"),
+            Err(e) => tracing::warn!("job {seq}: deleting outputs on revoke failed: {e}"),
+        }
     }
 
     /// Collect just the logs, for a container the dispatcher launched itself
@@ -257,4 +347,39 @@ pub async fn artifact_store(
         .await
         .map_err(|e| ArtifactStoreError(format!("artifacts object store: {e}")))?;
     Ok(Some(Arc::new(handle)))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    /// Design #362 S1's failure posture: only the size-band refusal earns the
+    /// louder level and the move-it-to-a-bucket instruction. An N-1 worker that
+    /// does not know `copy_file_chunk` answers with a `WorkerError::Other`
+    /// too, and a whole node's work containers must not blame its refresh on a
+    /// size the archive never had.
+    #[test]
+    fn only_an_over_band_refusal_names_the_operator_action() {
+        let refusal = types::worker::copy_file_too_large(
+            OUTPUT_PATH,
+            store::MAX_BLOB_BYTES + 1,
+            store::MAX_BLOB_BYTES,
+        );
+        let (actionable, message) = Harvester::output_copy_failure(7, 2, &refusal);
+        assert!(actionable, "{message}");
+        assert!(message.contains("belongs in a bucket"), "{message}");
+        assert!(message.contains("was NOT stored"), "{message}");
+
+        for other in [
+            r#"unknown op Some("copy_file_chunk") on chug.worker.w1.copy_file_chunk"#,
+            "node w1 unreachable",
+            "worker transport for w1/c3: timed out",
+        ] {
+            let (actionable, message) = Harvester::output_copy_failure(7, 2, other);
+            assert!(!actionable, "{message}");
+            assert!(!message.contains("belongs in a bucket"), "{message}");
+            assert!(message.contains(other), "{message}");
+        }
+    }
 }

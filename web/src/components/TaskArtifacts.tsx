@@ -5,7 +5,11 @@ import { SkeletonLines } from './Skeleton'
 const LABELS: Record<ArtifactKind, string> = {
   'session.jsonl': 'transcript',
   'stdout.log': 'logs',
+  'output.tar.gz': 'output',
 }
+
+/** Kinds that are opaque binary: offered as a download, never as text. */
+const BINARY: ArtifactKind[] = ['output.tar.gz']
 
 /**
  * Links to whatever a task left behind. Transcripts and container logs are
@@ -59,11 +63,22 @@ export function TaskArtifacts({
   return (
     <>
       <span className="artifact-links">
-        {kinds.map((k) => (
-          <button key={k} className="linklike" onClick={() => view(k)}>
-            {LABELS[k]}
-          </button>
-        ))}
+        {kinds.map((k) =>
+          BINARY.includes(k) ? (
+            <a
+              key={k}
+              className="linklike"
+              href={api.artifactUrl(owner, project, seq, task.id, k)}
+              download
+            >
+              {LABELS[k]}
+            </a>
+          ) : (
+            <button key={k} className="linklike" onClick={() => view(k)}>
+              {LABELS[k]}
+            </button>
+          ),
+        )}
       </span>
       {open && (
         <div className="artifact-viewer">

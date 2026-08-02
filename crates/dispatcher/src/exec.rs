@@ -459,6 +459,7 @@ impl Core {
                         Ok(out) => {
                             let usage = harvest.collect(&o, &p, seq, task_id, &out).await;
                             if let Some(id) = &out.container_id {
+                                harvest.collect_output(&o, &p, seq, task_id, id).await;
                                 harvest.dispose(seq, task_id, id).await;
                             }
                             (out.exit_code, usage)

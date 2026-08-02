@@ -2078,6 +2078,7 @@ impl Core {
         for &target in std::iter::once(&seq).chain(cascaded.iter()) {
             self.kill_running_containers(owner, project, target).await;
             self.close_pending_tasks(owner, project, target).await;
+            self.spawn_outputs_gc(owner, project, target);
             self.active
                 .remove(&(owner.to_string(), project.to_string(), target));
             let mut j = self.must_get(owner, project, target)?.clone();
@@ -2112,6 +2113,16 @@ impl Core {
         )
         .await?;
         Ok(cascaded)
+    }
+
+    /// Drop a revoked job's output archives (design #362 R2), off the actor
+    /// thread and best-effort — the same never-fail-a-job discipline as
+    /// `dispose`. Outputs only: transcripts, stdout and attachments survive,
+    /// because a revoked job is still an audit record.
+    fn spawn_outputs_gc(&self, owner: &str, project: &str, seq: u64) {
+        let harvest = self.harvester();
+        let (o, p) = (owner.to_string(), project.to_string());
+        tokio::spawn(async move { harvest.delete_outputs(&o, &p, seq).await });
     }
 
     /// Handle `req.jobs.update.*` (spec §2.1): full-field replace of a Draft

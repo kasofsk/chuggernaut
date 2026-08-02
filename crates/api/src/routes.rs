@@ -1287,8 +1287,9 @@ pub async fn artifacts_list(
 }
 
 /// Upper bound on a single uploaded attachment. Screenshots and short clips
-/// fit comfortably; the same value caps the request body (413 over it).
-pub const MAX_ATTACHMENT_BYTES: usize = 16 * 1024 * 1024;
+/// fit comfortably; the same value caps the request body (413 over it), and it
+/// is the platform-wide blob ceiling a harvested output shares (design #362).
+pub const MAX_ATTACHMENT_BYTES: usize = store::MAX_BLOB_BYTES;
 
 /// Reject path traversal and control characters in an uploaded filename — it
 /// becomes the object-name suffix and a download path segment.
@@ -1431,6 +1432,7 @@ pub async fn artifact_get(
     let content_type = match kind {
         store::ArtifactKind::SessionTranscript => "application/x-ndjson",
         store::ArtifactKind::Stdout => "text/plain; charset=utf-8",
+        store::ArtifactKind::Output => "application/gzip",
     };
     Ok((
         StatusCode::OK,

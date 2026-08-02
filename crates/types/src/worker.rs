@@ -81,6 +81,20 @@ pub enum WorkerError {
     },
 }
 
+/// Marker stamped on the [`WorkerError::Other`] returned for a `copy_file`
+/// past its size bound. Carried inside `Other` rather than as its own variant
+/// because [`WorkerError`] has no `#[serde(other)]` fallback, so a new variant
+/// would fail to decode on an N-1 peer (spec §14.1).
+pub const COPY_FILE_TOO_LARGE: &str = "copy_file_too_large";
+
+/// The refusal text for a file past its copy bound, so one marker names the
+/// condition whether the read crossed a worker RPC or ran in-process.
+pub fn copy_file_too_large(path: &str, len: usize, max_bytes: usize) -> String {
+    format!(
+        "{COPY_FILE_TOO_LARGE}: {path} is {len} bytes, over the {max_bytes}-byte copy_file bound"
+    )
+}
+
 /// Reply envelope for every worker op.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "result", rename_all = "snake_case")]
@@ -105,6 +119,20 @@ pub struct ContainerRef {
 pub struct CopyFileRequest {
     pub id: String,
     pub path: String,
+}
+
+/// Payload for `copy_file_chunk` (design #362 S1): one bounded slice of a
+/// container file, so an output archive past a single reply's bound still
+/// travels. Additive op — an N-1 daemon answers `unknown op` in a
+/// [`WorkerError::Other`], which decodes on both sides.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CopyFileChunkRequest {
+    pub id: String,
+    pub path: String,
+    /// Byte offset the returned slice starts at.
+    pub offset: u64,
+    /// Whole-file ceiling; a larger file is refused, never truncated.
+    pub max_bytes: u64,
 }
 
 /// Payload for `logs_tail`: cursor-paged live output (spec §4.2).
@@ -132,6 +160,14 @@ pub struct InspectOk {
 pub struct CopyFileOk {
     /// `None` — path not present in the container.
     pub data_b64: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CopyFileChunkOk {
+    /// `None` — path not present in the container.
+    pub data_b64: Option<String>,
+    /// Whole-file length, so a caller knows when it has all of it.
+    pub total_len: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

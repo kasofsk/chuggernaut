@@ -135,6 +135,8 @@ Two limits to read the number with. The run starts the image's `nats-server` and
 exports `CHUG_TEST_NATS_URL`, so tier-2 executes — but tier 3, and the tier-2
 suites that need a *private* server, still self-skip without Docker, so every
 percentage is a lower bound and the script says so. And `coverage.lcov` plus
-`coverage-html/` are written into the container and discarded with it: keeping
-them needs `ArtifactKind::Output` ([#362](docs/design/362-binary-artifacts.md)
-S1), for which this job type is the named first consumer.
+`coverage-html/` leave the container only through the run's output archive: the
+script tars them to `/workspace/chug-output.tar.gz`, which the dispatcher
+harvests into the task's `output.tar.gz` artifact
+([#362](docs/design/362-binary-artifacts.md) S1, spec §3.2) — download it from
+the task's artifact list. It is capped at 16 MiB and refused whole above that.

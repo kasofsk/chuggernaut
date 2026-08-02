@@ -5,9 +5,10 @@
 use crate::{NatsStore, StoreError, subjects};
 use std::time::Duration;
 use types::worker::{
-    ContainerRef, CopyFileOk, CopyFileRequest, InspectOk, LaunchOk, ListExitedOk, ListRunningOk,
-    LogsOk, LogsTailOk, LogsTailRequest, PingOk, RefreshCancelOk, RefreshCancelRequest, RefreshOk,
-    RefreshRequest, SetSlotsOk, SetSlotsRequest, WorkerError, WorkerLaunchRequest, WorkerReply,
+    ContainerRef, CopyFileChunkOk, CopyFileChunkRequest, CopyFileOk, CopyFileRequest, InspectOk,
+    LaunchOk, ListExitedOk, ListRunningOk, LogsOk, LogsTailOk, LogsTailRequest, PingOk,
+    RefreshCancelOk, RefreshCancelRequest, RefreshOk, RefreshRequest, SetSlotsOk, SetSlotsRequest,
+    WorkerError, WorkerLaunchRequest, WorkerReply,
 };
 
 /// Requests must fit NATS's default 1MB max_payload with headroom. Launch
@@ -23,21 +24,22 @@ pub const MAX_COPY_FILE_BYTES: usize = (MAX_REQUEST_BYTES - COPY_FILE_ENVELOPE_B
 /// Headroom left for the `CopyFileOk` JSON around the base64 payload.
 const COPY_FILE_ENVELOPE_BYTES: usize = 1024;
 
-/// Marker the daemon stamps on the [`WorkerError::Other`] it returns for a file
-/// over [`MAX_COPY_FILE_BYTES`]. Carried inside `Other` rather than as its own
-/// variant because [`WorkerError`] has no `#[serde(other)]` fallback, so a new
-/// variant would fail to decode on an N-1 dispatcher (spec §14.1).
-pub const COPY_FILE_TOO_LARGE: &str = "copy_file_too_large";
+pub use types::worker::COPY_FILE_TOO_LARGE;
 
 /// The `copy_file` bound check the daemon applies before encoding its reply
 /// (spec §3.1). Returns the named error for a file the reply could not carry,
 /// so an oversized read fails fast instead of stalling the caller until its op
 /// timeout.
 pub fn copy_file_over_bound(path: &str, len: usize) -> Option<WorkerError> {
-    (len > MAX_COPY_FILE_BYTES).then(|| WorkerError::Other {
-        message: format!(
-            "{COPY_FILE_TOO_LARGE}: {path} is {len} bytes, over the {MAX_COPY_FILE_BYTES}-byte worker RPC reply bound"
-        ),
+    copy_file_over_size(path, len, MAX_COPY_FILE_BYTES)
+}
+
+/// The same refusal against a caller-chosen ceiling, for `copy_file_chunk`
+/// (design #362 S1): the whole file is measured before any slice is sent, so an
+/// over-band archive costs one round trip rather than a truncated read.
+pub fn copy_file_over_size(path: &str, len: usize, max_bytes: usize) -> Option<WorkerError> {
+    (len > max_bytes).then(|| WorkerError::Other {
+        message: types::worker::copy_file_too_large(path, len, max_bytes),
     })
 }
 
@@ -150,6 +152,29 @@ impl WorkerRpc {
             &CopyFileRequest {
                 id: id.into(),
                 path: path.into(),
+            },
+            OP_TIMEOUT,
+        )
+        .await
+    }
+
+    /// One [`MAX_COPY_FILE_BYTES`] slice of a container file from `offset`
+    /// (design #362 S1). A whole file over `max_bytes` comes back as the
+    /// [`COPY_FILE_TOO_LARGE`] refusal instead of a slice.
+    pub async fn copy_file_chunk(
+        &self,
+        id: &str,
+        path: &str,
+        offset: u64,
+        max_bytes: u64,
+    ) -> std::result::Result<CopyFileChunkOk, WorkerRpcError> {
+        self.call(
+            "copy_file_chunk",
+            &CopyFileChunkRequest {
+                id: id.into(),
+                path: path.into(),
+                offset,
+                max_bytes,
             },
             OP_TIMEOUT,
         )
@@ -330,8 +355,30 @@ mod tests {
         );
     }
 
+    /// The output archive's ceiling (design #362) is checked at the boundary,
+    /// not near it: 16 MiB exactly is stored, one byte more is refused. A
+    /// truncated archive carries nothing, so this is a refusal and never a cut.
+    #[test]
+    fn output_ceiling_refuses_only_past_the_boundary() {
+        let max = crate::MAX_BLOB_BYTES;
+        let path = "/workspace/chug-output.tar.gz";
+        assert_eq!(copy_file_over_size(path, max - 1, max), None);
+        assert_eq!(copy_file_over_size(path, max, max), None, "at the cap fits");
+
+        let Some(WorkerError::Other { message }) = copy_file_over_size(path, max + 1, max) else {
+            panic!("one byte past the cap must be refused as WorkerError::Other");
+        };
+        for expected in [COPY_FILE_TOO_LARGE, path, &(max + 1).to_string()] {
+            assert!(message.contains(expected), "missing {expected}: {message}");
+        }
+    }
+
     #[test]
     fn op_parses_from_subject() {
+        assert_eq!(
+            op_from_subject("req.worker.nuc.copy_file_chunk"),
+            Some("copy_file_chunk")
+        );
         assert_eq!(op_from_subject("req.worker.nuc.launch"), Some("launch"));
         assert_eq!(
             op_from_subject("req.worker.nuc.copy_file"),

@@ -75,7 +75,7 @@ export interface EvalStructured {
   findings?: ReviewFinding[]
 }
 
-export type ArtifactKind = 'session.jsonl' | 'stdout.log'
+export type ArtifactKind = 'session.jsonl' | 'stdout.log' | 'output.tar.gz'
 
 /**
  * GET .../tasks/{id}/output?since=<byte offset> — a task's stdout as a resumable

@@ -11,6 +11,7 @@ pub mod worker;
 
 pub use artifacts::{
     ArtifactCrypto, ArtifactKind, ArtifactStore, Attachment, DEFAULT_ATTACHMENT_CONTENT_TYPE,
+    MAX_BLOB_BYTES,
 };
 pub use stores::{
     Bucket, CounterStore, JobStore, KvWatch, ProjectStore, RdepsStore, StepStore, TaskStore,
@@ -52,6 +53,69 @@ fn namespaced(prefix: &str, name: &str) -> String {
 }
 
 const DAY: Duration = Duration::from_secs(86_400);
+
+/// The two dials on the `outputs` object store (design #362 R1): how long a
+/// build byproduct is kept, and how much disk all of them together may hold.
+///
+/// Both are the operator's — `CHUG_OUTPUTS_MAX_AGE_DAYS` and
+/// `CHUG_OUTPUTS_MAX_BYTES` in the environment of `chuggernaut init`, re-applied
+/// to the live bucket each time it runs (spec §1.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputsRetention {
+    pub max_age: Duration,
+    pub max_bytes: i64,
+}
+
+/// 14 days — shorter than the artifacts bucket's 90, because an output is a
+/// byproduct and a transcript is the audit record.
+const OUTPUTS_MAX_AGE_DAYS_DEFAULT: u32 = 14;
+
+/// 8 GiB — roughly 500 archives at the 16 MiB per-task cap, or several thousand
+/// typical coverage tarballs.
+const OUTPUTS_MAX_BYTES_DEFAULT: i64 = 8 * 1024 * 1024 * 1024;
+
+/// Ceiling for a memory-backed bucket, which only a test namespace ever is
+/// (production connects with the empty prefix and gets File storage). JetStream
+/// reserves `max_bytes` from the account's memory pool, so hundreds of
+/// namespaces sharing one server must not each reserve a deployment-sized
+/// ceiling.
+const OUTPUTS_MAX_BYTES_MEMORY: i64 = 1024 * 1024;
+
+impl Default for OutputsRetention {
+    fn default() -> Self {
+        Self {
+            max_age: DAY * OUTPUTS_MAX_AGE_DAYS_DEFAULT,
+            max_bytes: OUTPUTS_MAX_BYTES_DEFAULT,
+        }
+    }
+}
+
+impl OutputsRetention {
+    /// Read the two dials from the environment, falling back to the defaults
+    /// for an unset or unparseable value (a bad value must not stop init).
+    pub fn from_env() -> Self {
+        let default = Self::default();
+        let days = std::env::var("CHUG_OUTPUTS_MAX_AGE_DAYS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok());
+        let bytes = std::env::var("CHUG_OUTPUTS_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok());
+        Self {
+            max_age: days.map_or(default.max_age, |d| DAY * d),
+            max_bytes: bytes.unwrap_or(default.max_bytes),
+        }
+    }
+
+    /// The ceiling to actually create the bucket with, clamped for memory
+    /// storage ([`OUTPUTS_MAX_BYTES_MEMORY`]).
+    fn ceiling_for(self, storage: jetstream::stream::StorageType) -> i64 {
+        match storage {
+            jetstream::stream::StorageType::Memory => self.max_bytes.min(OUTPUTS_MAX_BYTES_MEMORY),
+            jetstream::stream::StorageType::File => self.max_bytes,
+        }
+    }
+}
 
 /// Connected NATS handle wrapping a client + JetStream context.
 ///
@@ -163,13 +227,21 @@ impl NatsStore {
     /// creates are idempotent — disperses that thundering herd instead of failing
     /// a test's setup. Production (empty prefix) runs once, unchanged.
     pub async fn ensure_topology(&self) -> Result<()> {
+        self.ensure_topology_with(&OutputsRetention::from_env())
+            .await
+    }
+
+    /// [`ensure_topology`](NatsStore::ensure_topology) with the outputs bucket's
+    /// retention passed explicitly, so a test can size the ceiling without
+    /// touching the process environment.
+    pub async fn ensure_topology_with(&self, outputs: &OutputsRetention) -> Result<()> {
         if self.prefix.is_empty() {
-            return self.ensure_topology_inner().await;
+            return self.ensure_topology_inner(outputs).await;
         }
         let mut attempt = 0;
         loop {
             attempt += 1;
-            match self.ensure_topology_inner().await {
+            match self.ensure_topology_inner(outputs).await {
                 Ok(()) => return Ok(()),
                 Err(e) if attempt < 8 => {
                     tokio::time::sleep(Duration::from_millis(150 * attempt)).await;
@@ -180,7 +252,7 @@ impl NatsStore {
         }
     }
 
-    async fn ensure_topology_inner(&self) -> Result<()> {
+    async fn ensure_topology_inner(&self, outputs: &OutputsRetention) -> Result<()> {
         let storage = if self.prefix.is_empty() {
             jetstream::stream::StorageType::File
         } else {
@@ -230,7 +302,63 @@ impl NatsStore {
             })
             .await
             .map_err(nats_err)?;
+        self.ensure_outputs_store(outputs, storage).await?;
         Ok(())
+    }
+
+    /// Create the `outputs` object store, or retune an existing one to the
+    /// retention now configured (design #362 R1). `create_object_store` is
+    /// create-only, so the retune is what makes the two dials an operator can
+    /// actually turn on a live deployment rather than only at first init.
+    async fn ensure_outputs_store(
+        &self,
+        outputs: &OutputsRetention,
+        storage: jetstream::stream::StorageType,
+    ) -> Result<jetstream::object_store::ObjectStore> {
+        let bucket = self.ns(buckets::OBJECT_OUTPUTS);
+        let max_bytes = outputs.ceiling_for(storage);
+        let created = self
+            .js
+            .create_object_store(jetstream::object_store::Config {
+                bucket: bucket.clone(),
+                max_age: outputs.max_age,
+                max_bytes,
+                storage,
+                ..Default::default()
+            })
+            .await;
+        let create_err = match created {
+            Ok(store) => return Ok(store),
+            Err(e) => e,
+        };
+        let Ok(mut stream) = self.js.get_stream(format!("OBJ_{bucket}")).await else {
+            return Err(nats_err(create_err));
+        };
+        let mut config = stream.info().await.map_err(nats_err)?.config.clone();
+        if config.max_age != outputs.max_age || config.max_bytes != max_bytes {
+            config.max_age = outputs.max_age;
+            config.max_bytes = max_bytes;
+            self.js.update_stream(&config).await.map_err(nats_err)?;
+        }
+        self.js.get_object_store(&bucket).await.map_err(nats_err)
+    }
+
+    /// The outputs bucket for a reader: opened if it exists, created at the
+    /// configured retention if it does not. Never *retunes* — retention is
+    /// `ensure_topology`'s to set, so an api or dispatcher restart can never
+    /// silently move an operator's dial.
+    async fn outputs_store(&self) -> Result<jetstream::object_store::ObjectStore> {
+        let bucket = self.ns(buckets::OBJECT_OUTPUTS);
+        if let Ok(store) = self.js.get_object_store(&bucket).await {
+            return Ok(store);
+        }
+        let storage = if self.prefix.is_empty() {
+            jetstream::stream::StorageType::File
+        } else {
+            jetstream::stream::StorageType::Memory
+        };
+        self.ensure_outputs_store(&OutputsRetention::from_env(), storage)
+            .await
     }
 
     async fn bucket(&self, name: &str) -> Result<Bucket> {
@@ -275,7 +403,8 @@ impl NatsStore {
             .get_object_store(self.ns(buckets::OBJECT_ARTIFACTS))
             .await
             .map_err(nats_err)?;
-        Ok(ArtifactStore::new(obj, crypto))
+        let outputs = self.outputs_store().await?;
+        Ok(ArtifactStore::new(obj, outputs, crypto))
     }
 
     /// Raw bucket access for stores not yet given a typed wrapper.

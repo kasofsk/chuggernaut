@@ -624,3 +624,187 @@ async fn prefix_scan_returns_every_key_past_the_ack_pending_cap() {
         "a finished scan must delete its ephemeral consumer"
     );
 }
+
+/// Pseudo-random bytes that survive the artifact store's gzip, so a size-bound
+/// test measures the bound rather than the compressor.
+fn incompressible(len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len + 4);
+    let mut x: u32 = 0x9e37_79b9;
+    while out.len() < len {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    out.truncate(len);
+    out
+}
+
+/// Store one artifact of every kind for a task, so a GC assertion can name what
+/// went and what stayed.
+async fn seed_every_kind(arts: &store::ArtifactStore, seq: u64, task: u64) {
+    for (kind, body) in [
+        (
+            store::ArtifactKind::SessionTranscript,
+            &b"{\"type\":\"user\"}"[..],
+        ),
+        (store::ArtifactKind::Stdout, b"log"),
+        (store::ArtifactKind::Output, b"tarball"),
+    ] {
+        arts.put("acme", "api", seq, task, kind, body)
+            .await
+            .unwrap();
+    }
+}
+
+/// Design #362 R1/R2: an output is stored, read and listed like any other
+/// artifact, and revoke-time GC removes exactly the outputs — the transcript and
+/// stdout of the same task survive, because a revoked job is still an audit
+/// record.
+#[tokio::test]
+async fn outputs_are_gc_able_without_touching_the_audit_record() {
+    let server = require_nats!();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let arts = store
+        .artifacts(store::ArtifactCrypto::with_identity(&identity).unwrap())
+        .await
+        .unwrap();
+
+    for (seq, task) in [(42u64, 7u64), (43, 1)] {
+        seed_every_kind(&arts, seq, task).await;
+    }
+
+    let mut kinds: Vec<&str> = arts
+        .list_for_task("acme", "api", 42, 7)
+        .await
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str())
+        .collect();
+    kinds.sort_unstable();
+    assert_eq!(kinds, ["output.tar.gz", "session.jsonl", "stdout.log"]);
+    assert_eq!(
+        arts.get("acme", "api", 42, 7, store::ArtifactKind::Output)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(b"tarball".as_slice())
+    );
+
+    assert_eq!(
+        arts.delete_outputs_for_job("acme", "api", 42)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        arts.get("acme", "api", 42, 7, store::ArtifactKind::Output)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for kind in [
+        store::ArtifactKind::SessionTranscript,
+        store::ArtifactKind::Stdout,
+    ] {
+        assert!(
+            arts.get("acme", "api", 42, 7, kind)
+                .await
+                .unwrap()
+                .is_some(),
+            "revoke must never delete {}",
+            kind.as_str()
+        );
+    }
+    assert!(
+        arts.get("acme", "api", 43, 1, store::ArtifactKind::Output)
+            .await
+            .unwrap()
+            .is_some(),
+        "another job's outputs are not this job's to delete"
+    );
+    assert_eq!(
+        arts.delete_outputs_for_job("acme", "api", 42)
+            .await
+            .unwrap(),
+        0,
+        "a second revoke finds nothing left"
+    );
+}
+
+/// The substantive property of the second bucket (design #362 R1): output
+/// pressure is contained. With the outputs bucket at its byte ceiling, further
+/// outputs are refused and every transcript — stored before or after — is
+/// untouched and still readable.
+#[tokio::test]
+async fn output_pressure_cannot_displace_a_transcript() {
+    let server = require_nats!();
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store
+        .ensure_topology_with(&store::OutputsRetention {
+            max_age: std::time::Duration::from_secs(3600),
+            max_bytes: 256 * 1024,
+        })
+        .await
+        .unwrap();
+
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let arts = store
+        .artifacts(store::ArtifactCrypto::with_identity(&identity).unwrap())
+        .await
+        .unwrap();
+
+    let transcript = incompressible(64 * 1024);
+    arts.put(
+        "acme",
+        "api",
+        1,
+        1,
+        store::ArtifactKind::SessionTranscript,
+        &transcript,
+    )
+    .await
+    .unwrap();
+
+    let blob = incompressible(64 * 1024);
+    let mut refused = None;
+    for task in 1..32u64 {
+        if let Err(e) = arts
+            .put("acme", "api", 9, task, store::ArtifactKind::Output, &blob)
+            .await
+        {
+            refused = Some(e);
+            break;
+        }
+    }
+    assert!(
+        refused.is_some(),
+        "a 256KiB outputs ceiling must refuse 64KiB outputs well inside 32 of them"
+    );
+
+    assert_eq!(
+        arts.get("acme", "api", 1, 1, store::ArtifactKind::SessionTranscript)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(transcript.as_slice()),
+        "a transcript stored before the outputs bucket filled is still readable"
+    );
+    arts.put(
+        "acme",
+        "api",
+        2,
+        1,
+        store::ArtifactKind::SessionTranscript,
+        &transcript,
+    )
+    .await
+    .expect("a full outputs bucket must not block the artifacts bucket");
+}
