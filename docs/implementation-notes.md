@@ -1030,7 +1030,7 @@ stale.
 - **function TagsPage** — Read each tag back at the path the listing resolved to — the file endpoint reads verbatim, and a project that predates the config root still keeps its tags at the repo root (spec §1.1).
 
 ### `web/src/theme.tsx`
-- Names must match the [data-theme='...'] blocks in styles.css. 'cosmos' is the snazzy-redesign dark-first identity (#161); 'aurora' its light sibling. 'bauhaus'/'bauhaus-dark' are the brutalist pair — the chrome they share hangs off a [data-theme^='bauhaus'] prefix selector, so keep both on that prefix.
+- Names must match the [data-theme='...'] blocks in styles.css. 'cosmos' is the snazzy-redesign dark-first identity (#161); 'aurora' its light sibling. 'bauhaus'/'bauhaus-dark' are the brutalist pair — everything they share is token overrides in a [data-theme^='bauhaus'] prefix block, so keep both on that prefix. A theme block is tokens, not component rules: geometry, motion and the type roles are all overridable from there (web/CLAUDE.md, Styling model).
 
 ### `web/src/useEvents.ts`
 - **function useProjectEvents** — SSE subscription (§6.4). EventSource reconnects itself and replays from Last-Event-ID, so the handler just consumes. `onEvent` sees every event; use it to refetch or merge.

@@ -4,7 +4,7 @@
 :root {
   /* typography */
   --font: system-ui, -apple-system, sans-serif;
-  --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
   --fs-xs: 0.75rem; /* fine print: table headers, slugs */
   --fs-sm: 0.85rem; /* secondary: hints, badges, metadata */
   --fs-md: 0.9375rem; /* body */
@@ -26,27 +26,103 @@
   --r-full: 999px; /* pills */
 
   /* elevation */
-  --shadow-card:
-    0 1px 2px rgba(0, 0, 0, 0.15),
-    0 4px 16px rgba(0, 0, 0, 0.1);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.15), 0 4px 16px rgba(0, 0, 0, 0.1);
+
+  /* Stroke weights. Cards carry their own so a theme can double-rule the page
+     grid without thickening every control on it. */
+  --border-w: 1px;
+  --border-w-card: 1px;
+
+  /* Control geometry: one padding pair per interactive family, so a denser
+     theme retunes every button/field/pill from here. */
+  --ctrl-pad-y: 0.35rem; /* buttons */
+  --ctrl-pad-x: 0.8rem;
+  --ctrl-pad-y-lg: 0.5rem; /* primary actions */
+  --ctrl-pad-x-lg: 0.95rem;
+  --field-pad-y: 0.4rem; /* inputs, selects, textareas, menu rows */
+  --field-pad-x: 0.6rem;
+  --pill-pad-y: 0.15rem; /* badges, chips, tags */
+  --pill-pad-x: 0.6rem;
+  --icon-btn-size: 1.75rem; /* square glyph-only buttons */
+  --tap-min: 32px; /* floor for a control that must stay tappable */
+  --dot-size: 8px; /* status dots */
+  --dot-size-sm: 6px;
+  --card-pad-y: var(--sp-4);
+  --card-pad-x: var(--sp-5);
+
+  /* Tinted surfaces: the fill/stroke strengths every badge, chip and state
+     wash is mixed at. */
+  --tint-fill: 12%;
+  --tint-line: 35%;
+
+  /* Focus: one ring for every interactive element. */
+  --focus-w: 3px;
+  --focus-ring: 0 0 0 var(--focus-w)
+    color-mix(in srgb, var(--accent) 30%, transparent);
+
+  /* Motion. The reduced-motion block near the bottom collapses these, so a
+     transition written against them needs no media query of its own. */
+  --dur-fast: 0.15s;
+  --dur-slow: 0.3s;
+  --ease: ease;
+
+  /* Type roles. --label-* is the small-caps section label (card headings,
+     table headers); --badge-* the pill lettering; --display-* the gradient
+     page/job/project titles. */
+  --label-weight: 600;
+  --label-transform: uppercase;
+  --label-tracking: 0.08em;
+  --badge-fs: var(--fs-sm);
+  --badge-weight: 500;
+  --badge-transform: none;
+  --badge-tracking: 0;
+  --display-fill: linear-gradient(90deg, var(--accent), var(--accent-2));
+  --display-color: transparent;
+  --display-transform: none;
+  --display-tracking: -0.01em;
+
+  /* Fixed canvases: surfaces that are not themeable content. --on-accent is
+     text laid over an accent fill, --canvas the light page a sandboxed cover
+     paints itself on, --overlay the lightbox scrim. */
+  --on-accent: #fff;
+  --canvas: #fff;
+  --overlay: rgba(0, 0, 0, 0.62);
 
   /* redesign chrome (#161): shared across themes; colour tokens below may
      override --accent-2 / --glow for a richer gradient/halo. */
   --rail-w: 60px;
   --accent-2: var(--purple);
   --glow: color-mix(in srgb, var(--accent) 42%, transparent);
+  --accent-fill: linear-gradient(120deg, var(--accent), var(--accent-2));
+  --halo: radial-gradient(
+    1400px 420px at 50% -120px,
+    color-mix(in srgb, var(--accent) 8%, transparent),
+    transparent
+  );
+}
+
+/* Reduced motion, once: every hover/focus transition in the app is written
+   against --dur-*, so collapsing the two tokens settles them instantly. The
+   named-animation opt-outs further down are still their own blocks. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0s;
+    --dur-slow: 0s;
+  }
 }
 
 /* ── Themes ──────────────────────────────────────────────────────────────
    Every color in the app comes from these variables. To try a new look,
    add a [data-theme='...'] block and register the name in src/theme.tsx.
    --inset: recessed surfaces (inputs, code blocks); --btn-bg: buttons and
-   hover fills; --border-faint: subtle row separators. */
+   hover fills; --border-faint: subtle row separators. A theme may also
+   override any token above — geometry, motion and type roles included — so a
+   new look rarely needs a rule of its own (see the Bauhaus pair). */
 /* ── Cosmos: the snazzy-redesign dark-first identity (#161) ──────────────────
    Near-black blue-tinted surfaces, a glowing-blue accent into violet, a subtle
    planetary halo behind the page header (see body / .proj-header). Default. */
 :root,
-[data-theme='cosmos'] {
+[data-theme="cosmos"] {
   color-scheme: dark;
   --bg: #060912;
   --card: #0f1626;
@@ -72,7 +148,7 @@
 
 /* ── Aurora: the light sibling — same structure (rail, cards, accents), inverted
    surfaces (#161: dark-first but the toggle stays, both themes supported). */
-[data-theme='aurora'] {
+[data-theme="aurora"] {
   color-scheme: light;
   --bg: #eef2fb;
   --card: #ffffff;
@@ -96,7 +172,7 @@
   --glow: color-mix(in srgb, var(--accent) 32%, transparent);
 }
 
-[data-theme='tokyo'] {
+[data-theme="tokyo"] {
   color-scheme: dark;
   --bg: #1a1b26;
   --card: #24283b;
@@ -121,7 +197,7 @@
   --backdrop-opacity: 0.06;
 }
 
-[data-theme='midnight'] {
+[data-theme="midnight"] {
   color-scheme: dark;
   --bg: #12141a;
   --card: #1b1e27;
@@ -144,7 +220,7 @@
   --backdrop-opacity: 0.07;
 }
 
-[data-theme='gruvbox'] {
+[data-theme="gruvbox"] {
   color-scheme: dark;
   --bg: #282828;
   --card: #32302f;
@@ -166,7 +242,7 @@
   --backdrop-opacity: 0.06;
 }
 
-[data-theme='nord'] {
+[data-theme="nord"] {
   color-scheme: dark;
   --bg: #2e3440;
   --card: #3b4252;
@@ -190,15 +266,12 @@
 }
 
 /* ── Bauhaus: industrial brutalism, light — concrete-and-paper surfaces, hard
-   black rules, primary-colour accents. The radii tokens go to 0 and
-   --shadow-card becomes a hard offset block instead of a blur, so every box
-   reads as a printed rectangle; the backdrop art and the accent halo are
-   switched off — these themes are flat by construction. The chrome both
-   Bauhaus themes share sits in the [data-theme^='bauhaus'] block below. */
-[data-theme='bauhaus'] {
+   black rules, primary-colour accents. Only colour lives here; the flatness,
+   the squared corners, the stamped lettering and the hard shadow are all token
+   overrides in the [data-theme^='bauhaus'] block below, which both themes
+   share. */
+[data-theme="bauhaus"] {
   color-scheme: light;
-  /* a grotesque, not the platform UI face — the industrial half of the vibe */
-  --font: 'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif;
   --bg: #e9e6dd;
   --card: #fbfaf6;
   --inset: #ded9cd;
@@ -217,21 +290,14 @@
   --blue: #1d4ed8;
   --gray: #6b6558;
   --stripe: color-mix(in srgb, var(--text) 6%, transparent);
-  --backdrop-opacity: 0;
-  --glow: transparent;
-  --r-sm: 0;
-  --r-md: 0;
-  --r-lg: 0;
-  --r-full: 0;
   --shadow-card: 3px 3px 0 0 var(--border);
 }
 
 /* ── Bauhaus dark: the same construction inverted — ink surfaces, bone rules,
    signal-blue and red primaries. The hard shadow is a translucent bone block;
    a black one would be invisible against the near-black page. */
-[data-theme='bauhaus-dark'] {
+[data-theme="bauhaus-dark"] {
   color-scheme: dark;
-  --font: 'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif;
   --bg: #0b0b0c;
   --card: #151517;
   --inset: #101012;
@@ -250,48 +316,43 @@
   --blue: #4d79ff;
   --gray: #8a857a;
   --stripe: color-mix(in srgb, var(--text) 6%, transparent);
+  --shadow-card: 3px 3px 0 0 color-mix(in srgb, var(--border) 25%, transparent);
+}
+
+/* The construction both Bauhaus themes share, expressed as tokens rather than
+   as overrides of the components they land on. The ^= prefix matches both
+   names and, at equal specificity, wins on source order. */
+[data-theme^="bauhaus"] {
+  /* a grotesque, not the platform UI face — the industrial half of the vibe */
+  --font: "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif;
+  /* flat by construction: no backdrop art, no accent halo, no soft corners */
   --backdrop-opacity: 0;
   --glow: transparent;
+  --halo: none;
   --r-sm: 0;
   --r-md: 0;
   --r-lg: 0;
   --r-full: 0;
-  --shadow-card: 3px 3px 0 0 color-mix(in srgb, var(--border) 25%, transparent);
+  /* Double-weight rules on cards so the page grid reads as printed blocks. */
+  --border-w-card: 2px;
+  /* Display type is solid and set in caps rather than clipped from a gradient. */
+  --display-fill: none;
+  --display-color: var(--text);
+  --display-transform: uppercase;
+  --display-tracking: 0.02em;
+  /* Badges read as stamped labels: caps, tracked out, and one size down so the
+     uppercase width increase cancels out and table rows keep their metrics. */
+  --badge-fs: var(--fs-xs);
+  --badge-weight: 600;
+  --badge-transform: uppercase;
+  --badge-tracking: 0.05em;
 }
-
-/* Chrome the Bauhaus pair shares. The ^= prefix matches both theme names, and
-   outranks the base rules on specificity alone. Everything here is flatness or
-   type — the squared corners and hard shadows come from the tokens above. */
-[data-theme^='bauhaus'] body {
-  /* no accent halo behind the page: brutalist means flat, unlit surfaces */
-  background-image: none;
-}
-/* Display type is solid and set in caps rather than clipped from a gradient. */
-[data-theme^='bauhaus'] .topbar h1,
-[data-theme^='bauhaus'] .job-heading .job-num,
-[data-theme^='bauhaus'] .login h1 {
-  background: none;
-  color: var(--text);
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-}
-/* The masthead project name is flat primary rather than a gradient wash. Left
-   in mixed case: it is user data of unknown length inside a clipped header. */
-[data-theme^='bauhaus'] .proj-name {
-  background: none;
+/* The masthead project name is flat primary rather than the display gradient.
+   Left in mixed case: it is user data of unknown length inside a clipped
+   header, so it opts out of --display-transform. */
+[data-theme^="bauhaus"] .proj-name {
   color: var(--accent);
-}
-/* Double-weight rules on cards so the page grid reads as printed blocks. */
-[data-theme^='bauhaus'] .card {
-  border-width: 2px;
-}
-/* Badges read as stamped labels: caps, tracked out, and one size down so the
-   uppercase width increase cancels out and table rows keep their metrics. */
-[data-theme^='bauhaus'] .badge {
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  text-transform: none;
 }
 
 * {
@@ -302,12 +363,8 @@ body {
   margin: 0;
   background: var(--bg);
   /* Faint accent glow at the top of the viewport; fixed so it doesn't
-     scroll away or tile. */
-  background-image: radial-gradient(
-    1400px 420px at 50% -120px,
-    color-mix(in srgb, var(--accent) 8%, transparent),
-    transparent
-  );
+     scroll away or tile. Themes that are flat by construction set --halo: none. */
+  background-image: var(--halo);
   background-repeat: no-repeat;
   background-attachment: fixed;
   color: var(--text);
@@ -323,12 +380,12 @@ body {
    fully readable and the art only peeks through page gutters and empty
    areas. Opacity is tuned per theme so it stays equally subtle everywhere. */
 body::before {
-  content: '';
+  content: "";
   position: fixed;
   inset: 0;
   z-index: -1;
   pointer-events: none;
-  background-image: url('/chuggernaut-art.webp');
+  background-image: url("/chuggernaut-art.webp");
   background-position: center;
   background-size: cover;
   background-repeat: no-repeat;
@@ -344,21 +401,23 @@ pre {
   background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
+/* One hover/focus transition for everything interactive. The element list is
+   by tag wherever it can be — every button-shaped control in the app is a
+   <button>, so the classes that used to be named here were already covered. */
 a,
 button,
 input,
 select,
+textarea,
+summary,
 .badge,
-.tag,
-.dep-suggestion,
-.option-peek,
 table.jobs tbody tr {
   transition:
-    background-color 0.15s ease,
-    border-color 0.15s ease,
-    color 0.15s ease,
-    box-shadow 0.15s ease,
-    opacity 0.15s ease;
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
 }
 
 a {
@@ -367,6 +426,20 @@ a {
 }
 a:hover {
   text-decoration: underline;
+}
+
+/* Display type: the gradient-clipped page, job and project titles. A theme
+   swaps the fill for a solid colour (and may set it in caps) from tokens. */
+.topbar h1,
+.job-heading .job-num,
+.login h1,
+.proj-name {
+  background: var(--display-fill);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: var(--display-color);
+  text-transform: var(--display-transform);
+  letter-spacing: var(--display-tracking);
 }
 
 .page {
@@ -385,11 +458,6 @@ a:hover {
   font-size: var(--fs-xl);
   font-weight: 700;
   margin: 0;
-  letter-spacing: -0.01em;
-  background: linear-gradient(90deg, var(--accent), var(--purple));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
 }
 .topbar a {
   font-size: var(--fs-md);
@@ -407,38 +475,37 @@ a:hover {
 .job-heading .job-num {
   font-size: var(--fs-xl);
   font-weight: 700;
-  letter-spacing: -0.01em;
-  background: linear-gradient(90deg, var(--accent), var(--purple));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
 }
 .who {
   margin-left: auto;
   color: var(--dim);
   font-size: var(--fs-sm);
   background: var(--card);
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-full);
-  padding: 0.15rem 0.7rem;
+  padding: var(--pill-pad-y) var(--pill-pad-x);
 }
 
 .card {
   background: var(--card);
-  border: 1px solid var(--border);
+  border: var(--border-w-card) solid var(--border);
   border-radius: var(--r-lg);
-  padding: var(--sp-4) var(--sp-5);
+  padding: var(--card-pad-y) var(--card-pad-x);
   margin-bottom: var(--sp-4);
   box-shadow: var(--shadow-card);
 }
-/* Section label: small caps, dim — content inside stands out instead. */
+/* Section label: small caps, dim — content inside stands out instead. The
+   same role as a table header, so both are set from the --label-* tokens. */
+.card h2,
+table.jobs th {
+  font-size: var(--fs-xs);
+  font-weight: var(--label-weight);
+  text-transform: var(--label-transform);
+  letter-spacing: var(--label-tracking);
+  color: var(--dim);
+}
 .card h2 {
   margin: 0 0 var(--sp-3);
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--dim);
 }
 
 .row-head {
@@ -454,9 +521,9 @@ a:hover {
 button {
   background: var(--btn-bg);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-sm);
-  padding: 0.35rem 0.8rem;
+  padding: var(--ctrl-pad-y) var(--ctrl-pad-x);
   cursor: pointer;
   font: inherit;
 }
@@ -466,12 +533,6 @@ button:hover:not(:disabled) {
 }
 button:active:not(:disabled) {
   transform: translateY(1px);
-}
-button:focus-visible,
-input:focus-visible,
-select:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 button:disabled {
   opacity: 0.5;
@@ -493,26 +554,84 @@ button.link:hover {
   background: none;
 }
 
+/* ── Menu rows ───────────────────────────────────────────────────────────
+   A row in a list you pick from: dependency suggestions, the RichSelect menu,
+   saved filters. No frame of its own until it is hovered or highlighted. */
+.dep-suggestion,
+.rich-option,
+.qf-saved-item {
+  text-align: left;
+  background: none;
+  border: var(--border-w) solid transparent;
+  border-radius: var(--r-sm);
+  padding: var(--field-pad-y) var(--field-pad-x);
+}
+.dep-suggestion:hover:not(:disabled),
+.rich-option:hover:not(:disabled),
+.rich-option-hi,
+.qf-saved-item:hover:not(:disabled) {
+  background: var(--btn-bg);
+  border-color: transparent;
+}
+
+/* ── Primary actions ─────────────────────────────────────────────────────
+   The launch weight: the theme's accent fill, in the same geometry whether it
+   is rendered as a button or as a link. The two members differ only in radius
+   and in whether they carry the halo. */
+.btn-primary-glow,
+.capacity-newjob {
+  display: inline-flex;
+  align-items: center;
+  background: var(--accent-fill);
+  border: var(--border-w) solid
+    color-mix(in srgb, var(--accent) 60%, transparent);
+  border-radius: var(--r-sm);
+  padding: var(--ctrl-pad-y-lg) var(--ctrl-pad-x-lg);
+  color: var(--on-accent);
+  font-weight: 600;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+}
+.btn-primary-glow:hover:not(:disabled),
+.capacity-newjob:hover {
+  filter: brightness(1.08);
+  border-color: var(--accent);
+  background: var(--accent-fill);
+  text-decoration: none;
+}
+
 input,
 select,
 textarea {
   background: var(--inset);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-sm);
-  padding: 0.4rem 0.6rem;
+  padding: var(--field-pad-y) var(--field-pad-x);
   font: inherit;
 }
 input:focus,
 select:focus,
 textarea:focus {
-  outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 input::placeholder,
 textarea::placeholder {
   color: color-mix(in srgb, var(--dim) 70%, transparent);
+}
+
+/* One focus ring, for every element the keyboard can land on — the shadow
+   follows whatever radius the element already has, so pills stay pills. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 .login-wrap {
@@ -530,10 +649,6 @@ textarea::placeholder {
   margin: 0 0 var(--sp-2);
   font-size: var(--fs-xl);
   text-align: center;
-  background: linear-gradient(90deg, var(--accent), var(--purple));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
 }
 
 .error {
@@ -541,7 +656,7 @@ textarea::placeholder {
 }
 .error.banner {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
-  border: 1px solid var(--danger);
+  border: var(--border-w) solid var(--danger);
   border-radius: var(--r-sm);
   padding: var(--sp-2) 0.8rem;
   margin-bottom: var(--sp-4);
@@ -553,17 +668,12 @@ table.jobs {
 }
 table.jobs th {
   text-align: left;
-  color: var(--dim);
-  font-weight: 600;
-  font-size: var(--fs-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 0.3rem 0.6rem;
-  border-bottom: 1px solid var(--border);
+  padding: 0.3rem var(--field-pad-x);
+  border-bottom: var(--border-w) solid var(--border);
 }
 table.jobs td {
-  padding: 0.45rem 0.6rem;
-  border-bottom: 1px solid var(--border-faint);
+  padding: 0.45rem var(--field-pad-x);
+  border-bottom: var(--border-w) solid var(--border-faint);
   vertical-align: top;
 }
 table.jobs th.sortable {
@@ -652,17 +762,32 @@ td.actions button {
   font-variant-numeric: tabular-nums;
 }
 
-.badge {
+/* ── Pills ───────────────────────────────────────────────────────────────
+   Badges, chips and tags are one shape: a full-radius outline sized from the
+   --pill-pad-* tokens. Each member restates only what makes it itself. */
+.badge,
+.chip-batch,
+.tag,
+.group-chip {
   display: inline-block;
-  padding: 0.1rem 0.6rem;
+  padding: var(--pill-pad-y) var(--pill-pad-x);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-full);
-  font-size: var(--fs-sm);
-  font-weight: 500;
-  border: 1px solid;
+  font-size: var(--badge-fs);
+  font-weight: var(--badge-weight);
+}
+/* The tinted variant: text, hairline and wash are all mixed from the pill's
+   own --badge colour, so one variable recolours the whole pill. Caps and
+   tracking stop here — a tag or a group name is operator data, left in the
+   case it was written in. */
+.badge,
+.chip-batch {
   --badge: var(--gray);
   color: var(--badge);
-  border-color: color-mix(in srgb, var(--badge) 35%, transparent);
-  background: color-mix(in srgb, var(--badge) 12%, transparent);
+  border-color: color-mix(in srgb, var(--badge) var(--tint-line), transparent);
+  background: color-mix(in srgb, var(--badge) var(--tint-fill), transparent);
+  text-transform: var(--badge-transform);
+  letter-spacing: var(--badge-tracking);
 }
 .badge-green {
   --badge: var(--green);
@@ -681,6 +806,48 @@ td.actions button {
 }
 .badge-gray {
   --badge: var(--gray);
+}
+
+/* ── Status dots ─────────────────────────────────────────────────────────
+   The same primitive everywhere it appears: an unshrinkable round pip sized
+   from --dot-size, coloured by whoever mounts it. */
+.state-dot,
+.sf-dot,
+.notif-dot,
+.drift-dot,
+.badge-dot,
+.cap-dot {
+  width: var(--dot-size);
+  height: var(--dot-size);
+  border-radius: var(--r-full);
+  flex: none;
+}
+/* Dots that ride inside a pill or a dense row run one step down so they read
+   as punctuation rather than as their own status light. */
+.badge-dot,
+.cap-dot {
+  width: var(--dot-size-sm);
+  height: var(--dot-size-sm);
+}
+
+/* ── Icon buttons ────────────────────────────────────────────────────────
+   Glyph-only controls (close, expand, delete, uncouple, restore): one square
+   tap target, centred content, no text padding. Individual rules keep only
+   their placement and their hover colour. */
+.cover-close,
+.cover-expand,
+.attach-del,
+.consist-uncouple,
+.capacity-dot {
+  display: grid;
+  place-items: center;
+  width: var(--icon-btn-size);
+  height: var(--icon-btn-size);
+  padding: 0;
+  border: var(--border-w) solid var(--border);
+  border-radius: var(--r-full);
+  line-height: 1;
+  cursor: pointer;
 }
 
 .dim {
@@ -720,7 +887,7 @@ td.actions button {
 }
 .inbox-task,
 .triage-task {
-  border-top: 1px solid var(--border);
+  border-top: var(--border-w) solid var(--border);
   padding: var(--sp-3) 0;
 }
 .inbox-task:first-of-type,
@@ -747,9 +914,9 @@ td.actions button {
   width: 100%;
   height: 420px;
   max-height: 60vh;
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-sm);
-  background: #fff;
+  background: var(--canvas);
   margin: var(--sp-2) 0;
 }
 
@@ -828,10 +995,10 @@ td.actions button {
   line-height: 1.5;
 }
 .draft-preview {
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-sm);
   background: var(--inset);
-  padding: 0.4rem 0.6rem;
+  padding: var(--field-pad-y) var(--field-pad-x);
   min-height: 14rem;
 }
 /* The edit/preview toggle sits at the right end of the field label. */
@@ -953,16 +1120,9 @@ table.jobs tbody tr.row-draft td:first-child {
 /* 'batch (N)' chip beside the type of a batch job in the jobs table — flags a
    job that implements its member jobs on one branch. */
 .chip-batch {
-  display: inline-block;
+  --badge: var(--accent);
   margin-left: 0.4rem;
-  padding: 0.05rem 0.45rem;
-  border-radius: var(--r-full);
-  font-size: var(--fs-sm);
-  font-weight: 500;
   white-space: nowrap;
-  color: var(--accent);
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 /* The chip doubles as the expand/collapse toggle for the batch's member rows —
@@ -970,8 +1130,8 @@ table.jobs tbody tr.row-draft td:first-child {
 .chip-batch-toggle {
   appearance: none;
   font: inherit;
-  font-size: var(--fs-sm);
-  font-weight: 500;
+  font-size: var(--badge-fs);
+  font-weight: var(--badge-weight);
   line-height: inherit;
   cursor: pointer;
 }
@@ -1016,11 +1176,7 @@ table.jobs tbody tr.row-draft td:first-child {
 /* Unread marker on a collapsed card header: channel posts arrived while the
    operator was on the page. */
 .notif-dot {
-  width: 0.55rem;
-  height: 0.55rem;
-  border-radius: var(--r-full);
   background: var(--orange);
-  flex: none;
 }
 
 /* 'in batch #N' back-link next to a Batched member's state in the jobs table —
@@ -1052,7 +1208,7 @@ table.jobs tbody tr.row-draft td:first-child {
   padding: var(--sp-1) 0;
 }
 .batch-members li + li {
-  border-top: 1px solid var(--border-faint);
+  border-top: var(--border-w) solid var(--border-faint);
 }
 .batch-member-title {
   flex: 1;
@@ -1093,15 +1249,15 @@ table.jobs tbody tr.row-draft td:first-child {
   display: flex;
   gap: var(--sp-2);
 }
-.create-actions button[type='submit'],
+.create-actions button[type="submit"],
 .row-head button {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--bg);
   font-weight: 600;
-  padding: 0.45rem 1rem;
+  padding: var(--ctrl-pad-y-lg) var(--ctrl-pad-x-lg);
 }
-.create-actions button[type='submit']:hover:not(:disabled),
+.create-actions button[type="submit"]:hover:not(:disabled),
 .row-head button:hover:not(:disabled) {
   background: color-mix(in srgb, var(--accent) 85%, var(--text));
   border-color: color-mix(in srgb, var(--accent) 85%, var(--text));
@@ -1132,7 +1288,7 @@ table.jobs tbody tr.row-draft td:first-child {
   gap: var(--sp-2);
 }
 .name-list li {
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: 4px;
   padding: 0.1rem 0.45rem;
 }
@@ -1186,10 +1342,10 @@ table.jobs tbody tr.row-draft td:first-child {
   padding: 0;
 }
 .diff-file-list > li {
-  border-top: 1px solid var(--border);
+  border-top: var(--border-w) solid var(--border);
 }
 .diff-file-list > li:last-child {
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--border-w) solid var(--border);
 }
 .diff-file-row {
   display: flex;
@@ -1258,7 +1414,7 @@ table.jobs tbody tr.row-draft td:first-child {
   padding: 0;
 }
 .report {
-  border-top: 1px solid var(--border);
+  border-top: var(--border-w) solid var(--border);
   padding: var(--sp-3) 0;
 }
 .report:first-child {
@@ -1359,15 +1515,15 @@ table.jobs tbody tr.row-draft td:first-child {
 }
 .artifact-viewer {
   margin-top: 0.6rem;
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-sm);
 }
 .artifact-head {
   display: flex;
   gap: var(--sp-3);
   align-items: center;
-  padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid var(--border);
+  padding: var(--field-pad-y) var(--field-pad-x);
+  border-bottom: var(--border-w) solid var(--border);
 }
 .artifact-head strong {
   margin-right: auto;
@@ -1392,7 +1548,7 @@ table.jobs tbody tr.row-draft td:first-child {
    content, so a wide log line stretched the whole table sideways. */
 .log-pane {
   margin-top: var(--sp-3);
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-sm);
   background: var(--inset);
 }
@@ -1400,8 +1556,8 @@ table.jobs tbody tr.row-draft td:first-child {
   display: flex;
   gap: var(--sp-3);
   align-items: center;
-  padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid var(--border);
+  padding: var(--field-pad-y) var(--field-pad-x);
+  border-bottom: var(--border-w) solid var(--border);
 }
 .log-head strong {
   margin-right: auto;
@@ -1418,7 +1574,7 @@ table.jobs tbody tr.row-draft td:first-child {
 .log-truncated {
   padding: 0.3rem 0.6rem;
   font-size: var(--fs-xs);
-  border-bottom: 1px dashed var(--border-faint);
+  border-bottom: var(--border-w) dashed var(--border-faint);
 }
 /* Bound the height and scroll inside the box; wrap long lines so a wide build
    log never pushes the page sideways (web/CLAUDE.md mobile rule). */
@@ -1438,7 +1594,7 @@ table.jobs tbody tr.row-draft td:first-child {
   display: block;
   width: 100%;
   border: none;
-  border-top: 1px solid var(--border);
+  border-top: var(--border-w) solid var(--border);
   background: var(--btn-bg);
   color: var(--text);
   padding: 0.35rem;
@@ -1492,7 +1648,7 @@ table.jobs tbody tr.row-draft td:first-child {
   margin-top: var(--sp-1);
   padding: var(--sp-2);
   background: var(--inset);
-  border: 1px solid var(--border-faint);
+  border: var(--border-w) solid var(--border-faint);
   border-radius: var(--r-sm);
   max-height: 40vh;
   overflow: auto;
@@ -1520,12 +1676,12 @@ table.jobs tbody tr.row-draft td:first-child {
   display: none;
 }
 .tx-block > summary::before {
-  content: '▸';
+  content: "▸";
   color: var(--dim);
   flex: none;
 }
 .tx-block[open] > summary::before {
-  content: '▾';
+  content: "▾";
 }
 .tx-kind {
   font-family: var(--font-mono);
@@ -1562,7 +1718,7 @@ table.jobs tbody tr.row-draft td:first-child {
 }
 /* Final result event: highlighted completion banner with cost/timing. */
 .tx-final {
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-left: 3px solid var(--green);
   border-radius: var(--r-sm);
   background: color-mix(in srgb, var(--green) 7%, var(--inset));
@@ -1604,7 +1760,7 @@ table.jobs tbody tr.row-draft td:first-child {
 .channel-post {
   padding: var(--sp-2) var(--sp-3);
   background: var(--inset);
-  border: 1px solid var(--border-faint);
+  border: var(--border-w) solid var(--border-faint);
   border-radius: var(--r-md);
 }
 .channel-reply {
@@ -1635,7 +1791,7 @@ table.jobs tbody tr.row-draft td:first-child {
    Reports thread headers. Subtle, so it reads as a label, not a status. */
 .channel-origin {
   background: var(--inset);
-  border: 1px solid var(--border-faint);
+  border: var(--border-w) solid var(--border-faint);
   color: var(--dim);
   font-variant-numeric: tabular-nums;
 }
@@ -1706,7 +1862,7 @@ table.jobs tbody tr.row-draft td:first-child {
    rather than widening the card. */
 .md pre {
   background: var(--card);
-  border: 1px solid var(--border-faint);
+  border: var(--border-w) solid var(--border-faint);
   border-radius: var(--r-sm);
   padding: 0.6rem;
   margin: 0 0 var(--sp-2);
@@ -1738,7 +1894,7 @@ table.jobs tbody tr.row-draft td:first-child {
 }
 .md th,
 .md td {
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   padding: 0.2rem 0.4rem;
   text-align: left;
 }
@@ -1773,7 +1929,7 @@ table.jobs tbody tr.row-draft td:first-child {
   margin: 0 0 var(--sp-4);
   display: flex;
   gap: var(--sp-1);
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--border-w) solid var(--border);
   /* On narrow screens the tab set is wider than the viewport; scroll it
      horizontally rather than pushing the whole page sideways. Scrollbar is
      hidden — the active-tab underline signals there's more to swipe to. */
@@ -1784,7 +1940,7 @@ table.jobs tbody tr.row-draft td:first-child {
   display: none;
 }
 .tabs a {
-  padding: 0.45rem 0.9rem;
+  padding: var(--ctrl-pad-y-lg) var(--ctrl-pad-x-lg);
   border-radius: var(--r-sm) var(--r-sm) 0 0;
   color: inherit;
   text-decoration: none;
@@ -1823,12 +1979,8 @@ table.jobs tbody tr.row-draft td:first-child {
   margin: 0.35rem 0;
 }
 .tag {
-  padding: 0.15rem 0.6rem;
-  border-radius: var(--r-full);
-  border: 1px solid var(--border);
   background: transparent;
   color: inherit;
-  font-size: var(--fs-sm);
   cursor: pointer;
   opacity: 0.75;
 }
@@ -1846,24 +1998,14 @@ table.jobs tbody tr.row-draft td:first-child {
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-sm);
   padding: 0.3rem;
   background: var(--inset);
 }
-.dep-suggestion {
-  text-align: left;
-  background: none;
-  border: none;
-  padding: 0.3rem 0.5rem;
-  border-radius: var(--r-sm);
-}
-.dep-suggestion:hover {
-  background: var(--btn-bg);
-}
 
 .option-on {
-  border: 1px solid var(--accent);
+  border: var(--border-w) solid var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
@@ -1960,7 +2102,7 @@ table.jobs tbody tr.row-draft td:first-child {
     /* Even inset from both screen edges, now that the card no longer insets the
        item and the number no longer claims a gutter. */
     padding: 0.5rem 0.5rem 0.55rem;
-    border-bottom: 1px solid var(--border-faint);
+    border-bottom: var(--border-w) solid var(--border-faint);
   }
   .jobs-list tbody td {
     padding: 0;
@@ -2189,7 +2331,7 @@ table.jobs tbody tr.row-draft td:first-child {
   gap: var(--sp-2);
   text-align: left;
   background: var(--inset);
-  padding: 0.4rem 0.6rem;
+  padding: var(--field-pad-y) var(--field-pad-x);
 }
 .rich-select-trigger:hover:not(:disabled) {
   background: var(--inset);
@@ -2217,7 +2359,7 @@ table.jobs tbody tr.row-draft td:first-child {
   flex-direction: column;
   gap: 2px;
   background: var(--card);
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-md);
   box-shadow: var(--shadow-card);
   padding: var(--sp-1);
@@ -2228,16 +2370,6 @@ table.jobs tbody tr.row-draft td:first-child {
   display: flex;
   flex-direction: column;
   gap: 0.1rem;
-  text-align: left;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: var(--r-sm);
-  padding: 0.4rem 0.6rem;
-}
-.rich-option:hover:not(:disabled),
-.rich-option-hi {
-  background: var(--btn-bg);
-  border-color: transparent;
 }
 .rich-option-selected,
 .rich-option-selected.rich-option-hi {
@@ -2252,7 +2384,7 @@ table.jobs tbody tr.row-draft td:first-child {
   font-weight: 400;
 }
 .rich-option-empty {
-  padding: 0.4rem 0.6rem;
+  padding: var(--field-pad-y) var(--field-pad-x);
 }
 .option-peek {
   display: flex;
@@ -2333,7 +2465,7 @@ table.jobs tbody tr.row-draft td:first-child {
   margin: 0.5rem 0 0;
 }
 .origin-facts dt {
-  color: var(--fg-dim, #888);
+  color: var(--dim);
   font-size: var(--fs-sm);
   align-self: center;
 }
@@ -2350,22 +2482,24 @@ table.jobs tbody tr.row-draft td:first-child {
   position: relative;
   max-height: 260px;
   overflow: hidden;
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-md);
   margin: var(--sp-2) 0;
-  background: #fff; /* covers get no theme vars; give them a light canvas */
+  background: var(
+    --canvas
+  ); /* covers get no theme vars; give them a light canvas */
 }
 .cover-frame {
   display: block;
   width: 100%;
   height: 520px;
   border: 0;
-  background: #fff;
+  background: var(--canvas);
 }
 /* Bottom fade so a clipped tall cover reads as "there's more". pointer-events
    off so it never eats the click that opens the pop-out. */
 .cover-preview::after {
-  content: '';
+  content: "";
   position: absolute;
   left: 0;
   right: 0;
@@ -2389,20 +2523,12 @@ table.jobs tbody tr.row-draft td:first-child {
   top: var(--sp-2);
   right: var(--sp-2);
   z-index: 2;
-  display: grid;
-  place-items: center;
-  width: 1.9rem;
-  height: 1.9rem;
-  padding: 0;
   border-radius: var(--r-sm);
-  border: 1px solid var(--border);
   background: color-mix(in srgb, var(--card) 82%, transparent);
   color: var(--text);
-  cursor: pointer;
   opacity: 0;
-  transition: opacity 0.15s ease;
+  transition: opacity var(--dur-fast) var(--ease);
   font-size: var(--fs-md);
-  line-height: 1;
 }
 .cover-preview:hover .cover-expand,
 .cover-expand:focus-visible {
@@ -2417,12 +2543,16 @@ table.jobs tbody tr.row-draft td:first-child {
   display: grid;
   place-items: center;
   padding: var(--sp-4);
-  background: rgba(0, 0, 0, 0.62);
+  background: var(--overlay);
   animation: cover-fade 0.14s ease;
 }
 @keyframes cover-fade {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 .cover-lightbox-inner {
   position: relative;
@@ -2430,45 +2560,42 @@ table.jobs tbody tr.row-draft td:first-child {
   height: 92vh;
   border-radius: var(--r-lg);
   overflow: hidden;
-  background: #fff;
+  background: var(--canvas);
   box-shadow: var(--shadow-card);
   animation: cover-rise 0.16s ease;
 }
 @keyframes cover-rise {
-  from { transform: translateY(8px) scale(0.99); opacity: 0.6; }
-  to { transform: none; opacity: 1; }
+  from {
+    transform: translateY(8px) scale(0.99);
+    opacity: 0.6;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
 }
 .cover-frame-full {
   display: block;
   width: 100%;
   height: 100%;
   border: 0;
-  background: #fff;
+  background: var(--canvas);
 }
 .cover-close {
   position: absolute;
   top: var(--sp-2);
   right: var(--sp-2);
   z-index: 1;
-  display: grid;
-  place-items: center;
-  width: 2rem;
-  height: 2rem;
-  padding: 0;
-  border-radius: var(--r-full);
-  border: 1px solid var(--border);
-  background: color-mix(in srgb, #000 55%, transparent);
-  color: #fff;
-  cursor: pointer;
+  background: var(--overlay);
+  color: var(--on-accent);
   font-size: var(--fs-sm);
-  line-height: 1;
 }
 
 /* ── Job attachments (§1.6): upload/preview/delete grid ───────────────────── */
 .attachments.attach-dragover,
 .attach-composer.attach-dragover {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: var(--focus-ring);
 }
 .attach-controls {
   display: flex;
@@ -2476,7 +2603,7 @@ table.jobs tbody tr.row-draft td:first-child {
   flex-wrap: wrap;
 }
 .attach-composer {
-  border: 1px dashed var(--border);
+  border: var(--border-w) dashed var(--border);
   border-radius: var(--r-md);
   padding: var(--sp-3);
 }
@@ -2492,7 +2619,7 @@ table.jobs tbody tr.row-draft td:first-child {
 .attach-tile {
   position: relative;
   min-width: 0; /* let names ellipsis instead of stretching the track */
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-md);
   background: var(--inset);
   overflow: hidden;
@@ -2551,17 +2678,9 @@ table.jobs tbody tr.row-draft td:first-child {
   top: var(--sp-1);
   right: var(--sp-1);
   z-index: 1;
-  display: grid;
-  place-items: center;
-  width: 1.5rem;
-  height: 1.5rem;
-  padding: 0;
-  border-radius: var(--r-full);
-  border: 1px solid var(--border);
   background: color-mix(in srgb, var(--card) 80%, transparent);
   color: var(--text);
   font-size: var(--fs-xs);
-  line-height: 1;
 }
 .attach-del:hover:not(:disabled) {
   border-color: var(--danger);
@@ -2591,7 +2710,7 @@ table.jobs tbody tr.row-draft td:first-child {
 .attach-progress-bar {
   height: 100%;
   background: var(--accent);
-  transition: width 0.15s ease;
+  transition: width var(--dur-fast) var(--ease);
 }
 /* Image lightbox — the cover pop-out chrome (.cover-lightbox), sized to the
    image rather than a document frame. */
@@ -2620,7 +2739,7 @@ table.jobs tbody tr.row-draft td:first-child {
   width: 88px;
   height: 88px;
   object-fit: cover;
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-md);
 }
 .share-mode {
@@ -2673,42 +2792,24 @@ table.jobs tbody tr.row-draft td:first-child {
    readout. The card carries the drop shadow when the two are combined; standalone
    (feed down) the button carries its own. */
 .capacity-newjob {
-  display: inline-flex;
-  align-items: center;
-  text-decoration: none;
-  background: linear-gradient(120deg, var(--accent), var(--accent-2));
-  border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
-  color: #fff;
-  font-weight: 600;
-  font-size: var(--fs-md);
-  padding: 0.45rem 0.9rem;
   border-radius: var(--r-full);
-  white-space: nowrap;
+  font-size: var(--fs-md);
 }
+/* Standalone (the readout is collapsed) it is the only chrome there is, so it
+   carries the halo the capacity pill would otherwise provide. */
 .capacity-widget > .capacity-newjob {
-  padding: 0.5rem 0.95rem;
   box-shadow: 0 6px 20px -6px var(--glow);
 }
-.capacity-newjob:hover {
-  filter: brightness(1.08);
-  border-color: var(--accent);
-  text-decoration: none;
-}
-.capacity-widget[data-band='high'] {
+.capacity-widget[data-band="high"] {
   --band: var(--blue);
 }
-.capacity-widget[data-band='full'] {
+.capacity-widget[data-band="full"] {
   --band: var(--orange);
 }
 .capacity-dot {
-  width: 1.15rem;
-  height: 1.15rem;
-  padding: 0;
-  border-radius: var(--r-full);
-  border: 1px solid color-mix(in srgb, var(--band) 45%, transparent);
+  border-color: color-mix(in srgb, var(--band) 45%, transparent);
   background: color-mix(in srgb, var(--band) 30%, var(--card));
   box-shadow: var(--shadow-card);
-  cursor: pointer;
 }
 /* The shell holding both halves: launch button inset on the left, readout (or
    collapsed dot) on the right. The trailing padding is the wider one — it pads
@@ -2719,7 +2820,7 @@ table.jobs tbody tr.row-draft td:first-child {
   gap: var(--sp-2);
   padding: 0.25rem 0.6rem 0.25rem 0.25rem;
   border-radius: var(--r-full);
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   background: var(--card);
   box-shadow: var(--shadow-card);
 }
@@ -2755,11 +2856,8 @@ table.jobs tbody tr.row-draft td:first-child {
   gap: 3px;
 }
 .cap-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: var(--r-full);
   background: color-mix(in srgb, var(--dim) 40%, transparent);
-  transition: background 0.3s ease;
+  transition: background var(--dur-slow) var(--ease);
 }
 .cap-dot.on {
   background: var(--band);
@@ -2792,7 +2890,7 @@ table.jobs tbody tr.row-draft td:first-child {
   gap: var(--sp-2);
   padding: var(--sp-3);
   border-radius: var(--r-md);
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   background: var(--card);
   box-shadow: var(--shadow-card);
   animation: cover-fade 0.12s ease;
@@ -2824,7 +2922,7 @@ table.jobs tbody tr.row-draft td:first-child {
   font-family: var(--font-mono);
   padding: 0.05rem 0.35rem;
   border-radius: var(--r-sm);
-  border: 1px solid var(--border-faint);
+  border: var(--border-w) solid var(--border-faint);
   background: var(--inset);
 }
 .capacity-cluster-link {
@@ -2859,7 +2957,12 @@ table.jobs tbody tr.row-draft td:first-child {
 .cl-edge {
   width: 2px;
   height: 26px;
-  background: linear-gradient(to bottom, var(--border), var(--accent), var(--border));
+  background: linear-gradient(
+    to bottom,
+    var(--border),
+    var(--accent),
+    var(--border)
+  );
   opacity: 0.7;
 }
 .cl-fan {
@@ -2873,10 +2976,16 @@ table.jobs tbody tr.row-draft td:first-child {
   min-width: 160px;
   padding: var(--sp-3);
   border-radius: var(--r-md);
-  border: 1px solid var(--border);
-  background: linear-gradient(160deg, color-mix(in srgb, var(--accent) 6%, var(--card)), var(--card));
+  border: var(--border-w) solid var(--border);
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--accent) 6%, var(--card)),
+    var(--card)
+  );
   box-shadow: var(--shadow-card);
-  transition: opacity 0.3s ease, border-color 0.3s ease;
+  transition:
+    opacity var(--dur-slow) var(--ease),
+    border-color var(--dur-slow) var(--ease);
 }
 .cl-node-api,
 .cl-node-dispatcher,
@@ -2936,9 +3045,15 @@ table.jobs tbody tr.row-draft td:first-child {
   animation: none;
 }
 @keyframes cl-pulse {
-  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 55%, transparent); }
-  70% { box-shadow: 0 0 0 6px transparent; }
-  100% { box-shadow: 0 0 0 0 transparent; }
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 55%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
 }
 /* Pending-launch tray feeding the workers. */
 .cl-tray {
@@ -2947,7 +3062,8 @@ table.jobs tbody tr.row-draft td:first-child {
   gap: var(--sp-2);
   padding: 0.3rem 0.7rem;
   border-radius: var(--r-full);
-  border: 1px dashed color-mix(in srgb, var(--orange) 50%, var(--border));
+  border: var(--border-w) dashed
+    color-mix(in srgb, var(--orange) 50%, var(--border));
   background: color-mix(in srgb, var(--orange) 8%, var(--card));
 }
 .cl-tray-count {
@@ -2965,8 +3081,10 @@ table.jobs tbody tr.row-draft td:first-child {
 .cl-slot {
   min-height: 46px;
   border-radius: var(--r-sm);
-  border: 1px solid var(--border-faint);
-  transition: background 0.3s ease, border-color 0.3s ease;
+  border: var(--border-w) solid var(--border-faint);
+  transition:
+    background var(--dur-slow) var(--ease),
+    border-color var(--dur-slow) var(--ease);
 }
 .cl-slot-free {
   border-style: dashed;
@@ -2998,8 +3116,14 @@ table.jobs tbody tr.row-draft td:first-child {
   animation: cl-fill 0.28s ease;
 }
 @keyframes cl-fill {
-  from { opacity: 0; transform: scale(0.94); }
-  to { opacity: 1; transform: none; }
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 .cl-slot-top {
   display: flex;
@@ -3065,7 +3189,7 @@ table.jobs tbody tr.row-draft td:first-child {
 .cap-ctl {
   margin-top: var(--sp-3);
   padding-top: var(--sp-2);
-  border-top: 1px solid var(--border-faint);
+  border-top: var(--border-w) solid var(--border-faint);
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
@@ -3098,7 +3222,8 @@ table.jobs tbody tr.row-draft td:first-child {
    unacknowledged each get a bordered strip rather than a footnote. */
 .cap-alarm {
   --tone: var(--orange);
-  border: 1px solid color-mix(in srgb, var(--tone) 45%, var(--border));
+  border: var(--border-w) solid
+    color-mix(in srgb, var(--tone) 45%, var(--border));
   border-left-width: 3px;
   border-radius: var(--r-sm);
   background: color-mix(in srgb, var(--tone) 8%, var(--card));
@@ -3107,7 +3232,7 @@ table.jobs tbody tr.row-draft td:first-child {
   flex-direction: column;
   gap: var(--sp-1);
 }
-.cap-alarm[data-tone='bad'] {
+.cap-alarm[data-tone="bad"] {
   --tone: var(--red);
 }
 .cap-alarm-head {
@@ -3134,23 +3259,13 @@ table.jobs tbody tr.row-draft td:first-child {
 }
 .cap-step,
 .cap-set {
-  min-height: 32px;
+  min-height: var(--tap-min);
   padding: 0.2rem 0.7rem;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--border);
-  background: var(--btn-bg);
-  color: var(--text);
   font-size: var(--fs-xs);
-  cursor: pointer;
 }
 .cap-step {
-  min-width: 32px;
+  min-width: var(--tap-min);
   font-weight: 700;
-}
-.cap-step:disabled,
-.cap-set:disabled {
-  opacity: 0.45;
-  cursor: default;
 }
 .cap-set.danger {
   border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
@@ -3204,11 +3319,7 @@ table.jobs tbody tr.row-draft td:first-child {
   font-weight: 600;
 }
 .drift-dot {
-  width: 0.55rem;
-  height: 0.55rem;
-  border-radius: var(--r-full);
   background: var(--dim);
-  flex: none;
 }
 .drift-ok .drift-dot {
   background: var(--green);
@@ -3254,7 +3365,7 @@ table.jobs tbody tr.row-draft td:first-child {
   flex-wrap: wrap;
   gap: var(--sp-2);
   padding: var(--sp-2) 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--border-w) solid var(--border);
 }
 .freshness-row:last-child {
   border-bottom: none;
@@ -3273,7 +3384,7 @@ table.jobs tbody tr.row-draft td:first-child {
 /* Deploy leg checklist (rendered in a deploy job's detail): a from→to header
    then one row per leg, colored by status. */
 .deploy-card {
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-md);
   padding: var(--sp-3);
   margin: var(--sp-2) 0;
@@ -3414,7 +3525,7 @@ table.jobs tbody tr.row-draft td:first-child {
   gap: var(--sp-2);
   padding: var(--sp-3) 0;
   background: color-mix(in srgb, var(--card) 75%, var(--bg));
-  border-right: 1px solid var(--border-faint);
+  border-right: var(--border-w) solid var(--border-faint);
   backdrop-filter: blur(6px);
 }
 .rail-logo {
@@ -3462,13 +3573,13 @@ table.jobs tbody tr.row-draft td:first-child {
   padding: 0.2rem 0.5rem;
   border-radius: var(--r-sm);
   background: var(--card);
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   color: var(--text);
   font-size: var(--fs-xs);
   box-shadow: var(--shadow-card);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.12s ease;
+  transition: opacity var(--dur-fast) var(--ease);
   z-index: 70;
 }
 .rail-icon:hover .rail-tip {
@@ -3480,7 +3591,7 @@ table.jobs tbody tr.row-draft td:first-child {
   border-radius: var(--r-full);
   display: grid;
   place-items: center;
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 700;
   font-size: var(--fs-sm);
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
@@ -3495,7 +3606,7 @@ table.jobs tbody tr.row-draft td:first-child {
   position: relative;
   overflow: hidden;
   min-height: 138px;
-  border: 1px solid var(--border-faint);
+  border: var(--border-w) solid var(--border-faint);
   border-radius: var(--r-lg);
   background: var(--inset);
   margin-bottom: var(--sp-3);
@@ -3541,46 +3652,17 @@ table.jobs tbody tr.row-draft td:first-child {
   color: var(--dim);
   font-weight: 400;
 }
-.proj-name {
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
 .proj-name:hover {
   text-decoration: none;
-}
-.repo-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  padding: 0.2rem 0.6rem;
-  border-radius: var(--r-full);
-  border: 1px solid var(--border);
-  background: color-mix(in srgb, var(--card) 70%, transparent);
-  color: var(--dim);
-  font-size: var(--fs-sm);
-}
-.repo-chip svg {
-  color: var(--dim);
-}
-.repo-chip-linked {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
-}
-.repo-chip-linked svg {
-  color: var(--accent);
 }
 
 /* Active-tab glow underline (#161), layered over the base .tabs rules above. */
 .tabs a.active {
   text-shadow: 0 0 14px var(--glow);
-}
-.tabs a.active {
   position: relative;
 }
 .tabs a.active::after {
-  content: '';
+  content: "";
   position: absolute;
   left: 0.6rem;
   right: 0.6rem;
@@ -3629,7 +3711,7 @@ table.jobs tbody tr.row-draft td:first-child {
   align-items: center;
   gap: 0.55rem;
   background: none;
-  border: 1px solid transparent;
+  border: var(--border-w) solid transparent;
   border-radius: var(--r-sm);
   padding: 0.32rem 0.4rem;
   color: var(--text);
@@ -3652,10 +3734,6 @@ table.jobs tbody tr.row-draft td:first-child {
   font-size: var(--fs-sm);
 }
 .state-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: var(--r-full);
-  flex: none;
   background: var(--gray);
 }
 .dot-blue {
@@ -3706,7 +3784,7 @@ table.jobs tbody tr.row-draft td:first-child {
   justify-content: space-between;
   gap: 0.5rem;
   background: none;
-  border: 1px solid transparent;
+  border: var(--border-w) solid transparent;
   border-radius: var(--r-sm);
   padding: 0.32rem 0.4rem;
   color: var(--text);
@@ -3731,7 +3809,7 @@ table.jobs tbody tr.row-draft td:first-child {
 .qf-saved {
   margin-top: var(--sp-2);
   padding-top: var(--sp-2);
-  border-top: 1px solid var(--border-faint);
+  border-top: var(--border-w) solid var(--border-faint);
 }
 .qf-saved li {
   display: flex;
@@ -3741,19 +3819,11 @@ table.jobs tbody tr.row-draft td:first-child {
 .qf-saved-item {
   flex: 1;
   min-width: 0;
-  text-align: left;
-  background: none;
-  border: 0;
   color: var(--accent);
-  padding: 0.25rem 0.4rem;
-  border-radius: var(--r-sm);
   font-size: var(--fs-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.qf-saved-item:hover {
-  background: var(--btn-bg);
 }
 .qf-saved-del {
   background: none;
@@ -3774,11 +3844,11 @@ table.jobs tbody tr.row-draft td:first-child {
   margin-top: var(--sp-3);
 }
 .qf-save {
-  border: 1px dashed var(--border);
+  border: var(--border-w) dashed var(--border);
   background: transparent;
   color: var(--text);
   border-radius: var(--r-sm);
-  padding: 0.4rem 0.6rem;
+  padding: var(--field-pad-y) var(--field-pad-x);
   font-size: var(--fs-sm);
 }
 .qf-save:hover {
@@ -3834,7 +3904,7 @@ table.jobs tbody tr.row-draft td:first-child {
   align-items: center;
   gap: 0.4rem;
   background: var(--inset);
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-sm);
   padding: 0.15rem 0.55rem;
 }
@@ -3855,10 +3925,7 @@ table.jobs tbody tr.row-draft td:first-child {
 }
 .search-field:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
-}
-.state-filter {
-  padding: 0.45rem 0.6rem;
+  box-shadow: var(--focus-ring);
 }
 /* Sort-by control: the select picks the key, the button flips the direction.
    It shares its state with the click-to-sort table headers — and on phones,
@@ -3869,8 +3936,11 @@ table.jobs tbody tr.row-draft td:first-child {
   align-items: stretch;
   gap: 0.25rem;
 }
+/* The toolbar selects stand as tall as the composite search field beside
+   them (its own padding plus its inner input's), so the row reads as one bar. */
+.state-filter,
 .sort-select {
-  padding: 0.45rem 0.6rem;
+  padding: 0.45rem var(--field-pad-x);
 }
 .sort-dir {
   padding: 0.35rem 0.55rem;
@@ -3879,18 +3949,7 @@ table.jobs tbody tr.row-draft td:first-child {
   line-height: 1;
 }
 .btn-primary-glow {
-  background: linear-gradient(120deg, var(--accent), var(--accent-2));
-  border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
-  color: #fff;
-  font-weight: 600;
-  padding: 0.5rem 0.95rem;
-  border-radius: var(--r-sm);
   box-shadow: 0 6px 20px -6px var(--glow);
-}
-.btn-primary-glow:hover:not(:disabled) {
-  filter: brightness(1.08);
-  border-color: var(--accent);
-  background: linear-gradient(120deg, var(--accent), var(--accent-2));
 }
 
 /* ── Jobs table restyle: spark column, per-state accent bar, dot pills (#161) ── */
@@ -3908,44 +3967,44 @@ table.jobs tbody tr.row-draft td:first-child {
   font-size: 0.68rem;
   opacity: 0.4;
 }
-tr[data-state='Work'] .row-spark,
-tr[data-state='Evaluation'] .row-spark,
-tr[data-state='WrapUp'] .row-spark {
+tr[data-state="Work"] .row-spark,
+tr[data-state="Evaluation"] .row-spark,
+tr[data-state="WrapUp"] .row-spark {
   color: var(--orange);
   opacity: 0.95;
 }
-tr[data-state='Escalated'] .row-spark,
-tr[data-state='Stalled'] .row-spark {
+tr[data-state="Escalated"] .row-spark,
+tr[data-state="Stalled"] .row-spark {
   color: var(--orange);
   opacity: 0.85;
 }
 table.jobs tbody tr.row-accent td:first-child {
   box-shadow: inset 3px 0 0 var(--row-accent, transparent);
 }
-tr[data-state='Work'],
-tr[data-state='Ready'],
-tr[data-state='Blocked'] {
+tr[data-state="Work"],
+tr[data-state="Ready"],
+tr[data-state="Blocked"] {
   --row-accent: var(--blue);
 }
-tr[data-state='WrapUp'] {
+tr[data-state="WrapUp"] {
   --row-accent: var(--blue);
 }
-tr[data-state='Evaluation'] {
+tr[data-state="Evaluation"] {
   --row-accent: var(--purple);
 }
-tr[data-state='Escalated'],
-tr[data-state='Stalled'] {
+tr[data-state="Escalated"],
+tr[data-state="Stalled"] {
   --row-accent: var(--orange);
 }
-tr[data-state='Done'] {
+tr[data-state="Done"] {
   --row-accent: var(--green);
 }
-tr[data-state='Revoked'] {
+tr[data-state="Revoked"] {
   --row-accent: var(--red);
 }
-tr[data-state='Draft'],
-tr[data-state='Frozen'],
-tr[data-state='Batched'] {
+tr[data-state="Draft"],
+tr[data-state="Frozen"],
+tr[data-state="Batched"] {
   --row-accent: var(--gray);
 }
 /* Colored status dot leading every state pill (StateBadge). */
@@ -3955,11 +4014,7 @@ tr[data-state='Batched'] {
   gap: 0.4rem;
 }
 .badge-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: var(--r-full);
   background: currentColor;
-  flex: none;
 }
 
 /* ── System status footer (#163) ───────────────────────────────────────────── */
@@ -3992,12 +4047,8 @@ tr[data-state='Batched'] {
   font-size: var(--fs-sm);
 }
 .sf-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: var(--r-full);
   background: var(--green);
   box-shadow: 0 0 8px var(--green);
-  flex: none;
 }
 .sf-h-degraded .sf-dot {
   background: var(--orange);
@@ -4026,7 +4077,7 @@ tr[data-state='Batched'] {
   height: 8px;
   border-radius: var(--r-full);
   background: var(--inset);
-  border: 1px solid var(--border-faint);
+  border: var(--border-w) solid var(--border-faint);
   overflow: hidden;
 }
 .sf-bar-fill {
@@ -4034,9 +4085,9 @@ tr[data-state='Batched'] {
   height: 100%;
   border-radius: var(--r-full);
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
-  transition: width 0.4s ease;
+  transition: width var(--dur-slow) var(--ease);
 }
-.sf-fleet[data-band='full'] .sf-bar-fill {
+.sf-fleet[data-band="full"] .sf-bar-fill {
   background: linear-gradient(90deg, var(--orange), var(--danger));
 }
 .sf-fleet-read {
@@ -4118,7 +4169,12 @@ tr[data-state='Batched'] {
   }
 }
 .sc-space {
-  background: radial-gradient(130% 150% at 72% -30%, #1a2650 0%, #0a1128 42%, #05070f 100%);
+  background: radial-gradient(
+    130% 150% at 72% -30%,
+    #1a2650 0%,
+    #0a1128 42%,
+    #05070f 100%
+  );
 }
 .sc-sourcecode {
   background: linear-gradient(120deg, #0a1024, #120a24);
@@ -4192,8 +4248,16 @@ tr[data-state='Batched'] {
 }
 .train-sourcecode-2 .train-strip {
   background-image:
-    radial-gradient(1.4px 1.4px at 30px 40px, color-mix(in srgb, var(--accent) 50%, transparent), transparent),
-    radial-gradient(1.4px 1.4px at 120px 110px, color-mix(in srgb, var(--purple) 50%, transparent), transparent);
+    radial-gradient(
+      1.4px 1.4px at 30px 40px,
+      color-mix(in srgb, var(--accent) 50%, transparent),
+      transparent
+    ),
+    radial-gradient(
+      1.4px 1.4px at 120px 110px,
+      color-mix(in srgb, var(--purple) 50%, transparent),
+      transparent
+    );
   background-size: 180px 160px;
 }
 /* Built-in Matrix rain: THE green glyph rain. */
@@ -4240,11 +4304,20 @@ tr[data-state='Batched'] {
   z-index: 2;
   pointer-events: none;
   background:
-    linear-gradient(90deg, var(--bg) 0%, color-mix(in srgb, var(--bg) 55%, transparent) 42%, transparent 80%),
-    linear-gradient(0deg, color-mix(in srgb, var(--bg) 72%, transparent), transparent 58%);
+    linear-gradient(
+      90deg,
+      var(--bg) 0%,
+      color-mix(in srgb, var(--bg) 55%, transparent) 42%,
+      transparent 80%
+    ),
+    linear-gradient(
+      0deg,
+      color-mix(in srgb, var(--bg) 72%, transparent),
+      transparent 58%
+    );
 }
 .train-scrim::after {
-  content: '';
+  content: "";
   position: absolute;
   inset: 0;
   background: var(--bg);
@@ -4392,7 +4465,7 @@ tr[data-state='Batched'] {
   gap: 0.25rem;
   text-align: left;
   padding: var(--sp-3);
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-md);
   background: var(--inset);
   color: var(--text);
@@ -4403,7 +4476,9 @@ tr[data-state='Batched'] {
 .type-card-on {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, var(--inset));
-  box-shadow: 0 0 0 1px var(--accent), 0 8px 22px -10px var(--glow);
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 8px 22px -10px var(--glow);
 }
 .type-card-glyph {
   font-size: 1.15rem;
@@ -4451,7 +4526,7 @@ tr[data-state='Batched'] {
   align-items: center;
   gap: 0.3rem;
   padding: 0.2rem 0.5rem;
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-sm);
   background: var(--btn-bg);
   font-family: var(--font-mono);
@@ -4487,7 +4562,7 @@ tr[data-state='Batched'] {
   gap: 2px;
   overflow-x: auto;
   padding: 0.35rem 0.1rem 0.5rem;
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-md);
   background: var(--inset);
 }
@@ -4516,7 +4591,7 @@ tr[data-state='Batched'] {
   align-items: center;
   gap: 0.4rem;
   padding: 0.25rem 0.4rem 0.25rem 0.55rem;
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-sm);
   background: var(--btn-bg);
   box-shadow: var(--shadow-card);
@@ -4538,17 +4613,8 @@ tr[data-state='Batched'] {
   font-size: var(--fs-sm);
 }
 .consist-uncouple {
-  display: grid;
-  place-items: center;
-  width: 1.4rem;
-  height: 1.4rem;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--r-full);
   background: var(--inset);
   color: var(--dim);
-  cursor: pointer;
-  line-height: 1;
 }
 .consist-uncouple:hover:not(:disabled) {
   border-color: var(--danger);
@@ -4614,7 +4680,8 @@ tr[data-state='Batched'] {
 /* Live manifest: the computed dep/eval union, stamped like paperwork and
    re-stamped whenever an edit changes it. */
 .manifest-card {
-  border: 1px dashed color-mix(in srgb, var(--border) 70%, var(--dim));
+  border: var(--border-w) dashed
+    color-mix(in srgb, var(--border) 70%, var(--dim));
   border-radius: var(--r-md);
   padding: var(--sp-3);
   background: color-mix(in srgb, var(--accent) 3%, var(--card));
@@ -4694,7 +4761,7 @@ tr[data-state='Batched'] {
   margin: 0 calc(-1 * var(--sp-5)) calc(-1 * var(--sp-4));
   padding: var(--sp-3) var(--sp-5) var(--sp-4);
   background: var(--card);
-  border-top: 1px solid var(--border);
+  border-top: var(--border-w) solid var(--border);
 }
 .switch {
   position: relative;
@@ -4703,7 +4770,7 @@ tr[data-state='Batched'] {
   height: 38px;
   padding: 3px;
   border-radius: var(--r-full);
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   background: var(--inset);
   cursor: pointer;
 }
@@ -4724,14 +4791,16 @@ tr[data-state='Batched'] {
   width: calc(50% - 3px);
   border-radius: var(--r-full);
   background: var(--btn-bg);
-  transition: transform 0.25s ease, background 0.25s ease;
+  transition:
+    transform var(--dur-slow) var(--ease),
+    background var(--dur-slow) var(--ease);
 }
-.switch[data-mode='release'] .switch-knob {
+.switch[data-mode="release"] .switch-knob {
   transform: translateX(100%);
-  background: linear-gradient(120deg, var(--accent), var(--accent-2));
+  background: var(--accent-fill);
 }
-.switch[data-mode='draft'] .switch-opt:first-child,
-.switch[data-mode='release'] .switch-opt:last-child {
+.switch[data-mode="draft"] .switch-opt:first-child,
+.switch[data-mode="release"] .switch-opt:last-child {
   color: var(--text);
   font-weight: 600;
 }
@@ -4762,7 +4831,7 @@ tr[data-state='Batched'] {
     flex-direction: row;
     padding: 0 var(--sp-2);
     border-right: 0;
-    border-top: 1px solid var(--border-faint);
+    border-top: var(--border-w) solid var(--border-faint);
     gap: 0.15rem;
   }
   /* Keep the floating widgets clear of the bottom rail. */
@@ -4912,10 +4981,18 @@ tr[data-state='Batched'] {
   border-radius: 2px;
   display: inline-block;
 }
-.ac-dot.ac-created { background: var(--accent); }
-.ac-dot.ac-completed { background: var(--green); }
-.ac-bar.ac-created { fill: var(--accent); }
-.ac-bar.ac-completed { fill: var(--green); }
+.ac-dot.ac-created {
+  background: var(--accent);
+}
+.ac-dot.ac-completed {
+  background: var(--green);
+}
+.ac-bar.ac-created {
+  fill: var(--accent);
+}
+.ac-bar.ac-completed {
+  fill: var(--green);
+}
 .ac-grid {
   stroke: var(--border-faint);
   stroke-width: 1;
@@ -4939,7 +5016,7 @@ tr[data-state='Batched'] {
   top: 0;
   pointer-events: none;
   background: var(--card);
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
   border-radius: var(--r-sm);
   padding: 0.35rem 0.6rem;
   font-size: var(--fs-xs);
@@ -4960,8 +5037,8 @@ table.type-stats {
 }
 table.type-stats th,
 table.type-stats td {
-  padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid var(--border-faint);
+  padding: var(--field-pad-y) var(--field-pad-x);
+  border-bottom: var(--border-w) solid var(--border-faint);
   text-align: left;
 }
 table.type-stats th {
@@ -4977,8 +5054,12 @@ table.type-stats .num {
 .jobs-layout-full {
   grid-template-columns: minmax(0, 1fr);
 }
-.tabs-spacer { flex: 1; }
-.tabs-platform { opacity: 0.7; }
+.tabs-spacer {
+  flex: 1;
+}
+.tabs-platform {
+  opacity: 0.7;
+}
 
 /* The stats overview is defined below the file's first phone block, so its
    phone rules live here (see that block's header). A phone has no room for a
@@ -5007,8 +5088,12 @@ table.type-stats .num {
   animation: skel-shimmer 1.4s linear infinite;
 }
 @keyframes skel-shimmer {
-  from { background-position: 100% 0; }
-  to { background-position: -100% 0; }
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
 }
 .skel-lines {
   display: flex;
@@ -5016,33 +5101,41 @@ table.type-stats .num {
   gap: var(--sp-2);
   margin: var(--sp-2) 0;
 }
-.skel-table { margin: var(--sp-2) 0; }
+.skel-table {
+  margin: var(--sp-2) 0;
+}
 .skel-table-row {
   display: flex;
   gap: var(--sp-4);
   padding: var(--sp-2) 0;
-  border-bottom: 1px solid var(--border-faint);
+  border-bottom: var(--border-w) solid var(--border-faint);
 }
-.skel-table-row:last-child { border-bottom: none; }
+.skel-table-row:last-child {
+  border-bottom: none;
+}
 @media (prefers-reduced-motion: reduce) {
   .skel {
     animation: none;
     background: var(--inset);
   }
 }
-.proj-titleline { justify-content: space-between; }
+.proj-titleline {
+  justify-content: space-between;
+}
 .proj-header-links {
   display: inline-flex;
   gap: var(--sp-3);
   margin-left: auto;
 }
 .proj-header-links a {
-  color: var(--text-dim, inherit);
+  color: var(--text);
   opacity: 0.75;
   font-size: 0.9em;
 }
 .proj-header-links a:hover,
-.proj-header-links a.active { opacity: 1; }
+.proj-header-links a.active {
+  opacity: 1;
+}
 
 /* ── Header layout: full-bleed scene; links pinned top-right; loco right ──── */
 .proj-header-links {
@@ -5052,23 +5145,23 @@ table.type-stats .num {
   z-index: 4;
 }
 
-
 /* three-way initial-state selector on the create form */
 .mode-seg {
   display: inline-flex;
-  border: 1px solid var(--border-faint);
+  border: var(--border-w) solid var(--border-faint);
   border-radius: var(--r-md);
   overflow: hidden;
 }
 .mode-seg-opt {
-  padding: 6px 14px;
+  padding: var(--ctrl-pad-y) var(--ctrl-pad-x);
   background: none;
   border: 0;
-  cursor: pointer;
+  border-radius: 0;
   color: var(--dim);
-  font: inherit;
 }
-.mode-seg-opt + .mode-seg-opt { border-left: 1px solid var(--border-faint); }
+.mode-seg-opt + .mode-seg-opt {
+  border-left: var(--border-w) solid var(--border-faint);
+}
 .mode-seg-on {
   color: inherit;
   background: var(--inset);
@@ -5093,7 +5186,7 @@ table.type-stats .num {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  min-height: 2rem;
+  min-height: var(--tap-min);
   padding: 0 0.2rem;
   font-size: var(--fs-sm);
   color: var(--dim);
@@ -5117,7 +5210,7 @@ table.type-stats .num {
   flex-direction: column;
   gap: 0.3rem;
   padding: var(--sp-3) var(--sp-5);
-  border-top: 1px solid var(--border-faint);
+  border-top: var(--border-w) solid var(--border-faint);
 }
 .design-row:first-child {
   border-top: 0;
@@ -5214,7 +5307,7 @@ table.type-stats .num {
 }
 .design-members li {
   padding: var(--sp-2) 0;
-  border-top: 1px solid var(--border-faint);
+  border-top: var(--border-w) solid var(--border-faint);
 }
 .design-member-title {
   display: block;
@@ -5271,13 +5364,9 @@ table.type-stats .num {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  padding: 0.05rem 0.45rem;
-  border-radius: var(--r-full);
-  border: 1px solid var(--border);
   background: var(--inset);
   color: var(--dim);
   font-size: var(--fs-xs);
-  font-weight: 500;
   line-height: 1.5;
 }
 .group-chip:hover {

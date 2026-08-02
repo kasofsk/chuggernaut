@@ -38,9 +38,32 @@ in the same change.
 - **One stylesheet: `src/styles.css`.** No CSS-in-JS, no inline style objects for anything
   reusable. All colors come from CSS variables (design tokens at the top); never hard-code a
   hex value in a component.
+- **The token block is not only colour.** It also carries stroke weights
+  (`--border-w`, `--border-w-card`), control geometry (`--ctrl-pad-*`, `--field-pad-*`,
+  `--pill-pad-*`, `--icon-btn-size`, `--dot-size`, `--card-pad-*`, `--tap-min`), tint
+  strengths (`--tint-fill`/`--tint-line`), the focus ring (`--focus-ring`), motion
+  (`--dur-fast`/`--dur-slow`/`--ease`) and the type roles (`--label-*`, `--badge-*`,
+  `--display-*`). **Reach for a token before a literal** — a new `1px`, `0.4rem 0.6rem` or
+  `0.15s ease` in a rule is almost always one of these under another name.
+- **Primitives are families, not one-offs.** Pills (`.badge`/`.chip-batch`/`.tag`/
+  `.group-chip`), status dots, glyph-only icon buttons, menu rows and primary actions each
+  have one shared base rule near the top of the file; a member restates only what makes it
+  itself. Adding a sixth status dot means joining the dot rule, not writing `width: 7px`.
 - **Themes** are `[data-theme='...']` blocks in `styles.css`. To add one: add the block, then
   register its name in `src/theme.tsx`. `index.html` applies the saved theme before first
-  paint (mirror the `chug-theme` storage key if you change it).
+  paint (mirror the `chug-theme` storage key if you change it). A theme may override **any**
+  token, geometry and type included — so a new look should need no rule of its own. The
+  Bauhaus pair is the worked example: its flatness, squared corners, double-ruled cards,
+  stamped badge lettering and solid display type are all token overrides in the shared
+  `[data-theme^='bauhaus']` block. If a theme needs a component selector, ask first whether
+  the knob it wants should be a token.
+- **Two things are deliberately not themeable**: operator data is never re-cased (tags, group
+  names, project names opt out of `--badge-transform`/`--display-transform`), and the fixed
+  canvases (`--on-accent`, `--canvas` for sandboxed covers, `--overlay` for lightbox scrims)
+  stay legible regardless of the surrounding theme.
+- `prefers-reduced-motion` is handled once, by collapsing `--dur-fast`/`--dur-slow` to `0s`.
+  A transition written against those tokens needs no media query of its own; only a *named*
+  animation still needs an explicit opt-out block.
 - The mobile/responsive rules live in the `@media (max-width: 640px)` block near the bottom.
 
 ## Data & structure
