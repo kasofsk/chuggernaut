@@ -42,6 +42,22 @@ pub struct WorkerConfig {
     /// A node property, provisioned entirely worker-side: it never rides the
     /// wire or the dispatcher's launch config (spec §3.1).
     pub cache_dir: Option<PathBuf>,
+    /// The KVM device this node passes through (`WORKER_KVM`); `None` (unset) ⇒
+    /// no passthrough at all. A node property provisioned exactly as
+    /// [`Self::cache_dir`] is — worker-side, never on the wire or the launch
+    /// config (design #367 A1) — and the daemon refuses to start when it is set
+    /// and the device node is absent.
+    pub kvm_device: Option<PathBuf>,
+    /// Projects allowed the KVM device and the read-only toolchain mounts that
+    /// travel with it (`WORKER_KVM_PROJECTS`, `owner/project` entries). Empty ⇒
+    /// nobody, so enabling KVM on a node and granting it to a project are two
+    /// separate acts (design #367 §2.3).
+    pub kvm_projects: Vec<String>,
+    /// The node's Android SDK path (`WORKER_ANDROID_SDK_DIR`), mounted read-only
+    /// for an allow-listed launch. It names the operator's activation-maintained
+    /// **stable** path, which is why the parse rejects a nix store hash (design
+    /// #367 §3.5).
+    pub android_sdk_dir: PathBuf,
     /// Node-local script that rebuilds the three node images at a given SHA and
     /// swaps the daemon (`worker-refresh.sh build <sha> <tag>` / `swap <tag>`),
     /// invoked when a `refresh` RPC arrives (spec §3.1). `None` ⇒ self-refresh
@@ -131,6 +147,9 @@ impl WorkerConfig {
                     PathBuf::from("/usr/local/lib/chuggernaut/chuggernaut-channel")
                 }),
             cache_dir: parse_cache_dir(std::env::var("WORKER_CACHE_DIR").ok()),
+            kvm_device: parse_kvm_device(std::env::var("WORKER_KVM").ok())?,
+            kvm_projects: parse_kvm_projects(std::env::var("WORKER_KVM_PROJECTS").ok())?,
+            android_sdk_dir: parse_android_sdk_dir(std::env::var("WORKER_ANDROID_SDK_DIR").ok())?,
             refresh_script: resolve_refresh_script(std::env::var("WORKER_REFRESH_SCRIPT").ok()),
             refresh_git_url: parse_git_url(std::env::var("WORKER_REFRESH_GIT_URL").ok()),
             refresh_git_key: std::env::var("WORKER_GIT_KEY")
@@ -161,6 +180,101 @@ fn resolve_refresh_script(raw: Option<String>) -> Option<PathBuf> {
 /// behavior is unit-tested without mutating the process environment.
 fn parse_cache_dir(raw: Option<String>) -> Option<PathBuf> {
     raw.filter(|s| !s.is_empty()).map(PathBuf::from)
+}
+
+/// The node's Android SDK path when `WORKER_ANDROID_SDK_DIR` is unset (design
+/// #367 §3.5). Under `/var/lib` deliberately: a symlink under `/tmp` is not
+/// stat-able by the docker daemon at container create, so the mount fails.
+pub const ANDROID_SDK_DIR_DEFAULT: &str = "/var/lib/chuggernaut/android-sdk";
+
+/// Parse `WORKER_KVM` into the device this node passes through (design #367
+/// §2.3): absent, empty, `0`, `false` or `off` ⇒ `None`; `1`, `true` or `on` ⇒
+/// the default device; an absolute path names another device node. Anything
+/// else is a hard config error — a capability must never be silently off.
+fn parse_kvm_device(raw: Option<String>) -> Result<Option<PathBuf>, ConfigError> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    match raw.as_str() {
+        "0" | "false" | "off" => Ok(None),
+        "1" | "true" | "on" => Ok(Some(PathBuf::from(container::docker::KVM_DEVICE_PATH))),
+        path if path.starts_with('/') => Ok(Some(PathBuf::from(path))),
+        other => Err(ConfigError(format!(
+            "WORKER_KVM must be 1/0 or an absolute device path, got {other:?}"
+        ))),
+    }
+}
+
+/// Parse `WORKER_KVM_PROJECTS` into the projects allowed the device and the
+/// read-only toolchain mounts (design #367 §2.3), absent or empty ⇒ nobody. Each
+/// entry is `owner/project` — the launch env's `JOB_PROJECT` shape — and a
+/// malformed or repeated entry is a hard config error rather than a grant that
+/// silently never matches.
+fn parse_kvm_projects(raw: Option<String>) -> Result<Vec<String>, ConfigError> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let mut projects = Vec::new();
+    for entry in raw.split(',') {
+        let project = entry.trim();
+        let (owner, name) = project.split_once('/').unwrap_or_default();
+        if owner.is_empty() || name.is_empty() || name.contains('/') {
+            return Err(ConfigError(format!(
+                "WORKER_KVM_PROJECTS entry {project:?} is not an owner/project pair"
+            )));
+        }
+        if projects.iter().any(|p| p == project) {
+            return Err(ConfigError(format!(
+                "WORKER_KVM_PROJECTS lists {project:?} more than once"
+            )));
+        }
+        projects.push(project.to_string());
+    }
+    debug_assert!(
+        !projects.is_empty(),
+        "a parsed allow-list names at least one project"
+    );
+    Ok(projects)
+}
+
+/// Parse `WORKER_ANDROID_SDK_DIR` into the node's SDK path; absent or empty ⇒
+/// [`ANDROID_SDK_DIR_DEFAULT`]. A relative path, or one carrying a nix store
+/// hash, is a hard config error (design #367 §3.5): a store path changes on
+/// every SDK bump, so pinning one here keeps testing the *previous* SDK until
+/// garbage collection turns it into an unattributable `ENOENT`.
+fn parse_android_sdk_dir(raw: Option<String>) -> Result<PathBuf, ConfigError> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(PathBuf::from(ANDROID_SDK_DIR_DEFAULT));
+    };
+    let path = PathBuf::from(&raw);
+    if !path.is_absolute() {
+        return Err(ConfigError(format!(
+            "WORKER_ANDROID_SDK_DIR must be an absolute host path, got {raw:?}"
+        )));
+    }
+    if path
+        .components()
+        .any(|c| is_store_hash(&c.as_os_str().to_string_lossy()))
+    {
+        return Err(ConfigError(format!(
+            "WORKER_ANDROID_SDK_DIR {raw:?} names a nix store path — chug config names an \
+             activation-maintained stable path, never a content hash (design #367 §3.5)"
+        )));
+    }
+    Ok(path)
+}
+
+/// Whether one path component is a nix store entry: 32 characters of nix's
+/// base32 alphabet, then `-` and the derivation name.
+fn is_store_hash(component: &str) -> bool {
+    let Some((hash, name)) = component.split_once('-') else {
+        return false;
+    };
+    !name.is_empty()
+        && hash.len() == 32
+        && hash
+            .chars()
+            .all(|c| "0123456789abcdfghijklmnpqrsvwxyz".contains(c))
 }
 
 /// The node's first-boot slot count when `WORKER_SLOTS` is unset — the value of
@@ -280,6 +394,103 @@ mod tests {
             Some(PathBuf::from("/var/cache/chuggernaut/sccache"))
         );
         assert_eq!(parse_cache_dir(Some(String::new())), None);
+    }
+
+    /// `WORKER_KVM` (design #367 §2.3): unset is off — today's behavior — a
+    /// boolean turns on the default device, an explicit path names another, and
+    /// a value that is neither is refused rather than read as "off".
+    #[test]
+    fn kvm_device_parses_default_path_and_rejections() {
+        assert_eq!(parse_kvm_device(None).unwrap(), None);
+        assert_eq!(parse_kvm_device(Some(String::new())).unwrap(), None);
+        assert_eq!(parse_kvm_device(Some(" \t".into())).unwrap(), None);
+        assert_eq!(parse_kvm_device(Some("0".into())).unwrap(), None);
+        assert_eq!(parse_kvm_device(Some("false".into())).unwrap(), None);
+        assert_eq!(
+            parse_kvm_device(Some(" 1 ".into())).unwrap(),
+            Some(PathBuf::from("/dev/kvm"))
+        );
+        assert_eq!(
+            parse_kvm_device(Some("true".into())).unwrap(),
+            Some(PathBuf::from(container::docker::KVM_DEVICE_PATH))
+        );
+        assert_eq!(
+            parse_kvm_device(Some("/dev/kvm1".into())).unwrap(),
+            Some(PathBuf::from("/dev/kvm1"))
+        );
+        let err = parse_kvm_device(Some("yes".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("WORKER_KVM"), "{err}");
+    }
+
+    /// `WORKER_KVM_PROJECTS` (design #367 §2.3): unset grants NOBODY — the
+    /// fail-closed rule that makes enabling KVM on a node and granting it to a
+    /// project two separate acts — and every malformed entry is refused rather
+    /// than kept as a grant that can never match a `JOB_PROJECT`.
+    #[test]
+    fn kvm_projects_parse_empty_list_and_rejections() {
+        assert_eq!(parse_kvm_projects(None).unwrap(), Vec::<String>::new());
+        assert_eq!(
+            parse_kvm_projects(Some(String::new())).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            parse_kvm_projects(Some("  ".into())).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            parse_kvm_projects(Some(" acme/beacon , acme/api ".into())).unwrap(),
+            vec!["acme/beacon".to_string(), "acme/api".to_string()]
+        );
+
+        for bad in ["beacon", "acme/", "/beacon", "acme/b/c", "acme/beacon,", ""] {
+            assert!(
+                parse_kvm_projects(Some(format!("acme/api,{bad}"))).is_err(),
+                "must reject {bad:?}"
+            );
+        }
+        let err = parse_kvm_projects(Some("acme/api,acme/api".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("more than once"), "{err}");
+    }
+
+    /// `WORKER_ANDROID_SDK_DIR` (design #367 §3.5): unset is the documented
+    /// stable default, an absolute path is taken as given, and a nix store path
+    /// is REFUSED — no content hash may enter chug-side config, because it goes
+    /// silently wrong at the next `nixos-rebuild`.
+    #[test]
+    fn android_sdk_dir_rejects_a_store_hash() {
+        assert_eq!(
+            parse_android_sdk_dir(None).unwrap(),
+            PathBuf::from(ANDROID_SDK_DIR_DEFAULT)
+        );
+        assert_eq!(
+            parse_android_sdk_dir(Some(String::new())).unwrap(),
+            PathBuf::from(ANDROID_SDK_DIR_DEFAULT)
+        );
+        assert_eq!(
+            parse_android_sdk_dir(Some(" /var/lib/chug/android-sdk ".into())).unwrap(),
+            PathBuf::from("/var/lib/chug/android-sdk")
+        );
+
+        let store = "/nix/store/3zr1pgwpc00zrj8qc8d631bdfw1z9c5y-androidsdk/libexec/android-sdk";
+        let err = parse_android_sdk_dir(Some(store.into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("store path"), "{err}");
+        assert!(
+            parse_android_sdk_dir(Some(
+                "/var/lib/nix/j92gsy8k9mzqz9zjw6h1mp6nxbfnlqhx-android-sdk-emulator".into()
+            ))
+            .is_err(),
+            "a hash is a hash wherever it is written"
+        );
+        assert!(
+            parse_android_sdk_dir(Some("relative/android-sdk".into())).is_err(),
+            "a bind source must be an absolute host path"
+        );
     }
 
     #[test]

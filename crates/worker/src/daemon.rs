@@ -12,7 +12,7 @@
 
 use crate::capacity::Capacity;
 use crate::config::{WorkerConfig, WorkerMode};
-use container::docker::{DockerBackend, DockerNodeConfig};
+use container::docker::{DockerBackend, DockerNodeConfig, KvmGrant};
 use container::{
     BackendError, ContainerBackend, ContainerLaunchConfig, ContainerStatus, InjectedFile,
 };
@@ -215,6 +215,10 @@ struct WorkerState {
     /// Node-local build caching is on (`WORKER_CACHE_DIR` was set). When true,
     /// the backend bind-mounts the cache and every launch gets sccache env.
     cache_enabled: bool,
+    /// The node's KVM grant (design #367 A1) when passthrough is on, so the
+    /// launch env is injected for exactly the launches the backend gives the
+    /// device and mounts to — one allow-list decision, two consumers.
+    kvm: Option<KvmGrant>,
     /// Node-local build+swap script for self-refresh (spec §3.1); `None` ⇒
     /// refresh requests are rejected as unconfigured.
     refresh_script: Option<PathBuf>,
@@ -361,6 +365,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
 
     let backend = build_backend(&config).await?;
     let cache_enabled = config.cache_dir.is_some();
+    let kvm = kvm_grant(&config);
 
     let mut artifacts = HashMap::new();
     match tokio::fs::read(&config.channel_binary).await {
@@ -389,6 +394,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         artifact_hashes,
         version: version_string(),
         cache_enabled,
+        kvm,
         refresh_script: config.refresh_script.clone(),
         refresh_git_url: config.refresh_git_url.clone(),
         refresh_git_key: config.refresh_git_key.clone(),
@@ -478,8 +484,41 @@ async fn build_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend
         backend = backend.with_cache_dir(dir.clone());
         tracing::info!(cache_dir = %dir.display(), "node-local build cache enabled (sccache)");
     }
+    if let Some(grant) = kvm_grant(config) {
+        if !grant.device.exists() {
+            return Err(WorkerRunError::Config(format!(
+                "WORKER_KVM names {}, which this node does not have — a node never advertises a \
+                 capability it cannot serve (design #367 §2.3)",
+                grant.device.display()
+            )));
+        }
+        if grant.projects.is_empty() {
+            tracing::warn!(
+                "WORKER_KVM is on but WORKER_KVM_PROJECTS is empty — no launch will receive the \
+                 device or the toolchain mounts (design #367 §2.3: empty grants nobody)"
+            );
+        }
+        tracing::info!(
+            device = %grant.device.display(),
+            android_sdk_dir = %grant.android_sdk_dir.display(),
+            projects = ?grant.projects,
+            "KVM passthrough enabled for the allow-listed projects"
+        );
+        backend = backend.with_kvm(grant);
+    }
     backend.ping_all().await?;
     Ok(Arc::new(backend))
+}
+
+/// The node's KVM grant (design #367 A1), or `None` when `WORKER_KVM` is unset.
+/// The one place the three settings become one grant, so the device and the
+/// read-only mounts can only ever be enabled together.
+fn kvm_grant(config: &WorkerConfig) -> Option<KvmGrant> {
+    config.kvm_device.as_ref().map(|device| KvmGrant {
+        device: device.clone(),
+        android_sdk_dir: config.android_sdk_dir.clone(),
+        projects: config.kvm_projects.clone(),
+    })
 }
 
 /// The node's own capacity cell, stamped with this process's epoch (spec §3.1):
@@ -640,6 +679,7 @@ async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
             }
             let mut env = req.env;
             inject_cache_env(&mut env, state.cache_enabled);
+            inject_android_env(&mut env, state.kvm.as_ref());
             let id = state
                 .backend
                 .launch(ContainerLaunchConfig {
@@ -672,6 +712,23 @@ fn inject_cache_env(env: &mut HashMap<String, String>, cache_enabled: bool) {
         );
         env.insert("CARGO_INCREMENTAL".into(), "0".into());
     }
+}
+
+/// Point an allow-listed launch at the SDK the backend mounts for it (design
+/// #367 A1) — the launch message never mentions Android, exactly as it never
+/// mentions the cache. `HOME` is set alongside because the emulator writes
+/// `$HOME/.android` even with `ANDROID_USER_HOME` set, and the read-only mounts
+/// must never be that target.
+fn inject_android_env(env: &mut HashMap<String, String>, kvm: Option<&KvmGrant>) {
+    if !kvm.is_some_and(|grant| grant.admits(env)) {
+        return;
+    }
+    let sdk = container::docker::ANDROID_SDK_MOUNT_PATH;
+    let home = container::docker::KVM_HOME_PATH;
+    env.insert("ANDROID_SDK_ROOT".into(), sdk.into());
+    env.insert("ANDROID_HOME".into(), sdk.into());
+    env.insert("ANDROID_USER_HOME".into(), format!("{home}/.android"));
+    env.insert("HOME".into(), home.into());
 }
 
 async fn kill(state: &WorkerState, payload: &[u8]) -> WorkerReply<serde_json::Value> {
@@ -1351,6 +1408,67 @@ mod tests {
         );
         assert_eq!(env.get("CARGO_INCREMENTAL").map(String::as_str), Some("0"));
         assert_eq!(env.get("JOB_ID").map(String::as_str), Some("7"));
+    }
+
+    fn kvm_grant_for(projects: &[&str]) -> KvmGrant {
+        KvmGrant {
+            device: PathBuf::from(container::docker::KVM_DEVICE_PATH),
+            android_sdk_dir: PathBuf::from("/var/lib/chuggernaut/android-sdk"),
+            projects: projects.iter().map(|p| (*p).to_string()).collect(),
+        }
+    }
+
+    /// An allow-listed launch on a KVM node is pointed at the SDK the backend
+    /// mounts for it — a fixed container path carrying no store hash — with a
+    /// writable `HOME` for the `$HOME/.android` the emulator writes anyway
+    /// (design #367 A1).
+    #[test]
+    fn android_env_injected_for_an_allow_listed_project() {
+        let mut env = HashMap::from([("JOB_PROJECT".to_string(), "acme/beacon".to_string())]);
+        inject_android_env(&mut env, Some(&kvm_grant_for(&["acme/beacon"])));
+        let sdk = container::docker::ANDROID_SDK_MOUNT_PATH;
+        assert_eq!(env.get("ANDROID_SDK_ROOT").map(String::as_str), Some(sdk));
+        assert_eq!(env.get("ANDROID_HOME").map(String::as_str), Some(sdk));
+        assert_eq!(
+            env.get("ANDROID_USER_HOME").map(String::as_str),
+            Some("/root/.android")
+        );
+        assert_eq!(
+            env.get("HOME").map(String::as_str),
+            Some(container::docker::KVM_HOME_PATH)
+        );
+        assert!(
+            !env.values().any(|v| v.starts_with("/nix/store/")),
+            "no store path may reach the launch env: {env:?}"
+        );
+    }
+
+    /// The negative space: the same node injects nothing for a project it did
+    /// not allow-list, for a launch with no project, or when KVM is off — the
+    /// same allow-list decision the backend applies to the device and mounts.
+    #[test]
+    fn no_android_env_without_the_grant() {
+        let grant = kvm_grant_for(&["acme/beacon"]);
+        for (env, kvm) in [
+            (
+                HashMap::from([("JOB_PROJECT".into(), "acme/api".into())]),
+                Some(&grant),
+            ),
+            (HashMap::new(), Some(&grant)),
+            (
+                HashMap::from([("JOB_PROJECT".into(), "acme/beacon".into())]),
+                None,
+            ),
+        ] {
+            let mut env: HashMap<String, String> = env;
+            let before = env.len();
+            inject_android_env(&mut env, kvm);
+            assert_eq!(env.len(), before, "unexpected android env: {env:?}");
+        }
+
+        let mut env = HashMap::from([("JOB_PROJECT".to_string(), "acme/beacon".to_string())]);
+        inject_android_env(&mut env, Some(&kvm_grant_for(&[])));
+        assert_eq!(env.len(), 1, "an empty allow-list grants nobody: {env:?}");
     }
 
     /// The refresh skip decision (spec §3.1 / #114): a node with no git URL, or

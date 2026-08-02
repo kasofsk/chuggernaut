@@ -13,7 +13,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use bollard::Docker;
-use bollard::models::{ContainerCreateBody, HostConfig};
+use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig, Mount, MountTypeEnum};
 use bollard::query_parameters::{
     DownloadFromContainerOptionsBuilder, ListContainersOptionsBuilder, LogsOptionsBuilder,
     RemoveContainerOptionsBuilder, UploadToContainerOptionsBuilder,
@@ -51,6 +51,56 @@ const TASK_LABEL: &str = "chuggernaut.task";
 /// one source of truth, no drift between the mount and the env. Carries no job
 /// state: it is a build accelerator only, safe to be empty/cold (spec §3.1).
 pub const CACHE_MOUNT_PATH: &str = "/cache/sccache";
+
+/// Container-side path of the KVM device — always `/dev/kvm`, whatever the node
+/// calls it host-side, because that is where the emulator looks (design #367
+/// §2.3).
+pub const KVM_DEVICE_PATH: &str = "/dev/kvm";
+
+/// The node's nix store, mounted read-only at its own path for a KVM launch
+/// (design #367 §3.3). Its own path is load-bearing: the toolchain's wrappers
+/// name their interpreter and libraries by absolute store path, so a store
+/// mounted anywhere else does not start.
+pub const STORE_MOUNT_PATH: &str = "/nix/store";
+
+/// Container-side path of the node's Android SDK, bound from the operator's
+/// stable host path so no nix store hash ever appears in chug configuration
+/// (design #367 §3.5). The engine resolves that symlink host-side at each
+/// create, so a launch always gets the node's current SDK.
+pub const ANDROID_SDK_MOUNT_PATH: &str = "/opt/android-sdk";
+
+/// Writable `HOME` for a KVM launch. The emulator writes
+/// `$HOME/.android/emu-update-last-check.ini` even with `ANDROID_USER_HOME`
+/// set, so `HOME` must land in the container's own writable layer, never in a
+/// read-only mount (design #367 A1).
+pub const KVM_HOME_PATH: &str = "/root";
+
+/// One node's KVM grant (design #367 §2.3, §3.4): the device it passes through,
+/// the stable SDK path it mounts beside it, and the projects allowed both.
+///
+/// [`admits`](Self::admits) is the single decision site, so the device and the
+/// read-only mounts can only ever travel together.
+#[derive(Debug, Clone)]
+pub struct KvmGrant {
+    /// Host device node, `/dev/kvm` unless the node names another.
+    pub device: PathBuf,
+    /// Host path of the node's Android SDK — the operator's activation-
+    /// maintained stable path, never a store path.
+    pub android_sdk_dir: PathBuf,
+    /// `owner/project` allow-list; empty grants nobody (design #367 §2.3).
+    pub projects: Vec<String>,
+}
+
+impl KvmGrant {
+    /// Whether a launch carrying this env is admitted, matched on `JOB_PROJECT`
+    /// — the only project identity a node can observe (design #367 correction
+    /// 5). An empty allow-list admits nobody, so enabling KVM on a node is one
+    /// act and granting it to a project is another.
+    pub fn admits(&self, env: &HashMap<String, String>) -> bool {
+        env.get("JOB_PROJECT")
+            .is_some_and(|project| self.projects.iter().any(|allowed| allowed == project))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct DockerNodeConfig {
@@ -94,6 +144,12 @@ pub struct DockerBackend {
     /// worker-side via [`with_cache_dir`](DockerBackend::with_cache_dir); it is
     /// a node property, never carried on the wire or the launch config.
     cache_dir: Option<PathBuf>,
+    /// The node's KVM grant (design #367 A1): the device and read-only
+    /// toolchain mounts an allow-listed launch gets, `None` (the dispatcher's
+    /// construction) adding neither. Set worker-side via
+    /// [`with_kvm`](DockerBackend::with_kvm); like [`Self::cache_dir`] it is a
+    /// node property, never carried on the wire or the launch config.
+    kvm: Option<KvmGrant>,
     /// Platform placement policy (spec §3.1). Defaults to
     /// [`PlacementPolicy::Busyness`]; the dispatcher sets it from
     /// `PLACEMENT_POLICY` via [`with_placement_policy`](DockerBackend::with_placement_policy).
@@ -129,6 +185,7 @@ impl DockerBackend {
         Ok(Self {
             nodes,
             cache_dir: None,
+            kvm: None,
             policy: PlacementPolicy::default(),
         })
     }
@@ -145,6 +202,7 @@ impl DockerBackend {
                 in_service: AtomicBool::new(true),
             }],
             cache_dir: None,
+            kvm: None,
             policy: PlacementPolicy::default(),
         })
     }
@@ -163,6 +221,16 @@ impl DockerBackend {
     /// on the node share it, which sccache handles by design (it locks).
     pub fn with_cache_dir(mut self, host_dir: PathBuf) -> Self {
         self.cache_dir = Some(host_dir);
+        self
+    }
+
+    /// Enable KVM passthrough for the projects `grant` allow-lists (design #367
+    /// A1): those launches get the device and the read-only toolchain mounts,
+    /// every other launch on the node is untouched. Worker-daemon-only — the
+    /// dispatcher never calls this, so its fleet stays device- and
+    /// mount-free.
+    pub fn with_kvm(mut self, grant: KvmGrant) -> Self {
+        self.kvm = Some(grant);
         self
     }
 
@@ -372,7 +440,11 @@ impl ContainerBackend for DockerBackend {
             cmd: Some(config.cmd.clone()),
             env: Some(config.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
             labels: Some(managed_labels(&config)),
-            host_config: Some(build_host_config(&config, self.cache_dir.as_deref())?),
+            host_config: Some(build_host_config(
+                &config,
+                self.cache_dir.as_deref(),
+                self.kvm.as_ref(),
+            )?),
             ..Default::default()
         };
         let created = node
@@ -583,17 +655,22 @@ impl ContainerBackend for DockerBackend {
     }
 }
 
-/// Build the container's `HostConfig` from the launch limits plus the optional
-/// node-local cache dir. Factored out of Docker I/O so the produced spec — in
-/// particular whether a cache bind-mount is present — is unit-tested without a
-/// daemon. `cache_dir = None` (the dispatcher's backend) yields `binds: None`:
-/// the fleet stays bind-mount-free (spec §3.1). `Some(dir)` adds exactly one
-/// bind, `{dir}:{CACHE_MOUNT_PATH}`, carrying no job state.
+/// Build the container's `HostConfig` from the launch limits plus the node
+/// properties in force — factored out of Docker I/O so *which node properties
+/// are present* is unit-tested without a daemon.
+///
+/// The dispatcher's backend passes neither and so stays bind-mount-free at
+/// `devices: None, binds: None, mounts: None` (spec §3.1); a worker's
+/// `cache_dir` adds one bind `{dir}:{CACHE_MOUNT_PATH}`, and its `kvm` adds the
+/// device and both read-only mounts or none of the three, per
+/// [`KvmGrant::admits`].
 fn build_host_config(
     config: &ContainerLaunchConfig,
     cache_dir: Option<&Path>,
+    kvm: Option<&KvmGrant>,
 ) -> Result<HostConfig, BackendError> {
-    Ok(HostConfig {
+    let granted = kvm.filter(|g| g.admits(&config.env));
+    let host_config = HostConfig {
         nano_cpus: config.cpu_limit.map(|c| (c * 1e9) as i64),
         memory: config
             .memory_limit
@@ -602,8 +679,47 @@ fn build_host_config(
             .transpose()
             .map_err(BackendError::Launch)?,
         binds: cache_dir.map(|d| vec![format!("{}:{}", d.display(), CACHE_MOUNT_PATH)]),
+        devices: granted.map(|g| {
+            vec![DeviceMapping {
+                path_on_host: Some(g.device.display().to_string()),
+                path_in_container: Some(KVM_DEVICE_PATH.to_string()),
+                cgroup_permissions: Some("rwm".to_string()),
+            }]
+        }),
+        mounts: granted.map(|g| {
+            vec![
+                read_only_bind(Path::new(STORE_MOUNT_PATH), STORE_MOUNT_PATH),
+                read_only_bind(&g.android_sdk_dir, ANDROID_SDK_MOUNT_PATH),
+            ]
+        }),
         ..Default::default()
-    })
+    };
+    debug_assert_eq!(
+        host_config.devices.is_some(),
+        host_config.mounts.is_some(),
+        "a launch carries the KVM device and the read-only mounts together or carries neither"
+    );
+    Ok(host_config)
+}
+
+/// One read-only bind, declared through `HostConfig.mounts` rather than a
+/// `binds` string: the engine REFUSES a missing source instead of silently
+/// creating an empty directory in its place (design #367 correction 12).
+/// Read-only is structural here — this is the only constructor, and it cannot
+/// be built writable.
+fn read_only_bind(host_dir: &Path, container_path: &str) -> Mount {
+    debug_assert!(
+        host_dir.is_absolute(),
+        "a bind source is a host path: {}",
+        host_dir.display()
+    );
+    Mount {
+        typ: Some(MountTypeEnum::BIND),
+        source: Some(host_dir.display().to_string()),
+        target: Some(container_path.to_string()),
+        read_only: Some(true),
+        ..Default::default()
+    }
 }
 
 /// Labels for a launch: the managed marker plus the `(project, job, task)`
@@ -805,13 +921,16 @@ mod tests {
         }
     }
 
-    /// The dispatcher's backend (no cache dir) adds NO binds — the fleet stays
-    /// bind-mount-free (spec §3.1). Regression guard: the dispatcher path is
-    /// untouched by node-local caching.
+    /// The dispatcher's backend (no node properties) adds NO devices, binds or
+    /// mounts — the fleet stays bind-mount-free (spec §3.1). Regression guard:
+    /// the dispatcher path is untouched by node-local caching or by KVM
+    /// passthrough (design #367 A1).
     #[test]
-    fn host_config_without_cache_has_no_binds() {
-        let hc = build_host_config(&launch_config(), None).unwrap();
+    fn host_config_without_node_properties_is_bare() {
+        let hc = build_host_config(&launch_config(), None, None).unwrap();
         assert!(hc.binds.is_none(), "dispatcher path must add no binds");
+        assert!(hc.devices.is_none(), "dispatcher path must add no devices");
+        assert!(hc.mounts.is_none(), "dispatcher path must add no mounts");
         assert_eq!(hc.nano_cpus, Some(2_000_000_000));
         assert_eq!(hc.memory, Some(4 * 1024 * 1024 * 1024));
     }
@@ -821,13 +940,99 @@ mod tests {
     #[test]
     fn host_config_with_cache_adds_one_bind() {
         let dir = PathBuf::from("/var/cache/chuggernaut/sccache");
-        let hc = build_host_config(&launch_config(), Some(dir.as_path())).unwrap();
+        let hc = build_host_config(&launch_config(), Some(dir.as_path()), None).unwrap();
         assert_eq!(
             hc.binds,
             Some(vec![format!(
                 "/var/cache/chuggernaut/sccache:{CACHE_MOUNT_PATH}"
             )])
         );
+    }
+
+    fn kvm_grant() -> KvmGrant {
+        KvmGrant {
+            device: PathBuf::from(KVM_DEVICE_PATH),
+            android_sdk_dir: PathBuf::from("/var/lib/chuggernaut/android-sdk"),
+            projects: vec!["acme/beacon".to_string()],
+        }
+    }
+
+    fn launch_config_for(project: &str) -> ContainerLaunchConfig {
+        let mut config = launch_config();
+        config.env.insert("JOB_PROJECT".into(), project.to_string());
+        config
+    }
+
+    /// An allow-listed launch on a KVM node gets `/dev/kvm` at `/dev/kvm` with
+    /// `rwm`, plus BOTH toolchain mounts read-only — the store at its own path
+    /// (the wrappers name their libraries by store path) and the node's stable
+    /// SDK path at the fixed container path, with no store hash anywhere
+    /// (design #367 §3.3/§3.5).
+    #[test]
+    fn host_config_with_kvm_adds_device_and_read_only_mounts() {
+        let hc =
+            build_host_config(&launch_config_for("acme/beacon"), None, Some(&kvm_grant())).unwrap();
+
+        let devices = hc
+            .devices
+            .expect("an allow-listed launch carries the device");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].path_on_host.as_deref(), Some(KVM_DEVICE_PATH));
+        assert_eq!(
+            devices[0].path_in_container.as_deref(),
+            Some(KVM_DEVICE_PATH)
+        );
+        assert_eq!(devices[0].cgroup_permissions.as_deref(), Some("rwm"));
+
+        let mounts = hc
+            .mounts
+            .expect("an allow-listed launch carries the mounts");
+        assert_eq!(mounts.len(), 2);
+        for mount in &mounts {
+            assert_eq!(mount.typ, Some(MountTypeEnum::BIND));
+            assert_eq!(
+                mount.read_only,
+                Some(true),
+                "a toolchain mount is read-only, always: {mount:?}"
+            );
+        }
+        assert_eq!(mounts[0].source.as_deref(), Some(STORE_MOUNT_PATH));
+        assert_eq!(mounts[0].target.as_deref(), Some(STORE_MOUNT_PATH));
+        assert_eq!(
+            mounts[1].source.as_deref(),
+            Some("/var/lib/chuggernaut/android-sdk")
+        );
+        assert_eq!(mounts[1].target.as_deref(), Some(ANDROID_SDK_MOUNT_PATH));
+        assert!(
+            !format!("{mounts:?}").contains("/nix/store/"),
+            "no store path may reach the mount spec: {mounts:?}"
+        );
+        assert!(hc.binds.is_none(), "KVM adds no legacy binds");
+    }
+
+    /// The negative space, and the all-or-nothing pairing: a launch for a
+    /// project the node did not allow-list — or one with no project at all —
+    /// carries NEITHER the device nor the mounts, on the same node that grants
+    /// both to the allow-listed project. An empty allow-list grants nobody.
+    #[test]
+    fn host_config_without_allow_list_entry_carries_neither() {
+        for config in [
+            launch_config_for("acme/other"),
+            launch_config(),
+            launch_config_for(""),
+        ] {
+            let hc = build_host_config(&config, None, Some(&kvm_grant())).unwrap();
+            assert!(hc.devices.is_none(), "unlisted launch got the device");
+            assert!(hc.mounts.is_none(), "unlisted launch got the mounts");
+        }
+
+        let nobody = KvmGrant {
+            projects: vec![],
+            ..kvm_grant()
+        };
+        let hc = build_host_config(&launch_config_for("acme/beacon"), None, Some(&nobody)).unwrap();
+        assert!(hc.devices.is_none(), "an empty allow-list grants nobody");
+        assert!(hc.mounts.is_none(), "an empty allow-list grants nobody");
     }
 
     /// Every launch carries the managed marker plus the `(project, job, task)`

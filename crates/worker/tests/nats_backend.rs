@@ -9,6 +9,7 @@ use container::PlacementPolicy;
 use container::docker::DockerNodeConfig;
 use test_utils::backend_suite as suite;
 use test_utils::nats::NatsTestServer;
+use worker::config::ANDROID_SDK_DIR_DEFAULT;
 use worker::{FleetBackend, WorkerConfig, WorkerMode};
 
 /// The `WORKER_SLOTS_MAX` every daemon spawned here boots with (spec §3.1): above
@@ -49,6 +50,9 @@ async fn setup(
         docker_endpoint: local_docker_endpoint(),
         channel_binary: artifact_path,
         cache_dir: None,
+        kvm_device: None,
+        kvm_projects: vec![],
+        android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
         refresh_script: None,
         refresh_git_url: None,
         refresh_git_key: "/data/keys/worker_git".into(),
@@ -554,6 +558,9 @@ fn spawn_daemon(
         docker_endpoint: local_docker_endpoint(),
         channel_binary: channel,
         cache_dir: None,
+        kvm_device: None,
+        kvm_projects: vec![],
+        android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
         refresh_script,
         refresh_git_url,
         refresh_git_key,
@@ -876,6 +883,9 @@ async fn refresh_reports_skip_without_git_credential() {
         docker_endpoint: local_docker_endpoint(),
         channel_binary: channel,
         cache_dir: None,
+        kvm_device: None,
+        kvm_projects: vec![],
+        android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
         refresh_script: Some(fake_refresh_script()),
         refresh_git_url: None,
         refresh_git_key: dir.join("worker_git"),
@@ -1112,6 +1122,9 @@ async fn declared_mode_without_a_backend_refuses_to_start() {
         docker_endpoint: local_docker_endpoint(),
         channel_binary: "/nonexistent/chuggernaut-channel".into(),
         cache_dir: None,
+        kvm_device: None,
+        kvm_projects: vec![],
+        android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
         refresh_script: None,
         refresh_git_url: None,
         refresh_git_key: "/data/keys/worker_git".into(),
@@ -1119,4 +1132,39 @@ async fn declared_mode_without_a_backend_refuses_to_start() {
     let err = worker::run(config).await.unwrap_err().to_string();
     assert!(err.contains("WORKER_MODES"), "unexpected: {err}");
     assert!(err.contains("host"), "must name the mode: {err}");
+}
+
+/// A node whose `WORKER_KVM` device is absent refuses to come up, naming the
+/// device (design #367 §2.3) — the same fail-loud shape a declared mode without
+/// a backend gets. A node that advertises a capability it cannot serve would
+/// instead fail every allow-listed launch at container create, one job at a
+/// time.
+#[tokio::test]
+async fn declared_kvm_without_the_device_refuses_to_start() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let config = WorkerConfig {
+        node: "w1".into(),
+        slots: 4,
+        slots_max: DAEMON_SLOTS_MAX,
+        modes: vec![WorkerMode::Container],
+        nats_url: server.url().to_string(),
+        nats_creds: None,
+        docker_endpoint: local_docker_endpoint(),
+        channel_binary: "/nonexistent/chuggernaut-channel".into(),
+        cache_dir: None,
+        kvm_device: Some("/dev/definitely-not-kvm".into()),
+        kvm_projects: vec!["acme/beacon".into()],
+        android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
+        refresh_script: None,
+        refresh_git_url: None,
+        refresh_git_key: "/data/keys/worker_git".into(),
+    };
+    let err = worker::run(config).await.unwrap_err().to_string();
+    assert!(err.contains("WORKER_KVM"), "unexpected: {err}");
+    assert!(
+        err.contains("/dev/definitely-not-kvm"),
+        "must name the device: {err}"
+    );
 }

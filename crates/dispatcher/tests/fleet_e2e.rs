@@ -22,6 +22,7 @@ use store::NatsStore;
 use test_utils::FakeProvider;
 use test_utils::nats::NatsTestServer;
 use types::{FleetStatus, Job, JobState, Task, TaskKind, TaskPhase, TaskState, WorkerNode};
+use worker::config::ANDROID_SDK_DIR_DEFAULT;
 use worker::{FleetBackend, WorkerConfig, WorkerMode};
 
 mod common;
@@ -77,6 +78,9 @@ async fn worker_fleet(
         docker_endpoint: local_docker_endpoint(),
         channel_binary: artifact,
         cache_dir: None,
+        kvm_device: None,
+        kvm_projects: vec![],
+        android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
         refresh_script: None,
         refresh_git_url: None,
         refresh_git_key: "/data/keys/worker_git".into(),

@@ -88,6 +88,7 @@ The single NATS integration point, wrapping `async-nats`:
 - `K8sBackend` (Jobs API: create Job, watch pod status, stream logs; scale-out beyond a small fleet, built when needed)
 - The **workspace bootstrap wrapper** (§4.1): wraps every CMD with clone-to-`/workspace` + exec
 - **File injection** (put-archive after create, before start) for MCP binaries, prompt, and event batch — no host bind-mounts, so remote fleet nodes need nothing on disk
+- **Node properties** a worker sets on its own backend and the dispatcher never does (§3.1): the node-local build cache bind, and the `/dev/kvm` passthrough with its read-only toolchain mounts (design #367 A1). None of them reaches the wire or `ContainerLaunchConfig`
 - Launch config assembly helpers (env, injected files, limits)
 
 No knowledge of jobs or state — it launches, waits, kills, inspects, copies files.
