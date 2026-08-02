@@ -1,6 +1,6 @@
 # Design #373 — Project-supplied toolchains: nix environments in container mode (clock 3)
 
-Status: FINDING — clock 3 works in container mode on nodes dedicated to one project; image and env layer.
+Status: FINDING, amended 2026-08-02 — clock 3 in container mode on dedicated nodes; image+env layer; P1 shipped, 45s cap (C6).
 
 Written against the tree at `5aeb439` (this branch adds only this document).
 Every claim about this repository was read out of the source or out of
@@ -17,6 +17,19 @@ draft; the substantive changes are
 
 This document was **claimed and written by the operator**, not delegated: the
 decisions below were worked through directly.
+
+**Amended after P1 merged** (job #387). Job #384 shipped [P1](#sequencing) at `2bd4bf3`, and
+implementing it settled three things this document had guessed and one it had
+priced wrong. The bound in
+[3c](#3c-the-realise-is-bounded-and-it-is-outside-task_timeout) is not a free
+parameter — it has a **45-second ceiling**, which turns
+[Decision 5](#decision-5--warming-is-a-scheduled-job-not-a-platform-mechanism)'s
+warming job from an optimization into a precondition
+([C6](#c6-the-realise-bound-has-a-45-second-ceiling-so-warming-is-a-precondition-not-an-optimization)).
+The three smaller divergences are recorded in
+[P1 as shipped](#p1-as-shipped-job-384). Everything in that section is read out
+of the merged tree; where it and the argument above it disagree, the merged tree
+wins.
 
 ## The question
 
@@ -245,6 +258,13 @@ mounts are the whole change, and they are the shape `with_cache_dir`
 (`crates/container/src/docker.rs`) already establishes for adding a bind. Version
 skew is impossible because the client is the daemon's own binary.
 
+> **As shipped, W1 costs four mounts — plus a fifth when the node attaches a
+> device — and the client comes from the node's
+> profiles, not from a store path** — two mounts and an absolute store path were
+> both wrong, for reasons that are now written down in
+> [P1 as shipped](#p1-as-shipped-job-384). The conclusion holds; the mechanics
+> in the paragraph above do not.
+
 **W2 — the worker goes native.** #308 §H.6 already says a mixed-mode node forces
 this for host mode. Rejected here: this design's entire claim is that container
 mode does not need host-native execution, and paying host-native's largest cost
@@ -285,16 +305,31 @@ realise that exceeded the bound will not get faster by being requeued. That is
 the same posture [#367](367-android-emulator-execution.md) §3.3 gives a missing
 SDK mount: "fail the launch loudly … never fall through to an ambient SDK."
 
+**The bound is not a free parameter: its ceiling is 45 seconds.** This section
+first read as though the operator sized the timeout to the toolchain. They
+cannot. The realise runs *inside* the `launch` RPC handler
+(`crates/worker/src/daemon.rs`, `realise_for_launch` before `backend.launch`),
+and the dispatcher-side call is bounded at `store::worker::OP_TIMEOUT` = 60s, so
+a bound past that never produces the named failure this paragraph promises — it
+produces a transport failure and an orphaned container. P1 therefore ships
+`NIX_REALISE_TIMEOUT_SECS_MAX` = `OP_TIMEOUT` − 15s reserve = **45**, default
+**30** (`crates/worker/src/config.rs`), refused at parse time and again at
+deploy. The whole derivation, and what it does to
+[Decision 5](#decision-5--warming-is-a-scheduled-job-not-a-platform-mechanism),
+is [C6](#c6-the-realise-bound-has-a-45-second-ceiling-so-warming-is-a-precondition-not-an-optimization).
+
 This has a consequence for [Decision 5](#decision-5--warming-is-a-scheduled-job-not-a-platform-mechanism)
 that the first draft got wrong: **a project cannot absorb a cold realise by
 enlarging `resources.task_timeout`**, because the realise does not happen inside
-it.
+it. Nor, per C6, by enlarging the realise bound past 45s.
 
 ## Decision 4 — GC roots: an explicit indirect root per task, and no assertion
 
 **The worker creates an indirect GC root over the realised closure as part of
 the realise, and removes it when the task exits. The `chug-node` modules
-(job #372) provision the directory and assert nothing about `nix.gc`.**
+(job #372) assert nothing about `nix.gc`.** They do not provision the directory
+either — this section guessed that they would, and
+[P1 as shipped](#p1-as-shipped-job-384) records where it actually comes from.
 
 Measured, in order:
 
@@ -345,9 +380,12 @@ lifecycle.
 
 **The split:**
 
-- **Clock 1 (`chug-node`)** provisions the gcroots directory via
-  `systemd.tmpfiles`, owned by the worker's user — the same treatment
-  `WORKER_CACHE_DIR` already gets. One `d` line. No GC assertion.
+- **Clock 1 (the node)** provides the gcroots directory, owned by the worker's
+  user — the same treatment `WORKER_CACHE_DIR` already gets. No GC assertion.
+  *As shipped this is `deploy/prod/build-worker.sh`, not a `chug-node`
+  `systemd.tmpfiles` line: [#372](372-chug-node-modules.md) §5 A5 declines to own
+  GC roots, so the deploy provisions it and refuses if it cannot
+  ([P1 as shipped](#p1-as-shipped-job-384)).*
 - **Clock 2 (worker daemon)** creates the root over the **whole closure** as the
   realise's out-link and removes it at exit — the lifecycle `platform-ops`'s
   `dispose` already occupies, which exists because container overlays leaked
@@ -380,6 +418,19 @@ cost now lands in a bounded pre-launch phase, so the failure mode is a loud
 refused launch rather than a job that looks slow — better, but it makes warming
 *more* necessary, not less: an unwarmed environment does not run late, it does
 not run.
+
+**This section carries two claims, and they are different arguments.** The
+heading's claim is about **ownership**: warming is the project's to do, not the
+platform's. [C6](#c6-the-realise-bound-has-a-45-second-ceiling-so-warming-is-a-precondition-not-an-optimization)
+adds a claim about **necessity**: the realise bound cannot exceed 45s, and tens
+of minutes does not fit in 45 seconds, so **a toolchain that is not already
+substituted on the node cannot be realised in the launch path at all.** For any
+toolchain over the ceiling the warming job is a **precondition** of running the
+job type there — not a wise optimization a project may skip and pay for in
+latency. A node whose store lacks the closure refuses every admitted launch
+against it. The ownership argument below decides *who* warms; the necessity
+claim decides *whether the job type works at all*, and it holds even for a
+project that would happily accept slow first runs.
 
 **Warming is clock 3's problem.** The environment belongs to the project, so its
 readiness does too. A platform-owned pre-warm would put the operator back in the
@@ -415,9 +466,10 @@ on the default branch warms what is already merged. **The commit that bumps the
 toolchain pays the cold realise**, once, on its own job branch. That is the
 right place for it — the change that costs the time is the change that pays —
 but it means a toolchain bump can exceed the realise bound and be refused, and
-the project's answer is to raise the node's bound or land the flake change ahead
-of the code change. Say it in the job-type docs, as #309 §9 says of its own
-first-use cost.
+under C6's ceiling the project's answer is **only** to land the flake change
+ahead of the code change (or to substitute it from a cache first): raising the
+node's bound buys at most 45 seconds and cannot buy a cold Flutter realise. Say
+it in the job-type docs, as #309 §9 says of its own first-use cost.
 
 So the platform's obligations are exactly three, and all are decided above: a
 **bounded realise** ([3c](#3c-the-realise-is-bounded-and-it-is-outside-task_timeout)),
@@ -428,8 +480,12 @@ and **make the store visible to the container**
 it ships nothing for warming.
 
 **Still worth measuring — by whoever adopts it, not as a platform gate.** No
-cold realise has been timed in this tree, and the node's realise bound is a
-number someone has to pick from a measurement rather than from this document.
+cold realise has been timed in this tree. What a measurement now decides is
+narrower than the first draft thought: the bound is picked from a 1..45s range
+whose top P1 fixes ([C6](#c6-the-realise-bound-has-a-45-second-ceiling-so-warming-is-a-precondition-not-an-optimization)),
+so the number to measure is a *warm* realise — the substitution or the no-op —
+and what an adopter learns from a cold one is how far ahead of the code change
+the flake change has to land.
 
 ## Weighed against #355 — when a project picks which
 
@@ -447,7 +503,7 @@ full chuggernaut redeploy."
 | **Platform machinery** | a build path, a desired-state reconciler, per-node inventory, `docker rmi` GC (#355 §5, §7) | a realise step and a GC root ([Decision 4](#decision-4--gc-roots-an-explicit-indirect-root-per-task-and-no-assertion)) |
 | **Disk** | per-SHA tags, never dangling, explicit GC, a per-node byte budget (#355 §7) | content-addressed store, deduped across job types and projects, roots reaped |
 | **Bulk** | #367 §3.1's two real grounds: node disk, and rebuild time on refresh | the store already holds one copy however many job types name it |
-| **Cold cost** | a build, on the project's clock, out of band | a realise, bounded, in the launch path ([3c](#3c-the-realise-is-bounded-and-it-is-outside-task_timeout)) |
+| **Cold cost** | a build, on the project's clock, out of band | **must be paid out of band too.** The launch-path realise is capped at 45s ([C6](#c6-the-realise-bound-has-a-45-second-ceiling-so-warming-is-a-precondition-not-an-optimization)), which fits a substitution and not a cold build, so a warming job is a precondition rather than a tuning knob ([Decision 5](#decision-5--warming-is-a-scheduled-job-not-a-platform-mechanism)) |
 | **Can express** | anything a Dockerfile can, including non-nix ecosystems | anything nixpkgs can; **not** Xcode ([#322](322-macos-native-runtime.md) §3) |
 
 **#355 wins the column that matters most here, and it should be said plainly:**
@@ -477,6 +533,66 @@ The rule of thumb, in #367 §3.3's complement-not-rival shape:
   and it is the same three-layer split #367 §3.3 already drew — image, node-side
   bulk, container overlay — with the middle layer's clock moved from the
   operator to the project.
+
+## P1 as shipped (job #384)
+
+[P1](#sequencing) merged at `2bd4bf3`. Three places where the implementation
+diverged from the text above, **and the implementation was right** — recorded as
+fact rather than as options, so the next reader is not misled by the paragraph
+that guessed. The fourth divergence is large enough to be a Correction:
+[C6](#c6-the-realise-bound-has-a-45-second-ceiling-so-warming-is-a-precondition-not-an-optimization).
+
+- **The nix client does not come "out of the mounted store by absolute path"**
+  ([3b](#3b-where-the-realise-runs)'s W1). It cannot be, twice over. That path is
+  content-addressed (`/nix/store/<hash>-nix-<version>/bin/nix`), and
+  [#367](367-android-emulator-execution.md) §3.5 forbids a store hash in any
+  chug-side config; and `chug-worker` is long-lived, so a client resolved at
+  bind-create would pin the generation current at the last swap — exactly what
+  `--delete-older-than` collects. It is reached through the node's **profiles**
+  instead
+  (`NIX_CLIENT_DEFAULT` = `/nix/var/nix/profiles/system/sw/bin/nix-store`,
+  `crates/worker/src/config.rs`), a tree that is itself GC-rooted, mounted
+  read-only beside the store and resolved inside the container at each use
+  (`deploy/prod/build-worker.sh`). W1's *conclusion* survives — the client is
+  still the daemon's own binary, so version skew is still impossible — but by
+  the profiles, not by an absolute store path.
+- **The realise target is bound as its PARENT directory, never the leaf.** The
+  node's stable toolchain path is a *symlink into the store*, and `mount(2)`
+  resolves a bind source host-side — the same fact #367 relies on for the *task*
+  container. Applied to the leaf it destroys the property: `chug-worker` gets the
+  store path's content at a non-store path, and `nix-store --realise`, which
+  canonicalizes client-side before the daemon hears anything, refuses it. So the
+  toolchain path's `dirname` is bound as a **fifth** mount, added only when the
+  node attaches the KVM device (`deploy/prod/build-worker.sh`) — that attachment
+  is exactly the condition under which a launch is admitted and therefore
+  realised, so `realise_for_launch` (`crates/worker/src/daemon.rs`) returns
+  `Ok(None)` without it. `store_target()` (`crates/worker/src/nix.rs`) canonicalizes in the daemon's
+  own view and refuses a target that does not land under the store — making this
+  a **boot refusal** rather than a per-launch failure. The deploy refuses ahead
+  of that when the path is not a direct absolute symlink into the store under a
+  real parent, naming the `systemd.tmpfiles` `L+` remedy.
+- **The gcroots directory is not `chug-node`'s.** The [Sequencing](#sequencing)
+  row gated P1 on "#372 providing the gcroots dir and the daemon socket". Neither
+  was #372's to give: the daemon socket already exists at
+  `/nix/var/nix/daemon-socket/socket` on a stock node with nothing to provision
+  (the deploy checks for it and refuses if it is absent, and never creates it),
+  `/nix/var/nix/gcroots/auto` — where an indirect root registers — already
+  exists, and [#372](372-chug-node-modules.md) §5 A5 declines **both** an
+  assertion and a `chug.node.gcRoots` option, so job #383's merged modules
+  contain no `gcroots` at all. P1 provisions the roots directory from
+  `deploy/prod/build-worker.sh` instead, in the shape job #380 gives
+  `WORKER_CACHE_DIR`, and a failure to provision refuses the deploy with the live
+  daemon untouched.
+
+**One root cause underlies all three**, and it is what cost #384 all three of its
+rework cycles: `chug-worker` is itself a container, so every host fact has to be
+re-derived inside its namespace. The first two bullets are that mistake directly
+— the client's path and the realise target are both resolved in the daemon's own
+view, not the host's. The third is its consequence for provisioning: a directory
+the daemon creates lands in the daemon's writable layer and never on the node, so
+the deploy has to create it. The invariant is stated **once**, in
+[STYLE.md](../../STYLE.md) Tier 2 rule 7 — where a worker reads it before writing
+code rather than after failing — and this document does not restate it.
 
 ## Corrections
 
@@ -543,6 +659,65 @@ nothing to notice it. The bounded reaper in
 [Decision 4](#decision-4--gc-roots-an-explicit-indirect-root-per-task-and-no-assertion)
 is the container-mode replacement.
 
+### C6. The realise bound has a 45-second ceiling, so warming is a precondition, not an optimization
+
+[3c](#3c-the-realise-is-bounded-and-it-is-outside-task_timeout) treats the realise
+bound as a free parameter: the realise is covered by no existing timeout, so "the
+worker bounds it" and the operator sizes that bound to the toolchain. **It is not
+free.** Job #384 established where the realise actually runs and what contains it.
+
+**The ceiling, and where it comes from.** The realise happens inside the `launch`
+RPC handler — `realise_for_launch` runs before `backend.launch`
+(`crates/worker/src/daemon.rs`) — and the dispatcher-side call is bounded at
+`store::worker::OP_TIMEOUT` = **60s** (`crates/store/src/worker.rs`). A realise
+that outlives that budget does **not** produce the loud named
+`BackendError::Launch` 3c describes. The dispatcher's call fails as
+`WorkerRpcError::Transport`; a launch has no container id yet, so `rpc_err`
+(`crates/worker/src/backend.rs`) maps it to `BackendError::Unavailable("worker
+transport: …")`, which is not `NoCapacity` and so is not requeued — the task fails
+with a reason naming **worker transport**, which says nothing about a toolchain.
+
+**And the node keeps going.** The worker never learns the caller left: it finishes
+the realise and launches the container. The dispatcher only records
+`task.container_id` on the `Ok` path (`crates/dispatcher/src/launch_queue.rs`), so
+that container is running for a task already failed, under an id nobody holds,
+and its GC root is recovered only by the stale-root reaper's one-hour grace
+(`REAP_AGE_MIN`, `crates/worker/src/nix.rs`). A bound the RPC cannot contain
+converts a loud refusal into a silent orphan.
+
+**So P1 makes the ceiling a rule rather than a matter of operator judgement.**
+`NIX_REALISE_TIMEOUT_SECS_MAX` = `OP_TIMEOUT` − `NIX_REALISE_RESERVE_SECS` (15s
+for the container create and the reply's trip home) = **45**, with
+`NIX_REALISE_TIMEOUT_SECS_DEFAULT` = **30** (`crates/worker/src/config.rs`). A
+larger value is a hard config error at parse time, and `deploy/prod/build-worker.sh`
+mirrors the same 1..45 refusal so the deploy fails fast instead of handing
+`--restart=always` a daemon that cannot boot.
+
+**The consequence 3c did not draw.** [Decision 5](#decision-5--warming-is-a-scheduled-job-not-a-platform-mechanism)
+prices a cold Flutter/Android realise, after [#309](309-host-native-execution.md)
+§9, at *tens of minutes*. Tens of minutes does not fit in 45 seconds, and no
+operator setting makes it fit. Therefore **a project toolchain that is not
+already substituted on the node cannot be realised in the launch path at all**,
+and Decision 5's warming job stops being an optimization: it is a
+**precondition** for running any job type whose toolchain exceeds the ceiling.
+Decision 5's heading argues *ownership* — warming is the project's, not the
+platform's. This is a separate claim about *necessity*, and it binds even a
+project that would happily accept slow first runs.
+
+**The named successor: accept fast, realise in the background.** #384 raised the
+one shape that could lift the ceiling — the daemon acknowledging the launch
+immediately and doing the slow work outside the caller's budget. It is not
+hypothetical here: `refresh` already works that way, and `REFRESH_TIMEOUT`'s doc
+comment (`crates/store/src/worker.rs`) says so — "the daemon accepts fast and
+builds/swaps in the background … this only covers the accept round-trip, not the
+build." Recorded as the successor in the shape [3b](#3b-where-the-realise-runs)
+uses for W1→W3 and [#355](355-project-task-images.md) uses for O2→O1, **not
+designed here**. Its trigger: the first project toolchain that cannot be warmed
+ahead of the commit that needs it — i.e. the first time
+[What would refute this](#what-would-refute-this)'s first bullet actually
+happens. Until then a 45s bound plus a warming job is the cheaper answer, and it
+costs the platform nothing new.
+
 ## What this makes wrong elsewhere
 
 - **[#309](309-host-native-execution.md) §9** — three ways: the mechanism is not
@@ -583,10 +758,14 @@ is the container-mode replacement.
 ## What would refute this
 
 - **A cold realise no scheduled-job shape can absorb** — too slow to warm ahead
-  of the commit that needs it, and too slow for any defensible realise bound.
-  That would force the platform back into warming, which
+  of the commit that needs it. The second half of this bullet ("too slow for any
+  defensible realise bound") is no longer a judgement call: the bound tops out at
+  45s ([C6](#c6-the-realise-bound-has-a-45-second-ceiling-so-warming-is-a-precondition-not-an-optimization)),
+  so almost every cold realise is already past it. That would force the platform
+  back into warming, which
   [Decision 5](#decision-5--warming-is-a-scheduled-job-not-a-platform-mechanism)
-  declines, and would put clock 3 back in the operator's hands.
+  declines, or into C6's named successor — accept-fast, realise in the
+  background — and would put clock 3 back in the operator's hands.
 - **A project whose toolchain genuinely needs host state** — a device, a
   daemon, a persistent VM — rather than just files. That is #309/#322's
   territory and this document does not take it.
@@ -603,7 +782,7 @@ is the container-mode replacement.
 
 | Slice | Kind | Work | Depends on |
 | --- | --- | --- | --- |
-| **P1** | `code` | The realise step in the worker: `/nix/store:ro` + nix daemon socket mounted into `chug-worker`, client from the store (W1), bounded realise with a loud `BackendError::Launch`, out-link GC root named by task id, removal at exit, bounded stale-root reaper | `chug-node` (#372) providing the gcroots dir and the daemon socket |
+| **P1** | `code` | **Shipped (job #384, `2bd4bf3`)** — the realise step in the worker: `/nix/store:ro`, the profiles tree and the nix daemon socket mounted into `chug-worker`, client resolved through the profiles (W1, [as shipped](#p1-as-shipped-job-384)), realise bounded at 30s default / **45s ceiling** with a loud `BackendError::Launch` ([C6](#c6-the-realise-bound-has-a-45-second-ceiling-so-warming-is-a-precondition-not-an-optimization)), out-link GC root named by task id, removal at exit, bounded stale-root reaper. The shipped realise fires **only for a KVM-admitted launch** (`realise_for_launch`), so what P1 realises today is the node's declared Android SDK path, not yet an arbitrary project toolchain — that is P2 | **Nothing from #372.** The daemon socket and `/nix/var/nix/gcroots/auto` already exist on a stock node, and #372 §5 A5 declines to own GC roots, so `deploy/prod/build-worker.sh` provisions the roots dir in #380's shape ([as shipped](#p1-as-shipped-job-384)) |
 | **P2** | `code` | `runtime.env` accepted in container mode: the one field rule, the `xcode:`-is-host-only validate rule, R3's relative-ref rewriting, the commit sha on the launch spec, the store mount and env injection into the task container, `WORKER_NIX_PROJECTS` | [#309](309-host-native-execution.md) slice 4 (the `runtime:` block + epoch); P1 |
 | — | — | **Warming is not a platform slice.** Per [Decision 5](#decision-5--warming-is-a-scheduled-job-not-a-platform-mechanism) it is a scheduled job declaring the same env, warmed by P1's own realise; the substituter is clock 1 | — |
 
@@ -626,12 +805,21 @@ moved both out of the platform.
 [#367](367-android-emulator-execution.md) §3.1, §3.3 and its amendment;
 [#355](355-project-task-images.md) §1, §5, §7, §8, §9;
 [#310](310-scheduled-jobs.md); job #265 (worker-node co-tenancy, the assertion
-pattern); job #372 (`chug-node` modules — machine facts, the boundary this
-document stops at); `crates/types/src/job_type.rs` (`JobType::validate`, `image`
+pattern); [#372](372-chug-node-modules.md) §5 A5 (`chug-node` modules — machine
+facts, and why GC roots are not theirs); jobs #384 (P1 as merged), #383 (the
+modules), #380/#379 (the cache-dir provisioning shape) and #374 (the KVM
+mounts); `crates/types/src/job_type.rs` (`JobType::validate`, `image`
 rules); `crates/types/src/version.rs` (`CONFIG_SCHEMA_EPOCH`);
 `crates/container/src/lib.rs` (`bootstrap_cmd`, `ContainerLaunchConfig`);
 `crates/container/src/docker.rs` (`with_cache_dir`, `CACHE_MOUNT_PATH`);
 `crates/dispatcher/src/exec.rs` (`REPO_URL`/`JOB_BRANCH` injection);
-`crates/worker/src/config.rs`; `deploy/prod/build-worker.sh` (the worker's own
-container); `spec.md` §1.1, §3.1, §14.2; CLAUDE.md (factories and job-type
+`crates/dispatcher/src/launch_queue.rs` (what a non-`NoCapacity` launch error
+does); `crates/store/src/worker.rs` (`OP_TIMEOUT`, `REFRESH_TIMEOUT`);
+`crates/worker/src/config.rs` (`NIX_REALISE_TIMEOUT_SECS_MAX`, `NIX_CLIENT_DEFAULT`);
+`crates/worker/src/nix.rs` (`store_target`, `REAP_AGE_MIN`);
+`crates/worker/src/daemon.rs` (`realise_for_launch`);
+`crates/worker/src/backend.rs` (`rpc_err`); `deploy/prod/build-worker.sh` (the
+worker's own container, and the roots dir it provisions);
+[STYLE.md](../../STYLE.md) Tier 2 rule 7 (the container-namespace invariant);
+`spec.md` §1.1, §3.1, §14.2; CLAUDE.md (factories and job-type
 config are project-owned and repo-versioned).
