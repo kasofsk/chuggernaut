@@ -293,7 +293,32 @@ collision is verifiable in this tree:
   (`crates/domain/src/release.rs`) asserts that for any job type, any job, and
   any two input maps, the `JobType` the release path resolves is *equal* — with
   cases deliberately containing the input names a substitution engine would
-  notice. Threading `Job.inputs` into config resolution fails that test.
+  notice. Threading `Job.inputs` into config resolution fails that test — but its
+  reach stops at config resolution; see the correction directly below.
+
+**Correction (2026-08-02, from [#361](361-per-run-placement.md)):** that last
+sentence is true and is not the whole story. The test guards **job-type
+resolution**, and the natural shape of an input-driven placement hack never goes
+through it. `ContainerLaunchConfig.node` is composed at launch, at three sites
+that each read `job_type.placement_node()` (`crates/dispatcher/src/exec.rs`,
+`crates/dispatcher/src/eval.rs`, `crates/dispatcher/src/launch_queue.rs`), so a
+change of the form
+
+```rust
+node: job.inputs.get("runner").cloned().or_else(|| job_type.placement_node().map(String::from)),
+```
+
+leaves the resolved `JobType` byte-identical and **passes** the property test. It
+would arguably not even violate #311 Decision 1's literal wording: the job type
+was resolved without reading inputs; the *launch config* was overridden
+afterwards. **The invariant's text is broader than its enforcement**, and anyone
+citing this test as the reason gap 10 is blocked is citing it one step too far.
+Nothing the test *does* guard is diminished — no input reaches
+`with_job_evaluators` or the merge below it, which is what keeps
+[design-lifecycle.md](../../design-lifecycle.md)'s eval floor intact. The launch
+path is covered instead by a stated, reviewer-enforced contract:
+[contracts.md](../../contracts.md) §2 — "`ContainerLaunchConfig.node` is a pure
+function of the resolved job type."
 
 **So "make the runner an input" is not available under the current contract**,
 and this amendment does not invent a way around it. The likely shape is that
@@ -310,6 +335,13 @@ not placement by *choice* ("this run, on the cloud").
 the per-job-override re-litigation the gap-1 discussion below warns against, and
 it is a contract change (`Job` grows a field; §3.1's "the pin is the only
 affinity control") that deserves its own doc.
+
+That doc is [#361](361-per-run-placement.md), and it **closes gap 10 without any
+`Job` change**: the per-run lever decomposes into a capability requirement
+([#309](./309-host-native-execution.md) §5a, designed), load shedding and node
+drain (both shipped), and a cost axis this fleet does not have. `placement.node`
+stays the reviewed escape hatch, #311 Decision 1 stands unamended, and the only
+work gap 10 generated is the contract recorded above.
 
 ### A4. Job inputs shipped, so gap 1 is retired
 

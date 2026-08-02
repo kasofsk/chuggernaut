@@ -149,6 +149,37 @@ per job" in the type rather than in a comment. Two consequences worth copying:
   Where C4 uses the continuation to keep an expensive read behind the decision,
   a cheap read simply moves into the view.
 
+**The launch effects carry no placement, and that is a contract.**
+`LaunchWorkTask`, `LaunchWrapupTask` and the eval-stage launches name a job, a
+cycle and an attempt — never a node. Placement is composed on the far side of
+the port, from exactly one source:
+
+> **`ContainerLaunchConfig.node` is a pure function of the resolved job type.**
+> Nothing on the `Job` record participates.
+
+Three sites compose it today, each
+`node: job_type.placement_node().map(String::from)`.
+`crates/dispatcher/src/exec.rs` and `crates/dispatcher/src/eval.rs` set
+`AgentRunConfig.node`, which the Claude provider copies verbatim into the launch
+config it hands the backend (`crates/agent/src/claude.rs`), and
+`crates/dispatcher/src/launch_queue.rs` builds a `ContainerLaunchConfig` directly
+for command tasks. (`crates/worker/src/daemon.rs` rebuilds one node-side with
+`node: None`; by then the placement decision has already been made.)
+`JobType::placement_node(&self)` takes no `Job`, so the contract is nearly
+self-evident from the signature — it is written down because a *fourth* site
+could be written otherwise and nothing in the tree would catch it. The tier-1
+property test behind [#311](docs/design/311-job-inputs.md) Decision 1,
+`resolved_job_type_is_equal_for_any_two_input_maps`
+(`crates/domain/src/release.rs`), guards **job-type resolution**, which a
+launch-site read of `job.inputs` bypasses entirely
+([#361](docs/design/361-per-run-placement.md)). So this is a **reviewer-enforced**
+contract by design: #361 considered a mechanical check and rejected it — catching
+this properly needs taint analysis, and a grep gate over a struct-field
+initializer would match a coding *shape* where `.chug/tasks/check-comments.sh`
+and `.chug/tasks/check-duplication.sh` match a lexical *fact*. Placement is a
+fleet decision (`spec.md` §3.1); a second source for `node` is a design, not a
+call site. Reject one by name.
+
 ### 3. Invariants — what must always hold
 
 Harvest every "must"/"always"/"never" comment and defensive pattern into one
