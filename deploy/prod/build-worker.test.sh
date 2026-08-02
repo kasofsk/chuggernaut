@@ -56,7 +56,16 @@ EOF
 chmod +x "$BIN/git" "$BIN/ssh"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
-grep_log() { grep -qF "$1" "$LOG" || fail "expected in log: $1"; }
+grep_log() { grep -qF -- "$1" "$LOG" || fail "expected in log: $1"; }
+
+# The daemon `docker run` as the node's shell will see it, on one line with runs
+# of whitespace squeezed: the script composes it across backslash-continued
+# lines, so an assertion on the WHOLE run spec (rather than one token of it) has
+# to normalise the layout it is written in.
+daemon_run() {
+  sed -n '/docker run -d --restart=always --name chug-worker/,/chuggernaut\/worker:/p' "$LOG" \
+    | tr '\\\n' '  ' | tr -s ' '
+}
 
 # ── Case 1: cache on ⇒ the daemon run passes WORKER_CACHE_DIR (env only) ───────
 : > "$LOG"
@@ -154,6 +163,161 @@ PATH="$BIN:$PATH" \
 grep_log "WORKER_SLOTS=2"
 grep_log "WORKER_NODE=air"
 echo "ok: daemon run carries WORKER_SLOTS when set"
+
+# ── Case 2d: KVM unset ⇒ the daemon run is exactly the one it was before ──────
+# The three #367 settings and the device must be INERT until an operator turns
+# them on: this is the whole fleet's run spec, and every node in it has KVM off.
+# Asserted on the WHOLE composed run rather than on absent tokens, so a stray
+# flag anywhere in it fails here. Update this string deliberately when the run
+# spec changes — hand-composing it var by var is what drops settings (#265
+# reason 3), and a golden is the cheapest guard the shape has.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  sh "$SUT"
+
+EXPECTED_RUN="docker run -d --restart=always --name chug-worker\
+ -v /var/run/docker.sock:/var/run/docker.sock\
+ -v \$HOME/chuggernaut-worker/keys:/data/keys:ro\
+ -e WORKER_NODE=nuc -e NATS_URL=nats://10.0.0.1:4222\
+ -e NATS_CREDS=/data/keys/worker.creds\
+ -e RUST_LOG=info,async_nats=warn\
+ -e WORKER_REFRESH_GIT_URL= -e WORKER_GIT_KEY=/data/keys/worker_git\
+ chuggernaut/worker:prod >/dev/null"
+GOT_RUN="$(daemon_run)"
+case "$GOT_RUN" in
+  "$EXPECTED_RUN"*) ;;
+  *) fail "with the KVM vars unset the daemon run must be unchanged.
+  expected: $EXPECTED_RUN
+  got:      $GOT_RUN" ;;
+esac
+echo "ok: KVM unset leaves the daemon run spec byte-for-byte what it was"
+
+# ── Case 2e: KVM on ⇒ the three settings AND the device reach the daemon ──────
+# The device is the load-bearing half: chug-worker is itself a container, so the
+# daemon's device check reads its OWN view (crates/worker/src/daemon.rs) and a
+# daemon given WORKER_KVM without `--device` refuses to start, is looped by
+# --restart=always, and takes the node out of the fleet.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_KVM=1 \
+  WORKER_KVM_PROJECTS="acme/beacon,acme/api" \
+  WORKER_ANDROID_SDK_DIR=/etc/chug/android-sdk \
+  sh "$SUT"
+
+grep_log "-e WORKER_KVM='1'"
+grep_log "-e WORKER_KVM_PROJECTS='acme/beacon,acme/api'"
+grep_log "-e WORKER_ANDROID_SDK_DIR='/etc/chug/android-sdk'"
+grep_log "--device '/dev/kvm'"
+echo "ok: KVM on passes the three settings and the /dev/kvm device"
+
+# ── Case 2e2: an allow-list written with spaces stays ONE argument ─────────────
+# The daemon trims each entry (crates/worker/src/config.rs `parse_kvm_projects`),
+# so `acme/beacon, acme/api` is a valid list an operator will write. Unquoted it
+# word-splits and the tail lands after the image name — i.e. as the container's
+# COMMAND, which starts something other than the daemon.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_KVM=1 \
+  WORKER_KVM_PROJECTS="acme/beacon, acme/api" \
+  sh "$SUT"
+
+grep_log "-e WORKER_KVM_PROJECTS='acme/beacon, acme/api'"
+case "$(daemon_run)" in
+  *"chuggernaut/worker:prod >/dev/null"*) ;;
+  *) fail "the image must stay the LAST argument of the run (a split allow-list would follow it as a command)" ;;
+esac
+echo "ok: a spaced allow-list stays one argument and nothing follows the image"
+
+# ── Case 2f: WORKER_KVM may name another device node (#374's parse) ───────────
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_KVM=/dev/kvm1 \
+  sh "$SUT"
+
+grep_log "--device '/dev/kvm1'"
+grep_log "-e WORKER_KVM='/dev/kvm1'"
+echo "ok: an absolute WORKER_KVM names the device that is passed through"
+
+# ── Case 2g: WORKER_KVM=0 is OFF ⇒ the setting rides, the device must not ──────
+# The daemon reads 0/false/off as no passthrough at all, so attaching the device
+# for it would hand a node hardware its own config says it is not using.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_KVM=0 \
+  sh "$SUT"
+
+grep_log "-e WORKER_KVM='0'"
+if grep -qF -- "--device" "$LOG"; then
+  fail "WORKER_KVM=0 is off — no device may be attached"
+fi
+echo "ok: WORKER_KVM=0 passes the setting and attaches no device"
+
+# ── Case 2h: an unparseable WORKER_KVM is refused BEFORE the daemon restart ───
+# The daemon rejects anything that is neither a boolean nor an absolute path
+# (crates/worker/src/config.rs) — so passing it through would `docker rm -f` a
+# working daemon and replace it with one that cannot boot. Refuse instead; the
+# live daemon is left running.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_KVM=yes \
+  sh "$SUT" >"$WORK/kvm.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an unparseable WORKER_KVM must fail the deploy (got rc=0)"
+grep -qF "neither 1/0 nor an absolute device path" "$WORK/kvm.out" || fail "the refusal must name what is wrong"
+if grep -qF "docker run -d --restart=always --name chug-worker" "$LOG"; then
+  fail "an unparseable WORKER_KVM must not reach the daemon restart (live daemon untouched)"
+fi
+echo "ok: an unparseable WORKER_KVM refuses before the daemon is replaced"
+
+# ── Case 2i: WORKER_KVM is trimmed exactly as the daemon trims it ─────────────
+# `parse_kvm_device` trims before matching, so ` 1 ` is a value the daemon
+# accepts; without the same trim here the deploy would refuse it as unparseable
+# (case 2h) and a node an operator configured correctly could never be built.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_KVM=" 1 " \
+  sh "$SUT"
+
+grep_log "-e WORKER_KVM='1'"
+grep_log "--device '/dev/kvm'"
+
+# Whitespace-only is what the daemon reads as unset, so it must produce the
+# untouched run of case 2d rather than an unparseable-value refusal.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_KVM="  " \
+  sh "$SUT"
+
+if grep -qE -- "WORKER_KVM|--device" "$LOG"; then
+  fail "a whitespace-only WORKER_KVM is unset to the daemon — it must add nothing"
+fi
+echo "ok: WORKER_KVM is trimmed the way the daemon trims it"
 
 # ── Case 3: no worker node ⇒ clean no-op ──────────────────────────────────────
 : > "$LOG"

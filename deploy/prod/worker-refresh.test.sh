@@ -61,6 +61,13 @@ cat > "$BIN/docker" <<EOF
 cat >/dev/null 2>&1 || true
 echo "docker \$*" >> "$LOG"
 case "\$*" in
+  # The device carry-forward reads the LIVE container's .HostConfig.Devices.
+  # \$FAKE_KVM_DEVICES models a KVM-enabled node; empty (the default) is a fleet
+  # with no device, which is every node until an operator turns one on. Set it
+  # WITH the trailing space docker's \`{{range}}\` template really emits per
+  # device — command substitution strips newlines, not spaces, so a fixture
+  # without it would hide the double space the composed run actually carries.
+  inspect*HostConfig.Devices*) [ -z "\${FAKE_KVM_DEVICES:-}" ] || echo "\$FAKE_KVM_DEVICES" ;;
   inspect*data/keys*)     echo "/home/worksalot/chuggernaut-worker/keys" ;;
   inspect*docker.sock*)   echo "/var/run/docker.sock" ;;
   # Image-label read-back for the retag-swap guard: echo \$FAKE_LABEL (default
@@ -110,7 +117,7 @@ KEY="$WORK/key"
 : > "$KEY"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
-grep_log() { grep -qF "$1" "$LOG" || fail "expected in log: $1"; }
+grep_log() { grep -qF -- "$1" "$LOG" || fail "expected in log: $1"; }
 # Combined stdout+stderr of the run under test — the daemon streams exactly this
 # into the deploy leg, so the disk story is asserted on it.
 OUT="$WORK/out.txt"
@@ -500,6 +507,102 @@ if grep -qF "WORKER_SLOTS" "$LOG"; then
   fail "swap must not pass WORKER_SLOTS when unset (daemon default applies)"
 fi
 echo "ok: swap carries WORKER_SLOTS forward, and passes none when unset"
+
+# ── Case 3f: KVM off ⇒ the swap carries neither the settings nor a device ─────
+# Every node in the fleet is here until an operator turns KVM on, so the
+# replacement daemon's run spec must be untouched by #367 existing.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  sh "$SUT" swap prod
+
+if grep -qE "WORKER_KVM|WORKER_ANDROID_SDK_DIR" "$LOG"; then
+  fail "swap must not pass a KVM setting when none is set (no passthrough)"
+fi
+# Scoped to the swapper's own command line: the device carry-forward READS
+# `.HostConfig.Devices` with a `--format` template that itself contains the flag,
+# so a whole-log grep would match the inspect that proves the node has none.
+if grep -F "chug-worker-swap" "$LOG" | grep -qF -- "--device"; then
+  fail "swap must not invent a device the live daemon is not running with"
+fi
+echo "ok: swap passes no KVM setting and no device when KVM is off"
+
+# ── Case 3g: KVM on ⇒ settings from the env, the DEVICE from the live container ─
+# The asymmetry that makes this dangerous: dropping a setting turns KVM off (a
+# quiet regression, the node stays up), but dropping the DEVICE while keeping
+# WORKER_KVM takes the NODE DOWN — the replacement daemon refuses to start on a
+# device its own view lacks (crates/worker/src/daemon.rs), --restart=always
+# restarts it into the same refusal, and the node leaves the fleet. The swap
+# re-composes `docker run` from scratch, so this is exactly where that happens.
+#
+# The live container is faked with a NON-default device, so a swap that
+# reconstructed `--device` from WORKER_KVM (which says the default path here)
+# rather than from what is actually running fails this case.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  WORKER_KVM=1 \
+  WORKER_KVM_PROJECTS="acme/beacon, acme/api" \
+  WORKER_ANDROID_SDK_DIR=/etc/chug/android-sdk \
+  FAKE_KVM_DEVICES="--device /dev/kvm1:/dev/kvm1:rwm " \
+  sh "$SUT" swap prod
+
+grep_log "-e WORKER_KVM='1'"
+grep_log "-e WORKER_KVM_PROJECTS='acme/beacon, acme/api'"
+grep_log "-e WORKER_ANDROID_SDK_DIR='/etc/chug/android-sdk'"
+grep_log "--device /dev/kvm1:/dev/kvm1:rwm"
+# The device must land as a `docker run` FLAG — after the image it would be the
+# container's command, and the daemon would never start. Asserted as ORDERING
+# rather than adjacency: the template's trailing space survives into the composed
+# run, so the two are separated by whitespace the swapper's shell collapses.
+case "$(grep -F chug-worker-swap "$LOG")" in
+  *"--device /dev/kvm1:/dev/kvm1:rwm"*"chuggernaut/worker:prod"*) ;;
+  *) fail "the device must precede the image (after it, it would be the container's command)" ;;
+esac
+echo "ok: swap carries the KVM settings forward and the device from the live container"
+
+# ── Case 3h: WORKER_KVM set, no device on the live container ⇒ REFUSE the swap ─
+# The node-down mode, made impossible: rather than launch a replacement that
+# cannot boot, refuse. The node keeps running its current daemon (an old SHA is a
+# deploy warning; a node that will not start is an outage).
+: > "$LOG"
+if PATH="$BIN:$PATH" \
+     WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+     WORKER_KVM=1 \
+     sh "$SUT" swap prod > "$OUT" 2>&1; then
+  fail "a KVM daemon whose device cannot be carried forward must refuse the swap"
+fi
+grep_out "refusing swap"
+if grep -qF "docker run -d --name chug-worker-swap" "$LOG"; then
+  fail "the refusal must happen BEFORE the swapper is scheduled (the live daemon keeps running)"
+fi
+echo "ok: a device that cannot be carried forward refuses the swap instead of downing the node"
+
+# ── Case 3i: WORKER_KVM is OFF ⇒ no device is expected, so the swap PROCEEDS ───
+# The other side of 3h, and the one that bites: build-worker.sh composes an
+# explicitly-off node as `-e WORKER_KVM='0'` with NO device (build-worker.test.sh
+# case 2g), and the daemon reads 0/false/off as no passthrough at all. Refusing
+# that node's swap would freeze it on its old SHA forever for a node-down hazard
+# that cannot happen — so the refusal must key off the values that attach a
+# device, not off the var being set. The trailing/leading spaces ride along
+# because the daemon trims before it matches (`parse_kvm_device`) and the swap
+# must read the value the same way rather than seeing ` off ` as "on".
+for KVM_OFF_VALUE in 0 false " off "; do
+  : > "$LOG"
+  PATH="$BIN:$PATH" \
+    WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+    WORKER_KVM="$KVM_OFF_VALUE" \
+    sh "$SUT" swap prod > "$OUT" 2>&1 \
+    || fail "WORKER_KVM='$KVM_OFF_VALUE' is off — the swap must proceed, not refuse"
+  grep_log "docker run -d --name chug-worker-swap"
+  if grep -F "chug-worker-swap" "$LOG" | grep -qF -- "--device"; then
+    fail "WORKER_KVM='$KVM_OFF_VALUE' is off — no device may be carried forward"
+  fi
+done
+# The setting still rides, trimmed exactly as the daemon would trim it, so the
+# replacement daemon reads the same off as the one it replaces.
+grep_log "-e WORKER_KVM='off'"
+echo "ok: an explicitly-off WORKER_KVM swaps normally and carries the trimmed setting"
 
 # ── Case 4: unknown phase is a hard error ────────────────────────────────────
 if PATH="$BIN:$PATH" sh "$SUT" frobnicate 2>/dev/null; then

@@ -602,6 +602,15 @@ Notes:
   first probe. Zeroing the seed on an **existing** deployment is a sequenced
   change with a precondition — do not do it from memory; follow
   [the runbook §6](../../docs/runbooks/worker-capacity.md).
+- **KVM for Android emulator work is a per-node opt-in** —
+  [`docs/runbooks/worker-kvm.md`](../../docs/runbooks/worker-kvm.md) is the
+  procedure. `WORKER_KVM`, `WORKER_KVM_PROJECTS` and `WORKER_ANDROID_SDK_DIR` go
+  on the daemon at (re)creation like `WORKER_SLOTS`, and `build-worker.sh` adds
+  `--device` to the daemon's own `docker run` alongside them. That device is
+  load-bearing: `chug-worker` is itself a container, so a daemon given the env
+  without the device refuses to start and `--restart=always` loops the refusal.
+  The self-refresh swap carries the device forward from the live container and
+  refuses the swap rather than replace a KVM daemon with one that cannot boot.
 - The daemon's version is reported in its ping; the dispatcher logs a warning
   when it drifts from the dispatcher's own (stale node artifacts).
 - **Watch a refresh from the deploy job, not the node.** `worker-refresh.sh`

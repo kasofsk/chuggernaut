@@ -18,6 +18,9 @@
 #   WORKER_CACHE_DIR        optional node-local build cache (re-applied on swap)
 #   WORKER_SWAP_IMAGE       docker-cli image for the detached swapper (default docker:cli)
 #   WORKER_REFRESH_DISK_FREE_GB_MIN / _DISK_PATH   disk pre-flight (see below)
+#   WORKER_KVM / WORKER_KVM_PROJECTS / WORKER_ANDROID_SDK_DIR   KVM passthrough
+#     (design #367), re-applied on swap; the DEVICE itself is carried forward
+#     from the live container, never from this env (docs/runbooks/worker-kvm.md)
 set -eu
 
 PHASE="${1:?usage: worker-refresh.sh build <sha> <tag> | swap <tag>}"
@@ -396,6 +399,41 @@ swap)
     SLOTS_ARGS="-e WORKER_SLOTS=$WORKER_SLOTS"
   fi
 
+  # KVM passthrough (design #367, daemon side shipped by #374). The three
+  # SETTINGS are carried the same pass-from-env way as every knob above: this
+  # phase runs INSIDE chug-worker, so whatever `docker run -e WORKER_KVM=…` put
+  # on the daemon at node creation is already in this shell's environment, and
+  # inspecting for them would only re-read what we can read directly. The DEVICE
+  # is different in kind and is recovered from the live container below — see
+  # KVM_DEVICE_ARGS. Values are single-quoted for the swapper's shell, matching
+  # build-worker.sh, so an allow-list written with spaces cannot word-split.
+  #
+  # $KVM_ON is whether this node actually HAS a device, resolved exactly as the
+  # daemon resolves it (`parse_kvm_device`: trim, then 0/false/off ⇒ no device).
+  # A node deliberately set to WORKER_KVM=0 runs with the setting and no device
+  # — build-worker.sh composes precisely that — so the device refusal below must
+  # key off the values that attach one, not off the var being set at all.
+  # Nothing validates the SHAPE here: an unparseable value could never have
+  # booted the live daemon, so anything else on this node means KVM is on.
+  KVM="${WORKER_KVM:-}"
+  KVM="${KVM#"${KVM%%[![:space:]]*}"}"
+  KVM="${KVM%"${KVM##*[![:space:]]}"}"
+  KVM_ON=""
+  case "$KVM" in
+    '' | 0 | false | off) ;;
+    *) KVM_ON=1 ;;
+  esac
+  KVM_ARGS=""
+  if [ -n "$KVM" ]; then
+    KVM_ARGS="-e WORKER_KVM='$KVM'"
+  fi
+  if [ -n "${WORKER_KVM_PROJECTS:-}" ]; then
+    KVM_ARGS="$KVM_ARGS -e WORKER_KVM_PROJECTS='$WORKER_KVM_PROJECTS'"
+  fi
+  if [ -n "${WORKER_ANDROID_SDK_DIR:-}" ]; then
+    KVM_ARGS="$KVM_ARGS -e WORKER_ANDROID_SDK_DIR='$WORKER_ANDROID_SDK_DIR'"
+  fi
+
   # Recover the REAL host bind sources from the running daemon rather than
   # reconstructing them from $HOME. build-worker.sh mounts the keys from the
   # node login user's `\$HOME/chuggernaut-worker/keys` (expanded in the node's
@@ -413,6 +451,23 @@ swap)
     exit 1
   fi
   SOCK_SRC="${SOCK_SRC:-/var/run/docker.sock}"
+
+  # The KVM device, recovered the same inspect-the-live-container way as the
+  # mounts above, and for a sharper reason. A device is a `docker run` flag, not
+  # an env var, so it cannot ride the daemon's environment into this shell; and
+  # dropping it while carrying WORKER_KVM forward does not degrade the node, it
+  # REMOVES it — the replacement daemon refuses to start on a device its own view
+  # lacks (crates/worker/src/daemon.rs `build_backend`), --restart=always
+  # restarts it into the same refusal, and the node leaves the fleet on the first
+  # self-refresh after an operator enabled KVM. Reading `.HostConfig.Devices` off
+  # what is ACTUALLY running means the carry-forward cannot drift from the live
+  # daemon the way a second copy of the run spec would.
+  KVM_DEVICE_ARGS="$(docker inspect chug-worker \
+    --format '{{range .HostConfig.Devices}}--device {{.PathOnHost}}:{{.PathInContainer}}:{{.CgroupPermissions}} {{end}}')"
+  if [ -n "$KVM_ON" ] && [ -z "$KVM_DEVICE_ARGS" ]; then
+    echo "worker-refresh: WORKER_KVM='$KVM' enables KVM but the live chug-worker has no device to carry forward; refusing swap (the replacement would refuse to start and --restart=always would loop it — node down). Recreate the daemon with deploy/prod/build-worker.sh, which passes --device." >&2
+    exit 1
+  fi
 
   # The daemon's own log level (ticket #270). The binary configures tracing from
   # RUST_LOG (`tracing_subscriber::fmt::init`) whose default directive is ERROR,
@@ -440,7 +495,7 @@ swap)
     -e RUST_LOG=$RUST_LOG_NEW \
     -e WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-} \
     -e WORKER_GIT_KEY=${WORKER_GIT_KEY:-/data/keys/worker_git} \
-    $CACHE_ARGS $DISK_ARGS $SLOTS_ARGS chuggernaut/worker:$TAG"
+    $CACHE_ARGS $DISK_ARGS $SLOTS_ARGS $KVM_ARGS $KVM_DEVICE_ARGS chuggernaut/worker:$TAG"
 
   # Keep the swapper's transcript (ticket #270). This sibling container holds the
   # only record of the moment the node is most likely to break — it removes the

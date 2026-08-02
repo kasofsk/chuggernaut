@@ -120,6 +120,55 @@ SLOTS_ENV=""
 if [ -n "${WORKER_SLOTS:-}" ]; then
   SLOTS_ENV="-e WORKER_SLOTS=$WORKER_SLOTS"
 fi
+# KVM passthrough for Android emulator work (design #367 §2.3/§3.5, daemon side
+# shipped by #374): the three node settings AND the device node itself. The
+# device is not optional decoration — `chug-worker` is itself a container, so the
+# daemon's "does this node have the device" check reads the DAEMON CONTAINER's
+# own view (crates/worker/src/daemon.rs `build_backend`), and a daemon that gets
+# WORKER_KVM without `--device` refuses to start, is restarted into the same
+# refusal by --restart=always, and the node leaves the fleet.
+#
+# The value maps to a device path exactly as the daemon parses it
+# (crates/worker/src/config.rs `parse_kvm_device`): a boolean turns on the
+# default device node, an absolute path names another. A value that is neither is
+# refused HERE, before the live daemon is removed, rather than by a replacement
+# that then cannot boot. Values are single-quoted for the node's shell so an
+# allow-list written with spaces (`acme/beacon, acme/api` — the daemon trims)
+# cannot word-split into a stray `docker run` argument.
+#
+# Trimmed first, because `parse_kvm_device` trims before it matches: a ` 1 ` the
+# daemon accepts must not be refused by the deploy, and a whitespace-only value
+# must read as unset (the daemon's own reading) rather than as unparseable. The
+# trimmed value is what rides in `-e`, so the daemon and worker-refresh.sh's swap
+# both see exactly what was decided on here.
+#
+# All three empty when unset ⇒ no passthrough and no device: exactly the run this
+# script produced before Android existed. Enabling KVM on a node and granting it
+# to a project stay two separate acts — WORKER_KVM_PROJECTS is fail-closed, and
+# an empty one grants nobody. docs/runbooks/worker-kvm.md is the procedure.
+KVM_ENV=""
+KVM_DEVICE_ARG=""
+KVM="${WORKER_KVM:-}"
+KVM="${KVM#"${KVM%%[![:space:]]*}"}"
+KVM="${KVM%"${KVM##*[![:space:]]}"}"
+if [ -n "$KVM" ]; then
+  KVM_ENV="-e WORKER_KVM='$KVM'"
+  case "$KVM" in
+    0 | false | off) ;;
+    1 | true | on) KVM_DEVICE_ARG="--device '/dev/kvm'" ;;
+    /*) KVM_DEVICE_ARG="--device '$KVM'" ;;
+    *)
+      echo "build-worker: WORKER_KVM='$KVM' is neither 1/0 nor an absolute device path — the daemon would refuse to start on it (crates/worker/src/config.rs); REFUSING (live daemon untouched)" >&2
+      exit 1
+      ;;
+  esac
+fi
+if [ -n "${WORKER_KVM_PROJECTS:-}" ]; then
+  KVM_ENV="$KVM_ENV -e WORKER_KVM_PROJECTS='$WORKER_KVM_PROJECTS'"
+fi
+if [ -n "${WORKER_ANDROID_SDK_DIR:-}" ]; then
+  KVM_ENV="$KVM_ENV -e WORKER_ANDROID_SDK_DIR='$WORKER_ANDROID_SDK_DIR'"
+fi
 # Log level for the daemon (ticket #270). The binary filters on RUST_LOG and its
 # default directive is ERROR, so a daemon started without it emits nothing — not
 # even the "worker up" line the probe below waits for, nor the refresh relay that
@@ -141,6 +190,8 @@ docker run -d --restart=always --name chug-worker \
   $CACHE_ENV \
   $DISK_ENV \
   $SLOTS_ENV \
+  $KVM_ENV \
+  $KVM_DEVICE_ARG \
   chuggernaut/worker:$TAG >/dev/null"
 ssh "$WORKER_SSH" "$REMOTE"
 
