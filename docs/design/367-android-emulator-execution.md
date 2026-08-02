@@ -1,16 +1,29 @@
 # Design #367 — Android emulator execution: a container with `/dev/kvm`, not a host runtime
 
-Status: PROPOSED.
+Status: PROPOSED, amended 2026-08-02 — recommendation unchanged, phase A1's mechanism rewritten.
 
-Written against the tree at `1e567e3`. Every claim about this repository was
-read out of the source or out of [`spec.md`](../../spec.md), not inferred from a
-sibling design; where the brief and the tree disagree, the tree wins and the
-disagreement is recorded in
+Written against the tree at `1e567e3`, amended against `fef87f9`. Every claim
+about this repository was read out of the source or out of
+[`spec.md`](../../spec.md), not inferred from a sibling design; where the brief
+and the tree disagree, the tree wins and the disagreement is recorded in
 [Corrections](#corrections-verified-against-the-tree). The four external claims
 the brief supplies were fetched and are quoted where used. One class of claim —
 anything about the **beacon** repository — is **not verifiable from this tree**:
 `~/beacon` is not present in this container, and every such claim below is
 marked *(secondhand)*.
+
+**The 2026-08-02 amendment.** An operator ran the experiment this document's
+phase A0 asked for, on `gumbo-nuc-0` against the real `chuggernaut/agent:prod`
+image. It **confirms the recommendation and refutes phase A1's mechanism**, so
+the recommendation below is untouched and §[3](#3-part-two-the-toolchain-bulk)
+and §[7](#7-sequencing-what-ships-first-and-what-it-unblocks) are rewritten
+around what was measured. That measurement is *(secondhand)* on the same terms
+as everything else about that node: `gumbo-nuc-0` is not reachable from this
+container (`ssh` fails at host-key verification), and this container has no
+`/dev/kvm`, no `/nix`, and no docker socket, so nothing about it could be
+reproduced here. Corrections [8](#the-2026-08-02-measurement-corrections-812)
+onward carry it; correction 12 is the one finding of the amendment that *is*
+tree-verified, and it is a second thing A1 got wrong.
 
 **What this document is for.** [#308](./308-gha-port.md) category F treats
 "mobile" as one thing that needs host-native execution, and
@@ -46,7 +59,9 @@ H.6 and the gap table; [#309](./309-host-native-execution.md) §4, §5a, §5b, �
 
 The brief is right about the thing that carries its argument — Android is a
 device-passthrough problem, not a host-execution problem. Seven claims needed
-adjusting, and five of them move work.
+adjusting, and five of them move work. The 2026-08-02 amendment adds five more
+(8–12) in [its own subsection](#the-2026-08-02-measurement-corrections-812);
+four of those move work too.
 
 1. **#322 W1 has landed. The brief understates its own case.** It says the
    Android route needs neither `HostBackend` nor the `runtime:` selector nor the
@@ -134,6 +149,124 @@ One more thing the brief flags that is worth pinning: `crates/worker/src/config.
 line 375 contains the string `"kvm"`. It is a *rejected `WORKER_MODES` value* in
 a parse test, not a device reference. A future `grep -rn kvm` will hit it; it
 means nothing.
+
+A citation the brief and an earlier draft of this document both got wrong: the
+**three clocks of [#308](./308-gha-port.md) are in H.6**, not H.2. `### H.2 What
+it buys` runs lines 708–726 there and contains no clocks; *"Three clocks, plus a
+fourth thing that has no clock"* is line 843, inside `### H.6 NixOS layering:
+where tooling lives` — the same section as the layering rule
+§[3.6](#36-the-clock-this-borrows-from-and-who-owns-it) quotes, so that section
+cites one #308 section rather than two. The H.2 citations that remain in this
+document are about what host mode buys, and are correct.
+
+### The 2026-08-02 measurement (corrections 8–12)
+
+Corrections 8–11 come from the operator's run on `gumbo-nuc-0` and are
+*(secondhand)* — see the amendment note above for why they could not be
+reproduced here. Correction 12 is read out of this tree and is not secondhand.
+
+8. **The device half is measured, not argued** *(secondhand)*. On the live
+   worker node, against the unmodified `chuggernaut/agent:prod` image:
+
+   ```
+   docker run --rm --device /dev/kvm -v /nix/store:/nix/store:ro \
+     -e ANDROID_SDK_ROOT=/nix/store/3zr1pgwpc00zrj8qc8d631bdfw1z9c5y-androidsdk/libexec/android-sdk \
+     chuggernaut/agent:prod  …
+   ```
+
+   `/dev/kvm` appeared inside the container as `crw-rw-rw-`, readable and
+   writable, with **no `--privileged`**. `emulator -accel-check` exited 0 with
+   *"KVM (version 12) is installed and usable."* A `pixel_8` AVD on
+   `system-images;android-34;google_apis;x86_64` was created and booted
+   headless: `adb devices` → `emulator-5554  device`, `INFO | Boot completed in
+   30421 ms`, ~40s wall clock from launch to `sys.boot_completed=1`. Every
+   load-bearing claim of §[1](#1-the-question-and-the-hypothesis-under-test)
+   and §[2](#2-part-one-the-device) is now an observation rather than an
+   inference from Google's docs, and §[8](#8-risks-and-open-questions)'s first
+   risk — "the KVM precondition is the whole design, and it is unverified" — is
+   **retired for this node**.
+
+9. **A1's bind is wrong, and the reason generalizes** *(secondhand)*. A1
+   specifies `WORKER_ANDROID_SDK_DIR` bound as a plain host path. That cannot
+   work here, because the SDK is nix-provisioned and is not self-contained:
+
+   - `ANDROID_SDK_ROOT` is
+     `/nix/store/3zr1pgw…-androidsdk/libexec/android-sdk`, and the tree is a
+     **symlink farm out of itself** — `emulator ->
+     /nix/store/j92gsy…-android-sdk-emulator-36.6.11/…`, `ndk-bundle ->
+     /nix/store/spgfki…`. Bind only the SDK path and every one of those
+     dangles.
+   - `emulator` is a **nix wrapper script** whose shebang is
+     `#! /nix/store/zh1ijdh…-bash-5.3p9/bin/bash`, and which references
+     `libglvnd`, `dbus`, `xkeyboard-config`, `libx11` and `systemd` by store
+     path. In a Debian container that interpreter does not exist, so the
+     wrapper does not even start.
+   - The closure is **17.5 GiB across 197 store paths**; `/nix/store` on the
+     box is 56G.
+
+   The shape that works is **`-v /nix/store:/nix/store:ro` plus
+   `ANDROID_SDK_ROOT`**. It is the same cost as A1 claimed — one bind,
+   node-side, no wire change, no dispatcher change, no epoch bump — from a
+   different source, and it exposes a great deal more than A1's curated
+   directory did. §[3.4](#34-what-the-nixstore-mount-exposes) decides that
+   exposure and §[3.5](#35-staleness-no-store-hash-in-any-chug-side-config)
+   decides the hash-pinning problem it creates.
+
+10. **A0 is already done, and one of its two requirements was never real**
+    *(secondhand)*. `gumbo-nuc-0`'s NixOS configuration
+    (`~/beacon/infra/gha-runner/configuration.nix`, a *different project's*
+    repo) already provisions the SDK through
+    `androidenv.composeAndroidPackages` with `includeNDK`, `includeEmulator`,
+    `includeSystemImages`, `platformVersions ["34" "35" "36"]`, `abiVersions
+    ["x86_64"]` and `ndkVersions ["28.2.13676358"]`, and it is present on the
+    box. A0's other requirement — "the daemon's user in the `kvm` group" — is
+    **moot**: `/dev/kvm` is mode `0666`, `worksalot` is not in the `kvm` group,
+    and the container opened the device anyway. Stated here so a future reader
+    does not go chasing group membership. The host's *GHA runner* systemd units
+    do need `SupplementaryGroups = ["docker" "kvm"]` plus `PrivateDevices =
+    false` and `DevicePolicy = "auto"`, because nixpkgs' systemd hardening
+    defaults hide `/dev/kvm` — that is a systemd-unit concern for units the
+    operator writes, and it does **not** reach the containerized `chug-worker`,
+    which is started by `docker run` (`deploy/prod/build-worker.sh`) and has no
+    unit of its own.
+
+11. **The image needs nothing** *(secondhand)*. A1 calls for "a slim Android
+    task image". The measurement says **no image change at all**: `java` is not
+    on `PATH` in `chuggernaut/agent:prod`, and `avdmanager` ran regardless,
+    because the nix wrappers resolve their own JDK out of the store. So T2's
+    premise moved in the platform's favour — the toolchain-bulk problem of
+    §[3](#3-part-two-the-toolchain-bulk) does not shrink, it **disappears**:
+    zero bytes are added to any image the platform rebuilds per node per
+    deploy. §[3.3](#33-recommendation-t2-now-and-t5-as-the-complement-rather-than-the-rival)
+    is strengthened accordingly.
+
+12. **The worker daemon cannot see the host filesystem, so A1's "fail loudly if
+    the mount is absent" cannot work as written** — and this one is
+    tree-verified. `deploy/prod/build-worker.sh` line 133 starts the daemon as
+    `docker run -d --restart=always --name chug-worker -v
+    /var/run/docker.sock:/var/run/docker.sock -v
+    $HOME/chuggernaut-worker/keys:/data/keys:ro …`. Its only host views are the
+    docker socket and its own credentials. Node-local caching works anyway
+    because the *docker daemon* resolves the bind's source path host-side —
+    which the deploy script's own comment states ("the daemon itself never
+    touches the cache files", lines 84–89) — though `crates/worker/src/daemon.rs`
+    still calls `std::fs::create_dir_all` on `WORKER_CACHE_DIR`, which in the
+    deployed shape creates a phantom directory *inside the worker container*
+    and never touches the host path being bound. That is harmless for a cache
+    that is safe to be empty. It is **not** harmless for a toolchain mount:
+    a `-v`-style bind with a missing source is created by the docker engine as
+    an empty root-owned directory rather than refused, so a node whose store —
+    or whose stable SDK path (§3.5) — is not where the config says would launch
+    a container with an empty directory in its place and fail deep inside the
+    task instead of at the launch. The fix is in
+    §[3.5](#35-staleness-no-store-hash-in-any-chug-side-config); the point here
+    is that §[2.3](#23-recommendation)'s bullet — *"the daemon refuses to start
+    if the setting is on and the device node is absent"* — is unimplementable
+    from inside a container and is corrected there. (The docker `-v`-creates
+    versus `--mount`-refuses distinction is engine-documented behavior; there is
+    no docker daemon in this container, so it is stated, not demonstrated, and
+    unlike correction 3 no `bollard` metadata was present here to check the
+    field names against.)
 
 ---
 
@@ -248,6 +381,11 @@ mitigation is the one the fleet already uses for the docker socket — **grant i
 narrowly** (§2.3), and keep the KVM node's kernel current as a machine fact
 under #308 H.6's "system closure" row.
 
+Correction 8 settles the mechanics of the grant: `--device /dev/kvm` alone was
+sufficient, `--privileged` was not needed, and because the device is mode
+`0666` there is no group, no `device_cgroup_rules` entry and no uid mapping to
+arrange. The narrow grant is available at its documented price.
+
 ### 2.2 Options for the device primitive
 
 **D1 — node-side, unconditional: every container on a KVM-enabled node gets the
@@ -313,12 +451,20 @@ node. No.
 
 - The node declares the physical fact: `WORKER_KVM=1` (or a device path,
   defaulting to `/dev/kvm`), parsed in `crates/worker/src/config.rs` beside
-  `parse_cache_dir`, and **the daemon refuses to start if the setting is on and
-  the device node is absent** — the same fail-loud shape `build_backend` already
-  uses for an unserviceable `WORKER_MODES` entry. A node advertising a
-  capability it cannot serve is the failure #322 W1's test exists to prevent.
+  `parse_cache_dir`. **The failure must still be loud, but it cannot be a
+  startup `stat`** (correction 12): the daemon runs in a container that cannot
+  see the host's `/dev/kvm`. A `--device` whose host path is missing is refused
+  by the engine at container create, so the loud failure lands on the launch as
+  a `BackendError::Launch` naming the device — one launch per affected job
+  rather than one refusal at boot, which is weaker than `build_backend`'s
+  `WORKER_MODES` check and is the honest price of a containerized daemon. If a
+  boot-time check is wanted later, the mechanism is a one-shot probe container,
+  not a `stat`.
 - The operator declares the policy: `WORKER_KVM_PROJECTS=owner/project,…`,
-  empty ⇒ nobody, checked against the launch's `JOB_PROJECT`.
+  empty ⇒ nobody, checked against the launch's `JOB_PROJECT`. Per
+  §[3.4](#34-what-the-nixstore-mount-exposes) this one list gates the device
+  **and** the store mount: they are granted together or not at all, decided at
+  one site, so no future edit can hand out the wider of the two on its own.
 - `DockerBackend` gains a device list exactly as it has `cache_dir` — a node
   property, `None` on the dispatcher's construction, never on the wire or in
   `ContainerLaunchConfig`. `build_host_config` populates `HostConfig.devices`
@@ -376,20 +522,46 @@ unchanged — but a design that repeats a false premise is a design a future
 reader will over-apply. The correct statement is: *do not put the Android SDK
 in an image the platform rebuilds on every deploy.*
 
+**And per correction 11, the amended answer is stronger than the constraint
+asked for.** The constraint says "do not bake it"; the measurement says nothing
+needs to be added to any image *at all* — not the SDK, not a JDK, not the
+emulator's shared libraries — because the nix wrappers carry their own
+interpreter, their own JDK and their own libraries by store path, and the store
+is the mount. `chuggernaut/agent:prod` booted an emulator unmodified. So the
+size of this section's problem is not "how few GB can we get the Android image
+down to"; it is **zero GB, and the whole question moves to what the mount
+exposes** (§[3.4](#34-what-the-nixstore-mount-exposes)).
+
 ### 3.2 Options
 
 **T1 — bake it into a platform image.** Rejected on §3.1's two real grounds.
 
-**T2 — a second named node-local mount, read-only (recommended).**
-`WORKER_ANDROID_SDK_DIR` on the node, bind-mounted **read-only** at a fixed
-container path (`/opt/android-sdk`), with `ANDROID_SDK_ROOT`/`ANDROID_HOME`
-injected worker-side exactly as `inject_cache_env` injects `SCCACHE_DIR`
-(`crates/worker/src/daemon.rs`). Provisioned by the operator out of band — an
-`sdkmanager` run, or a NixOS closure — which is precisely #308 H.6's "system
-closure = machine facts" row.
+**T2 — a second named node-local mount, read-only (recommended, and rewritten
+by correction 9).** As originally written: `WORKER_ANDROID_SDK_DIR` on the node,
+bind-mounted read-only at `/opt/android-sdk`, with
+`ANDROID_SDK_ROOT`/`ANDROID_HOME` injected worker-side exactly as
+`inject_cache_env` injects `SCCACHE_DIR` (`crates/worker/src/daemon.rs`).
+
+**That version is dead.** The SDK on the target node is nix-provisioned, so it
+is not a directory — it is a *view into a store*, and binding the view without
+the store yields dangling symlinks and a wrapper whose interpreter is missing
+(correction 9). The surviving form of T2, and the one the rest of this section
+means, is:
+
+> **`/nix/store` bind-mounted read-only at `/nix/store`, plus a resolved
+> `ANDROID_SDK_ROOT`.** Node-side, read-only, injected beside
+> `inject_cache_env`, provisioned by the operator's `nixos-rebuild` — still
+> exactly #308 H.6's "system closure = machine facts" row, and already done on
+> the target node (correction 10).
+
+The mechanism's *cost profile* is unchanged — one mount, or two under
+§[3.5](#35-staleness-no-store-hash-in-any-chug-side-config)'s preferred
+resolution mechanism; no wire change, no dispatcher change, no epoch bump. Its
+*exposure* is not, and §[3.4](#34-what-the-nixstore-mount-exposes) owes an
+argument rather than a shrug.
 
 **T3 — generalize `WORKER_CACHE_DIR` into a list of named node mounts.**
-`WORKER_MOUNTS=sccache:/cache/sccache:rw,android-sdk:/opt/android-sdk:ro`, one
+`WORKER_MOUNTS=sccache:/cache/sccache:rw,nix-store:/nix/store:ro`, one
 mechanism, still node-side.
 
 **T4 — #309 P5 declared caches.** The flake-attribute-derived per-project cache
@@ -400,7 +572,13 @@ which container mode does not have.
 **T5 — a project task image under [#355](./355-project-task-images.md) with the
 SDK baked in.** Under #355's recommended O2 the node *builds* the image locally
 and never pulls it, and it is rebuilt on the **project's** clock, not on every
-platform deploy — which neutralizes §3.1's second ground entirely.
+platform deploy — which neutralizes §3.1's second ground entirely. **Correction
+11 changes what this option is for.** It is no longer needed to hold the
+toolchain, because nothing needs to hold the toolchain; what it would still buy
+is *ownership* — an image the project builds from its own flake, on its own
+clock, instead of borrowing the node's system closure. That is the tension
+§[3.6](#36-the-clock-this-borrows-from-and-who-owns-it) names and does not
+resolve.
 
 ### 3.3 Recommendation: T2 now, and T5 as the complement rather than the rival
 
@@ -410,12 +588,22 @@ generality principle applies, and #309 §9 is explicit that `WORKER_CACHE_DIR`
 "should not be overloaded — it keeps its documented contract for container mode
 unchanged."
 
+**The amendment strengthens this, and the strengthening is worth stating
+plainly.** With the store as the mount, the recommendation costs the platform
+*nothing to build*: no Android layer in any platform image, no project image
+required to carry a toolchain, no `sdkmanager` provisioning step to write and
+maintain, and — per correction 10 — no A0 work outstanding on the target node.
+The mount and the SDK are both already there; what is missing is the six lines
+of worker code that use them. That is a materially better position than the
+original T2 argued for, and it removes the only reason this section needed T5.
+
 **Read-only is the load-bearing property, and it is what makes the whole design
 work.** `spec.md` §3.1 permits the one cache bind because it "carries **no job
 state** — it is a build accelerator only, safe to be empty/cold", and
-concurrency is safe because *sccache locks*. An Android SDK satisfies neither
-of those the way sccache does — so it needs a different justification, and
-read-only is it:
+concurrency is safe because *sccache locks*. A nix store satisfies neither of
+those the way sccache does — it is not safe to be empty, and its absence is a
+hard failure rather than a slow build — so it needs a different justification,
+and read-only is it:
 
 - **Concurrency safety by construction.** Two emulator tasks on one node cannot
   corrupt a mount neither can write. sccache's justification (it locks) does not
@@ -427,6 +615,23 @@ read-only is it:
   no shared adb server, no reuse check.
 - **It is not a cache and should not be called one.** It is a read-only
   toolchain volume. Calling it a cache invites someone to make it writable.
+- **And with a nix store it is not merely a policy — it is the store's own
+  contract.** `/nix/store` is root-owned and immutable by design, which is the
+  same property [#309 §10](./309-host-native-execution.md#10-trust-and-tenancy)
+  already leans on when it lists the store among what a *host* task reaches and
+  says the immutability "genuinely bounds this". A `:ro` bind adds a second
+  lock to a door that was already locked.
+
+**Correction 8 answers the measurement this section was most exposed on.** §4
+and §8 both flagged "a read-only SDK mount may not survive contact with
+`sdkmanager`" as the one result that could change the shape. It survived: the
+AVD was created and the emulator booted with the SDK reachable only through a
+read-only store, and nothing in the boot path needed to write into the SDK
+tree. Two residuals, not one, remain — license-acceptance files, which
+`androidenv` settles at build time rather than at run time, and any flow that
+genuinely calls `sdkmanager` to *install* a package, which under this design is
+a `nixos-rebuild`, not a task action. Both are narrower than the original risk
+and neither reopens the lease question.
 
 **Cold-start is the honest cost, and it is charged to the operator, not to
 `task_timeout`.** #309 §9's "cold-realise cost" analysis applies here and
@@ -436,20 +641,255 @@ means the failure mode is "the node does not have the SDK" (loud, at launch)
 rather than "the first task of the day takes forty minutes and looks slow"
 (#309 §9's exact complaint about a cold `nix develop`). The node must therefore
 **fail the launch loudly** when a KVM-and-SDK job lands and the mount is absent,
-never fall through to an ambient SDK.
+never fall through to an ambient SDK — and correction 12 says that loudness has
+to be built rather than assumed, because a `-v`-style bind on a missing source
+is created empty by the engine instead of refused.
+§[3.5](#35-staleness-no-store-hash-in-any-chug-side-config) carries the
+mechanism. On the target node the cold-start cost is already paid: the closure
+is in the system profile, and `nixos-rebuild` paid for it out of band exactly
+as this paragraph asks.
 
-**T5 is complementary, not alternative.** The right split is:
+**T5 is complementary, not alternative** — and the split it completes is now
+one layer emptier:
 
 | Layer | Holds | Size | Clock | Mechanism |
 | --- | --- | --- | --- | --- |
-| Task image | JDK, emulator runtime deps, `git`/`ssh`, the agent CLI | hundreds of MB | project repo (#355) or platform | `image:` |
-| Node mount | SDK packages, system images, NDK | many GB | operator, out of band | `WORKER_ANDROID_SDK_DIR` |
+| Task image | `git`/`ssh`, the agent CLI — **nothing Android-specific** (correction 11) | unchanged | project repo (#355) or platform | `image:` |
+| Node mount | the whole nix store, holding SDK + system images + NDK + their interpreters and libraries | 56G present, 17.5 GiB used by this closure | operator, `nixos-rebuild` | `/nix/store:ro` |
 | Container overlay | the AVD, `ANDROID_USER_HOME`, gradle output | per task | the task | nothing — it is the overlay |
 
-A slim project image plus a mounted SDK is the right split, and it is the one
-design #355 §9 already implies without saying so: `image:` and the node-resolved
-environment reference are "the same slot in two modes", and a node mount is
-neither — it is a third thing, the machine fact.
+The original row-1 entry (JDK, emulator runtime deps) is struck: correction 11
+measured `java` absent from `PATH` in `chuggernaut/agent:prod` and `avdmanager`
+running regardless. A **stock** platform image plus a mounted store is the
+split, and it is the one design #355 §9 already implies without saying so:
+`image:` and the node-resolved environment reference are "the same slot in two
+modes", and a node mount is neither — it is a third thing, the machine fact.
+
+### 3.4 What the `/nix/store` mount exposes
+
+The mount is one flag and it should not be allowed to arrive as one. `-v
+/nix/store:/nix/store:ro` hands the job container **every package on the node**,
+on a box that also hosts another project's GitHub Actions runners (job #265,
+worker-node co-tenancy — a job, not a design doc, so there is nothing to link).
+That is a far wider read surface than the curated
+`WORKER_ANDROID_SDK_DIR` the original A1 imagined, and the difference deserves
+an argument.
+
+**What is actually reachable, stated precisely.** A nix store path is
+world-readable *by design* — that is not an accident of permissions, it is how
+the store works, and it is why "no secrets in the store" is a first-order nix
+rule rather than a style preference. So the mount grants:
+
+- every derivation output ever realised on the node and not yet
+  garbage-collected — the GHA runner's toolchains, and any project source that
+  was ever copied into the store by a `nix build .#` or `nix develop` of a
+  local flake;
+- nothing writable, and nothing outside `/nix/store` — not `/etc`, not the
+  runner's work directories, not its credentials, not the docker socket;
+- no *node* privilege: the store is data, and the container reading it is the
+  same container that already runs arbitrary project code.
+
+**The one thing that would make this unacceptable is a secret in the store**, so
+it must be checked rather than assumed. NixOS's own idioms keep secrets out —
+`*PasswordFile`/`*TokenFile` options, `sops-nix`/`agenix`, systemd credentials
+— but a literal string in `configuration.nix` that reaches `pkgs.writeText` or
+a `substituteInPlace` lands in the store in cleartext, and a GHA runner
+registration token is exactly the kind of value that gets written that way. This
+document cannot check it (the node is unreachable from here), so it becomes an
+**A0 acceptance gate**: the operator greps the store for the runner's
+registration token and any known secret material, records the result, and the
+mount does not ship until that check is on the record.
+
+Options weighed:
+
+**E1 — mount the whole store, read-only (recommended, with conditions).**
+One bind, zero moving parts, and the exposure is a read of world-readable data
+on a node that is already policy-single-tenant for the project that gets the
+device (D2's `WORKER_KVM_PROJECTS`, §2.3). Its strongest defence is that it is
+**strictly less than the platform has already accepted elsewhere**:
+[#309 §10](./309-host-native-execution.md#10-trust-and-tenancy)'s tenancy table
+lists `/nix/store` among what a host task reaches, calls the store's
+root-owned immutability a genuine bound, and accepts it — while host mode also
+hands over the task user's home, every declared cache and the node's process
+table. This mount is that row and none of the others, minus write access.
+*Against:* it is still a widening, and it widens for a *container*, which is the
+isolation model the platform otherwise sells as the strict one. A reader who
+skips this section will read "one bind" and not know that.
+
+**E2 — mount only the 197-path closure.** Compute the closure of the SDK and
+bind each store path individually. *For:* the exposure becomes exactly the
+toolchain and nothing else. *Against, and it is decisive:* it is **197 binds**
+per container, recomputed per launch (the closure changes on every SDK bump), so
+the worker would have to shell out to `nix path-info -r` at launch — a new
+runtime dependency on nix *inside the containerized worker*, which per
+correction 12 cannot even see the store. And it is fragile in the worst way:
+any path the toolchain resolves lazily and the closure walk missed fails at
+runtime as a bare `ENOENT` deep inside a test run. Trading a wide read for a
+launch-time nix dependency and a new class of confusing failure is a bad trade.
+
+**E3 — bake the closure into an image.** `nix copy --to docker://` or
+`dockerTools`, producing an image that carries the 17.5 GiB closure. *For:* no
+host mount at all; §3.1's rules apply unchanged. *Against:* it re-acquires
+everything §3.1 rejects — the disk, and (unless it is a #355 project image) the
+per-deploy rebuild — to buy an isolation property the read-only store already
+has. **Named as the escape hatch** if the exposure argument is refused, and as
+the thing #355 would make cheap.
+
+**E4 — a chroot store holding only the Android closure.** Nix can realise a
+closure into a store rooted elsewhere (`--store` with a `root=`), giving
+`/var/lib/chug/android-store/nix/store` containing the 197 paths and nothing
+else; bind *that* at `/nix/store` and the container sees store-path-correct
+absolute paths for the toolchain and nothing about the other tenant. *For:* E2's
+isolation with E1's single bind. *Against:* it duplicates 17.5 GiB on a disk the
+`worker-refresh.sh` free-space floor already guards, and it needs an operator
+step that must be re-run on every SDK bump — a second thing to keep in step with
+`nixos-rebuild`, which is precisely the drift §3.5 is about to reject. The exact
+invocation is also unverified from this container (no nix here).
+
+**Recommendation: E1, read-only, with four conditions on the record.**
+
+1. The mount is added **only for launches the D2 allow-list already admits** —
+   `WORKER_KVM_PROJECTS` gates the device and the store together, one policy,
+   one decision site. An unrelated `code` job on the same node sees neither.
+2. It is **read-only, always**, and the code says so structurally rather than by
+   convention (a mount type that cannot be constructed writable, not a `:ro`
+   suffix a future edit can drop).
+3. The **A0 secret check above is a gate**, not a note.
+4. The node with the mount is **declared effectively single-tenant with respect
+   to store contents**, in the same words #309 §10 uses for host nodes: the
+   accepted risk is that a project's code can read what else was built on its
+   node, and making that explicit and policy-checked is the honest version of
+   accepting it. If that node ever hosts a second *chuggernaut* project, this
+   decision is reopened, not inherited.
+
+**E4 is the named escalation** for that last case, and E3 for the case where
+the store may not be exposed at all.
+
+### 3.5 Staleness: no store hash in any chug-side config
+
+`3zr1pgwpc00zrj8qc8d631bdfw1z9c5y-androidsdk` is content-hashed: **any** SDK
+bump changes it. A `WORKER_ANDROID_SDK_DIR` or `ANDROID_SDK_ROOT` holding that
+string is operator-typed config that goes silently wrong on the next
+`nixos-rebuild` — verbatim the failure
+[#309 §4](./309-host-native-execution.md#4-capability-advertisement) cites when
+it rejects dispatcher-side static config: *"it relocates a physical fact into
+operator-typed config that goes silently wrong after a `nixos-rebuild`."* This
+document does not get to reject that shape in §5 and adopt it in §3, so the
+resolution here is the same one: **the physical fact is read from the node's
+filesystem at the moment it is used, and no content hash appears in any
+chug-side configuration, ever.**
+
+The failure is worth spelling out because it is quiet in a specific way. After a
+bump the old store path stays valid until garbage collection, so a pinned
+`ANDROID_SDK_ROOT` keeps working — against the *previous* SDK — and the job goes
+on passing while testing something the operator thinks was replaced. Then
+`nix-collect-garbage` removes it and the job fails with `ENOENT` on a path
+nobody typed recently. Silent wrongness followed by an unattributable failure is
+the worst available shape.
+
+Options:
+
+- **S1 — pin the store path in `WORKER_ANDROID_SDK_DIR`.** Cheapest, and what
+  A1 as written implies. **Rejected** on the paragraph above.
+- **S2 — the worker reads the host's `ANDROID_SDK_ROOT` at launch.** Reads
+  nicely and **cannot work**: the daemon is a container (correction 12) whose
+  environment is whatever `deploy/prod/build-worker.sh` passed it, so "the
+  host's environment" is not a thing it can see. It degenerates into S1 with a
+  redeploy attached.
+- **S3 — a stable path the operator's NixOS config maintains, resolved at use
+  (recommended).** `configuration.nix` gains one `environment.etc` entry (or
+  equivalent) pointing a fixed path — say `/etc/chug/android-sdk` — at the
+  current `androidsdk` output. `nixos-rebuild switch` updates it atomically as
+  part of the same activation that changes the store path, so the two can never
+  disagree. Chug-side config then contains a **fixed string and no hash**.
+- **S4 — the worker globs `/nix/store/*-androidsdk`.** **Rejected:** multiple
+  generations coexist by design, the glob is unordered, and a wrong pick is
+  invisible.
+
+**Take S3.** Two mechanisms deliver it and the choice between them is a
+measurement, not an argument:
+
+- **(a) Let the docker engine resolve it — a second, tiny bind.** The container
+  gets **two** mounts: `/nix/store:/nix/store:ro` (which the wrapper's
+  store-path shebang and the closure both require, and which no amount of
+  cleverness removes) and the stable path bound at a fixed container path,
+  `/etc/chug/android-sdk` → `/opt/android-sdk:ro`. The engine resolves the
+  symlink host-side at container create, so the *node's current* SDK is what
+  lands there, freshly, on every launch — and `ANDROID_SDK_ROOT` becomes the
+  literal constant `/opt/android-sdk/libexec/android-sdk`, with no hash and no
+  resolution logic anywhere in this repo. Declaring that second mount as a
+  `--mount`-style bind (missing source ⇒ refused) rather than a `-v`-style one
+  (missing source ⇒ silently created empty) also discharges correction 12's
+  loudness problem at the same time. Costs the worker nothing: it never needs to
+  see the path, exactly as it never sees `WORKER_CACHE_DIR`'s. **One divergence
+  from the measurement, stated because this is the section that leans hardest on
+  it:** correction 8's run set `ANDROID_SDK_ROOT` to the store path itself,
+  whereas (a) points it at a bind path *outside* `/nix/store`. That should be
+  inert — the wrappers name their interpreter and libraries by absolute store
+  path, and the store is mounted — but nothing measured it.
+- **(b) Let the worker canonicalize it — one bind, one host view.** The daemon
+  reads the symlink at each launch and injects the concrete store path as
+  `ANDROID_SDK_ROOT`, so only `/nix/store` is mounted. Needs `/etc/chug`
+  bind-mounted into the *worker* container, i.e. an edit to
+  `deploy/prod/build-worker.sh` and a matching carry-forward in
+  `deploy/prod/worker-refresh.sh`'s swap — the two places every worker knob
+  already has to be threaded through.
+
+**(a) is preferred** because it adds no host view to the daemon and puts the
+resolution in the one process that is already resolving host paths; (b) is
+preferred by anyone who would rather pay a deploy-script edit than a second
+mount. A1 confirms **two** things before writing the config parse — that the
+engine resolves the symlink host-side, and that `emulator` and `avdmanager`
+behave identically with a non-store `ANDROID_SDK_ROOT` — and if either fails,
+(b) is the fallback with no other consequence, because (b) injects the concrete
+store path and so reproduces the measured value verbatim. The *contract* is
+identical either way. That contract is the part that must not
+be negotiated: **the node resolves; chug config names a stable path; a content
+hash never enters `WORKER_*` or a job type.**
+
+Note what this does *not* do: it does not put the resolution in the dispatcher,
+in a job type, or in an input. The SDK's identity stays a physical fact of the
+node, observed where it is used — which is the same answer
+§[5.1](#51-resolution-the-defaults-table-is-right-the-doc-comment-is-wrong)
+gives for capabilities and #309 §4 gives for modes. One class of problem, one
+resolution mechanism, as the brief requires.
+
+The rule generalizes past Android, and should be stated that way in the runbook:
+any nix-provisioned node toolchain this platform consumes is referenced through
+an activation-maintained stable path, never through a store path.
+
+### 3.6 The clock this borrows from, and who owns it
+
+Taking the SDK from the **node's system closure** means #308 H.6's **clock 1**
+(operator, `nixos-rebuild`, needs a drain) is supplying what H.6 assigns to
+**clock 3** (project repo, `git push`, no deploy at all). The same section is
+explicit about this: *"Resist putting per-project tooling in the node's NixOS configuration …
+makes the node a **central control plane** — which CLAUDE.md rejects outright."*
+By that rule, provisioning `platformVersions ["34" "35" "36"]` on the node is
+the wrong home for a fact that belongs in the project's `flake.nix`, and a
+`compileSdk` bump becomes an operator ticket and a drain instead of a commit.
+
+This document **names the tension and leaves it**, deliberately:
+
+- The alternative — project-supplied toolchains, a flake per project, and the
+  container-mode analogue of #309's `runtime.env` — is a design in its own
+  right, and a separate job owns it. Reaching for it here would make an
+  Android-leg document the venue for the platform's toolchain-ownership
+  decision.
+- Everything §[7](#7-sequencing-what-ships-first-and-what-it-unblocks) proposes
+  survives that decision. `/nix/store:ro` plus a resolved stable path is the
+  mechanism whether the store was filled by the node's closure (clock 1) or by
+  a project flake realised on the node (clock 3); only *who ran the build*
+  changes, and no chug-side config records the answer either way.
+- The interim is honest as long as it is written down: **this is a borrowed
+  clock, on one node, for one project.** A second Android project on a
+  different node is the trigger to stop borrowing.
+
+Cross-references for whoever picks it up: #308 H.6 (the three clocks and the
+layering rule this bends), [#355](./355-project-task-images.md) (the
+project-clock mechanism that already exists for images), and
+[#309 §9](./309-host-native-execution.md#9-environment-and-state) (declared
+environments and their GC).
 
 ---
 
@@ -468,7 +908,7 @@ reasoning.
 | --- | --- | --- |
 | The AVD (`beacon-emu`) | per-container `ANDROID_USER_HOME`, created per run, dies with the overlay (correction 7) | **No** |
 | The adb server / ports 5554-5555 | container-local: `build_host_config` sets `nano_cpus`, `memory`, `binds` and nothing else, so Docker's default bridge network namespace applies and each container has its own | **No** |
-| The SDK / system images | read-only mount (§3.3) | **No** |
+| The SDK / system images | read-only `/nix/store` mount (§3.3), immutable by the store's own contract | **No** |
 | `/dev/kvm` | KVM multiplexes VMs by design; a host runs many guests | **No** |
 | CPU and RAM | `resources.cpu` / `resources.memory`, enforced today via `nano_cpus`/`memory` | **No — this is the existing mechanism** |
 
@@ -490,9 +930,13 @@ resources — only bites once host nodes run device-bound work (H.5)"*, is right
 in its qualifier and wrong in citing H.5's Android example.
 
 **The one thing that could force a lease after all, stated so it is not a
-surprise.** If the emulator turns out to need write access into the SDK
-directory — license acceptance files, `sdkmanager` temp state, a
-an adb key the SDK tree expects — then the mount cannot be read-only,
+surprise — and largely answered by correction 8.** The measurement created an
+AVD and booted an emulator against a store that is immutable by construction, so
+the boot path does not write into the SDK tree. What follows is retained for the
+residual cases §3.3 names (a flow that installs an SDK package at task time),
+and it is now unlikely rather than open. If the emulator turns out to need write
+access into the SDK directory — license acceptance files, `sdkmanager` temp
+state, an adb key the SDK tree expects — then the mount cannot be read-only,
 the concurrency argument above loses its by-construction property, and an SDK
 tree satisfies neither of `spec.md` §3.1's justifications for the sccache bind.
 The answer then is *not* a lease; it is a per-container copy-up of the small
@@ -506,6 +950,27 @@ emulator SIGSEGV about eleven minutes in, and #308 §F is right that these are
 re-derive them against a container on the fleet's own kernel. If two concurrent
 emulators prove unstable for reasons that are not memory, the answer is still
 the capacity dial, not a new primitive.
+
+**Two more, measured on 2026-08-02, recorded so A2 does not rediscover them**
+*(secondhand)*:
+
+- **The emulator wrote `/root/.android/emu-update-last-check.ini` despite
+  `ANDROID_USER_HOME` being set.** So the tooling's mutable state is not
+  entirely `ANDROID_USER_HOME`-rooted — some of it follows `HOME`. The bullet
+  above ("it forces the mutable state into the container's own writable layer")
+  still holds, because *both* destinations are the overlay and both die with it;
+  what does **not** hold is any future assumption that setting
+  `ANDROID_USER_HOME`/`ANDROID_AVD_HOME` is sufficient to relocate every write.
+  Whatever A1 does about AVD home must also give the task a writable `HOME`, and
+  anything that later tries to make `HOME` read-only or shared will break in a
+  way that looks like an emulator bug.
+- **`Unable to connect character device modem: address resolution failed for
+  ::1`.** The container has no IPv6 loopback. Harmless for the boot — the AVD
+  came up and `adb devices` saw it — but the emulator's **console/modem** path
+  is what SMS injection, network-condition simulation and `telnet`-style console
+  commands use, so any test that touches those should be expected to fail until
+  the container gets a working `::1`. Cheap to fix at the container level if it
+  is ever needed; not worth fixing pre-emptively.
 
 ---
 
@@ -562,7 +1027,13 @@ The proposal: **`features: Vec<String>`** on `NodeCapabilities`, absent ⇒ `[]`
 specifies — so no `WORKER_RPC_VERSION` bump. A KVM-enabled node with a
 provisioned SDK advertises `["kvm", "android-sdk"]`; the daemon derives both
 from its own config and its own filesystem, never from operator-typed strings
-about what it *should* have.
+about what it *should* have. Correction 12 constrains *how* it derives them —
+the daemon's container cannot stat the host, so a derivation that needs the host
+filesystem is a probe container or nothing. Advertising from config alone
+(`WORKER_KVM` is set ⇒ claim `kvm`) is the weaker thing this document settles
+for at A3, and it is weaker in exactly the way #322 W1's
+`declared_mode_without_a_backend_refuses_to_start` exists to prevent. Naming it
+here so A3 does not discover it at design time.
 
 The corresponding job-type side is `placement.features` and it is **phase A4**,
 not now — §[2.3](#23-recommendation)'s trigger.
@@ -642,7 +1113,10 @@ For a platform whose evaluation gates *are* the CI, weakening what a gate proves
 is the wrong trade.
 
 **Rejected, and named as the fallback** if the Linux node turns out to be a VM
-without nested virtualization and cannot be replaced.
+without nested virtualization and cannot be replaced. **Correction 8 closes
+that condition on the only node in question**: `emulator -accel-check` reported
+KVM version 12 installed and usable from inside the container. The fallback
+stays written down for a future node, but it has no live trigger.
 
 ### 6.2 Host-native Android on a pinned Linux node
 
@@ -650,7 +1124,10 @@ The #309/#322 route applied to Android: `WORKER_MODES=container,host`, a
 `HostBackend`, `runtime: { mode: host, env: "nix:.#android" }`.
 
 *For:* One mechanism for both legs of category F. Reuses whatever #322 W2 builds.
-Gives ambient SDK state for free.
+Gives ambient SDK state for free — though correction 9's `/nix/store` mount
+gives the container mode the same store access the host mode would have, so
+this "for" is now nearly empty: the difference between the two routes on the
+toolchain axis is write access to the store, which neither wants.
 
 *Against:* It costs #322 W2 in full — the durable task registry, the liveness
 ladder, restart recovery, the total `/workspace` + `/chuggernaut` wire-path
@@ -700,30 +1177,40 @@ that made #313 B-IV and `WORKER_CACHE_DIR` cheap.
 
 | Phase | Kind | Work | Depends on |
 | --- | --- | --- | --- |
-| **A0** | operator | Confirm KVM on the target Linux node (`/dev/kvm` present, the daemon's user in the `kvm` group). Provision the SDK + system images at a host path. Zero code — and **this is the precondition the whole design rests on** | — |
-| **A1** | `code` | `WORKER_KVM` + `WORKER_KVM_PROJECTS` + `WORKER_ANDROID_SDK_DIR` in `crates/worker/src/config.rs` beside `parse_cache_dir`; `DockerBackend` device + read-only-mount properties beside `cache_dir`; `build_host_config` populates `HostConfig.devices` and the second bind; `ANDROID_SDK_ROOT`/`ANDROID_HOME`/`ANDROID_USER_HOME` injected beside `inject_cache_env`; fail-loud when the setting is on and the device or mount is absent. A slim Android task image. The job type pinned with `placement.node`. **No wire change, no dispatcher change, no epoch bump** | A0 |
-| **A2** | `code` | Prove it against a **boring `./gradlew connectedAndroidTest` on one module**, not against the full flutter integration suite — #308 H.4 is right that it sits at the confluence of too many unbuilt things, and #309 and #322 both say the same about their own first targets. Measure: does the emulator need to write into the SDK tree (§[4](#4-exclusivity-and-why-android-does-not-need-a-lease)); do two concurrent emulators fit in the node's memory; does the SIGSEGV reproduce | A1 |
+| **A0** | operator | **Mostly done** (correction 10): KVM is confirmed usable from a container, the SDK is already provisioned by the node's NixOS config, and the `kvm`-group requirement was never real (`/dev/kvm` is `0666`). What remains is two things and neither is code: the **store secret-scan gate** (§[3.4](#34-what-the-nixstore-mount-exposes)) and the **stable SDK path** in `configuration.nix` (§[3.5](#35-staleness-no-store-hash-in-any-chug-side-config)). Both land in the operator's repo, not this one | — |
+| **A1** | `code` | `WORKER_KVM` + `WORKER_KVM_PROJECTS` + a **stable** SDK path setting (never a store hash) in `crates/worker/src/config.rs` beside `parse_cache_dir`; `DockerBackend` device + read-only-mount properties beside `cache_dir`; `build_host_config` populates `HostConfig.devices` and a read-only `/nix/store` mount whose missing source is **refused, not created empty** (correction 12); `ANDROID_SDK_ROOT`/`ANDROID_HOME`/`ANDROID_USER_HOME` injected beside `inject_cache_env`, plus a writable `HOME`. **No image work** (correction 11). The job type pinned with `placement.node`. Confirms the two things §[3.5](#35-staleness-no-store-hash-in-any-chug-side-config) leaves open — engine-side symlink resolution, and a non-store `ANDROID_SDK_ROOT` — before the config parse is written, falling back to S3(b) if either fails. **No wire change, no dispatcher change, no epoch bump** | A0's two remaining items |
+| **A2** | `code` | Prove it against a **boring `./gradlew connectedAndroidTest` on one module**, not against the full flutter integration suite — #308 H.4 is right that it sits at the confluence of too many unbuilt things, and #309 and #322 both say the same about their own first targets. Measure what correction 8 did not: do two concurrent emulators fit in the node's memory; does the SIGSEGV reproduce; does anything in the suite need the emulator console (no `::1` in the container) or write outside `ANDROID_USER_HOME` (`/root/.android/emu-update-last-check.ini` already does) — §[4](#4-exclusivity-and-why-android-does-not-need-a-lease) | A1 |
 | **A3** | `code` | `NodeCapabilities` on `PingOk`/`WorkerAnnounce` with `features`, and the `choose_placement` predicate — **this is [#309 §4](./309-host-native-execution.md#4-capability-advertisement)/§5a and [#322](./322-macos-native-runtime.md) P1, one slice serving both legs**. Unpins Android work. Needed only when a second KVM node exists | A2; §[5.2](#52-the-field-and-the-shape-smell-worth-naming)'s "decide the whole field set at once" |
 | **A4** | `code` | `placement.features` as a job-type field + `CONFIG_SCHEMA_EPOCH` bump. Only when the pin stops expressing the requirement | A3 |
 | **never** | — | Device leases for Android (§[4](#4-exclusivity-and-why-android-does-not-need-a-lease)). #309 §5b/P4 stays, motivated by iOS | — |
 
 **A1 is the phase to start**, and its whole cost is one config parse, one
-builder method, one `HostConfig` field, one bind and four env vars — the same
-diff shape as the sccache work that already shipped.
+builder method, one `HostConfig` field, one or two read-only mounts and four env
+vars — the same diff shape as the sccache work that already shipped. The
+amendment makes it
+cheaper, not dearer: the image work is gone (correction 11), A0 is nearly gone
+(correction 10), and the two things it adds — a mount that refuses a missing
+source, and a stable path instead of a hash — are both smaller than the "slim
+Android task image" line they replace.
 
 **What it unblocks:** the Android half of #308 category F, without waiting on any
 of #322's W2, W3, N1, N2, W4 or W5. Restated as a schedule fact: the corpus currently
 sequences Android behind six phases of macOS work it does not need.
 
 Test placement per [`testing.md`](../../testing.md): the config parses
-(`WORKER_KVM`, `WORKER_KVM_PROJECTS`, `WORKER_ANDROID_SDK_DIR`), the produced
+(`WORKER_KVM`, `WORKER_KVM_PROJECTS`, the stable SDK path), the produced
 `HostConfig` (device present only for an allow-listed project; absent otherwise;
-the read-only flag on the SDK bind), the env injection, and the
-`choose_placement` features predicate are all pure → **tier 1**, beside
-`host_config_with_cache_adds_one_bind` and `parse_cache_dir`'s tests. The
-daemon's refusal to start with `WORKER_KVM` set and no device node is **tier 2**
-beside `declared_mode_without_a_backend_refuses_to_start`. An emulator boot is
-**tier 3 / out of tree** and belongs to the consumer project's own job.
+the store mount read-only and of a kind that refuses a missing source), the env
+injection, and the `choose_placement` features predicate are all pure → **tier
+1**, beside `host_config_with_cache_adds_one_bind` and `parse_cache_dir`'s
+tests. Correction 12 moves one test that the original A1 put at tier 2: there is
+no boot-time refusal to test, because the containerized daemon cannot stat the
+host, so what tier 2 covers instead is that a launch against a node missing the
+device or the store **fails as a named `BackendError::Launch`** rather than
+starting a container that will fail later. **A regression test must assert the
+negative space explicitly**: a launch for a project *not* on the allow-list
+carries neither the device nor the mount. An emulator boot is **tier 3 / out of
+tree** and belongs to the consumer project's own job.
 
 ---
 
@@ -731,7 +1218,7 @@ beside `declared_mode_without_a_backend_refuses_to_start`. An emulator boot is
 
 | Phase | Contract changed |
 | --- | --- |
-| A1 | `WorkerConfig` gains device/mount/allow-list fields; `DockerBackend` gains a node-property builder beside `with_cache_dir`; **`build_host_config`'s postcondition changes** — "whether a cache bind-mount is present" becomes "which node properties are present", and the dispatcher-side `binds: None` invariant must survive as `devices: None, binds: None`; a new node-side invariant — a daemon never advertises or serves a device it does not hold |
+| A1 | `WorkerConfig` gains device/mount/allow-list fields; `DockerBackend` gains a node-property builder beside `with_cache_dir`; **`build_host_config`'s postcondition changes** — "whether a cache bind-mount is present" becomes "which node properties are present", and the dispatcher-side `binds: None` invariant must survive as `devices: None, binds: None, mounts: None`; a new node-side invariant — **a launch carries the device and the store mount together or carries neither**, decided once from the allow-list; and a mount-source contract — a missing store source is refused at create, never materialized as an empty directory (correction 12) |
 | A3 | Two wire records additively (`PingOk`, `WorkerAnnounce` gain `Option<NodeCapabilities>`), no `WORKER_RPC_VERSION` bump; `choose_placement` postcondition gains the features predicate and a second distinct `NoCapacity` message |
 | A4 | Job-type schema epoch (§14.1): `placement.features`, `CONFIG_SCHEMA_EPOCH` 2 → 3 (or later) with a frozen feature constant per `INPUTS_SCHEMA_EPOCH`'s precedent (`crates/types/src/version.rs`), plus the `min_dispatcher` rule |
 
@@ -762,9 +1249,24 @@ beside `declared_mode_without_a_backend_refuses_to_start`. An emulator boot is
 - **`spec.md` §3.1** — "no host bind-mounts … The one permitted exception is a
   **worker-provisioned node-local build cache**" becomes a small closed class,
   and the section gains a device-passthrough sentence. This is a `docs` job, not
-  part of A1.
+  part of A1. **The amendment widens this edit.** The exception's justification
+  is written around the cache's own properties — "carries **no job state** … safe
+  to be empty/cold, and never affects correctness" — and a `/nix/store` mount
+  satisfies the first and fails the second two: it is not safe to be empty and
+  its absence is a correctness failure. So §3.1 does not gain a second member of
+  the same class; it gains a **second class**, a read-only node toolchain volume
+  whose absence must fail the launch. Saying so is the difference between a
+  closed list of two and an open door.
+- **#308 H.6's layering rule** — *"resist putting per-project tooling in the
+  node's NixOS configuration"* — is what §[3.6](#36-the-clock-this-borrows-from-and-who-owns-it)
+  knowingly bends by consuming the node's system closure. Not a correction to
+  H.6, which is right; a recorded exception with a named trigger to end it.
 - **`crates/container/src/docker.rs`** — `build_host_config`'s doc comment names
   the cache bind specifically.
+- **`crates/worker/src/daemon.rs`'s `create_dir_all` on `WORKER_CACHE_DIR`** —
+  harmless but misleading in the deployed shape: it creates a directory inside
+  the worker's own container, not the host path being bound (correction 12).
+  Worth a doc-comment sentence when A1 is next to it, not a change of behavior.
 - **`crates.md`'s `container` row** — already noted as wrong by #309; a device
   property does not make it wronger, but the same edit should catch it.
 
@@ -772,15 +1274,37 @@ beside `declared_mode_without_a_backend_refuses_to_start`. An emulator boot is
 
 ## 8. Risks and open questions
 
-- **The KVM precondition is the whole design, and it is unverified.** This
-  container has no `/dev/kvm` (`ls -l /dev/kvm` → no such file), which proves
-  nothing about the fleet's nodes but does prove the check is not free. If the
-  intended Linux node is itself a VM without nested virtualization, `--device
-  /dev/kvm` fails and the fallbacks are Redroid (§6.1) or a different machine.
-  **A0 exists to answer this before any code is written.**
-- **A read-only SDK mount may not survive contact with `sdkmanager`.** The one
-  measurement that could change the shape; §[4](#4-exclusivity-and-why-android-does-not-need-a-lease)
-  states the answer if it fails (copy-up the mutable subset, not a lease).
+- ~~**The KVM precondition is the whole design, and it is unverified.**~~
+  **Retired 2026-08-02 by correction 8** — measured usable from an unmodified
+  container on `gumbo-nuc-0`, no `--privileged`, emulator booted. The risk is
+  retired *for that node*; a second KVM node re-asks the question and A0 is
+  still the place to answer it.
+- ~~**A read-only SDK mount may not survive contact with `sdkmanager`.**~~
+  **Largely retired by correction 8** — AVD creation and boot needed no write
+  into the SDK tree. Residual: a task flow that installs an SDK package at run
+  time, which under this design is a `nixos-rebuild` and not a task action
+  (§[3.3](#33-recommendation-t2-now-and-t5-as-the-complement-rather-than-the-rival)).
+- **The `/nix/store` mount is the design's widest grant, and it is accepted
+  rather than eliminated.** A read of every package on a node shared with
+  another project's CI. §[3.4](#34-what-the-nixstore-mount-exposes) argues it
+  and attaches four conditions; the one that can still fail is the secret scan,
+  which this document could not run.
+- **Garbage collection can delete a running task's toolchain.** #309 §9 and #308
+  H.6 both flag this for host mode, and it arrives unchanged in container mode:
+  a `nix-collect-garbage` that removes the SDK closure mid-run breaks a live
+  emulator. The mitigation is a property of *how* the SDK is provisioned rather
+  than new code — a closure referenced by the NixOS **system profile** is
+  GC-rooted by that profile, whereas an ad-hoc `nix build` is not. So A0's
+  provisioning must stay in `configuration.nix`, and "provision it by hand for a
+  quick test" is a footgun worth naming.
+- **A pinned store hash goes silently stale.**
+  §[3.5](#35-staleness-no-store-hash-in-any-chug-side-config) rejects the pin
+  and requires an activation-maintained stable path. The residual risk is
+  procedural: nothing in this repo can enforce that the operator's
+  `configuration.nix` keeps that path, and its disappearance shows up as a
+  refused launch rather than a silent wrong result — which is the correct
+  direction to fail, and is the reason correction 12's mount-source behavior is
+  a contract rather than a detail.
 - **The emulator's empirical tuning does not port.** `-gpu swangle`,
   `-no-snapshot` and the eleven-minute SIGSEGV are GHA-runner adaptations; #308
   §F says expect to re-derive them and it is right.
@@ -788,14 +1312,19 @@ beside `declared_mode_without_a_backend_refuses_to_start`. An emulator boot is
   (§2.1). The allow-list narrows *who*, not *what*; keeping the node's kernel
   current is a machine fact under #308 H.6's system-closure row and belongs in
   the node runbook.
-- **Disk.** The SDK mount shares the partition with the node's images and the
-  `worker-refresh.sh` free-disk floor. #355 §7's "the platform refresh must win"
-  rule applies to a hand-provisioned mount as much as to a built image, and
-  nothing enforces it for a directory the operator created.
-- **Everything about beacon in this document is secondhand.** The AVD
-  correction, the `runs-on` labels and the emulator flags all come from operator
-  inspection, not from a tree this document could read. The device half of the
-  design is independent of all of it; the toolchain half is not.
+- **Disk.** The store shares the partition with the node's images and the
+  `worker-refresh.sh` free-disk floor: 17.5 GiB of Android closure inside a 56G
+  store, growing by a closure on every SDK bump until something collects it.
+  #355 §7's "the platform refresh must win" rule applies to a store the operator
+  fills as much as to a built image, and nothing in this repo enforces it. The
+  amendment improves this axis rather than worsening it — the alternative was a
+  multi-GB image on the same disk.
+- **Everything about beacon and about the 2026-08-02 measurement is
+  secondhand.** The AVD correction, the `runs-on` labels, the emulator flags and
+  corrections 8–11 all come from operator inspection of a node this document
+  cannot reach. The measurement is detailed enough to be reproducible by anyone
+  with node access, and reproducing it is the cheapest possible check on this
+  design; correction 12 is the only amendment finding read out of this tree.
 - **A3's field set should be decided once.** Five `Vec<String>` capability fields
   are proposed across four unimplemented designs
   (§[5.2](#52-the-field-and-the-shape-smell-worth-naming)). Whoever lands
