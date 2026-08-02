@@ -99,6 +99,7 @@ fn sample_job() -> types::Job {
         base_ref: Some("f00dcafe".into()),
         knowledge_tags: vec!["web".into()],
         eval: vec![sample_evaluator()],
+        require_approval: false,
         timeout: Some("45m".into()),
         model: Some("claude-opus-5".into()),
         inputs: std::collections::BTreeMap::from([

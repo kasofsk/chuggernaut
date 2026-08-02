@@ -136,6 +136,7 @@ function CreateJob({
   const [files, setFiles] = useState<File[]>([])
   const typeTimeout = typeDetail?.job_type?.resources?.task_timeout ?? null
   const [model, setModel] = useState('')
+  const [requireApproval, setRequireApproval] = useState(false)
   const typeModel = typeDetail?.job_type?.work?.model ?? null
   const [mode, setMode] = useState<JobMode>('frozen')
   const [error, setError] = useState<string | null>(null)
@@ -195,6 +196,7 @@ function CreateJob({
         knowledge_tags: allTags.length ? allTags : undefined,
         groups: groups.length ? groups : undefined,
         eval: evals.length ? evals : undefined,
+        require_approval: requireApproval || undefined,
         timeout: timeout.trim() || undefined,
         model: model.trim() || undefined,
         inputs: suppliedInputs(declaredInputs, inputValues),
@@ -475,6 +477,21 @@ function CreateJob({
           onAdd={(name) => setGroups((gs) => [...gs, name])}
           onRemove={(name) => setGroups((gs) => gs.filter((g) => g !== name))}
         />
+
+        <label className="field-check">
+          <input
+            type="checkbox"
+            checked={requireApproval}
+            onChange={(e) => setRequireApproval(e.target.checked)}
+          />
+          <span>
+            Require my approval{' '}
+            <span className="dim">
+              (adds a sign-off step after every other criterion passes — the job waits in your
+              inbox instead of merging)
+            </span>
+          </span>
+        </label>
 
         <label className="field">
           <span>

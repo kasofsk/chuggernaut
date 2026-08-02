@@ -67,6 +67,13 @@ pub struct Job {
     /// collisions with the type's evaluators are a release-time error.
     #[serde(default)]
     pub eval: Vec<Evaluator>,
+    /// The job may not pass evaluation without an explicit operator sign-off
+    /// (spec §1.1 require-approval): criteria resolution synthesizes one required
+    /// [`crate::EvaluatorType::Human`] evaluator, staged after every other one.
+    /// Additive like [`eval`] — it adds a criterion, never removes one — and
+    /// defaulted false so records written before it deserialize.
+    #[serde(default)]
+    pub require_approval: bool,
     /// Optional per-job work-task timeout override (duration string, §1.1).
     /// Layers over the job type's `resources.task_timeout` exactly like [`eval`]
     /// layers over the type's evaluators — but for Work tasks only; evaluators
@@ -211,6 +218,10 @@ pub struct JobSummary<'a> {
     pub base_ref: Option<&'a str>,
     pub knowledge_tags: &'a [String],
     pub eval: &'a [Evaluator],
+    /// Whether the job needs an operator sign-off ([`Job::require_approval`]).
+    /// Carried by the list so "waiting on your approval" is legible from the
+    /// jobs table without opening the job.
+    pub require_approval: bool,
     pub timeout: Option<&'a str>,
     pub model: Option<&'a str>,
     /// The job's effective inputs ([`Job::inputs`]). Carried by the list because
@@ -280,6 +291,7 @@ impl<'a> From<&'a Job> for JobSummary<'a> {
             base_ref: job.base_ref.as_deref(),
             knowledge_tags: &job.knowledge_tags,
             eval: &job.eval,
+            require_approval: job.require_approval,
             timeout: job.timeout.as_deref(),
             model: job.model.as_deref(),
             inputs: &job.inputs,
@@ -411,6 +423,9 @@ pub struct CreateSpec {
     /// Additive per-job evaluators; validated (field rules + name collisions
     /// against the type's list) at release, not creation.
     pub eval: Vec<Evaluator>,
+    /// Require an operator sign-off before the job can pass evaluation
+    /// ([`Job::require_approval`]). False for every job the creator did not gate.
+    pub require_approval: bool,
     /// Optional per-job work-task timeout override (duration string, §1.1);
     /// parseability validated at release. None → the type default applies.
     pub timeout: Option<String>,
@@ -448,6 +463,9 @@ pub struct CreateSpec {
 pub struct BatchComposition {
     pub deps: Vec<u64>,
     pub eval: Vec<Evaluator>,
+    /// True when **any** member requires operator sign-off: one merge completes
+    /// every member, so the strictest member's gate governs the whole batch.
+    pub require_approval: bool,
 }
 
 /// Why the dispatcher escalated (→Escalated) or stalled (→Stalled) a job,
@@ -852,6 +870,33 @@ mod tests {
         assert!(grouped.state.is_terminal());
     }
 
+    /// The §1.1 approval gate is additive: a record written before it loads with
+    /// the gate off, and a gated record round-trips.
+    #[test]
+    fn job_round_trips_with_require_approval_and_stays_backward_compat() {
+        let json = r#"{
+          "id": 21,
+          "project": "acme/api",
+          "type": "code",
+          "deps": [],
+          "state": "Frozen",
+          "branch": "job/21",
+          "base_ref": null,
+          "knowledge_tags": [],
+          "factory": null,
+          "created_at": "2026-08-01T10:00:00Z",
+          "ready_at": null
+        }"#;
+        let job: Job = serde_json::from_str(json).unwrap();
+        assert!(!job.require_approval);
+
+        let mut gated = job.clone();
+        gated.require_approval = true;
+        let back = serde_json::to_string(&gated).unwrap();
+        assert!(back.contains(r#""require_approval":true"#), "{back}");
+        assert_eq!(serde_json::from_str::<Job>(&back).unwrap(), gated);
+    }
+
     #[test]
     fn job_round_trips_with_model_override() {
         let json = r#"{
@@ -894,6 +939,7 @@ mod tests {
             base_ref: Some("abc123".into()),
             knowledge_tags: vec!["rust".into()],
             eval: Vec::new(),
+            require_approval: true,
             timeout: Some("30m".into()),
             model: Some("claude-opus-5".into()),
             inputs: BTreeMap::from([("service".to_string(), "web".to_string())]),

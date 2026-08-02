@@ -208,6 +208,13 @@ adding a check specific to its instructions). The GH Actions parallel holds:
 genuinely different eval profile is a different job type — types are cheap,
 they live in the repo.
 
+The per-job **approval gate** (`require_approval`, spec §1.1) is that rule made
+one-click rather than a new one: setting the flag synthesizes exactly one
+required Human evaluator named `approval` into the resolved criteria, staged
+after every other evaluator, and the name is reserved so nothing can overwrite
+it in either direction. It adds a criterion and removes none, which is what
+makes it expressible as a flag at all.
+
 ---
 
 ## Vocabulary

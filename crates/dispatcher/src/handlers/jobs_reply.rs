@@ -65,17 +65,26 @@ pub(super) async fn job_criteria(
     let mut evaluators = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     let mut wrap_up = None;
+    let mut gate: Option<types::Evaluator> = None;
     match crate::release::load_job_type(repos, owner, project, &reference, &job.r#type, Some(seq))
         .await
     {
         Ok(jt) => {
             wrap_up = Some(format!("{:?}", jt.wrap_up.r#type).to_lowercase());
             evaluators.extend(annotate(&jt.eval, "type"));
-            if let Err(errs) = crate::release::with_job_evaluators(jt, &job) {
-                errors.extend(
+            match crate::release::with_job_evaluators(jt, &job) {
+                Ok(resolved) if job.require_approval => {
+                    gate = resolved
+                        .eval
+                        .iter()
+                        .find(|e| e.name == crate::release::APPROVAL_EVALUATOR_NAME)
+                        .cloned();
+                }
+                Ok(_) => {}
+                Err(errs) => errors.extend(
                     errs.into_iter()
                         .map(|e| format!("{}: {}", e.field, e.message)),
-                );
+                ),
             }
         }
         Err(errs) => {
@@ -86,6 +95,7 @@ pub(super) async fn job_criteria(
         }
     }
     evaluators.extend(annotate(&job.eval, "job"));
+    evaluators.extend(annotate(gate.as_slice(), "approval"));
     ok_reply(&serde_json::json!({
         "ref": reference,
         "wrap_up": wrap_up,

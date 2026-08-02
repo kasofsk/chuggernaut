@@ -186,6 +186,7 @@ export function DraftEditor({
     knowledge_tags: tags,
     groups,
     eval: job.eval,
+    require_approval: job.require_approval,
     timeout: timeout.trim() || null,
     model: model.trim() || null,
     inputs: typeDetail ? suppliedInputs(declaredInputs, inputs) : inputsOrUndefined(inputs),

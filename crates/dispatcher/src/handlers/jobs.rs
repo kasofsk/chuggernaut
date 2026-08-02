@@ -9,7 +9,7 @@
 //! after parsing, which is what separates a 400 from a 422.
 //!
 //! - **Accepts:** `req.jobs.{create,update,draft,finalize,get,list,release,
-//!   revoke,members,claim,unclaim,triage,criteria}.{owner}.{project}[.{seq}]`.
+//!   revoke,members,groups,approval,claim,unclaim,triage,criteria}.{owner}.{project}[.{seq}]`.
 //! - **Emits:** the matching `CoreHandle` call, and a reply built by
 //!   [`super::jobs_reply`] (the derived job view, the jobs list with its
 //!   channel-progress join, or the resolved criteria).
@@ -102,6 +102,10 @@ struct CreateJobBody {
     /// Additive per-job evaluators (design-lifecycle.md); validated at release.
     #[serde(default)]
     eval: Vec<types::Evaluator>,
+    /// Gate the job on an explicit operator sign-off (§1.1 require-approval):
+    /// criteria resolution adds one required Human evaluator, staged last.
+    #[serde(default)]
+    require_approval: bool,
     /// Optional per-job work-task timeout override (duration string, §1.1);
     /// layers over the type's `resources.task_timeout` for Work tasks only.
     /// Parseability validated at release. Absent → the type default applies.
@@ -147,6 +151,8 @@ struct UpdateJobBody {
     #[serde(default)]
     eval: Vec<types::Evaluator>,
     #[serde(default)]
+    require_approval: bool,
+    #[serde(default)]
     timeout: Option<String>,
     #[serde(default)]
     model: Option<String>,
@@ -170,6 +176,13 @@ struct GroupsBody {
     add: Vec<String>,
     #[serde(default)]
     remove: Vec<String>,
+}
+
+/// Wire body for `req.jobs.approval` (spec §1.1 require-approval): whether the
+/// job needs an operator sign-off before it can pass evaluation.
+#[derive(serde::Deserialize)]
+struct ApprovalBody {
+    require: bool,
 }
 
 /// Wire body for `req.jobs.members` (spec §2.1 draft batches): the seqs to
@@ -228,6 +241,7 @@ async fn jobs_dispatch(
         ("list", None) => jobs_list(&ctx.store, owner, project).await,
         ("members", Some(seq)) => jobs_members(ctx, owner, project, seq, payload).await,
         ("groups", Some(seq)) => jobs_groups(ctx, owner, project, seq, payload).await,
+        ("approval", Some(seq)) => jobs_approval(ctx, owner, project, seq, payload).await,
         ("criteria", Some(seq)) => job_criteria(&ctx.store, &ctx.repos, owner, project, seq).await,
         (verb, Some(seq)) => jobs_transition(ctx, verb, owner, project, seq)
             .await
@@ -285,6 +299,7 @@ async fn jobs_create(ctx: &JobsCtx, owner: &str, project: &str, payload: &[u8]) 
                     members: b.members,
                     knowledge_tags: b.knowledge_tags,
                     eval: b.eval,
+                    require_approval: b.require_approval,
                     timeout: b.timeout,
                     model: b.model,
                     inputs: b.inputs,
@@ -330,6 +345,7 @@ async fn jobs_update(
                     deps: b.deps,
                     knowledge_tags: b.knowledge_tags,
                     eval: b.eval,
+                    require_approval: b.require_approval,
                     timeout: b.timeout,
                     model: b.model,
                     inputs: b.inputs,
@@ -382,6 +398,29 @@ async fn jobs_groups(
         Ok(b) => match ctx
             .handle
             .edit_groups(owner, project, seq, b.add, b.remove)
+            .await
+        {
+            Err(e) => error_reply(&e),
+            Ok(_) => fetch_job(&ctx.store, owner, project, seq).await,
+        },
+    }
+}
+
+/// `req.jobs.approval` — spec §1.1 require-approval: set/clear the operator
+/// sign-off gate, pre-Work states only. The actor answers 422 with the state it
+/// refused; the reply is the updated job.
+async fn jobs_approval(
+    ctx: &JobsCtx,
+    owner: &str,
+    project: &str,
+    seq: u64,
+    payload: &[u8],
+) -> Vec<u8> {
+    match serde_json::from_slice::<ApprovalBody>(payload) {
+        Err(e) => bad_request(&e.to_string()),
+        Ok(b) => match ctx
+            .handle
+            .set_require_approval(owner, project, seq, b.require)
             .await
         {
             Err(e) => error_reply(&e),

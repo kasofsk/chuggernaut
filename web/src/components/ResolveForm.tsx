@@ -5,6 +5,7 @@ export function ResolveForm({
   escalation,
   preWork = false,
   evaluator = false,
+  approval = false,
   work = false,
   onResolve,
 }: {
@@ -13,6 +14,9 @@ export function ResolveForm({
   preWork?: boolean
   /** human evaluator task: failing offers the abort verdict (design-lifecycle.md) */
   evaluator?: boolean
+  /** the synthesized per-job approval gate (§1.1): the same Pass/Fail verbs,
+   *  labelled as the sign-off decision the operator is actually making */
+  approval?: boolean
   /** human-performed work attempt: Pass offers a summary — it becomes the
    *  squash-merge commit body, like an agent's submit_result (§1.2 claims) */
   work?: boolean
@@ -26,7 +30,7 @@ export function ResolveForm({
   return (
     <div className="resolve">
       <input
-        placeholder="notes (optional; required to fail)"
+        placeholder={approval ? 'notes (optional; required to reject)' : 'notes (optional; required to fail)'}
         value={notes}
         onChange={(e) => setNotes(e.target.value)}
       />
@@ -61,15 +65,15 @@ export function ResolveForm({
               onResolve({ kind: 'Pass', structured, summary: summary.trim() || undefined })
             }
           >
-            pass
+            {approval ? 'approve' : 'pass'}
           </button>
           <button
             className="danger"
             disabled={!structured}
-            title={structured ? '' : 'failing requires notes'}
+            title={structured ? '' : approval ? 'rejecting requires notes' : 'failing requires notes'}
             onClick={() => structured && onResolve({ kind: 'Fail', structured, abort: abort || undefined })}
           >
-            fail
+            {approval ? 'reject' : 'fail'}
           </button>
           {evaluator && (
             <label className="dim" title="not satisfiable by rework — skip retries and escalate to a human">

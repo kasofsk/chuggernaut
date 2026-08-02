@@ -13,7 +13,8 @@
 //! - **Spec:** §2.2, §2.3, §14.
 
 pub use chuggernaut_domain::release::{
-    KvNames, SCHEMA_SKEW_FIELD, ValidationError, wiring_errors, with_job_evaluators,
+    APPROVAL_EVALUATOR_NAME, KvNames, SCHEMA_SKEW_FIELD, ValidationError, approval_evaluator,
+    wiring_errors, with_job_evaluators,
 };
 use types::{Evaluator, EvaluatorType, Job, JobType, ProjectDefaults, WorkType};
 use vcs::RepoManager;
@@ -136,6 +137,7 @@ pub async fn static_errors(
     }
     for (i, e) in job_type.eval.iter().enumerate() {
         if matches!(e.r#type, EvaluatorType::Agent | EvaluatorType::Human)
+            && e.name != APPROVAL_EVALUATOR_NAME
             && let Some(p) = &e.prompt
         {
             require_file.push((format!("eval[{i}].prompt"), p.clone()));

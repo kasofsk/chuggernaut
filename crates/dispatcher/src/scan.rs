@@ -117,6 +117,7 @@ fn schedule_create_spec(owner: &str, project: &str, schedule: &types::Schedule) 
         members: vec![],
         knowledge_tags: vec![],
         eval: vec![],
+        require_approval: false,
         timeout: None,
         model: None,
         inputs: schedule.inputs.clone(),
@@ -621,6 +622,7 @@ mod tests {
             members,
             knowledge_tags,
             eval,
+            require_approval,
             timeout,
             model,
             inputs,
@@ -636,7 +638,7 @@ mod tests {
         assert_eq!(schedule.as_deref(), Some("nightly"));
         assert!(inputs.is_empty(), "{inputs:?}");
         assert!(cover_html.is_none() && timeout.is_none() && model.is_none());
-        assert!(factory.is_none() && !draft);
+        assert!(factory.is_none() && !draft && !require_approval);
         assert!(deps.is_empty() && members.is_empty() && knowledge_tags.is_empty());
         assert!(eval.is_empty() && groups.is_empty());
     }

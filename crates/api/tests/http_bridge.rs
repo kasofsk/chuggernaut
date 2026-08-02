@@ -23,7 +23,7 @@ work:
   type: human
   prompt: prompts/manual.md
 eval:
-  - name: approval
+  - name: sign-off
     type: human
     prompt: prompts/approve.md
 "#;
@@ -474,7 +474,7 @@ async fn http_bridge_end_to_end() {
     assert_eq!(evs.len(), 2, "{criteria}");
     assert_eq!(
         (evs[0]["name"].as_str(), evs[0]["source"].as_str()),
-        (Some("approval"), Some("type"))
+        (Some("sign-off"), Some("type"))
     );
     assert_eq!(
         (evs[1]["name"].as_str(), evs[1]["source"].as_str()),
@@ -632,7 +632,7 @@ async fn http_bridge_end_to_end() {
         },
     )
     .await;
-    assert_eq!(eval_task["evaluator"], "approval");
+    assert_eq!(eval_task["evaluator"], "sign-off");
     let (status, _, _) = call(
         &router,
         "POST",

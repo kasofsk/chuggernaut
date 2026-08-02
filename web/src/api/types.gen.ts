@@ -1051,6 +1051,14 @@ export interface Job {
    */
   ready_at: string | null;
   /**
+   * The job may not pass evaluation without an explicit operator sign-off
+   * (spec §1.1 require-approval): criteria resolution synthesizes one required
+   * [`crate::EvaluatorType::Human`] evaluator, staged after every other one.
+   * Additive like [`eval`] — it adds a criterion, never removes one — and
+   * defaulted false so records written before it deserialize.
+   */
+  require_approval: boolean;
+  /**
    * Schedule name when an occurrence of `.chug/schedules/{name}.yaml`
    * created this job (spec §1.1 schedules); None for every other origin,
    * written only by the origination path, immutable after creation.
@@ -1162,6 +1170,12 @@ export interface JobSummary {
   model: string | null;
   project: string;
   ready_at: string | null;
+  /**
+   * Whether the job needs an operator sign-off ([`Job::require_approval`]).
+   * Carried by the list so "waiting on your approval" is legible from the
+   * jobs table without opening the job.
+   */
+  require_approval: boolean;
   /**
    * The schedule that created the job ([`Job::schedule`]). Carried by the
    * list because trigger provenance is what tells a scheduled run apart from

@@ -358,6 +358,7 @@ mod tests {
             base_ref: None,
             knowledge_tags: vec![],
             eval: vec![],
+            require_approval: false,
             timeout: None,
             model: None,
             inputs: BTreeMap::new(),

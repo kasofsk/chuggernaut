@@ -1050,6 +1050,11 @@
           ],
           "format": "date-time"
         },
+        "require_approval": {
+          "description": "The job may not pass evaluation without an explicit operator sign-off\n(spec §1.1 require-approval): criteria resolution synthesizes one required\n[`crate::EvaluatorType::Human`] evaluator, staged after every other one.\nAdditive like [`eval`] — it adds a criterion, never removes one — and\ndefaulted false so records written before it deserialize.",
+          "type": "boolean",
+          "default": false
+        },
         "schedule": {
           "description": "Schedule name when an occurrence of `.chug/schedules/{name}.yaml`\ncreated this job (spec §1.1 schedules); None for every other origin,\nwritten only by the origination path, immutable after creation.\n\nIt is also the key the at-most-one-in-flight rule reads — the most\nrecent job carrying a schedule's name IS that schedule's anchor, so no\nlast-fired state is stored anywhere (spec §1.1).",
           "type": [
@@ -1100,6 +1105,7 @@
         "base_ref",
         "knowledge_tags",
         "eval",
+        "require_approval",
         "timeout",
         "model",
         "claim_next",
@@ -1274,6 +1280,10 @@
           ],
           "format": "date-time"
         },
+        "require_approval": {
+          "description": "Whether the job needs an operator sign-off ([`Job::require_approval`]).\nCarried by the list so \"waiting on your approval\" is legible from the\njobs table without opening the job.",
+          "type": "boolean"
+        },
         "schedule": {
           "description": "The schedule that created the job ([`Job::schedule`]). Carried by the\nlist because trigger provenance is what tells a scheduled run apart from\nan operator's, and it is one short name rather than prose.",
           "type": [
@@ -1317,6 +1327,7 @@
         "base_ref",
         "knowledge_tags",
         "eval",
+        "require_approval",
         "timeout",
         "model",
         "claim_next",

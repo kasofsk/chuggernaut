@@ -209,6 +209,7 @@ fn req(r#type: &str, deps: &[u64], inputs: &[(&str, &str)]) -> CreateSpec {
         deps: deps.to_vec(),
         knowledge_tags: vec![],
         eval: vec![],
+        require_approval: false,
         timeout: None,
         model: None,
         factory: None,

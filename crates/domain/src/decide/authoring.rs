@@ -105,14 +105,11 @@ pub fn validate_member(
     Some(job)
 }
 
-/// Validate `member_seqs` against the batch rules at *current* state and, if
-/// all pass, compute the batch's external-dep and evaluator unions (spec
-/// §2.1). Pure (no mutation) — the caller absorbs. Member-on-member deps are
-/// satisfied jointly so they drop out; the batch depends on the union of the
-/// members' *external* deps. Evaluators union by name (identical duplicates
-/// dedup; a same-name-different-definition clash is a validation error).
-/// `min_members` is the committable floor (2) everywhere the batch must be
-/// releasable; a Draft batch composing passes 1.
+/// Validate `member_seqs` against the batch rules at *current* state and, on a
+/// clean pass, compute the composition the batch commits (spec §2.1): external
+/// deps union minus the members, evaluators union by name, the approval gate
+/// unions as an OR. Pure — the caller absorbs — and `min_members` is the
+/// committable floor (2), which a Draft batch composing passes as 1.
 pub fn plan_batch(
     graph: Option<&JobGraph>,
     ty: &str,
@@ -173,7 +170,12 @@ pub fn plan_batch(
     if !errs.is_empty() {
         return Err(errs);
     }
-    Ok(BatchComposition { deps, eval })
+    let require_approval = members.iter().any(|j| j.require_approval);
+    Ok(BatchComposition {
+        deps,
+        eval,
+        require_approval,
+    })
 }
 
 /// The auto-index description a batch defaults to (spec §2.1):
@@ -214,6 +216,7 @@ mod tests {
             base_ref: None,
             knowledge_tags: vec![],
             eval: vec![],
+            require_approval: false,
             timeout: None,
             model: None,
             inputs: Default::default(),
@@ -260,6 +263,30 @@ mod tests {
         let comp = plan_batch(Some(&g), "code", &[2, 3], 2).unwrap();
         assert_eq!(comp.deps, vec![1]);
         assert_eq!(comp.eval.len(), 1);
+        assert!(!comp.require_approval);
+    }
+
+    /// One merge completes every member, so one member's approval gate governs
+    /// the whole batch — the union is an OR, not an AND.
+    #[test]
+    fn plan_batch_inherits_approval_from_any_member() {
+        let mut g = JobGraph::default();
+        let plain = job(1, &[], JobState::Frozen);
+        let mut gated = job(2, &[], JobState::Frozen);
+        gated.require_approval = true;
+        g.insert(plain);
+        g.insert(gated);
+
+        assert!(
+            plan_batch(Some(&g), "code", &[1, 2], 2)
+                .unwrap()
+                .require_approval
+        );
+        assert!(
+            !plan_batch(Some(&g), "code", &[1], 1)
+                .unwrap()
+                .require_approval
+        );
     }
 
     /// A same-name-different-definition evaluator has no defensible union.

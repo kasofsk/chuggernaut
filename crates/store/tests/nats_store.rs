@@ -26,6 +26,7 @@ fn job(seq: u64) -> Job {
         base_ref: None,
         knowledge_tags: vec![],
         eval: vec![],
+        require_approval: false,
         timeout: None,
         model: None,
         claim_next: false,

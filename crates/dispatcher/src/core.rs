@@ -94,6 +94,9 @@ pub struct UpdateJobRequest {
     pub deps: Vec<u64>,
     pub knowledge_tags: Vec<String>,
     pub eval: Vec<types::Evaluator>,
+    /// Whether the job needs an operator sign-off ([`types::Job::require_approval`]).
+    /// Editable after Draft too, through [`Core::set_require_approval`].
+    pub require_approval: bool,
     pub timeout: Option<String>,
     pub model: Option<String>,
     /// The supplied inputs, replaced wholesale like every other field. A Draft
@@ -282,6 +285,16 @@ pub enum Msg {
         seq: u64,
         add: Vec<String>,
         remove: Vec<String>,
+        reply: Reply<Job>,
+    },
+    /// `req.jobs.approval.*` (spec §1.1 require-approval): set/clear the job's
+    /// operator sign-off gate. 422 once the job has entered Work, where the
+    /// resolved criteria are already pinned and the edit could not take effect.
+    SetRequireApproval {
+        owner: String,
+        project: String,
+        seq: u64,
+        require: bool,
         reply: Reply<Job>,
     },
     /// `req.jobs.claim.*` (spec §1.2 claims): a human claims the job's next
@@ -482,6 +495,7 @@ impl Msg {
             Msg::FinalizeJob { .. } => "FinalizeJob",
             Msg::EditMembers { .. } => "EditMembers",
             Msg::EditGroups { .. } => "EditGroups",
+            Msg::SetRequireApproval { .. } => "SetRequireApproval",
             Msg::ClaimJob { .. } => "ClaimJob",
             Msg::UnclaimJob { .. } => "UnclaimJob",
             Msg::TriageJob { .. } => "TriageJob",
@@ -663,6 +677,27 @@ impl CoreHandle {
             seq,
             add,
             remove,
+            reply,
+        })
+        .await
+    }
+
+    /// Set or clear the job's operator sign-off gate (spec §1.1). Accepted only
+    /// while the job has not yet entered Work — past that the criteria are
+    /// already resolved, so the edit would be a silent no-op (422).
+    pub async fn set_require_approval(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        require: bool,
+    ) -> Result<Job> {
+        let (owner, project) = (owner.to_string(), project.to_string());
+        self.call(|reply| Msg::SetRequireApproval {
+            owner,
+            project,
+            seq,
+            require,
             reply,
         })
         .await
@@ -1444,6 +1479,18 @@ impl Core {
             } => {
                 let _ = reply.send(self.edit_groups(&owner, &project, seq, add, remove).await);
             }
+            Msg::SetRequireApproval {
+                owner,
+                project,
+                seq,
+                require,
+                reply,
+            } => {
+                let _ = reply.send(
+                    self.set_require_approval(&owner, &project, seq, require)
+                        .await,
+                );
+            }
             Msg::ClaimJob {
                 owner,
                 project,
@@ -1716,6 +1763,7 @@ impl Core {
             base_ref: None,
             knowledge_tags: req.knowledge_tags,
             eval: req.eval,
+            require_approval: req.require_approval,
             timeout: req.timeout,
             model: req.model,
             inputs: req.inputs,
@@ -1767,17 +1815,7 @@ impl Core {
 
         let min = if req.draft { 1 } else { 2 };
         let comp = self.plan_batch(&owner, &project, &req.r#type, &member_seqs, min)?;
-
-        let (deps, eval, description) = if req.draft {
-            (Vec::new(), Vec::new(), req.description)
-        } else {
-            let description = if req.description.is_empty() {
-                Self::batch_auto_description(&req.r#type, &member_seqs)
-            } else {
-                req.description
-            };
-            (comp.deps, comp.eval, description)
-        };
+        let (deps, eval, require_approval, description) = Self::create_batch_committed(&req, comp);
 
         let seq = self.counters.next(&owner, &project).await?;
         let batch = Job {
@@ -1799,6 +1837,7 @@ impl Core {
             base_ref: None,
             knowledge_tags: req.knowledge_tags,
             eval,
+            require_approval,
             timeout: req.timeout,
             model: req.model,
             inputs: req.inputs,
@@ -1831,6 +1870,36 @@ impl Core {
                 .await?;
         }
         Ok(batch)
+    }
+
+    /// The deps / evaluators / approval gate / description a new batch commits
+    /// (spec §2.1). A **Draft** batch commits none of the composition — its
+    /// membership is not absorbed yet, so finalize/release recomputes the unions
+    /// against current state; an atomic batch commits them all, with the approval
+    /// gate ORed over the members.
+    fn create_batch_committed(
+        req: &CreateSpec,
+        comp: types::BatchComposition,
+    ) -> (Vec<u64>, Vec<types::Evaluator>, bool, String) {
+        if req.draft {
+            return (
+                Vec::new(),
+                Vec::new(),
+                req.require_approval,
+                req.description.clone(),
+            );
+        }
+        let description = if req.description.is_empty() {
+            Self::batch_auto_description(&req.r#type, &req.members)
+        } else {
+            req.description.clone()
+        };
+        (
+            comp.deps,
+            comp.eval,
+            req.require_approval || comp.require_approval,
+            description,
+        )
     }
 
     /// The batch membership rules (spec §2.1), resolved against this project's
@@ -1951,6 +2020,7 @@ impl Core {
         let comp = self.plan_batch(owner, project, &job.r#type, &job.members, 2)?;
         job.deps = comp.deps;
         job.eval = comp.eval;
+        job.require_approval |= comp.require_approval;
         if job.description.is_empty() {
             job.description = Self::batch_auto_description(&job.r#type, &job.members);
         }
@@ -2150,6 +2220,7 @@ impl Core {
             deps,
             knowledge_tags,
             eval,
+            require_approval,
             timeout,
             model,
             inputs,
@@ -2165,6 +2236,7 @@ impl Core {
         job.deps = deps;
         job.knowledge_tags = knowledge_tags;
         job.eval = eval;
+        job.require_approval = require_approval;
         job.timeout = timeout;
         job.model = model;
         job.inputs = inputs;
@@ -2208,6 +2280,10 @@ impl Core {
             (job.deps != req.deps, "deps"),
             (job.knowledge_tags != req.knowledge_tags, "knowledge_tags"),
             (job.eval != req.eval, "eval"),
+            (
+                job.require_approval != req.require_approval,
+                "require_approval",
+            ),
             (job.timeout != req.timeout, "timeout"),
             (job.model != req.model, "model"),
             (job.inputs != req.inputs, "inputs"),
@@ -2373,6 +2449,62 @@ impl Core {
             seq,
             "job-updated",
             serde_json::json!({ "fields": ["groups"] }),
+        )
+        .await?;
+        Ok(job)
+    }
+
+    /// Handle `req.jobs.approval.*` (spec §1.1 require-approval): set or clear the
+    /// job's operator sign-off gate, in the pre-Work states only — Draft, Frozen,
+    /// Blocked, Ready, Stalled. Past Work entry the criteria are already resolved,
+    /// so the edit is a 422 naming the state; a request that changes nothing
+    /// writes nothing and announces nothing, like [`Core::edit_groups`].
+    pub async fn set_require_approval(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        require: bool,
+    ) -> Result<Job> {
+        let mut job = self.must_get(owner, project, seq)?.clone();
+        if job.require_approval == require {
+            return Ok(job);
+        }
+        if !matches!(
+            job.state,
+            JobState::Draft
+                | JobState::Frozen
+                | JobState::Blocked
+                | JobState::Ready
+                | JobState::Stalled
+        ) {
+            return Err(CoreError::Validation(vec![ValidationError::new(
+                Some(seq),
+                "require_approval",
+                format!(
+                    "job {seq} is {:?}; the approval gate is only editable before the job enters \
+                     Work, where its evaluation criteria are resolved",
+                    job.state
+                ),
+            )]));
+        }
+        let state_before = job.state;
+        job.require_approval = require;
+        self.jobs.put(&job).await?;
+        self.graphs
+            .entry(job.project.clone())
+            .or_default()
+            .insert(job.clone());
+        debug_assert_eq!(
+            job.state, state_before,
+            "an approval edit never moves a job"
+        );
+        self.publish(
+            owner,
+            project,
+            seq,
+            "job-updated",
+            serde_json::json!({ "fields": ["require_approval"] }),
         )
         .await?;
         Ok(job)

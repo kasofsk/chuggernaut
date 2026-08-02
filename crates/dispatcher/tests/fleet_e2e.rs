@@ -151,6 +151,7 @@ fn job(id: u64, state: JobState, base_ref: &str) -> Job {
         base_ref: Some(base_ref.into()),
         knowledge_tags: vec![],
         eval: vec![],
+        require_approval: false,
         timeout: None,
         model: None,
         claim_next: false,

@@ -303,7 +303,7 @@ export const api = {
   /** `inputs` carries the values the job supplies for its type's declared
    *  `inputs:` (spec §1.1). Send it only when non-empty — a type declaring no
    *  inputs must produce the body it produces today, byte for byte. */
-  createJob: (owner: string, project: string, body: { type: string; title?: string; description?: string; deps?: number[]; knowledge_tags?: string[]; groups?: string[]; eval?: EvaluatorInput[]; timeout?: string; model?: string; inputs?: Record<string, string>; draft?: boolean }) =>
+  createJob: (owner: string, project: string, body: { type: string; title?: string; description?: string; deps?: number[]; knowledge_tags?: string[]; groups?: string[]; eval?: EvaluatorInput[]; require_approval?: boolean; timeout?: string; model?: string; inputs?: Record<string, string>; draft?: boolean }) =>
     req<JobFull>('POST', `/api/v1/projects/${owner}/${project}/jobs`, body),
   /** Full-field replace of an editable Draft job; 409 once it has left Draft. */
   patchJob: (owner: string, project: string, seq: number, body: JobPatch) =>
@@ -327,6 +327,11 @@ export const api = {
    *  grouping the same job from two tabs both land. 422 on a malformed name. */
   jobGroups: (owner: string, project: string, seq: number, body: { add?: string[]; remove?: string[] }) =>
     req<Job>('PUT', `/api/v1/projects/${owner}/${project}/jobs/${seq}/groups`, body),
+  /** Set/clear the job's operator sign-off gate (spec §1.1 require-approval).
+   *  Pre-Work states only — 422 once the job has entered Work, where its
+   *  evaluation criteria are already resolved and the edit could not apply. */
+  jobApproval: (owner: string, project: string, seq: number, require: boolean) =>
+    req<JobFull>('PUT', `/api/v1/projects/${owner}/${project}/jobs/${seq}/approval`, { require }),
   revoke: (owner: string, project: string, seq: number) =>
     req<Job>('POST', `/api/v1/projects/${owner}/${project}/jobs/${seq}/revoke`),
   /** Claim the next work attempt for a human (spec §1.2 claims); 409 while an attempt is in flight. */

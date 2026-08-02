@@ -196,6 +196,10 @@ export interface JobPatch {
    *  `jobGroups`, which is add/remove rather than a replace. */
   groups: string[]
   eval: EvaluatorInput[]
+  /** Require an operator sign-off before the job can pass evaluation (spec
+   *  §1.1). Part of the full replace like every other field; outside Draft the
+   *  flag stays editable through `jobApproval` until the job enters Work. */
+  require_approval: boolean
   /** duration string override, or null for the type default */
   timeout: string | null
   /** work-model override, or null for the resolved default */

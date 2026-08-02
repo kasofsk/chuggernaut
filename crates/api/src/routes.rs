@@ -1057,6 +1057,25 @@ pub async fn jobs_groups(
     .await
 }
 
+/// Set/clear the job's operator sign-off gate (§1.1 require-approval), body
+/// `{ require: bool }`. Member+ — the same privilege that resolves the resulting
+/// task — and 422 from the dispatcher once the job has entered Work.
+pub async fn jobs_approval(
+    State(state): State<SharedState>,
+    Path((owner, project, seq)): Path<(String, String, u64)>,
+    Auth(identity): Auth,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<Response> {
+    member_on(&identity, &owner, &project)?;
+    forward(
+        &state,
+        &store::subjects::jobs_approval(&owner, &project, seq),
+        body,
+        StatusCode::OK,
+    )
+    .await
+}
+
 /// Claim the job's next work attempt for a human (§1.2 claims): the attempt
 /// parks as a Pending task with the declared kind instead of launching.
 /// Member+; the dispatcher enforces the in-flight guard (409).

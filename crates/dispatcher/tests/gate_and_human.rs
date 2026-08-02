@@ -53,7 +53,7 @@ work:
   type: agent
   prompt: prompts/impl.md
 eval:
-  - name: approval
+  - name: sign-off
     type: human
     prompt: prompts/approve.md
 "#;
@@ -184,6 +184,7 @@ fn req(r#type: &str) -> CreateSpec {
         deps: vec![],
         knowledge_tags: vec![],
         eval: vec![],
+        require_approval: false,
         timeout: None,
         model: None,
         factory: None,
@@ -1034,6 +1035,248 @@ async fn human_evaluator_and_human_work_resolve_via_inbox() {
         Some(types::TaskResult::Human { pass: true, ref operator, summary: Some(ref s), .. })
             if operator == "david" && s == "Fixed the config and confirmed the build passes."
     ));
+    assert_invariants_of(&rig.invariants);
+}
+
+fn req_gated(r#type: &str) -> CreateSpec {
+    CreateSpec {
+        require_approval: true,
+        ..req(r#type)
+    }
+}
+
+/// The job's pending approval gate, waited for by watcher (#206 principle 3):
+/// it is created a whole stage transition after Evaluation is entered, so a
+/// fixed sleep would be racy under load.
+async fn approval_task(store: &NatsStore, seq: u64) -> types::Task {
+    test_utils::wait::task_where(
+        store,
+        "acme",
+        "api",
+        seq,
+        format!("pending approval gate on #{seq}"),
+        |t| t.evaluator.as_deref() == Some("approval") && t.state == TaskState::Pending,
+    )
+    .await
+}
+
+/// A job with `require_approval` gains one required Human evaluator after
+/// everything else has passed, and approving it lands the merge (spec §1.1
+/// require-approval). The gate is staged past the type's own evaluator, so the
+/// operator is asked only once `tests` is Done.
+#[tokio::test]
+async fn approval_gate_runs_last_and_passing_it_lands_the_merge() {
+    let Some(rig) = rig().await else { return };
+    commit_branch(&rig, "src/gated.rs");
+
+    let job = rig
+        .handle
+        .create_job(req_gated("reworkable"))
+        .await
+        .unwrap();
+    assert_invariants_of(&rig.invariants);
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
+    wait_for_state(&rig.store, job.id, JobState::Evaluation).await;
+
+    let gate = approval_task(&rig.store, job.id).await;
+    assert_eq!(gate.phase, TaskPhase::Evaluation);
+    assert_eq!(gate.stage, 1);
+    let inbox = pending_inbox(&rig.store).await;
+    assert!(
+        inbox.iter().any(|t| t.job_seq == job.id && t.id == gate.id),
+        "the gate surfaces in the operator inbox: {inbox:?}"
+    );
+    let tasks = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap();
+    let tests = tasks
+        .iter()
+        .find(|t| t.evaluator.as_deref() == Some("tests"))
+        .expect("the type's own evaluator still runs");
+    assert_eq!((tests.stage, tests.state), (0, TaskState::Done));
+
+    rig.handle
+        .resolve_task(
+            "acme",
+            "api",
+            job.id,
+            gate.id,
+            TaskResolution::Pass {
+                structured: None,
+                summary: None,
+            },
+            "david",
+        )
+        .await
+        .unwrap();
+    assert_invariants_of(&rig.invariants);
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+    assert!(pending_inbox(&rig.store).await.is_empty());
+    assert_invariants_of(&rig.invariants);
+}
+
+/// Rejecting the gate is an ordinary required-evaluator fail: the job reworks
+/// and the operator's notes ride into the next work attempt as eval context.
+#[tokio::test]
+async fn rejecting_the_approval_gate_reworks_with_the_notes() {
+    let Some(rig) = rig().await else { return };
+    commit_branch(&rig, "src/gated.rs");
+    commit_branch(&rig, "src/gated2.rs");
+
+    let job = rig
+        .handle
+        .create_job(req_gated("reworkable"))
+        .await
+        .unwrap();
+    assert_invariants_of(&rig.invariants);
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
+    wait_for_state(&rig.store, job.id, JobState::Evaluation).await;
+
+    let gate = approval_task(&rig.store, job.id).await;
+    rig.handle
+        .resolve_task(
+            "acme",
+            "api",
+            job.id,
+            gate.id,
+            TaskResolution::Fail {
+                structured: serde_json::json!({ "notes": "rename the flag first" }),
+                abort: false,
+            },
+            "david",
+        )
+        .await
+        .unwrap();
+    assert_invariants_of(&rig.invariants);
+    wait_for_state(&rig.store, job.id, JobState::Evaluation).await;
+
+    let rework = &rig.provider.runs()[1];
+    assert_eq!(rework.eval_context.len(), 2);
+    assert!(
+        rework.prompt.contains("rename the flag first"),
+        "{}",
+        rework.prompt
+    );
+    assert_invariants_of(&rig.invariants);
+}
+
+/// `abort: true` on the rejection means "not satisfiable by rework": the
+/// remaining budget is skipped and the job escalates (spec §1.2 Abort verdict).
+#[tokio::test]
+async fn aborting_the_approval_gate_escalates_instead_of_reworking() {
+    let Some(rig) = rig().await else { return };
+    commit_branch(&rig, "src/gated.rs");
+
+    let job = rig
+        .handle
+        .create_job(req_gated("reworkable"))
+        .await
+        .unwrap();
+    assert_invariants_of(&rig.invariants);
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
+    wait_for_state(&rig.store, job.id, JobState::Evaluation).await;
+
+    let gate = approval_task(&rig.store, job.id).await;
+    rig.handle
+        .resolve_task(
+            "acme",
+            "api",
+            job.id,
+            gate.id,
+            TaskResolution::Fail {
+                structured: serde_json::json!({ "notes": "wrong premise entirely" }),
+                abort: true,
+            },
+            "david",
+        )
+        .await
+        .unwrap();
+    assert_invariants_of(&rig.invariants);
+    let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+    assert_eq!(
+        escalated.escalation.as_ref().map(|e| e.reason.as_str()),
+        Some("eval_abort")
+    );
+    assert_eq!(rig.provider.runs().len(), 1, "abort skips the rework cycle");
+    assert_invariants_of(&rig.invariants);
+}
+
+/// Revoking a job whose approval is pending empties the inbox — the
+/// synthesized gate is closed by the same §1.2 revoke-closes-tasks path every
+/// other Human task takes.
+#[tokio::test]
+async fn revoke_closes_a_pending_approval_task() {
+    let Some(rig) = rig().await else { return };
+    commit_branch(&rig, "src/gated.rs");
+
+    let job = rig
+        .handle
+        .create_job(req_gated("reworkable"))
+        .await
+        .unwrap();
+    assert_invariants_of(&rig.invariants);
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
+    wait_for_state(&rig.store, job.id, JobState::Evaluation).await;
+    let gate = approval_task(&rig.store, job.id).await;
+
+    rig.handle.revoke_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
+    wait_for_state(&rig.store, job.id, JobState::Revoked).await;
+    assert!(pending_inbox(&rig.store).await.is_empty());
+
+    let closed = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .get("acme", "api", job.id, gate.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(closed.state, TaskState::Done);
+    assert!(matches!(
+        closed.result,
+        Some(types::TaskResult::Human { pass: false, ref operator, .. }) if operator == "system"
+    ));
+    assert_invariants_of(&rig.invariants);
+}
+
+/// The gate is editable only while the job could still act on it: a Frozen job
+/// takes the flag, a job past Work entry gets a 422 rather than a silent no-op.
+#[tokio::test]
+async fn the_approval_flag_is_editable_before_work_and_rejected_after() {
+    let Some(rig) = rig().await else { return };
+    commit_branch(&rig, "src/gated.rs");
+
+    let job = rig.handle.create_job(req("reworkable")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
+    let gated = rig
+        .handle
+        .set_require_approval("acme", "api", job.id, true)
+        .await
+        .unwrap();
+    assert!(gated.require_approval);
+
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
+    wait_for_state(&rig.store, job.id, JobState::Evaluation).await;
+    approval_task(&rig.store, job.id).await;
+
+    let err = rig
+        .handle
+        .set_require_approval("acme", "api", job.id, false)
+        .await
+        .expect_err("the gate is no longer editable");
+    assert!(format!("{err:?}").contains("require_approval"), "{err:?}");
     assert_invariants_of(&rig.invariants);
 }
 

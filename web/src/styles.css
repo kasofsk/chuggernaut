@@ -981,6 +981,36 @@ td.actions button {
   font-size: var(--fs-sm);
   overflow-wrap: anywhere;
 }
+/* A boolean field — the create form's checkbox rows and the job page's approval
+   gate. The checkbox sits beside its label rather than above it, so it reads as
+   one tappable row at any width; the label restates the `.field` type roles
+   because it is a flex row, not the column those rules target. */
+.create-job .field-check,
+.job-approval {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  min-height: var(--tap-min);
+}
+.job-approval {
+  margin-top: 0.6rem;
+}
+.create-job .field-check > input,
+.job-approval > input {
+  margin-top: 0.2rem;
+  flex: none;
+}
+.create-job .field-check > span,
+.job-approval > span {
+  color: var(--text);
+  font-weight: 600;
+  font-size: var(--fs-md);
+}
+.create-job .field-check > span .dim,
+.job-approval > span .dim {
+  font-weight: 400;
+  font-size: var(--fs-sm);
+}
 
 /* ── Draft editor ────────────────────────────────────────────────────────
    The live form a Draft job renders in place of the read-only info card. It

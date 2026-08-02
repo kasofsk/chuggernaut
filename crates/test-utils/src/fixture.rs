@@ -36,6 +36,7 @@ pub fn job(project: &str, id: u64) -> types::Job {
         base_ref: None,
         knowledge_tags: vec![],
         eval: vec![],
+        require_approval: false,
         timeout: None,
         model: None,
         inputs: Default::default(),

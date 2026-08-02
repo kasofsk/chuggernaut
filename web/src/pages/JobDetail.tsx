@@ -33,6 +33,7 @@ import { ProjectHeader } from '../components/ProjectHeader'
 import { Skeleton, SkeletonLines } from '../components/Skeleton'
 import { DeployLegCard, deployReportOf } from '../components/DeployLegCard'
 import { DiffFiles } from '../components/DiffFiles'
+import { approvalIsEditable, isApprovalTask } from '../approval'
 import { fmtDuration } from '../format'
 
 function bestEffort<T>(p: Promise<T>): Promise<T | null> {
@@ -64,6 +65,7 @@ export function JobDetail() {
   const [releasing, setReleasing] = useState(false)
   const groupChoices = useGroupOptions(owner, project)
   const [groupBusy, setGroupBusy] = useState(false)
+  const [approvalBusy, setApprovalBusy] = useState(false)
 
   useEffect(() => {
     api.platformConfig().then(
@@ -189,6 +191,14 @@ export function JobDetail() {
 
   const isDraft = job.state === 'Draft'
   const isDraftBatch = isDraft && (job.members ?? []).length > 0
+  const approvalPending = pendingHuman.some(isApprovalTask)
+  const setApproval = (require: boolean) => {
+    setApprovalBusy(true)
+    api
+      .jobApproval(owner, project, job.id, require)
+      .then(refresh, setActionError(setError))
+      .finally(() => setApprovalBusy(false))
+  }
   const inputEntries = Object.entries(job.inputs ?? {})
 
   const openLogTask = tasks.find((t) => t.id === openLogs) ?? null
@@ -211,6 +221,13 @@ export function JobDetail() {
           (job.awaiting_human.claimed ? (
             <span className="badge badge-purple" title="a claimed attempt is in progress — a human is doing the work">
               human working
+            </span>
+          ) : approvalPending ? (
+            <span
+              className="badge badge-orange"
+              title="every other criterion passed — this job is waiting on your sign-off"
+            >
+              your approval
             </span>
           ) : (
             <span className="badge badge-orange" title="a human task is pending in the inbox below">
@@ -313,6 +330,24 @@ export function JobDetail() {
           onAdd={(name) => editGroups({ add: [name] })}
           onRemove={(name) => editGroups({ remove: [name] })}
         />
+        {(approvalIsEditable(job) || job.require_approval) && (
+          <label className="job-approval">
+            <input
+              type="checkbox"
+              checked={job.require_approval}
+              disabled={approvalBusy || !approvalIsEditable(job)}
+              onChange={(e) => setApproval(e.target.checked)}
+            />
+            <span>
+              Require my approval{' '}
+              <span className="dim">
+                {approvalIsEditable(job)
+                  ? 'a sign-off step runs after every other criterion passes'
+                  : 'locked in — the criteria for this job are already resolved'}
+              </span>
+            </span>
+          </label>
+        )}
         {job.state === 'Batched' ? (
           <p className="batch-note dim">
             Absorbed into{' '}
@@ -439,6 +474,7 @@ export function JobDetail() {
                 escalation={job.state === 'Escalated' || job.state === 'Stalled'}
                 preWork={job.state === 'Stalled'}
                 evaluator={t.phase === 'Evaluation'}
+                approval={isApprovalTask(t)}
                 work={t.phase === 'Work' && job.state === 'Work'}
                 onResolve={(r) =>
                   api.resolve(owner, project, job.id, t.id, r).then(refresh, setActionError(setError))

@@ -133,6 +133,7 @@ fn member(r#type: &str, deps: &[u64], title: &str, description: &str) -> CreateS
         members: vec![],
         knowledge_tags: vec![],
         eval: vec![],
+        require_approval: false,
         timeout: None,
         model: None,
         factory: None,

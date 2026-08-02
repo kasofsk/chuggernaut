@@ -36,6 +36,7 @@ fn job(repo: &TempRepo, id: u64, state: JobState, base_ref: Option<String>) -> J
         base_ref,
         knowledge_tags: vec![],
         eval: vec![],
+        require_approval: false,
         timeout: None,
         model: None,
         claim_next: false,

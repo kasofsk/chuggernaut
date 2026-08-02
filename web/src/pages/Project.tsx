@@ -11,6 +11,7 @@ import { StatusFooter } from '../components/StatusFooter'
 import { IconSearch } from '../components/icons'
 import { SkeletonTable } from '../components/Skeleton'
 import { useFleet } from '../useFleet'
+import { isApprovalTask } from '../approval'
 import { fmtDuration } from '../format'
 import { GroupChips } from '../components/JobGroups'
 import {
@@ -204,6 +205,8 @@ export function ProjectPage() {
     pending.filter((t) => t.phase === 'Work' && t.performed_by === 'human').map((t) => t.job_seq),
   )
 
+  const awaitingApproval = new Set(pending.filter(isApprovalTask).map((t) => t.job_seq))
+
   const inbox = pending.filter((t) => {
     const state = jobBySeq.get(t.job_seq)?.state
     return state !== 'Revoked' && state !== 'Done'
@@ -327,6 +330,7 @@ export function ProjectPage() {
                 }
                 preWork={jobBySeq.get(t.job_seq)?.state === 'Stalled'}
                 evaluator={t.phase === 'Evaluation'}
+                approval={isApprovalTask(t)}
                 work={
                   t.phase === 'Work' &&
                   jobBySeq.get(t.job_seq)?.state === 'Work'
@@ -540,6 +544,24 @@ export function ProjectPage() {
                     >
                       queued
                     </span>
+                  )}
+                  {awaitingApproval.has(j.id) ? (
+                    <span
+                      className="badge badge-orange"
+                      title="every other criterion passed — this job is waiting on your sign-off"
+                    >
+                      your approval
+                    </span>
+                  ) : (
+                    j.require_approval &&
+                    !j.completed_at && (
+                      <span
+                        className="badge"
+                        title="this job needs your sign-off after its other criteria pass (§1.1)"
+                      >
+                        approval gated
+                      </span>
+                    )
                   )}
                 </td>
                 <td className="dim col-deps">

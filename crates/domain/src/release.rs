@@ -16,7 +16,7 @@
 use crate::graph::JobGraph;
 use serde::Serialize;
 use std::collections::HashSet;
-use types::{Job, JobType};
+use types::{Evaluator, EvaluatorType, Job, JobType};
 
 /// §6.5 validation error shape: `field` uses dot notation matching the job
 /// type YAML structure; `job_seq` is omitted for errors not tied to a job.
@@ -108,13 +108,59 @@ pub fn wiring_errors(job: &Job, graph: &JobGraph) -> Vec<ValidationError> {
     errs
 }
 
-/// Layer the job's additive evaluators (design-lifecycle.md) on top of the
-/// type's list. The type's evaluators are a floor: a name collision is an
-/// error, and the merged list must still pass the §1.1 field rules (which
-/// also enforces the image fallback for the extras). The base type already
-/// validated clean in `load_job_type`, so any error here is the extras'.
+/// The evaluator name reserved for the per-job approval gate
+/// ([`Job::require_approval`], spec §1.1). Reserved unconditionally, so a job
+/// type or a per-job evaluator claiming it is a release-time error rather than a
+/// silent overwrite in either direction.
+pub const APPROVAL_EVALUATOR_NAME: &str = "approval";
+
+/// The sign-off instructions the synthesized approval task carries into the
+/// operator inbox. Inline text rather than a repo path, so requiring approval
+/// adds nothing to a project's config tree.
+const APPROVAL_PROMPT: &str = "## Operator approval required\n\n\
+    This job cannot pass evaluation without your explicit sign-off, and every \
+    other evaluator has already passed. Review the branch and the results \
+    below, then **pass** to approve the merge, or **fail** with notes — the \
+    notes become the rework context the next work cycle reads. Fail with \
+    **abort** when the work is not satisfiable by rework at all.\n";
+
+/// The operator sign-off evaluator synthesized for a job that requires approval
+/// (spec §1.1). Staged one past every evaluator in `resolved` so an operator is
+/// never asked to sign off on work a later stage is about to reject; `None` when
+/// an evaluator already sits at the `u32` stage ceiling and nothing can follow it.
+pub fn approval_evaluator(resolved: &[Evaluator]) -> Option<Evaluator> {
+    let stage = resolved
+        .iter()
+        .map(|e| e.stage)
+        .max()
+        .map_or(Some(0), |highest| highest.checked_add(1))?;
+    assert!(
+        resolved.iter().all(|e| e.stage < stage),
+        "the approval gate must stage after every other evaluator"
+    );
+    Some(Evaluator {
+        name: APPROVAL_EVALUATOR_NAME.to_string(),
+        r#type: EvaluatorType::Human,
+        image: None,
+        run: None,
+        prompt: Some(APPROVAL_PROMPT.to_string()),
+        provider: None,
+        model: None,
+        secrets: Vec::new(),
+        required: Some(true),
+        stage,
+    })
+}
+
+/// Layer the job's additive evaluators (design-lifecycle.md) and its approval
+/// gate ([`Job::require_approval`]) on top of the type's list — the type's
+/// evaluators are a floor, so a name collision is an error and the merged list
+/// must still pass the §1.1 field rules. The base type already validated clean
+/// in `load_job_type`, so any error here is the extras'.
 pub fn with_job_evaluators(job_type: JobType, job: &Job) -> Result<JobType, Vec<ValidationError>> {
-    if job.eval.is_empty() {
+    let claims_reserved =
+        |evals: &[Evaluator]| evals.iter().any(|e| e.name == APPROVAL_EVALUATOR_NAME);
+    if job.eval.is_empty() && !job.require_approval && !claims_reserved(&job_type.eval) {
         return Ok(job_type);
     }
     let mut merged = job_type;
@@ -132,6 +178,24 @@ pub fn with_job_evaluators(job_type: JobType, job: &Job) -> Result<JobType, Vec<
             continue;
         }
         merged.eval.push(e.clone());
+    }
+    if claims_reserved(&merged.eval) {
+        errs.push(ValidationError::new(
+            Some(job.id),
+            "eval.name",
+            format!(
+                "evaluator '{APPROVAL_EVALUATOR_NAME}' is reserved for the per-job approval gate"
+            ),
+        ));
+    } else if job.require_approval {
+        match approval_evaluator(&merged.eval) {
+            Some(gate) => merged.eval.push(gate),
+            None => errs.push(ValidationError::new(
+                Some(job.id),
+                "eval.stage",
+                "the approval gate cannot be staged past an evaluator at the u32 stage ceiling",
+            )),
+        }
     }
     errs.extend(
         merged
@@ -152,7 +216,6 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use std::collections::BTreeMap;
-    use types::{Evaluator, EvaluatorType};
 
     fn agent_type_with_memory(mem: &str) -> JobType {
         JobType::parse(&format!(
@@ -196,6 +259,7 @@ resources:
                 required: None,
                 stage: 0,
             }],
+            require_approval: false,
             timeout: None,
             model: None,
             claim_next: false,
@@ -275,5 +339,127 @@ resources:
                 );
             }
         }
+    }
+
+    fn staged_type(stages: &[u32]) -> JobType {
+        let evals: String = stages
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                format!("  - name: e{i}\n    type: command\n    run: ./e.sh\n    stage: {s}\n")
+            })
+            .collect();
+        JobType::parse(&format!(
+            "name: code\nimage: img:latest\nwork:\n  type: agent\n  prompt: p.md\neval:\n{evals}"
+        ))
+        .unwrap()
+    }
+
+    fn approving_job() -> Job {
+        let mut job = job_with_extra_eval();
+        job.eval.clear();
+        job.require_approval = true;
+        job
+    }
+
+    /// The flag adds exactly one required Human evaluator, staged past every
+    /// other one, and removes nothing the type declared.
+    #[test]
+    fn approval_gate_is_additive_and_stages_last() {
+        let jt = staged_type(&[0, 1, 1]);
+        let resolved = with_job_evaluators(jt.clone(), &approving_job()).unwrap();
+        assert_eq!(resolved.eval.len(), jt.eval.len() + 1);
+        for declared in &jt.eval {
+            assert!(resolved.eval.contains(declared), "{resolved:?}");
+        }
+        let gate: Vec<_> = resolved
+            .eval
+            .iter()
+            .filter(|e| e.name == APPROVAL_EVALUATOR_NAME)
+            .collect();
+        assert_eq!(gate.len(), 1, "{resolved:?}");
+        assert_eq!(gate[0].r#type, EvaluatorType::Human);
+        assert_eq!(gate[0].required, Some(true));
+        assert_eq!(gate[0].stage, 2);
+    }
+
+    /// A type with no evaluators leaves the gate at stage 0, and the per-job
+    /// additions count toward the maximum the gate stages past.
+    #[test]
+    fn approval_stage_is_computed_from_the_resolved_set() {
+        let bare =
+            JobType::parse("name: code\nimage: img:latest\nwork:\n  type: agent\n  prompt: p.md\n")
+                .unwrap();
+        let resolved = with_job_evaluators(bare, &approving_job()).unwrap();
+        assert_eq!(resolved.eval.len(), 1);
+        assert_eq!(resolved.eval[0].stage, 0);
+
+        let mut job = approving_job();
+        job.eval = vec![Evaluator {
+            name: "extra-ci".into(),
+            r#type: EvaluatorType::Command,
+            image: None,
+            run: Some("./ci.sh".into()),
+            prompt: None,
+            provider: None,
+            model: None,
+            secrets: vec![],
+            required: None,
+            stage: 7,
+        }];
+        let resolved = with_job_evaluators(staged_type(&[0]), &job).unwrap();
+        let gate = resolved
+            .eval
+            .iter()
+            .find(|e| e.name == APPROVAL_EVALUATOR_NAME)
+            .expect("gate");
+        assert_eq!(gate.stage, 8);
+    }
+
+    /// Flag unset ⇒ resolution is byte-for-byte what it was before the gate
+    /// existed, including the untouched-type fast path.
+    #[test]
+    fn without_the_flag_resolution_is_unchanged() {
+        let jt = staged_type(&[0, 3]);
+        let mut job = approving_job();
+        job.require_approval = false;
+        assert_eq!(with_job_evaluators(jt.clone(), &job).unwrap(), jt);
+    }
+
+    /// A config evaluator at the `u32` stage ceiling leaves nowhere to stage the
+    /// gate, which is a release-time error like every other bad-config case —
+    /// never a panic inside the single-writer actor.
+    #[test]
+    fn approval_past_the_stage_ceiling_is_a_release_error() {
+        assert!(
+            approval_evaluator(&staged_type(&[u32::MAX]).eval).is_none(),
+            "nothing can stage past the ceiling"
+        );
+        let errs = with_job_evaluators(staged_type(&[0, u32::MAX]), &approving_job())
+            .expect_err("no stage left for the gate");
+        assert!(errs.iter().any(|e| e.field == "eval.stage"), "{errs:?}");
+    }
+
+    /// The reserved name is reserved unconditionally — from the type's side and
+    /// from the job's — so neither can silently overwrite the gate.
+    #[test]
+    fn reserved_approval_name_is_a_release_error() {
+        let jt = JobType::parse(
+            "name: code\nimage: img:latest\nwork:\n  type: agent\n  prompt: p.md\n\
+             eval:\n  - name: approval\n    type: command\n    run: ./a.sh\n",
+        )
+        .unwrap();
+        for flag in [false, true] {
+            let mut job = approving_job();
+            job.require_approval = flag;
+            let errs = with_job_evaluators(jt.clone(), &job).expect_err("reserved name");
+            assert!(errs.iter().any(|e| e.field == "eval.name"), "{errs:?}");
+        }
+
+        let mut job = approving_job();
+        job.require_approval = false;
+        job.eval = vec![approval_evaluator(&[]).expect("gate")];
+        let errs = with_job_evaluators(staged_type(&[0]), &job).expect_err("reserved name");
+        assert!(errs.iter().any(|e| e.field == "eval.name"), "{errs:?}");
     }
 }

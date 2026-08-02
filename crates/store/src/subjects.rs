@@ -134,6 +134,12 @@ pub fn jobs_groups(owner: &str, project: &str, seq: u64) -> String {
     format!("req.jobs.groups.{owner}.{project}.{seq}")
 }
 
+/// Set/clear the job's operator sign-off gate (spec §1.1 require-approval).
+/// Pre-Work states only — past Work entry the criteria are already resolved.
+pub fn jobs_approval(owner: &str, project: &str, seq: u64) -> String {
+    format!("req.jobs.approval.{owner}.{project}.{seq}")
+}
+
 /// Claim the job's next work attempt for a human (spec §1.2 claims).
 pub fn jobs_claim(owner: &str, project: &str, seq: u64) -> String {
     format!("req.jobs.claim.{owner}.{project}.{seq}")

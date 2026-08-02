@@ -71,6 +71,7 @@ async fn setup() -> Option<(NatsStore, Core, u64)> {
             deps: vec![],
             knowledge_tags: vec![],
             eval: vec![],
+            require_approval: false,
             timeout: None,
             model: None,
             factory: None,
