@@ -1,0 +1,46 @@
+# On-demand Rust coverage over the whole workspace. Released by hand when
+# somebody wants a number — never wired into .chug/jobs/_defaults.yaml, never a
+# per-push gate (docs/design/308-gha-port.md §G retires beacon's `rust-coverage`
+# workflow into exactly this: "coverage is a thing you ask for, not a thing that
+# runs on every push").
+#
+# The deliverable is the task's stdout: .chug/tasks/coverage.sh prints the human
+# summary last, and the dispatcher harvests a command task's container logs into
+# its stdout.log artifact (crates/platform-ops/src/harvest.rs), readable from the
+# UI and the API. coverage.lcov and coverage-html/ have nowhere to go yet — that
+# is docs/design/362-binary-artifacts.md S1, and this job type is its trigger.
+name: coverage
+display_name: Coverage
+description: Instrumented cargo llvm-cov run over the whole workspace; the summary is the task's stdout. Nothing is merged.
+image: chuggernaut/agent-rust:prod
+work:
+  # No agent and no inline review: there is nothing to author, only something to
+  # measure. cargo-llvm-cov is not in the image — the script fetches a pinned
+  # prebuilt per run rather than taxing every node on every deploy
+  # (docs/design/367-android-emulator-execution.md §3.1).
+  type: command
+  run: ./.chug/tasks/coverage.sh
+wrap_up:
+  # A coverage run produces a report, not a change (deploy.yaml's shape, not
+  # code.yaml's): the branch carries no commits, so there is nothing to merge and
+  # eval-pass goes straight to Done with the branch discarded. spec §1.1 allows
+  # wrap_up for a command work type; §3.3 step 12 is the straight-to-Done path.
+  type: none
+# The appended project `ci` default (.chug/jobs/_defaults.yaml) still runs as
+# stage 1. This job carries no commits, so ci.sh finds an empty diff against
+# origin/main and exits at its "HEAD identical to origin/$BASE_BRANCH" check in
+# seconds — the same thing a deploy job's ci evaluator does.
+resources:
+  cpu: 3
+  memory: 6Gi
+  # code.yaml's 1h covers a cold cargo build plus the whole inline author/review
+  # loop. This has no agent loop but rebuilds the workspace with
+  # -C instrument-coverage (a distinct rustc invocation, so it shares nothing with
+  # the node cache's ordinary artifacts) and runs every test instrumented, which
+  # is slower than a plain `cargo test`. Doubled to 2h for that headroom.
+  task_timeout: 2h
+# rework_budget is omitted because it is DISALLOWED for work.type: command
+# (spec §1.1 field-rules table, §3.3: a command work step cannot rework — an eval
+# failure escalates to a human immediately). work_retries stays at its default 0:
+# a failed coverage run is re-releasable by hand, and an automatic retry spends
+# another instrumented workspace build to learn the same thing.

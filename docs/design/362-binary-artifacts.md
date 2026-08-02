@@ -661,16 +661,17 @@ is recorded so the next author starts from the constraints:
 | Slice | What | Gate on |
 | --- | --- | --- |
 | **S0** | Cap the worker `copy_file` reply and name the error; one sentence in `spec.md` §3.1 | **Landed** (job #363), as the defect fix of [Decision 1](#decision-1-fix-the-copy_file-bound-first-as-a-defect); the `copy_file` rows and [C3](#c3-the-real-size-regime-is-copy_file-on-a-worker-node-not-the-object-store) above describe the tree before it |
-| **S1** | `ArtifactKind::Output`; a `Harvester::collect_output` reading `/workspace/chug-output.tar.gz` before `dispose`, wired to the **work-side** monitors only ([scope](#which-containers-are-read-and-what-that-actually-costs)); the 16 MiB cap, refused with a named error and warned rather than failing the task ([why](#the-size-band-with-numbers)); a chunked `copy_file` op | A first consumer existing — see below |
+| **S1** | `ArtifactKind::Output`; a `Harvester::collect_output` reading `/workspace/chug-output.tar.gz` before `dispose`, wired to the **work-side** monitors only ([scope](#which-containers-are-read-and-what-that-actually-costs)); the 16 MiB cap, refused with a named error and warned rather than failing the task ([why](#the-size-band-with-numbers)); a chunked `copy_file` op | **Gate met** (job #375): the consumer exists — `.chug/jobs/coverage.yaml` + `.chug/tasks/coverage.sh`, which write `coverage.lcov` and `coverage-html/` into a work container that then discards them. See below |
 | **S2** | The `outputs` bucket with its own `max_age` + byte ceiling; revoke-time GC | Lands with S1; S1 without it re-creates the 2026-07-21 disk class |
 | **S3** | Declared `outputs:` schema, cross-job reads, per-attempt selection | A **second** consumer with per-output addressing needs. Deferred, deliberately |
 | — | S3/Minio artifact store (`spec.md` Appendix: Deferred) | Stays deferred; nothing here needs it |
 
 **The first consumer is in this repo, not in beacon.** [#308](308-gha-port.md)
 §G retires `rust-coverage` into "an ordinary job — coverage is a thing you ask
-for, not a thing that runs on every push". A `coverage` job type here produces
-`coverage.lcov` plus a summary and today has nowhere to put them. That is the
-smallest honest consumer for S1, and writing it is the trigger. Note which side
+for, not a thing that runs on every push". That `coverage` job type now exists
+(`.chug/jobs/coverage.yaml`): it produces `coverage.lcov` plus an HTML tree and a
+summary, and only the summary survives, because stdout is the one thing harvest
+keeps. That is the smallest honest consumer for S1. Note which side
 of the scope table it lands on: a coverage run is command-shaped, so it is a
 command **work** container and its harvest is the new `copy_file` in
 `collect_logs`'s world — the half of S1 that does not yet exist, not the half

@@ -655,6 +655,11 @@ host, not copy them.
 that outlived its bug), `rust-coverage` (becomes an ordinary job — coverage is a
 thing you ask for, not a thing that runs on every push).
 
+**Landed** (job #375) for `rust-coverage`: `.chug/jobs/coverage.yaml` is that
+ordinary job, released by hand and wired into no default. Its report has nowhere
+durable to go until [#362](362-binary-artifacts.md) S1, which named this job type
+as the consumer that triggers it.
+
 ## H. Host-native workers
 
 A third node kind that runs tasks as **host processes** in a NixOS or macOS

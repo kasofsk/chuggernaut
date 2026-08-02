@@ -4,20 +4,21 @@ Normal tests plus fixture-driven end-to-end runs. Three tiers, in increasing cos
 
 ## What CI actually runs
 
-The merge gate (`.chug/tasks/ci.sh`, mirrored by `.github/workflows/ci.yml`) runs
-tiers 1 **and 2**. The `agent-rust` image bakes a `nats-server` binary
-(`deploy/prod/Dockerfile.agent-rust`), and the `test-utils` harness spawns it as
-an ephemeral per-test process — so the NATS tier executes for real rather than
-self-skipping. `ci.sh` prints the tier state up front and a per-tier pass tally
-at the end (`tier-2 (NATS): N passed across M file(s)`), so a green gate is never
-silently partial.
+The merge gate (`.chug/tasks/ci.sh`) runs tiers 1 **and 2**. The `test-utils`
+harness reaches a server two ways and only two (`crates/test-utils/src/nats.rs`):
+the URL in `CHUG_TEST_NATS_URL` when a caller exports one, else a `nats` image
+started through testcontainers, which needs a Docker daemon. `ci.sh` provides the
+first — it starts one communal Docker NATS for the whole gate and exports its URL
+— so the NATS tier executes for real rather than self-skipping. It prints the
+tier state up front and a per-tier pass tally at the end (`tier-2 (NATS): N
+passed across M file(s)`), so a green gate is never silently partial.
 
 Tier 3 (real Docker containers) stays out of the gate and self-skips. If NATS is
-somehow unavailable (no binary **and** no Docker), `ci.sh` prints
-`tier-2 (NATS): SKIPPED` and, when the diff itself adds or edits a tier-2 test
-file, a loud `!!!` warning — such a change then needs a **manual verification
-note** in the work summary (run the tier-2 suite locally with a `nats-server` on
-`PATH`).
+unavailable, `ci.sh` prints `tier-2 (NATS): SKIPPED` and, when the diff itself
+adds or edits a tier-2 test file, a loud `!!!` warning — such a change then needs
+a **manual verification note** in the work summary. To run the tier locally
+without Docker, start the `nats-server` binary yourself and point the harness at
+it: `nats-server -js & CHUG_TEST_NATS_URL=nats://127.0.0.1:4222 cargo test`.
 
 ## Tier 1: Unit
 
@@ -31,7 +32,7 @@ Pure-logic tests, no I/O, colocated with the code:
 
 ## Tier 2: Integration (per crate, real dependencies, fake peers)
 
-- `store` against a **real NATS server** (`test-utils` spawns one — a local `nats-server` binary if present, else a Docker `nats:2-alpine` container; skips only when neither is available): bucket creation, watch semantics, stream replay-from-sequence, request-reply retry
+- `store` against a **real NATS server** (`test-utils` reuses the `CHUG_TEST_NATS_URL` server when one is exported, else starts a `nats:2.10-alpine` container through testcontainers; skips only when neither is available): bucket creation, watch semantics, stream replay-from-sequence, request-reply retry
 - `vcs` against **temp bare repos on disk**: branch lifecycle, squash-merge (clean, no-op, conflict), conflict-context builder, diff-by-job-state including the Done-state `git log --grep` recovery
 - `container` against the **local Docker socket** (skipped when unavailable): launch/wait/kill/inspect/copy_file, bootstrap wrapper, resource limits
 - `dispatcher` with **real NATS + fake `ContainerBackend` + fake `AgentProvider`** (`test-utils`): full lifecycle runs entirely in-process — seed jobs, drive Ready→Work→Evaluation→Done, retries, rework, escalation, revoke cascades, restart reconciliation (kill and restart the dispatcher task mid-run, assert §3.6 behavior), factory batching/backpressure with synthetic ingest events
@@ -91,7 +92,7 @@ it would have said, and it carries it into the failure output.
 
 The gate itself has a shell test rather than a Rust one — `.chug/tasks/check-comments.test.sh`,
 run directly, no NATS or cargo — alongside `check-duplication.test.sh`,
-`doc-lint.test.sh`, `modules-registry.test.sh` (which drives
+`coverage.test.sh`, `doc-lint.test.sh`, `modules-registry.test.sh` (which drives
 `.chug/tasks/check-modules.sh`) and `.githooks/pre-commit.test.sh` (which drives
 real `git commit`s in throwaway repos with the hook installed). Shell gates are
 tested in shell: the tier-1/2/3 ladder above is about the platform's behavior,
@@ -99,6 +100,28 @@ and a gate's own behavior is not reachable from a cargo test.
 
 ## Conventions
 
-- `test-utils` owns: the NATS harness (local `nats-server` process, else Docker container), temp-repo builder, fake backend/provider, fixture seeding, and `require_nats!`/`e2e!` guard macros that skip when NATS/Docker are unavailable
+- `test-utils` owns: the NATS harness (`CHUG_TEST_NATS_URL`, else a testcontainers-run `nats` container), temp-repo builder, fake backend/provider, fixture seeding, and `require_nats!`/`e2e!` guard macros that skip when NATS/Docker are unavailable
 - Every bug fix lands with a regression test at the lowest tier that can express it
 - Coverage is tracked per crate (v1 discipline carries over); `dispatcher::state` and `release` validation are held to ~100% branch coverage — they are the correctness core
+
+## Coverage: on demand, never a gate
+
+Numbers come from releasing a **`coverage` job** (`.chug/jobs/coverage.yaml`),
+which runs `.chug/tasks/coverage.sh` in the `agent-rust` image: a pinned prebuilt
+`cargo-llvm-cov` fetched per run (the platform rebuilds its images on every node
+on every deploy, so occasional-use tooling stays out of them), an instrumented
+`--workspace --all-features` run, and the human summary printed **last** —
+stdout is the deliverable, and a worker keeps only its final 700 KiB. It carries
+no commits and merges nothing (`wrap_up: type: none`).
+
+It is deliberately not wired into `_defaults.yaml` or `ci.sh`: coverage is a
+thing you ask for, not a thing that runs on every push
+([#308](docs/design/308-gha-port.md) §G).
+
+Two limits to read the number with. The run starts the image's `nats-server` and
+exports `CHUG_TEST_NATS_URL`, so tier-2 executes — but tier 3, and the tier-2
+suites that need a *private* server, still self-skip without Docker, so every
+percentage is a lower bound and the script says so. And `coverage.lcov` plus
+`coverage-html/` are written into the container and discarded with it: keeping
+them needs `ArtifactKind::Output` ([#362](docs/design/362-binary-artifacts.md)
+S1), for which this job type is the named first consumer.
