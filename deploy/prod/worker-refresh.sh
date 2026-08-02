@@ -15,7 +15,8 @@
 #   WORKER_REFRESH_GIT_URL  ssh://git@<ssh-front>:2222/<owner>/<repo>.git (required)
 #   WORKER_GIT_KEY          ssh private key for the node credential (default /data/keys/worker_git)
 #   WORKER_NODE, NATS_URL, NATS_CREDS   passed through to the replacement daemon
-#   WORKER_CACHE_DIR        optional node-local build cache (re-applied on swap)
+#   WORKER_CACHE_DIR        optional node-local build cache (re-applied on swap;
+#     the host dir is provisioned at node creation by build-worker.sh, never here)
 #   WORKER_SWAP_IMAGE       docker-cli image for the detached swapper (default docker:cli)
 #   WORKER_REFRESH_DISK_FREE_GB_MIN / _DISK_PATH   disk pre-flight (see below)
 #   WORKER_KVM / WORKER_KVM_PROJECTS / WORKER_ANDROID_SDK_DIR   KVM passthrough
@@ -365,6 +366,15 @@ swap)
   # cache bind to each sibling job container via the docker socket (host path),
   # so the DAEMON container needs no cache mount of its own. Carrying this
   # forward is what stops a refresh from silently dropping caching (#55/#82).
+  #
+  # Carried forward, never CREATED — deliberately, on two counts. This phase
+  # runs INSIDE chug-worker, which mounts only the docker socket and the keys
+  # dir, so a `mkdir -p` here would land in the daemon container's writable
+  # layer and never on the host: it is the very bug this variable already had
+  # (crates/worker/src/daemon.rs's `create_dir_all`), not a fix for it. And a
+  # swap runs on a node build-worker.sh already provisioned, so a dir missing at
+  # this point means something removed it — which the engine's launch refusal
+  # should say out loud (#379), not a defensive create that hides it.
   CACHE_ARGS=""
   if [ -n "${WORKER_CACHE_DIR:-}" ]; then
     CACHE_ARGS="-e WORKER_CACHE_DIR=$WORKER_CACHE_DIR"

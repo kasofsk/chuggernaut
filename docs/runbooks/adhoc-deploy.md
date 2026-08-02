@@ -117,9 +117,10 @@ WORKER_NATS_URL=nats://100.x.y.z:4222 \
 - Optional but usually wanted here: `WORKER_CACHE_DIR`,
   `WORKER_REFRESH_GIT_URL`, `WORKER_GIT_KEY` — the script forwards them to the
   daemon's `docker run` (see §1c for why they matter). All three normally come
-  from `chuggernaut.env`. `WORKER_CACHE_DIR`'s host path must already exist on
-  the node — this script does not create it, and since #379 a missing one fails
-  every launch there (§1c).
+  from `chuggernaut.env`. `WORKER_CACHE_DIR`'s host path is created on the node
+  by this script before it starts the daemon (`mkdir -p`, falling back to
+  `sudo -n mkdir -p`); a path it cannot create refuses the deploy with the live
+  daemon untouched, because a missing one fails every launch there (§1c).
 
 The image tag is `CHUG_IMAGE_TAG` (default `prod`).
 
@@ -138,8 +139,10 @@ ssh "$WORKER_SSH" 'docker ps --filter name=chug-worker --format "{{.Image}} {{.S
 need to (re)start it standalone without a full image rebuild. This is the exact
 `docker run` `build-worker.sh` issues — reproduce it by hand:
 
-Passing `WORKER_CACHE_DIR`? Provision the host path first, on the node —
-nothing else creates it since #379, and every launch fails without it (below):
+Passing `WORKER_CACHE_DIR`? Provision the host path first, on the node. This is
+the by-hand path, so nothing does it for you here — `build-worker.sh` (§1b) is
+what provisions it on a scripted deploy — and every launch fails without it
+(below):
 
 ```sh
 ssh "$WORKER_SSH" 'sudo mkdir -p /var/cache/chuggernaut/sccache'
@@ -183,11 +186,13 @@ Three env details are load-bearing:
   node**: since #379 it is a typed mount, so a missing source fails every launch
   on that node with the path in the error (`invalid mount config for type
   "bind": bind source path does not exist: …`) rather than silently giving each
-  container an empty directory. **Nothing provisions it for you** — the daemon's
-  own `create_dir_all` runs inside the daemon container, which does not mount
-  that path (above), so it never touches the host; and dockerd no longer creates
-  it as a side effect of the first launch, which is how it came into being
-  before #379 (design #372 C3). Create it once per node —
+  container an empty directory. **Nothing on this by-hand path provisions it for
+  you** — the daemon's own `create_dir_all` runs inside the daemon container,
+  which does not mount that path (above), so it never touches the host; and
+  dockerd no longer creates it as a side effect of the first launch, which is how
+  it came into being before #379 (design #372 C3). `build-worker.sh` creates it
+  at node creation (§1b), which is why a scripted deploy needs no step here;
+  starting the daemon by hand as above skips that, so create it once per node —
   `ssh "$WORKER_SSH" 'sudo mkdir -p /var/cache/chuggernaut/sccache'` — or, if
   launches are already failing, fix the path or unset the variable.
 - **No empty-string refresh env.** Give `WORKER_REFRESH_GIT_URL` (and

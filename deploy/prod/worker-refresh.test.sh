@@ -103,7 +103,17 @@ fi
 exit 0
 EOF
 
-chmod +x "$BIN/git" "$BIN/docker" "$BIN/df"
+# Fake mkdir: log the argv, then do the real thing (the script's own temp work
+# must still succeed). It exists so a case can assert what this script must NOT
+# do — create the host cache dir — which is otherwise invisible to a log of
+# docker/git calls.
+cat > "$BIN/mkdir" <<EOF
+#!/bin/sh
+echo "mkdir \$*" >> "$LOG"
+exec /bin/mkdir "\$@"
+EOF
+
+chmod +x "$BIN/git" "$BIN/docker" "$BIN/df" "$BIN/mkdir"
 
 # Free space the fake df reports, in 1K blocks. Default ~57GB — comfortably over
 # the pre-flight threshold, so the pre-existing cases are unaffected.
@@ -455,7 +465,18 @@ grep_log "WORKER_CACHE_DIR=/var/cache/chuggernaut/sccache"
 if grep -qF -- "-v /var/cache/chuggernaut/sccache:/var/cache/chuggernaut/sccache" "$LOG"; then
   fail "swap must pass WORKER_CACHE_DIR as env only, not a daemon bind-mount"
 fi
-echo "ok: swap carries WORKER_CACHE_DIR forward as env (no daemon mount)"
+# Carried forward, never created. This phase runs INSIDE chug-worker, which does
+# not mount the cache path, so a `mkdir -p` here would land in the daemon
+# container's writable layer and never on the host — the same illusion the
+# daemon's own create_dir_all gives (#379). The host dir is provisioned at node
+# creation by build-worker.sh; a dir missing at swap time is something to fail
+# loudly on, not to re-create silently.
+# Catches both shapes: a direct `mkdir` (the fake logs one) and a `mkdir` smuggled
+# into the detached swapper's inner command (logged with the `docker run` argv).
+if grep -F "/var/cache/chuggernaut/sccache" "$LOG" | grep -qF "mkdir"; then
+  fail "the swap must not create the cache dir (it would land in the container, not on the host)"
+fi
+echo "ok: swap carries WORKER_CACHE_DIR forward as env, and creates no host dir"
 
 # ── Case 3c: swap carries the disk pre-flight knobs forward (deploy #248) ──────
 # Same class of silent-drop bug as WORKER_CACHE_DIR: a node tuned to a different

@@ -87,9 +87,38 @@ REFRESH_ENV="-e WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-} -e WORKER_GIT
 # files. Empty when unset ⇒ caching stays off (the daemon reads None). This is
 # the durable fix for #55's dormant cache: baked-in sccache only warms when the
 # daemon actually runs with WORKER_CACHE_DIR.
+#
+# The HOST directory is provisioned HERE, at node creation, because nothing else
+# does: the daemon's own `create_dir_all` (crates/worker/src/daemon.rs) runs
+# inside the daemon container, which does not mount this path, so it lands in
+# that container's writable layer and never on the host. Until #379 dockerd
+# covered for that — the sibling launch's `-v` silently created a missing source
+# — but the cache is a typed mount now and the engine REFUSES a missing source,
+# so a fresh node with WORKER_CACHE_DIR set would fail every launch, permanently.
+#
+# Plain `mkdir -p` first (idempotent: an existing dir is a success, which is
+# every node built before this, and needs no privilege), `sudo -n` only as the
+# fallback for a first create under a root-owned parent like /var/cache. No
+# `chmod`: the dir keeps the node's default ownership and mode, which is exactly
+# what dockerd's silent create produced and what the fleet has run on — job
+# containers write to it as root (neither agent Dockerfile sets `USER`, and the
+# launch config sets no user), and widening the mode of a directory that already
+# holds a warm cache is not this script's call. A failure REFUSES the deploy
+# before the live daemon is touched, rather than starting a daemon whose every
+# launch fails.
+#
+# Ownership of this step is #372's if the chug-node module ever lands: it
+# provisions the same path via systemd.tmpfiles (#372 §5, the treatment #373
+# Decision 4 gives the nix gcroots dir). This is the bridge until then, and it
+# moves out in the same change that lands the module — never alongside it.
 CACHE_ENV=""
 if [ -n "${WORKER_CACHE_DIR:-}" ]; then
   CACHE_ENV="-e WORKER_CACHE_DIR=$WORKER_CACHE_DIR"
+  if ! ssh "$WORKER_SSH" "mkdir -p '$WORKER_CACHE_DIR' 2>/dev/null || sudo -n mkdir -p '$WORKER_CACHE_DIR'"; then
+    echo "build-worker: cannot provision WORKER_CACHE_DIR '$WORKER_CACHE_DIR' on $WORKER_SSH (tried mkdir -p, then sudo -n mkdir -p) — the daemon would start and then fail EVERY launch with 'bind source path does not exist'; REFUSING daemon restart (live daemon untouched). Create it by hand on the node, or unset WORKER_CACHE_DIR to run without caching." >&2
+    exit 1
+  fi
+  echo "build-worker: host cache dir $WORKER_CACHE_DIR present on $WORKER_SSH"
 fi
 # Disk pre-flight knobs (deploy #248, worker-refresh.sh): the refresh refuses a
 # build that cannot fit a new image generation, sized by a conservative constant.

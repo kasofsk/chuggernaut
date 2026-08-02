@@ -41,7 +41,10 @@ EOF
 #     the SHA fake-git reports, so the label assert passes unless a case forces a
 #     mismatch (the stale-image-label case);
 #   * the daemon health probe (`...State.Running...`) echoes HEALTHY unless
-#     $FAIL_PROBE is set, so a case can drive the probe to time out.
+#     $FAIL_PROBE is set, so a case can drive the probe to time out;
+#   * the cache-dir provisioning (`mkdir -p …`) succeeds unless $FAIL_MKDIR is
+#     set, which models a node where neither the login user nor `sudo -n` can
+#     create the path.
 cat > "$BIN/ssh" <<EOF
 #!/bin/sh
 cat >/dev/null 2>&1 || true
@@ -49,6 +52,7 @@ echo "ssh \$*" >> "$LOG"
 case "\$*" in
   *chug.git.sha*)  echo "\${FAKE_LABEL:-deadbeefcafe}" ;;
   *State.Running*) [ -n "\${FAIL_PROBE:-}" ] || echo HEALTHY ;;
+  *mkdir*)         [ -z "\${FAIL_MKDIR:-}" ] || exit 1 ;;
 esac
 exit 0
 EOF
@@ -57,6 +61,11 @@ chmod +x "$BIN/git" "$BIN/ssh"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 grep_log() { grep -qF -- "$1" "$LOG" || fail "expected in log: $1"; }
+
+# Line number of the first log entry containing $1, for the ORDER assertions
+# (a cache dir created after the daemon is already running provisions nothing in
+# time — the daemon must find the path there).
+line_of() { grep -nF -- "$1" "$LOG" | head -n 1 | cut -d: -f1; }
 
 # The daemon `docker run` as the node's shell will see it, on one line with runs
 # of whitespace squeezed: the script composes it across backslash-continued
@@ -95,6 +104,21 @@ if grep -qF -- "-v /var/cache/chuggernaut/sccache:" "$LOG"; then
 fi
 echo "ok: daemon run carries WORKER_CACHE_DIR (env only) + refresh coords + node"
 
+# ── Case 1b: cache on ⇒ the HOST directory is created, before the daemon runs ──
+# Nothing else creates it: the daemon's own create_dir_all runs inside the daemon
+# container (which does not mount this path), and since #379 the cache is a typed
+# mount whose missing source the engine REFUSES — so an unprovisioned node fails
+# every launch, permanently. The `sudo -n` fallback covers a first create under a
+# root-owned parent; plain `mkdir -p` succeeds unprivileged on every node that
+# already has the dir.
+grep_log "mkdir -p '/var/cache/chuggernaut/sccache'"
+grep_log "sudo -n mkdir -p '/var/cache/chuggernaut/sccache'"
+mkdir_line="$(line_of "mkdir -p '/var/cache/chuggernaut/sccache'")"
+run_line="$(line_of "docker run -d --restart=always --name chug-worker")"
+[ -n "$mkdir_line" ] && [ -n "$run_line" ] || fail "expected both a mkdir and a daemon run in the log"
+[ "$mkdir_line" -lt "$run_line" ] || fail "the cache dir must be created BEFORE the daemon is started"
+echo "ok: WORKER_CACHE_DIR's host dir is provisioned on the node before the daemon starts"
+
 # ── Case 2: cache unset ⇒ no WORKER_CACHE_DIR passed (caching stays off) ───────
 : > "$LOG"
 PATH="$BIN:$PATH" \
@@ -116,7 +140,12 @@ fi
 if grep -qF "WORKER_SLOTS" "$LOG"; then
   fail "WORKER_SLOTS must not be passed when unset (daemon default applies)"
 fi
-echo "ok: no WORKER_CACHE_DIR, WORKER_REFRESH_DISK_* or WORKER_SLOTS passed when unset"
+# Caching off ⇒ nothing to provision: a node that asked for no cache must not
+# acquire a directory (nor a `sudo` call) from a deploy.
+if grep -qF "mkdir" "$LOG"; then
+  fail "no cache dir may be created when WORKER_CACHE_DIR is unset"
+fi
+echo "ok: no WORKER_CACHE_DIR, WORKER_REFRESH_DISK_* or WORKER_SLOTS passed when unset, and no dir created"
 
 # Also assert the label + health verification happened on the success path.
 grep_log "chug.git.sha=deadbeefcafe"                 # SHA baked as an image LABEL
@@ -318,6 +347,29 @@ if grep -qE -- "WORKER_KVM|--device" "$LOG"; then
   fail "a whitespace-only WORKER_KVM is unset to the daemon — it must add nothing"
 fi
 echo "ok: WORKER_KVM is trimmed the way the daemon trims it"
+
+# ── Case 2j: an unprovisionable cache dir refuses BEFORE the daemon restart ───
+# A daemon started against a host path that does not exist comes up healthy and
+# then fails EVERY launch ("bind source path does not exist"), which reads as a
+# broken node rather than as a misconfigured deploy. Refuse instead, while the
+# working daemon is still running, and name both attempts in the message.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_CACHE_DIR=/var/cache/chuggernaut/sccache \
+  FAIL_MKDIR=1 \
+  sh "$SUT" >"$WORK/cache.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an unprovisionable WORKER_CACHE_DIR must fail the deploy (got rc=0)"
+grep -qF "cannot provision WORKER_CACHE_DIR" "$WORK/cache.out" || fail "the refusal must name what is wrong"
+if grep -qF "docker run -d --restart=always --name chug-worker" "$LOG"; then
+  fail "an unprovisionable WORKER_CACHE_DIR must not reach the daemon restart (live daemon untouched)"
+fi
+echo "ok: an unprovisionable cache dir refuses before the daemon is replaced"
 
 # ── Case 3: no worker node ⇒ clean no-op ──────────────────────────────────────
 : > "$LOG"
