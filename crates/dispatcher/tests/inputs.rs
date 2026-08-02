@@ -543,6 +543,15 @@ async fn golden_trace_inputs_reach_work_and_eval_container_envs() {
     ];
     let runs = provider.runs();
     assert_eq!(injected(&runs[0].env), expected, "work container env");
+    assert!(
+        runs[0].prompt.contains(
+            "## Job Brief\n\n### Inputs\n<untrusted_input>\nservice: web\nsha: 4f9c1ab\n\
+             </untrusted_input>\n"
+        ),
+        "the work agent reads the resolved set in its §4.3 brief, nested under \
+         the brief heading, and never learns of the unresolved 'note': {}",
+        runs[0].prompt
+    );
 
     let eval = backend
         .launches()
@@ -562,7 +571,7 @@ async fn golden_trace_inputs_reach_work_and_eval_container_envs() {
 #[tokio::test]
 async fn an_input_free_job_launches_a_byte_identical_eval_env() {
     let Some(rig) = rig().await else { return };
-    let (store, backend) = (rig.store.clone(), rig.backend.clone());
+    let (store, backend, provider) = (rig.store.clone(), rig.backend.clone(), rig.provider.clone());
     commit_on_work(&rig);
 
     let (handle, sink) = spawn_checked(rig.core);
@@ -595,6 +604,13 @@ async fn an_input_free_job_launches_a_byte_identical_eval_env() {
             "REPO_URL",
         ],
         "an input-free job's eval env must not grow a key"
+    );
+    let work = &provider.runs()[0];
+    assert!(
+        !work.prompt.contains("### Inputs") && !work.prompt.contains("<untrusted_input>"),
+        "the same guarantee on the prompt side (#311 slice B): an input-free job's \
+         §4.3 brief is the one it read before inputs existed: {}",
+        work.prompt
     );
     let released = event(&job_events(&store, job.id).await, "job-released");
     assert_eq!(released["state"], serde_json::json!("Ready"));

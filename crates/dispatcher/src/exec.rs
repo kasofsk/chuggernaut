@@ -1901,11 +1901,12 @@ pub(crate) fn task_timeout(job_type: &JobType) -> Duration {
         .unwrap_or(Duration::from_secs(3600))
 }
 
-/// §4.3 job brief: the instance's ticket (title/description from job
-/// creation), appended to the type's prompt for the work agent, every agent
-/// evaluator, and human task prompts. Empty when the job carries neither.
+/// §4.3 job brief: the instance's ticket (title/description from job creation)
+/// and the job's resolved inputs, appended to the type's prompt for the work
+/// agent, every agent evaluator, and human task prompts. Empty when the job
+/// carries none of the three.
 pub(crate) fn job_brief_block(job: &types::Job) -> String {
-    if job.title.is_empty() && job.description.is_empty() {
+    if job.title.is_empty() && job.description.is_empty() && job.inputs.is_empty() {
         return String::new();
     }
     let mut block = String::from("\n\n---\n## Job Brief\n");
@@ -1917,6 +1918,7 @@ pub(crate) fn job_brief_block(job: &types::Job) -> String {
         block.push_str(&job.description);
         block.push('\n');
     }
+    block.push_str(&inputs::brief_inputs_block(&job.inputs));
     block
 }
 
@@ -1937,6 +1939,7 @@ pub(crate) fn batch_brief_block(job: &types::Job, members: &[types::Job]) -> Str
         block.push_str(&job.description);
         block.push('\n');
     }
+    block.push_str(&inputs::brief_inputs_block(&job.inputs));
     for member in members {
         block.push_str(&format!("\n### Ticket #{}", member.id));
         if !member.title.is_empty() {
@@ -2324,6 +2327,64 @@ mod tests {
             batch_brief_block(&base, &[ungrouped_member]),
             batch_brief_block(&grouped, &[member]),
             "groups must not change a batch's brief either"
+        );
+    }
+
+    /// #311 slice B: an agent is told the target it acts on, in an `### Inputs`
+    /// subsection nested under `## Job Brief` — after the ticket, never a
+    /// sibling heading, one line per resolved input.
+    #[test]
+    fn resolved_inputs_render_under_the_job_brief_heading() {
+        use super::job_brief_block;
+        let one = types::Job {
+            inputs: std::collections::BTreeMap::from([("service".into(), "web".into())]),
+            ..briefed_job()
+        };
+        assert_eq!(
+            job_brief_block(&one),
+            "\n\n---\n## Job Brief\n**Ship the thing**\n\nDo the work described here.\n\
+             \n### Inputs\n<untrusted_input>\nservice: web\n</untrusted_input>\n",
+        );
+
+        let several = types::Job {
+            inputs: std::collections::BTreeMap::from([
+                ("service".into(), "web".into()),
+                ("image_tag".into(), "4f9c1ab".into()),
+            ]),
+            ..briefed_job()
+        };
+        let brief = job_brief_block(&several);
+        assert!(
+            brief.contains("\n### Inputs\n<untrusted_input>\nimage_tag: 4f9c1ab\nservice: web\n"),
+            "{brief}"
+        );
+        assert_eq!(
+            brief.matches("## Job Brief").count(),
+            1,
+            "the block must not emit a second brief heading: {brief}"
+        );
+    }
+
+    /// The §4.3 byte-identity guarantee, the prompt-side twin of the tier-2
+    /// input-free container-env trace: a job carrying no inputs reads exactly
+    /// the brief it read before slice B existed.
+    #[test]
+    fn an_input_free_job_reads_a_byte_identical_brief() {
+        use super::job_brief_block;
+        let base = briefed_job();
+        assert!(base.inputs.is_empty());
+        assert_eq!(
+            job_brief_block(&base),
+            "\n\n---\n## Job Brief\n**Ship the thing**\n\nDo the work described here.\n",
+        );
+        assert!(
+            job_brief_block(&types::Job {
+                title: String::new(),
+                description: String::new(),
+                ..base
+            })
+            .is_empty(),
+            "a job with neither ticket nor inputs still has no brief"
         );
     }
 }

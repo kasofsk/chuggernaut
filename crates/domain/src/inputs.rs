@@ -25,6 +25,14 @@
 //! 4. [`stamp_event_inputs`] — the §10.3 audit fragment: `job-created` carries
 //!    what the originator asked for, the Ready-transition event what actually
 //!    ran.
+//! 5. [`brief_inputs_block`] — the §4.3 job brief's `### Inputs` subsection, so
+//!    an agent job is told the target it is acting on rather than left to read
+//!    an env var nobody mentioned (design #311 Decision 4, Option B).
+//! 6. [`summary_inputs_line`] — the squash-body `Inputs:` line, which records
+//!    the effective set in git history for merge-mode jobs. It is *not* the
+//!    audit answer for `wrap_up: type: none` jobs (`deploy`, `rollback`): those
+//!    produce no squash commit at all, and their record is the §10.3 event
+//!    stream plus the job record.
 //!
 //! The *shape* rules a value clears whatever its declaration — charset, length,
 //! name form — belong to [`types::inputs`], which the creation pass (422) also
@@ -34,14 +42,15 @@
 //!   `BTreeMap<String, String>` (plus, for the fill, `&mut` that map); a
 //!   container env under assembly; an event payload under assembly.
 //! - **Emits:** [`ValidationError`]s under `field: "inputs.{name}"`, the
-//!   add-only fill's mutation, the injected env keys, and the event fragment.
+//!   add-only fill's mutation, the injected env keys, the event fragment, and
+//!   the two rendered text fragments (job brief, squash body).
 //! - **Guarantees:** pure and synchronous, no I/O, no clock; the fill only ever
 //!   *inserts* keys absent from the map, asserted at the write site, so a
 //!   supplied value can never be overwritten by a default; the declaration is
 //!   read, never written — a resolved input can no more reach the job type than
 //!   the job type can reach the input map; a job with no inputs is touched by
-//!   nothing here, so its env and its events stay byte-identical to a tree
-//!   without the feature.
+//!   nothing here, so its env, its events and its job brief stay byte-identical
+//!   to a tree without the feature.
 //! - **Spec:** §1.1 (the `inputs:` field rules and the `Job` record), §2.2 (the
 //!   release-time, Ready-transition and launch-time passes), §4.1 (container
 //!   env), §10.3 (the audit trail); design #311 Decisions 3, 4, 5, 6.
@@ -211,6 +220,67 @@ pub fn inject_input_env(
         "input injection is one key per resolved value",
     );
     refused
+}
+
+/// The §4.3 brief's `### Inputs` subsection (design #311 Decision 4, Option B):
+/// one `name: value` line per resolved input, wrapped in the
+/// [`BRIEF_UNTRUSTED_OPEN`]/[`BRIEF_UNTRUSTED_CLOSE`] delimiter and nested at
+/// `###` under `## Job Brief`, which no value can escape because the charset
+/// excludes `#` and every newline.
+///
+/// A job with no inputs renders **nothing** — the prompt-side twin of
+/// [`inject_input_env`]'s absent-means-absent, so the brief of every job that
+/// exists today stays byte-identical (§4.3 prompt cleanliness).
+pub fn brief_inputs_block(inputs: &BTreeMap<String, String>) -> String {
+    if inputs.is_empty() {
+        return String::new();
+    }
+    debug_assert!(
+        inputs
+            .keys()
+            .all(|name| !name.contains('\n') && !name.contains('#')),
+        "an input name reaching the brief must not be able to open a heading",
+    );
+    let mut block = format!("\n### Inputs\n{BRIEF_UNTRUSTED_OPEN}\n");
+    for (name, value) in inputs {
+        block.push_str(&format!("{name}: {value}\n"));
+    }
+    block.push_str(BRIEF_UNTRUSTED_CLOSE);
+    block.push('\n');
+    debug_assert!(
+        !block.contains("\n## "),
+        "the inputs block must not emit a sibling of ## Job Brief: {block}",
+    );
+    block
+}
+
+/// The delimiter the brief wraps input values in, advisory to the model and
+/// defense in depth only. The checked control is the charset (design #311
+/// Decision 5): a delimiter is read, a charset is enforced.
+const BRIEF_UNTRUSTED_OPEN: &str = "<untrusted_input>";
+const BRIEF_UNTRUSTED_CLOSE: &str = "</untrusted_input>";
+
+/// The squash-body `Inputs: name=value …` line (design #311 Decision 6), which
+/// opens the commit body above the agent's closing summary exactly as a batch's
+/// member list does (spec §2.1).
+///
+/// `None` for a job with no inputs, and for the motivating `wrap_up: type: none`
+/// jobs there is no squash body at all — their durable record is the §10.3 event
+/// stream plus the job record, never git history.
+pub fn summary_inputs_line(inputs: &BTreeMap<String, String>) -> Option<String> {
+    if inputs.is_empty() {
+        return None;
+    }
+    let rendered = inputs
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    debug_assert!(
+        !rendered.contains('\n'),
+        "an input value cannot contain a newline: {rendered}",
+    );
+    Some(format!("Inputs: {rendered}"))
 }
 
 /// Stamp a job's input map onto an event payload (spec §6.3, §10.3; design #311
@@ -485,6 +555,61 @@ mod tests {
         assert_eq!(
             extra,
             serde_json::json!({ "state": "Ready", "inputs": { "sha": "4f9c1ab" } }),
+        );
+    }
+
+    /// The prompt-side shape (#311 Decision 4, Option B): a `###` subsection —
+    /// never a sibling of `## Job Brief` — with one `name: value` line per
+    /// resolved input, in the map's deterministic order.
+    #[test]
+    fn the_brief_block_renders_one_line_per_resolved_input() {
+        assert_eq!(
+            brief_inputs_block(&supplied(&[("service", "web")])),
+            "\n### Inputs\n<untrusted_input>\nservice: web\n</untrusted_input>\n",
+        );
+        assert_eq!(
+            brief_inputs_block(&supplied(&[
+                ("service", "web"),
+                ("image_tag", "4f9c1ab"),
+                ("region", "eu"),
+            ])),
+            "\n### Inputs\n<untrusted_input>\nimage_tag: 4f9c1ab\nregion: eu\nservice: web\n\
+             </untrusted_input>\n",
+        );
+    }
+
+    /// The prompt-side twin of absent-means-absent: no inputs renders **no
+    /// block**, not an empty one, so §4.3's byte-identity property holds for
+    /// every job in the tree today.
+    #[test]
+    fn the_brief_block_is_empty_for_an_input_free_job() {
+        assert_eq!(brief_inputs_block(&BTreeMap::new()), "");
+    }
+
+    /// The charset (#311 Decision 5) is the control the `###` nesting rests on:
+    /// no accepted value can carry a `#` or a newline, so none can forge a
+    /// heading of any level inside the block.
+    #[test]
+    fn no_accepted_value_can_forge_a_heading() {
+        for forgery in ["## Job Brief", "x\n## Job Brief", "#heading"] {
+            assert!(
+                types::inputs::check_value_charset(forgery).is_err(),
+                "the charset must reject {forgery:?} before it reaches a brief"
+            );
+        }
+        let block = brief_inputs_block(&supplied(&[("sha", "4f9c1ab")]));
+        assert!(!block.contains("\n## "), "{block}");
+        assert!(block.starts_with("\n### Inputs\n"), "{block}");
+    }
+
+    /// The git-history record (#311 Decision 6): `name=value` pairs on one line,
+    /// and nothing at all for a job with no inputs.
+    #[test]
+    fn the_squash_body_line_renders_the_effective_set() {
+        assert_eq!(summary_inputs_line(&BTreeMap::new()), None);
+        assert_eq!(
+            summary_inputs_line(&supplied(&[("service", "web"), ("image_tag", "4f9c1ab")])),
+            Some("Inputs: image_tag=4f9c1ab service=web".to_string()),
         );
     }
 }

@@ -1216,22 +1216,7 @@ impl Core {
                 _ => note.to_string(),
             });
         }
-        if job.is_batch() {
-            let header = format!(
-                "Batch of {} {} jobs: {}",
-                job.members.len(),
-                job.r#type,
-                job.members
-                    .iter()
-                    .map(|m| format!("#{m}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
-            summary = Some(match summary {
-                Some(prose) if !prose.is_empty() => format!("{header}\n\n{prose}"),
-                _ => header,
-            });
-        }
+        summary = squash_body_preamble(&job, summary);
         let default_branch = self.repos.default_branch(owner, project).await?;
         let head = self
             .repos
@@ -1901,6 +1886,35 @@ impl Core {
     }
 }
 
+/// The lines a squash body opens with, above the agent's closing summary: a
+/// batch's member list (spec §2.1) and then the job's effective inputs (design
+/// #311 Decision 6). A job that is neither batched nor parameterized keeps the
+/// summary exactly as the agent wrote it.
+fn squash_body_preamble(job: &Job, summary: Option<String>) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    if job.is_batch() {
+        lines.push(format!(
+            "Batch of {} {} jobs: {}",
+            job.members.len(),
+            job.r#type,
+            job.members
+                .iter()
+                .map(|m| format!("#{m}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+    }
+    lines.extend(crate::inputs::summary_inputs_line(&job.inputs));
+    if lines.is_empty() {
+        return summary;
+    }
+    let preamble = lines.join("\n");
+    Some(match summary {
+        Some(prose) if !prose.is_empty() => format!("{preamble}\n\n{prose}"),
+        _ => preamble,
+    })
+}
+
 /// Augment the §4.3 conflict-context block with resolve-in-place guidance: the
 /// 3-way merge is ALREADY committed on job/{seq} (Change B), so the agent must
 /// resolve the markers where they sit and commit — not reimplement the change.
@@ -2144,5 +2158,48 @@ mod tests {
         let out = fenced_delta(&big);
         assert!(out.contains("truncated"), "{}", &out[out.len() - 80..]);
         assert!(out.len() < big.len() + 200);
+    }
+
+    /// #311 slice B: the effective inputs open the squash body above the
+    /// agent's closing summary, exactly where a batch's member list opens it —
+    /// and a job with neither keeps the summary byte-identical.
+    #[test]
+    fn the_squash_body_opens_with_the_batch_list_then_the_inputs() {
+        let plain = test_utils::fixture::job("acme/api", 1);
+        assert_eq!(
+            squash_body_preamble(&plain, Some("did things".into())),
+            Some("did things".to_string()),
+            "an unparameterized, unbatched job is untouched"
+        );
+        assert_eq!(squash_body_preamble(&plain, None), None);
+
+        let parameterized = Job {
+            inputs: std::collections::BTreeMap::from([
+                ("service".into(), "web".into()),
+                ("image_tag".into(), "4f9c1ab".into()),
+            ]),
+            ..plain.clone()
+        };
+        assert_eq!(
+            squash_body_preamble(&parameterized, Some("did things".into())),
+            Some("Inputs: image_tag=4f9c1ab service=web\n\ndid things".to_string()),
+        );
+        assert_eq!(
+            squash_body_preamble(&parameterized, None),
+            Some("Inputs: image_tag=4f9c1ab service=web".to_string()),
+        );
+
+        let batch = Job {
+            members: vec![2, 3],
+            r#type: "web".into(),
+            ..parameterized
+        };
+        assert_eq!(
+            squash_body_preamble(&batch, Some("did things".into())),
+            Some(
+                "Batch of 2 web jobs: #2 #3\nInputs: image_tag=4f9c1ab service=web\n\ndid things"
+                    .to_string()
+            ),
+        );
     }
 }

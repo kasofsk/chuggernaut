@@ -1,6 +1,6 @@
 # Design #311 — Job inputs (parameterizing a run without rewriting it)
 
-Status: IMPLEMENTED IN PART — slice A shipped in jobs #314–#319.
+Status: IMPLEMENTED IN PART — slices A and B shipped in jobs #314–#319 and #369.
 
 [Slice A](#minimum-useful-version) — the recommended first ship — landed end to
 end and is deployed: `CONFIG_SCHEMA_EPOCH` is 2 in
@@ -10,10 +10,16 @@ injected into work, eval and wrap-up containers, and `.chug/jobs/rollback.yaml`
 plus `.chug/tasks/rollback.sh` are the first consumer (#314–#317, with the
 deploy #318 carrying the epoch bump to prod). Slice B's web half — declared
 inputs rendered on the create form, the Draft editor and the job header —
-shipped in #319. **Still open:** slice B's `### Inputs` block in
-`job_brief_block` (`crates/dispatcher/src/exec.rs`) and the squash-body
-`Inputs:` line, which is what agent jobs need; and slice C (`inputs:` on a
-schedule file), blocked on [#310](./310-scheduled-jobs.md) landing.
+shipped in #319, and its dispatcher half in #369: the `### Inputs` block is
+rendered by `chuggernaut_domain::inputs::brief_inputs_block` into
+`job_brief_block` (`crates/dispatcher/src/exec.rs`) for the work agent and every
+agent evaluator, and `summary_inputs_line` opens the squash body above the
+agent's closing summary (`crates/dispatcher/src/eval.rs`). The
+`<untrusted_input>` delimiter in the Option B sketch below was new to this repo
+when it landed, exactly as [correction 3](#corrections-verified-against-the-tree)
+predicted — the brief block did not already use one for the description, and
+still does not. **Still open:** slice C (`inputs:` on a schedule file), which
+[#310](./310-scheduled-jobs.md) has since unblocked.
 
 Written against the tree at `acdb2c6`. Every claim about current behavior below
 was read out of `spec.md` and the source in this repo; where the brief and the
