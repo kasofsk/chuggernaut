@@ -159,7 +159,11 @@ async fn commit_to_integration(rig: &Rig, files: &[(&str, &str)]) {
 async fn link_seeds_config_without_clobbering_and_leaves_origin_untouched() {
     let Some(rig) = rig().await else { return };
     rig.origin
-        .commit_to_main("jobs/code.yaml", b"name: custom", "user's own job type")
+        .commit_to_main(
+            ".chug/jobs/code.yaml",
+            b"name: custom",
+            "user's own job type",
+        )
         .await;
     let origin_main_before = rig.origin.main_sha().await;
 
@@ -180,18 +184,21 @@ async fn link_seeds_config_without_clobbering_and_leaves_origin_untouched() {
     );
     assert_eq!(rig.origin.main_sha().await, origin_main_before);
     let integration_yaml = repos
-        .read_file_at("acme", "api", "integration", "jobs/code.yaml")
+        .read_file_at("acme", "api", "integration", ".chug/jobs/code.yaml")
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(integration_yaml, "name: custom");
+    assert_eq!(
+        integration_yaml, "name: custom",
+        "the seed skips a config file the repo already carries"
+    );
     assert!(
         repos
-            .read_file_at("acme", "api", "integration", "prompts/work/code.md")
+            .read_file_at("acme", "api", "integration", ".chug/prompts/work/code.md")
             .await
             .unwrap()
             .is_some(),
-        "template prompt seeded"
+        "template prompt seeded under the §1.1 config root"
     );
     let origin_sha = repos.origin_main_sha("acme", "api").await.unwrap();
     assert_eq!(

@@ -57,11 +57,11 @@ RUN arch="$(dpkg --print-architecture)" \
 # static binary. The test-utils harness NEVER execs it (it reaches a broker only
 # via CHUG_TEST_NATS_URL or a testcontainers image — crates/test-utils/src/nats.rs,
 # #378): the scripts do. `.chug/tasks/coverage.sh` starts it and exports the URL
-# on every coverage run, and `.chug/tasks/ci.sh` does the same under
-# CHUG_CI_LOCAL_NATS=1 — which is how this image executes the SHARED-server half
-# of the NATS tier with no Docker socket at all. Only that half: the
-# private-server suites (NatsTestServer::spawn) ignore the URL and still need a
-# daemon, so both scripts name them as self-skipping (testing.md).
+# on every coverage run, and `.chug/tasks/ci.sh` does the same by default since
+# #382 (CHUG_CI_LOCAL_NATS=0 opts out) — which is how this image executes the
+# SHARED-server half of the NATS tier with no Docker socket at all. Only that
+# half: the private-server suites (NatsTestServer::spawn) ignore the URL and
+# still need a daemon, so both scripts name them as self-skipping (testing.md).
 #
 # Arch-selected for the same reason as sccache above (deploy #347): this binary
 # IS the tier-2 mechanism on this image, so a qemu-emulated one means the tier a

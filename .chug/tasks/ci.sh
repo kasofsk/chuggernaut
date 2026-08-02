@@ -6,10 +6,11 @@
 # a broker exactly two ways and only two (crates/test-utils/src/nats.rs): the
 # URL in CHUG_TEST_NATS_URL, or a `nats` image started through testcontainers,
 # which needs Docker. It never execs a `nats-server` binary itself. So this gate
-# PROVIDES the first: a communal Docker NATS when a daemon is usable, else — with
-# CHUG_CI_LOCAL_NATS=1 — the `nats-server` the agent-rust image bakes, started
-# here and exported as CHUG_TEST_NATS_URL (deploy/prod/Dockerfile.agent-rust,
-# testing.md). When neither happens the tier self-skips.
+# PROVIDES the first: a communal Docker NATS when a daemon is usable, else the
+# `nats-server` the agent-rust image bakes, started here and exported as
+# CHUG_TEST_NATS_URL (deploy/prod/Dockerfile.agent-rust, testing.md) — on by
+# default since #382, CHUG_CI_LOCAL_NATS=0 opts out. When neither happens the
+# tier self-skips.
 #
 # A URL is not the WHOLE tier, though: NatsTestServer::spawn/spawn_with_config
 # never read the env var by construction (nats.rs gates that branch on `shared &&
@@ -214,18 +215,17 @@ start_gate_nats() {
 # nats_store` for real, 9 tests, no Docker. Same mechanism as
 # .chug/tasks/coverage.sh's start_nats, which is why both scripts agree.
 #
-# OPT-IN, and only for now: #378 measured the whole tier against it and the
-# dispatcher's suites do not yet pass (four failures across tests/inputs.rs,
-# tests/groups.rs and tests/origin.rs — born red while the tier was dark). A
-# default-on flip would fail every job's gate, so the flip is the last step of
-# the follow-up that fixes them, not this probe fix. It buys the SHARED-server
-# files only — the private-server ones stay dark without a daemon, which is what
-# announce_tier2 subtracts.
+# ON by default since #382, which fixed the four born-red dispatcher tests
+# (tests/inputs.rs, tests/groups.rs, tests/origin.rs) #378 measured against it —
+# so a job container with no docker socket, which is every evaluator, now runs
+# the tier instead of announcing that it could have. CHUG_CI_LOCAL_NATS=0 opts
+# back out. It buys the SHARED-server files only — the private-server ones stay
+# dark without a daemon, which is what announce_tier2 subtracts.
 start_gate_nats_local() {
 	command -v nats-server >/dev/null 2>&1 || return 0
-	if [ "${CHUG_CI_LOCAL_NATS:-0}" != "1" ]; then
-		echo "ci: a local nats-server IS available but is not used — set CHUG_CI_LOCAL_NATS=1"
-		echo "    to run tier-2 against it (see start_gate_nats_local in this script)."
+	if [ "${CHUG_CI_LOCAL_NATS:-1}" != "1" ]; then
+		echo "ci: a local nats-server IS available but CHUG_CI_LOCAL_NATS=${CHUG_CI_LOCAL_NATS:-1}"
+		echo "    opts out of it — tier-2 will self-skip (see start_gate_nats_local)."
 		return 0
 	fi
 	GATE_NATS_DIR="$(mktemp -d)"
@@ -360,11 +360,13 @@ run_full_ci() {
 	# After, never before: the announcement reports the mechanism's result.
 	announce_tier2
 
-	# Tier-2's dispatcher suites overflow the default test-thread stack in a
-	# debug build — measured in agent-rust on 2026-08-02, a dozen binaries abort
-	# with `has overflowed its stack` before asserting anything. Debug-mode async
-	# state machines are simply large, so raise the stack whenever the tier
-	# actually runs (and never otherwise, to keep a tier-1-only run untouched).
+	# Tier-2's dispatcher suites overflow libtest's 2 MiB default test-thread
+	# stack in a debug build — a dozen binaries abort with `has overflowed its
+	# stack` before asserting anything. Measured 2026-08-02 (#382): the deepest
+	# chain is 17 NON-recursive dispatcher frames and peaks at 1899 KiB in debug
+	# against 52 KiB in release, so it is unoptimized async state machines and
+	# not a runaway in the code. 4 MiB clears the whole tier; 16 MiB is headroom.
+	# Raised only when the tier actually runs, so a tier-1-only run is untouched.
 	if [ "$nats_ready" -eq 1 ]; then
 		RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}"
 		export RUST_MIN_STACK

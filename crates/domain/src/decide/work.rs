@@ -8,8 +8,9 @@
 //! - **Entered** — the launch-time fork (§3.2 steps 1–6, §14.2): the contract
 //!   and the §2.2 launch-time KV pass either hold — the job moves to `Work` and
 //!   a first cycle announces itself — or they do not, and the job parks. Which
-//!   park is the decision: a *first* launch tripping the version-skew gate is
-//!   `Stalled` (pre-work, Retry/Revoke only), everything else `Escalated`.
+//!   park is the decision: a job still `Ready` has no work task, so it parks
+//!   `Stalled` (pre-work, Retry/Revoke only, spec §575); a rework re-entry is
+//!   post-work and parks `Escalated`.
 //! - **Attempt** — one attempt's task record, and whether it runs at all: a
 //!   declared human work task and a *claimed* attempt (§1.2) are parked for the
 //!   operator instead of launched, and the claim is consumed by the same
@@ -431,13 +432,10 @@ fn decide_entered(
     (transitions, effects, WorkStep::Begin)
 }
 
-/// Which park a failed launch-time validation earns. Config-ahead-of-binary
-/// (§14.2) on a *first* launch is `Stalled` — Retry/Revoke only, one park —
-/// instead of the `Escalated` storm every `web` job took on 2026-07-22. A rework
-/// re-entry (cycle > 1) reads the already-pinned, already-validated base_ref and
-/// is post-work, so a skew surfacing there keeps the `Escalated` path (and
-/// Ready→Stalled is the only valid pre-work park anyway — Evaluation/WrapUp→
-/// Stalled is not in the §2.1 table).
+/// Which park a failed launch-time validation earns. A job still `Ready` has no
+/// work task yet, so every pre-work park is `Stalled` (§2.1's only pre-work park
+/// edge, and spec §575) — config-ahead-of-binary (§14.2) says so with its own
+/// reason; a rework re-entry is post-work and keeps the `Escalated` path.
 fn decide_entered_park(
     view: &WorkView<'_>,
     owner: &str,
@@ -445,6 +443,7 @@ fn decide_entered_park(
     failure: EntryFailure,
 ) -> Effect {
     let seq = view.job.id;
+    let pre_work = view.job.state == JobState::Ready;
     let (reason, detail) = match failure {
         EntryFailure::Contract(errors) => {
             let detail = errors
@@ -480,11 +479,22 @@ fn decide_entered_park(
             format!("Job {seq}: input rejected at launch: {violation}"),
         ),
     };
+    let (owner, project, reason) = (owner.to_string(), project.to_string(), reason.to_string());
+    if pre_work {
+        return Effect::Stall {
+            owner,
+            project,
+            seq,
+            reason,
+            detail,
+            failing_task: None,
+        };
+    }
     Effect::Escalate {
-        owner: owner.to_string(),
-        project: project.to_string(),
+        owner,
+        project,
         seq,
-        reason: reason.to_string(),
+        reason,
         detail,
         failing_task: None,
     }
@@ -1073,6 +1083,26 @@ mod tests {
             .collect()
     }
 
+    /// A launch-time park's payload plus the state it puts the job in —
+    /// `Stalled` pre-work, `Escalated` after (§2.1, spec §575).
+    fn park(effects: &[Effect]) -> (JobState, &str, &str, Option<u64>) {
+        match effects.last().expect("an effect") {
+            Effect::Stall {
+                reason,
+                detail,
+                failing_task,
+                ..
+            } => (JobState::Stalled, reason, detail, *failing_task),
+            Effect::Escalate {
+                reason,
+                detail,
+                failing_task,
+                ..
+            } => (JobState::Escalated, reason, detail, *failing_task),
+            other => panic!("expected a park, got {other:?}"),
+        }
+    }
+
     fn escalation(effects: &[Effect]) -> (&str, &str, Option<u64>) {
         match effects.last().expect("an effect") {
             Effect::Escalate {
@@ -1196,9 +1226,9 @@ mod tests {
         assert_eq!(escalation(&effects).0, "launch_validation_failed");
     }
 
-    /// Any other contract error escalates, with every field error verbatim.
+    /// Any other contract error parks, with every field error verbatim.
     #[test]
-    fn entry_contract_errors_escalate_with_the_reasons() {
+    fn entry_contract_errors_park_with_the_reasons() {
         let job = sample_job(JobState::Ready);
         let (_, effects, _) = decide(
             &WorkView::entry(&job, None, 1, Utc::now()),
@@ -1210,7 +1240,8 @@ mod tests {
                 )])),
             },
         );
-        let (reason, detail, failing) = escalation(&effects);
+        let (state, reason, detail, failing) = park(&effects);
+        assert_eq!(state, JobState::Stalled);
         assert_eq!(reason, "launch_validation_failed");
         assert_eq!(
             detail,
@@ -1221,7 +1252,7 @@ mod tests {
 
     /// The §2.2 launch-time KV pass names what is missing, in order.
     #[test]
-    fn entry_missing_kv_escalates_naming_every_name() {
+    fn entry_missing_kv_parks_naming_every_name() {
         let job = sample_job(JobState::Ready);
         let (_, effects, _) = decide(
             &WorkView::entry(&job, None, 1, Utc::now()),
@@ -1233,9 +1264,38 @@ mod tests {
             },
         );
         assert_eq!(
-            escalation(&effects).1,
+            park(&effects).2,
             "Job 7: missing at launch: secret 'DEPLOY_KEY', var 'REGION'"
         );
+    }
+
+    /// **The §2.1 park-edge guard**: a job still `Ready` has no work task, so
+    /// every launch-time park is `Stalled` — an `Escalate` here is a transition
+    /// [`crate::state::assert_transition`] rejects, which silently strands the job.
+    #[test]
+    fn every_pre_work_park_stalls_a_ready_job() {
+        let job = sample_job(JobState::Ready);
+        for failure in [
+            EntryFailure::Contract(vec![ValidationError::new(
+                Some(7),
+                "work.prompt",
+                "missing",
+            )]),
+            EntryFailure::MissingKv(vec!["secret 'DEPLOY_KEY'".into()]),
+            EntryFailure::BadInput("input 'sha': value contains ';'".into()),
+        ] {
+            let (_, effects, _) = decide(
+                &WorkView::entry(&job, None, 1, Utc::now()),
+                WorkEvent::Entered {
+                    failure: Some(failure),
+                },
+            );
+            assert_eq!(park(&effects).0, JobState::Stalled);
+            assert!(
+                crate::state::assert_transition(job.state, JobState::Stalled).is_ok(),
+                "the park state must be an edge the §2.1 table admits"
+            );
+        }
     }
 
     /// The third launch-time pass (design #311 Decision 3): an input value that
@@ -1243,7 +1303,7 @@ mod tests {
     /// no container, and the violation named. Reaching this means an earlier pass
     /// was bypassed, which is why it parks rather than sanitizing.
     #[test]
-    fn entry_bad_input_escalates_naming_the_violation() {
+    fn entry_bad_input_parks_naming_the_violation() {
         let job = sample_job(JobState::Ready);
         let (transitions, effects, step) = decide(
             &WorkView::entry(&job, None, 1, Utc::now()),
@@ -1255,7 +1315,8 @@ mod tests {
         );
         assert!(transitions.is_empty(), "a parked entry moves no record");
         assert!(matches!(step, WorkStep::Idle), "and launches nothing");
-        let (reason, detail, failing) = escalation(&effects);
+        let (state, reason, detail, failing) = park(&effects);
+        assert_eq!(state, JobState::Stalled, "pre-work parks are Stalled");
         assert_eq!(reason, "launch_validation_failed");
         assert_eq!(
             detail,

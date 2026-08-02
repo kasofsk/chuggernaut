@@ -10,9 +10,11 @@ The merge gate (`.chug/tasks/ci.sh`) runs tier 1, and tier 2 when it can. The
 exports one, else a `nats` image started through testcontainers, which needs a
 Docker daemon. It never execs a `nats-server` binary. `ci.sh` provides the first
 — a communal Docker NATS for the whole gate when a daemon is usable, else the
-image's baked `nats-server` started by the gate itself under `CHUG_CI_LOCAL_NATS=1`.
-That second path stays opt-in until the four dispatcher tier-2 tests that went red
-while the tier was dark are fixed, and it buys the **shared-server** files only:
+image's baked `nats-server` started by the gate itself. That second path is **on by
+default** since job 382 fixed the four dispatcher tier-2 tests that went red while
+the tier was dark (`CHUG_CI_LOCAL_NATS=0` opts back out), which is what makes the
+tier run on an evaluator container — those get no Docker socket. It buys the
+**shared-server** files only:
 `NatsTestServer::spawn`/`spawn_with_config` never consult the URL, so the
 private-server files self-skip on a Docker-less host and the gate names them
 rather than counting them. What the gate announces is the *result* of that

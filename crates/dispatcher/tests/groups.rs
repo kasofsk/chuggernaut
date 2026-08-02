@@ -158,16 +158,21 @@ async fn update_events(store: &NatsStore, seq: u64) -> Vec<serde_json::Value> {
 }
 
 /// The work agent commits on the job branch, so the job can actually land.
-fn commit_on_work(rig: &Rig) {
-    let bare = rig.repo.bare_path();
-    rig.provider.on_run(move |cfg| async move {
-        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
-        let work = clone_branch_from(&bare, &branch).await;
-        let body = format!("// work produced on {branch}\n");
-        work.commit_file("src/work.rs", body.as_bytes(), "work")
-            .await;
-        work.push(&branch).await;
-    });
+/// `runs` hooks are queued, one per work run the test drives — a `FakeProvider`
+/// hook is `FnOnce`, so an unhooked run leaves the branch empty and the job
+/// escalates `no_output_produced` instead.
+fn commit_on_work(rig: &Rig, runs: usize) {
+    for _ in 0..runs {
+        let bare = rig.repo.bare_path();
+        rig.provider.on_run(move |cfg| async move {
+            let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+            let work = clone_branch_from(&bare, &branch).await;
+            let body = format!("// work produced on {branch}\n");
+            work.commit_file("src/work.rs", body.as_bytes(), "work")
+                .await;
+            work.push(&branch).await;
+        });
+    }
 }
 
 /// The env keys that legitimately differ between two *different* jobs: the
@@ -202,7 +207,7 @@ fn comparable_env(env: &HashMap<String, String>) -> BTreeMap<&str, &str> {
 async fn a_done_job_can_be_grouped_and_the_record_shows_it() {
     let Some(rig) = rig().await else { return };
     let store = rig.store.clone();
-    commit_on_work(&rig);
+    commit_on_work(&rig, 1);
 
     let (handle, sink) = spawn_checked(rig.core);
     let job = handle.create_job(req(&[])).await.unwrap();
@@ -348,7 +353,7 @@ async fn a_revoked_job_can_be_grouped() {
 async fn groups_never_reach_the_container_env() {
     let Some(rig) = rig().await else { return };
     let (store, backend, provider) = (rig.store.clone(), rig.backend.clone(), rig.provider.clone());
-    commit_on_work(&rig);
+    commit_on_work(&rig, 2);
 
     let (handle, sink) = spawn_checked(rig.core);
     let plain = handle.create_job(req(&[])).await.unwrap();

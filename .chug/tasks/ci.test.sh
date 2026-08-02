@@ -16,7 +16,8 @@
 #   but two independent notions of "ready" drifting apart.
 #
 # The defect's own configuration — a baked `nats-server`, no Docker daemon, no
-# CHUG_TEST_NATS_URL — is case 1, and it must now genuinely RUN the tier.
+# CHUG_TEST_NATS_URL and nothing opted in — is case 1, and since #382 flipped
+# CHUG_CI_LOCAL_NATS to opt-OUT it must genuinely RUN the tier.
 # Deliberately Docker-free: a Docker-less path proven with a real daemon would
 # prove nothing.
 #
@@ -128,12 +129,21 @@ setup() { # setup <docker-mode> <nats-mode>
 	chmod +x "$BIN"/*
 }
 
+# A third argument sets CHUG_CI_LOCAL_NATS; omitting it leaves the variable
+# UNSET, which is the case that exercises ci.sh's own default rather than a
+# value this test chose.
 run_sut() { # run_sut <stdout-file> [CHUG_TEST_NATS_URL] [CHUG_CI_LOCAL_NATS]
 	set +e
 	(
 		cd "$REPO" || exit 1
-		PATH="$BIN:/usr/bin:/bin" RUSTC_WRAPPER="" BASE_BRANCH="" RUST_MIN_STACK="" \
-			CHUG_TEST_NATS_URL="${2:-}" CHUG_CI_LOCAL_NATS="${3:-0}" sh "$SUT" >"$1" 2>&1
+		export PATH="$BIN:/usr/bin:/bin" RUSTC_WRAPPER="" BASE_BRANCH="" RUST_MIN_STACK=""
+		export CHUG_TEST_NATS_URL="${2:-}"
+		if [ "$#" -ge 3 ]; then
+			export CHUG_CI_LOCAL_NATS="$3"
+		else
+			unset CHUG_CI_LOCAL_NATS
+		fi
+		sh "$SUT" >"$1" 2>&1
 	)
 	STATUS=$?
 	set -e
@@ -165,9 +175,9 @@ announcement_matches_mechanism() { # <stdout-file> <docker-mode>
 }
 
 # --- case 1: the #375 defect — a baked binary and no Docker -------------------
-echo "case 1: nats-server present, no Docker, opt-in on — the gate STARTS one and the tier really runs"
+echo "case 1: nats-server present, no Docker, nothing set — the gate STARTS one and the tier really runs"
 setup down ready
-run_sut "$WORK/out1.txt" "" 1
+run_sut "$WORK/out1.txt"
 
 check "exits 0" "$([ "$STATUS" -eq 0 ] && echo ok || echo no)"
 check "announcement matches the mechanism" "$(announcement_matches_mechanism "$WORK/out1.txt" down)"
@@ -181,25 +191,28 @@ check "claims only the file a URL reaches" "$(saw "$WORK/out1.txt" "1 of 2 integ
 check "names the private-server file as self-skipping" "$(saw "$WORK/out1.txt" "$PRIVATE_FILE")"
 check "warns the tally over-counts the self-skips" "$(saw "$WORK/out1.txt" "SELF-SKIPPED (no Docker)")"
 
-# --- case 1b: the same host with the opt-in off -------------------------------
-# The defect's exact shape: a `nats-server` on PATH that the gate does not use.
-# It must then announce a SKIP and say how to turn it on — never claim the tier.
-echo "case 1b: nats-server present but opt-in off — announces the skip, not the tier"
+# --- case 1b: the same host, opted out -----------------------------------------
+# The #375 defect's exact shape, now reachable only on purpose: a `nats-server`
+# on PATH that the gate does not use. It must then announce a SKIP and say what
+# turned it off — never claim the tier. Also pins the flip itself: case 1 and
+# this case differ only in CHUG_CI_LOCAL_NATS, so an accidental revert to
+# opt-in makes case 1 look like this one.
+echo "case 1b: nats-server present but CHUG_CI_LOCAL_NATS=0 — announces the skip, not the tier"
 setup down ready
-run_sut "$WORK/out1b.txt"
+run_sut "$WORK/out1b.txt" "" 0
 
 check "exits 0" "$([ "$STATUS" -eq 0 ] && echo ok || echo no)"
 check "announcement matches the mechanism" "$(announcement_matches_mechanism "$WORK/out1b.txt" down)"
 check "never claims the tier ran" "$(absent "$WORK/out1b.txt" "tier-2 (NATS) ENABLED")"
 check "announces the skip" "$(saw "$WORK/out1b.txt" "tier-2 (NATS) SKIPPED")"
-check "names the opt-in" "$(saw "$WORK/out1b.txt" "set CHUG_CI_LOCAL_NATS=1")"
+check "names the opt-out" "$(saw "$WORK/out1b.txt" "CHUG_CI_LOCAL_NATS=0")"
 check "exports no URL" "$(absent "$CARGO_LOG" "CHUG_TEST_NATS_URL=nats://")"
 check "leaves the stack alone" "$(saw "$CARGO_LOG" "RUST_MIN_STACK=]")"
 
 # --- case 2: the binary is there but the server cannot start ------------------
 echo "case 2: a nats-server that dies is NOT a tier that runs"
 setup down dead
-run_sut "$WORK/out2.txt" "" 1
+run_sut "$WORK/out2.txt"
 
 check "exits 0" "$([ "$STATUS" -eq 0 ] && echo ok || echo no)"
 check "announcement matches the mechanism" "$(announcement_matches_mechanism "$WORK/out2.txt" down)"
@@ -223,7 +236,7 @@ check "never claims the tier ran" "$(absent "$WORK/out3.txt" "tier-2 (NATS) ENAB
 # --- case 4: a Docker daemon ---------------------------------------------------
 echo "case 4: with a daemon the communal container still owns the tier"
 setup ok ready
-run_sut "$WORK/out4.txt" "" 1
+run_sut "$WORK/out4.txt"
 
 check "exits 0" "$([ "$STATUS" -eq 0 ] && echo ok || echo no)"
 check "announcement matches the mechanism" "$(announcement_matches_mechanism "$WORK/out4.txt" ok)"

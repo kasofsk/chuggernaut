@@ -166,9 +166,9 @@ async fn rig() -> Option<Rig> {
 }
 
 /// A `Core` over an already-seeded store and repo. Shared by [`rig`] and by the
-/// launch-park test, which needs a **second** core: a fresh one enqueues every
-/// `Ready` job at construction, which is how a job whose record was rewritten
-/// underneath it gets re-launched.
+/// two tests that rewrite a job record behind a live `Core`: only a fresh one
+/// re-reads `jobs.*` KV, re-enqueuing every `Ready` job and re-indexing the
+/// dependency graph the in-memory one still remembers as it was.
 async fn core_over(
     store: &NatsStore,
     repo: &TempRepo,
@@ -421,11 +421,16 @@ async fn a_blocked_job_resolves_its_defaults_at_the_unblock_ref() {
     let mut done = jobs.get("acme", "api", upstream.id).await.unwrap().unwrap();
     done.state = JobState::Done;
     jobs.put(&done).await.unwrap();
-    rig.core
-        .on_job_done("acme", "api", upstream.id)
-        .await
-        .unwrap();
-    assert_invariants(&rig.core);
+    let mut core = core_over(
+        &rig.store,
+        &rig.repo,
+        &rig.backend,
+        &rig.provider,
+        rig._server.url(),
+    )
+    .await;
+    core.on_job_done("acme", "api", upstream.id).await.unwrap();
+    assert_invariants(&core);
 
     let unblocked = stored(&rig.store, job.id).await;
     assert_eq!(unblocked.state, JobState::Ready);
@@ -665,7 +670,11 @@ async fn a_value_outside_the_charset_parks_the_job_at_launch() {
     )
     .await;
     assert_invariants_of(&sink);
-    assert_eq!(parked.state, JobState::Escalated, "parks like a missing KV");
+    assert_eq!(
+        parked.state,
+        JobState::Stalled,
+        "parks like a missing KV, and a pre-work park is Stalled (spec §575)"
+    );
     let escalation = parked.escalation.expect("the park records why");
     assert_eq!(escalation.reason, "launch_validation_failed");
     assert!(

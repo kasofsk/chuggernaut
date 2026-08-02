@@ -572,7 +572,7 @@ A parked claimed attempt is visibly *in progress by a human*: it appears in the 
 
 Escalation never bypasses evaluation — `Done` is only reachable via an evaluation pass.
 
-**Pre-Work escalations** — escalations raised before any work task exists put the job in the **`Stalled`** state (not `Escalated`): Blocked→Stalled on re-validation failure (see §2.1); job-deadline escalation from Ready (Ready→Stalled, see §3.5). They accept only `Retry` and `Revoke`; `Resolve` is rejected with 400. For these, `Retry` re-attempts the failed step — re-runs Ready-transition re-validation for the former, re-enqueues the job for execution for the latter — rather than creating a work task. The distinction is carried by the state itself: `Stalled` has no transition into `Work` or `Evaluation`, so a mis-routed `Resolve` is impossible by construction rather than guarded at resolve time.
+**Pre-Work escalations** — escalations raised before any work task exists put the job in the **`Stalled`** state (not `Escalated`): Blocked→Stalled on re-validation failure (see §2.1); job-deadline escalation from Ready (Ready→Stalled, see §3.5); launch-time validation failure from Ready (Ready→Stalled, see §2.1 and §3.2 — a first-cycle launch parks the job it never started, whatever the failing pass). They accept only `Retry` and `Revoke`; `Resolve` is rejected with 400. For these, `Retry` re-attempts the failed step — re-runs Ready-transition re-validation for a `Blocked` park, re-enqueues the job for execution for a `Ready` one (deadline or launch validation) — rather than creating a work task. The distinction is carried by the state itself: `Stalled` has no transition into `Work` or `Evaluation`, so a mis-routed `Resolve` is impossible by construction rather than guarded at resolve time.
 
 **Manual triage (advisory)** — when a job is `Escalated` or `Stalled`, the operator may **dispatch a triage task** (`POST .../jobs/{seq}/triage`, §6.2) to help understand *why* it failed. The dispatcher runs an agent over the whole job state — the job brief, the escalation reason, every task that ran with its result, and the per-task captured Stdout logs (decrypted via the `age_artifacts` identity) — and records its written assessment + recommendation as a `TaskPhase::Triage` task carrying `TaskResult::Triage`. Triage is **purely advisory**: it never changes job state and creates no job transition (there is no `Triage` row in the §2.1 table). The operator still decides Retry / Resolve / Revoke. It runs in a platform-level image (`TRIAGE_IMAGE`, §12.4) with provider/model from the platform agent defaults, so it works uniformly on any job type (agent/command/human). The run is self-contained — the prompt embeds the job state in plaintext and there is no channel MCP, so the assessment is read back from the agent CLI's own JSON result text rather than a `submit_result` call. Session transcripts are omitted from the prompt by design (opaque, large, low value). Triage may be dispatched repeatedly; a revoke's container cleanup kills an in-flight triage.
 
@@ -793,11 +793,12 @@ The authoritative definition of all valid job state transitions. No transition e
 | `Blocked` | `Stalled` | Last upstream dep reaches Done | Re-validation of static config at `base_ref` fails (file deleted or renamed since release) | Create Human task describing the missing file; publish `job-stalled` |
 | `Ready` | `Work` | Dispatcher picks up job | — | Create work task (cycle=1, attempt=1); create branch `job/{seq}` from `base_ref`; launch container or surface Human task; publish `job-started` |
 | `Ready` | `Stalled` | `job_deadline` elapsed before work started (§3.5) | — | Create Human task noting the deadline; publish `job-stalled` |
+| `Ready` | `Stalled` | Launch-time validation fails (declared secret or var missing from KV, contract error, or an input value outside the charset) | — | Create Human task naming what failed, reason `launch_validation_failed` (`config_schema_skew` for §14.2 skew); launch nothing; publish `job-stalled`. A pre-Work park (§575): no work task exists, so `Resolve` must be impossible by construction |
 | `Work` | `Work` | Container work task fails, retries remain | `attempt ≤ work_retries` | Hard-reset `job/{seq}` to `base_ref` (a container failure discards the attempt — contrast rework re-entry below, and the human `Fail` handoff in §1.2, both of which preserve the branch), unless the crashed attempt pushed commits (then recovered as-is, see §3.2 crash recovery); create new task (same cycle, attempt++). An **agent** container that exits 0 but produced **nothing** (no commits beyond `base_ref` **and** empty summary) fails here too, reason `no_output_produced` (§3.2 empty-output guard) |
 | `Work` | `Work` | Human-performed work attempt resolved `Fail`, retries remain | `attempt ≤ work_retries` | **Preserve** `job/{seq}` as-is (deliberate handoff at a clean commit boundary — operator commits survive); inject the `Fail` `structured` notes into the next attempt's context like eval findings; create new task (same cycle, attempt++, launched per the DECLARED kind), §1.2 |
 | `Work` | `Escalated` | Work task fails, no retries left | `attempt > work_retries` | Create Human escalation task; publish `job-escalated` |
 | `Work` | `Escalated` | Human work task resolved `Fail` | — | Create Human escalation task; publish `job-escalated` |
-| `Work` | `Escalated` | Launch-time validation fails (declared secret or var missing from KV) | — | Create Human escalation task; publish `job-escalated` |
+| `Work` | `Escalated` | Launch-time validation fails on a rework re-entry (cycle > 1) | — | Create Human escalation task; publish `job-escalated` |
 | `Work` | `Evaluation` | Work task succeeds | — | If default HEAD moved past `base_ref`, rebase `job/{seq}` onto HEAD and set `base_ref` = HEAD (§3.2 step 9; bookkeeping, no cycle/budget change; a conflict falls through on the old base); create one task per evaluator in the lowest `stage` (§3.3 staged evaluation; attempt=1); publish `job-evaluation-started` |
 | `Evaluation` | `Evaluation` | A stage completes with every required evaluator passing and a later stage remains | — | Create the next stage's evaluator tasks (attempt=1); a short-circuited stage creates none |
 | `Evaluation` | `Evaluation` | Agent eval container exits without `submit_eval`, retries remain | `attempt ≤ eval_retries` | Create new eval task (same cycle, attempt++) |
@@ -1056,7 +1057,8 @@ pub enum ContainerStatus { Running, Exited { exit_code: i32 } }
 
 For each Ready job, the dispatcher executes the following sequence:
 
-1. Transition job Ready → Work; create work task (cycle=1, attempt=1)
+1. Run the §2.2 launch-time pass (contract at `base_ref`, declared secrets/vars present, input values inside the charset), then transition job Ready → Work; create work task (cycle=1, attempt=1)
+   - **A failed pass parks the job before the transition:** it stays `Ready` and moves to `Stalled` (§2.1, §575) with reason `launch_validation_failed` — `config_schema_skew` for a §14.2 skew — creating no work task and launching nothing. Only a rework re-entry, which is already past `Work`, parks `Escalated`.
    - **Claims (§1.2):** every work-task launch (this step, retries, escalation Retry, rework re-entry) first consults `claim_next` inside the serialized launch path: when set, the attempt is parked as a Pending task with the declared kind and `performed_by: human` instead of launching a container, and the claim is consumed. Steps 3–7 are skipped for the parked attempt; resolution (Pass/Fail, §1.2) drives it from there.
 2. **For `work.type: agent | command`**: create branch `job/{seq}` from `base_ref`; load job type and prompt files from `base_ref`. **For `work.type: human`**: create branch `job/{seq}` from `base_ref`; surface the Human task in the operator inbox; await operator resolution (skip to step 8). `base_ref` is locked from this point — no external actor or event changes it except a squash-merge conflict (step 12), which updates it under dispatcher control before re-entering this step.
    - **Rework/conflict context (cycle > 1):** if `eval_context` is non-empty or `merge_conflict` is set, the dispatcher reads the prompt file content from the repo at `base_ref`, appends a structured context block (see §4.3 for format), and passes the combined string as the prompt to the provider. Human rework tasks have the same block appended to their inbox prompt. On cycle 1 the prompt is the file content alone. Prompt content is always resolved by the dispatcher and delivered to containers via a mounted file — never passed as a path (see §4.3).
@@ -1831,7 +1833,8 @@ All events are published exclusively by the dispatcher to `job.events.{owner}.{p
 | `job-rework-started` | Evaluation → Work with cycle++; includes new `cycle`, `reason` (`eval_failure` \| `merge_conflict` \| `merge_gate_failure`), and `eval_context` (populated for `eval_failure` and `merge_gate_failure`; empty for `merge_conflict`) |
 | `job-merge-gate-started` | Eval reduce passed with moved default HEAD; merge-gate tasks created (see §3.3); includes `cycle` |
 | `job-done` | Evaluation → Done |
-| `job-escalated` | Any transition to Escalated (work retries exhausted, rework budget exhausted, launch/re-validation failure, required eval infra failure, human work failed, command eval failure, deadline exceeded); includes `reason` field |
+| `job-escalated` | Any transition to Escalated (work retries exhausted, rework budget exhausted, launch validation failing on a rework re-entry, required eval infra failure, human work failed, command eval failure, deadline exceeded); includes `reason` field |
+| `job-stalled` | Any transition to Stalled — every pre-Work park (§575): Blocked re-validation failure, a first-cycle launch validation failure, a deadline elapsed while Ready; includes `reason` field |
 | `job-escalation-resolved` | Operator completes escalation Human task; includes `action` (`Retry`/`Resolve`/`Revoke`) |
 | `job-revoked` | Any non-terminal → Revoked; includes cascaded job seqs if dependents were also revoked |
 | `schedule-fired` | An occurrence of a schedule (§1.1 schedules) created a job; published on the **created** job; includes `schedule` and `occurrence_at` |
@@ -2055,7 +2058,7 @@ pub trait VarStore: Send + Sync {
 }
 ```
 
-`list` returns both names and values — vars are not sensitive. At job launch the dispatcher reads every var declared in the job type's `vars:` list and injects them as env vars into both work and eval containers. If any declared var is missing at launch, the job transitions to Escalated.
+`list` returns both names and values — vars are not sensitive. At job launch the dispatcher reads every var declared in the job type's `vars:` list and injects them as env vars into both work and eval containers. If any declared var is missing at launch, the job parks: `Stalled` on a first launch (a pre-Work park, §575) and `Escalated` on a rework re-entry.
 
 The `CHUG_` name prefix is **reserved** for vars exactly as it is for secrets (§5.3): a `CHUG_`-prefixed name in `vars:` is a release-validation error, and injection skips it so a stored one cannot clobber a task-origin stamp (§4.1, §6.3).
 
@@ -2079,7 +2082,7 @@ pub trait SecretStore: Send + Sync {
 }
 ```
 
-`list` returns names only — values are never returned to callers outside the dispatcher. The dispatcher decrypts values at job launch and injects them as env vars. Containers never see the age key or the KV bucket. If any declared secret is missing at launch, the job transitions to Escalated.
+`list` returns names only — values are never returned to callers outside the dispatcher. The dispatcher decrypts values at job launch and injects them as env vars. Containers never see the age key or the KV bucket. If any declared secret is missing at launch, the job parks: `Stalled` on a first launch (a pre-Work park, §575) and `Escalated` on a rework re-entry.
 
 Key rotation requires re-encrypting all values with the new public key — a one-time admin operation exposed as a platform CLI command.
 
@@ -2446,8 +2449,9 @@ A job type may also declare `min_dispatcher: <epoch>`. When it exceeds the
 running dispatcher's `CONFIG_SCHEMA_EPOCH`, the config is ahead of the binary:
 `load_job_type` refuses it with a diagnostic naming the file, field, and needed
 version. At launch this parks the job **pre-Work (Stalled)** with that reason —
-Retry/Revoke only, one park, no per-launch escalation storm — rather than
-burning launches into `Escalated` one job at a time.
+Retry/Revoke only, one park, no per-launch escalation storm. Every other
+first-cycle launch failure parks the same way under `launch_validation_failed`
+(§575); only a rework re-entry, past `Work` already, escalates.
 
 Some schema features require that declaration rather than leaving it to the
 author: a non-empty `inputs:` (§1.1) is a field rule error unless

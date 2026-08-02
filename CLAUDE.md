@@ -56,7 +56,8 @@ the absence of a workflow file.
   `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D
   warnings`, and `cargo test --workspace --no-fail-fast`. Tier-2 executes only when
   the gate can hand the harness a broker — a communal Docker NATS, or the image's
-  baked `nats-server` under `CHUG_CI_LOCAL_NATS=1` (#378) — and says which of the
+  baked `nats-server`, which since #382 is the default on a Docker-less host
+  (`CHUG_CI_LOCAL_NATS=0` opts out) — and says which of the
   two happened, naming the private-server files the URL-only path leaves dark;
   otherwise it announces the skip. It is diff-aware, with two independent
   stages: a diff touching `web/` runs `npm ci && npm run build` (tsc + vite), a
