@@ -54,13 +54,18 @@ RUN arch="$(dpkg --print-architecture)" \
  && sccache --version
 
 # nats-server binary for tier-2 (NATS) integration tests. A single ~15 MB
-# static binary; test-utils' harness spawns it as an ephemeral process (no
-# Docker needed) so `.chug/tasks/ci.sh` in this image actually EXECUTES the NATS
-# tier instead of silently skipping it (testing.md).
+# static binary. The test-utils harness NEVER execs it (it reaches a broker only
+# via CHUG_TEST_NATS_URL or a testcontainers image — crates/test-utils/src/nats.rs,
+# #378): the scripts do. `.chug/tasks/coverage.sh` starts it and exports the URL
+# on every coverage run, and `.chug/tasks/ci.sh` does the same under
+# CHUG_CI_LOCAL_NATS=1 — which is how this image executes the SHARED-server half
+# of the NATS tier with no Docker socket at all. Only that half: the
+# private-server suites (NatsTestServer::spawn) ignore the URL and still need a
+# daemon, so both scripts name them as self-skipping (testing.md).
 #
 # Arch-selected for the same reason as sccache above (deploy #347): this binary
-# IS the tier-2 gate on this image, so a qemu-emulated one means the tier the
-# gate reports as EXECUTED ran under emulation on every arm64 node.
+# IS the tier-2 mechanism on this image, so a qemu-emulated one means the tier a
+# script reports as EXECUTED ran under emulation on every arm64 node.
 ARG NATS_VERSION=2.10.22
 RUN arch="$(dpkg --print-architecture)" \
  && case "$arch" in \

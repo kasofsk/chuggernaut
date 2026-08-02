@@ -4,21 +4,32 @@ Normal tests plus fixture-driven end-to-end runs. Three tiers, in increasing cos
 
 ## What CI actually runs
 
-The merge gate (`.chug/tasks/ci.sh`) runs tiers 1 **and 2**. The `test-utils`
-harness reaches a server two ways and only two (`crates/test-utils/src/nats.rs`):
-the URL in `CHUG_TEST_NATS_URL` when a caller exports one, else a `nats` image
-started through testcontainers, which needs a Docker daemon. `ci.sh` provides the
-first — it starts one communal Docker NATS for the whole gate and exports its URL
-— so the NATS tier executes for real rather than self-skipping. It prints the
-tier state up front and a per-tier pass tally at the end (`tier-2 (NATS): N
-passed across M file(s)`), so a green gate is never silently partial.
+The merge gate (`.chug/tasks/ci.sh`) runs tier 1, and tier 2 when it can. The
+`test-utils` harness reaches a server two ways and only two
+(`crates/test-utils/src/nats.rs`): the URL in `CHUG_TEST_NATS_URL` when a caller
+exports one, else a `nats` image started through testcontainers, which needs a
+Docker daemon. It never execs a `nats-server` binary. `ci.sh` provides the first
+— a communal Docker NATS for the whole gate when a daemon is usable, else the
+image's baked `nats-server` started by the gate itself under `CHUG_CI_LOCAL_NATS=1`.
+That second path stays opt-in until the four dispatcher tier-2 tests that went red
+while the tier was dark are fixed, and it buys the **shared-server** files only:
+`NatsTestServer::spawn`/`spawn_with_config` never consult the URL, so the
+private-server files self-skip on a Docker-less host and the gate names them
+rather than counting them. What the gate announces is the *result* of that
+attempt and never a separate probe — the two drifting apart is what job 375 found,
+and `.chug/tasks/ci.test.sh` pins both the claim and its size to the mechanism. It
+prints the tier state up front and a per-tier pass tally at the end (`tier-2
+(NATS): N passed across M file(s)`, flagged as an upper bound when the
+private-server tests self-skipped, since cargo counts a skip as a pass), so a
+green gate is never silently partial.
 
 Tier 3 (real Docker containers) stays out of the gate and self-skips. If NATS is
 unavailable, `ci.sh` prints `tier-2 (NATS): SKIPPED` and, when the diff itself
 adds or edits a tier-2 test file, a loud `!!!` warning — such a change then needs
 a **manual verification note** in the work summary. To run the tier locally
 without Docker, start the `nats-server` binary yourself and point the harness at
-it: `nats-server -js & CHUG_TEST_NATS_URL=nats://127.0.0.1:4222 cargo test`.
+it: `nats-server -js & CHUG_TEST_NATS_URL=nats://127.0.0.1:4222 cargo test` — the
+private-server suites above still skip, so that is not a whole-tier run.
 
 ## Tier 1: Unit
 
@@ -92,7 +103,9 @@ it would have said, and it carries it into the failure output.
 
 The gate itself has a shell test rather than a Rust one — `.chug/tasks/check-comments.test.sh`,
 run directly, no NATS or cargo — alongside `check-duplication.test.sh`,
-`coverage.test.sh`, `doc-lint.test.sh`, `modules-registry.test.sh` (which drives
+`ci.test.sh` (the merge gate's own tier-2 announcement, driven against stubbed
+`cargo`/`docker`/`nats-server`), `coverage.test.sh`, `doc-lint.test.sh`,
+`modules-registry.test.sh` (which drives
 `.chug/tasks/check-modules.sh`) and `.githooks/pre-commit.test.sh` (which drives
 real `git commit`s in throwaway repos with the hook installed). Shell gates are
 tested in shell: the tier-1/2/3 ladder above is about the platform's behavior,

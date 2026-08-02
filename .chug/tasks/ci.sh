@@ -1,14 +1,23 @@
 #!/bin/sh
-# Project-wide CI gate (wired in .chug/jobs/_defaults.yaml). Mirrors
-# .github/workflows/ci.yml.
+# Project-wide CI gate (wired in .chug/jobs/_defaults.yaml). It IS this repo's
+# CI — there is no .github/ workflow here to mirror (CLAUDE.md).
 #
-# Tier-2 (NATS) integration tests run for real here: the agent-rust image bakes
-# a `nats-server` binary, and test-utils' harness spawns it as an ephemeral
-# process (deploy/prod/Dockerfile.agent-rust, testing.md). When NEITHER a
-# `nats-server` binary NOR a Docker daemon is present the harness self-skips —
-# so this script announces the tier state up front and prints a per-tier
-# summary afterward, and a green gate is never silently partial (Docker-only
-# tier-3 tests remain out of scope and self-skip regardless).
+# Tier-2 (NATS) integration tests run for real here. test-utils' harness reaches
+# a broker exactly two ways and only two (crates/test-utils/src/nats.rs): the
+# URL in CHUG_TEST_NATS_URL, or a `nats` image started through testcontainers,
+# which needs Docker. It never execs a `nats-server` binary itself. So this gate
+# PROVIDES the first: a communal Docker NATS when a daemon is usable, else — with
+# CHUG_CI_LOCAL_NATS=1 — the `nats-server` the agent-rust image bakes, started
+# here and exported as CHUG_TEST_NATS_URL (deploy/prod/Dockerfile.agent-rust,
+# testing.md). When neither happens the tier self-skips.
+#
+# A URL is not the WHOLE tier, though: NatsTestServer::spawn/spawn_with_config
+# never read the env var by construction (nats.rs gates that branch on `shared &&
+# config.is_none()`), so the private-server files reach a broker through Docker
+# or not at all. The announcement below therefore reports what start_gate_nats
+# ACHIEVED and which files that mechanism cannot reach, rather than predicting
+# either separately — a green gate is never silently partial (Docker-only tier-3
+# tests remain out of scope and self-skip regardless).
 set -eu
 export CARGO_TERM_COLOR=always
 
@@ -97,20 +106,36 @@ nats_files="$(grep -rlE 'NatsTestServer|require_nats' crates --include='*.rs' 2>
 	| grep '/tests/' || true)"
 nats_count="$(printf '%s\n' "$nats_files" | grep -c . || true)"
 
-# Prefer a local nats-server binary (what the CI image bakes), else a Docker
-# daemon — mirrors NatsTestServer::spawn's mechanism order.
+# The subset of those that needs a PRIVATE server. NatsTestServer::spawn and
+# spawn_with_config (i.e. require_nats_config) never consult CHUG_TEST_NATS_URL,
+# so these reach a broker only through Docker, whatever URL the gate exports —
+# .chug/tasks/coverage.sh carries the same caveat for the same reason.
+nats_private_files="$(grep -rlE 'NatsTestServer::spawn|require_nats_config' crates --include='*.rs' 2>/dev/null \
+	| grep '/tests/' || true)"
+nats_private_count="$(printf '%s\n' "$nats_private_files" | grep -c . || true)"
+
+# Whether tier-2 executes, and how much of it, is never PREDICTED here: both are
+# outcomes of start_gate_nats(), the single thing that decides, which sets these
+# three. The announcement and the mechanism therefore cannot describe different
+# worlds — the #375 defect was two independent notions of "ready" (a probe that
+# counted a local `nats-server` binary the mechanism could not use) drifting
+# apart, and claiming the private-server files for a URL-only mechanism is the
+# same defect one size down.
 nats_ready=0
-if command -v nats-server >/dev/null 2>&1; then
-	nats_ready=1
-elif docker info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
-	nats_ready=1
-fi
+nats_private_ok=0
+nats_mechanism=none
 
 announce_tier2() {
-	if [ "$nats_ready" -eq 1 ]; then
-		echo "ci: tier-2 (NATS) ENABLED — $nats_count integration file(s) execute against a real nats-server"
+	if [ "$nats_ready" -eq 1 ] && [ "$nats_private_ok" -eq 1 ]; then
+		echo "ci: tier-2 (NATS) ENABLED via $nats_mechanism — $nats_count integration file(s) execute against a real nats-server"
+	elif [ "$nats_ready" -eq 1 ]; then
+		echo "ci: tier-2 (NATS) ENABLED via $nats_mechanism — $((nats_count - nats_private_count)) of $nats_count integration file(s) execute in full;"
+		echo "    a URL is not a Docker daemon, so the PRIVATE-server tests (NatsTestServer::spawn /"
+		echo "    require_nats_config) in $nats_private_count file(s) self-skip — and cargo counts a self-skipped"
+		echo "    test as passed, so the tally below over-reports them:"
+		printf '      %s\n' $nats_private_files
 	else
-		echo "ci: tier-2 (NATS) SKIPPED — no nats-server binary or Docker daemon;"
+		echo "ci: tier-2 (NATS) SKIPPED — no CHUG_TEST_NATS_URL, no Docker daemon and no usable nats-server;"
 		echo "    $nats_count integration file(s) self-skip (NOT executed):"
 		printf '      %s\n' $nats_files
 		# GOAL/2 partition: a diff that ADDS or edits tier-2 tests we did not
@@ -145,14 +170,92 @@ announce_tier2() {
 # reaper lag, plus the tier-3 real-container suites) saturated a laptop
 # Docker daemon and flaked the gate with setup timeouts. Per-test namespaces
 # make the sharing safe; the private-server suites (prod-named or config-mode)
-# deliberately ignore the env and keep their own containers. Best-effort: if
-# Docker cannot start it, tests fall back to per-binary containers (or skip,
-# exactly as without it).
+# deliberately ignore the env and keep their own containers.
+#
+# Docker first, then the baked binary: where a daemon exists the communal
+# container is the measured, sibling-aware path, and even a container that fails
+# to start leaves the harness able to run per-binary testcontainers — so that
+# host is tier-2-ready either way. A Docker-less host is ready only if the local
+# `nats-server` actually comes up, which is why `nats_ready` is set from the
+# result and not from `command -v`, and is ready only for the shared-server
+# files, which is why `nats_private_ok` is a separate outcome of the same
+# function rather than a second guess made at announcement time.
 GATE_NATS_NAME=""
+GATE_NATS_PID=""
+GATE_NATS_DIR=""
+GATE_NATS_PORT=4222
 start_gate_nats() {
-	[ -n "${CHUG_TEST_NATS_URL:-}" ] && return 0 # caller provided one
-	command -v docker >/dev/null 2>&1 || return 0
-	docker info >/dev/null 2>&1 || return 0
+	# Probed once, first, and independently of which mechanism wins: it is what
+	# decides whether the private-server files can run, and a caller-provided URL
+	# neither grants nor withholds it.
+	if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+		nats_private_ok=1
+	fi
+	if [ -n "${CHUG_TEST_NATS_URL:-}" ]; then
+		nats_ready=1
+		nats_mechanism="the caller-provided CHUG_TEST_NATS_URL"
+		echo "ci: tier-2 uses the caller-provided CHUG_TEST_NATS_URL=$CHUG_TEST_NATS_URL"
+		echo "    — trusted, NOT probed here (no TCP in POSIX sh). If it is wrong the harness"
+		echo "    prints a loud UNREACHABLE line per binary and falls back to a container."
+		return 0
+	fi
+	if [ "$nats_private_ok" -eq 1 ]; then
+		nats_ready=1
+		nats_mechanism="a communal Docker NATS"
+		start_gate_nats_docker
+		return 0
+	fi
+	start_gate_nats_local
+}
+
+# The Docker-less path (#378), for the host class the agent-rust CI container
+# actually is: the baked `nats-server` and no docker socket. Measured by #375 —
+# `nats-server -js` plus CHUG_TEST_NATS_URL ran `cargo test -p store --test
+# nats_store` for real, 9 tests, no Docker. Same mechanism as
+# .chug/tasks/coverage.sh's start_nats, which is why both scripts agree.
+#
+# OPT-IN, and only for now: #378 measured the whole tier against it and the
+# dispatcher's suites do not yet pass (four failures across tests/inputs.rs,
+# tests/groups.rs and tests/origin.rs — born red while the tier was dark). A
+# default-on flip would fail every job's gate, so the flip is the last step of
+# the follow-up that fixes them, not this probe fix. It buys the SHARED-server
+# files only — the private-server ones stay dark without a daemon, which is what
+# announce_tier2 subtracts.
+start_gate_nats_local() {
+	command -v nats-server >/dev/null 2>&1 || return 0
+	if [ "${CHUG_CI_LOCAL_NATS:-0}" != "1" ]; then
+		echo "ci: a local nats-server IS available but is not used — set CHUG_CI_LOCAL_NATS=1"
+		echo "    to run tier-2 against it (see start_gate_nats_local in this script)."
+		return 0
+	fi
+	GATE_NATS_DIR="$(mktemp -d)"
+	nats-server -js -sd "$GATE_NATS_DIR" -a 127.0.0.1 -p "$GATE_NATS_PORT" \
+		>"$GATE_NATS_DIR/log" 2>&1 &
+	GATE_NATS_PID=$!
+	i=0
+	while [ "$i" -lt 100 ]; do
+		if grep -q "Server is ready" "$GATE_NATS_DIR/log" 2>/dev/null; then
+			CHUG_TEST_NATS_URL="nats://127.0.0.1:$GATE_NATS_PORT"
+			export CHUG_TEST_NATS_URL
+			nats_ready=1
+			nats_mechanism="a local nats-server"
+			echo "ci: gate NATS is a local nats-server at $CHUG_TEST_NATS_URL (pid $GATE_NATS_PID, no Docker)"
+			return 0
+		fi
+		# A server that died (port 4222 already busy, unwritable store dir)
+		# will never print the line — stop waiting the full 20s for it, and
+		# show its own words rather than a generic timeout.
+		kill -0 "$GATE_NATS_PID" 2>/dev/null || break
+		i=$((i + 1))
+		sleep 0.2
+	done
+	echo "!!! ci: the local nats-server did not come up — tier-2 will self-skip. It said:"
+	sed -n '1,20p' "$GATE_NATS_DIR/log" 2>/dev/null | sed 's/^/!!!     /'
+	stop_gate_nats
+	return 0
+}
+
+start_gate_nats_docker() {
 	GATE_NATS_NAME="chug-gate-nats-$$"
 	docker run -d --rm --name "$GATE_NATS_NAME" -p 127.0.0.1:0:4222 \
 		nats:2.10-alpine -js >/dev/null 2>&1 || { GATE_NATS_NAME=""; return 0; }
@@ -193,9 +296,23 @@ start_gate_nats() {
 	return 0
 }
 
+# Spelled as `if` blocks, not `[ ] && cmd`: this runs both from the EXIT trap and
+# from a failed local start, where an AND-list whose test is false is a `set -e`
+# trip that would replace the gate's real exit status.
 stop_gate_nats() {
-	[ -n "$GATE_NATS_NAME" ] && docker rm -f "$GATE_NATS_NAME" >/dev/null 2>&1
+	if [ -n "$GATE_NATS_NAME" ]; then
+		docker rm -f "$GATE_NATS_NAME" >/dev/null 2>&1 || true
+	fi
 	GATE_NATS_NAME=""
+	if [ -n "$GATE_NATS_PID" ]; then
+		kill "$GATE_NATS_PID" 2>/dev/null || true
+	fi
+	GATE_NATS_PID=""
+	if [ -n "$GATE_NATS_DIR" ]; then
+		rm -rf "$GATE_NATS_DIR"
+	fi
+	GATE_NATS_DIR=""
+	return 0
 }
 
 # Typecheck + bundle the operator UI. Same two commands .chug/tasks/web-publish.sh
@@ -234,13 +351,24 @@ run_full_ci() {
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets -- -D warnings
 
+	# POSIX sh has ONE EXIT trap — the sccache stats printer already owns it, so
+	# re-arm with both (a bare `trap stop_gate_nats EXIT` here would silently
+	# clobber the stats printer; the #186 web-publish lesson). Armed BEFORE the
+	# server starts, so nothing it starts can outlive the gate.
+	trap 'stop_gate_nats; print_sccache_stats' EXIT
+	start_gate_nats
+	# After, never before: the announcement reports the mechanism's result.
 	announce_tier2
 
-	start_gate_nats
-	# POSIX sh has ONE EXIT trap — line ~61 already owns it for the sccache
-	# stats, so re-arm with both (a bare `trap stop_gate_nats EXIT` here would
-	# silently clobber the stats printer; the #186 web-publish lesson).
-	trap 'stop_gate_nats; print_sccache_stats' EXIT
+	# Tier-2's dispatcher suites overflow the default test-thread stack in a
+	# debug build — measured in agent-rust on 2026-08-02, a dozen binaries abort
+	# with `has overflowed its stack` before asserting anything. Debug-mode async
+	# state machines are simply large, so raise the stack whenever the tier
+	# actually runs (and never otherwise, to keep a tier-1-only run untouched).
+	if [ "$nats_ready" -eq 1 ]; then
+		RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}"
+		export RUST_MIN_STACK
+	fi
 
 	# Stream the test output live (tee) while capturing cargo's real exit code
 	# through the pipe (POSIX sh has no `pipefail`).
@@ -291,6 +419,14 @@ run_full_ci() {
 
 	if [ "$nats_ready" -eq 1 ]; then
 		echo "ci: tier summary — tier-1+other: $other_passed passed; tier-2 (NATS): $nats_passed passed across $nats_ran file(s)"
+		# A test that returned early because its server was unavailable is a pass
+		# to cargo, so without a daemon that count includes the private-server
+		# tests announce_tier2 named as self-skipping. Say so where the number is,
+		# not only where the announcement was.
+		if [ "$nats_private_ok" -eq 0 ]; then
+			echo "ci:   — of which the private-server tests in $nats_private_count file(s) SELF-SKIPPED (no Docker);"
+			echo "ci:     cargo counts a self-skipped test as passed, so tier-2's number is an upper bound."
+		fi
 	else
 		echo "ci: tier summary — tier-1+other: $other_passed passed; tier-2 (NATS): SKIPPED (0 of $nats_count file(s) executed)"
 	fi

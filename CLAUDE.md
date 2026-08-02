@@ -33,10 +33,15 @@ cargo test -p <crate>          # unit + integration for one crate
 cargo test                     # whole workspace
 ```
 
-Integration tests need **NATS** (and some need **Docker**). Run these dependencies in
-**containers, not host installs** — `test-utils` provides the NATS harness and an `e2e!`
-guard macro that skips when Docker/NATS are unavailable. Prefer `nats-server` via Docker
-over a brew install.
+Integration tests need **NATS** (and some need **Docker**). The `test-utils` harness
+reaches a broker **two ways and only two** (`crates/test-utils/src/nats.rs`): the URL in
+`CHUG_TEST_NATS_URL`, else a `nats` image via testcontainers, which needs Docker — it
+never execs a local `nats-server` itself, so a bare binary on `PATH` buys nothing unless
+you start it and export the URL (`nats-server -js & CHUG_TEST_NATS_URL=nats://127.0.0.1:4222
+cargo test`). That URL buys the **shared-server** suites only: `NatsTestServer::spawn` /
+`spawn_with_config` (the `require_nats_config` guard) never read it, so the
+private-server files still need Docker and self-skip without it. Prefer containers over
+host installs. The `e2e!` guard macro skips when Docker/NATS are unavailable.
 
 ## CI — the evaluation gates ARE the CI
 
@@ -49,8 +54,11 @@ the absence of a workflow file.
 - `.chug/jobs/_defaults.yaml` appends the `ci` **command evaluator** to *every* job
   type. It runs `.chug/tasks/ci.sh` (stage 1) against the job branch before any merge:
   `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D
-  warnings`, and `cargo test --workspace --no-fail-fast` with tier-2 tests
-  executing against a real `nats-server`. It is diff-aware, with two independent
+  warnings`, and `cargo test --workspace --no-fail-fast`. Tier-2 executes only when
+  the gate can hand the harness a broker — a communal Docker NATS, or the image's
+  baked `nats-server` under `CHUG_CI_LOCAL_NATS=1` (#378) — and says which of the
+  two happened, naming the private-server files the URL-only path leaves dark;
+  otherwise it announces the skip. It is diff-aware, with two independent
   stages: a diff touching `web/` runs `npm ci && npm run build` (tsc + vite), a
   diff touching Rust paths runs the cargo gate, and a doc/config-only diff runs
   neither and gates in seconds.
