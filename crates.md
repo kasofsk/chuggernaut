@@ -247,4 +247,5 @@ Invariants worth enforcing (enforced in `test-utils/tests/boundary_guard.rs` ove
 ## Not crates
 
 - **PWA** (Part 11) — frontend workspace at `web/`: React + TypeScript + Vite (React Flow, `react-diff-view`, `vite-plugin-pwa`); built assets embedded into or served by `api`.
+- **Host preparation** — `nix/`: the `chug-node` NixOS and nix-darwin modules a worker node's host repo imports (`flake.nix` exports them as `nixosModules.chug-node` / `darwinModules.chug-node`, design #372). Nix, not Rust; nothing here builds or tests it.
 - **SSH server** — stock `sshd` with `TrustedUserCAKeys` and an `AuthorizedPrincipalsCommand`/forced-command hook calling the `auth` ref-authorization helper; configuration, not code.
