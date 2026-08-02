@@ -16,6 +16,11 @@
 #      a partial number as a total.
 #   4. A failing instrumented test run still produces the report — and still
 #      exits non-zero.
+#   5. Both report files are archived into /workspace/chug-output.tar.gz, the one
+#      path harvest lifts into the task's output.tar.gz artifact (spec §3.2).
+#      Untested when #381 added the archive step, which is how the stub `cargo`
+#      that produces neither file went unnoticed until #385 wired this suite
+#      into the gate.
 #
 # Run:  .chug/tasks/coverage.test.sh   (exits 0 iff all cases pass)
 set -eu
@@ -31,6 +36,11 @@ RUN="$WORK/run"
 mkdir -p "$BIN" "$RUN"
 CARGO_LOG="$WORK/cargo.log"
 CURL_LOG="$WORK/curl.log"
+
+# Resolved before the stub PATH exists, so the `tar` stub can delegate to the
+# real one; the harvest path is coverage.sh's fixed destination (spec §3.2).
+REAL_TAR="$(command -v tar)"
+HARVEST_PATH="/workspace/chug-output.tar.gz"
 
 FAILURES=0
 check() { # check <description> <condition-description> — reads the last verdict
@@ -50,22 +60,48 @@ absent() {
 
 # --- stubs -------------------------------------------------------------------
 # `cargo` logs its argv and exits 0, except the instrumented run (--no-report),
-# whose exit code each case chooses. `curl` logs the URL it was asked for and
-# writes a tarball that really does contain a `cargo-llvm-cov` file, so the
-# extract-and-install path executes for real. `install` diverts the binary into
-# the stub PATH instead of /usr/local/bin.
+# whose exit code each case chooses. It also CREATES the two report paths it is
+# told to write, because coverage.sh archives them straight afterwards and a stub
+# that only logs would make the real `tar` — not the code under test — decide the
+# outcome. `curl` logs the URL it was asked for and writes a tarball that really
+# does contain a `cargo-llvm-cov` file, so the extract-and-install path executes
+# for real. `install` diverts the binary into the stub PATH instead of
+# /usr/local/bin, and `tar` diverts coverage.sh's fixed /workspace harvest path
+# into the sandbox so a test run never writes outside it.
 make_stubs() { # make_stubs <arch-dpkg-reports> <exit-code-of-the-instrumented-run>
-	rm -f "$BIN"/* "$CARGO_LOG" "$CURL_LOG"
+	rm -f "$BIN"/* "$CARGO_LOG" "$CURL_LOG" "$WORK/chug-output.tar.gz"
 	: >"$CARGO_LOG"
 	: >"$CURL_LOG"
 
 	cat >"$BIN/cargo" <<EOF
 #!/bin/sh
 echo "cargo \$*" >> "$CARGO_LOG"
+prev=""
+for a in "\$@"; do
+  case "\$prev" in
+  --output-path) : > "\$a" ;;
+  --output-dir) mkdir -p "\$a" ;;
+  esac
+  prev="\$a"
+done
 case "\$*" in
 *--no-report*) exit $2 ;;
 esac
 exit 0
+EOF
+
+	cat >"$BIN/tar" <<EOF
+#!/bin/sh
+n=\$#
+i=0
+while [ \$i -lt \$n ]; do
+  a="\$1"
+  shift
+  case "\$a" in $HARVEST_PATH) a="$WORK/chug-output.tar.gz" ;; esac
+  set -- "\$@" "\$a"
+  i=\$((i + 1))
+done
+exec $REAL_TAR "\$@"
 EOF
 
 	cat >"$BIN/curl" <<EOF
@@ -133,7 +169,9 @@ check "announces tier-2 as enabled" "$(saw "$WORK/out1.txt" "tier-2 (NATS) ENABL
 check "runs the workspace instrumented" "$(saw "$CARGO_LOG" "llvm-cov --workspace --all-features --no-report --no-fail-fast")"
 check "writes the lcov report" "$(saw "$CARGO_LOG" "llvm-cov report --lcov --output-path coverage.lcov")"
 check "writes the html report" "$(saw "$CARGO_LOG" "llvm-cov report --html --output-dir coverage-html")"
-check "says the files are discarded" "$(saw "$WORK/out1.txt" "DISCARDED when the container is removed")"
+check "archives both reports into the harvest path" \
+	"$(tar -tzf "$WORK/chug-output.tar.gz" 2>/dev/null | grep -q coverage.lcov && echo ok || echo no)"
+check "says where the files end up" "$(saw "$WORK/out1.txt" "into this task's output.tar.gz")"
 check "states the scope as a lower bound" "$(saw "$WORK/out1.txt" "LOWER BOUND")"
 LAST_CARGO="$(tail -n 1 "$CARGO_LOG")"
 check "the summary is the LAST cargo call" \

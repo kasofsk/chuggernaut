@@ -596,6 +596,152 @@ comments_gate() {
 	.chug/tasks/check-comments.sh
 }
 
+# --- shell test suites (job #385) ---------------------------------------------
+# The tests OF THE GATES. Until #385 nothing executed a single `*.test.sh` —
+# not this gate, not .githooks/pre-commit — so a regression in check-comments.sh,
+# doc-lint.sh, this file, or any deploy script was caught only by an agent
+# choosing to run the suite by hand. That is not a gate, and it is not even
+# reliable diligence: these suites are written for the gate's Debian
+# environment, so a hand-run on a macOS host produces false reds (BSD sed
+# rejecting GNU label syntax, /var → /private/var). Wiring them in makes ONE
+# environment authoritative. The measured miss #385 found on day one:
+# coverage.test.sh had been red since #381 added an archive step to coverage.sh
+# without teaching the suite's stub `cargo` to produce the files it archives.
+#
+# DISCOVERY IS A GLOB, over `git ls-files` and not `find`: a new suite is picked
+# up with no second place to register it (#378 added ci.test.sh and nothing
+# noticed), and tracked-files-only keeps node_modules/ and target/ out by
+# construction rather than by a prune list that would rot. The cost a glob makes
+# open-ended is bounded below instead, per suite and in total, and a glob that
+# matched NOTHING fails rather than passing quietly — that is the shape of every
+# gate this repo has caught covering less than it claimed.
+#
+# UNCONDITIONAL, like the four gates above: a nix-only or docs-only diff runs no
+# other stage at all, and these suites are exactly what such a diff can break.
+# Measured 2026-08-02 on the agent-rust container: 17 suites, 36.8s total, of
+# which deploy/prod/update-refresh.test.sh alone is 27.1s (stub polling sleeps;
+# deterministic across consecutive runs, 19/19 each).
+#
+# BOTH BOUNDS ARE ENFORCED WHERE THEY ARE ANNOUNCED. The per-suite cap needs a
+# working `timeout`, so that is PROBED before the header prints rather than
+# fallen back on afterwards — an unconditional stage that announces a cap it is
+# not applying is the #375 defect (a claim and a mechanism describing different
+# worlds) in the one stage whose sibling test exists to pin that invariant. The
+# total budget is checked BETWEEN suites and not after the loop, because a
+# post-loop check bounds nothing: the loop's real ceiling would be count x cap,
+# which grows with every suite the glob picks up (STYLE.md Tier 2 rule 3).
+CI_SUITE_TIMEOUT_SECS="${CHUG_CI_SUITE_TIMEOUT_SECS:-60}"
+CI_SUITES_BUDGET_SECS="${CHUG_CI_SUITES_BUDGET_SECS:-120}"
+
+shell_suites_gate() {
+	if [ "${CHUG_CI_SHELL_SUITES:-1}" != "1" ]; then
+		echo "ci: shell suites SKIPPED — CHUG_CI_SHELL_SUITES=${CHUG_CI_SHELL_SUITES}."
+		echo "    Each suite is run with this set to 0, so the nested ci.sh that"
+		echo "    .chug/tasks/ci.test.sh drives cannot recurse into the suites again."
+		return 0
+	fi
+
+	_suites="$(git ls-files '*.test.sh' 2>/dev/null || true)"
+	if [ -z "$_suites" ]; then
+		echo "!!! ci: \`git ls-files '*.test.sh'\` matched nothing, so the shell-suite stage"
+		echo "!!!     would gate NOTHING. Either this is not a git checkout or every suite"
+		echo "!!!     was deleted; both are a broken gate, never a pass."
+		exit 1
+	fi
+	_count="$(printf '%s\n' "$_suites" | grep -c .)"
+	shell_suites_gate_require_timeout
+	echo "ci: shell suites — $_count *.test.sh suite(s) from git ls-files;" \
+		"per-suite cap ${CI_SUITE_TIMEOUT_SECS}s, total budget ${CI_SUITES_BUDGET_SECS}s"
+
+	_suite_log="$(mktemp)"
+	_suites_failed=""
+	_suites_started="$(date +%s)"
+	_elapsed=0
+	IFS='
+'
+	for _s in $_suites; do
+		unset IFS
+		shell_suites_gate_run "$_s"
+		_elapsed=$(($(date +%s) - _suites_started))
+		if [ "$_elapsed" -gt "$CI_SUITES_BUDGET_SECS" ]; then
+			shell_suites_gate_over_budget "$_s"
+		fi
+		IFS='
+'
+	done
+	unset IFS
+	rm -f "$_suite_log"
+
+	if [ -n "$_suites_failed" ]; then
+		echo "!!! ci: shell suite(s) FAILED:"
+		printf '!!!      %s\n' $_suites_failed
+		echo "!!!     These are the tests of the gates themselves — reproduce with"
+		echo "!!!     \`sh <suite>\`. A macOS host can red them spuriously; the gate's"
+		echo "!!!     Debian container is the authority."
+		exit 1
+	fi
+	echo "ci: shell suites — all $_count passed in ${_elapsed}s"
+}
+
+# A FUNCTIONAL probe, not `command -v`: what has to hold is that the cap can be
+# applied, which a `timeout` that exists but cannot run (a shim, a wrong-arch
+# binary, macOS where it is `gtimeout` or absent) does not give.
+shell_suites_gate_require_timeout() {
+	if timeout 5 true >/dev/null 2>&1; then
+		return 0
+	fi
+	echo "!!! ci: no working \`timeout\` on PATH, so the ${CI_SUITE_TIMEOUT_SECS}s per-suite cap cannot"
+	echo "!!!     be applied. This stage is unconditional and runs in every job's gate, so"
+	echo "!!!     an unbounded one would let a single hanging suite wedge the fleet — and"
+	echo "!!!     announcing a cap that is not in force is the very drift .chug/tasks/ci.test.sh"
+	echo "!!!     exists to pin. Install GNU coreutils, or set CHUG_CI_SHELL_SUITES=0 to opt"
+	echo "!!!     out of the stage out loud (it then announces the skip and runs no suite)."
+	exit 1
+}
+
+# Reported the moment the budget is crossed, naming what therefore never ran:
+# a bound that is only checked once every suite has already run is not a bound.
+shell_suites_gate_over_budget() { # <the suite that crossed it>
+	echo "!!! ci: the shell suites crossed the ${CI_SUITES_BUDGET_SECS}s total budget at $1 (${_elapsed}s)."
+	echo "!!!     This stage is unconditional, so its cost is every job's cost. Make the"
+	echo "!!!     new suite fast, or raise CHUG_CI_SUITES_BUDGET_SECS deliberately with"
+	echo "!!!     the measurement in the commit message."
+	_not_reached="$(printf '%s\n' "$_suites" | awk -v last="$1" 'seen { print } $0 == last { seen = 1 }')"
+	if [ -n "$_not_reached" ]; then
+		echo "!!!     STOPPED there, so these suite(s) did NOT run and are ungated here:"
+		printf '!!!      %s\n' $_not_reached
+	fi
+	if [ -n "$_suites_failed" ]; then
+		echo "!!!     Already failing before the budget was crossed:"
+		printf '!!!      %s\n' $_suites_failed
+	fi
+	rm -f "$_suite_log"
+	exit 1
+}
+
+# One suite, timed and capped. CHUG_CI_SHELL_SUITES=0 is the recursion guard:
+# ci.test.sh drives a real ci.sh, which must not run the suites a second time.
+shell_suites_gate_run() {
+	_t0="$(date +%s)"
+	set +e
+	CHUG_CI_SHELL_SUITES=0 timeout "$CI_SUITE_TIMEOUT_SECS" sh "$1" >"$_suite_log" 2>&1
+	_rc=$?
+	set -e
+	_took=$(($(date +%s) - _t0))
+	if [ "$_rc" -eq 0 ]; then
+		echo "  ok   $1 (${_took}s)"
+		return 0
+	fi
+	if [ "$_rc" -eq 124 ]; then
+		echo "  FAIL $1 — killed at the ${CI_SUITE_TIMEOUT_SECS}s per-suite cap"
+	else
+		echo "  FAIL $1 (exit $_rc, ${_took}s)"
+	fi
+	sed -n '1,60p' "$_suite_log" | sed 's/^/       | /'
+	_suites_failed="$_suites_failed $1"
+	return 0
+}
+
 # Diff-aware gate: run each stage only when the change actually touches paths
 # that stage owns, so docs/prompt/job-type changes still pass in seconds.
 #   Rust stage: crates/**  Cargo.toml  Cargo.lock  rust-toolchain*  .chug/tasks/ci.sh
@@ -646,6 +792,10 @@ duplication_gate
 # Comment lint, same placement and for the same reason: a web-only diff never
 # reaches the cargo section, and TSX is as able to carry banned prose as Rust.
 comments_gate
+# The shell suites last among the pure-shell gates: they are the slowest of them
+# (~37s against ~2s), so the cheap lints report first, and check-duplication.test.sh
+# reuses the npx cache duplication_gate has just warmed.
+shell_suites_gate
 if [ "$diff_ok" -eq 1 ]; then
 	rust_changed=0
 	web_changed=0

@@ -63,14 +63,29 @@ the absence of a workflow file.
   stages: a diff touching `web/` runs `npm ci && npm run build` (tsc + vite), a
   diff touching Rust paths runs the cargo gate, and a doc/config-only diff runs
   neither and gates in seconds.
-- `.chug/tasks/ci.sh` also runs four pure-shell gates **before** those diff-aware
+- `.chug/tasks/ci.sh` also runs five pure-shell gates **before** those diff-aware
   stages, so a web-only or docs-only change is still gated: the `.chug/jobs/*.yaml`
   version-skew check against the deployed dispatcher (spec §14), the
   `MODULES.md` registry check (`.chug/tasks/check-modules.sh`),
   `.chug/tasks/check-duplication.sh` — copy-paste
   detection via a pinned `jscpd@5.0.5` at `threshold: 0` (STYLE.md Tier 1;
-  ~30ms for the whole repo, so it is unconditional) — and
-  `.chug/tasks/check-comments.sh`, the comment lint. Any clone fails the gate.
+  ~30ms for the whole repo, so it is unconditional) — `.chug/tasks/check-comments.sh`,
+  the comment lint, and since #385 **the repo's 17 `*.test.sh` shell suites**.
+  Any clone fails the gate.
+- **The shell suites are the tests of the gates themselves, and CI runs them all.**
+  Discovery is `git ls-files '*.test.sh'` — add a suite and it is picked up, with
+  no list to update and nothing to register; a glob matching nothing fails rather
+  than passing quietly. Bounded at 60s per suite and 120s total
+  (`CHUG_CI_SUITE_TIMEOUT_SECS` / `CHUG_CI_SUITES_BUDGET_SECS`), the total checked
+  *between* suites so it stops at the bound and names what it never ran; measured
+  36.8s for all 17, 27.1s of that `deploy/prod/update-refresh.test.sh`. The
+  per-suite cap needs a working `timeout`, probed before the stage announces it —
+  a host without one fails the stage rather than running it uncapped and quiet.
+  Each suite is handed
+  `CHUG_CI_SHELL_SUITES=0` so the real `ci.sh` that `ci.test.sh` drives cannot
+  recurse. **The gate's Debian container is the authority** — these suites assume
+  GNU tooling, so hand-running them on macOS produces false reds (`testing.md`).
+  Deliberately *not* in the pre-commit hook, which is ~2s by design.
 - **Comments are banned; docs are not.** `.chug/tasks/check-comments.sh` rejects
   every non-doc comment in any Rust or TypeScript source and caps doc comments at
   two sentences (module headers exempt) — STYLE.md Tier 1. The tree holds **zero**

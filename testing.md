@@ -104,14 +104,48 @@ wrong: `escalates_when_eval_retries_are_exhausted` carries what a comment above
 it would have said, and it carries it into the failure output.
 
 The gate itself has a shell test rather than a Rust one — `.chug/tasks/check-comments.test.sh`,
-run directly, no NATS or cargo — alongside `check-duplication.test.sh`,
-`ci.test.sh` (the merge gate's own tier-2 announcement, driven against stubbed
-`cargo`/`docker`/`nats-server`), `coverage.test.sh`, `doc-lint.test.sh`,
-`modules-registry.test.sh` (which drives
-`.chug/tasks/check-modules.sh`) and `.githooks/pre-commit.test.sh` (which drives
-real `git commit`s in throwaway repos with the hook installed). Shell gates are
-tested in shell: the tier-1/2/3 ladder above is about the platform's behavior,
-and a gate's own behavior is not reachable from a cargo test.
+run directly, no NATS or cargo. Shell gates are tested in shell: the tier-1/2/3
+ladder above is about the platform's behavior, and a gate's own behavior is not
+reachable from a cargo test.
+
+## The shell suites: `*.test.sh`
+
+Every gate script, hook and deploy script is pinned by a `*.test.sh` beside it —
+17 of them, driving the real script inside a throwaway repo against stubbed
+`cargo`, `npm`, `docker`, `nats-server`, `curl` and `ssh`. No NATS, no Docker, no
+network. Run one directly: `sh .chug/tasks/check-comments.test.sh`.
+
+**`.chug/tasks/ci.sh` runs all of them, unconditionally, as its last pure-shell
+stage** (job #385; before that nothing executed a single one, and
+`coverage.test.sh` had been red for a day). Unconditional because a diff touching
+only `deploy/`, `.githooks/`, `nix/` or a `.chug/tasks/*.sh` other than `ci.sh`
+triggers neither the cargo stage nor the web one — those diffs are exactly what
+these suites cover.
+
+- **Discovery is `git ls-files '*.test.sh'`** — a new suite is picked up with no
+  list to update, and tracked-files-only keeps `node_modules/` and `target/` out
+  by construction. A glob that matches nothing **fails** the gate.
+- **Bounded**: 60s per suite (`CHUG_CI_SUITE_TIMEOUT_SECS`), 120s total
+  (`CHUG_CI_SUITES_BUDGET_SECS`); over either is a loud failure, because an
+  unconditional stage's cost is every job's cost. Measured 2026-08-02 on the
+  `agent-rust` container: **36.8s for all 17**, of which
+  `deploy/prod/update-refresh.test.sh` alone is 27.1s (stub polling sleeps).
+  The total is checked **between** suites, not after the loop — otherwise the
+  real ceiling would be suite-count × per-suite cap — and the failure names the
+  suites it therefore never ran. The per-suite cap is applied with `timeout`,
+  which is *probed* before the stage announces the cap: no working `timeout`
+  fails the stage rather than silently running the suites unbounded, so the
+  announcement can never claim a bound that is not in force.
+- Each suite runs with `CHUG_CI_SHELL_SUITES=0`, so the real `ci.sh` that
+  `ci.test.sh` drives does not recurse into the suites again. Setting it to 0 by
+  hand opts the stage out, announced.
+- **The gate's Debian container is the authoritative environment.** These suites
+  assume GNU tooling and Linux path semantics, so a hand-run on macOS reds some
+  of them spuriously (BSD `sed` rejecting GNU label syntax in
+  `agent-rust-image.test.sh`; `/var` → `/private/var` in `pre-commit.test.sh`).
+  Trust the gate over a laptop.
+- They are **not** in `.githooks/pre-commit`: the hook is ~2s by design and these
+  are 36.8s.
 
 ## Conventions
 
