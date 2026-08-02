@@ -138,17 +138,21 @@ passed to the daemon **as env only** — [`deploy/prod/build-worker.sh`](../../d
 So the `std::fs::create_dir_all(dir)` in
 [`crates/worker/src/daemon.rs`](../../crates/worker/src/daemon.rs) creates the
 path **inside the daemon container's writable layer**, which is discarded at the
-next swap. The host path is created by dockerd, as root, mode 0755, the first
-time a job container binds `{dir}:/cache/sccache` (the bind is built in
-`host_config` in [`crates/container/src/docker.rs`](../../crates/container/src/docker.rs)).
+next swap. The host path used to be created by dockerd, as root, mode 0755, the
+first time a job container bound `{dir}:/cache/sccache`; #379 made that a typed
+mount in `build_host_config`
+([`crates/container/src/docker.rs`](../../crates/container/src/docker.rs)), so
+the engine now refuses such a launch and **nothing creates the path at all**.
 
 This makes the brief's "cache dir via `systemd.tmpfiles`" *more* justified than
 it states, and it is the cleanest example of the module's whole thesis: a
-condition the worker depends on, that nothing on the host declares, that
-currently comes into being as a side effect of the first container launch. Note
-also that the cache is genuinely safe to lose (§3.1: "carries no job state … a
-missing, empty, or cold cache is always safe"), so this is a hygiene fix, not an
-outage fix — §5 declines to assert about it for exactly that reason.
+condition the worker depends on, that nothing on the host declares, that came
+into being as a side effect of the first container launch and now does not come
+into being at all. Note also that the cache's *contents* are genuinely safe to
+lose (§3.1: "carries no job state … an empty or cold cache is always safe") but
+its *directory* is not: a node whose `WORKER_CACHE_DIR` is missing fails every
+launch. §5 declines to assert about it as a hygiene item, a judgement made
+before #379, and a follow-up should revisit it on those terms.
 
 **C4 — #265's reason 4 has drifted and is weaker than stated; reasons 1–3 hold
 exactly.** Re-verified below in [§8](#8-why-the-module-must-not-declare-the-container).

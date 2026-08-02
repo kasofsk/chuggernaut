@@ -117,7 +117,9 @@ WORKER_NATS_URL=nats://100.x.y.z:4222 \
 - Optional but usually wanted here: `WORKER_CACHE_DIR`,
   `WORKER_REFRESH_GIT_URL`, `WORKER_GIT_KEY` — the script forwards them to the
   daemon's `docker run` (see §1c for why they matter). All three normally come
-  from `chuggernaut.env`.
+  from `chuggernaut.env`. `WORKER_CACHE_DIR`'s host path must already exist on
+  the node — this script does not create it, and since #379 a missing one fails
+  every launch there (§1c).
 
 The image tag is `CHUG_IMAGE_TAG` (default `prod`).
 
@@ -135,6 +137,13 @@ ssh "$WORKER_SSH" 'docker ps --filter name=chug-worker --format "{{.Image}} {{.S
 **When:** the daemon is wedged, was started without the cache/refresh env, or you
 need to (re)start it standalone without a full image rebuild. This is the exact
 `docker run` `build-worker.sh` issues — reproduce it by hand:
+
+Passing `WORKER_CACHE_DIR`? Provision the host path first, on the node —
+nothing else creates it since #379, and every launch fails without it (below):
+
+```sh
+ssh "$WORKER_SSH" 'sudo mkdir -p /var/cache/chuggernaut/sccache'
+```
 
 ```sh
 ssh "$WORKER_SSH" '
@@ -170,7 +179,17 @@ Three env details are load-bearing:
   (`Dockerfile.agent-rust`), so cargo builds reuse compilation across jobs.
   **Unset ⇒ caching stays off** — this is the durable fix for the dormant cache
   (#55): the baked-in sccache only warms when the daemon actually runs with
-  `WORKER_CACHE_DIR` set.
+  `WORKER_CACHE_DIR` set. **Set ⇒ the host path must already exist on the
+  node**: since #379 it is a typed mount, so a missing source fails every launch
+  on that node with the path in the error (`invalid mount config for type
+  "bind": bind source path does not exist: …`) rather than silently giving each
+  container an empty directory. **Nothing provisions it for you** — the daemon's
+  own `create_dir_all` runs inside the daemon container, which does not mount
+  that path (above), so it never touches the host; and dockerd no longer creates
+  it as a side effect of the first launch, which is how it came into being
+  before #379 (design #372 C3). Create it once per node —
+  `ssh "$WORKER_SSH" 'sudo mkdir -p /var/cache/chuggernaut/sccache'` — or, if
+  launches are already failing, fix the path or unset the variable.
 - **No empty-string refresh env.** Give `WORKER_REFRESH_GIT_URL` (and
   `WORKER_GIT_KEY`) their **real** values, not an empty string. `build-worker.sh`
   passes `WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-}` — **empty when

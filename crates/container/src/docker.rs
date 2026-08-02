@@ -45,11 +45,11 @@ const PROJECT_LABEL: &str = "chuggernaut.project";
 const JOB_LABEL: &str = "chuggernaut.job";
 const TASK_LABEL: &str = "chuggernaut.task";
 
-/// Container-side path of the node-local build cache, when a backend is
-/// configured with one ([`DockerBackend::with_cache_dir`]). Exported so the
-/// worker daemon points `SCCACHE_DIR` at the same path it bind-mounts here —
-/// one source of truth, no drift between the mount and the env. Carries no job
-/// state: it is a build accelerator only, safe to be empty/cold (spec §3.1).
+/// Container-side path of the node-local build cache
+/// ([`DockerBackend::with_cache_dir`]), exported so the worker daemon points
+/// `SCCACHE_DIR` at the same path it mounts here — no drift between the mount
+/// and the env. Its contents carry no job state: a build accelerator only, safe
+/// to be cold (spec §3.1).
 pub const CACHE_MOUNT_PATH: &str = "/cache/sccache";
 
 /// Container-side path of the KVM device — always `/dev/kvm`, whatever the node
@@ -139,10 +139,11 @@ struct Node {
 pub struct DockerBackend {
     nodes: Vec<Node>,
     /// Host path of the node-local build cache, bind-mounted into every
-    /// container at [`CACHE_MOUNT_PATH`]. `None` (the dispatcher's construction)
-    /// adds no binds at all — the fleet stays bind-mount-free (spec §3.1). Set
-    /// worker-side via [`with_cache_dir`](DockerBackend::with_cache_dir); it is
-    /// a node property, never carried on the wire or the launch config.
+    /// container at [`CACHE_MOUNT_PATH`]; `None` (the dispatcher's
+    /// construction) adds no mount at all, so the fleet stays bind-mount-free
+    /// (spec §3.1). Set worker-side via
+    /// [`with_cache_dir`](DockerBackend::with_cache_dir); it is a node
+    /// property, never carried on the wire or the launch config.
     cache_dir: Option<PathBuf>,
     /// The node's KVM grant (design #367 A1): the device and read-only
     /// toolchain mounts an allow-listed launch gets, `None` (the dispatcher's
@@ -215,10 +216,10 @@ impl DockerBackend {
     }
 
     /// Enable node-local build caching: bind-mount `host_dir` into every
-    /// launched container at [`CACHE_MOUNT_PATH`]. Worker-daemon-only — the
-    /// dispatcher never calls this, so its fleet stays bind-mount-free (spec
-    /// §3.1). The daemon owns creating/owning `host_dir`; concurrent containers
-    /// on the node share it, which sccache handles by design (it locks).
+    /// launched container at [`CACHE_MOUNT_PATH`], writably, and refuse the
+    /// launch if it does not exist. Worker-daemon-only — the dispatcher never
+    /// calls this, so its fleet stays bind-mount-free (spec §3.1); `host_dir` is
+    /// provisioned on the node, and concurrent containers share it safely.
     pub fn with_cache_dir(mut self, host_dir: PathBuf) -> Self {
         self.cache_dir = Some(host_dir);
         self
@@ -661,15 +662,27 @@ impl ContainerBackend for DockerBackend {
 ///
 /// The dispatcher's backend passes neither and so stays bind-mount-free at
 /// `devices: None, binds: None, mounts: None` (spec §3.1); a worker's
-/// `cache_dir` adds one bind `{dir}:{CACHE_MOUNT_PATH}`, and its `kvm` adds the
-/// device and both read-only mounts or none of the three, per
-/// [`KvmGrant::admits`].
+/// `cache_dir` adds one writable mount at [`CACHE_MOUNT_PATH`], and its `kvm`
+/// adds the device and both read-only mounts or none of the three, per
+/// [`KvmGrant::admits`] — nothing here sets `binds`.
 fn build_host_config(
     config: &ContainerLaunchConfig,
     cache_dir: Option<&Path>,
     kvm: Option<&KvmGrant>,
 ) -> Result<HostConfig, BackendError> {
     let granted = kvm.filter(|g| g.admits(&config.env));
+    let mut mounts = Vec::new();
+    if let Some(dir) = cache_dir {
+        mounts.push(writable_bind(dir, CACHE_MOUNT_PATH));
+    }
+    if let Some(g) = granted {
+        mounts.push(read_only_bind(
+            Path::new(STORE_MOUNT_PATH),
+            STORE_MOUNT_PATH,
+        ));
+        mounts.push(read_only_bind(&g.android_sdk_dir, ANDROID_SDK_MOUNT_PATH));
+    }
+    let toolchain_mounts = mounts.iter().filter(|m| m.read_only == Some(true)).count();
     let host_config = HostConfig {
         nano_cpus: config.cpu_limit.map(|c| (c * 1e9) as i64),
         memory: config
@@ -678,7 +691,6 @@ fn build_host_config(
             .map(parse_memory)
             .transpose()
             .map_err(BackendError::Launch)?,
-        binds: cache_dir.map(|d| vec![format!("{}:{}", d.display(), CACHE_MOUNT_PATH)]),
         devices: granted.map(|g| {
             vec![DeviceMapping {
                 path_on_host: Some(g.device.display().to_string()),
@@ -686,27 +698,32 @@ fn build_host_config(
                 cgroup_permissions: Some("rwm".to_string()),
             }]
         }),
-        mounts: granted.map(|g| {
-            vec![
-                read_only_bind(Path::new(STORE_MOUNT_PATH), STORE_MOUNT_PATH),
-                read_only_bind(&g.android_sdk_dir, ANDROID_SDK_MOUNT_PATH),
-            ]
-        }),
+        mounts: (!mounts.is_empty()).then_some(mounts),
         ..Default::default()
     };
     debug_assert_eq!(
         host_config.devices.is_some(),
-        host_config.mounts.is_some(),
-        "a launch carries the KVM device and the read-only mounts together or carries neither"
+        toolchain_mounts == 2,
+        "a launch carries the KVM device and both read-only mounts together or carries neither"
     );
     Ok(host_config)
+}
+
+/// The node's build cache, mounted writable — sccache writes through it, so
+/// unlike a toolchain mount it cannot be read-only. Derived from
+/// [`read_only_bind`] so both share its refuse-a-missing-source property.
+fn writable_bind(host_dir: &Path, container_path: &str) -> Mount {
+    Mount {
+        read_only: Some(false),
+        ..read_only_bind(host_dir, container_path)
+    }
 }
 
 /// One read-only bind, declared through `HostConfig.mounts` rather than a
 /// `binds` string: the engine REFUSES a missing source instead of silently
 /// creating an empty directory in its place (design #367 correction 12).
-/// Read-only is structural here — this is the only constructor, and it cannot
-/// be built writable.
+/// Read-only is structural here — it cannot be built writable, and
+/// [`writable_bind`] is a separate act.
 fn read_only_bind(host_dir: &Path, container_path: &str) -> Mount {
     debug_assert!(
         host_dir.is_absolute(),
@@ -935,17 +952,30 @@ mod tests {
         assert_eq!(hc.memory, Some(4 * 1024 * 1024 * 1024));
     }
 
-    /// A worker backend with a cache dir bind-mounts exactly that dir at the
-    /// fixed container path, and nothing else.
+    /// A worker backend with a cache dir mounts exactly that dir at the fixed
+    /// container path and nothing else — as a typed *mount*, never a `binds`
+    /// string, so a cache dir that does not exist is refused by the engine
+    /// instead of silently created empty; and writable, since sccache writes
+    /// through it.
     #[test]
-    fn host_config_with_cache_adds_one_bind() {
+    fn host_config_with_cache_adds_one_writable_mount() {
         let dir = PathBuf::from("/var/cache/chuggernaut/sccache");
         let hc = build_host_config(&launch_config(), Some(dir.as_path()), None).unwrap();
+        assert!(hc.binds.is_none(), "the cache is a mount, not a bind");
+        assert!(hc.devices.is_none(), "a cache dir grants no device");
+
+        let mounts = hc.mounts.expect("a cache dir carries its mount");
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].typ, Some(MountTypeEnum::BIND));
         assert_eq!(
-            hc.binds,
-            Some(vec![format!(
-                "/var/cache/chuggernaut/sccache:{CACHE_MOUNT_PATH}"
-            )])
+            mounts[0].source.as_deref(),
+            Some("/var/cache/chuggernaut/sccache")
+        );
+        assert_eq!(mounts[0].target.as_deref(), Some(CACHE_MOUNT_PATH));
+        assert_eq!(
+            mounts[0].read_only,
+            Some(false),
+            "a write-through cache cannot be read-only"
         );
     }
 
@@ -1008,6 +1038,37 @@ mod tests {
             "no store path may reach the mount spec: {mounts:?}"
         );
         assert!(hc.binds.is_none(), "KVM adds no legacy binds");
+    }
+
+    /// The two node properties are independent and compose: a KVM node that
+    /// also caches carries all three mounts, with read-only holding for the
+    /// toolchain pair and only for it. Each is equally legal alone —
+    /// [`host_config_with_cache_adds_one_writable_mount`] is a cache with no
+    /// grant, and the test above is a grant with no cache.
+    #[test]
+    fn host_config_with_cache_and_kvm_carries_both_independently() {
+        let dir = PathBuf::from("/var/cache/chuggernaut/sccache");
+        let hc = build_host_config(
+            &launch_config_for("acme/beacon"),
+            Some(dir.as_path()),
+            Some(&kvm_grant()),
+        )
+        .unwrap();
+
+        assert!(hc.binds.is_none(), "neither property sets binds");
+        assert_eq!(hc.devices.map(|d| d.len()), Some(1));
+
+        let mounts = hc.mounts.expect("both properties carry mounts");
+        assert_eq!(mounts.len(), 3);
+        let by_target = |target: &str| {
+            mounts
+                .iter()
+                .find(|m| m.target.as_deref() == Some(target))
+                .unwrap_or_else(|| panic!("no mount at {target}"))
+        };
+        assert_eq!(by_target(CACHE_MOUNT_PATH).read_only, Some(false));
+        assert_eq!(by_target(STORE_MOUNT_PATH).read_only, Some(true));
+        assert_eq!(by_target(ANDROID_SDK_MOUNT_PATH).read_only, Some(true));
     }
 
     /// The negative space, and the all-or-nothing pairing: a launch for a
