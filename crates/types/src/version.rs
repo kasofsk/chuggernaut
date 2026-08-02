@@ -52,7 +52,7 @@
 /// Epoch 2 is job `inputs:` (#311, [`INPUTS_SCHEMA_EPOCH`]): a top-level field
 /// an N-1 dispatcher *would* tolerate, which is exactly why it needs the bump —
 /// tolerating it means a job runs with no value where the type declares one.
-pub const CONFIG_SCHEMA_EPOCH: u32 = 2;
+pub const CONFIG_SCHEMA_EPOCH: u32 = 3;
 
 /// The epoch at which job `inputs:` landed (#311, spec §1.1). A job type
 /// declaring a non-empty `inputs:` must declare `min_dispatcher` at least this
@@ -65,6 +65,15 @@ pub const CONFIG_SCHEMA_EPOCH: u32 = 2;
 /// unrelated feature does not retroactively raise what an existing `inputs:`
 /// config has to declare.
 pub const INPUTS_SCHEMA_EPOCH: u32 = 2;
+
+/// The epoch at which a **schedule's** `inputs:` landed (#311 slice C, spec
+/// §1.1): a schedule supplying a non-empty map must declare `min_dispatcher` at
+/// least this high ([`crate::Schedule::validate`]), or a dispatcher that cannot
+/// see the field fires the occurrence with the values dropped.
+///
+/// Above [`INPUTS_SCHEMA_EPOCH`] rather than a reuse of it — a dispatcher at
+/// epoch 2 understands a job type's `inputs:` and still drops a schedule's.
+pub const SCHEDULE_INPUTS_SCHEMA_EPOCH: u32 = 3;
 
 /// The worker-node RPC protocol version ([`crate::worker`] ops, spec §3.1).
 /// The daemon logs-and-fallbacks on an unknown op rather than crashing, so an
@@ -94,7 +103,10 @@ mod tests {
 
     #[test]
     fn feature_epochs_are_understood_by_this_binary() {
-        let feature_epochs: Vec<(&str, u32)> = vec![("inputs", INPUTS_SCHEMA_EPOCH)];
+        let feature_epochs: Vec<(&str, u32)> = vec![
+            ("inputs", INPUTS_SCHEMA_EPOCH),
+            ("schedule-inputs", SCHEDULE_INPUTS_SCHEMA_EPOCH),
+        ];
         for (name, epoch) in feature_epochs {
             assert!(
                 epoch <= CONFIG_SCHEMA_EPOCH,

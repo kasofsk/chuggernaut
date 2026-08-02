@@ -101,8 +101,10 @@ fn latest_scheduled_job(graph: &crate::graph::JobGraph, name: &str) -> Option<Sc
 }
 
 /// What one occurrence asks `Core::create_job` for. Every occurrence of a
-/// schedule asks for the same job — a static title and ticket body, no deps and
-/// no inputs (design #310 Decision 10 keeps parameterization out of v1).
+/// schedule asks for the same job — a static title, ticket body and input map,
+/// and no deps — so the schedule's `inputs:` become the created job's
+/// **supplied** set and declared defaults materialize at the Ready transition
+/// like any other job's (design #311 slice C).
 fn schedule_create_spec(owner: &str, project: &str, schedule: &types::Schedule) -> CreateSpec {
     CreateSpec {
         owner: owner.to_string(),
@@ -117,7 +119,7 @@ fn schedule_create_spec(owner: &str, project: &str, schedule: &types::Schedule) 
         eval: vec![],
         timeout: None,
         model: None,
-        inputs: std::collections::BTreeMap::new(),
+        inputs: schedule.inputs.clone(),
         groups: vec![],
         factory: None,
         schedule: Some(schedule.name.clone()),
@@ -572,6 +574,71 @@ mod tests {
             slots: Some(2),
             capacity,
         }
+    }
+
+    fn schedule(yaml: &str) -> types::Schedule {
+        types::Schedule::parse(yaml).unwrap()
+    }
+
+    /// The origination path passes the schedule's `inputs:` through unchanged
+    /// (design #311 slice C) — as the created job's **supplied** set, so
+    /// declared defaults still materialize once, at the Ready transition.
+    #[test]
+    fn a_schedule_originates_a_job_carrying_its_inputs() {
+        let spec = schedule_create_spec(
+            "acme",
+            "api",
+            &schedule(
+                "name: nightly\njob_type: rollback\ncron: '0 2 * * *'\n\
+                 min_dispatcher: 3\ninputs:\n  sha: 4f9c1ab\n  service: worker\n",
+            ),
+        );
+        assert_eq!(
+            spec.inputs,
+            std::collections::BTreeMap::from([
+                ("sha".to_string(), "4f9c1ab".to_string()),
+                ("service".to_string(), "worker".to_string()),
+            ])
+        );
+        assert_eq!(spec.r#type, "rollback");
+        assert_eq!(spec.schedule.as_deref(), Some("nightly"));
+    }
+
+    /// The golden backstop: a schedule with no `inputs:` asks for exactly the
+    /// job it asked for before the field existed — the feature is off, not
+    /// merely unused.
+    #[test]
+    fn a_schedule_without_inputs_originates_the_same_job_as_before() {
+        let before = schedule("name: nightly\njob_type: code\ncron: '0 2 * * *'\ndescription: x\n");
+        let CreateSpec {
+            owner,
+            project,
+            r#type,
+            title,
+            description,
+            cover_html,
+            deps,
+            members,
+            knowledge_tags,
+            eval,
+            timeout,
+            model,
+            inputs,
+            groups,
+            factory,
+            schedule,
+            draft,
+        } = schedule_create_spec("acme", "api", &before);
+        assert_eq!(
+            [owner, project, r#type, title, description],
+            ["acme", "api", "code", "nightly", "x"].map(str::to_string),
+        );
+        assert_eq!(schedule.as_deref(), Some("nightly"));
+        assert!(inputs.is_empty(), "{inputs:?}");
+        assert!(cover_html.is_none() && timeout.is_none() && model.is_none());
+        assert!(factory.is_none() && !draft);
+        assert!(deps.is_empty() && members.is_empty() && knowledge_tags.is_empty());
+        assert!(eval.is_empty() && groups.is_empty());
     }
 
     /// The §8 never-observed warning fires for exactly one signature — a worker

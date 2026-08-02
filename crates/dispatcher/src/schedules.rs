@@ -10,11 +10,11 @@
 //!
 //! An invalid file is **skipped and logged**, never fatal: an unparseable
 //! schedule, a `cron` that does not parse, a name disagreeing with the file
-//! stem, a `job_type` naming a file absent at HEAD, or a missing `description`
-//! for an agent target all leave the project's other schedules loading
-//! normally. `schedule-invalid` has no home — the event stream is job-scoped
-//! and an invalid file has no job — so `chuggernaut validate` in CI is the
-//! primary defense and this is the fallback.
+//! stem, a `job_type` naming a file absent at HEAD, a missing `description`
+//! for an agent target, or an `inputs:` value the target does not declare all
+//! leave the project's other schedules loading normally. `schedule-invalid` has
+//! no home — the event stream is job-scoped and an invalid file has no job — so
+//! `chuggernaut validate` in CI is the primary defense and this is the fallback.
 //!
 //! - **Accepts:** a project and the `vcs` port.
 //! - **Emits:** the project's valid schedules, each paired with the two pieces
@@ -212,8 +212,8 @@ async fn read_one(
         tracing::warn!("{owner}/{project} schedule '{stem}': {warning}");
     }
 
-    let target = target_work_type(repos, owner, project, head, &schedule.job_type).await?;
-    let errors = schedule.validate_against_target(target);
+    let target = target_job_type(repos, owner, project, head, &schedule.job_type).await?;
+    let errors = schedule.validate_against_target(&target);
     if !errors.is_empty() {
         return Err(errors
             .iter()
@@ -224,24 +224,22 @@ async fn read_one(
     Ok(schedule)
 }
 
-/// The work type of the job type a schedule fires, checked at the same HEAD
-/// (design #310 Decision 6): a schedule naming a type that does not exist there
-/// is invalid at load and stops firing.
-async fn target_work_type(
+/// The job type a schedule fires, read at the same HEAD (design #310 Decision
+/// 6): a schedule naming a type that does not exist there is invalid at load
+/// and stops firing.
+async fn target_job_type(
     repos: &RepoManager,
     owner: &str,
     project: &str,
     head: &str,
     job_type: &str,
-) -> Result<types::WorkType, String> {
+) -> Result<JobType, String> {
     let relative = format!("jobs/{job_type}.yaml");
     let file = project_config::read_file(repos, owner, project, head, &relative)
         .await
         .map_err(|e| format!("reading {relative} failed: {e}"))?
         .ok_or_else(|| format!("job_type '{job_type}' has no {relative} at HEAD"))?;
-    JobType::parse(&file.content)
-        .map(|jt| jt.work.r#type)
-        .map_err(|e| format!("job_type '{job_type}' does not parse: {e}"))
+    JobType::parse(&file.content).map_err(|e| format!("job_type '{job_type}' does not parse: {e}"))
 }
 
 #[cfg(test)]

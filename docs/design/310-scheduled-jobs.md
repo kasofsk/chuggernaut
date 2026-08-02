@@ -803,7 +803,8 @@ ship first and be genuinely useful for `flutter-integration-tests`:
 Deferred to follow-ups, in rough priority order: `auto_release: false` (needed
 before anyone schedules a `deploy`); the platform health surface that gives
 `schedule-invalid` and `factory-invalid` somewhere to go; a UI badge and filter
-on trigger provenance; `timezone:`; `inputs:` (doc 3).
+on trigger provenance; `timezone:`. `inputs:` (doc 3) shipped in #376, on this
+doc's origination path and with no change to Decision 10's seam.
 
 ## Contracts this changes
 

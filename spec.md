@@ -399,13 +399,17 @@ title: Nightly integration    # optional; the created job's title; defaults to `
 description: |                # required when the target declares `work.type: agent` (the §4.3 job brief); optional otherwise
   Run the nightly integration suite.
 min_dispatcher: 5             # optional; §14.2 skew gate, same meaning as on a job type
+inputs:                       # optional; the values every occurrence supplies to the job it creates
+  image_tag: ghcr.io/acme/api:4f9c1ab
 ```
+
+**`inputs:`** is a flat `name: value` map, judged by the same rules an operator's `POST jobs` map is (§1.1 `inputs:`): the charset, the 256-character value bound, the 16-entry count bound, and the lowercase name form. It is the created job's **supplied** set — the schedule passes values through, it does not resolve them, so a declared `default` the schedule omits materializes once at the Ready transition exactly as it does for an API-created job. Because a schedule names its `job_type`, the values are also judged against that type's declaration wherever both files are readable: an input the type does not declare, a value failing its `pattern`/`values`, and a `required` input the schedule never supplies are all errors at `chuggernaut validate` and at reload, not at 3am. A non-empty `inputs:` **requires `min_dispatcher >=` the schedule-inputs epoch** (§14.2) — the field is invisible to a dispatcher that predates it, and a dropped value fires a job with a different meaning rather than a failed one.
 
 **Cron is a deliberate subset**, evaluated in **UTC**: five whitespace-separated fields (`minute hour day-of-month month day-of-week`), each `*`, `N`, `N-M`, `*/S`, or a comma-list of the last three. Day-of-week is `0`–`6`, Sunday first. No `@daily` aliases, no `L`/`W`/`#`, no month or weekday names, no seconds and no year field — an expression is a copy of a GitHub Actions `schedule:` string, so anything the two sides would read differently is rejected. **When day-of-month and day-of-week are *both* restricted (neither is `*`), an occurrence matches if *either* matches** — the POSIX OR rule; when one is `*`, both must match. "Restricted" means anything other than a bare `*`, so a stepped day field such as `*/3` is restricted and participates in the OR rule — Vixie cron instead exempts any field *beginning* with `*` and would AND the same expression, which is the one case where the two readings of a copied string diverge. There is no `timezone:` field: a schedule's meaning must not depend on where the dispatcher runs, and UTC is also why DST never arises.
 
 **Schema tolerance follows §14** exactly as a job type's does — a file read live from HEAD can merge ahead of the binary that parses it, so unknown *top-level* fields are tolerated with a warning and `min_dispatcher` gates a file that genuinely needs a newer dispatcher.
 
-**Validation** runs at two layers. At **merge time**, `chuggernaut validate .chug/schedules/*.yaml` applies the field rules offline and `.chug/tasks/ci.sh` gates every changed schedule file; the `description` rule is checked against the target job type when its file sits in the same config root, and its existence is otherwise a release-time check like a prompt file's. At **reload time** an invalid file is **skipped** and the project's remaining schedules load normally — an invalid trigger file never blocks dispatch. A project loads at most 64 schedule files; entries beyond the cap are refused and reported, never silently truncated.
+**Validation** runs at two layers. At **merge time**, `chuggernaut validate .chug/schedules/*.yaml` applies the field rules offline and `.chug/tasks/ci.sh` gates every changed schedule file; the `description` and `inputs:` rules are checked against the target job type when its file sits in the same config root, and its existence is otherwise a release-time check like a prompt file's. At **reload time** an invalid file is **skipped** and the project's remaining schedules load normally — an invalid trigger file never blocks dispatch. A project loads at most 64 schedule files; entries beyond the cap are refused and reported, never silently truncated.
 
 **Origination is dispatcher-side and rides the §3.5 scan tick**, so it inherits the single writer and initiates nothing while draining (§3.6). Everything the tick decides reduces to one value per schedule — the **anchor**, the instant an occurrence must be strictly *after* in order to fire:
 
@@ -2441,10 +2445,16 @@ burning launches into `Escalated` one job at a time.
 
 Some schema features require that declaration rather than leaving it to the
 author: a non-empty `inputs:` (§1.1) is a field rule error unless
-`min_dispatcher` is at least the epoch inputs landed in. The rule exists because
-`min_dispatcher` is the one field an N-1 dispatcher **does** parse — it cannot
-see `inputs:` at all, so without the declaration it would accept the config and
-run the job unparameterized.
+`min_dispatcher` is at least the epoch inputs landed in — on a job type, the
+epoch job inputs landed in; on a **schedule file**, the later epoch a schedule's
+`inputs:` landed in, because a dispatcher that understands the first still drops
+the second. The rule exists because `min_dispatcher` is the one field an N-1
+dispatcher **does** parse — it cannot see `inputs:` at all, so without the
+declaration it would accept the config and run the job unparameterized. Each
+feature freezes its own constant at the epoch it shipped
+(`types::version::INPUTS_SCHEMA_EPOCH`, `SCHEDULE_INPUTS_SCHEMA_EPOCH`), so a
+later bump for an unrelated feature never retroactively raises what an existing
+config must declare.
 
 ### 14.3 Merge-time gate
 

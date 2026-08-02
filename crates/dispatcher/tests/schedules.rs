@@ -50,6 +50,25 @@ work:
   prompt: prompts/manual.md
 ";
 
+/// A parameterized target: one required input the schedule supplies, one
+/// optional input whose declared default the Ready transition materializes.
+const PARAMETERIZED_YAML: &str = r"
+name: parameterized
+min_dispatcher: 2
+work:
+  type: human
+  prompt: prompts/manual.md
+inputs:
+  - name: sha
+    type: string
+    required: true
+    pattern: '^[0-9a-f]{7,40}$'
+  - name: service
+    type: enum
+    values: [web, worker]
+    default: web
+";
+
 const NIGHTLY: &str = r#"
 name: nightly
 job_type: code
@@ -67,6 +86,18 @@ cron: "* * * * *"
 description: Run it.
 "#;
 
+/// The same occurrence cadence against the parameterized target, supplying the
+/// required input and leaving the optional one to its declared default.
+const EVERY_MINUTE_WITH_INPUTS: &str = r#"
+name: nightly
+job_type: parameterized
+cron: "* * * * *"
+description: Run it.
+min_dispatcher: 3
+inputs:
+  sha: 4f9c1ab
+"#;
+
 async fn repo_with(files: &[(&str, &str)]) -> TempRepo {
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
@@ -74,6 +105,7 @@ async fn repo_with(files: &[(&str, &str)]) -> TempRepo {
         (".chug/jobs/code.yaml", CODE_YAML),
         (".chug/jobs/sweep.yaml", COMMAND_YAML),
         (".chug/jobs/manual.yaml", MANUAL_YAML),
+        (".chug/jobs/parameterized.yaml", PARAMETERIZED_YAML),
         (".chug/prompts/impl.md", "implement it"),
         (".chug/prompts/manual.md", "do it by hand"),
     ]
@@ -143,6 +175,16 @@ async fn an_invalid_schedule_is_skipped_and_never_wedges_the_scan() {
         (
             "skewed",
             "name: skewed\njob_type: code\ncron: '0 2 * * *'\ndescription: x\nmin_dispatcher: 999\n",
+        ),
+        (
+            "undeclared-input",
+            "name: undeclared-input\njob_type: parameterized\ncron: '0 2 * * *'\n\
+             min_dispatcher: 3\ninputs:\n  region: eu\n",
+        ),
+        (
+            "ungated-inputs",
+            "name: ungated-inputs\njob_type: parameterized\ncron: '0 2 * * *'\n\
+             inputs:\n  sha: 4f9c1ab\n",
         ),
     ] {
         let repo = repo_with(&[
@@ -314,6 +356,79 @@ async fn a_due_schedule_fires_once_with_provenance_and_its_event() {
         2,
         "the job it just created blocks the next occurrence"
     );
+}
+
+/// Design #311 slice C: the schedule's `inputs:` reach the job record as its
+/// supplied set, the target's declared default materializes **once** at the
+/// Ready transition, and the two events carry the two sets §10.3 names.
+#[tokio::test]
+async fn a_fired_schedule_carries_its_inputs_onto_the_job_record() {
+    let Some(rig) = rig(EVERY_MINUTE_WITH_INPUTS).await else {
+        return;
+    };
+    seed_prior_job(&rig, JobState::Done, Duration::hours(3), true).await;
+
+    let (handle, sink) = spawn_checked(core_of(&rig).await);
+    handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&sink);
+
+    let jobs = all_jobs(&rig).await;
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    let fired = jobs.last().unwrap();
+    assert_eq!(fired.r#type, "parameterized");
+    assert_eq!(
+        fired.inputs,
+        std::collections::BTreeMap::from([
+            ("service".to_string(), "web".to_string()),
+            ("sha".to_string(), "4f9c1ab".to_string()),
+        ]),
+        "the schedule's value plus the declared default, materialized once"
+    );
+    assert!(fired.base_ref.is_some(), "the release pinned a base_ref");
+
+    let events = job_events(&rig, fired.id).await;
+    let of = |name: &str| {
+        events
+            .iter()
+            .find(|v| v["event_type"] == serde_json::json!(name))
+            .unwrap_or_else(|| panic!("no {name} in {:?}", event_types(&events)))
+            .clone()
+    };
+    assert_eq!(
+        of("job-created")["inputs"],
+        serde_json::json!({ "sha": "4f9c1ab" }),
+        "job-created carries what the schedule supplied"
+    );
+    assert_eq!(
+        of("job-released")["inputs"],
+        serde_json::json!({ "service": "web", "sha": "4f9c1ab" }),
+        "the release event carries the effective set"
+    );
+}
+
+/// The golden backstop: a schedule with no `inputs:` produces the job it
+/// produced before the field existed — no map on the record, and no `inputs`
+/// key on any of its events.
+#[tokio::test]
+async fn a_schedule_without_inputs_fires_a_job_identical_to_today_s() {
+    let Some(rig) = rig(EVERY_MINUTE).await else {
+        return;
+    };
+    seed_prior_job(&rig, JobState::Done, Duration::hours(3), true).await;
+
+    let (handle, sink) = spawn_checked(core_of(&rig).await);
+    handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&sink);
+
+    let jobs = all_jobs(&rig).await;
+    let fired = jobs.last().unwrap();
+    assert!(fired.inputs.is_empty(), "{:?}", fired.inputs);
+    for event in job_events(&rig, fired.id).await {
+        assert!(
+            event.get("inputs").is_none(),
+            "an input-free job stamps nothing: {event}"
+        );
+    }
 }
 
 /// Design #310 Decision 4: an occurrence that comes due while a prior run is

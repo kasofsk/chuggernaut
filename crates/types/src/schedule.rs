@@ -13,7 +13,7 @@
 //! dispatcher.
 //!
 //! - **Accepts:** the YAML text of one schedule file, plus the file's stem and
-//!   the target job type's work type for the two rules that need them.
+//!   the target [`JobType`] for the rules that need them.
 //! - **Emits:** [`Schedule`], [`crate::job_type::FieldRuleError`] naming the
 //!   rule a file broke, and [`crate::job_type::ConfigWarning`] for a tolerated
 //!   unknown field.
@@ -22,7 +22,7 @@
 //! - **Spec:** §1.1 (field rules), design #310 (Decisions 2, 3 and 6).
 
 use crate::cron::{CronExpr, CronParseError};
-use crate::job_type::{ConfigWarning, FieldRuleError, WorkType};
+use crate::job_type::{ConfigWarning, FieldRuleError, Input, JobType, WorkType};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -63,6 +63,13 @@ pub struct Schedule {
     /// same meaning it carries on a job type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_dispatcher: Option<u32>,
+    /// The values every occurrence supplies to the job it creates (design #311
+    /// slice C), in the shape [`crate::Job::inputs`] uses. A non-empty map
+    /// requires `min_dispatcher >= SCHEDULE_INPUTS_SCHEMA_EPOCH`, because a
+    /// dispatcher that cannot see this field would fire the occurrence with the
+    /// values dropped.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, String>,
     /// Unknown top-level fields, captured rather than rejected; each surfaces
     /// as a [`ConfigWarning`].
     #[serde(flatten, default)]
@@ -135,6 +142,7 @@ impl Schedule {
                 });
             }
         }
+        errs.extend(self.validate_inputs(&context));
         debug_assert!(
             !errs.is_empty() || self.cron_expr().is_ok(),
             "a schedule with no violations has a parseable cron expression"
@@ -142,22 +150,89 @@ impl Schedule {
         errs
     }
 
-    /// The one rule that needs the target job type (design #310 Decision 6): an
-    /// agent run's job brief comes from the schedule, so `description` is
-    /// required when the target declares `work.type: agent` and optional
-    /// otherwise.
-    pub fn validate_against_target(&self, target: WorkType) -> Vec<FieldRuleError> {
+    /// The supplied `inputs:` map's own rules (design #311 slice C): the §14
+    /// skew declaration, and the shape every input value clears whatever
+    /// declares it — count, name form, charset, length — reused wholesale from
+    /// [`crate::inputs`] rather than restated here.
+    fn validate_inputs(&self, context: &str) -> Vec<FieldRuleError> {
+        let mut errs = Vec::new();
+        if self.inputs.is_empty() {
+            return errs;
+        }
+        if self.min_dispatcher.unwrap_or(0) < crate::version::SCHEDULE_INPUTS_SCHEMA_EPOCH {
+            errs.push(FieldRuleError::Required {
+                field: "min_dispatcher",
+                context: format!(
+                    "a schedule supplying 'inputs:' (needs min_dispatcher >= {})",
+                    crate::version::SCHEDULE_INPUTS_SCHEMA_EPOCH
+                ),
+            });
+        }
+        if let Err(e) = crate::inputs::check_supplied(&self.inputs) {
+            errs.push(FieldRuleError::Invalid {
+                field: "inputs",
+                context: context.to_string(),
+                reason: e.to_string(),
+            });
+        }
+        errs
+    }
+
+    /// The rules that need the target job type (design #310 Decision 6, design
+    /// #311 slice C): an agent run's job brief comes from the schedule, so
+    /// `description` is required when the target declares `work.type: agent`;
+    /// and the supplied `inputs:` must satisfy the target's declaration.
+    pub fn validate_against_target(&self, target: &JobType) -> Vec<FieldRuleError> {
         let missing = self
             .description
             .as_ref()
             .is_none_or(|d| d.trim().is_empty());
-        if target == WorkType::Agent && missing {
-            return vec![FieldRuleError::Required {
+        let mut errs = Vec::new();
+        if target.work.r#type == WorkType::Agent && missing {
+            errs.push(FieldRuleError::Required {
                 field: "description",
                 context: format!("schedule '{}' targeting work.type: agent", self.name),
-            }];
+            });
         }
-        Vec::new()
+        errs.extend(self.declared_input_errors(&target.inputs));
+        errs
+    }
+
+    /// Every occurrence supplies the same map, so the values the target
+    /// declares are decidable the moment both files are readable — which is why
+    /// this runs at config load and at `chuggernaut validate`, not at 3am.
+    fn declared_input_errors(&self, declared: &[Input]) -> Vec<FieldRuleError> {
+        let context = format!(
+            "schedule '{}' targeting job type '{}'",
+            self.name, self.job_type
+        );
+        let mut errs = Vec::new();
+        let invalid = |reason: String| FieldRuleError::Invalid {
+            field: "inputs",
+            context: context.clone(),
+            reason,
+        };
+        for (name, value) in &self.inputs {
+            match declared.iter().find(|d| &d.name == name) {
+                None => errs.push(invalid(format!(
+                    "input '{name}' is not declared by this job type"
+                ))),
+                Some(input) => {
+                    if let Err(e) = crate::inputs::check_value(input, value) {
+                        errs.push(invalid(format!("input '{name}': {e}")));
+                    }
+                }
+            }
+        }
+        for input in declared {
+            if input.required && !self.inputs.contains_key(&input.name) {
+                errs.push(invalid(format!(
+                    "input '{}' is required but the schedule supplies no value",
+                    input.name
+                )));
+            }
+        }
+        errs
     }
 
     /// Non-fatal config warnings (spec §14): unknown top-level fields that were
@@ -191,8 +266,38 @@ cron: "0 2 * * *"
 description: Run the nightly integration suite.
 "#;
 
+    /// A schedule supplying the `rollback` shape: one required `sha` matching a
+    /// declared pattern, and one optional `service` left to its default.
+    const WITH_INPUTS: &str = r#"
+name: n
+job_type: rollback
+cron: "0 2 * * *"
+description: Roll it back.
+min_dispatcher: 3
+inputs:
+  sha: 4f9c1ab
+"#;
+
     fn parse(yaml: &str) -> Schedule {
         Schedule::parse(yaml).unwrap()
+    }
+
+    /// The job type a schedule fires, built from the same YAML an author would
+    /// write, so the declaration these rules read is the parsed one.
+    fn target(work_type: &str, inputs_block: &str) -> JobType {
+        JobType::parse(&format!(
+            "name: rollback\nimage: img:latest\nmin_dispatcher: 2\n\
+             work:\n  type: {work_type}\n  prompt: p.md\n{inputs_block}"
+        ))
+        .unwrap()
+    }
+
+    /// The `rollback` declaration #311 motivates the feature with.
+    fn rollback_inputs() -> String {
+        "inputs:\n  - name: sha\n    type: string\n    required: true\n    \
+         pattern: '^[0-9a-f]{7,40}$'\n  - name: service\n    type: enum\n    \
+         values: [web, worker]\n    default: web\n"
+            .to_string()
     }
 
     #[test]
@@ -292,21 +397,22 @@ description: Run the nightly integration suite.
 
     #[test]
     fn description_is_required_only_for_an_agent_target() {
+        let agent = target("agent", "");
         let with_description = parse(NIGHTLY);
-        assert!(
-            with_description
-                .validate_against_target(WorkType::Agent)
-                .is_empty()
-        );
+        assert!(with_description.validate_against_target(&agent).is_empty());
 
         let without = parse("name: n\njob_type: deploy\ncron: '0 2 * * *'\n");
         assert!(
             without
-                .validate_against_target(WorkType::Command)
+                .validate_against_target(&target("command", ""))
                 .is_empty()
         );
-        assert!(without.validate_against_target(WorkType::Human).is_empty());
-        let errs = without.validate_against_target(WorkType::Agent);
+        assert!(
+            without
+                .validate_against_target(&target("human", ""))
+                .is_empty()
+        );
+        let errs = without.validate_against_target(&agent);
         assert_eq!(errs.len(), 1, "{errs:?}");
         assert!(
             errs[0].to_string().contains("'description' is required"),
@@ -314,7 +420,155 @@ description: Run the nightly integration suite.
         );
 
         let blank = parse("name: n\njob_type: code\ncron: '0 2 * * *'\ndescription: '  '\n");
-        assert_eq!(blank.validate_against_target(WorkType::Agent).len(), 1);
+        assert_eq!(blank.validate_against_target(&agent).len(), 1);
+    }
+
+    /// The slice-C shape: a supplied map parses into [`Schedule::inputs`],
+    /// clears the §1.1 rules, and survives a YAML round trip.
+    #[test]
+    fn a_schedule_parses_and_validates_its_supplied_inputs() {
+        let schedule = parse(WITH_INPUTS);
+        assert_eq!(
+            schedule.inputs,
+            BTreeMap::from([("sha".to_string(), "4f9c1ab".to_string())])
+        );
+        assert!(schedule.validate("n").is_empty(), "{schedule:?}");
+        assert!(
+            schedule.config_warnings().is_empty(),
+            "inputs is not unknown"
+        );
+        let yaml = serde_yaml::to_string(&schedule).unwrap();
+        assert_eq!(Schedule::parse(&yaml).unwrap(), schedule);
+    }
+
+    /// The value rules are [`crate::inputs`]'s, not a second copy: over-count,
+    /// the charset, the length bound and the name form all decide here exactly
+    /// as they do for an API-supplied map.
+    #[test]
+    fn supplied_input_values_clear_the_shared_shape_rules() {
+        let with = |block: &str| {
+            parse(&format!(
+                "name: n\njob_type: rollback\ncron: '0 2 * * *'\nmin_dispatcher: 3\ninputs:\n{block}"
+            ))
+        };
+        let over_count = (0..=crate::inputs::INPUTS_COUNT_MAX)
+            .map(|i| format!("  input_{i}: v\n"))
+            .collect::<String>();
+        for (block, expected) in [
+            (over_count.as_str(), "exceeds the limit"),
+            ("  sha: 'a;rm -rf'\n", "outside the allowed charset"),
+            ("  CHUG_SHA: 4f9c1ab\n", "is malformed"),
+            ("  chug_input_sha: 4f9c1ab\n", "is not declared"),
+        ] {
+            let schedule = with(block);
+            let errs: Vec<String> = schedule
+                .validate("n")
+                .iter()
+                .chain(
+                    schedule
+                        .validate_against_target(&target("command", &rollback_inputs()))
+                        .iter(),
+                )
+                .map(std::string::ToString::to_string)
+                .collect();
+            assert!(
+                errs.iter().any(|e| e.contains(expected)),
+                "{expected:?} missing from {errs:?}"
+            );
+        }
+        let over_length = format!("  sha: {}\n", "a".repeat(crate::INPUT_VALUE_LEN_MAX + 1));
+        assert!(
+            with(&over_length)
+                .validate("n")
+                .iter()
+                .any(|e| e.to_string().contains("over the 256-character limit"))
+        );
+    }
+
+    /// The §14 gate that keeps the N-1 drop from being silent: a dispatcher
+    /// that cannot see `inputs:` refuses the file on `min_dispatcher` instead
+    /// of firing the occurrence without the values.
+    #[test]
+    fn supplying_inputs_requires_the_schedule_inputs_epoch() {
+        let ungated = parse(&WITH_INPUTS.replace("min_dispatcher: 3\n", ""));
+        let errs = ungated.validate("n");
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(
+            errs[0].to_string().contains("'min_dispatcher' is required"),
+            "{errs:?}"
+        );
+        assert!(errs[0].to_string().contains("inputs"), "{errs:?}");
+
+        let stale = parse(&WITH_INPUTS.replace("min_dispatcher: 3", "min_dispatcher: 2"));
+        assert_eq!(
+            stale.validate("n").len(),
+            1,
+            "the job-type epoch is not enough"
+        );
+        assert_eq!(
+            parse(WITH_INPUTS).requires_dispatcher(crate::SCHEDULE_INPUTS_SCHEMA_EPOCH - 1),
+            Some(crate::SCHEDULE_INPUTS_SCHEMA_EPOCH),
+            "an N-1 dispatcher refuses the file rather than dropping its inputs"
+        );
+    }
+
+    /// The rules that need the target's declaration: an undeclared name, a
+    /// value failing the declared `pattern`/`values`, and a required input the
+    /// schedule never supplies — each decidable at config load.
+    #[test]
+    fn supplied_inputs_are_judged_against_the_target_declaration() {
+        let declared = target("command", &rollback_inputs());
+        assert!(
+            parse(WITH_INPUTS)
+                .validate_against_target(&declared)
+                .is_empty()
+        );
+
+        let with = |block: &str| {
+            parse(&format!(
+                "name: n\njob_type: rollback\ncron: '0 2 * * *'\nmin_dispatcher: 3\ninputs:\n{block}"
+            ))
+        };
+        for (block, expected) in [
+            ("  region: eu\n", "is not declared by this job type"),
+            ("  sha: not_hex\n", "does not match the declared pattern"),
+            (
+                "  sha: 4f9c1ab\n  service: database\n",
+                "not one of the declared values",
+            ),
+            (
+                "  service: web\n",
+                "is required but the schedule supplies no value",
+            ),
+        ] {
+            let errs: Vec<String> = with(block)
+                .validate_against_target(&declared)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect();
+            assert!(
+                errs.iter().any(|e| e.contains(expected)),
+                "{expected:?} missing from {errs:?}"
+            );
+        }
+    }
+
+    /// The feature is off, not merely unused: a schedule with no `inputs:`
+    /// parses, validates and serializes byte-identically to one written before
+    /// the field existed.
+    #[test]
+    fn a_schedule_without_inputs_is_unchanged_by_the_field() {
+        let schedule = parse(NIGHTLY);
+        assert!(schedule.inputs.is_empty());
+        assert!(schedule.validate("nightly-integration").is_empty());
+        assert!(
+            schedule
+                .validate_against_target(&target("agent", ""))
+                .is_empty()
+        );
+        let yaml = serde_yaml::to_string(&schedule).unwrap();
+        assert!(!yaml.contains("inputs"), "{yaml}");
+        assert!(parse(NIGHTLY).requires_dispatcher(0).is_none());
     }
 
     #[test]

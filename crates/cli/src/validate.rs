@@ -18,7 +18,7 @@
 
 use clap::Parser;
 use std::path::{Path, PathBuf};
-use types::{JobType, ProjectDefaults, Schedule, WorkType};
+use types::{JobType, ProjectDefaults, Schedule};
 
 #[derive(Parser)]
 pub struct ValidateArgs {
@@ -152,7 +152,8 @@ fn skew_error(needed: u32, deployed_epoch: u32) -> String {
 
 /// A `.chug/schedules/{name}.yaml` file (design #310): the §1.1 field rules,
 /// the skew gate, and — when the target job type sits in the same config root —
-/// the rule that an agent target needs a `description`.
+/// the rules that need it, an agent target's `description` and the declaration
+/// every supplied input is judged against.
 fn validate_schedule(path: &Path, content: &str, deployed_epoch: u32) -> Outcome {
     let schedule = match Schedule::parse(content) {
         Ok(s) => s,
@@ -181,7 +182,7 @@ fn validate_schedule(path: &Path, content: &str, deployed_epoch: u32) -> Outcome
     if let Some(target) = sibling_job_type(path, &schedule.job_type) {
         errors.extend(
             schedule
-                .validate_against_target(target)
+                .validate_against_target(&target)
                 .iter()
                 .map(std::string::ToString::to_string),
         );
@@ -189,14 +190,14 @@ fn validate_schedule(path: &Path, content: &str, deployed_epoch: u32) -> Outcome
     Outcome { errors, warnings }
 }
 
-/// The work type of the job type a schedule names, when its file sits in the
-/// same config root. A missing or unparseable target is not reported here — the
-/// existence check is release-time, like a prompt file's.
-fn sibling_job_type(path: &Path, job_type: &str) -> Option<WorkType> {
+/// The job type a schedule names, when its file sits in the same config root. A
+/// missing or unparseable target is not reported here — the existence check is
+/// release-time, like a prompt file's.
+fn sibling_job_type(path: &Path, job_type: &str) -> Option<JobType> {
     let root = path.parent()?.parent()?;
     let target = root.join("jobs").join(format!("{job_type}.yaml"));
     let content = std::fs::read_to_string(target).ok()?;
-    Some(JobType::parse(&content).ok()?.work.r#type)
+    JobType::parse(&content).ok()
 }
 
 fn sibling_defaults(path: &Path) -> Option<Result<ProjectDefaults, serde_yaml::Error>> {
@@ -387,6 +388,32 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("requires dispatcher schema epoch >= 9")),
         );
+    }
+
+    /// The merge-time half of design #311 slice C: the target's declaration
+    /// sits in the same config root, so a schedule supplying an input the type
+    /// does not declare — or omitting one it requires — fails CI rather than
+    /// firing at 3am.
+    #[test]
+    fn a_schedule_supplying_inputs_is_validated_against_its_target() {
+        let dir = config_root(
+            "name: nightly\njob_type: rollback\ncron: '0 2 * * *'\nmin_dispatcher: 3\n\
+             inputs:\n  region: eu\n",
+        );
+        std::fs::write(
+            dir.path().join("jobs/rollback.yaml"),
+            "name: rollback\nimage: img:latest\nmin_dispatcher: 2\n\
+             work:\n  type: command\n  run: ./r.sh\n\
+             inputs:\n  - name: sha\n    type: string\n    required: true\n",
+        )
+        .unwrap();
+        let errs = schedule_errors(&dir, types::CONFIG_SCHEMA_EPOCH);
+        for expected in [
+            "input 'region' is not declared by this job type",
+            "input 'sha' is required but the schedule supplies no value",
+        ] {
+            assert!(errs.iter().any(|e| e.contains(expected)), "{errs:?}");
+        }
     }
 
     #[test]

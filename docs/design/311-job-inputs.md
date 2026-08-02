@@ -1,9 +1,11 @@
 # Design #311 — Job inputs (parameterizing a run without rewriting it)
 
-Status: IMPLEMENTED IN PART — slices A and B shipped in jobs #314–#319 and #369.
+Status: IMPLEMENTED — slices A, B and C shipped in jobs #314–#319, #369
+and #376.
 
 [Slice A](#minimum-useful-version) — the recommended first ship — landed end to
-end and is deployed: `CONFIG_SCHEMA_EPOCH` is 2 in
+end and is deployed: `CONFIG_SCHEMA_EPOCH` was 2 when it landed and is 3 today
+(slice C's `SCHEDULE_INPUTS_SCHEMA_EPOCH`, below) in
 `crates/types/src/version.rs`, `crates/types/src/inputs.rs` holds the shared
 rules and `crates/domain/src/inputs.rs` the pure decider, `CHUG_INPUT_*` is
 injected into work, eval and wrap-up containers, and `.chug/jobs/rollback.yaml`
@@ -18,8 +20,13 @@ agent's closing summary (`crates/dispatcher/src/eval.rs`). The
 `<untrusted_input>` delimiter in the Option B sketch below was new to this repo
 when it landed, exactly as [correction 3](#corrections-verified-against-the-tree)
 predicted — the brief block did not already use one for the description, and
-still does not. **Still open:** slice C (`inputs:` on a schedule file), which
-[#310](./310-scheduled-jobs.md) has since unblocked.
+still does not. Slice C shipped in #376: `inputs:` on a schedule file
+(`crates/types/src/schedule.rs`), threaded into `schedule_create_spec`
+(`crates/dispatcher/src/scan.rs`) as the created job's supplied set, judged
+against the target's declaration at config load, and gated on a
+`SCHEDULE_INPUTS_SCHEMA_EPOCH` of 3 — a schedule's `inputs:` is invisible to a
+dispatcher that understands a job type's, so only an epoch that dispatcher does
+not advertise turns the drop into a refusal.
 
 Written against the tree at `acdb2c6`. Every claim about current behavior below
 was read out of `spec.md` and the source in this repo; where the brief and the
@@ -924,6 +931,9 @@ the create-form rendering and the job-header display in `web/`.
 
 **Slice C — schedules.** `inputs:` on the schedule file, passed through #310's
 origination path unchanged. Blocked on #310 landing, and on nothing here.
+Shipped in #376, with one addition this doc did not anticipate: the schedule
+surface needs its **own** epoch, because the epoch that gates a job type's
+`inputs:` is one an N−1 dispatcher already advertises.
 
 Deferred, in rough priority order: `bool`/`int`/list kinds; `/chuggernaut/inputs.json`
 for structured values; a "create N" client-side fan-out affordance; per-input
@@ -949,6 +959,9 @@ Per CLAUDE.md's contract-first rule for dispatcher work:
 | Bound | `inputs_count_max = 16` declared inputs per type; `input_value_len_max = 256` per value. Both hard errors |
 | Golden trace | `job-created` (supplied inputs) → `job-released` (effective inputs, after default fill) → `job-started` → the work container env contains exactly the keys for inputs with a **resolved** value — no key for a declared optional input that has neither a supplied value nor a `default`. Plus: a missing-required-input release rejected with `inputs.{name}`, and a job with no inputs producing an eval container env byte-identical to today's |
 | Epoch | `CONFIG_SCHEMA_EPOCH` +1, in the same commit as the parser change (§14.1) |
+| `Schedule.inputs` | New field (slice C), `BTreeMap<String, String>`, empty on every schedule written before it. Passed through the origination path as the created job's **supplied** set — no second materialization site, no second validation implementation |
+| `Schedule::validate` | A non-empty `inputs:` requires `min_dispatcher >= SCHEDULE_INPUTS_SCHEMA_EPOCH`, and every supplied value clears `types::inputs`' shape rules |
+| `Schedule::validate_against_target` | Now takes the whole target `JobType`: an undeclared name, a value failing the declared `pattern`/`values`, and a missing `required` input are decided at config load and at `chuggernaut validate` |
 
 New modules get a doc header (accepts / emits / guarantees / spec §) and a
 `MODULES.md` registry row, per the direction-of-travel rule; `.chug/tasks/ci.sh`
