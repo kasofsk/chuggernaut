@@ -9,13 +9,32 @@ use container::PlacementPolicy;
 use container::docker::DockerNodeConfig;
 use test_utils::backend_suite as suite;
 use test_utils::nats::NatsTestServer;
-use worker::config::ANDROID_SDK_DIR_DEFAULT;
+use worker::config::{
+    ANDROID_SDK_DIR_DEFAULT, NIX_CLIENT_DEFAULT, NIX_DAEMON_SOCKET_DEFAULT,
+    NIX_REALISE_TIMEOUT_SECS_DEFAULT, NIX_STORE_DIR_DEFAULT,
+};
 use worker::{FleetBackend, WorkerConfig, WorkerMode};
 
 /// The `WORKER_SLOTS_MAX` every daemon spawned here boots with (spec §3.1): above
 /// the boot `slots: 4`, so the boot value is never clamped, and low enough that a
 /// request above the ceiling is easy to state.
 const DAEMON_SLOTS_MAX: u32 = 6;
+
+/// A fresh directory this process alone owns, for a test's node-local files.
+/// Canonicalized, so a node whose store prefix is derived from it still matches
+/// a realise target the daemon resolves.
+fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "{prefix}-{}-{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.canonicalize().unwrap()
+}
 
 /// In-process daemon (node "w1", local Docker) + fleet backend over it, or
 /// None to skip (no Docker).
@@ -28,15 +47,7 @@ async fn setup(
         return None;
     }
 
-    let dir = std::env::temp_dir().join(format!(
-        "chug-worker-test-{}-{:x}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = unique_temp_dir("chug-worker-test");
     let artifact_path = dir.join("chuggernaut-channel");
     std::fs::write(&artifact_path, artifact_bytes).unwrap();
 
@@ -53,6 +64,11 @@ async fn setup(
         kvm_device: None,
         kvm_projects: vec![],
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
+        nix_gcroots_dir: None,
+        nix_client: NIX_CLIENT_DEFAULT.into(),
+        nix_daemon_socket: NIX_DAEMON_SOCKET_DEFAULT.into(),
+        nix_store_dir: NIX_STORE_DIR_DEFAULT.into(),
+        nix_realise_timeout_secs: NIX_REALISE_TIMEOUT_SECS_DEFAULT,
         refresh_script: None,
         refresh_git_url: None,
         refresh_git_key: "/data/keys/worker_git".into(),
@@ -561,6 +577,11 @@ fn spawn_daemon(
         kvm_device: None,
         kvm_projects: vec![],
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
+        nix_gcroots_dir: None,
+        nix_client: NIX_CLIENT_DEFAULT.into(),
+        nix_daemon_socket: NIX_DAEMON_SOCKET_DEFAULT.into(),
+        nix_store_dir: NIX_STORE_DIR_DEFAULT.into(),
+        nix_realise_timeout_secs: NIX_REALISE_TIMEOUT_SECS_DEFAULT,
         refresh_script,
         refresh_git_url,
         refresh_git_key,
@@ -862,15 +883,7 @@ async fn refresh_reports_skip_without_git_credential() {
         return;
     }
 
-    let dir = std::env::temp_dir().join(format!(
-        "chug-worker-skip-{}-{:x}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = unique_temp_dir("chug-worker-skip");
     let channel = dir.join("chuggernaut-channel");
     std::fs::write(&channel, b"x").unwrap();
     let config = WorkerConfig {
@@ -886,6 +899,11 @@ async fn refresh_reports_skip_without_git_credential() {
         kvm_device: None,
         kvm_projects: vec![],
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
+        nix_gcroots_dir: None,
+        nix_client: NIX_CLIENT_DEFAULT.into(),
+        nix_daemon_socket: NIX_DAEMON_SOCKET_DEFAULT.into(),
+        nix_store_dir: NIX_STORE_DIR_DEFAULT.into(),
+        nix_realise_timeout_secs: NIX_REALISE_TIMEOUT_SECS_DEFAULT,
         refresh_script: Some(fake_refresh_script()),
         refresh_git_url: None,
         refresh_git_key: dir.join("worker_git"),
@@ -923,6 +941,104 @@ async fn refresh_reports_skip_without_git_credential() {
     let id = fleet.launch(suite::cfg("true")).await.unwrap();
     suite::rm(&id);
     daemon.abort();
+}
+
+/// A node with per-task nix GC roots on, whose nix client never returns: every
+/// boot precondition is present in `dir` so the daemon starts — including a
+/// toolchain that RESOLVES INTO the node's store, the shape a parent bind
+/// preserves — and a one-second realise bound makes the launch refusal prompt.
+fn nix_rooted_config(dir: &std::path::Path, nats_url: &str) -> WorkerConfig {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::create_dir_all(dir.join("gcroots")).unwrap();
+    std::fs::create_dir_all(dir.join("store").join("aaaa-toolchain")).unwrap();
+    std::os::unix::fs::symlink(
+        dir.join("store").join("aaaa-toolchain"),
+        dir.join("toolchain"),
+    )
+    .unwrap();
+    std::fs::write(dir.join("socket"), b"").unwrap();
+    std::fs::write(dir.join("chuggernaut-channel"), b"x").unwrap();
+    let client = dir.join("nix-store");
+    std::fs::write(&client, b"#!/bin/sh\nsleep 60\n").unwrap();
+    std::fs::set_permissions(&client, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    WorkerConfig {
+        node: "w1".into(),
+        slots: 4,
+        slots_max: DAEMON_SLOTS_MAX,
+        modes: vec![WorkerMode::Container],
+        nats_url: nats_url.to_string(),
+        nats_creds: None,
+        docker_endpoint: local_docker_endpoint(),
+        channel_binary: dir.join("chuggernaut-channel"),
+        cache_dir: None,
+        kvm_device: Some("/dev/null".into()),
+        kvm_projects: vec!["acme/nix".into()],
+        android_sdk_dir: dir.join("toolchain"),
+        nix_gcroots_dir: Some(dir.join("gcroots")),
+        nix_client: client,
+        nix_daemon_socket: dir.join("socket"),
+        nix_store_dir: dir.join("store"),
+        nix_realise_timeout_secs: 1,
+        refresh_script: None,
+        refresh_git_url: None,
+        refresh_git_key: dir.join("worker_git"),
+    }
+}
+
+/// A realise that breaks the node's bound REFUSES the launch over the real wire
+/// (design #373 3c): the dispatcher-facing error is `BackendError::Launch`
+/// naming `WORKER_NIX_REALISE_TIMEOUT_SECS`, never `NoCapacity` — a realise that
+/// timed out will not be faster on a requeue — and no root survives the refusal.
+#[tokio::test]
+async fn a_realise_over_the_bound_refuses_the_launch_as_launch_not_capacity() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    if !suite::docker_available() {
+        eprintln!("skipping: Docker daemon unavailable");
+        return;
+    }
+
+    let dir = unique_temp_dir("chug-worker-nix");
+    let gcroots = dir.join("gcroots");
+    let config = nix_rooted_config(&dir, server.url());
+    let daemon = tokio::spawn(async move {
+        if let Err(e) = worker::run(config).await {
+            eprintln!("daemon exited: {e}");
+        }
+    });
+
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let fleet = fleet_over(store, "w1", 8).await;
+    await_reachable(&fleet, "w1").await;
+
+    let mut admitted = suite::cfg("true");
+    admitted.env.insert("JOB_PROJECT".into(), "acme/nix".into());
+    admitted
+        .env
+        .insert("CHUG_TASK_ID".into(), "nixbound".into());
+    let err = fleet
+        .launch(admitted)
+        .await
+        .expect_err("a realise past the bound must refuse the launch");
+    match &err {
+        container::BackendError::Launch(message) => assert!(
+            message.contains("WORKER_NIX_REALISE_TIMEOUT_SECS"),
+            "the refusal must name the bound: {message}"
+        ),
+        other => panic!("a realise refusal must be Launch, got {other:?}"),
+    }
+    assert!(
+        !gcroots.join("task-nixbound").exists(),
+        "a refused realise leaves no root behind"
+    );
+
+    let unadmitted = fleet.launch(suite::cfg("true")).await.unwrap();
+    suite::rm(&unadmitted);
+    daemon.abort();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The `copy_file` reply bound over the real wire (design
@@ -1194,6 +1310,11 @@ async fn declared_mode_without_a_backend_refuses_to_start() {
         kvm_device: None,
         kvm_projects: vec![],
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
+        nix_gcroots_dir: None,
+        nix_client: NIX_CLIENT_DEFAULT.into(),
+        nix_daemon_socket: NIX_DAEMON_SOCKET_DEFAULT.into(),
+        nix_store_dir: NIX_STORE_DIR_DEFAULT.into(),
+        nix_realise_timeout_secs: NIX_REALISE_TIMEOUT_SECS_DEFAULT,
         refresh_script: None,
         refresh_git_url: None,
         refresh_git_key: "/data/keys/worker_git".into(),
@@ -1226,6 +1347,11 @@ async fn declared_kvm_without_the_device_refuses_to_start() {
         kvm_device: Some("/dev/definitely-not-kvm".into()),
         kvm_projects: vec!["acme/beacon".into()],
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
+        nix_gcroots_dir: None,
+        nix_client: NIX_CLIENT_DEFAULT.into(),
+        nix_daemon_socket: NIX_DAEMON_SOCKET_DEFAULT.into(),
+        nix_store_dir: NIX_STORE_DIR_DEFAULT.into(),
+        nix_realise_timeout_secs: NIX_REALISE_TIMEOUT_SECS_DEFAULT,
         refresh_script: None,
         refresh_git_url: None,
         refresh_git_key: "/data/keys/worker_git".into(),

@@ -22,7 +22,10 @@ use store::NatsStore;
 use test_utils::FakeProvider;
 use test_utils::nats::NatsTestServer;
 use types::{FleetStatus, Job, JobState, Task, TaskKind, TaskPhase, TaskState, WorkerNode};
-use worker::config::ANDROID_SDK_DIR_DEFAULT;
+use worker::config::{
+    ANDROID_SDK_DIR_DEFAULT, NIX_CLIENT_DEFAULT, NIX_DAEMON_SOCKET_DEFAULT,
+    NIX_REALISE_TIMEOUT_SECS_DEFAULT, NIX_STORE_DIR_DEFAULT,
+};
 use worker::{FleetBackend, WorkerConfig, WorkerMode};
 
 mod common;
@@ -81,6 +84,11 @@ async fn worker_fleet(
         kvm_device: None,
         kvm_projects: vec![],
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
+        nix_gcroots_dir: None,
+        nix_client: NIX_CLIENT_DEFAULT.into(),
+        nix_daemon_socket: NIX_DAEMON_SOCKET_DEFAULT.into(),
+        nix_store_dir: NIX_STORE_DIR_DEFAULT.into(),
+        nix_realise_timeout_secs: NIX_REALISE_TIMEOUT_SECS_DEFAULT,
         refresh_script: None,
         refresh_git_url: None,
         refresh_git_key: "/data/keys/worker_git".into(),

@@ -12,9 +12,11 @@
 
 use crate::capacity::Capacity;
 use crate::config::{WorkerConfig, WorkerMode};
+use crate::nix::{NixRoots, REAP_AGE_MIN};
 use container::docker::{DockerBackend, DockerNodeConfig, KvmGrant};
 use container::{
-    BackendError, ContainerBackend, ContainerLaunchConfig, ContainerStatus, InjectedFile,
+    BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
+    InjectedFile,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -221,6 +223,15 @@ struct WorkerState {
     /// launch env is injected for exactly the launches the backend gives the
     /// device and mounts to — one allow-list decision, two consumers.
     kvm: Option<KvmGrant>,
+    /// The node's nix realise and per-task GC roots (design #373 P1); `None`
+    /// (`WORKER_NIX_GCROOTS_DIR` unset) ⇒ neither, and today's behavior. Shared
+    /// with the reaper task, which is the crash backstop for the roots this
+    /// daemon holds.
+    nix: Option<Arc<NixRoots>>,
+    /// Which task each rooted container belongs to, so `remove` — the op
+    /// `platform-ops`'s `dispose` drives — drops exactly that task's root.
+    /// Bounded by [`NIX_ROOTED_MAX`]; the reaper covers anything a crash loses.
+    nix_rooted: std::sync::Mutex<HashMap<ContainerId, String>>,
     /// Node-local build+swap script for self-refresh (spec §3.1); `None` ⇒
     /// refresh requests are rejected as unconfigured.
     refresh_script: Option<PathBuf>,
@@ -368,6 +379,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
     let backend = build_backend(&config).await?;
     let cache_enabled = config.cache_dir.is_some();
     let kvm = kvm_grant(&config);
+    let nix = nix_roots(&config)?;
 
     let mut artifacts = HashMap::new();
     match tokio::fs::read(&config.channel_binary).await {
@@ -397,6 +409,8 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         version: version_string(),
         cache_enabled,
         kvm,
+        nix: nix.clone(),
+        nix_rooted: std::sync::Mutex::new(HashMap::new()),
         refresh_script: config.refresh_script.clone(),
         refresh_git_url: config.refresh_git_url.clone(),
         refresh_git_key: config.refresh_git_key.clone(),
@@ -432,6 +446,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         announce_now,
         state.version.clone(),
     );
+    spawn_nix_reaper(state.clone());
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT));
     let tasks = tokio::task::JoinSet::new();
@@ -521,6 +536,118 @@ fn kvm_grant(config: &WorkerConfig) -> Option<KvmGrant> {
         android_sdk_dir: config.android_sdk_dir.clone(),
         projects: config.kvm_projects.clone(),
     })
+}
+
+/// The node's nix realise and GC roots (design #373 P1), or `None` when
+/// `WORKER_NIX_GCROOTS_DIR` is unset. A declared roots directory that is absent
+/// from the daemon's own view refuses the boot, the same posture a declared KVM
+/// device gets — never a silent skip that leaves a task's closure collectable.
+fn nix_roots(config: &WorkerConfig) -> Result<Option<Arc<NixRoots>>, WorkerRunError> {
+    let Some(gcroots_dir) = config.nix_gcroots_dir.clone() else {
+        return Ok(None);
+    };
+    let roots = NixRoots {
+        client: config.nix_client.clone(),
+        gcroots_dir,
+        daemon_socket: config.nix_daemon_socket.clone(),
+        store_dir: config.nix_store_dir.clone(),
+        realise_timeout: Duration::from_secs(config.nix_realise_timeout_secs),
+    };
+    let realise_target = config
+        .kvm_device
+        .is_some()
+        .then_some(config.android_sdk_dir.as_path());
+    roots
+        .check(realise_target)
+        .map_err(WorkerRunError::Config)?;
+    if config.kvm_device.is_none() {
+        tracing::warn!(
+            "WORKER_NIX_GCROOTS_DIR is set but this node passes no toolchain through \
+             (WORKER_KVM unset) — nothing hands a task store paths, so no root is ever taken"
+        );
+    }
+    tracing::info!(
+        gcroots_dir = %roots.gcroots_dir.display(),
+        client = %roots.client.display(),
+        realise_timeout_secs = config.nix_realise_timeout_secs,
+        "per-task nix GC roots enabled (design #373 P1)"
+    );
+    Ok(Some(Arc::new(roots)))
+}
+
+/// How often the stale-root reaper runs (design #373 Decision 4). Roots are
+/// released at task exit, so this is the crash backstop rather than the primary
+/// path — an hour between passes is ample, and the interval's immediate first
+/// tick is deliberately spent doing nothing, because a daemon still booting its
+/// docker connection knows least about what is live.
+const NIX_REAP_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// How many rooted containers the daemon tracks at once (STYLE.md Tier 2 rule
+/// 3). A node runs a handful of slots, so reaching this means containers are
+/// never being removed — the reaper is what recovers the roots either way.
+const NIX_ROOTED_MAX: usize = 512;
+
+/// Reap roots whose task is long gone, on a bounded cadence. Detached and
+/// best-effort: a pass that cannot see the node's containers is SKIPPED rather
+/// than reaping on incomplete knowledge, which would pull a root out from under
+/// a live task.
+fn spawn_nix_reaper(state: Arc<WorkerState>) {
+    let Some(roots) = state.nix.clone() else {
+        return;
+    };
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(NIX_REAP_INTERVAL);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let Some(live) = reap_live_tasks(&state).await else {
+                continue;
+            };
+            let removed = roots.reap(&live, REAP_AGE_MIN);
+            if removed > 0 {
+                tracing::warn!(
+                    removed,
+                    "reaped stale nix GC roots — a worker died holding them"
+                );
+            }
+        }
+    });
+}
+
+/// The tasks one reaper pass must spare, or `None` when the node's containers
+/// cannot be seen. The count is asked for FIRST because it is the call that
+/// propagates an unreachable docker endpoint — the listing degrades an
+/// unreachable node to an empty set, which would read as "nothing is live".
+async fn reap_live_tasks(state: &WorkerState) -> Option<std::collections::HashSet<String>> {
+    if let Err(e) = state.backend.managed_running_total().await {
+        tracing::warn!("nix GC root reaper skipped this pass — cannot count containers: {e}");
+        return None;
+    }
+    let containers = match state.backend.list_managed_running().await {
+        Ok(containers) => containers,
+        Err(e) => {
+            tracing::warn!("nix GC root reaper skipped this pass: {e}");
+            return None;
+        }
+    };
+    let mut live: std::collections::HashSet<String> = containers
+        .into_iter()
+        .filter_map(|c| c.task.map(|t| t.to_string()))
+        .collect();
+    live.extend(nix_rooted_tasks(state));
+    Some(live)
+}
+
+/// Every task this daemon currently holds a root for, so the reaper spares a
+/// launch whose container the node cannot list yet.
+fn nix_rooted_tasks(state: &WorkerState) -> Vec<String> {
+    state
+        .nix_rooted
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .cloned()
+        .collect()
 }
 
 /// The node's own capacity cell, stamped with this process's epoch (spec §3.1):
@@ -683,7 +810,8 @@ async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
             let mut env = req.env;
             inject_cache_env(&mut env, state.cache_enabled);
             inject_android_env(&mut env, state.kvm.as_ref());
-            let id = state
+            let rooted = realise_for_launch(state, &env).await?;
+            let launched = state
                 .backend
                 .launch(ContainerLaunchConfig {
                     image: req.image,
@@ -694,8 +822,15 @@ async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
                     memory_limit: req.memory_limit,
                     node: None,
                 })
-                .await
-                .map_err(backend_err)?;
+                .await;
+            let id = match launched {
+                Ok(id) => id,
+                Err(e) => {
+                    release_root_for_task(state, rooted.as_deref());
+                    return Err(backend_err(e));
+                }
+            };
+            remember_root(state, &id, rooted);
             Ok(LaunchOk { id })
         }
         .await,
@@ -732,6 +867,100 @@ fn inject_android_env(env: &mut HashMap<String, String>, kvm: Option<&KvmGrant>)
     env.insert("ANDROID_HOME".into(), sdk.into());
     env.insert("ANDROID_USER_HOME".into(), format!("{home}/.android"));
     env.insert("HOME".into(), home.into());
+}
+
+/// Realise the toolchain this launch is about to be given, and hold a GC root
+/// over it for the task's lifetime (design #373 P1). Returns the task the root
+/// names, or `None` when this node takes no roots or this launch gets no
+/// toolchain — the same [`KvmGrant::admits`] decision the mounts already turn on.
+async fn realise_for_launch(
+    state: &WorkerState,
+    env: &HashMap<String, String>,
+) -> Result<Option<String>, WorkerError> {
+    let Some(roots) = state.nix.as_ref() else {
+        return Ok(None);
+    };
+    let Some(grant) = state.kvm.as_ref() else {
+        return Ok(None);
+    };
+    let Some(task_id) = rooted_task_id(Some(grant), env)? else {
+        return Ok(None);
+    };
+    roots
+        .realise(&task_id, &grant.android_sdk_dir)
+        .await
+        .map_err(launch_refused)?;
+    Ok(Some(task_id))
+}
+
+/// Which task a launch takes a GC root for: `None` when the launch gets no
+/// toolchain — the same [`KvmGrant::admits`] decision the mounts turn on — and a
+/// refusal when an admitted launch names no task. Pure, so the fork is tested
+/// without a backend.
+fn rooted_task_id(
+    kvm: Option<&KvmGrant>,
+    env: &HashMap<String, String>,
+) -> Result<Option<String>, WorkerError> {
+    if !kvm.is_some_and(|grant| grant.admits(env)) {
+        return Ok(None);
+    }
+    let task_id = env.get("CHUG_TASK_ID").ok_or_else(|| {
+        launch_refused(
+            "this node roots a launch's toolchain per task, but the launch carries no \
+             CHUG_TASK_ID — refused rather than run against a collectable closure (design \
+             #373 Decision 4)"
+                .to_string(),
+        )
+    })?;
+    Ok(Some(task_id.clone()))
+}
+
+/// A realise that fails REFUSES the launch: `Launch`, never `NoCapacity`. A
+/// realise that broke the node's bound will not get faster by being requeued as
+/// capacity (design #373 3c).
+fn launch_refused(message: String) -> WorkerError {
+    WorkerError::Launch { message }
+}
+
+/// Remember which task a launched container's root names, so `remove` can drop
+/// exactly that one. A tracking table at its bound stops growing and leans on
+/// the reaper — it never refuses a launch that has already been realised.
+fn remember_root(state: &WorkerState, id: &ContainerId, task_id: Option<String>) {
+    let Some(task_id) = task_id else {
+        return;
+    };
+    let mut rooted = state
+        .nix_rooted
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if rooted.len() >= NIX_ROOTED_MAX {
+        tracing::warn!(
+            tracked = rooted.len(),
+            "nix GC root tracking is at its bound — this task's root falls to the reaper"
+        );
+        return;
+    }
+    rooted.insert(id.clone(), task_id);
+    debug_assert!(rooted.len() <= NIX_ROOTED_MAX, "the table stays bounded");
+}
+
+/// Drop the root a container's task holds, at the container's removal — the
+/// lifecycle `platform-ops`'s `dispose` drives. Best-effort in both halves: an
+/// untracked container simply has nothing to release.
+fn release_root_for_container(state: &WorkerState, id: &ContainerId) {
+    let task_id = state
+        .nix_rooted
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(id);
+    release_root_for_task(state, task_id.as_deref());
+}
+
+/// Drop one task's root, if this node holds any.
+fn release_root_for_task(state: &WorkerState, task_id: Option<&str>) {
+    if let (Some(roots), Some(task_id)) = (state.nix.as_ref(), task_id) {
+        roots.release(task_id);
+    }
 }
 
 async fn kill(state: &WorkerState, payload: &[u8]) -> WorkerReply<serde_json::Value> {
@@ -853,11 +1082,16 @@ async fn logs_tail(state: &WorkerState, payload: &[u8]) -> WorkerReply<LogsTailO
     )
 }
 
+/// Remove a finished container and release the GC root its task held (design
+/// #373 Decision 4). The root goes whatever the removal did: the task is over
+/// either way, and a root outliving it is the disk leak the reaper exists for.
 async fn remove(state: &WorkerState, payload: &[u8]) -> WorkerReply<serde_json::Value> {
     reply(
         async {
             let req: ContainerRef = parse(payload)?;
-            state.backend.remove(&req.id).await.map_err(backend_err)?;
+            let removed = state.backend.remove(&req.id).await;
+            release_root_for_container(state, &req.id);
+            removed.map_err(backend_err)?;
             Ok(serde_json::json!({}))
         }
         .await,
@@ -1505,6 +1739,45 @@ mod tests {
         let mut env = HashMap::from([("JOB_PROJECT".to_string(), "acme/beacon".to_string())]);
         inject_android_env(&mut env, Some(&kvm_grant_for(&[])));
         assert_eq!(env.len(), 1, "an empty allow-list grants nobody: {env:?}");
+    }
+
+    /// A launch takes a root exactly when it takes the toolchain mounts, by the
+    /// same allow-list decision (design #373 P1): a project the node did not
+    /// grant, and a node with no grant at all, root nothing.
+    #[test]
+    fn only_an_admitted_launch_takes_a_root() {
+        let grant = kvm_grant_for(&["acme/beacon"]);
+        let admitted = HashMap::from([
+            ("JOB_PROJECT".to_string(), "acme/beacon".to_string()),
+            ("CHUG_TASK_ID".to_string(), "42".to_string()),
+        ]);
+        assert_eq!(
+            rooted_task_id(Some(&grant), &admitted).unwrap(),
+            Some("42".to_string())
+        );
+
+        let other = HashMap::from([("JOB_PROJECT".to_string(), "acme/api".to_string())]);
+        assert_eq!(rooted_task_id(Some(&grant), &other).unwrap(), None);
+        assert_eq!(rooted_task_id(None, &admitted).unwrap(), None);
+        assert_eq!(rooted_task_id(Some(&grant), &HashMap::new()).unwrap(), None);
+    }
+
+    /// Every refusal on the realise path is `Launch`, NEVER `NoCapacity`
+    /// (design #373 3c): a `NoCapacity` would requeue the task onto the same
+    /// node to break the same bound again, forever, instead of failing loudly.
+    #[test]
+    fn a_realise_refusal_is_a_launch_failure_not_no_capacity() {
+        let admitted = HashMap::from([("JOB_PROJECT".to_string(), "acme/beacon".to_string())]);
+        let err = rooted_task_id(Some(&kvm_grant_for(&["acme/beacon"])), &admitted)
+            .expect_err("an admitted launch with no task id is refused");
+        match &err {
+            WorkerError::Launch { message } => assert!(message.contains("CHUG_TASK_ID"), "{err:?}"),
+            other => panic!("a realise refusal must be Launch, got {other:?}"),
+        }
+        assert!(matches!(
+            launch_refused("realise exceeded WORKER_NIX_REALISE_TIMEOUT_SECS=600s".into()),
+            WorkerError::Launch { .. }
+        ));
     }
 
     /// The refresh skip decision (spec §3.1 / #114): a node with no git URL, or

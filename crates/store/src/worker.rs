@@ -43,8 +43,11 @@ pub fn copy_file_over_size(path: &str, len: usize, max_bytes: usize) -> Option<W
     })
 }
 
-/// Ops that just execute a container action.
-const OP_TIMEOUT: Duration = Duration::from_secs(60);
+/// Ops that just execute a container action. Public because a node-side bound
+/// inside one of these ops has to fit within it — a wait the caller has already
+/// abandoned fails on transport, so the daemon's own named failure is never seen
+/// (design #373 3c).
+pub const OP_TIMEOUT: Duration = Duration::from_secs(60);
 /// Liveness probe — placement blocks on this, keep it tight.
 const PING_TIMEOUT: Duration = Duration::from_secs(2);
 /// Self-refresh: the daemon accepts fast and builds/swaps in the background

@@ -70,6 +70,11 @@ case "\$*" in
   inspect*HostConfig.Devices*) [ -z "\${FAKE_KVM_DEVICES:-}" ] || echo "\$FAKE_KVM_DEVICES" ;;
   inspect*data/keys*)     echo "/home/worksalot/chuggernaut-worker/keys" ;;
   inspect*docker.sock*)   echo "/var/run/docker.sock" ;;
+  # The nix mount carry-forward (design #373 P1) reads every mount of the LIVE
+  # container as \`Destination|Source|RW\`. \$FAKE_NIX_MOUNTS models a node with
+  # per-task GC roots on; empty (the default) is a node without them, which is
+  # every node until an operator turns them on.
+  inspect*Destination*)   [ -z "\${FAKE_NIX_MOUNTS:-}" ] || echo "\$FAKE_NIX_MOUNTS" ;;
   # Image-label read-back for the retag-swap guard: echo \$FAKE_LABEL (default
   # abc123, the requested SHA in the success cases) so the assert passes unless a
   # case forces a mismatch (the stale-image-label case).
@@ -624,6 +629,123 @@ done
 # replacement daemon reads the same off as the one it replaces.
 grep_log "-e WORKER_KVM='off'"
 echo "ok: an explicitly-off WORKER_KVM swaps normally and carries the trimmed setting"
+
+# ── Case 3i: nix roots on ⇒ settings from the env, MOUNTS from the live node ──
+# design #373 P1, and the same asymmetry as the KVM device one case up: dropping
+# a nix SETTING turns roots off (quiet), dropping a nix MOUNT takes the node DOWN
+# — the replacement daemon refuses to start without its roots dir, its client or
+# the socket in its own view (crates/worker/src/nix.rs) and --restart=always
+# loops the refusal. The fixture uses a NON-default profiles path resolved
+# through /mnt (gumbo-nuc-0's real shape), so a swap that reconstructed the
+# mounts from a hardcoded path instead of reading the live container still fails.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+  WORKER_NIX_REALISE_TIMEOUT_SECS=40 \
+  FAKE_NIX_MOUNTS="/nix/store|/mnt/nix/store|false /nix/var/nix/profiles|/mnt/nix/var/nix/profiles|false /nix/var/nix/daemon-socket|/nix/var/nix/daemon-socket|true /var/lib/chuggernaut/gcroots|/var/lib/chuggernaut/gcroots|true" \
+  sh "$SUT" swap prod
+
+grep_log "-e WORKER_NIX_GCROOTS_DIR='/var/lib/chuggernaut/gcroots'"
+grep_log "-e WORKER_NIX_REALISE_TIMEOUT_SECS='40'"
+grep_log "-v /mnt/nix/store:/nix/store:ro"
+grep_log "-v /mnt/nix/var/nix/profiles:/nix/var/nix/profiles:ro"
+grep_log "-v /nix/var/nix/daemon-socket:/nix/var/nix/daemon-socket"
+grep_log "-v /var/lib/chuggernaut/gcroots:/var/lib/chuggernaut/gcroots"
+# Each mount keeps the live container's own read-only bit: a socket mounted :ro
+# fails every realise (connecting needs write on the inode), and a store mounted
+# writable would hand a task the node's whole store to edit.
+if grep -qF -- "-v /nix/var/nix/daemon-socket:/nix/var/nix/daemon-socket:ro" "$LOG"; then
+  fail "the daemon socket must stay read-write across a swap"
+fi
+if grep -qF -- "-v /var/lib/chuggernaut/gcroots:/var/lib/chuggernaut/gcroots:ro" "$LOG"; then
+  fail "the roots dir must stay writable across a swap"
+fi
+# The swap must not create the roots dir: it runs INSIDE chug-worker, so a mkdir
+# here lands in the daemon container's filesystem and never on the host (#379/#380).
+if grep -F "/var/lib/chuggernaut/gcroots" "$LOG" | grep -qF "mkdir"; then
+  fail "the swap must not create the gcroots dir (it would land in the container)"
+fi
+echo "ok: swap carries the nix settings forward and the four mounts from the live container"
+
+# ── Case 3j: a nix mount that cannot be carried forward REFUSES the swap ──────
+# The node-down case: WORKER_NIX_GCROOTS_DIR says roots are on, but the live
+# container has no roots mount to carry, so the replacement could only come up
+# refusing to boot. Refuse the swap instead and leave the old daemon serving.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+  FAKE_NIX_MOUNTS="/nix/store|/nix/store|false /nix/var/nix/daemon-socket|/nix/var/nix/daemon-socket|true" \
+  sh "$SUT" swap prod >"$WORK/nixswap.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a missing nix mount must refuse the swap (got rc=0)"
+grep -qF "/var/lib/chuggernaut/gcroots" "$WORK/nixswap.out" || fail "the refusal must name the missing mount"
+if grep -qF "docker run -d --name chug-worker-swap" "$LOG"; then
+  fail "a missing nix mount must not schedule the swapper (the live daemon keeps serving)"
+fi
+echo "ok: a nix mount that cannot be carried forward refuses the swap instead of downing the node"
+
+# ── Case 3l: roots + a KVM device ⇒ the toolchain's PARENT is carried forward ──
+# The fifth mount, and its destination is the DIRECTORY HOLDING the stable path
+# — binding that path itself would resolve the operator's symlink host-side and
+# hand the client a non-store path it refuses. Dropping the mount on a swap does
+# not turn roots off: it makes every admitted launch on the node fail, and the
+# replacement's own boot check refuses to start at all. Carried by destination
+# like the rest, with its read-only bit, and refused when it is not there.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+  WORKER_KVM=1 WORKER_ANDROID_SDK_DIR=/etc/chug/android-sdk \
+  FAKE_KVM_DEVICES="--device /dev/kvm:/dev/kvm:rwm" \
+  FAKE_NIX_MOUNTS="/nix/store|/nix/store|false /nix/var/nix/daemon-socket|/nix/var/nix/daemon-socket|true /var/lib/chuggernaut/gcroots|/var/lib/chuggernaut/gcroots|true /etc/chug|/etc/chug|false" \
+  sh "$SUT" swap prod
+
+grep_log "-v /etc/chug:/etc/chug:ro"
+
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+  WORKER_KVM=1 WORKER_ANDROID_SDK_DIR=/etc/chug/android-sdk \
+  FAKE_KVM_DEVICES="--device /dev/kvm:/dev/kvm:rwm" \
+  FAKE_NIX_MOUNTS="/nix/store|/nix/store|false /nix/var/nix/daemon-socket|/nix/var/nix/daemon-socket|true /var/lib/chuggernaut/gcroots|/var/lib/chuggernaut/gcroots|true" \
+  sh "$SUT" swap prod >"$WORK/nixsdk.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a missing toolchain mount must refuse the swap (got rc=0)"
+grep -qF "no mount at '/etc/chug'" "$WORK/nixsdk.out" || fail "the refusal must name the missing mount"
+if grep -qF "docker run -d --name chug-worker-swap" "$LOG"; then
+  fail "a missing toolchain mount must not schedule the swapper"
+fi
+
+# A node with roots on and NO device realises nothing, so no toolchain mount is
+# expected and its absence must NOT refuse the swap.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+  WORKER_KVM=0 WORKER_ANDROID_SDK_DIR=/etc/chug/android-sdk \
+  FAKE_NIX_MOUNTS="/nix/store|/nix/store|false /nix/var/nix/daemon-socket|/nix/var/nix/daemon-socket|true /var/lib/chuggernaut/gcroots|/var/lib/chuggernaut/gcroots|true" \
+  sh "$SUT" swap prod
+grep_log "docker run -d --name chug-worker-swap"
+echo "ok: swap carries the toolchain mount forward with the device, and refuses when it is gone"
+
+# ── Case 3k: nix roots off ⇒ the swap is nix-free ─────────────────────────────
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  FAKE_NIX_MOUNTS="/nix/store|/nix/store|false" \
+  sh "$SUT" swap prod
+
+if grep -F "chug-worker-swap" "$LOG" | grep -qE "WORKER_NIX|/nix/store"; then
+  fail "a node with roots off must get no nix env and no nix mount"
+fi
+echo "ok: swap adds nothing nix when WORKER_NIX_GCROOTS_DIR is unset"
 
 # ── Case 4: unknown phase is a hard error ────────────────────────────────────
 if PATH="$BIN:$PATH" sh "$SUT" frobnicate 2>/dev/null; then

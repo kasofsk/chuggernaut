@@ -17,7 +17,7 @@ device passthrough beats a host runtime) and not the normative text
 
 | Piece | Owned by | Where it lives |
 | --- | --- | --- |
-| the SDK, and a **stable path** to it | the node's NixOS config | `configuration.nix` — an `environment.etc` (or equivalent) entry pointing a fixed path such as `/etc/chug/android-sdk` at the current `androidsdk` output |
+| the SDK, and a **stable path** to it | the node's NixOS config | `configuration.nix` — an `environment.etc` (or equivalent) entry pointing a fixed path such as `/etc/chug/android-sdk` at the current `androidsdk` output; §7 narrows this to a *direct* symlink once per-task GC roots are on |
 | `WORKER_KVM`, `WORKER_KVM_PROJECTS`, `WORKER_ANDROID_SDK_DIR`, **and `--device`** | `deploy/prod/build-worker.sh`, carried across every self-refresh by `deploy/prod/worker-refresh.sh` | the `chug-worker` container's `docker run` |
 | **who** may use it | `WORKER_KVM_PROJECTS` — `owner/project` entries, comma-separated | the same `docker run` |
 
@@ -149,12 +149,105 @@ the mounts, while the node keeps working.
 
 ---
 
+## 7. Holding the toolchain against the node's garbage collector
+
+The mounts above give a task nix store paths, and **nothing roots them**. Today
+the node's SDK survives its weekly `nix-gc` only because it sits in
+`environment.systemPackages` and is therefore reachable from
+`/run/current-system` — a property of *whose* config supplies the toolchain, not
+of the mount. Set `WORKER_NIX_GCROOTS_DIR` and the daemon stops depending on
+that: before each allow-listed launch it realises the declared toolchain and
+registers an **indirect GC root named by task id**, in one command through the
+node's nix daemon, held for exactly that task's lifetime.
+
+| Piece | Owned by | Where it lives |
+| --- | --- | --- |
+| the roots directory itself | `deploy/prod/build-worker.sh` (`mkdir -p`, then `sudo -n mkdir -p`) | a worker-writable host path, e.g. `/var/lib/chuggernaut/gcroots` |
+| the mounts into `chug-worker` (the store and the profiles tree read-only, the socket dir and the roots dir read-write, plus the **directory holding** the toolchain path read-only when a device is attached) | `build-worker.sh`, carried across every self-refresh by `worker-refresh.sh` | the daemon's own `docker run` |
+| `WORKER_NIX_GCROOTS_DIR`, `WORKER_NIX_CLIENT`, `WORKER_NIX_DAEMON_SOCKET`, `WORKER_NIX_STORE_DIR`, `WORKER_NIX_REALISE_TIMEOUT_SECS` | the same `docker run` | the daemon's environment |
+
+Add the roots dir to the §3 command and the rest follows:
+
+```sh
+WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+  deploy/prod/build-worker.sh
+```
+
+A few things are worth knowing before you do:
+
+- **It is a node-down if a mount is dropped**, exactly like the device: the
+  daemon refuses to start without its roots dir, its client or the socket *in its
+  own view*, and `--restart=always` loops the refusal. Both scripts are written
+  around that — `build-worker.sh` refuses a deploy it cannot provision, and
+  `worker-refresh.sh` refuses a swap whose live container has no nix mount to
+  carry forward.
+- **The client is a profiles path, deliberately.** `chug-worker` outlives many
+  `nixos-rebuild`s and docker resolves a bind source host-side at create, so a
+  client resolved into `/nix/store` is pinned to one generation and
+  `--delete-older-than` can collect it out from under the running daemon. The
+  profiles tree is itself a GC root; a store-hash value is refused outright.
+- **A slow realise fails the launch, loudly.** It runs before the task exists, so
+  `resources.task_timeout` cannot cover it; `WORKER_NIX_REALISE_TIMEOUT_SECS`
+  (default 30, **1..45 only**) bounds it and breaking the bound refuses the launch
+  rather than requeueing it as capacity. The ceiling is not a preference: the
+  realise runs inside the `launch` RPC the dispatcher abandons after 60s, so a
+  larger value is never reached — the task fails on *worker transport* instead,
+  never naming the bound, while the node goes on launching a container nobody is
+  waiting for. A toolchain too slow for 45s wants a warming job (design #373
+  Decision 5), not a bigger number; both the daemon and `build-worker.sh` refuse
+  one.
+- **The stable path must be ONE hop into the store, and it is its PARENT that is
+  mounted.** `nix-store --realise` resolves its argument *client-side* — inside
+  `chug-worker`, before the nix daemon hears anything — so the daemon container
+  has to be able to read the operator's symlink and follow it into the mounted
+  store. A bind whose source *is* that symlink cannot deliver it: `mount(2)`
+  resolves the source host-side, and the container gets the store path's content
+  at a non-store path, which the client refuses ("not in the Nix store"). So
+  `build-worker.sh` binds `dirname` of the toolchain path read-only, and requires
+  the path itself to be a **direct, absolute symlink into the store**:
+
+  ```nix
+  systemd.tmpfiles.rules = [ "L+ /etc/chug/android-sdk - - - - ${pkgs.androidsdk}" ];
+  ```
+
+  A NixOS `environment.etc` entry does *not* qualify — it routes through
+  `/etc/static`, a second hop no mount here reproduces. Check yours with
+  `readlink /etc/chug/android-sdk` (one hop, not `readlink -f`): the answer must
+  begin `/nix/store/`. `build-worker.sh` refuses the deploy when it does not, and
+  the daemon re-derives the same property from inside the container at boot, so
+  neither shape ever reaches a per-launch failure. Binding the parent also means
+  the symlink is *shared*, not copied: a `nixos-rebuild` moves the toolchain
+  under a running daemon rather than pinning the generation current at the swap.
+
+Verify on the node while a task runs: `ls -l $WORKER_NIX_GCROOTS_DIR` shows one
+`task-<id>` symlink per running task, `nix-store --query --roots <store-path>`
+names it, and it is gone once the container is removed. A `task-<id>` left by a
+worker that died is removed by the daemon's own bounded reaper on a later pass —
+a leak of disk, never of a job.
+
+| Symptom | What it means | What to do |
+| --- | --- | --- |
+| `WORKER_NIX_GCROOTS_DIR … is not a directory in the daemon's own view` in `docker logs chug-worker` | the dir is missing on the host, or is not mounted into the daemon container | recreate the daemon with `build-worker.sh`, which creates it and mounts every path |
+| `the toolchain this node realises (…) does not resolve in the daemon's own view` | the SDK path's **parent** is not mounted into `chug-worker` (the realise resolves it client-side) | recreate the daemon with `build-worker.sh`; it adds that mount whenever a device is attached |
+| `… resolves to … which is not under /nix/store` | the stable path reached the container as a plain directory — the leaf was bound instead of its parent, or the path is not a symlink into the store | make it one direct `L+` hop into the store (above) and recreate the daemon |
+| `build-worker: … is not a direct symlink into '/nix/store' under a real parent directory` | `WORKER_ANDROID_SDK_DIR` is missing, is a plain directory, or is an `environment.etc` entry hopping through `/etc/static` | declare it with `systemd.tmpfiles` (above), or unset `WORKER_NIX_GCROOTS_DIR` |
+| `WORKER_NIX_REALISE_TIMEOUT_SECS=… is over the ceiling` (daemon) or `is outside 1..45` (deploy) | the bound cannot fit inside the `launch` RPC | lower it to ≤45, and warm the toolchain with a scheduled job if that is not enough |
+| `build-worker: cannot provision WORKER_NIX_GCROOTS_DIR` | neither the login user nor `sudo -n` could create it; the live daemon was left running | create it by hand on the node, or unset the var |
+| `build-worker: … lacks the nix preconditions` | the node has no `/nix/store`, profiles tree or daemon socket | this node cannot hold roots — unset the var |
+| `worker-refresh: … has no mount at '<path>' to carry forward` | the running daemon was created some other way, without the nix mounts | recreate it with `build-worker.sh`; the node stays up on its current SHA |
+| a launch fails naming `WORKER_NIX_REALISE_TIMEOUT_SECS` | the realise did not finish inside the node's bound | warm the toolchain (a scheduled job declaring it), or raise the bound at node creation, up to the 45s ceiling |
+
+---
+
 ## Related
 
 - [design #367](../design/367-android-emulator-execution.md) — §2.3 (the three
   settings), §3.3 and §3.5 (the mounts and the stable path), §3.4 (what the
   `/nix/store` mount exposes), Phasing (A1 shipped the daemon, A2 is the gradle
   proof this unblocks).
+- [design #373](../design/373-project-toolchains.md) — 3b (where the realise
+  runs and its trust cost), 3c (the bound), Decision 4 and Correction C5 (the
+  roots and the reaper) — the argument behind §7 above.
 - [`spec.md`](../../spec.md) §3.1 — worker nodes, node-local properties.
 - [`worker-capacity.md`](./worker-capacity.md) — the other node knob, and the
   same "recreate the daemon to change a boot value" shape.

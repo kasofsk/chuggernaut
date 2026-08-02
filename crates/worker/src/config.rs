@@ -58,6 +58,32 @@ pub struct WorkerConfig {
     /// **stable** path, which is why the parse rejects a nix store hash (design
     /// #367 §3.5).
     pub android_sdk_dir: PathBuf,
+    /// Worker-writable directory the node's per-task nix GC roots are written to
+    /// (`WORKER_NIX_GCROOTS_DIR`); `None` (unset) ⇒ no realise and no roots at
+    /// all. A runtime precondition provisioned with the node, so the daemon
+    /// refuses to start when it is set and the directory is absent (design #373
+    /// Decision 4).
+    pub nix_gcroots_dir: Option<PathBuf>,
+    /// The nix client the realise runs (`WORKER_NIX_CLIENT`), defaulting to
+    /// [`NIX_CLIENT_DEFAULT`]. It resolves through the node's *profiles*, which
+    /// are themselves a GC root, so the long-lived worker's own client cannot be
+    /// collected by an old-generation GC (design #373 3b).
+    pub nix_client: PathBuf,
+    /// The node's nix daemon socket (`WORKER_NIX_DAEMON_SOCKET`), defaulting to
+    /// [`NIX_DAEMON_SOCKET_DEFAULT`]. The realise is the daemon's work, not the
+    /// worker's: builders stay sandboxed as `nixbld` users (design #373 3b).
+    pub nix_daemon_socket: PathBuf,
+    /// The store prefix a realise target must resolve into
+    /// (`WORKER_NIX_STORE_DIR`, nix's own `NIX_STORE_DIR`), defaulting to
+    /// [`NIX_STORE_DIR_DEFAULT`]. The boot check refuses a toolchain that lands
+    /// outside it, because the nix client refuses a non-store path.
+    pub nix_store_dir: PathBuf,
+    /// Bound on one pre-launch realise in seconds
+    /// (`WORKER_NIX_REALISE_TIMEOUT_SECS`), defaulting to
+    /// [`NIX_REALISE_TIMEOUT_SECS_DEFAULT`]. The realise runs before execution
+    /// begins, so no `task_timeout` covers it and an unbounded one would hang the
+    /// launch path (design #373 3c, STYLE.md Tier 2 rule 3).
+    pub nix_realise_timeout_secs: u64,
     /// Node-local script that rebuilds the three node images at a given SHA and
     /// swaps the daemon (`worker-refresh.sh build <sha> <tag>` / `swap <tag>`),
     /// invoked when a `refresh` RPC arrives (spec §3.1). `None` ⇒ self-refresh
@@ -150,6 +176,25 @@ impl WorkerConfig {
             kvm_device: parse_kvm_device(std::env::var("WORKER_KVM").ok())?,
             kvm_projects: parse_kvm_projects(std::env::var("WORKER_KVM_PROJECTS").ok())?,
             android_sdk_dir: parse_android_sdk_dir(std::env::var("WORKER_ANDROID_SDK_DIR").ok())?,
+            nix_gcroots_dir: parse_nix_gcroots_dir(std::env::var("WORKER_NIX_GCROOTS_DIR").ok())?,
+            nix_client: parse_nix_path(
+                "WORKER_NIX_CLIENT",
+                std::env::var("WORKER_NIX_CLIENT").ok(),
+                NIX_CLIENT_DEFAULT,
+            )?,
+            nix_daemon_socket: parse_nix_path(
+                "WORKER_NIX_DAEMON_SOCKET",
+                std::env::var("WORKER_NIX_DAEMON_SOCKET").ok(),
+                NIX_DAEMON_SOCKET_DEFAULT,
+            )?,
+            nix_store_dir: parse_nix_path(
+                "WORKER_NIX_STORE_DIR",
+                std::env::var("WORKER_NIX_STORE_DIR").ok(),
+                NIX_STORE_DIR_DEFAULT,
+            )?,
+            nix_realise_timeout_secs: parse_nix_realise_timeout_secs(
+                std::env::var("WORKER_NIX_REALISE_TIMEOUT_SECS").ok(),
+            )?,
             refresh_script: resolve_refresh_script(std::env::var("WORKER_REFRESH_SCRIPT").ok()),
             refresh_git_url: parse_git_url(std::env::var("WORKER_REFRESH_GIT_URL").ok()),
             refresh_git_key: std::env::var("WORKER_GIT_KEY")
@@ -246,10 +291,18 @@ fn parse_android_sdk_dir(raw: Option<String>) -> Result<PathBuf, ConfigError> {
     let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
         return Ok(PathBuf::from(ANDROID_SDK_DIR_DEFAULT));
     };
-    let path = PathBuf::from(&raw);
+    parse_stable_path("WORKER_ANDROID_SDK_DIR", &raw)
+}
+
+/// One absolute host path out of operator-typed config, refusing a nix store
+/// hash. A content hash goes silently wrong at the next `nixos-rebuild` (design
+/// #367 §3.5) and, unrooted, is collectable garbage the moment a GC runs — which
+/// is why the worker's own nix client is held to the same rule (design #373 3b).
+fn parse_stable_path(var: &str, raw: &str) -> Result<PathBuf, ConfigError> {
+    let path = PathBuf::from(raw);
     if !path.is_absolute() {
         return Err(ConfigError(format!(
-            "WORKER_ANDROID_SDK_DIR must be an absolute host path, got {raw:?}"
+            "{var} must be an absolute host path, got {raw:?}"
         )));
     }
     if path
@@ -257,11 +310,101 @@ fn parse_android_sdk_dir(raw: Option<String>) -> Result<PathBuf, ConfigError> {
         .any(|c| is_store_hash(&c.as_os_str().to_string_lossy()))
     {
         return Err(ConfigError(format!(
-            "WORKER_ANDROID_SDK_DIR {raw:?} names a nix store path — chug config names an \
-             activation-maintained stable path, never a content hash (design #367 §3.5)"
+            "{var} {raw:?} names a nix store path — chug config names a stable, \
+             activation-maintained path, never a content hash (design #367 §3.5, #373 3b)"
         )));
     }
     Ok(path)
+}
+
+/// The node's nix client when `WORKER_NIX_CLIENT` is unset (design #373 3b): the
+/// multi-call `nix` binary reached *through the profiles*, which are themselves
+/// a GC root — a client resolved out of a generation's store path can be
+/// collected out from under the long-lived worker.
+pub const NIX_CLIENT_DEFAULT: &str = "/nix/var/nix/profiles/system/sw/bin/nix-store";
+
+/// The node's nix daemon socket when `WORKER_NIX_DAEMON_SOCKET` is unset — nix's
+/// own default location, mode `0666` on a stock node, so the worker needs no uid
+/// mapping to use it (design #373 3b).
+pub const NIX_DAEMON_SOCKET_DEFAULT: &str = "/nix/var/nix/daemon-socket/socket";
+
+/// The store prefix when `WORKER_NIX_STORE_DIR` is unset — nix's own default,
+/// and the path `build-worker.sh` mounts read-only. A node that relocated its
+/// store (nix's `NIX_STORE_DIR`) names the new prefix here.
+pub const NIX_STORE_DIR_DEFAULT: &str = "/nix/store";
+
+/// Headroom the `launch` RPC keeps for everything the realise precedes — the
+/// container create and start, and the reply's own trip home. Subtracted from
+/// the dispatcher's launch budget to give the realise its ceiling.
+const NIX_REALISE_RESERVE_SECS: u64 = 15;
+
+/// The largest realise bound the `launch` RPC can actually contain, since the
+/// realise runs inside it and the dispatcher abandons the call at
+/// [`store::worker::OP_TIMEOUT`]. Past this the caller has already failed the
+/// task on transport, so the named refusal design #373 3c asks for could never
+/// be reached.
+pub const NIX_REALISE_TIMEOUT_SECS_MAX: u64 =
+    store::worker::OP_TIMEOUT.as_secs() - NIX_REALISE_RESERVE_SECS;
+
+/// The realise bound when `WORKER_NIX_REALISE_TIMEOUT_SECS` is unset (design
+/// #373 3c), inside [`NIX_REALISE_TIMEOUT_SECS_MAX`] with room left for the
+/// container create the same RPC still has to do. A closure that cannot be
+/// substituted in this long fails the launch loudly rather than hanging the
+/// launch path until the caller gives up on transport.
+pub const NIX_REALISE_TIMEOUT_SECS_DEFAULT: u64 = 30;
+
+/// Parse `WORKER_NIX_GCROOTS_DIR` into the node's GC-roots directory; absent or
+/// empty ⇒ `None`, which turns the realise and its roots off entirely (design
+/// #373 Decision 4). Held to [`parse_stable_path`]'s rule: the roots directory is
+/// worker-writable node state, never a store path.
+fn parse_nix_gcroots_dir(raw: Option<String>) -> Result<Option<PathBuf>, ConfigError> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    parse_stable_path("WORKER_NIX_GCROOTS_DIR", &raw).map(Some)
+}
+
+/// Parse one of the node's nix paths (the client, the daemon socket); absent or
+/// empty ⇒ `default`. Same stable-path rule as every other operator-typed path.
+fn parse_nix_path(var: &str, raw: Option<String>, default: &str) -> Result<PathBuf, ConfigError> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(PathBuf::from(default));
+    };
+    parse_stable_path(var, &raw)
+}
+
+/// Parse `WORKER_NIX_REALISE_TIMEOUT_SECS` into the realise bound; absent or
+/// empty ⇒ [`NIX_REALISE_TIMEOUT_SECS_DEFAULT`]. Zero, non-numeric and anything
+/// over [`NIX_REALISE_TIMEOUT_SECS_MAX`] are hard config errors: a zero bound
+/// refuses every launch, and a bound the `launch` RPC cannot contain fails on
+/// transport instead of naming itself, which is what design #373 3c forbids.
+fn parse_nix_realise_timeout_secs(raw: Option<String>) -> Result<u64, ConfigError> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(NIX_REALISE_TIMEOUT_SECS_DEFAULT);
+    };
+    let value: u64 = raw.parse().map_err(|_| {
+        ConfigError(format!(
+            "WORKER_NIX_REALISE_TIMEOUT_SECS must be a number of seconds, got {raw:?}"
+        ))
+    })?;
+    if value == 0 {
+        return Err(ConfigError(
+            "WORKER_NIX_REALISE_TIMEOUT_SECS must be at least 1 — a zero bound would refuse \
+             every launch it covers"
+                .into(),
+        ));
+    }
+    if value > NIX_REALISE_TIMEOUT_SECS_MAX {
+        return Err(ConfigError(format!(
+            "WORKER_NIX_REALISE_TIMEOUT_SECS={value} is over the ceiling of \
+             {NIX_REALISE_TIMEOUT_SECS_MAX}s — the realise runs inside the `launch` RPC, which \
+             the dispatcher abandons after {}s, so a longer bound is never reached: the task \
+             fails on worker transport while this node goes on to launch a container nobody is \
+             waiting for (design #373 3c)",
+            store::worker::OP_TIMEOUT.as_secs()
+        )));
+    }
+    Ok(value)
 }
 
 /// Whether one path component is a nix store entry: 32 characters of nix's
@@ -490,6 +633,122 @@ mod tests {
         assert!(
             parse_android_sdk_dir(Some("relative/android-sdk".into())).is_err(),
             "a bind source must be an absolute host path"
+        );
+    }
+
+    /// The nix node settings (design #373 P1): unset gcroots ⇒ the whole
+    /// mechanism is off, the client and socket carry their documented defaults,
+    /// and every one of them is held to the no-store-hash rule — a hashed client
+    /// is precisely the path an old-generation GC collects out from under a
+    /// long-lived worker.
+    #[test]
+    fn nix_settings_parse_defaults_and_reject_store_paths() {
+        assert_eq!(parse_nix_gcroots_dir(None).unwrap(), None);
+        assert_eq!(parse_nix_gcroots_dir(Some("  ".into())).unwrap(), None);
+        assert_eq!(
+            parse_nix_gcroots_dir(Some(" /var/lib/chuggernaut/gcroots ".into())).unwrap(),
+            Some(PathBuf::from("/var/lib/chuggernaut/gcroots"))
+        );
+        assert!(
+            parse_nix_gcroots_dir(Some("gcroots".into())).is_err(),
+            "a roots dir is an absolute host path"
+        );
+
+        assert_eq!(
+            parse_nix_path("WORKER_NIX_CLIENT", None, NIX_CLIENT_DEFAULT).unwrap(),
+            PathBuf::from(NIX_CLIENT_DEFAULT)
+        );
+        assert_eq!(
+            parse_nix_path(
+                "WORKER_NIX_DAEMON_SOCKET",
+                Some(String::new()),
+                NIX_DAEMON_SOCKET_DEFAULT
+            )
+            .unwrap(),
+            PathBuf::from(NIX_DAEMON_SOCKET_DEFAULT)
+        );
+        assert!(
+            NIX_CLIENT_DEFAULT.starts_with("/nix/var/nix/profiles/"),
+            "the default client must resolve through the profiles, which are a GC root"
+        );
+        assert_eq!(
+            parse_nix_path("WORKER_NIX_STORE_DIR", None, NIX_STORE_DIR_DEFAULT).unwrap(),
+            PathBuf::from("/nix/store")
+        );
+        assert_eq!(
+            parse_nix_path(
+                "WORKER_NIX_STORE_DIR",
+                Some(" /mnt/nix/store ".into()),
+                NIX_STORE_DIR_DEFAULT
+            )
+            .unwrap(),
+            PathBuf::from("/mnt/nix/store")
+        );
+
+        let store = "/nix/store/h2zwqsnfmrh0f8asaash8qwm8lygikcw-nix-2.34.7/bin/nix";
+        let err = parse_nix_path("WORKER_NIX_CLIENT", Some(store.into()), NIX_CLIENT_DEFAULT)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("store path"), "{err}");
+        assert!(
+            parse_nix_gcroots_dir(Some(store.into())).is_err(),
+            "a hash is a hash wherever it is written"
+        );
+    }
+
+    /// The realise bound (design #373 3c): unset is the documented default, a
+    /// number is taken as given, and zero or a typo is REFUSED — the launch path
+    /// must never end up unbounded by a value that read as "off".
+    #[test]
+    fn nix_realise_timeout_parses_default_and_rejections() {
+        assert_eq!(
+            parse_nix_realise_timeout_secs(None).unwrap(),
+            NIX_REALISE_TIMEOUT_SECS_DEFAULT
+        );
+        assert_eq!(
+            parse_nix_realise_timeout_secs(Some(" \t".into())).unwrap(),
+            NIX_REALISE_TIMEOUT_SECS_DEFAULT
+        );
+        assert_eq!(
+            parse_nix_realise_timeout_secs(Some(" 40 ".into())).unwrap(),
+            40
+        );
+        let err = parse_nix_realise_timeout_secs(Some("0".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("at least 1"), "{err}");
+        assert!(parse_nix_realise_timeout_secs(Some("ages".into())).is_err());
+    }
+
+    /// The bound is REFUSED at parse time when it cannot fit inside the `launch`
+    /// RPC the realise runs in (design #373 3c): past the dispatcher's
+    /// [`store::worker::OP_TIMEOUT`] the task has already failed on transport, so
+    /// a longer bound buys nothing and hides the failure it was meant to name.
+    #[test]
+    fn nix_realise_timeout_is_refused_over_the_launch_rpc_budget() {
+        const {
+            assert!(
+                NIX_REALISE_TIMEOUT_SECS_MAX < store::worker::OP_TIMEOUT.as_secs(),
+                "the ceiling must leave the RPC room for the container create"
+            );
+        }
+        assert_eq!(
+            parse_nix_realise_timeout_secs(Some(NIX_REALISE_TIMEOUT_SECS_DEFAULT.to_string()))
+                .unwrap(),
+            NIX_REALISE_TIMEOUT_SECS_DEFAULT,
+            "the default must be a value the parse itself accepts"
+        );
+        assert_eq!(
+            parse_nix_realise_timeout_secs(Some(NIX_REALISE_TIMEOUT_SECS_MAX.to_string())).unwrap(),
+            NIX_REALISE_TIMEOUT_SECS_MAX
+        );
+        let err = parse_nix_realise_timeout_secs(Some("600".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("over the ceiling"), "{err}");
+        assert!(
+            err.contains("launch"),
+            "the refusal names the coupling: {err}"
         );
     }
 

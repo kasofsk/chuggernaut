@@ -198,6 +198,140 @@ fi
 if [ -n "${WORKER_ANDROID_SDK_DIR:-}" ]; then
   KVM_ENV="$KVM_ENV -e WORKER_ANDROID_SDK_DIR='$WORKER_ANDROID_SDK_DIR'"
 fi
+# Per-task nix GC roots (design #373 P1, daemon side in crates/worker/src/nix.rs).
+# WORKER_NIX_GCROOTS_DIR is the switch: unset ⇒ nothing below happens and the run
+# spec is exactly what it was. Set ⇒ the daemon realises the node's declared
+# toolchain before an allow-listed launch and holds an indirect GC root over it
+# for the task's lifetime, so a weekly `nix-gc` cannot collect a store path out
+# from under a running task (the mounts #374 shipped hold NO root today).
+#
+# Four mounts, each load-bearing, plus a fifth when a device is attached:
+#   * the store read-only (WORKER_NIX_STORE_DIR, nix's own default) — the closure
+#     the client and the task both read, and the prefix the daemon's boot check
+#     requires a realise target to resolve into.
+#   * the profiles dir read-only — where the CLIENT comes from. Not the store
+#     path: chug-worker is long-lived and survives many `nixos-rebuild`s, and
+#     docker resolves a bind source host-side at create, so a client resolved at
+#     create pins the generation current at the last swap — which
+#     `--delete-older-than` collects. `/nix/var/nix/gcroots/profiles` is itself a
+#     root, so a client resolved THROUGH the profiles at each use follows the
+#     node's current generation and is never collectable.
+#   * the daemon socket dir READ-WRITE — connecting to a unix socket needs write
+#     on the inode, so a read-only parent will not do. The socket is 0666 on a
+#     stock node, so no uid mapping is needed (the /dev/kvm situation in #367).
+#   * the roots dir read-write, at the SAME path inside the container as on the
+#     host: the nix daemon registers an indirect root by the path it is handed,
+#     and resolves that path in its own (host) namespace.
+#
+# The roots dir is provisioned here for the same reason WORKER_CACHE_DIR is
+# (#380): the daemon's own view is a container, so nothing it does reaches the
+# host path. #372 §5 A5 declines to own this — the chug-node modules contribute
+# nothing for GC roots — so this script is the provisioner, and a failure REFUSES
+# the deploy with the live daemon untouched rather than starting a daemon that
+# refuses to boot and is looped by --restart=always.
+#
+# TRUST COST, stated where an operator will see it (design #373 3b): giving the
+# worker container the nix daemon socket means anything that realises here runs
+# in the process that also holds docker.sock, the NATS creds and the git key.
+# P1 realises only what the NODE already declares (WORKER_ANDROID_SDK_DIR) — no
+# project-supplied flake is evaluated, so P1 does not yet incur the unsandboxed
+# project-code half of that cost. It does incur the rest: unbounded build CPU and
+# disk are reachable through the socket, which is why the realise is bounded and
+# the node is single-tenant (#373 Decision 1).
+NIX_ENV=""
+NIX_MOUNT_ARGS=""
+GCROOTS="${WORKER_NIX_GCROOTS_DIR:-}"
+GCROOTS="${GCROOTS#"${GCROOTS%%[![:space:]]*}"}"
+GCROOTS="${GCROOTS%"${GCROOTS##*[![:space:]]}"}"
+if [ -n "$GCROOTS" ]; then
+  case "$GCROOTS" in
+    /*) ;;
+    *)
+      echo "build-worker: WORKER_NIX_GCROOTS_DIR='$GCROOTS' is not an absolute host path — the daemon would refuse to start on it (crates/worker/src/config.rs); REFUSING (live daemon untouched)" >&2
+      exit 1
+      ;;
+  esac
+  NIX_PROFILES_DIR="${WORKER_NIX_PROFILES_DIR:-/nix/var/nix/profiles}"
+  NIX_SOCKET="${WORKER_NIX_DAEMON_SOCKET:-/nix/var/nix/daemon-socket/socket}"
+  NIX_SOCKET_DIR="${NIX_SOCKET%/*}"
+  NIX_STORE_DIR="${WORKER_NIX_STORE_DIR:-/nix/store}"
+  if ! ssh "$WORKER_SSH" "mkdir -p '$GCROOTS' 2>/dev/null || sudo -n mkdir -p '$GCROOTS'"; then
+    echo "build-worker: cannot provision WORKER_NIX_GCROOTS_DIR '$GCROOTS' on $WORKER_SSH (tried mkdir -p, then sudo -n mkdir -p) — the daemon refuses to start without it and --restart=always would loop it, taking the node out of the fleet; REFUSING daemon restart (live daemon untouched). Create it by hand on the node, or unset WORKER_NIX_GCROOTS_DIR to run without per-task GC roots." >&2
+    exit 1
+  fi
+  if ! ssh "$WORKER_SSH" "[ -d '$NIX_STORE_DIR' ] && [ -d '$NIX_PROFILES_DIR' ] && [ -S '$NIX_SOCKET' ]"; then
+    echo "build-worker: $WORKER_SSH lacks the nix preconditions for WORKER_NIX_GCROOTS_DIR (want '$NIX_STORE_DIR', '$NIX_PROFILES_DIR' and the daemon socket '$NIX_SOCKET') — REFUSING daemon restart (live daemon untouched). This node has no nix daemon; unset WORKER_NIX_GCROOTS_DIR." >&2
+    exit 1
+  fi
+  NIX_ENV="-e WORKER_NIX_GCROOTS_DIR='$GCROOTS'"
+  if [ "$NIX_STORE_DIR" != "/nix/store" ]; then
+    NIX_ENV="$NIX_ENV -e WORKER_NIX_STORE_DIR='$NIX_STORE_DIR'"
+  fi
+  if [ -n "${WORKER_NIX_CLIENT:-}" ]; then
+    NIX_ENV="$NIX_ENV -e WORKER_NIX_CLIENT='$WORKER_NIX_CLIENT'"
+  fi
+  if [ "$NIX_SOCKET" != "/nix/var/nix/daemon-socket/socket" ]; then
+    NIX_ENV="$NIX_ENV -e WORKER_NIX_DAEMON_SOCKET='$NIX_SOCKET'"
+  fi
+  if [ -n "${WORKER_NIX_REALISE_TIMEOUT_SECS:-}" ]; then
+    # Refused HERE for the same reason WORKER_KVM's shape is: a bound the daemon
+    # rejects at parse time would be found by a replacement that then cannot
+    # boot. The ceiling is NIX_REALISE_TIMEOUT_SECS_MAX in
+    # crates/worker/src/config.rs (the `launch` RPC's 60s budget less the
+    # container create) — that file is the source of truth; this mirrors it so
+    # the deploy fails fast instead of the node leaving the fleet.
+    case "$WORKER_NIX_REALISE_TIMEOUT_SECS" in
+      '' | *[!0-9]*)
+        echo "build-worker: WORKER_NIX_REALISE_TIMEOUT_SECS='$WORKER_NIX_REALISE_TIMEOUT_SECS' is not a number of seconds — the daemon would refuse to start on it (crates/worker/src/config.rs); REFUSING (live daemon untouched)" >&2
+        exit 1
+        ;;
+    esac
+    if [ "$WORKER_NIX_REALISE_TIMEOUT_SECS" -lt 1 ] || [ "$WORKER_NIX_REALISE_TIMEOUT_SECS" -gt 45 ]; then
+      echo "build-worker: WORKER_NIX_REALISE_TIMEOUT_SECS='$WORKER_NIX_REALISE_TIMEOUT_SECS' is outside 1..45 — the realise runs inside the launch RPC the dispatcher abandons after 60s, so the daemon refuses a longer bound at parse time (crates/worker/src/config.rs NIX_REALISE_TIMEOUT_SECS_MAX); REFUSING (live daemon untouched)" >&2
+      exit 1
+    fi
+    NIX_ENV="$NIX_ENV -e WORKER_NIX_REALISE_TIMEOUT_SECS='$WORKER_NIX_REALISE_TIMEOUT_SECS'"
+  fi
+  NIX_MOUNT_ARGS="-v '$NIX_STORE_DIR':'$NIX_STORE_DIR':ro -v '$NIX_PROFILES_DIR':'$NIX_PROFILES_DIR':ro -v '$NIX_SOCKET_DIR':'$NIX_SOCKET_DIR' -v '$GCROOTS':'$GCROOTS'"
+  # And a FIFTH mount when a device is actually attached: the DIRECTORY HOLDING
+  # the toolchain path, never that path itself. `nix-store --realise` resolves
+  # its argument CLIENT-side — inside chug-worker, before it says anything to the
+  # nix daemon — and the operator's stable path is a symlink into the store, so
+  # the client has to be able to READ that symlink. A bind whose source IS the
+  # stable path destroys it: mount(2) resolves the source host-side, and the
+  # container gets the store path's CONTENT at a non-store PATH, which the client
+  # refuses ("not in the Nix store"). Binding the parent keeps the symlink a
+  # symlink and lets it resolve through the store mount above — and, because a
+  # bound directory is shared rather than copied, it follows the node across a
+  # `nixos-rebuild` instead of pinning the generation current at this deploy.
+  #
+  # Hence the shape requirement checked below: a DIRECT, absolute symlink into
+  # the store under a real parent directory (a `systemd.tmpfiles` `L+` line).
+  # NixOS's `environment.etc` routes each entry through `/etc/static`, a second
+  # hop that no mount here reproduces — refused with the remedy named, rather
+  # than deployed into a daemon whose every admitted launch fails. Gated on
+  # $KVM_DEVICE_ARG because attaching the device is exactly the condition that
+  # makes a launch admitted, and therefore realised
+  # (crates/worker/src/daemon.rs `realise_for_launch`); the daemon's own boot
+  # check re-derives the same property from inside the container
+  # (crates/worker/src/nix.rs `store_target`).
+  if [ -n "$KVM_DEVICE_ARG" ]; then
+    SDK_DIR="${WORKER_ANDROID_SDK_DIR:-/var/lib/chuggernaut/android-sdk}"
+    SDK_DIR="${SDK_DIR#"${SDK_DIR%%[![:space:]]*}"}"
+    SDK_DIR="${SDK_DIR%"${SDK_DIR##*[![:space:]]}"}"
+    SDK_PARENT="${SDK_DIR%/*}"
+    if [ -z "$SDK_PARENT" ]; then
+      echo "build-worker: WORKER_ANDROID_SDK_DIR='$SDK_DIR' sits directly under / — chug-worker would have to bind the node's root filesystem to reach it; REFUSING (live daemon untouched). Put the toolchain path in a directory of its own." >&2
+      exit 1
+    fi
+    if ! ssh "$WORKER_SSH" "[ -d '$SDK_PARENT' ] && [ -L '$SDK_DIR' ] && case \"\$(readlink '$SDK_DIR')\" in '$NIX_STORE_DIR'/*) [ -e '$SDK_DIR' ] ;; *) false ;; esac"; then
+      echo "build-worker: per-task nix GC roots are on and WORKER_KVM attaches a device, but '$SDK_DIR' on $WORKER_SSH is not a direct symlink into '$NIX_STORE_DIR' under a real parent directory — chug-worker mounts '$SDK_PARENT' read-only and resolves that symlink itself, so anything else (a plain directory, or a NixOS environment.etc entry, which hops through /etc/static) cannot be realised and the daemon refuses to start; REFUSING daemon restart (live daemon untouched). Declare it as one hop — systemd.tmpfiles.rules = [ \"L+ $SDK_DIR - - - - \${pkgs.androidsdk}\" ] — or unset WORKER_NIX_GCROOTS_DIR." >&2
+      exit 1
+    fi
+    NIX_MOUNT_ARGS="$NIX_MOUNT_ARGS -v '$SDK_PARENT':'$SDK_PARENT':ro"
+  fi
+  echo "build-worker: per-task nix GC roots on — roots dir $GCROOTS present on $WORKER_SSH"
+fi
 # Log level for the daemon (ticket #270). The binary filters on RUST_LOG and its
 # default directive is ERROR, so a daemon started without it emits nothing — not
 # even the "worker up" line the probe below waits for, nor the refresh relay that
@@ -221,6 +355,8 @@ docker run -d --restart=always --name chug-worker \
   $SLOTS_ENV \
   $KVM_ENV \
   $KVM_DEVICE_ARG \
+  $NIX_ENV \
+  $NIX_MOUNT_ARGS \
   chuggernaut/worker:$TAG >/dev/null"
 ssh "$WORKER_SSH" "$REMOTE"
 

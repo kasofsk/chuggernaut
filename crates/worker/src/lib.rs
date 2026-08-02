@@ -13,6 +13,7 @@ pub mod backend;
 pub mod capacity;
 pub mod config;
 pub mod daemon;
+pub mod nix;
 
 pub use backend::FleetBackend;
 pub use config::{WorkerConfig, WorkerMode};

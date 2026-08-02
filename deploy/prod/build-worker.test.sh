@@ -44,7 +44,10 @@ EOF
 #     $FAIL_PROBE is set, so a case can drive the probe to time out;
 #   * the cache-dir provisioning (`mkdir -p …`) succeeds unless $FAIL_MKDIR is
 #     set, which models a node where neither the login user nor `sudo -n` can
-#     create the path.
+#     create the path;
+#   * the nix preconditions (`[ -d '/nix/store' ] …`) and the toolchain-shape
+#     probe (`[ -L … ]`) succeed unless $FAIL_NIX_PRECHECK / $FAIL_SDK_PRECHECK
+#     is set.
 cat > "$BIN/ssh" <<EOF
 #!/bin/sh
 cat >/dev/null 2>&1 || true
@@ -53,6 +56,8 @@ case "\$*" in
   *chug.git.sha*)  echo "\${FAKE_LABEL:-deadbeefcafe}" ;;
   *State.Running*) [ -n "\${FAIL_PROBE:-}" ] || echo HEALTHY ;;
   *mkdir*)         [ -z "\${FAIL_MKDIR:-}" ] || exit 1 ;;
+  *"[ -d '/nix/store' ]"*) [ -z "\${FAIL_NIX_PRECHECK:-}" ] || exit 1 ;;
+  *"[ -L "*)       [ -z "\${FAIL_SDK_PRECHECK:-}" ] || exit 1 ;;
 esac
 exit 0
 EOF
@@ -370,6 +375,245 @@ if grep -qF "docker run -d --restart=always --name chug-worker" "$LOG"; then
   fail "an unprovisionable WORKER_CACHE_DIR must not reach the daemon restart (live daemon untouched)"
 fi
 echo "ok: an unprovisionable cache dir refuses before the daemon is replaced"
+
+# ── Case 2k: nix roots on ⇒ the four mounts, the settings, and the roots dir ───
+# design #373 P1. Each mount is load-bearing and the daemon refuses to boot
+# without the roots dir, the client and the socket in its OWN view, so a run spec
+# missing one takes the node out of the fleet (--restart=always loops the
+# refusal). The CLIENT rides through the profiles rather than the store: a
+# store-path client is pinned to the generation current at the last swap, and
+# `--delete-older-than` collects it out from under a long-lived daemon.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+  WORKER_NIX_REALISE_TIMEOUT_SECS=40 \
+  sh "$SUT"
+
+grep_log "-e WORKER_NIX_GCROOTS_DIR='/var/lib/chuggernaut/gcroots'"
+grep_log "-e WORKER_NIX_REALISE_TIMEOUT_SECS='40'"
+grep_log "-v '/nix/store':'/nix/store':ro"
+grep_log "-v '/nix/var/nix/profiles':'/nix/var/nix/profiles':ro"
+grep_log "-v '/nix/var/nix/daemon-socket':'/nix/var/nix/daemon-socket'"
+grep_log "-v '/var/lib/chuggernaut/gcroots':'/var/lib/chuggernaut/gcroots'"
+# The socket mount must be WRITABLE — connecting to a unix socket needs write on
+# the inode, so a :ro parent would fail every realise.
+if grep -qF -- "-v '/nix/var/nix/daemon-socket':'/nix/var/nix/daemon-socket':ro" "$LOG"; then
+  fail "the nix daemon socket must be mounted read-write"
+fi
+# The roots dir is provisioned HERE, before the daemon starts: the daemon's own
+# view is a container, so nothing it does reaches the host path (#380's lesson,
+# and #372 §5 A5 declines to own this).
+grep_log "mkdir -p '/var/lib/chuggernaut/gcroots'"
+grep_log "sudo -n mkdir -p '/var/lib/chuggernaut/gcroots'"
+roots_line="$(line_of "mkdir -p '/var/lib/chuggernaut/gcroots'")"
+run_line="$(line_of "docker run -d --restart=always --name chug-worker")"
+[ "$roots_line" -lt "$run_line" ] || fail "the gcroots dir must be created BEFORE the daemon starts"
+case "$(daemon_run)" in
+  *"chuggernaut/worker:prod >/dev/null"*) ;;
+  *) fail "the image must stay the LAST argument of the run" ;;
+esac
+echo "ok: nix roots on passes the four mounts + settings and provisions the roots dir first"
+
+# ── Case 2l: nix roots unset ⇒ nothing nix reaches the node ────────────────────
+# The whole fleet is here until an operator turns roots on: no mount, no env, no
+# probe, no directory.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  sh "$SUT"
+
+if grep -qE "WORKER_NIX|/nix/store|/nix/var" "$LOG"; then
+  fail "nothing nix may reach a node with WORKER_NIX_GCROOTS_DIR unset"
+fi
+echo "ok: WORKER_NIX_GCROOTS_DIR unset leaves the daemon run nix-free"
+
+# ── Case 2m: an unprovisionable roots dir refuses BEFORE the daemon restart ────
+# Same shape as the cache dir (#380): a daemon started without its roots dir
+# refuses to boot, is looped by --restart=always, and the node leaves the fleet.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+  FAIL_MKDIR=1 \
+  sh "$SUT" >"$WORK/nixroots.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an unprovisionable gcroots dir must fail the deploy (got rc=0)"
+grep -qF "cannot provision WORKER_NIX_GCROOTS_DIR" "$WORK/nixroots.out" \
+  || fail "the refusal must name what is wrong"
+if grep -qF "docker run -d --restart=always --name chug-worker" "$LOG"; then
+  fail "an unprovisionable gcroots dir must not reach the daemon restart"
+fi
+echo "ok: an unprovisionable gcroots dir refuses before the daemon is replaced"
+
+# ── Case 2n: a node with no nix daemon refuses too, and a relative path does ───
+# The mounts are only sound on a node that actually has a store, a profiles tree
+# and a daemon socket; a node without them would take the four mounts and then
+# fail the daemon's own boot check.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+  FAIL_NIX_PRECHECK=1 \
+  sh "$SUT" >"$WORK/nixpre.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a node without a nix daemon must fail the deploy (got rc=0)"
+grep -qF "lacks the nix preconditions" "$WORK/nixpre.out" || fail "the refusal must name what is missing"
+
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_NIX_GCROOTS_DIR=relative/gcroots \
+  sh "$SUT" >"$WORK/nixrel.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a relative gcroots dir must fail the deploy (got rc=0)"
+grep -qF "is not an absolute host path" "$WORK/nixrel.out" || fail "the refusal must name what is wrong"
+if grep -qF "docker run -d --restart=always --name chug-worker" "$LOG"; then
+  fail "a relative gcroots dir must not reach the daemon restart"
+fi
+echo "ok: a nix-less node and a relative roots dir both refuse before the daemon is replaced"
+
+# ── Case 2o: roots + a KVM device ⇒ the toolchain's PARENT is mounted too ──────
+# `nix-store --realise` resolves its argument CLIENT-side, inside chug-worker,
+# before the nix daemon hears anything, and the operator's stable path is a
+# symlink INTO the store. Binding that path itself destroys the symlink —
+# mount(2) resolves the source host-side — leaving the store path's content at a
+# non-store path the client refuses. Binding the parent keeps it readable as a
+# symlink, resolving through the store mount, and following the node across a
+# `nixos-rebuild` rather than pinning this deploy's generation.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+  WORKER_KVM=1 \
+  WORKER_KVM_PROJECTS=acme/beacon \
+  WORKER_ANDROID_SDK_DIR=/etc/chug/android-sdk \
+  sh "$SUT"
+
+grep_log "-v '/etc/chug':'/etc/chug':ro"
+# And never the leaf: that is the bind whose source the kernel resolves.
+if grep -qF -- "-v '/etc/chug/android-sdk':" "$LOG"; then
+  fail "binding the stable path itself resolves the symlink away — mount its parent"
+fi
+# The probe demands the SHAPE the mount depends on, not mere existence: a direct
+# absolute symlink into the store, under a real parent directory.
+grep_log "[ -L '/etc/chug/android-sdk' ]"
+grep_log "readlink '/etc/chug/android-sdk'"
+grep_log "in '/nix/store'/*)"
+
+# The default toolchain path is the one the daemon's own config defaults to, so a
+# node that never set WORKER_ANDROID_SDK_DIR still gets the realise target it
+# will actually be handed.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+  WORKER_KVM=1 \
+  sh "$SUT"
+grep_log "-v '/var/lib/chuggernaut':'/var/lib/chuggernaut':ro"
+
+# A node with roots on but NO device realises nothing, so it takes no toolchain
+# mount — WORKER_KVM=0 is a deliberate configuration, not a half-enabled one.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+  WORKER_KVM=0 \
+  WORKER_ANDROID_SDK_DIR=/etc/chug/android-sdk \
+  sh "$SUT"
+if grep -qF -- "-v '/etc/chug'" "$LOG"; then
+  fail "a node with no device realises nothing and must take no toolchain mount"
+fi
+
+# And an SDK path whose SHAPE the mount cannot carry — a plain directory, or a
+# NixOS environment.etc entry hopping through /etc/static — refuses the deploy
+# rather than booting a daemon whose own check will refuse it forever.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+  WORKER_KVM=1 \
+  WORKER_ANDROID_SDK_DIR=/etc/chug/android-sdk \
+  FAIL_SDK_PRECHECK=1 \
+  sh "$SUT" >"$WORK/nixsdk.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an unrealisable toolchain path must fail the deploy (got rc=0)"
+grep -qF "'/etc/chug/android-sdk' on worksalot@nuc is not a direct symlink into '/nix/store'" \
+  "$WORK/nixsdk.out" || fail "the refusal must name the path and the shape it needs"
+grep -qF "systemd.tmpfiles.rules" "$WORK/nixsdk.out" || fail "the refusal must name the remedy"
+if grep -qF "docker run -d --restart=always --name chug-worker" "$LOG"; then
+  fail "an unrealisable toolchain path must not reach the daemon restart"
+fi
+
+# A toolchain path directly under / would need the node's root filesystem bound
+# into chug-worker to be readable as a symlink. Refused on sight, no ssh needed.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+  WORKER_KVM=1 \
+  WORKER_ANDROID_SDK_DIR=/android-sdk \
+  sh "$SUT" >"$WORK/nixroot.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a toolchain path under / must fail the deploy (got rc=0)"
+grep -qF "sits directly under /" "$WORK/nixroot.out" || fail "the refusal must say why"
+echo "ok: roots + a device mount the toolchain's PARENT, and a shape that cannot work refuses"
+
+# ── Case 2p: a realise bound the launch RPC cannot contain is REFUSED ──────────
+# The realise runs inside the `launch` RPC the dispatcher abandons after 60s, so
+# the daemon refuses a longer bound at parse time (config.rs
+# NIX_REALISE_TIMEOUT_SECS_MAX). Catching it here keeps the failure a failed
+# deploy instead of a node looping --restart=always out of the fleet.
+for bad in 900 0 soon; do
+  : > "$LOG"
+  set +e
+  PATH="$BIN:$PATH" \
+    WORKER_SSH=worksalot@nuc \
+    WORKER_NATS_URL=nats://10.0.0.1:4222 \
+    CHUG_WORKER_NODE=nuc \
+    WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+    WORKER_NIX_REALISE_TIMEOUT_SECS="$bad" \
+    sh "$SUT" >"$WORK/nixbound.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "WORKER_NIX_REALISE_TIMEOUT_SECS=$bad must fail the deploy (got rc=0)"
+  grep -qF "WORKER_NIX_REALISE_TIMEOUT_SECS" "$WORK/nixbound.out" \
+    || fail "the refusal must name the bound ($bad)"
+  if grep -qF "docker run -d --restart=always --name chug-worker" "$LOG"; then
+    fail "an unusable realise bound ($bad) must not reach the daemon restart"
+  fi
+done
+echo "ok: a realise bound outside the launch RPC's budget refuses before the daemon is replaced"
 
 # ── Case 3: no worker node ⇒ clean no-op ──────────────────────────────────────
 : > "$LOG"

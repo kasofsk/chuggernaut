@@ -22,6 +22,11 @@
 #   WORKER_KVM / WORKER_KVM_PROJECTS / WORKER_ANDROID_SDK_DIR   KVM passthrough
 #     (design #367), re-applied on swap; the DEVICE itself is carried forward
 #     from the live container, never from this env (docs/runbooks/worker-kvm.md)
+#   WORKER_NIX_GCROOTS_DIR / WORKER_NIX_CLIENT / WORKER_NIX_DAEMON_SOCKET /
+#     WORKER_NIX_STORE_DIR /
+#     WORKER_NIX_REALISE_TIMEOUT_SECS   per-task nix GC roots (design #373 P1),
+#     re-applied on swap; the nix MOUNTS are carried forward from the live
+#     container, never re-derived here
 set -eu
 
 PHASE="${1:?usage: worker-refresh.sh build <sha> <tag> | swap <tag>}"
@@ -479,6 +484,94 @@ swap)
     exit 1
   fi
 
+  # Per-task nix GC roots (design #373 P1). The four SETTINGS ride the daemon's
+  # environment into this shell like every other knob; the MOUNTS cannot,
+  # and are recovered from the live container for the same reason the KVM device
+  # is. Dropping them does not degrade the node: the daemon's boot check refuses
+  # to start without its roots dir, its client and the socket in ITS OWN view
+  # (crates/worker/src/nix.rs), --restart=always loops the refusal, and the node
+  # leaves the fleet — the #377 node-down hazard, one mount over.
+  #
+  # Carried by DESTINATION rather than reconstructed: anything under /nix, the
+  # store prefix, the roots dir, and — when this node attaches a KVM device —
+  # the DIRECTORY HOLDING the toolchain path (never that path itself: a bind
+  # whose source is the operator's symlink resolves it host-side and the client
+  # then sees a non-store path it refuses to realise),
+  # with each mount's own read-only bit preserved (the
+  # store, the profiles and the toolchain are :ro; the socket dir and the roots
+  # dir must stay writable — connecting to a unix socket needs write on the
+  # inode). Reading what is ACTUALLY running is what keeps this from drifting
+  # the way a second copy of the run spec would, and it carries a node whose
+  # profiles or socket live on a different mount point (gumbo-nuc-0's
+  # /nix/var/nix/gcroots/profiles resolves through /mnt) with no path assumption
+  # here at all.
+  NIX_GCROOTS="${WORKER_NIX_GCROOTS_DIR:-}"
+  NIX_GCROOTS="${NIX_GCROOTS#"${NIX_GCROOTS%%[![:space:]]*}"}"
+  NIX_GCROOTS="${NIX_GCROOTS%"${NIX_GCROOTS##*[![:space:]]}"}"
+  NIX_ARGS=""
+  NIX_MOUNT_ARGS=""
+  if [ -n "$NIX_GCROOTS" ]; then
+    NIX_ARGS="-e WORKER_NIX_GCROOTS_DIR='$NIX_GCROOTS'"
+    if [ -n "${WORKER_NIX_CLIENT:-}" ]; then
+      NIX_ARGS="$NIX_ARGS -e WORKER_NIX_CLIENT='$WORKER_NIX_CLIENT'"
+    fi
+    if [ -n "${WORKER_NIX_DAEMON_SOCKET:-}" ]; then
+      NIX_ARGS="$NIX_ARGS -e WORKER_NIX_DAEMON_SOCKET='$WORKER_NIX_DAEMON_SOCKET'"
+    fi
+    if [ -n "${WORKER_NIX_REALISE_TIMEOUT_SECS:-}" ]; then
+      NIX_ARGS="$NIX_ARGS -e WORKER_NIX_REALISE_TIMEOUT_SECS='$WORKER_NIX_REALISE_TIMEOUT_SECS'"
+    fi
+    if [ -n "${WORKER_NIX_STORE_DIR:-}" ]; then
+      NIX_ARGS="$NIX_ARGS -e WORKER_NIX_STORE_DIR='$WORKER_NIX_STORE_DIR'"
+    fi
+    NIX_SOCKET_DIR="${WORKER_NIX_DAEMON_SOCKET:-/nix/var/nix/daemon-socket/socket}"
+    NIX_SOCKET_DIR="${NIX_SOCKET_DIR%/*}"
+    NIX_STORE_DIR="${WORKER_NIX_STORE_DIR:-/nix/store}"
+    NIX_TOOLCHAIN_DIR=""
+    if [ -n "$KVM_ON" ]; then
+      NIX_SDK_DIR="${WORKER_ANDROID_SDK_DIR:-/var/lib/chuggernaut/android-sdk}"
+      NIX_SDK_DIR="${NIX_SDK_DIR#"${NIX_SDK_DIR%%[![:space:]]*}"}"
+      NIX_SDK_DIR="${NIX_SDK_DIR%"${NIX_SDK_DIR##*[![:space:]]}"}"
+      NIX_TOOLCHAIN_DIR="${NIX_SDK_DIR%/*}"
+    fi
+    HAVE_STORE=""
+    HAVE_ROOTS=""
+    HAVE_SOCKET=""
+    HAVE_TOOLCHAIN=""
+    for m in $(docker inspect chug-worker \
+      --format '{{range .Mounts}}{{.Destination}}|{{.Source}}|{{.RW}} {{end}}'); do
+      dst="${m%%|*}"
+      rest="${m#*|}"
+      src="${rest%%|*}"
+      rw="${rest##*|}"
+      case "$dst" in
+        /nix | /nix/*) ;;
+        "$NIX_STORE_DIR") ;;
+        "$NIX_GCROOTS") ;;
+        *)
+          if [ -z "$NIX_TOOLCHAIN_DIR" ] || [ "$dst" != "$NIX_TOOLCHAIN_DIR" ]; then continue; fi
+          ;;
+      esac
+      if [ "$rw" = "true" ]; then
+        NIX_MOUNT_ARGS="$NIX_MOUNT_ARGS -v $src:$dst"
+      else
+        NIX_MOUNT_ARGS="$NIX_MOUNT_ARGS -v $src:$dst:ro"
+      fi
+      if [ "$dst" = "$NIX_STORE_DIR" ]; then HAVE_STORE=1; fi
+      if [ "$dst" = "$NIX_GCROOTS" ]; then HAVE_ROOTS=1; fi
+      if [ "$dst" = "$NIX_SOCKET_DIR" ]; then HAVE_SOCKET=1; fi
+      if [ -n "$NIX_TOOLCHAIN_DIR" ] && [ "$dst" = "$NIX_TOOLCHAIN_DIR" ]; then HAVE_TOOLCHAIN=1; fi
+    done
+    nix_mount_missing() {
+      echo "worker-refresh: WORKER_NIX_GCROOTS_DIR='$NIX_GCROOTS' enables per-task nix GC roots but the live chug-worker has no mount at '$1' to carry forward; refusing swap (the replacement would refuse to start and --restart=always would loop it — node down). Recreate the daemon with deploy/prod/build-worker.sh, which passes every nix mount." >&2
+      exit 1
+    }
+    if [ -z "$HAVE_STORE" ]; then nix_mount_missing "$NIX_STORE_DIR"; fi
+    if [ -z "$HAVE_ROOTS" ]; then nix_mount_missing "$NIX_GCROOTS"; fi
+    if [ -z "$HAVE_SOCKET" ]; then nix_mount_missing "$NIX_SOCKET_DIR"; fi
+    if [ -n "$NIX_TOOLCHAIN_DIR" ] && [ -z "$HAVE_TOOLCHAIN" ]; then nix_mount_missing "$NIX_TOOLCHAIN_DIR"; fi
+  fi
+
   # The daemon's own log level (ticket #270). The binary configures tracing from
   # RUST_LOG (`tracing_subscriber::fmt::init`) whose default directive is ERROR,
   # so a daemon started without it emits NOTHING an operator can use: not the
@@ -505,7 +598,8 @@ swap)
     -e RUST_LOG=$RUST_LOG_NEW \
     -e WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-} \
     -e WORKER_GIT_KEY=${WORKER_GIT_KEY:-/data/keys/worker_git} \
-    $CACHE_ARGS $DISK_ARGS $SLOTS_ARGS $KVM_ARGS $KVM_DEVICE_ARGS chuggernaut/worker:$TAG"
+    $CACHE_ARGS $DISK_ARGS $SLOTS_ARGS $KVM_ARGS $KVM_DEVICE_ARGS \
+    $NIX_ARGS $NIX_MOUNT_ARGS chuggernaut/worker:$TAG"
 
   # Keep the swapper's transcript (ticket #270). This sibling container holds the
   # only record of the moment the node is most likely to break — it removes the

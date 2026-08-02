@@ -611,6 +611,17 @@ Notes:
   without the device refuses to start and `--restart=always` loops the refusal.
   The self-refresh swap carries the device forward from the live container and
   refuses the swap rather than replace a KVM daemon with one that cannot boot.
+- **Per-task nix GC roots are the same shape of per-node opt-in** (spec §3.1,
+  [the runbook §7](../../docs/runbooks/worker-kvm.md)). `WORKER_NIX_GCROOTS_DIR`
+  turns them on; `build-worker.sh` provisions the directory and mounts four
+  paths into `chug-worker` itself (the store and the profiles tree read-only,
+  the nix daemon socket dir and the roots dir read-write) plus, on a node with a
+  KVM device, the **directory holding** the toolchain path the realise resolves
+  (binding that path itself would resolve the operator's symlink away and leave
+  the client a non-store path) — and the swap carries
+  those mounts forward from the live container, refusing rather than replacing
+  a rooting daemon with one that cannot boot. Without it a task holds store
+  paths no GC root protects.
 - The daemon's version is reported in its ping; the dispatcher logs a warning
   when it drifts from the dispatcher's own (stale node artifacts).
 - **Watch a refresh from the deploy job, not the node.** `worker-refresh.sh`
