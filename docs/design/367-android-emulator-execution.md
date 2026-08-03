@@ -62,7 +62,9 @@ device-passthrough problem, not a host-execution problem. Seven claims needed
 adjusting, and five of them move work. The 2026-08-02 amendment adds five more
 (8–12) in [its own subsection](#the-2026-08-02-measurement-corrections-812);
 four of those move work too. Building phase A2 adds a thirteenth
-([below](#building-a2-correction-13)), and it moves A2's own entrypoint.
+([below](#building-a2-correction-13)), and it moves A2's own entrypoint; the
+first real A2 run adds a fourteenth
+([below](#the-first-real-a2-run-correction-14)), which bounds correction 11.
 
 1. **#322 W1 has landed. The brief understates its own case.** It says the
    Android route needs neither `HostBackend` nor the `runtime:` selector nor the
@@ -239,7 +241,10 @@ reproduced here. Correction 12 is read out of this tree and is not secondhand.
     §[3](#3-part-two-the-toolchain-bulk) does not shrink, it **disappears**:
     zero bytes are added to any image the platform rebuilds per node per
     deploy. §[3.3](#33-recommendation-t2-now-and-t5-as-the-complement-rather-than-the-rival)
-    is strengthened accordingly.
+    is strengthened accordingly. **Bounded by
+    [correction 14](#the-first-real-a2-run-correction-14)**: the wrapper trick
+    covers the SDK tools and stops at gradle, which needs a real `JAVA_HOME` —
+    supplied as a third mounted leaf, still not as image bytes.
 
 12. **The worker daemon cannot see the host filesystem, so A1's "fail loudly if
     the mount is absent" cannot work as written** — and this one is
@@ -309,6 +314,36 @@ reproduced here. Correction 12 is read out of this tree and is not secondhand.
     §[8](#8-risks-and-open-questions). The proof job is pinned and single, so
     concurrency is not exercised; both remain open questions for whoever unpins
     it (A3).
+
+### The first real A2 run (correction 14)
+
+14. **Correction 11 is right and it stops at gradle.** The measurement behind it
+    — `java` is absent from `chuggernaut/agent:prod`'s `PATH` and `avdmanager`
+    ran anyway, because the nix wrappers resolve their own JDK out of the
+    mounted store — held on the node's first real ladder run (job #396): rungs
+    1–3 passed, including the SDK tools running off the read-only mounts. Rung 4
+    then failed with `ERROR: JAVA_HOME is not set and no 'java' command could be
+    found`. Gradle, which `flutter build apk` invokes, is **not** a nix wrapper:
+    it resolves its JDK from `JAVA_HOME` (or `PATH`) and has nothing to fall
+    back on. So the wrapper trick covers the SDK tools and nothing beyond them,
+    and "the image needs nothing" survives only because the JDK arrives the same
+    way the other toolchains do — as a **third read-only leaf**
+    (`WORKER_JDK_DIR` ⇒ `/opt/jdk`, `JAVA_HOME`; #397), not as image bytes.
+
+    `JAVA_HOME` alone, deliberately: gradle's launcher prefers it over `PATH`,
+    and a container `PATH` set from the daemon **replaces** the image's rather
+    than prepending to it, which is a far wider blast radius than one variable
+    for a tool that does not need it. The value is the derivation **root**, not
+    the nested `lib/openjdk` — both carry `bin/java`, only the nested one carries
+    `release`, and the root is what nixpkgs designates and what the node's own
+    `configuration.nix` exports for its GitHub runners' Android builds. A rung-4
+    failure that complains about the JDK's *layout* rather than its absence is
+    the signal to revisit that choice.
+
+    Three leaves is also the shape's own argument against itself: one symlink,
+    one setting and one mount per tool scales linearly with the toolchain, which
+    is precisely what [#373](373-project-toolchains.md) P2's project-declared
+    toolchains exist to replace. Three is affordable; the trend is the finding.
 
 ---
 

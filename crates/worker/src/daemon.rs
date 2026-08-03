@@ -519,6 +519,7 @@ async fn build_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend
             device = %grant.device.display(),
             android_sdk_dir = %grant.android_sdk_dir.display(),
             flutter_dir = ?grant.flutter_dir,
+            jdk_dir = ?grant.jdk_dir,
             projects = ?grant.projects,
             "KVM passthrough enabled for the allow-listed projects"
         );
@@ -536,6 +537,7 @@ fn kvm_grant(config: &WorkerConfig) -> Option<KvmGrant> {
         device: device.clone(),
         android_sdk_dir: config.android_sdk_dir.clone(),
         flutter_dir: config.flutter_dir.clone(),
+        jdk_dir: config.jdk_dir.clone(),
         projects: config.kvm_projects.clone(),
     })
 }
@@ -875,11 +877,19 @@ fn inject_toolchain_env(env: &mut HashMap<String, String>, kvm: Option<&KvmGrant
             container::docker::FLUTTER_MOUNT_PATH.into(),
         );
     }
+    if grant.jdk_dir.is_some() {
+        env.insert("JAVA_HOME".into(), container::docker::JDK_MOUNT_PATH.into());
+    }
     debug_assert!(
         grant.flutter_dir.is_none()
             || env.get("FLUTTER_ROOT").map(String::as_str)
                 == Some(container::docker::FLUTTER_MOUNT_PATH),
         "FLUTTER_ROOT names the mount the backend adds, never a host path"
+    );
+    debug_assert!(
+        grant.jdk_dir.is_none()
+            || env.get("JAVA_HOME").map(String::as_str) == Some(container::docker::JDK_MOUNT_PATH),
+        "JAVA_HOME names the mount the backend adds, never a host path"
     );
 }
 
@@ -1699,6 +1709,7 @@ mod tests {
             device: PathBuf::from(container::docker::KVM_DEVICE_PATH),
             android_sdk_dir: PathBuf::from("/var/lib/chuggernaut/android-sdk"),
             flutter_dir: None,
+            jdk_dir: None,
             projects: projects.iter().map(|p| (*p).to_string()).collect(),
         }
     }
@@ -1729,6 +1740,10 @@ mod tests {
         assert!(
             !env.contains_key("FLUTTER_ROOT"),
             "a node that provisions no Flutter names none: {env:?}"
+        );
+        assert!(
+            !env.contains_key("JAVA_HOME"),
+            "a node that provisions no JDK names none: {env:?}"
         );
     }
 
@@ -1768,6 +1783,67 @@ mod tests {
         let mut unlisted = HashMap::from([("JOB_PROJECT".to_string(), "acme/api".to_string())]);
         inject_toolchain_env(&mut unlisted, Some(&grant));
         assert_eq!(unlisted.len(), 1, "unlisted launch got env: {unlisted:?}");
+    }
+
+    /// A JDK-provisioned node names its own leaf in `JAVA_HOME` — the variable
+    /// gradle needs, since it is not a nix wrapper and cannot resolve a JDK out
+    /// of the store (design #367 correction 14) — leaving the other toolchain
+    /// variables on their own mounts, each distinct and none a store path.
+    #[test]
+    fn java_home_injected_only_when_the_node_provisions_a_jdk() {
+        let grant = KvmGrant {
+            flutter_dir: Some(PathBuf::from("/var/lib/chuggernaut/toolchain/flutter")),
+            jdk_dir: Some(PathBuf::from("/var/lib/chuggernaut/toolchain/jdk")),
+            ..kvm_grant_for(&["acme/beacon"])
+        };
+        let mut env = HashMap::from([("JOB_PROJECT".to_string(), "acme/beacon".to_string())]);
+        inject_toolchain_env(&mut env, Some(&grant));
+        assert_eq!(
+            env.get("JAVA_HOME").map(String::as_str),
+            Some(container::docker::JDK_MOUNT_PATH)
+        );
+        assert_eq!(
+            env.get("FLUTTER_ROOT").map(String::as_str),
+            Some(container::docker::FLUTTER_MOUNT_PATH)
+        );
+        assert_eq!(
+            env.get("ANDROID_SDK_ROOT").map(String::as_str),
+            Some(container::docker::ANDROID_SDK_MOUNT_PATH)
+        );
+        let leaves = [
+            env.get("JAVA_HOME"),
+            env.get("FLUTTER_ROOT"),
+            env.get("ANDROID_SDK_ROOT"),
+        ];
+        assert_eq!(
+            leaves
+                .iter()
+                .flatten()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3,
+            "the three toolchains are separate leaves: {env:?}"
+        );
+        assert!(
+            !env.values().any(|v| v.starts_with("/nix/store/")),
+            "no store path may reach the launch env: {env:?}"
+        );
+
+        let mut jdk_only = HashMap::from([("JOB_PROJECT".to_string(), "acme/beacon".to_string())]);
+        inject_toolchain_env(
+            &mut jdk_only,
+            Some(&KvmGrant {
+                flutter_dir: None,
+                jdk_dir: grant.jdk_dir.clone(),
+                ..kvm_grant_for(&["acme/beacon"])
+            }),
+        );
+        assert_eq!(
+            jdk_only.get("JAVA_HOME").map(String::as_str),
+            Some(container::docker::JDK_MOUNT_PATH),
+            "a JDK leaf is independent of the Flutter one: {jdk_only:?}"
+        );
+        assert!(!jdk_only.contains_key("FLUTTER_ROOT"));
     }
 
     /// The negative space: the same node injects nothing for a project it did

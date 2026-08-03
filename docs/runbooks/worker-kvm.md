@@ -19,7 +19,7 @@ device passthrough beats a host runtime) and not the normative text
 | Piece | Owned by | Where it lives |
 | --- | --- | --- |
 | the SDK, and a **stable path** to it | the node's NixOS config | `configuration.nix` — an `environment.etc` (or equivalent) entry pointing a fixed path such as `/etc/chug/android-sdk` at the current `androidsdk` output; §7 narrows this to a *direct* symlink once per-task GC roots are on |
-| `WORKER_KVM`, `WORKER_KVM_PROJECTS`, `WORKER_ANDROID_SDK_DIR`, the optional `WORKER_FLUTTER_DIR`, **and `--device`** | `deploy/prod/build-worker.sh`, carried across every self-refresh by `deploy/prod/worker-refresh.sh` | the `chug-worker` container's `docker run` |
+| `WORKER_KVM`, `WORKER_KVM_PROJECTS`, `WORKER_ANDROID_SDK_DIR`, the optional `WORKER_FLUTTER_DIR` and `WORKER_JDK_DIR`, **and `--device`** | `deploy/prod/build-worker.sh`, carried across every self-refresh by `deploy/prod/worker-refresh.sh` | the `chug-worker` container's `docker run` |
 | **who** may use it | `WORKER_KVM_PROJECTS` — `owner/project` entries, comma-separated | the same `docker run` |
 
 The stable path is not a nicety. `/nix/store/3zr1pgw…-androidsdk/…` is
@@ -38,6 +38,22 @@ an emulator proof needs both. Unset ⇒ no mount, no `FLUTTER_ROOT`, and the
 launch is what it was; `WORKER_ANDROID_SDK_DIR` keeps its meaning either way, so
 turning Flutter on is not a migration. It is **not** realised or GC-rooted (§7)
 — only the Android SDK is.
+
+**The JDK is a third leaf, and gradle is why.** A node whose jobs build an APK
+also sets `WORKER_JDK_DIR` — its own stable path, mounted read-only at
+`/opt/jdk`, with `JAVA_HOME` pointed there. The SDK tools do not need it (the
+nix wrappers resolve their own JDK out of the mounted store, which is why
+`avdmanager` runs with no `java` on `PATH`), but gradle is not a wrapper: without
+`JAVA_HOME` a Flutter APK build dies with `ERROR: JAVA_HOME is not set and no
+'java' command could be found`, which is exactly where job #396's proof stopped.
+Name the **derivation root** — the path nixpkgs designates and a NixOS
+`JAVA_HOME` already exports — not the nested `lib/openjdk`; both hold `bin/java`.
+Unset ⇒ no mount, no `JAVA_HOME`, launch unchanged, and no other setting changes
+meaning. Like Flutter it is **not** realised or GC-rooted (§7).
+
+Three tools, three symlinks, three settings: this scales linearly with the
+toolchain and is the stopgap design #373 P2 (project-declared toolchains)
+exists to replace. Note the trend rather than adding a fourth by reflex.
 
 **The allow-list is fail-closed.** Unset or empty grants *nobody*, so enabling
 KVM on a node and granting it to a project are two separate acts. A node with
@@ -99,12 +115,14 @@ WORKER_SSH=worksalot@gumbo-nuc-0 CHUG_WORKER_NODE=nuc \
   WORKER_KVM_PROJECTS=acme/beacon \
   WORKER_ANDROID_SDK_DIR=/etc/chug/android-sdk \
   WORKER_FLUTTER_DIR=/var/lib/chuggernaut/toolchain/flutter \
+  WORKER_JDK_DIR=/var/lib/chuggernaut/toolchain/jdk \
   deploy/prod/build-worker.sh
 ```
 
 Pass **every** var the node should keep, not just the new ones: this recreates
 the daemon container, so a var you omit is a var the node loses. Drop the
-`WORKER_FLUTTER_DIR` line on a node that provisions no Flutter.
+`WORKER_FLUTTER_DIR` and `WORKER_JDK_DIR` lines on a node that provisions
+neither.
 
 The same names are documented in `deploy/prod/env.example`, and a
 deployment whose `WORKER_SSH` *is* set (i.e. one where `update.sh` runs
@@ -169,6 +187,7 @@ the mounts, while the node keeps working.
 | a job runs but the emulator reports no KVM | that project is not on the allow-list, so it gets neither the device nor the mounts | check `WORKER_KVM_PROJECTS` against the job's `JOB_PROJECT` (`owner/project`, exactly) |
 | the SDK is missing inside the container | the stable path does not resolve on the node | `readlink -f` it; the mount refuses a missing source rather than creating an empty directory, so the launch fails loudly |
 | `FLUTTER_ROOT` is unset in an allow-listed job, or `/opt/flutter` is empty | the node never set `WORKER_FLUTTER_DIR` — it is optional and off by default | set it (§3) and recreate the daemon; the Android SDK is unaffected either way |
+| a gradle or `flutter build apk` step fails with `JAVA_HOME is not set and no 'java' command could be found` | the node never set `WORKER_JDK_DIR`; the SDK tools work regardless, so the rest of the job looks healthy | set it to the JDK's stable path (§3) and recreate the daemon. If `JAVA_HOME` *is* set and gradle complains about the JDK's layout instead, try the nested `lib/openjdk` — the derivation root is what nixpkgs designates and what this node's runners already build against, so the root is the documented value |
 
 ---
 
@@ -243,7 +262,8 @@ A few things are worth knowing before you do:
   under a running daemon rather than pinning the generation current at the swap.
 
 - **This is the opposite of what the JOB container's mounts do, and both are
-  right.** `/opt/android-sdk` and `/opt/flutter` bind the **leaf itself** — the
+  right.** `/opt/android-sdk`, `/opt/flutter` and `/opt/jdk` bind the **leaf
+  itself** — the
   stable path, not its parent — precisely so `mount(2)` resolves it host-side and
   the job container gets the toolchain's content at a fixed, hash-free path.
   Nothing runs `nix-store` against those mounts; the job just reads files, and an

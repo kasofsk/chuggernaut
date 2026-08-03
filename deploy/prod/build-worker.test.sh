@@ -254,9 +254,9 @@ grep_log "-e WORKER_ANDROID_SDK_DIR='/etc/chug/android-sdk'"
 grep_log "--device '/dev/kvm'"
 echo "ok: KVM on passes the three settings and the /dev/kvm device"
 
-# ── Case 2e1: the node's Flutter SDK is a SECOND, independent leaf (#393) ──────
-# Set ⇒ it rides beside WORKER_ANDROID_SDK_DIR, whose value is UNTOUCHED (the
-# whole reason this is a second setting and not a repointing of the first —
+# ── Case 2e1: Flutter and the JDK are FURTHER, independent leaves (#393, #397) ─
+# Set ⇒ each rides beside WORKER_ANDROID_SDK_DIR, whose value is UNTOUCHED (the
+# whole reason these are further settings and not a repointing of the first —
 # gumbo-nuc-0 needs no migration). Unset ⇒ not a token in the composed run, so
 # an Android-only node's spec is what it was — case 2d's golden proves that half.
 : > "$LOG"
@@ -268,11 +268,13 @@ PATH="$BIN:$PATH" \
   WORKER_KVM_PROJECTS="acme/beacon" \
   WORKER_ANDROID_SDK_DIR=/var/lib/chuggernaut/toolchain/android-sdk \
   WORKER_FLUTTER_DIR=/var/lib/chuggernaut/toolchain/flutter \
+  WORKER_JDK_DIR=/var/lib/chuggernaut/toolchain/jdk \
   sh "$SUT"
 
 grep_log "-e WORKER_ANDROID_SDK_DIR='/var/lib/chuggernaut/toolchain/android-sdk'"
 grep_log "-e WORKER_FLUTTER_DIR='/var/lib/chuggernaut/toolchain/flutter'"
-echo "ok: WORKER_FLUTTER_DIR rides beside WORKER_ANDROID_SDK_DIR, which is unchanged"
+grep_log "-e WORKER_JDK_DIR='/var/lib/chuggernaut/toolchain/jdk'"
+echo "ok: WORKER_FLUTTER_DIR and WORKER_JDK_DIR ride beside the unchanged Android SDK"
 
 # ── Case 2e2: an allow-list written with spaces stays ONE argument ─────────────
 # The daemon trims each entry (crates/worker/src/config.rs `parse_kvm_projects`),

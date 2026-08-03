@@ -261,6 +261,15 @@ fi
 if [ -n "${WORKER_FLUTTER_DIR:-}" ]; then
   KVM_ENV="$KVM_ENV -e WORKER_FLUTTER_DIR='$WORKER_FLUTTER_DIR'"
 fi
+# The node's JDK (#397): a THIRD leaf on the same terms, mounted read-only at
+# /opt/jdk with JAVA_HOME pointed at it. It exists because the nix wrappers'
+# resolve-my-own-JDK trick stops at gradle, which Flutter invokes and which is
+# not a wrapper (design #367 correction 14): the SDK tools ran without a JDK on
+# PATH, `flutter build apk` did not. Optional exactly as the others are — unset ⇒
+# no mount, no env, no migration — and superseded by #373 P2 with them.
+if [ -n "${WORKER_JDK_DIR:-}" ]; then
+  KVM_ENV="$KVM_ENV -e WORKER_JDK_DIR='$WORKER_JDK_DIR'"
+fi
 # Per-task nix GC roots (design #373 P1, daemon side in crates/worker/src/nix.rs).
 # WORKER_NIX_GCROOTS_DIR is the switch: unset ⇒ nothing below happens and the run
 # spec is exactly what it was. Set ⇒ the daemon realises the node's declared

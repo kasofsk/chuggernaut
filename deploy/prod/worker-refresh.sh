@@ -23,7 +23,8 @@
 #     the host dir is provisioned at node creation by build-worker.sh, never here)
 #   WORKER_SWAP_IMAGE       docker-cli image for the detached swapper (default docker:cli)
 #   WORKER_REFRESH_DISK_FREE_GB_MIN / _DISK_PATH   disk pre-flight (see below)
-#   WORKER_KVM / WORKER_KVM_PROJECTS / WORKER_ANDROID_SDK_DIR / WORKER_FLUTTER_DIR
+#   WORKER_KVM / WORKER_KVM_PROJECTS / WORKER_ANDROID_SDK_DIR / WORKER_FLUTTER_DIR /
+#     WORKER_JDK_DIR
 #     KVM passthrough (design #367), re-applied on swap; the DEVICE itself is carried forward
 #     from the live container, never from this env (docs/runbooks/worker-kvm.md)
 #   WORKER_NIX_GCROOTS_DIR / WORKER_NIX_CLIENT / WORKER_NIX_DAEMON_SOCKET /
@@ -490,6 +491,12 @@ swap)
   # node whose builds need it, so it rides forward with the rest.
   if [ -n "${WORKER_FLUTTER_DIR:-}" ]; then
     KVM_ARGS="$KVM_ARGS -e WORKER_FLUTTER_DIR='$WORKER_FLUTTER_DIR'"
+  fi
+  # The node's JDK (#397), a THIRD independent leaf carried on the same terms:
+  # dropping it on a self-refresh would leave JAVA_HOME unset on a node whose
+  # gradle builds need it, which is the failure #396 measured.
+  if [ -n "${WORKER_JDK_DIR:-}" ]; then
+    KVM_ARGS="$KVM_ARGS -e WORKER_JDK_DIR='$WORKER_JDK_DIR'"
   fi
 
   # Recover the REAL host bind sources from the running daemon rather than

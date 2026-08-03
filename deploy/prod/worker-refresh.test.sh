@@ -542,7 +542,7 @@ PATH="$BIN:$PATH" \
   WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
   sh "$SUT" swap prod
 
-if grep -qE "WORKER_KVM|WORKER_ANDROID_SDK_DIR|WORKER_FLUTTER_DIR" "$LOG"; then
+if grep -qE "WORKER_KVM|WORKER_ANDROID_SDK_DIR|WORKER_FLUTTER_DIR|WORKER_JDK_DIR" "$LOG"; then
   fail "swap must not pass a KVM setting when none is set (no passthrough)"
 fi
 # Scoped to the swapper's own command line: the device carry-forward READS
@@ -587,10 +587,11 @@ case "$(grep -F chug-worker-swap "$LOG")" in
 esac
 echo "ok: swap carries the KVM settings forward and the device from the live container"
 
-# ── Case 3g1: the node's Flutter SDK rides forward too (#393) ─────────────────
-# A self-refresh that dropped it would silently un-provision Flutter on a node
-# whose builds need it — the quiet-regression half of the asymmetry above. The
-# Android SDK must come through unchanged beside it: two independent leaves.
+# ── Case 3g1: the Flutter and JDK leaves ride forward too (#393, #397) ────────
+# A self-refresh that dropped one would silently un-provision it on a node whose
+# builds need it — the quiet-regression half of the asymmetry above, and for the
+# JDK it is exactly the JAVA_HOME failure #396 measured. The Android SDK must
+# come through unchanged beside them: three independent leaves.
 : > "$LOG"
 PATH="$BIN:$PATH" \
   WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
@@ -598,12 +599,14 @@ PATH="$BIN:$PATH" \
   WORKER_KVM_PROJECTS="acme/beacon" \
   WORKER_ANDROID_SDK_DIR=/var/lib/chuggernaut/toolchain/android-sdk \
   WORKER_FLUTTER_DIR=/var/lib/chuggernaut/toolchain/flutter \
+  WORKER_JDK_DIR=/var/lib/chuggernaut/toolchain/jdk \
   FAKE_KVM_DEVICES="--device /dev/kvm:/dev/kvm:rwm " \
   sh "$SUT" swap prod
 
 grep_log "-e WORKER_ANDROID_SDK_DIR='/var/lib/chuggernaut/toolchain/android-sdk'"
 grep_log "-e WORKER_FLUTTER_DIR='/var/lib/chuggernaut/toolchain/flutter'"
-echo "ok: swap carries WORKER_FLUTTER_DIR forward beside the unchanged Android SDK"
+grep_log "-e WORKER_JDK_DIR='/var/lib/chuggernaut/toolchain/jdk'"
+echo "ok: swap carries the Flutter and JDK leaves forward beside the unchanged Android SDK"
 
 # ── Case 3h: WORKER_KVM set, no device on the live container ⇒ REFUSE the swap ─
 # The node-down mode, made impossible: rather than launch a replacement that

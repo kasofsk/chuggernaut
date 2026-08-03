@@ -64,6 +64,12 @@ pub struct WorkerConfig {
     /// rule as [`Self::android_sdk_dir`], and no default: a node that does not
     /// provision Flutter must not name a path that is not there.
     pub flutter_dir: Option<PathBuf>,
+    /// The node's JDK path (`WORKER_JDK_DIR`), mounted read-only for an
+    /// allow-listed launch as a third, independent toolchain leaf; `None`
+    /// (unset) ⇒ no mount and no `JAVA_HOME`. Held to the same stable-path rule
+    /// as [`Self::android_sdk_dir`], and no default: a node that does not
+    /// provision a JDK must not name a path that is not there.
+    pub jdk_dir: Option<PathBuf>,
     /// Worker-writable directory the node's per-task nix GC roots are written to
     /// (`WORKER_NIX_GCROOTS_DIR`); `None` (unset) ⇒ no realise and no roots at
     /// all. A runtime precondition provisioned with the node, so the daemon
@@ -183,6 +189,7 @@ impl WorkerConfig {
             kvm_projects: parse_kvm_projects(std::env::var("WORKER_KVM_PROJECTS").ok())?,
             android_sdk_dir: parse_android_sdk_dir(std::env::var("WORKER_ANDROID_SDK_DIR").ok())?,
             flutter_dir: parse_flutter_dir(std::env::var("WORKER_FLUTTER_DIR").ok())?,
+            jdk_dir: parse_jdk_dir(std::env::var("WORKER_JDK_DIR").ok())?,
             nix_gcroots_dir: parse_nix_gcroots_dir(std::env::var("WORKER_NIX_GCROOTS_DIR").ok())?,
             nix_client: parse_nix_path(
                 "WORKER_NIX_CLIENT",
@@ -310,6 +317,17 @@ fn parse_flutter_dir(raw: Option<String>) -> Result<Option<PathBuf>, ConfigError
         return Ok(None);
     };
     parse_stable_path("WORKER_FLUTTER_DIR", &raw).map(Some)
+}
+
+/// Parse `WORKER_JDK_DIR` into the node's JDK path; absent or empty ⇒ `None`,
+/// which mounts nothing and injects no `JAVA_HOME`. Optional for the same reason
+/// Flutter is: a node that provisions only the Android SDK stays exactly as it
+/// is.
+fn parse_jdk_dir(raw: Option<String>) -> Result<Option<PathBuf>, ConfigError> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    parse_stable_path("WORKER_JDK_DIR", &raw).map(Some)
 }
 
 /// One absolute host path out of operator-typed config, refusing a nix store
@@ -679,6 +697,34 @@ mod tests {
         );
         assert!(
             parse_flutter_dir(Some("toolchain/flutter".into())).is_err(),
+            "a bind source must be an absolute host path"
+        );
+    }
+
+    /// `WORKER_JDK_DIR`: unset is OFF — no mount, no `JAVA_HOME`, today's
+    /// behavior on every node — and the same no-store-hash rule holds, which
+    /// matters most here: the node's JDK lives at a content-addressed
+    /// `openjdk-17.0.20+2` store path an operator would otherwise be tempted to
+    /// paste in.
+    #[test]
+    fn jdk_dir_is_optional_and_rejects_a_store_hash() {
+        assert_eq!(parse_jdk_dir(None).unwrap(), None);
+        assert_eq!(parse_jdk_dir(Some(String::new())).unwrap(), None);
+        assert_eq!(parse_jdk_dir(Some(" \t".into())).unwrap(), None);
+        assert_eq!(
+            parse_jdk_dir(Some(" /var/lib/chuggernaut/toolchain/jdk ".into())).unwrap(),
+            Some(PathBuf::from("/var/lib/chuggernaut/toolchain/jdk"))
+        );
+
+        let store = "/nix/store/hgz4vjw1x8k6qy0mprsz9d3fabn7lc5m-openjdk-17.0.20+2";
+        let err = parse_jdk_dir(Some(store.into())).unwrap_err().to_string();
+        assert!(err.contains("store path"), "{err}");
+        assert!(
+            err.contains("WORKER_JDK_DIR"),
+            "the refusal names the setting: {err}"
+        );
+        assert!(
+            parse_jdk_dir(Some("toolchain/jdk".into())).is_err(),
             "a bind source must be an absolute host path"
         );
     }
