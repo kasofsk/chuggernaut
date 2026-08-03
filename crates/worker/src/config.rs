@@ -58,6 +58,12 @@ pub struct WorkerConfig {
     /// **stable** path, which is why the parse rejects a nix store hash (design
     /// #367 §3.5).
     pub android_sdk_dir: PathBuf,
+    /// The node's Flutter SDK path (`WORKER_FLUTTER_DIR`), mounted read-only for
+    /// an allow-listed launch as a second, independent toolchain leaf; `None`
+    /// (unset) ⇒ no mount and no `FLUTTER_ROOT`. Held to the same stable-path
+    /// rule as [`Self::android_sdk_dir`], and no default: a node that does not
+    /// provision Flutter must not name a path that is not there.
+    pub flutter_dir: Option<PathBuf>,
     /// Worker-writable directory the node's per-task nix GC roots are written to
     /// (`WORKER_NIX_GCROOTS_DIR`); `None` (unset) ⇒ no realise and no roots at
     /// all. A runtime precondition provisioned with the node, so the daemon
@@ -176,6 +182,7 @@ impl WorkerConfig {
             kvm_device: parse_kvm_device(std::env::var("WORKER_KVM").ok())?,
             kvm_projects: parse_kvm_projects(std::env::var("WORKER_KVM_PROJECTS").ok())?,
             android_sdk_dir: parse_android_sdk_dir(std::env::var("WORKER_ANDROID_SDK_DIR").ok())?,
+            flutter_dir: parse_flutter_dir(std::env::var("WORKER_FLUTTER_DIR").ok())?,
             nix_gcroots_dir: parse_nix_gcroots_dir(std::env::var("WORKER_NIX_GCROOTS_DIR").ok())?,
             nix_client: parse_nix_path(
                 "WORKER_NIX_CLIENT",
@@ -292,6 +299,17 @@ fn parse_android_sdk_dir(raw: Option<String>) -> Result<PathBuf, ConfigError> {
         return Ok(PathBuf::from(ANDROID_SDK_DIR_DEFAULT));
     };
     parse_stable_path("WORKER_ANDROID_SDK_DIR", &raw)
+}
+
+/// Parse `WORKER_FLUTTER_DIR` into the node's Flutter SDK path; absent or empty
+/// ⇒ `None`, which mounts nothing and injects no `FLUTTER_ROOT`. Optional rather
+/// than defaulted because Flutter is a second, independent leaf: a node that
+/// provisions only the Android SDK stays exactly as it is.
+fn parse_flutter_dir(raw: Option<String>) -> Result<Option<PathBuf>, ConfigError> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    parse_stable_path("WORKER_FLUTTER_DIR", &raw).map(Some)
 }
 
 /// One absolute host path out of operator-typed config, refusing a nix store
@@ -632,6 +650,35 @@ mod tests {
         );
         assert!(
             parse_android_sdk_dir(Some("relative/android-sdk".into())).is_err(),
+            "a bind source must be an absolute host path"
+        );
+    }
+
+    /// `WORKER_FLUTTER_DIR`: unset is OFF — no mount, no `FLUTTER_ROOT`, today's
+    /// behavior on every node that has only the Android SDK — and the same
+    /// no-store-hash rule holds, because a Flutter store path goes stale at the
+    /// next `nixos-rebuild` exactly as an SDK one does.
+    #[test]
+    fn flutter_dir_is_optional_and_rejects_a_store_hash() {
+        assert_eq!(parse_flutter_dir(None).unwrap(), None);
+        assert_eq!(parse_flutter_dir(Some(String::new())).unwrap(), None);
+        assert_eq!(parse_flutter_dir(Some(" \t".into())).unwrap(), None);
+        assert_eq!(
+            parse_flutter_dir(Some(" /var/lib/chuggernaut/toolchain/flutter ".into())).unwrap(),
+            Some(PathBuf::from("/var/lib/chuggernaut/toolchain/flutter"))
+        );
+
+        let store = "/nix/store/cshk8jsnfmrh0f8asaash8qwm8lygikc-flutter-wrapped-3.41.2-sdk-links";
+        let err = parse_flutter_dir(Some(store.into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("store path"), "{err}");
+        assert!(
+            err.contains("WORKER_FLUTTER_DIR"),
+            "the refusal names the setting: {err}"
+        );
+        assert!(
+            parse_flutter_dir(Some("toolchain/flutter".into())).is_err(),
             "a bind source must be an absolute host path"
         );
     }

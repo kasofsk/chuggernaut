@@ -69,6 +69,12 @@ pub const STORE_MOUNT_PATH: &str = "/nix/store";
 /// create, so a launch always gets the node's current SDK.
 pub const ANDROID_SDK_MOUNT_PATH: &str = "/opt/android-sdk";
 
+/// Container-side path of the node's Flutter SDK, a second independent leaf
+/// bound exactly as [`ANDROID_SDK_MOUNT_PATH`] is and just as optional. The two
+/// tools are complementary — Flutter ships Dart and the engine artifacts, the
+/// Android SDK ships `adb` and the emulator.
+pub const FLUTTER_MOUNT_PATH: &str = "/opt/flutter";
+
 /// Writable `HOME` for a KVM launch. The emulator writes
 /// `$HOME/.android/emu-update-last-check.ini` even with `ANDROID_USER_HOME`
 /// set, so `HOME` must land in the container's own writable layer, never in a
@@ -87,6 +93,10 @@ pub struct KvmGrant {
     /// Host path of the node's Android SDK — the operator's activation-
     /// maintained stable path, never a store path.
     pub android_sdk_dir: PathBuf,
+    /// Host path of the node's Flutter SDK, held to the same stable-path rule;
+    /// `None` (the node does not provision one) adds no mount and no
+    /// `FLUTTER_ROOT`, leaving an Android-only node exactly as it was.
+    pub flutter_dir: Option<PathBuf>,
     /// `owner/project` allow-list; empty grants nobody (design #367 §2.3).
     pub projects: Vec<String>,
 }
@@ -663,7 +673,7 @@ impl ContainerBackend for DockerBackend {
 /// The dispatcher's backend passes neither and so stays bind-mount-free at
 /// `devices: None, binds: None, mounts: None` (spec §3.1); a worker's
 /// `cache_dir` adds one writable mount at [`CACHE_MOUNT_PATH`], and its `kvm`
-/// adds the device and both read-only mounts or none of the three, per
+/// adds the device and the read-only toolchain mounts or none of them, per
 /// [`KvmGrant::admits`] — nothing here sets `binds`.
 fn build_host_config(
     config: &ContainerLaunchConfig,
@@ -681,8 +691,12 @@ fn build_host_config(
             STORE_MOUNT_PATH,
         ));
         mounts.push(read_only_bind(&g.android_sdk_dir, ANDROID_SDK_MOUNT_PATH));
+        if let Some(flutter_dir) = &g.flutter_dir {
+            mounts.push(read_only_bind(flutter_dir, FLUTTER_MOUNT_PATH));
+        }
     }
     let toolchain_mounts = mounts.iter().filter(|m| m.read_only == Some(true)).count();
+    let toolchain_mounts_expected = granted.map_or(0, |g| 2 + usize::from(g.flutter_dir.is_some()));
     let host_config = HostConfig {
         nano_cpus: config.cpu_limit.map(|c| (c * 1e9) as i64),
         memory: config
@@ -702,9 +716,15 @@ fn build_host_config(
         ..Default::default()
     };
     debug_assert_eq!(
+        toolchain_mounts, toolchain_mounts_expected,
+        "an admitted launch carries the store and the SDK, plus Flutter exactly when the node \
+         provisions one"
+    );
+    debug_assert_eq!(
         host_config.devices.is_some(),
-        toolchain_mounts == 2,
-        "a launch carries the KVM device and both read-only mounts together or carries neither"
+        toolchain_mounts >= 2,
+        "a launch carries the KVM device and the read-only toolchain mounts together or carries \
+         neither"
     );
     Ok(host_config)
 }
@@ -983,7 +1003,15 @@ mod tests {
         KvmGrant {
             device: PathBuf::from(KVM_DEVICE_PATH),
             android_sdk_dir: PathBuf::from("/var/lib/chuggernaut/android-sdk"),
+            flutter_dir: None,
             projects: vec!["acme/beacon".to_string()],
+        }
+    }
+
+    fn kvm_grant_with_flutter() -> KvmGrant {
+        KvmGrant {
+            flutter_dir: Some(PathBuf::from("/var/lib/chuggernaut/toolchain/flutter")),
+            ..kvm_grant()
         }
     }
 
@@ -1071,20 +1099,105 @@ mod tests {
         assert_eq!(by_target(ANDROID_SDK_MOUNT_PATH).read_only, Some(true));
     }
 
+    /// A node that also provisions Flutter mounts it as a THIRD read-only leaf
+    /// at its own container path, from its own stable host path — independent of
+    /// the Android SDK, which is unmoved and still at
+    /// [`ANDROID_SDK_MOUNT_PATH`], so a node that never sets it needs no
+    /// migration.
+    #[test]
+    fn host_config_with_flutter_adds_a_third_read_only_mount() {
+        let hc = build_host_config(
+            &launch_config_for("acme/beacon"),
+            None,
+            Some(&kvm_grant_with_flutter()),
+        )
+        .unwrap();
+
+        assert_eq!(hc.devices.as_ref().map(Vec::len), Some(1));
+        let mounts = hc
+            .mounts
+            .expect("an allow-listed launch carries the mounts");
+        assert_eq!(mounts.len(), 3);
+        for mount in &mounts {
+            assert_eq!(mount.typ, Some(MountTypeEnum::BIND));
+            assert_eq!(
+                mount.read_only,
+                Some(true),
+                "a toolchain mount is read-only, always: {mount:?}"
+            );
+        }
+        let by_target = |target: &str| {
+            mounts
+                .iter()
+                .find(|m| m.target.as_deref() == Some(target))
+                .unwrap_or_else(|| panic!("no mount at {target}"))
+        };
+        assert_eq!(
+            by_target(ANDROID_SDK_MOUNT_PATH).source.as_deref(),
+            Some("/var/lib/chuggernaut/android-sdk")
+        );
+        assert_eq!(
+            by_target(FLUTTER_MOUNT_PATH).source.as_deref(),
+            Some("/var/lib/chuggernaut/toolchain/flutter"),
+            "the leaf itself is the bind source — the engine resolves the symlink host-side"
+        );
+        assert_eq!(
+            by_target(STORE_MOUNT_PATH).target.as_deref(),
+            Some("/nix/store")
+        );
+        assert!(
+            !format!("{mounts:?}").contains("/nix/store/"),
+            "no store path may reach the mount spec: {mounts:?}"
+        );
+        assert!(hc.binds.is_none(), "a third leaf adds no legacy binds");
+    }
+
+    /// Flutter UNSET leaves an Android node byte-identical to what it was: the
+    /// device, the same two mounts at the same paths, and nothing at
+    /// [`FLUTTER_MOUNT_PATH`] — the property that lets `gumbo-nuc-0` take this
+    /// change with no migration.
+    #[test]
+    fn host_config_without_flutter_is_unchanged() {
+        let dir = PathBuf::from("/var/cache/chuggernaut/sccache");
+        for cache in [None, Some(dir.as_path())] {
+            let hc =
+                build_host_config(&launch_config_for("acme/beacon"), cache, Some(&kvm_grant()))
+                    .unwrap();
+            assert_eq!(hc.devices.as_ref().map(Vec::len), Some(1));
+            let mounts = hc
+                .mounts
+                .expect("an allow-listed launch carries the mounts");
+            let read_only: Vec<_> = mounts
+                .iter()
+                .filter(|m| m.read_only == Some(true))
+                .filter_map(|m| m.target.as_deref())
+                .collect();
+            assert_eq!(read_only, vec![STORE_MOUNT_PATH, ANDROID_SDK_MOUNT_PATH]);
+            assert!(
+                !mounts
+                    .iter()
+                    .any(|m| m.target.as_deref() == Some(FLUTTER_MOUNT_PATH)),
+                "an unprovisioned node mounts no Flutter: {mounts:?}"
+            );
+        }
+    }
+
     /// The negative space, and the all-or-nothing pairing: a launch for a
     /// project the node did not allow-list — or one with no project at all —
     /// carries NEITHER the device nor the mounts, on the same node that grants
     /// both to the allow-listed project. An empty allow-list grants nobody.
     #[test]
     fn host_config_without_allow_list_entry_carries_neither() {
-        for config in [
-            launch_config_for("acme/other"),
-            launch_config(),
-            launch_config_for(""),
-        ] {
-            let hc = build_host_config(&config, None, Some(&kvm_grant())).unwrap();
-            assert!(hc.devices.is_none(), "unlisted launch got the device");
-            assert!(hc.mounts.is_none(), "unlisted launch got the mounts");
+        for grant in [kvm_grant(), kvm_grant_with_flutter()] {
+            for config in [
+                launch_config_for("acme/other"),
+                launch_config(),
+                launch_config_for(""),
+            ] {
+                let hc = build_host_config(&config, None, Some(&grant)).unwrap();
+                assert!(hc.devices.is_none(), "unlisted launch got the device");
+                assert!(hc.mounts.is_none(), "unlisted launch got the mounts");
+            }
         }
 
         let nobody = KvmGrant {

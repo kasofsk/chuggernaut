@@ -683,7 +683,9 @@ Notes:
   [the runbook §6](../../docs/runbooks/worker-capacity.md).
 - **KVM for Android emulator work is a per-node opt-in** —
   [`docs/runbooks/worker-kvm.md`](../../docs/runbooks/worker-kvm.md) is the
-  procedure. `WORKER_KVM`, `WORKER_KVM_PROJECTS` and `WORKER_ANDROID_SDK_DIR` go
+  procedure. `WORKER_KVM`, `WORKER_KVM_PROJECTS`, `WORKER_ANDROID_SDK_DIR` and
+  the optional `WORKER_FLUTTER_DIR` (a second toolchain leaf at `/opt/flutter`;
+  unset ⇒ no mount and no `FLUTTER_ROOT`) go
   on the daemon at (re)creation like `WORKER_SLOTS`, and `build-worker.sh` adds
   `--device` to the daemon's own `docker run` alongside them. That device is
   load-bearing: `chug-worker` is itself a container, so a daemon given the env

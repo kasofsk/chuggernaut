@@ -18,7 +18,7 @@ device passthrough beats a host runtime) and not the normative text
 | Piece | Owned by | Where it lives |
 | --- | --- | --- |
 | the SDK, and a **stable path** to it | the node's NixOS config | `configuration.nix` — an `environment.etc` (or equivalent) entry pointing a fixed path such as `/etc/chug/android-sdk` at the current `androidsdk` output; §7 narrows this to a *direct* symlink once per-task GC roots are on |
-| `WORKER_KVM`, `WORKER_KVM_PROJECTS`, `WORKER_ANDROID_SDK_DIR`, **and `--device`** | `deploy/prod/build-worker.sh`, carried across every self-refresh by `deploy/prod/worker-refresh.sh` | the `chug-worker` container's `docker run` |
+| `WORKER_KVM`, `WORKER_KVM_PROJECTS`, `WORKER_ANDROID_SDK_DIR`, the optional `WORKER_FLUTTER_DIR`, **and `--device`** | `deploy/prod/build-worker.sh`, carried across every self-refresh by `deploy/prod/worker-refresh.sh` | the `chug-worker` container's `docker run` |
 | **who** may use it | `WORKER_KVM_PROJECTS` — `owner/project` entries, comma-separated | the same `docker run` |
 
 The stable path is not a nicety. `/nix/store/3zr1pgw…-androidsdk/…` is
@@ -27,6 +27,16 @@ content-hashed, so an SDK bump changes it: a pinned store path keeps testing the
 `ENOENT` nobody typed recently. The daemon refuses a store hash outright
 (design #367 §3.5) — name the activation-maintained path instead, and
 `nixos-rebuild switch` moves the SDK and the path in one atomic step.
+
+**Flutter is a second leaf, not a replacement.** A node whose jobs build a
+Flutter app also sets `WORKER_FLUTTER_DIR` — its own stable path, mounted
+read-only at `/opt/flutter`, with `FLUTTER_ROOT` pointed there. The two are
+complementary: Flutter ships Dart, the gradle wrapper and the engine artifacts,
+while `adb`, `emulator` and `platform-tools` come only from the Android SDK, so
+an emulator proof needs both. Unset ⇒ no mount, no `FLUTTER_ROOT`, and the
+launch is what it was; `WORKER_ANDROID_SDK_DIR` keeps its meaning either way, so
+turning Flutter on is not a migration. It is **not** realised or GC-rooted (§7)
+— only the Android SDK is.
 
 **The allow-list is fail-closed.** Unset or empty grants *nobody*, so enabling
 KVM on a node and granting it to a project are two separate acts. A node with
@@ -87,13 +97,15 @@ WORKER_SSH=worksalot@gumbo-nuc-0 CHUG_WORKER_NODE=nuc \
   WORKER_KVM=1 \
   WORKER_KVM_PROJECTS=acme/beacon \
   WORKER_ANDROID_SDK_DIR=/etc/chug/android-sdk \
+  WORKER_FLUTTER_DIR=/var/lib/chuggernaut/toolchain/flutter \
   deploy/prod/build-worker.sh
 ```
 
 Pass **every** var the node should keep, not just the new ones: this recreates
-the daemon container, so a var you omit is a var the node loses.
+the daemon container, so a var you omit is a var the node loses. Drop the
+`WORKER_FLUTTER_DIR` line on a node that provisions no Flutter.
 
-The same three names are documented in `deploy/prod/env.example`, and a
+The same names are documented in `deploy/prod/env.example`, and a
 deployment whose `WORKER_SSH` *is* set (i.e. one where `update.sh` runs
 `build-worker.sh` for you) can put them in `chuggernaut.env` instead. On prod,
 where deploys reach the node over the no-ssh self-refresh path, the values in
@@ -146,6 +158,7 @@ the mounts, while the node keeps working.
 | the daemon logs `WORKER_KVM is on but WORKER_KVM_PROJECTS is empty` | the capability is on and granted to nobody — fail-closed, working as intended | add the `owner/project` entry and recreate the daemon |
 | a job runs but the emulator reports no KVM | that project is not on the allow-list, so it gets neither the device nor the mounts | check `WORKER_KVM_PROJECTS` against the job's `JOB_PROJECT` (`owner/project`, exactly) |
 | the SDK is missing inside the container | the stable path does not resolve on the node | `readlink -f` it; the mount refuses a missing source rather than creating an empty directory, so the launch fails loudly |
+| `FLUTTER_ROOT` is unset in an allow-listed job, or `/opt/flutter` is empty | the node never set `WORKER_FLUTTER_DIR` — it is optional and off by default | set it (§3) and recreate the daemon; the Android SDK is unaffected either way |
 
 ---
 
@@ -218,6 +231,16 @@ A few things are worth knowing before you do:
   neither shape ever reaches a per-launch failure. Binding the parent also means
   the symlink is *shared*, not copied: a `nixos-rebuild` moves the toolchain
   under a running daemon rather than pinning the generation current at the swap.
+
+- **This is the opposite of what the JOB container's mounts do, and both are
+  right.** `/opt/android-sdk` and `/opt/flutter` bind the **leaf itself** — the
+  stable path, not its parent — precisely so `mount(2)` resolves it host-side and
+  the job container gets the toolchain's content at a fixed, hash-free path.
+  Nothing runs `nix-store` against those mounts; the job just reads files, and an
+  SDK at a non-store path works fully (design #367 measurement 2, down to
+  `emulator -accel-check`). The parent-bind rule above is specific to the
+  **realise target**, whose client *must* still see a store path. Do not
+  "fix" either into the other.
 
 Verify on the node while a task runs: `ls -l $WORKER_NIX_GCROOTS_DIR` shows one
 `task-<id>` symlink per running task, `nix-store --query --roots <store-path>`

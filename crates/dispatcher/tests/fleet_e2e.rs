@@ -84,6 +84,7 @@ async fn worker_fleet(
         kvm_device: None,
         kvm_projects: vec![],
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
+        flutter_dir: None,
         nix_gcroots_dir: None,
         nix_client: NIX_CLIENT_DEFAULT.into(),
         nix_daemon_socket: NIX_DAEMON_SOCKET_DEFAULT.into(),

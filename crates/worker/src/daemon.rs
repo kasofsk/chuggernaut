@@ -518,6 +518,7 @@ async fn build_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend
         tracing::info!(
             device = %grant.device.display(),
             android_sdk_dir = %grant.android_sdk_dir.display(),
+            flutter_dir = ?grant.flutter_dir,
             projects = ?grant.projects,
             "KVM passthrough enabled for the allow-listed projects"
         );
@@ -528,12 +529,13 @@ async fn build_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend
 }
 
 /// The node's KVM grant (design #367 A1), or `None` when `WORKER_KVM` is unset.
-/// The one place the three settings become one grant, so the device and the
-/// read-only mounts can only ever be enabled together.
+/// The one place the node's KVM settings become one grant, so the device and
+/// the read-only mounts can only ever be enabled together.
 fn kvm_grant(config: &WorkerConfig) -> Option<KvmGrant> {
     config.kvm_device.as_ref().map(|device| KvmGrant {
         device: device.clone(),
         android_sdk_dir: config.android_sdk_dir.clone(),
+        flutter_dir: config.flutter_dir.clone(),
         projects: config.kvm_projects.clone(),
     })
 }
@@ -809,7 +811,7 @@ async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
             }
             let mut env = req.env;
             inject_cache_env(&mut env, state.cache_enabled);
-            inject_android_env(&mut env, state.kvm.as_ref());
+            inject_toolchain_env(&mut env, state.kvm.as_ref());
             let rooted = realise_for_launch(state, &env).await?;
             let launched = state
                 .backend
@@ -852,21 +854,33 @@ fn inject_cache_env(env: &mut HashMap<String, String>, cache_enabled: bool) {
     }
 }
 
-/// Point an allow-listed launch at the SDK the backend mounts for it (design
-/// #367 A1) — the launch message never mentions Android, exactly as it never
-/// mentions the cache. `HOME` is set alongside because the emulator writes
+/// Point an allow-listed launch at the toolchains the backend mounts for it
+/// (design #367 A1) — the launch message never mentions them, exactly as it
+/// never mentions the cache. `HOME` is set alongside because the emulator writes
 /// `$HOME/.android` even with `ANDROID_USER_HOME` set, and the read-only mounts
 /// must never be that target.
-fn inject_android_env(env: &mut HashMap<String, String>, kvm: Option<&KvmGrant>) {
-    if !kvm.is_some_and(|grant| grant.admits(env)) {
+fn inject_toolchain_env(env: &mut HashMap<String, String>, kvm: Option<&KvmGrant>) {
+    let Some(grant) = kvm.filter(|grant| grant.admits(env)) else {
         return;
-    }
+    };
     let sdk = container::docker::ANDROID_SDK_MOUNT_PATH;
     let home = container::docker::KVM_HOME_PATH;
     env.insert("ANDROID_SDK_ROOT".into(), sdk.into());
     env.insert("ANDROID_HOME".into(), sdk.into());
     env.insert("ANDROID_USER_HOME".into(), format!("{home}/.android"));
     env.insert("HOME".into(), home.into());
+    if grant.flutter_dir.is_some() {
+        env.insert(
+            "FLUTTER_ROOT".into(),
+            container::docker::FLUTTER_MOUNT_PATH.into(),
+        );
+    }
+    debug_assert!(
+        grant.flutter_dir.is_none()
+            || env.get("FLUTTER_ROOT").map(String::as_str)
+                == Some(container::docker::FLUTTER_MOUNT_PATH),
+        "FLUTTER_ROOT names the mount the backend adds, never a host path"
+    );
 }
 
 /// Realise the toolchain this launch is about to be given, and hold a GC root
@@ -1684,6 +1698,7 @@ mod tests {
         KvmGrant {
             device: PathBuf::from(container::docker::KVM_DEVICE_PATH),
             android_sdk_dir: PathBuf::from("/var/lib/chuggernaut/android-sdk"),
+            flutter_dir: None,
             projects: projects.iter().map(|p| (*p).to_string()).collect(),
         }
     }
@@ -1695,7 +1710,7 @@ mod tests {
     #[test]
     fn android_env_injected_for_an_allow_listed_project() {
         let mut env = HashMap::from([("JOB_PROJECT".to_string(), "acme/beacon".to_string())]);
-        inject_android_env(&mut env, Some(&kvm_grant_for(&["acme/beacon"])));
+        inject_toolchain_env(&mut env, Some(&kvm_grant_for(&["acme/beacon"])));
         let sdk = container::docker::ANDROID_SDK_MOUNT_PATH;
         assert_eq!(env.get("ANDROID_SDK_ROOT").map(String::as_str), Some(sdk));
         assert_eq!(env.get("ANDROID_HOME").map(String::as_str), Some(sdk));
@@ -1711,13 +1726,55 @@ mod tests {
             !env.values().any(|v| v.starts_with("/nix/store/")),
             "no store path may reach the launch env: {env:?}"
         );
+        assert!(
+            !env.contains_key("FLUTTER_ROOT"),
+            "a node that provisions no Flutter names none: {env:?}"
+        );
+    }
+
+    /// A Flutter-provisioned node points the same admitted launch at its own
+    /// mount too, leaving the Android variables on the Android mount — each
+    /// toolchain resolves to its own leaf, and neither carries a store path.
+    #[test]
+    fn flutter_env_injected_only_when_the_node_provisions_it() {
+        let grant = KvmGrant {
+            flutter_dir: Some(PathBuf::from("/var/lib/chuggernaut/toolchain/flutter")),
+            ..kvm_grant_for(&["acme/beacon"])
+        };
+        let mut env = HashMap::from([("JOB_PROJECT".to_string(), "acme/beacon".to_string())]);
+        inject_toolchain_env(&mut env, Some(&grant));
+        assert_eq!(
+            env.get("FLUTTER_ROOT").map(String::as_str),
+            Some(container::docker::FLUTTER_MOUNT_PATH)
+        );
+        assert_eq!(
+            env.get("ANDROID_SDK_ROOT").map(String::as_str),
+            Some(container::docker::ANDROID_SDK_MOUNT_PATH)
+        );
+        assert_eq!(
+            env.get("ANDROID_HOME").map(String::as_str),
+            Some(container::docker::ANDROID_SDK_MOUNT_PATH)
+        );
+        assert_ne!(
+            env.get("FLUTTER_ROOT"),
+            env.get("ANDROID_SDK_ROOT"),
+            "the two toolchains are separate leaves: {env:?}"
+        );
+        assert!(
+            !env.values().any(|v| v.starts_with("/nix/store/")),
+            "no store path may reach the launch env: {env:?}"
+        );
+
+        let mut unlisted = HashMap::from([("JOB_PROJECT".to_string(), "acme/api".to_string())]);
+        inject_toolchain_env(&mut unlisted, Some(&grant));
+        assert_eq!(unlisted.len(), 1, "unlisted launch got env: {unlisted:?}");
     }
 
     /// The negative space: the same node injects nothing for a project it did
     /// not allow-list, for a launch with no project, or when KVM is off — the
     /// same allow-list decision the backend applies to the device and mounts.
     #[test]
-    fn no_android_env_without_the_grant() {
+    fn no_toolchain_env_without_the_grant() {
         let grant = kvm_grant_for(&["acme/beacon"]);
         for (env, kvm) in [
             (
@@ -1732,12 +1789,12 @@ mod tests {
         ] {
             let mut env: HashMap<String, String> = env;
             let before = env.len();
-            inject_android_env(&mut env, kvm);
+            inject_toolchain_env(&mut env, kvm);
             assert_eq!(env.len(), before, "unexpected android env: {env:?}");
         }
 
         let mut env = HashMap::from([("JOB_PROJECT".to_string(), "acme/beacon".to_string())]);
-        inject_android_env(&mut env, Some(&kvm_grant_for(&[])));
+        inject_toolchain_env(&mut env, Some(&kvm_grant_for(&[])));
         assert_eq!(env.len(), 1, "an empty allow-list grants nobody: {env:?}");
     }
 

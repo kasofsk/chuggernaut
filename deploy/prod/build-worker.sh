@@ -204,7 +204,7 @@ if [ -n "${WORKER_SLOTS:-}" ]; then
   SLOTS_ENV="-e WORKER_SLOTS=$WORKER_SLOTS"
 fi
 # KVM passthrough for Android emulator work (design #367 §2.3/§3.5, daemon side
-# shipped by #374): the three node settings AND the device node itself. The
+# shipped by #374): the node settings AND the device node itself. The
 # device is not optional decoration — `chug-worker` is itself a container, so the
 # daemon's "does this node have the device" check reads the DAEMON CONTAINER's
 # own view (crates/worker/src/daemon.rs `build_backend`), and a daemon that gets
@@ -225,7 +225,7 @@ fi
 # trimmed value is what rides in `-e`, so the daemon and worker-refresh.sh's swap
 # both see exactly what was decided on here.
 #
-# All three empty when unset ⇒ no passthrough and no device: exactly the run this
+# All of them empty when unset ⇒ no passthrough and no device: exactly the run this
 # script produced before Android existed. Enabling KVM on a node and granting it
 # to a project stay two separate acts — WORKER_KVM_PROJECTS is fail-closed, and
 # an empty one grants nobody. docs/runbooks/worker-kvm.md is the procedure.
@@ -251,6 +251,15 @@ if [ -n "${WORKER_KVM_PROJECTS:-}" ]; then
 fi
 if [ -n "${WORKER_ANDROID_SDK_DIR:-}" ]; then
   KVM_ENV="$KVM_ENV -e WORKER_ANDROID_SDK_DIR='$WORKER_ANDROID_SDK_DIR'"
+fi
+# The node's Flutter SDK (#393): a SECOND, independent toolchain leaf, mounted
+# read-only at /opt/flutter for an allow-listed launch with FLUTTER_ROOT pointed
+# at it. Optional by construction — unset ⇒ no mount, no env, and the run spec is
+# byte-identical to what it was, so an Android-only node needs no migration and
+# WORKER_ANDROID_SDK_DIR's meaning is untouched. It is NOT realised and takes no
+# GC root: #373 P2's declared project toolchains supersede this stopgap.
+if [ -n "${WORKER_FLUTTER_DIR:-}" ]; then
+  KVM_ENV="$KVM_ENV -e WORKER_FLUTTER_DIR='$WORKER_FLUTTER_DIR'"
 fi
 # Per-task nix GC roots (design #373 P1, daemon side in crates/worker/src/nix.rs).
 # WORKER_NIX_GCROOTS_DIR is the switch: unset ⇒ nothing below happens and the run
