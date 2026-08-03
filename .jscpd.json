@@ -11,6 +11,7 @@
     "**/.git/**",
     "**/templates/**",
     "**/tests/**",
+    "fixtures/mobile/**",
     "**/*.test.*",
     "**/*.gen.ts",
     "**/*.md",

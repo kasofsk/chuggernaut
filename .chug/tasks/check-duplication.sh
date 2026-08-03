@@ -26,6 +26,12 @@
 # fails. The duplication that matters is duplication a human wrote; the source
 # of these files (the Rust `types` crate) is itself under this gate.
 #
+# Why `fixtures/mobile/**` is in that same ignorePattern: it is a stock
+# `flutter create` skeleton, and Android resource qualifiers REQUIRE
+# `res/values/styles.xml` and `res/values-night/styles.xml` to be the same
+# shape, so no extraction can satisfy threshold 0. Same class as `*.gen.ts` —
+# code we accept, not code we author. Full argument in fixtures/mobile/README.md.
+#
 # CI (.chug/tasks/ci.sh) and the pre-commit hook (.githooks/pre-commit) both call
 # THIS script, so "clean locally" and "clean in CI" cannot diverge. The hook
 # rejects a clone (exit 1) but treats an unrunnable gate (exit 2) as a loud skip,

@@ -61,6 +61,7 @@ Full stack — NATS, dispatcher, API, real containers — driven from the `fixtu
 
 - `fixtures/sample.json` — minimal 4-job graph; the smoke test
 - `fixtures/studybuddy/` — realistic 26-job, 5-phase Flutter project with full ticket bodies and dependencies; the load-bearing e2e fixture
+- `fixtures/mobile/` — a stock Flutter app skeleton, **not** an e2e job-graph fixture: a build target for the mobile-execution proofs (#367 A2, #322). Nothing seeds it; see `fixtures/mobile/README.md`
 
 The v1 fixture format (`title`/`body`/`deps`/`priority`/`capabilities`) predates v2 job types. A v2 seed step maps each fixture entry to a job instance: ticket body → work prompt file committed to the project repo, `deps` → `inputs`, `capabilities` → job type selection. The seed tool lives in `cli` (`chuggernaut seed <project> <fixture>`), so e2e tests exercise the same path users do.
 
