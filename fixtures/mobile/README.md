@@ -4,6 +4,10 @@ A stock `flutter create` skeleton, committed so the platform has something real
 to build when proving mobile execution. It is **not** a product, not a sample,
 and nothing imports it.
 
+It is also the **only** tree under `fixtures/`. The end-to-end job-graph
+fixtures [testing.md](../../testing.md) once described are not built — this is
+a build target, not a tier-3 fixture, and nothing seeds it.
+
 ```
 flutter create --platforms=android,ios --org xyz.kasofsk --project-name chug_mobile_proof
 ```

@@ -186,6 +186,20 @@ verify it in seconds and must name it when rejecting.
    Its evaluation-phase counterpart (`.chug/tasks/review-docs-updated.md`) is
    wired but deliberately inert until the project decides how docs are managed.
 
+   **A doc that says a gate, tier, fixture or command exists is making a factual
+   claim about the tree — check it, or mark it as intent.** Present-tense prose
+   about machinery is trusted and acted on, so a stale claim is worse than
+   silence: it sends the next author to build against something that is not
+   there, and lets a reviewer accept it as an answer. Write what the tree does,
+   date the measurement, and mark anything unbuilt in the heading rather than
+   describing it as if it ran. *Why:* one week produced five — a `.github/`
+   workflow mirror that did not exist and a `tier-2 ENABLED` announcement over a
+   tier that self-skipped (#375, #378/#382), 17 shell suites nothing executed
+   (#385), a duplication gate analysing no `.nix` files (#383), `check-modules.sh`
+   verifying row presence but never content (#382), and `testing.md`'s tier 3,
+   whose fixtures went out with the v1 tree and whose `chuggernaut seed` command
+   v2 never had (#394).
+
 6. **New behavior lands with a regression test at the lowest tier that can
    express it** (`testing.md`); the correctness core (`dispatcher::state`,
    release validation) stays at near-total branch coverage. *Why:* the lower

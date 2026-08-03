@@ -1,6 +1,13 @@
 # Chuggernaut v2 — Testing Strategy
 
-Normal tests plus fixture-driven end-to-end runs. Three tiers, in increasing cost; CI runs the first two on every PR, the third nightly and on demand.
+Two tiers exist and the merge gate runs both — tier 2 whenever it can reach a
+broker. A third, fixture-driven end-to-end, is **intent, not machinery**, and
+its section says so. Nothing in this repo runs nightly: the gates are the
+job-type evaluators ([CLAUDE.md](CLAUDE.md), "the evaluation gates ARE the CI").
+
+A tier, gate or fixture this document describes as existing is a **factual claim
+about the tree** — see [STYLE.md](STYLE.md) Tier 2 rule 5. Anything not built is
+marked here rather than described in the present tense.
 
 ## What CI actually runs
 
@@ -25,8 +32,14 @@ prints the tier state up front and a per-tier pass tally at the end (`tier-2
 private-server tests self-skipped, since cargo counts a skip as a pass), so a
 green gate is never silently partial.
 
-Tier 3 (real Docker containers) stays out of the gate and self-skips. If NATS is
-unavailable, `ci.sh` prints `tier-2 (NATS): SKIPPED` and, when the diff itself
+The tests that need a **real Docker daemon** —
+`crates/container/tests/docker_backend.rs`,
+`crates/worker/tests/nats_backend.rs`, `crates/dispatcher/tests/fleet_e2e.rs` —
+are tier-2 files that self-skip on a Docker-less host through
+`test_utils::backend_suite::docker_available()`. They are not a third tier; there
+is no third tier to run.
+
+If NATS is unavailable, `ci.sh` prints `tier-2 (NATS): SKIPPED` and, when the diff itself
 adds or edits a tier-2 test file, a loud `!!!` warning — such a change then needs
 a **manual verification note** in the work summary. To run the tier locally
 without Docker, start the `nats-server` binary yourself and point the harness at
@@ -53,24 +66,80 @@ Pure-logic tests, no I/O, colocated with the code:
 
 The fake backend/provider are deterministic and scriptable per test ("container exits 0 after committing file X", "agent calls submit_eval with pass=false"). This tier is where most behavioral coverage lives — it is fast enough for every PR.
 
-## Tier 3: End-to-end (fixtures)
+## Tier 3: End-to-end (fixtures) — PLANNED, NOT BUILT
 
-Full stack — NATS, dispatcher, API, real containers — driven from the `fixtures/` projects. The flow mirrors real usage: start from the issues/features defined in the fixture, seed the graph, run to completion, assert outcomes.
+**No part of this tier exists. Nothing below is machinery you can run, and no
+test can be "covered at tier 3" today.** Measured against the tree on
+2026-08-03:
 
-**Fixtures:**
+- `git ls-files fixtures/` lists 67 files, every one of them under
+  `fixtures/mobile/`.
+- The `chuggernaut` binary has no `seed` subcommand — the eleven it does have
+  are `dispatcher`, `worker`, `api`, `webhooks`, `init`, `admin`, `ssh-cert`,
+  `ssh-shell`, `ssh-authz`, `schema` and `validate`
+  (`crates/chuggernaut/src/main.rs`).
+- No file under `crates/` references `fixtures/` at all, so no test reads one.
 
-- `fixtures/sample.json` — minimal 4-job graph; the smoke test
-- `fixtures/studybuddy/` — realistic 26-job, 5-phase Flutter project with full ticket bodies and dependencies; the load-bearing e2e fixture
-- `fixtures/mobile/` — a stock Flutter app skeleton, **not** an e2e job-graph fixture: a build target for the mobile-execution proofs (#367 A2, #322). Nothing seeds it; see `fixtures/mobile/README.md`
+Earlier revisions of this page described a `sample.json` smoke graph and a
+load-bearing `studybuddy/` project under `fixtures/`, in the present tense. Those
+were **v1** fixtures; the v1 tree was deleted when v2 was promoted to the repo
+root (`c5bec73`, 2026-07-20) and nothing in v2 ever consumed them. The seed
+command was v1's too (`Seed { .. }`, "seed jobs from a fixture file", in the v1
+CLI); the v2 binary has never had one. What was left here was a v1 tier
+described in the present tense plus a plan for porting it, with nothing to
+separate the two.
 
-The v1 fixture format (`title`/`body`/`deps`/`priority`/`capabilities`) predates v2 job types. A v2 seed step maps each fixture entry to a job instance: ticket body → work prompt file committed to the project repo, `deps` → `inputs`, `capabilities` → job type selection. The seed tool lives in `cli` (`chuggernaut seed <project> <fixture>`), so e2e tests exercise the same path users do.
+### The intent, kept as intent
 
-**Two agent modes:**
+The tier worth building is a full-stack run — NATS, dispatcher, API, real
+containers — driven from fixture projects: start from the tickets a fixture
+defines, seed the graph, run to completion, assert outcomes. Two properties are
+the reason it is worth building at all, and any future design should keep them:
 
-1. **Scripted agent** (default, hermetic, runs nightly): the work "agent" is a deterministic image that reads its prompt and makes predictable commits (e.g. writes a file named after the job). Asserts the *platform*: dependency ordering, branch/merge behavior (including forced merge-conflict scenarios via overlapping file edits), eval fan-out with command evaluators, escalation and task-inbox flows via the API, factory runs end-to-end (POST synthetic Sentry-style events to `/ingest/{source}`, assert triage job → created jobs → provenance and release policy).
-2. **Real agent smoke** (manual/tagged, costs tokens): `sample.json` with real Claude against a scratch project — asserts provider integration, MCP tool wiring, and prompt delivery, not outcomes. Gated behind an env var with a hard token budget.
+- **Seed through the user's path.** Whatever creates the graph should be a
+  command a user also runs, not a test-only back door, so the tier exercises
+  the real entry point. (No such command exists; naming one here is what made
+  the old text read as reportage.)
+- **Assert against public surfaces only** — the HTTP API and git history (final
+  graph state, one squash-merge per non-noop job with the §3.2 commit format,
+  event-stream contents), never KV internals, so the tests survive internal
+  refactors.
 
-**Assertions** run against the public surfaces only — the HTTP API and git history (final graph state, one squash-merge per non-noop job with the §3.2 commit format, event stream contents) — never against KV internals, so e2e tests survive internal refactors.
+**Two agent modes** — the part of the old design most worth preserving, because
+it is what keeps such a tier affordable:
+
+1. **Scripted agent** (hermetic, the default): the work "agent" is a
+   deterministic image that reads its prompt and makes predictable commits
+   (e.g. writes a file named after the job). It asserts the *platform*, not a
+   model: dependency ordering, branch/merge behavior including forced conflicts
+   via overlapping edits, eval fan-out with command evaluators, escalation and
+   task-inbox flows through the API, factories end to end (POST synthetic
+   events to `/ingest/{source}`, assert triage job → created jobs → provenance
+   and release policy).
+2. **Real-agent smoke** (opt-in, costs tokens): a minimal graph against a real
+   provider and a scratch project, asserting provider integration, MCP tool
+   wiring and prompt delivery — never outcomes. Would need an explicit opt-in
+   and a hard token budget.
+
+Neither mode has a schedule to inherit — nothing here runs nightly, and this repo
+has no `.chug/schedules/` at all. A built tier 3 would be released like the
+on-demand [`coverage` job type](#coverage-on-demand-never-a-gate), or scheduled
+under [spec §1.1](spec.md) ([#310](docs/design/310-scheduled-jobs.md)) if someone
+writes the schedule.
+
+**Building it is a separate job, and a design question first** — what seeds a
+graph, what a fixture format is in v2, and what it costs per run are not settled
+here. Do not treat this section as a work item already scoped.
+
+### What `fixtures/` actually holds
+
+One tree, and it is not an e2e fixture:
+
+- [`fixtures/mobile/`](fixtures/mobile/README.md) — a stock Flutter app
+  skeleton, a *build target* for the mobile-execution proofs
+  ([#367](docs/design/367-android-emulator-execution.md) A2,
+  [#322](docs/design/322-macos-native-runtime.md)). Nothing seeds it, no test
+  reads it, and it carries no job graph; its README says what it is for.
 
 ## Duplication: integration tests are out of scope
 
@@ -150,7 +219,7 @@ these suites cover.
 
 ## Conventions
 
-- `test-utils` owns: the NATS harness (`CHUG_TEST_NATS_URL`, else a testcontainers-run `nats` container), temp-repo builder, fake backend/provider, fixture seeding, and `require_nats!`/`e2e!` guard macros that skip when NATS/Docker are unavailable
+- `test-utils` owns: the NATS harness (`CHUG_TEST_NATS_URL`, else a testcontainers-run `nats` container), temp-repo builder, fake backend/provider, record-fixture builders (`fixture::job` — one blank `types::Job` a test edits into its case, not a project fixture), and the skip guards: the `require_nats!`/`require_nats_config!` macros for NATS and `backend_suite::docker_available()` for Docker. There is no `e2e!` macro
 - Every bug fix lands with a regression test at the lowest tier that can express it
 - Coverage is tracked per crate (v1 discipline carries over); `dispatcher::state` and `release` validation are held to ~100% branch coverage — they are the correctness core
 
@@ -169,9 +238,11 @@ thing you ask for, not a thing that runs on every push
 ([#308](docs/design/308-gha-port.md) §G).
 
 Two limits to read the number with. The run starts the image's `nats-server` and
-exports `CHUG_TEST_NATS_URL`, so tier-2 executes — but tier 3, and the tier-2
-suites that need a *private* server, still self-skip without Docker, so every
-percentage is a lower bound and the script says so. And `coverage.lcov` plus
+exports `CHUG_TEST_NATS_URL`, so tier-2 executes — but the tier-2 suites that
+need a *private* server, and the ones that need a Docker daemon, still self-skip,
+so every percentage is a lower bound and the script says so. (Its wording calls
+those Docker-needing suites "Tier-3"; they are the tier-2 files named above, and
+tier 3 is not built.) And `coverage.lcov` plus
 `coverage-html/` leave the container only through the run's output archive: the
 script tars them to `/workspace/chug-output.tar.gz`, which the dispatcher
 harvests into the task's `output.tar.gz` artifact

@@ -12,7 +12,8 @@ Don't re-derive these — read them:
 - `design.md` — rationale; `design-lifecycle.md` — the job/release lifecycle in depth.
 - `crates.md` — the crate/module map: what each crate owns and why. Read before adding a crate
   or moving responsibility between them.
-- `testing.md` — the three test tiers and where a given test belongs.
+- `testing.md` — the test tiers and where a given test belongs (two are built;
+  tier 3 is marked as intent, not machinery).
 - `STYLE.md` — the tiered blessed practices (machine-checkable invariants,
   reviewer-checked rules, principles). Hold every change to it; reviewers reject
   by rule name.
@@ -41,7 +42,9 @@ you start it and export the URL (`nats-server -js & CHUG_TEST_NATS_URL=nats://12
 cargo test`). That URL buys the **shared-server** suites only: `NatsTestServer::spawn` /
 `spawn_with_config` (the `require_nats_config` guard) never read it, so the
 private-server files still need Docker and self-skip without it. Prefer containers over
-host installs. The `e2e!` guard macro skips when Docker/NATS are unavailable.
+host installs. The skip guards are the `require_nats!` / `require_nats_config!`
+macros and `test_utils::backend_suite::docker_available()`; there is no `e2e!`
+macro, and no tier-3 suite for one to guard (`testing.md`).
 
 ## CI — the evaluation gates ARE the CI
 
