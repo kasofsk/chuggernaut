@@ -138,8 +138,10 @@ One tree, and it is not an e2e fixture:
 - [`fixtures/mobile/`](fixtures/mobile/README.md) — a stock Flutter app
   skeleton, a *build target* for the mobile-execution proofs
   ([#367](docs/design/367-android-emulator-execution.md) A2,
-  [#322](docs/design/322-macos-native-runtime.md)). Nothing seeds it, no test
-  reads it, and it carries no job graph; its README says what it is for.
+  [#322](docs/design/322-macos-native-runtime.md)). Nothing seeds it, no cargo
+  test reads it, and it carries no job graph; what builds it is the on-demand
+  `android-proof` job (`.chug/jobs/android-proof.yaml`), on the one node with
+  `/dev/kvm`. Its README says what it is for.
 
 ## Duplication: integration tests are out of scope
 
@@ -181,9 +183,9 @@ reachable from a cargo test.
 ## The shell suites: `*.test.sh`
 
 Every gate script, hook and deploy script is pinned by a `*.test.sh` beside it —
-17 of them, driving the real script inside a throwaway repo against stubbed
-`cargo`, `npm`, `docker`, `nats-server`, `curl` and `ssh`. No NATS, no Docker, no
-network. Run one directly: `sh .chug/tasks/check-comments.test.sh`.
+18 of them, driving the real script inside a throwaway repo against stubbed
+`cargo`, `npm`, `docker`, `nats-server`, `curl`, `ssh`, `flutter`, `adb` and
+`emulator`. No NATS, no Docker, no network. Run one directly: `sh .chug/tasks/check-comments.test.sh`.
 
 **`.chug/tasks/ci.sh` runs all of them, unconditionally, as its last pure-shell
 stage** (job #385; before that nothing executed a single one, and
@@ -198,8 +200,10 @@ these suites cover.
 - **Bounded**: 60s per suite (`CHUG_CI_SUITE_TIMEOUT_SECS`), 120s total
   (`CHUG_CI_SUITES_BUDGET_SECS`); over either is a loud failure, because an
   unconditional stage's cost is every job's cost. Measured 2026-08-02 on the
-  `agent-rust` container: **36.8s for all 17**, of which
-  `deploy/prod/update-refresh.test.sh` alone is 27.1s (stub polling sleeps).
+  `agent-rust` container: **36.8s for the 17 that existed then**, of which
+  `deploy/prod/update-refresh.test.sh` alone is 27.1s (stub polling sleeps);
+  `android-proof.test.sh` (#367 A2) adds ~9s, most of it three deliberately short
+  emulator bounds it waits out.
   The total is checked **between** suites, not after the loop — otherwise the
   real ceiling would be suite-count × per-suite cap — and the failure names the
   suites it therefore never ran. The per-suite cap is applied with `timeout`,

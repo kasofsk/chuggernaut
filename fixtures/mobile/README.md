@@ -18,7 +18,10 @@ Two capabilities need an end-to-end proof against real hardware, and both need
 an app to point at:
 
 - **Android** — [design #367](../../docs/design/367-android-emulator-execution.md)
-  phase A2: `./gradlew` and an emulator, in a container, on a KVM-enabled node.
+  phase A2, and it is built: releasing an `android-proof` job
+  (`.chug/jobs/android-proof.yaml`) runs `.chug/tasks/android-proof.sh` on the
+  KVM-enabled node, which builds this tree with `flutter build apk --debug` and
+  then installs and launches that APK on an emulator it boots.
 - **iOS** — [design #322](../../docs/design/322-macos-native-runtime.md): a
   simulator build, host-native on macOS. Blocked much further back than A2 —
   host-native execution does not exist yet

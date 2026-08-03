@@ -61,7 +61,8 @@ The brief is right about the thing that carries its argument — Android is a
 device-passthrough problem, not a host-execution problem. Seven claims needed
 adjusting, and five of them move work. The 2026-08-02 amendment adds five more
 (8–12) in [its own subsection](#the-2026-08-02-measurement-corrections-812);
-four of those move work too.
+four of those move work too. Building phase A2 adds a thirteenth
+([below](#building-a2-correction-13)), and it moves A2's own entrypoint.
 
 1. **#322 W1 has landed. The brief understates its own case.** It says the
    Android route needs neither `HostBackend` nor the `runtime:` selector nor the
@@ -267,6 +268,47 @@ reproduced here. Correction 12 is read out of this tree and is not secondhand.
     no docker daemon in this container, so it is stated, not demonstrated, and
     unlike correction 3 no `bollard` metadata was present here to check the
     field names against.)
+
+### Building A2 (correction 13)
+
+13. **The A2 entrypoint is `flutter`, not `./gradlew`.** The
+    [Phasing](#7-sequencing-what-ships-first-and-what-it-unblocks) table asks A2
+    to prove the design against "a boring `./gradlew connectedAndroidTest` on one
+    module". That command cannot run against a fresh clone at all, and the
+    reason is a property of the stock template rather than of this particular
+    fixture: `flutter create` **gitignores** `gradlew`, `gradlew.bat`,
+    `gradle-wrapper.jar` and `local.properties`, and
+    `fixtures/mobile/android/settings.gradle.kts` hard-requires `flutter.sdk`
+    out of `local.properties` (`require(flutterSdkPath != null)`). All four are
+    written by the Flutter tool on its first build — which is why job #392's
+    `flutter create` produced 88 files and tracked 67 of them. A job container
+    starts from a clone, so `./gradlew` there is a missing file, and the wrapper
+    it would need is the output of the build it was meant to replace.
+
+    So `.chug/tasks/android-proof.sh` enters through `flutter build apk --debug`
+    (rung 4) and the gradle half is proved *by* it: the build generates the
+    wrapper and `local.properties` on the way. **This does not weaken the
+    original intent** — the intent was to prove the device path against
+    something boring rather than against a full integration suite, and a debug
+    APK build is that.
+
+    The same finding moves the rung *after* it. The stock skeleton ships no
+    `androidTest` sources and no `integration_test` dependency, so
+    `connectedAndroidTest` would demonstrate that gradle can run zero tests.
+    Rung 5 instead installs rung 4's APK onto the booted emulator with `flutter
+    install` and waits, bounded, for the app's own process to appear — adb, the
+    device and the built artifact, with nothing bespoke added to a fixture whose
+    value is being stock (`fixtures/mobile/README.md`). Adding a trivial
+    `integration_test` to the fixture was the alternative and was rejected on
+    that ground: it costs a `pubspec.yaml` dependency and a hand-written file in
+    a tree that is regenerated rather than edited, to prove the same three
+    things.
+
+    What A2 does **not** measure, and the Phasing row asked for: two concurrent
+    emulators in the node's memory, and the SIGSEGV of
+    §[8](#8-risks-and-open-questions). The proof job is pinned and single, so
+    concurrency is not exercised; both remain open questions for whoever unpins
+    it (A3).
 
 ---
 
@@ -1179,7 +1221,7 @@ that made #313 B-IV and `WORKER_CACHE_DIR` cheap.
 | --- | --- | --- | --- |
 | **A0** | operator | **Mostly done** (correction 10): KVM is confirmed usable from a container, the SDK is already provisioned by the node's NixOS config, and the `kvm`-group requirement was never real (`/dev/kvm` is `0666`). What remains is two things and neither is code: the **store secret-scan gate** (§[3.4](#34-what-the-nixstore-mount-exposes)) and the **stable SDK path** in `configuration.nix` (§[3.5](#35-staleness-no-store-hash-in-any-chug-side-config)). Both land in the operator's repo, not this one | — |
 | **A1** | `code` | `WORKER_KVM` + `WORKER_KVM_PROJECTS` + a **stable** SDK path setting (never a store hash) in `crates/worker/src/config.rs` beside `parse_cache_dir`; `DockerBackend` device + read-only-mount properties beside `cache_dir`; `build_host_config` populates `HostConfig.devices` and a read-only `/nix/store` mount whose missing source is **refused, not created empty** (correction 12); `ANDROID_SDK_ROOT`/`ANDROID_HOME`/`ANDROID_USER_HOME` injected beside `inject_cache_env`, plus a writable `HOME`. **No image work** (correction 11). The job type pinned with `placement.node`. Confirms the two things §[3.5](#35-staleness-no-store-hash-in-any-chug-side-config) leaves open — engine-side symlink resolution, and a non-store `ANDROID_SDK_ROOT` — before the config parse is written, falling back to S3(b) if either fails. **No wire change, no dispatcher change, no epoch bump** | A0's two remaining items |
-| **A2** | `code` | Prove it against a **boring `./gradlew connectedAndroidTest` on one module**, not against the full flutter integration suite — #308 H.4 is right that it sits at the confluence of too many unbuilt things, and #309 and #322 both say the same about their own first targets. Measure what correction 8 did not: do two concurrent emulators fit in the node's memory; does the SIGSEGV reproduce; does anything in the suite need the emulator console (no `::1` in the container) or write outside `ANDROID_USER_HOME` (`/root/.android/emu-update-last-check.ini` already does) — §[4](#4-exclusivity-and-why-android-does-not-need-a-lease) | A1 |
+| **A2** | `code` | **Built** — `.chug/jobs/android-proof.yaml` + `.chug/tasks/android-proof.sh`, a five-rung ladder (mounts and env → `emulator -accel-check` → the toolchains → `flutter build apk --debug` of `fixtures/mobile` → an emulator boot and a device-backed task), pinned with `placement.node: nuc`, every wait bounded and every rung's verdict in stdout. **Correction 13 replaces this row's entrypoint**: `flutter`, never a bare `./gradlew`. As originally written: prove it against a **boring `./gradlew connectedAndroidTest` on one module**, not against the full flutter integration suite — #308 H.4 is right that it sits at the confluence of too many unbuilt things, and #309 and #322 both say the same about their own first targets. Measure what correction 8 did not: do two concurrent emulators fit in the node's memory; does the SIGSEGV reproduce; does anything in the suite need the emulator console (no `::1` in the container) or write outside `ANDROID_USER_HOME` (`/root/.android/emu-update-last-check.ini` already does) — §[4](#4-exclusivity-and-why-android-does-not-need-a-lease) | A1 |
 | **A3** | `code` | `NodeCapabilities` on `PingOk`/`WorkerAnnounce` with `features`, and the `choose_placement` predicate — **this is [#309 §4](./309-host-native-execution.md#4-capability-advertisement)/§5a and [#322](./322-macos-native-runtime.md) P1, one slice serving both legs**. Unpins Android work. Needed only when a second KVM node exists | A2; §[5.2](#52-the-field-and-the-shape-smell-worth-naming)'s "decide the whole field set at once" |
 | **A4** | `code` | `placement.features` as a job-type field + `CONFIG_SCHEMA_EPOCH` bump. Only when the pin stops expressing the requirement | A3 |
 | **never** | — | Device leases for Android (§[4](#4-exclusivity-and-why-android-does-not-need-a-lease)). #309 §5b/P4 stays, motivated by iOS | — |

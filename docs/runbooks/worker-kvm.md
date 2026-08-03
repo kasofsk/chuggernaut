@@ -1,8 +1,9 @@
 # Turning KVM on for a worker node (Android emulator execution)
 
 **Audience:** the prod operator. You want one node to run Android emulator work
-— `./gradlew connectedAndroidTest` against a real emulator — and no other node
-to change at all. This page is the whole procedure and its failure modes.
+— a Flutter build and a device-backed task against a real emulator — and no
+other node to change at all. This page is the whole procedure and its failure
+modes.
 
 It is *not* the design argument (that is
 [design #367](../design/367-android-emulator-execution.md), including why a
@@ -130,6 +131,15 @@ ssh worksalot@gumbo-nuc-0 \
 ssh worksalot@gumbo-nuc-0 docker inspect <job-container> \
   --format '{{json .HostConfig.Devices}} {{json .HostConfig.Mounts}}'
 ```
+
+**The end-to-end check is a job, not a command.** Release an `android-proof`
+job (`.chug/jobs/android-proof.yaml`, design #367 A2) and read its `stdout.log`
+artifact: `.chug/tasks/android-proof.sh` climbs a five-rung ladder — the mounts
+and env, `emulator -accel-check`, the toolchains, `flutter build apk --debug` of
+`fixtures/mobile`, then an emulator boot and a device-backed task — and prints a
+LADDER summary naming the rung that broke. Rung 1 failing is a
+placement-or-allow-list problem and everything above it is a toolchain one,
+which is the fork this table exists to tell apart.
 
 `build-worker.sh` also proves the daemon is up before it claims success — it
 waits for the daemon's own `worker up` line and fails loudly on a timeout, so a

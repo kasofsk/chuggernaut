@@ -1,0 +1,64 @@
+# The Android proof — design #367 phase A2, on demand. Releasing it runs
+# .chug/tasks/android-proof.sh on the one node that has /dev/kvm and climbs a
+# five-rung ladder: the device and the toolchain mounts, `emulator -accel-check`,
+# the two toolchains, a real `flutter build apk --debug` of fixtures/mobile, and
+# an emulator booted headless under KVM with a device-backed task against the APK
+# that build produced.
+#
+# It is deliberately NOT in .chug/jobs/_defaults.yaml and not wired into any
+# gate. The proof answers "does Android execution work on this node", which is a
+# question you ask after touching the node, the mounts or the fixture — not on
+# every push. Same shape as .chug/jobs/coverage.yaml (job #375) for the same
+# reason.
+#
+# The deliverable is the task's STDOUT. The dispatcher harvests a command work
+# task's container logs into its `stdout.log` artifact (spec §3.2), and the
+# script prints its LADDER summary last, on the failing path as much as the
+# passing one, because a worker keeps only the final 700 KiB of them.
+name: android-proof
+display_name: Android proof
+description: Boot the node's Android emulator under KVM and build fixtures/mobile against it. A report, not a change; nothing is merged.
+# No image work anywhere in this design (#367 correction 11): `java` is not on
+# this image's PATH and the SDK's own nix wrappers resolve their JDK out of the
+# store, so the stock agent image plus the node's read-only mounts is the whole
+# toolchain. The 2026-08-02 measurement ran on exactly this image unmodified.
+image: chuggernaut/agent:prod
+work:
+  # A command, not an agent: there is nothing to author, only something to
+  # demonstrate. The script's stdout is the report.
+  type: command
+  run: ./.chug/tasks/android-proof.sh
+wrap_up:
+  # A proof produces a report, not a change: the branch carries no commits, so
+  # eval-pass goes straight to Done with the branch discarded (spec §3.3 step
+  # 12). coverage.yaml's shape, and deploy.yaml's before it.
+  type: none
+# Pinned by NODE NAME because `nuc` is the only node with the device, and #367's
+# phase A4 — `placement.features` plus a capability predicate — is exactly what
+# later replaces this pin. Until a second KVM node exists, a name is the honest
+# expression of the requirement (#361, spec §3.1): an unpinned release would land
+# on whichever node is freest and fail rung 1 having proved nothing.
+placement:
+  node: nuc
+resources:
+  # Sized from what rungs 4 and 5 actually run, not from a sibling job type:
+  # fixtures/mobile/android/gradle.properties asks the Gradle daemon for
+  # -Xmx8G -XX:MaxMetaspaceSize=4G, and a headless emulator wants ~2GiB beside
+  # it, so a limit under ~12Gi turns a passing proof into an OOM kill. The node
+  # is 12-core/31GiB (deploy/prod/README.md §6), so half its cores and 12Gi
+  # leave its other slot usable.
+  cpu: 6
+  memory: 12Gi
+  # NOT code.yaml's 1h shape and not coverage.yaml's doubling of it. The ladder
+  # bounds its own waits (STYLE.md Tier 2 rule 3): rung 5 cannot exceed ~13m of
+  # bounded waiting and rung 4's `flutter build apk` is capped at 1h by the
+  # script itself, which is the only genuinely open-ended step — a cold run
+  # fetches the Gradle distribution, the AGP dependency graph and the pub cache
+  # over the network. 1h + ~15m + headroom = 90m, and every internal bound is
+  # smaller so a failure names its rung instead of being killed here.
+  task_timeout: 90m
+# rework_budget is omitted because it is DISALLOWED for work.type: command
+# (spec §1.1 field-rules table; JobType::validate rejects it) — a command work
+# step cannot rework, so an eval failure escalates to a human. work_retries stays
+# at its default 0: a failed proof is a finding, and re-running it automatically
+# would spend another emulator boot to learn the same thing.

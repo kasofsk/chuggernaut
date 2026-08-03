@@ -68,7 +68,7 @@ done
 # --- the shell-suite stage's fixtures (#385) ----------------------------------
 # A real git index, because the stage discovers through `git ls-files` — an
 # unindexed tree would make every case below prove nothing. The suites are
-# throwaway stand-ins: running the repo's real 17 from inside one of them is the
+# throwaway stand-ins: running the repo's real suites from inside one of them is the
 # recursion the stage guards against, and case 9 pins the guard instead.
 #
 # The stand-in ASSERTS ITS OWN ENVIRONMENT: it fails unless the gate handed it

@@ -73,7 +73,7 @@ the absence of a workflow file.
   `.chug/tasks/check-duplication.sh` — copy-paste
   detection via a pinned `jscpd@5.0.5` at `threshold: 0` (STYLE.md Tier 1;
   ~30ms for the whole repo, so it is unconditional) — `.chug/tasks/check-comments.sh`,
-  the comment lint, and since #385 **the repo's 17 `*.test.sh` shell suites**.
+  the comment lint, and since #385 **the repo's 18 `*.test.sh` shell suites**.
   Any clone fails the gate.
 - **The shell suites are the tests of the gates themselves, and CI runs them all.**
   Discovery is `git ls-files '*.test.sh'` — add a suite and it is picked up, with
@@ -81,7 +81,8 @@ the absence of a workflow file.
   than passing quietly. Bounded at 60s per suite and 120s total
   (`CHUG_CI_SUITE_TIMEOUT_SECS` / `CHUG_CI_SUITES_BUDGET_SECS`), the total checked
   *between* suites so it stops at the bound and names what it never ran; measured
-  36.8s for all 17, 27.1s of that `deploy/prod/update-refresh.test.sh`. The
+  36.8s for the 17 that existed on 2026-08-02, 27.1s of that
+  `deploy/prod/update-refresh.test.sh`, plus ~9s for `android-proof.test.sh`. The
   per-suite cap needs a working `timeout`, probed before the stage announces it —
   a host without one fails the stage rather than running it uncapped and quiet.
   Each suite is handed
