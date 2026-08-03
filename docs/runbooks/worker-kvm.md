@@ -41,11 +41,15 @@ turning Flutter on is not a migration. It is **not** realised or GC-rooted (§7)
 
 **The JDK is a third leaf, and gradle is why.** A node whose jobs build an APK
 also sets `WORKER_JDK_DIR` — its own stable path, mounted read-only at
-`/opt/jdk`, with `JAVA_HOME` pointed there. The SDK tools do not need it (the
-nix wrappers resolve their own JDK out of the mounted store, which is why
-`avdmanager` runs with no `java` on `PATH`), but gradle is not a wrapper: without
-`JAVA_HOME` a Flutter APK build dies with `ERROR: JAVA_HOME is not set and no
-'java' command could be found`, which is exactly where job #396's proof stopped.
+`/opt/jdk`, with `JAVA_HOME` pointed there. The SDK tools do not need it — the
+nix wrappers under `cmdline-tools/<version>/bin` resolve their own JDK out of
+the mounted store, which is why `avdmanager` runs with no `java` on `PATH` —
+but gradle is not a wrapper: without `JAVA_HOME` a Flutter APK build dies with
+`ERROR: JAVA_HOME is not set and no 'java' command could be found`, which is
+exactly where job #396's proof stopped. **Resolve SDK tools from
+`cmdline-tools`, never from the deprecated `$ANDROID_SDK_ROOT/tools/bin`**: those
+are plain scripts rather than wrappers, so once `JAVA_HOME` exists they honour it
+and die on a JDK with no JAXB (job #398, the row in §6).
 Name the **derivation root** — the path nixpkgs designates and a NixOS
 `JAVA_HOME` already exports — not the nested `lib/openjdk`; both hold `bin/java`.
 Unset ⇒ no mount, no `JAVA_HOME`, launch unchanged, and no other setting changes
@@ -187,6 +191,7 @@ the mounts, while the node keeps working.
 | a job runs but the emulator reports no KVM | that project is not on the allow-list, so it gets neither the device nor the mounts | check `WORKER_KVM_PROJECTS` against the job's `JOB_PROJECT` (`owner/project`, exactly) |
 | the SDK is missing inside the container | the stable path does not resolve on the node | `readlink -f` it; the mount refuses a missing source rather than creating an empty directory, so the launch fails loudly |
 | `FLUTTER_ROOT` is unset in an allow-listed job, or `/opt/flutter` is empty | the node never set `WORKER_FLUTTER_DIR` — it is optional and off by default | set it (§3) and recreate the daemon; the Android SDK is unaffected either way |
+| an SDK tool dies with `NoClassDefFoundError: javax/xml/bind/annotation/XmlSchema` | it was resolved from the deprecated `$ANDROID_SDK_ROOT/tools/bin`, a plain script that honours `JAVA_HOME` and then runs a JDK with no JAXB. The mount and `JAVA_HOME` are fine — with `JAVA_HOME` *unset* the same script works, which is why job #398 saw this only after #397 | run the `cmdline-tools/<version>/bin` copy, a nix wrapper that works either way. `.chug/tasks/android-proof.sh` resolves it that way and prints which launcher it picked |
 | a gradle or `flutter build apk` step fails with `JAVA_HOME is not set and no 'java' command could be found` | the node never set `WORKER_JDK_DIR`; the SDK tools work regardless, so the rest of the job looks healthy | set it to the JDK's stable path (§3) and recreate the daemon. If `JAVA_HOME` *is* set and gradle complains about the JDK's layout instead, try the nested `lib/openjdk` — the derivation root is what nixpkgs designates and what this node's runners already build against, so the root is the documented value |
 
 ---

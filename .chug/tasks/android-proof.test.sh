@@ -25,6 +25,11 @@
 #   5. A BUILD THAT EXITS 0 WITHOUT PRODUCING AN APK STILL FAILS. `flutter build`
 #      is the rung's evidence, not its verdict (the coverage.test.sh lesson: a
 #      stub that only logs lets the script claim work it never did).
+#   6. WHICH `avdmanager` THE LADDER RUNS. cmdline-tools/<version>/bin holds the
+#      supported launcher and tools/bin the deprecated one, which dies under a
+#      JAVA_HOME whose JDK has no JAXB (job #398). The version directory is
+#      globbed, never hardcoded, and an SDK holding NEITHER launcher fails rung 3
+#      loudly rather than falling through to a binary that dies three lines later.
 #
 # Run:  .chug/tasks/android-proof.test.sh   (exits 0 iff all cases pass)
 set -eu
@@ -117,15 +122,31 @@ echo "emulator stub: pretending to boot"
 sleep 20
 EOF
 
-	printf '#!/bin/sh\necho "avdmanager $*" >> "%s"\nexit 0\n' "$CMD_LOG" >"$BIN/avdmanager"
 	chmod +x "$BIN"/*
 }
 
+# `avdmanager` is installed into the sandbox SDK rather than $BIN, because WHICH
+# copy the ladder runs is itself under test (#398). Each copy tags the shared log
+# with where it was invoked from, so the winner is readable from the log alone.
+install_avdmanager() { # install_avdmanager <sdk-relative-bin-dir>
+	mkdir -p "$SDK/$1"
+	cat >"$SDK/$1/avdmanager" <<EOF
+#!/bin/sh
+echo "avdmanager \$*" >> "$CMD_LOG"
+echo "avdmanager-source=$1" >> "$CMD_LOG"
+exit 0
+EOF
+	chmod +x "$SDK/$1/avdmanager"
+}
+
 # The node's shape by default: device granted, both toolchains mounted, the
-# emulator boots, the app comes up. Each case spoils exactly one of those.
+# emulator boots, the app comes up. The SDK ships cmdline-tools under a REAL
+# version directory and no `latest` symlink, which is gumbo-nuc-0's shape. Each
+# case spoils exactly one of those.
 reset_case() {
-	rm -rf "$STATE" "$FIXTURE/build"
+	rm -rf "$STATE" "$FIXTURE/build" "$SDK/cmdline-tools" "$SDK/tools"
 	mkdir -p "$STATE"
+	install_avdmanager cmdline-tools/13.0/bin
 	: >"$CMD_LOG"
 	printf 'Flutter 3.41.2 - channel stable\n' >"$STATE/version"
 	echo 0 >"$STATE/accel_rc"
@@ -178,6 +199,8 @@ verdict "the emulator boots before the app is installed" \
 verdict "the emulator is headless" "$(found "$CMD_LOG" "-no-window -no-audio")"
 verdict "it waits for the device, then for sys.boot_completed" \
 	"$(before "$CMD_LOG" "adb wait-for-device" "getprop sys.boot_completed")"
+verdict "it runs the cmdline-tools avdmanager from a globbed version directory" \
+	"$(found "$CMD_LOG" "avdmanager-source=cmdline-tools/13.0/bin")"
 verdict "it names the expected Flutter version" \
 	"$(found "$SANDBOX/out1.txt" "flutter is the expected 3.41.2")"
 verdict "the VERDICT is the very last line" \
@@ -294,6 +317,70 @@ verdict "exits non-zero" "$([ "$STATUS" -ne 0 ] && echo ok || echo no)"
 verdict "names rung 5" "$(found "$SANDBOX/out10.txt" "RUNG 5 FAILED")"
 verdict "still names the bound in seconds" "$(found "$SANDBOX/out10.txt" "within its 3s bound")"
 verdict "did not park inside adb shell" "$(missing "$SANDBOX/out10.txt" "sys.boot_completed=1")"
+
+# --- case 11: both launchers exist ------------------------------------------------
+echo "case 11: with both launchers present, cmdline-tools wins over tools/bin"
+reset_case
+install_avdmanager tools/bin
+run_ladder "$SANDBOX/out11.txt"
+
+verdict "exits 0" "$(yes_no "$STATUS")"
+verdict "names the cmdline-tools launcher as the supported one" \
+	"$(found "$SANDBOX/out11.txt" "$SDK/cmdline-tools/13.0/bin/avdmanager (cmdline-tools, the supported launcher)")"
+verdict "runs the cmdline-tools launcher" \
+	"$(found "$CMD_LOG" "avdmanager-source=cmdline-tools/13.0/bin")"
+verdict "never runs the deprecated launcher" \
+	"$(missing "$CMD_LOG" "avdmanager-source=tools/bin")"
+verdict "shouts about no deprecated launcher" \
+	"$(missing "$SANDBOX/out11.txt" "DEPRECATED launcher")"
+
+# --- case 12: several version directories -------------------------------------------
+echo "case 12: among cmdline-tools versions, \`latest\` is preferred and tools/bin still loses"
+reset_case
+install_avdmanager cmdline-tools/latest/bin
+install_avdmanager tools/bin
+run_ladder "$SANDBOX/out12.txt"
+
+verdict "exits 0" "$(yes_no "$STATUS")"
+verdict "runs the \`latest\` launcher" \
+	"$(found "$CMD_LOG" "avdmanager-source=cmdline-tools/latest/bin")"
+verdict "runs no other cmdline-tools version" \
+	"$(missing "$CMD_LOG" "avdmanager-source=cmdline-tools/13.0/bin")"
+verdict "never runs the deprecated launcher" \
+	"$(missing "$CMD_LOG" "avdmanager-source=tools/bin")"
+
+# --- case 13: only the deprecated launcher --------------------------------------------
+echo "case 13: an SDK with only tools/bin is used, loudly — it dies under a JAXB-less JAVA_HOME"
+reset_case
+rm -rf "$SDK/cmdline-tools"
+install_avdmanager tools/bin
+run_ladder "$SANDBOX/out13.txt"
+
+verdict "exits 0" "$(yes_no "$STATUS")"
+verdict "falls back to the deprecated launcher" \
+	"$(found "$CMD_LOG" "avdmanager-source=tools/bin")"
+verdict "shouts that it is deprecated" "$(found "$SANDBOX/out13.txt" "DEPRECATED launcher")"
+verdict "names the error that fallback produces" \
+	"$(found "$SANDBOX/out13.txt" "javax/xml/bind")"
+
+# --- case 14: neither launcher exists ---------------------------------------------------
+echo "case 14: an SDK holding neither launcher fails rung 3 loudly, not three lines later"
+reset_case
+rm -rf "$SDK/cmdline-tools"
+run_ladder "$SANDBOX/out14.txt"
+
+verdict "exits non-zero" "$([ "$STATUS" -ne 0 ] && echo ok || echo no)"
+verdict "names rung 3" "$(found "$SANDBOX/out14.txt" "RUNG 3 FAILED")"
+verdict "fails on the resolution itself" \
+	"$(found "$SANDBOX/out14.txt" 'RUNG 3 FAILED — no `avdmanager`')"
+verdict "does not instead die on a downstream exit code" \
+	"$(missing "$SANDBOX/out14.txt" "avdmanager list target exited")"
+verdict "names the supported location" "$(found "$SANDBOX/out14.txt" "cmdline-tools/*/bin")"
+verdict "names the deprecated location too" "$(found "$SANDBOX/out14.txt" "$SDK/tools/bin")"
+verdict "runs no avdmanager at all" "$(missing "$CMD_LOG" "avdmanager")"
+verdict "never builds" "$(missing "$CMD_LOG" "flutter build")"
+verdict "rung 4 reads NOT REACHED" \
+	"$(found "$SANDBOX/out14.txt" "rung 4 a Flutter APK build: NOT REACHED")"
 
 echo
 if [ "$BAD" -eq 0 ]; then

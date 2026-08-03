@@ -20,7 +20,9 @@
 #   1. mounts and env      — placement/allow-list, not toolchain: an un-granted
 #                            project gets no device and no injected env at all
 #   2. KVM acceleration    — the device is present AND usable
-#   3. toolchains answer   — flutter and the SDK's own tools run off read-only mounts
+#   3. toolchains answer   — flutter and the SDK's own tools run off read-only
+#                            mounts, with `avdmanager` resolved from
+#                            cmdline-tools rather than the deprecated tools/bin
 #   4. flutter build apk   — the Flutter half, unreachable before job #393
 #   5. emulator + a device-backed task — the Android half
 #
@@ -70,6 +72,9 @@ POLL_INTERVAL_SECS="${CHUG_ANDROID_POLL_INTERVAL_SECS:-2}"
 # A single probe's own bound, well under the wait it runs inside: generous enough
 # that a busy-but-healthy device answers, short enough that a hung one retries.
 PROBE_TIMEOUT_SECS="${CHUG_ANDROID_PROBE_TIMEOUT_SECS:-15}"
+# A cap on the cmdline-tools version directories scanned, so the glob below is a
+# bounded loop like every other wait here (STYLE.md Tier 2 rule 3).
+CMDLINE_TOOLS_DIRS_MAX="${CHUG_ANDROID_CMDLINE_TOOLS_DIRS_MAX:-32}"
 
 LADDER=""
 RUNGS_CLEARED=0
@@ -79,6 +84,8 @@ EMULATOR_PID=""
 ADB_SERVER_STARTED=""
 WORK_DIR=""
 EMULATOR_LOG=""
+CMDLINE_TOOLS_BIN=""
+AVDMANAGER=""
 
 rung_title() {
 	case "$1" in
@@ -217,8 +224,11 @@ rung_1_report_mount() { # rung_1_report_mount <name> <actual> <expected>
 
 # The SDK's tools are not on the image's PATH — nothing about the image is
 # Android-aware (#367 correction 11), so the mounts are put on PATH here.
+# cmdline-tools comes FIRST and tools/bin only as a fallback: see
+# prepare_environment_cmdline_tools_bin.
 prepare_environment() {
-	PATH="$FLUTTER_ROOT/bin:$ANDROID_SDK_ROOT/emulator:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/tools/bin:$PATH"
+	CMDLINE_TOOLS_BIN="$(prepare_environment_cmdline_tools_bin)"
+	PATH="$FLUTTER_ROOT/bin:$ANDROID_SDK_ROOT/emulator:$ANDROID_SDK_ROOT/platform-tools:${CMDLINE_TOOLS_BIN:+$CMDLINE_TOOLS_BIN:}$ANDROID_SDK_ROOT/tools/bin:$PATH"
 	export PATH
 	ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$ANDROID_USER_HOME/avd}"
 	GRADLE_USER_HOME="${GRADLE_USER_HOME:-$HOME/.gradle}"
@@ -229,6 +239,39 @@ prepare_environment() {
 	EMULATOR_LOG="$WORK_DIR/emulator.log"
 }
 
+# The SUPPORTED launchers live under cmdline-tools/<version>/bin, and nixpkgs
+# wraps them so they prepend their own JDK to PATH; the ones under
+# $ANDROID_SDK_ROOT/tools/bin are the DEPRECATED plain scripts, which honour
+# JAVA_HOME and then run a JDK that may have no JAXB — the
+# `NoClassDefFoundError: javax/xml/bind/annotation/XmlSchema` job #398 measured
+# once #397 started injecting JAVA_HOME. That regression was latent, not caused
+# by the JDK mount: with JAVA_HOME unset both launchers work, which is why run
+# #396 cleared rung 3 on the same SDK.
+#
+# The version directory is NOT fixed — `latest` is a convention this SDK does not
+# follow (it ships `13.0`) — so it is globbed, `latest` preferred when present,
+# and a candidate counts only if it really holds the launcher.
+prepare_environment_cmdline_tools_bin() {
+	_best=""
+	_seen=0
+	for _candidate in "$ANDROID_SDK_ROOT"/cmdline-tools/*/bin; do
+		_seen=$((_seen + 1))
+		if [ "$_seen" -gt "$CMDLINE_TOOLS_DIRS_MAX" ]; then
+			echo "!!! android-proof: more than $CMDLINE_TOOLS_DIRS_MAX directories under $ANDROID_SDK_ROOT/cmdline-tools — the scan stopped at its bound" >&2
+			break
+		fi
+		[ -x "$_candidate/avdmanager" ] || continue
+		case "$_candidate" in
+		*/cmdline-tools/latest/bin)
+			_best="$_candidate"
+			break
+			;;
+		esac
+		[ -n "$_best" ] || _best="$_candidate"
+	done
+	printf '%s' "$_best"
+}
+
 rung_2_acceleration() {
 	command -v emulator >/dev/null 2>&1 ||
 		rung_fail 2 "no \`emulator\` on PATH under $ANDROID_SDK_ROOT"
@@ -237,18 +280,38 @@ rung_2_acceleration() {
 }
 
 rung_3_toolchains() {
-	for _tool in flutter adb avdmanager; do
+	for _tool in flutter adb; do
 		command -v "$_tool" >/dev/null 2>&1 ||
 			rung_fail 3 "no \`$_tool\` on PATH — looked under $FLUTTER_ROOT/bin and $ANDROID_SDK_ROOT"
 		echo "android-proof: $_tool -> $(command -v "$_tool")"
 	done
+	rung_3_avdmanager
 	rung_3_flutter_version
-	bounded 3 "$TOOL_TIMEOUT_SECS" "avdmanager list target" avdmanager list target
+	bounded 3 "$TOOL_TIMEOUT_SECS" "avdmanager list target" "$AVDMANAGER" list target
 	_image_dir="$ANDROID_SDK_ROOT/$(printf '%s' "$SYSTEM_IMAGE" | tr ';' '/')"
 	[ -d "$_image_dir" ] ||
 		rung_fail 3 "the SDK holds no '$SYSTEM_IMAGE' ($_image_dir) — the node provisions the images, so either pick another with CHUG_ANDROID_SYSTEM_IMAGE or add it to the node's configuration.nix"
 	ls "$ANDROID_SDK_ROOT/platforms" "$ANDROID_SDK_ROOT/build-tools" 2>/dev/null || true
 	rung_pass 3 "flutter and the SDK tools run off the read-only mounts, and '$SYSTEM_IMAGE' is installed"
+}
+
+# Resolved to an absolute path rather than left to PATH, because the fallback is
+# a launcher that dies three lines later and a SILENT fallback is what made #398
+# cost two runs. It is the only SDK tool the ladder resolves this way: `emulator`
+# comes from $ANDROID_SDK_ROOT/emulator, `adb` from platform-tools, and
+# `sdkmanager` is never invoked here.
+rung_3_avdmanager() {
+	AVDMANAGER="${CMDLINE_TOOLS_BIN:+$CMDLINE_TOOLS_BIN/avdmanager}"
+	if [ -n "$AVDMANAGER" ] && [ -x "$AVDMANAGER" ]; then
+		echo "android-proof: avdmanager -> $AVDMANAGER (cmdline-tools, the supported launcher)"
+		return 0
+	fi
+	AVDMANAGER="$ANDROID_SDK_ROOT/tools/bin/avdmanager"
+	[ -x "$AVDMANAGER" ] ||
+		rung_fail 3 "no \`avdmanager\` under $ANDROID_SDK_ROOT/cmdline-tools/*/bin NOR the deprecated $ANDROID_SDK_ROOT/tools/bin — this SDK ships neither, so rung 5 could never create an AVD. The node provisions the SDK, so add the cmdline-tools package to its configuration.nix (docs/runbooks/worker-kvm.md)"
+	echo "!!! android-proof: avdmanager -> $AVDMANAGER, the DEPRECATED launcher — this SDK holds"
+	echo "!!!     no cmdline-tools/<version>/bin/avdmanager. It honours JAVA_HOME='${JAVA_HOME:-}'"
+	echo "!!!     and dies with NoClassDefFoundError javax/xml/bind if that JDK has no JAXB (#398)."
 }
 
 # Run once and kept, because the same output answers two questions. A version
@@ -282,7 +345,7 @@ rung_4_build() {
 rung_5_emulator() {
 	_status=0
 	printf 'no\n' | timeout "$TOOL_TIMEOUT_SECS" \
-		avdmanager create avd -n "$AVD_NAME" -k "$SYSTEM_IMAGE" --force || _status=$?
+		"$AVDMANAGER" create avd -n "$AVD_NAME" -k "$SYSTEM_IMAGE" --force || _status=$?
 	[ "$_status" -eq 0 ] ||
 		rung_fail 5 "avdmanager create avd -n $AVD_NAME -k '$SYSTEM_IMAGE' exited $_status (124 = its ${TOOL_TIMEOUT_SECS}s bound)"
 	adb_bounded "$TOOL_TIMEOUT_SECS" start-server >/dev/null

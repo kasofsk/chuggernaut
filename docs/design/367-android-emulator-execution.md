@@ -244,7 +244,10 @@ reproduced here. Correction 12 is read out of this tree and is not secondhand.
     is strengthened accordingly. **Bounded by
     [correction 14](#the-first-real-a2-run-correction-14)**: the wrapper trick
     covers the SDK tools and stops at gradle, which needs a real `JAVA_HOME` —
-    supplied as a third mounted leaf, still not as image bytes.
+    supplied as a third mounted leaf, still not as image bytes. And narrowed by
+    [correction 15](#the-second-real-a2-run-correction-15): it is the
+    `cmdline-tools` launchers that are wrapped, not the deprecated `tools/bin`
+    ones the measurement happened not to run.
 
 12. **The worker daemon cannot see the host filesystem, so A1's "fail loudly if
     the mount is absent" cannot work as written** — and this one is
@@ -344,6 +347,35 @@ reproduced here. Correction 12 is read out of this tree and is not secondhand.
     one setting and one mount per tool scales linearly with the toolchain, which
     is precisely what [#373](373-project-toolchains.md) P2's project-declared
     toolchains exist to replace. Three is affordable; the trend is the finding.
+
+### The second real A2 run (correction 15)
+
+15. **`avdmanager` is two binaries and only one of them is a wrapper**
+    *(secondhand)*. The wrapper property corrections 11 and 14 lean on belongs
+    to `$ANDROID_SDK_ROOT/cmdline-tools/<version>/bin`, which nixpkgs wraps to
+    prepend its own JDK to `PATH`. It does **not** belong to
+    `$ANDROID_SDK_ROOT/tools/bin`, the deprecated launcher: that is a plain
+    444-byte script which honours `JAVA_HOME` and then runs whatever JDK it
+    names, dying with `NoClassDefFoundError:
+    javax/xml/bind/annotation/XmlSchema` on a JDK with no JAXB. A 2×2 measured
+    in a real container on `gumbo-nuc-0`, with the real mounts and
+    `chuggernaut/agent:prod`:
+
+    | | `tools/bin/avdmanager` | `cmdline-tools/13.0/bin/avdmanager` |
+    | --- | --- | --- |
+    | `JAVA_HOME` unset | OK | OK |
+    | `JAVA_HOME=/opt/jdk` | **FAIL** | OK |
+
+    So the rung-3 failure of the second ladder run (job #398) was **latent from
+    the start rather than caused by the JDK mount**: run #396 cleared rung 3
+    only because `JAVA_HOME` was unset then, and correction 14's third leaf
+    merely exposed it. That is the difference between a revert and a fix, and
+    the fix is the resolution order — `.chug/tasks/android-proof.sh` takes the
+    launcher from `cmdline-tools/*/bin` first, **globbed** rather than assuming
+    the `latest` symlink this SDK does not ship, falls back to `tools/bin` only
+    with a shout, and fails rung 3 outright when the SDK holds neither. A silent
+    fallback to a binary that dies three lines later is what made this cost two
+    runs.
 
 ---
 
