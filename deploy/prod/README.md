@@ -546,13 +546,90 @@ scp "$KEYS_DIR/worker-nuc.creds" worksalot@gumbo-nuc-0:chuggernaut-worker/keys/w
 #    DOCKER_NODES="local|unix:///…/docker.sock|0, nuc|worker|0"
 #    WORKER_SSH=worksalot@gumbo-nuc-0
 #    WORKER_NATS_URL=nats://100.116.243.42:4222     # Mini's tailnet IP
-#    WORKER_SLOTS=2                                 # the node's FIRST-BOOT value
+#    WORKER_SLOTS_nuc=2                             # the node's FIRST-BOOT value
+#    WORKER_CACHE_DIR_nuc=/var/cache/chuggernaut/sccache
+#    WORKER_REFRESH_GIT_URL=ssh://git@100.116.243.42:2222/<owner>/chuggernaut.git
+#    WORKER_GIT_KEY=/data/keys/worker_git
+#    (the whole run spec, per node — "The run spec is declared" below)
 # 4. build + start the daemon on the node (also runs on every CD deploy)
 set -a; . deploy/prod/chuggernaut.env; set +a
 deploy/prod/build-worker.sh
 # 5. no dispatcher restart needed: the daemon announces itself and the
 #    dispatcher merges it into the live fleet (spec §3.1). Confirm on the
 #    Cluster page, or GET /api/v1/platform/fleet.
+```
+
+**The run spec is declared, not inherited.**
+
+The file a human edits is **`deploy/prod/chuggernaut.env` on the Mini**
+(`~/chuggernaut/deploy/prod/chuggernaut.env`). It is gitignored, so this repo
+holds only [`env.example`](env.example) — editing that changes nothing on any
+node. Everything a `chug-worker` daemon runs with is composed from that file by
+`build-worker.sh` at node (re)creation; `worker-refresh.sh`'s swap then carries
+the daemon's environment forward across self-refreshes. Inheritance is how a
+value *survives*, not how it is *declared* — a setting that lives only inside
+the container is gone the moment the node is recreated without it, and each of
+these fails quietly: `WORKER_CACHE_DIR` ⇒ caching off, `WORKER_SLOTS` ⇒ the node
+boots at the daemon's default of 4, `WORKER_REFRESH_GIT_URL` / `WORKER_GIT_KEY`
+⇒ the node keeps serving jobs and stops updating.
+
+Declare **per node**: `WORKER_*_<node>` wins over the bare `WORKER_*` (the node
+is `CHUG_WORKER_NODE`). A fleet's nodes do not share paths, so one value cannot
+be true of both:
+
+```sh
+# on the Mini, in deploy/prod/chuggernaut.env
+WORKER_SLOTS_air=2
+WORKER_SLOTS_nuc=2
+WORKER_CACHE_DIR_air=/Users/<you>/chuggernaut-worker/sccache
+WORKER_CACHE_DIR_nuc=/var/cache/chuggernaut/sccache
+WORKER_REFRESH_GIT_URL=ssh://git@100.116.243.42:2222/<owner>/chuggernaut.git
+WORKER_GIT_KEY=/data/keys/worker_git
+```
+
+Read a node's **live** values off the node before declaring them — the container
+is what it is running, not what anyone wrote down:
+
+```sh
+ssh <node> 'docker inspect chug-worker --format "{{range .Config.Env}}{{println .}}{{end}}"' \
+  | grep '^WORKER_'
+```
+
+A colima node's `WORKER_CACHE_DIR` must sit under a prefix colima shares into
+the VM (the mac home by default): `dockerd` runs inside the VM, so a path
+outside any shared prefix binds a VM-local directory that dies with the VM while
+the mac-side path never appears at all.
+
+**Drift is reported, both ways round.**
+
+- `build-worker.sh` compares the live container's environment with the run it is
+  about to compose and **refuses**, live daemon untouched, when the new run
+  would drop a setting the node is running — including one this script never
+  forwards (`WORKER_SLOTS_MAX`). Declare it, or pass `WORKER_SPEC_DROP_OK=1` to
+  drop it on purpose. Both are loud; neither is silent.
+- On the no-ssh path nothing can push this file to a node, so each refresh
+  **reports the node's own spec** on stdout, which the daemon relays into the
+  deploy's task output (`worker-refresh: run spec on air (build): …`, plus a
+  `WARNING` line for an unset cache dir or capacity). Compare that against the
+  file above; there is no UI for it and none is needed.
+
+**The consequence, stated plainly:** `WORKER_SSH` is unset for both prod nodes —
+Tailscale SSH blocks tagged→tagged, so the Mini cannot reach either and
+`build-worker.sh` no-ops on every deploy (the air's images are built from the
+operator laptop). Nothing scheduled ever re-applies `chuggernaut.env` to a prod
+node. The declaration is what a human recreates a node *from*, and the refresh's
+report is how they see what a node is running *meanwhile*. Fixing the routing is
+its own job.
+
+The laptop that *can* reach a node does not have `chuggernaut.env` — it lives on
+the Mini. Fetch it before rebuilding one, so the node is recreated from the
+declaration rather than from whatever is remembered:
+
+```sh
+scp gumbo-mini-0:chuggernaut/deploy/prod/chuggernaut.env /tmp/chug.env
+set -a; . /tmp/chug.env; set +a
+WORKER_SSH=worksalot@dev-air.tail20c474.ts.net CHUG_WORKER_NODE=air \
+  deploy/prod/build-worker.sh
 ```
 
 Notes:
@@ -587,8 +664,10 @@ Notes:
   *live daemon's* env, so it survives every deploy:
 
   ```sh
+  # from a machine that can ssh the node; the node's spec comes from the file,
+  # so only the destination is typed (WORKER_SSH is never resolved per node).
+  set -a; . deploy/prod/chuggernaut.env; set +a
   WORKER_SSH=worksalot@dev-air.tail20c474.ts.net CHUG_WORKER_NODE=air \
-    WORKER_SLOTS=2 WORKER_NATS_URL=nats://100.116.243.42:4222 \
     deploy/prod/build-worker.sh
   ```
 

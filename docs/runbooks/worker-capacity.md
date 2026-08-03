@@ -143,13 +143,20 @@ this behaviour already has.
 Capacity at node creation is the *only* place `WORKER_SLOTS` still matters:
 
 ```sh
+# WORKER_SLOTS_nuc=2 (and the rest of the node's run spec) is declared in
+# chuggernaut.env on the Mini — deploy/prod/README.md §6.
+set -a; . deploy/prod/chuggernaut.env; set +a
 WORKER_SSH=worksalot@gumbo-nuc-0 CHUG_WORKER_NODE=nuc \
-  WORKER_SLOTS=2 WORKER_NATS_URL=nats://100.116.243.42:4222 \
   deploy/prod/build-worker.sh
 ```
 
 Set it to something the node can actually serve, then never touch it again —
-after the first observation the UI owns the number.
+after the first observation the UI owns the number. **Declare it**, per node,
+rather than passing it on the command line: a value that only ever rode a
+`docker run` survives by circulation (the self-refresh swap re-applies the
+daemon's own environment) and disappears at the first recreation that forgets
+it. `build-worker.sh` refuses to replace a daemon whose `WORKER_SLOTS` the new
+run would drop.
 
 Two consequences worth knowing before they surprise you:
 
@@ -172,7 +179,9 @@ concurrent Rust builds is what it actually sustains. To lower it you must add
 `-e WORKER_SLOTS_MAX=<n>` to the daemon's `docker run` by hand — and know that
 the self-refresh swap forwards only the vars it names, so **the next deploy drops
 it** and the ceiling reverts to the CPU count. Setting it in `chuggernaut.env`
-does nothing at all. Until that passthrough is added, treat a lowered ceiling as
+does nothing at all. It is no longer silent, at least: `build-worker.sh` refuses
+to rebuild a daemon carrying one, naming it as a value nothing forwards
+(`WORKER_SPEC_DROP_OK=1` proceeds, and you re-add the flag by hand). Until that passthrough is added, treat a lowered ceiling as
 per-creation, not durable.
 
 ---

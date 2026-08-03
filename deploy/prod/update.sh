@@ -151,9 +151,12 @@ refresh_workers() {
 # file, never a dump. Both caps are env-overridable for a one-off investigation.
 #
 # Nothing NEW is disclosed: `.log`/`.cancel` are copies of CLI output that was
-# already relayed to this same stdout. The refresh env (NATS_CREDS,
-# MINI_DEPLOY_KEY, ssh key paths) is never echoed by the CLI and is not read here
-# — only these two transcript files are; the pid files are skipped as noise.
+# already relayed to this same stdout. No secret is echoed by the CLI and none is
+# read here — only these two transcript files are; the pid files are skipped as
+# noise. A relayed line may carry the node's own run spec (worker-refresh.sh
+# reports it so an unreachable node states its configuration, ticket #390): the
+# node name, its slot count, its cache dir, its git URL and the container path of
+# its key — no credential, and each of them is declared in chuggernaut.env.
 # `printf`, not `echo`: a transcript line is arbitrary text and some shells'
 # `echo` expands backslash escapes in it.
 refresh_workers_transcripts() {

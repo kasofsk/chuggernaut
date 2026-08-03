@@ -11,7 +11,11 @@
 #
 # All external tools (git, ssh, docker) come from PATH so the shell test can
 # fake them (worker-refresh.test.sh). Config is env-driven, inherited from the
-# daemon's own environment:
+# daemon's own environment — which is how a value SURVIVES a refresh, never how
+# it is DECLARED: the run spec is declared in deploy/prod/chuggernaut.env on the
+# dispatcher host and applied by build-worker.sh (deploy/prod/README.md §6).
+# Each phase reports the spec it is running so a node the Mini cannot ssh still
+# states its own configuration into the deploy's task output:
 #   WORKER_REFRESH_GIT_URL  ssh://git@<ssh-front>:2222/<owner>/<repo>.git (required)
 #   WORKER_GIT_KEY          ssh private key for the node credential (default /data/keys/worker_git)
 #   WORKER_NODE, NATS_URL, NATS_CREDS   passed through to the replacement daemon
@@ -45,6 +49,34 @@ PHASE="${1:?usage: worker-refresh.sh build <sha> <tag> | swap <tag>}"
 # keeps the stream line-at-a-time — never batch progress behind a build.
 refresh_phase() {
   echo "worker-refresh: phase $1"
+}
+
+# ── the run spec this node is actually running (ticket #390) ─────────────────
+# This script inherits its config from the daemon's own environment, which is
+# the only mechanism available to it: the swap runs INSIDE chug-worker, and the
+# dispatcher host cannot ssh a tagged worker, so nothing here can read
+# chuggernaut.env on the Mini. Inheritance is therefore how a value SURVIVES a
+# refresh — but it is not how a value is DECLARED, and the four settings below
+# were found (#265 reason 3) living only in the container, circulating from one
+# generation of the daemon to the next with nothing to compare them against.
+#
+# So the node reports what it is running, every refresh, on the daemon's stdout
+# — which the daemon relays line by line into the deploy's task output. That is
+# the drift report for a node the Mini cannot reach: an operator reads the
+# node's real spec off the deploy leg and compares it with what
+# deploy/prod/chuggernaut.env declares, with no ssh and no UI.
+#
+# The two that fail SILENTLY get their own line, because their absence looks
+# exactly like a working node: caching off is a slow node (#55), and a boot
+# capacity back at the daemon's default is an over-committed one.
+refresh_run_spec_report() {
+  echo "worker-refresh: run spec on ${WORKER_NODE:-?} ($1): WORKER_SLOTS=${WORKER_SLOTS:-<unset>} WORKER_CACHE_DIR=${WORKER_CACHE_DIR:-<unset>} WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-<unset>} WORKER_GIT_KEY=${WORKER_GIT_KEY:-/data/keys/worker_git}"
+  if [ -z "${WORKER_CACHE_DIR:-}" ]; then
+    echo "worker-refresh: WARNING: WORKER_CACHE_DIR is unset — this node builds with sccache OFF; if that is not deliberate the value was dropped at some daemon (re)creation and only build-worker.sh can put it back"
+  fi
+  if [ -z "${WORKER_SLOTS:-}" ]; then
+    echo "worker-refresh: WARNING: WORKER_SLOTS is unset — this node boots at the daemon's default of 4 until the dispatcher reconciles its recorded intent"
+  fi
 }
 
 # ── docker disk hygiene (deploy #248) ────────────────────────────────────────
@@ -203,6 +235,7 @@ build)
   # with NO agent images because a refresh mutated before it validated its own
   # config; nothing below this block may touch a live image until the new one is
   # built to completion.
+  refresh_run_spec_report build
   GIT_URL="${WORKER_REFRESH_GIT_URL:?set WORKER_REFRESH_GIT_URL (ssh://git@<ssh-front>:2222/<owner>/<repo>.git)}"
   KEY="${WORKER_GIT_KEY:-/data/keys/worker_git}"
   if [ ! -f "$KEY" ]; then
@@ -363,6 +396,9 @@ swap)
   # The replacement carries the SAME env the daemon runs with (inherited here).
   NODE="${WORKER_NODE:?WORKER_NODE must be set}"
   NATS="${NATS_URL:?NATS_URL must be set}"
+  # Reported again here because THIS is the moment the spec is re-applied: what
+  # the swap carries forward is what the node runs until someone recreates it.
+  refresh_run_spec_report swap
   CREDS="${NATS_CREDS:-/data/keys/worker.creds}"
   SWAP_IMAGE="${WORKER_SWAP_IMAGE:-docker:cli}"
 

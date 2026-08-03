@@ -747,6 +747,56 @@ if grep -F "chug-worker-swap" "$LOG" | grep -qE "WORKER_NIX|/nix/store"; then
 fi
 echo "ok: swap adds nothing nix when WORKER_NIX_GCROOTS_DIR is unset"
 
+# ── Case 3m: every phase REPORTS the run spec it is running (ticket #390) ─────
+# This script's config is INHERITED from the daemon's own environment, which is
+# the only mechanism it can have — the swap runs inside chug-worker and the
+# dispatcher host cannot ssh a tagged worker, so nothing here can read
+# chuggernaut.env. Inheritance is how a value survives; it is not how a value is
+# DECLARED, and #390 found four settings living only inside the container. The
+# node therefore states its own spec on stdout, which the daemon relays into the
+# deploy's task output — that report IS the drift check for a node the Mini
+# cannot reach, and it costs no UI and no new mechanism.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=air NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  WORKER_SLOTS=2 \
+  WORKER_CACHE_DIR=/Users/op/chuggernaut-worker/sccache \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  WORKER_GIT_KEY=/data/keys/worker_git \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+
+grep_out "run spec on air (swap): WORKER_SLOTS=2 WORKER_CACHE_DIR=/Users/op/chuggernaut-worker/sccache WORKER_REFRESH_GIT_URL=ssh://git@front:2222/acme/chug.git WORKER_GIT_KEY=/data/keys/worker_git"
+if grep -qF "WARNING" "$OUT"; then
+  fail "a fully specified node must report its spec without warning about it"
+fi
+
+# The build phase reports it too — it runs FIRST and for minutes, so it is the
+# report that reaches the deploy while the daemon relaying it is still alive.
+PATH="$BIN:$PATH" \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  WORKER_GIT_KEY="$KEY" \
+  WORKER_NODE=air WORKER_SLOTS=2 WORKER_CACHE_DIR=/Users/op/chuggernaut-worker/sccache \
+  FAKE_FETCH_HEAD=abc123 \
+  sh "$SUT" build abc123 prod > "$OUT" 2>&1
+grep_out "run spec on air (build): WORKER_SLOTS=2"
+echo "ok: both phases report the run spec the node is actually running"
+
+# ── Case 3n: the two settings that fail SILENTLY say so, by name ──────────────
+# Their absence looks exactly like a healthy node: caching off is a slow node
+# (#55's dormant cache, which took a dedicated fix to notice), and a dropped
+# capacity is an over-committed one. Nothing else reports either.
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+
+grep_out "WARNING: WORKER_CACHE_DIR is unset"
+grep_out "WARNING: WORKER_SLOTS is unset"
+grep_out "run spec on nuc (swap): WORKER_SLOTS=<unset> WORKER_CACHE_DIR=<unset>"
+# Reporting is all it does: a node missing a value must still swap, or a deploy
+# would leave it stranded on the old SHA over a line of config.
+grep_log "docker run -d --name chug-worker-swap"
+echo "ok: an unset cache dir or capacity is named out loud, and still swaps"
+
 # ── Case 4: unknown phase is a hard error ────────────────────────────────────
 if PATH="$BIN:$PATH" sh "$SUT" frobnicate 2>/dev/null; then
   fail "unknown phase should exit non-zero"

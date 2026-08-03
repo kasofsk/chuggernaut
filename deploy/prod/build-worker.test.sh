@@ -45,6 +45,9 @@ EOF
 #   * the cache-dir provisioning (`mkdir -p …`) succeeds unless $FAIL_MKDIR is
 #     set, which models a node where neither the login user nor `sudo -n` can
 #     create the path;
+#   * the LIVE daemon's environment (`...Config.Env...`, the run-spec drift
+#     check) echoes $FAKE_LIVE_ENV — empty by default, which is a node with no
+#     chug-worker yet and therefore nothing that can drift;
 #   * the nix preconditions (`[ -d '/nix/store' ] …`) and the toolchain-shape
 #     probe (`[ -L … ]`) succeed unless $FAIL_NIX_PRECHECK / $FAIL_SDK_PRECHECK
 #     is set.
@@ -56,6 +59,7 @@ case "\$*" in
   *chug.git.sha*)  echo "\${FAKE_LABEL:-deadbeefcafe}" ;;
   *State.Running*) [ -n "\${FAIL_PROBE:-}" ] || echo HEALTHY ;;
   *mkdir*)         [ -z "\${FAIL_MKDIR:-}" ] || exit 1 ;;
+  *Config.Env*)    [ -z "\${FAKE_LIVE_ENV:-}" ] || printf '%s\n' "\${FAKE_LIVE_ENV}" ;;
   *"[ -d '/nix/store' ]"*) [ -z "\${FAIL_NIX_PRECHECK:-}" ] || exit 1 ;;
   *"[ -L "*)       [ -z "\${FAIL_SDK_PRECHECK:-}" ] || exit 1 ;;
 esac
@@ -661,5 +665,166 @@ set -e
 grep -qF "did NOT report healthy" "$WORK/probe.out" || fail "probe timeout must be loud"
 grep -qF "deployed" "$WORK/probe.out" && fail "must not print a 'deployed' message when the probe times out"
 echo "ok: unhealthy daemon times out loudly (non-zero, no 'deployed' claim)"
+
+# ── Case 6: a per-node declaration wins over the bare one (ticket #390) ───────
+# The fleet's nodes do not share paths — a colima node's cache lives under the
+# mac home shared into the VM, a NixOS node's under /var/cache — so a
+# single-valued chuggernaut.env can be true of only one of them, and the other
+# node's spec then lives nowhere but inside its running container. That is the
+# shape #265 reason 3 predicted and #390 measured. <VAR>_<node> is how one env
+# file declares a fleet; the bare value stays the default for the rest.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  WORKER_SLOTS=4 \
+  WORKER_SLOTS_air=2 \
+  WORKER_CACHE_DIR=/var/cache/chuggernaut/sccache \
+  WORKER_CACHE_DIR_air=/Users/op/chuggernaut-worker/sccache \
+  sh "$SUT"
+
+grep_log "WORKER_SLOTS=2"
+grep_log "WORKER_CACHE_DIR=/Users/op/chuggernaut-worker/sccache"
+if grep -qF "WORKER_SLOTS=4" "$LOG"; then
+  fail "a per-node WORKER_SLOTS_air must win over the bare WORKER_SLOTS"
+fi
+if grep -qF "WORKER_CACHE_DIR=/var/cache/chuggernaut/sccache" "$LOG"; then
+  fail "a per-node WORKER_CACHE_DIR_air must win over the bare WORKER_CACHE_DIR"
+fi
+# The per-node value is the one PROVISIONED too — a host dir created at the
+# fleet-wide path would leave the node's every launch failing on a missing bind
+# source (#379/#380) while the deploy claimed success.
+grep_log "mkdir -p '/Users/op/chuggernaut-worker/sccache'"
+echo "ok: <VAR>_<node> wins over the bare <VAR>, for the run spec and the provisioning"
+
+# ── Case 6b: another node's declaration must not leak onto this node ──────────
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_SLOTS_air=2 \
+  WORKER_CACHE_DIR_air=/Users/op/chuggernaut-worker/sccache \
+  sh "$SUT"
+
+if grep -qE "WORKER_SLOTS|WORKER_CACHE_DIR" "$LOG"; then
+  fail "the air's declarations must not reach the nuc"
+fi
+echo "ok: a per-node declaration applies to that node only"
+
+# ── Case 6c: WORKER_SSH is NOT resolved per node (prod's deploy depends on it) ─
+# `WORKER_SSH` is the switch that says this machine can reach the node at all,
+# and update.sh calls this script on every prod deploy expecting the no-op —
+# the Mini cannot ssh a tagged worker. A per-node destination that turned the
+# script ON would make every deploy try, and fail, to reach a node it cannot.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  WORKER_SSH_air=worksalot@air \
+  sh "$SUT" > "$WORK/nossh.out" 2>&1
+if [ -s "$LOG" ]; then
+  fail "WORKER_SSH_<node> must not switch the script on (prod's deploy relies on the no-op)"
+fi
+echo "ok: WORKER_SSH stays the switch — a per-node destination cannot turn the script on"
+
+# ── Case 7: a live setting this run would DROP refuses the restart ────────────
+# `docker rm -f chug-worker` makes the composed spec the node's whole truth, so
+# anything the live daemon carries and this composition does not is dropped
+# silently — caching off (#55), the boot capacity back at 4, or a node that
+# keeps serving jobs and quietly stops updating. Refuse while the live daemon is
+# still running, exactly as the label and KVM-device guards do.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  FAKE_LIVE_ENV="WORKER_NODE=nuc
+WORKER_SLOTS=2
+WORKER_CACHE_DIR=/var/cache/chuggernaut/sccache
+WORKER_REFRESH_GIT_URL=ssh://git@front:2222/acme/chug.git
+PATH=/usr/bin" \
+  sh "$SUT" >"$WORK/drift.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a run spec that drops a live setting must fail the deploy (got rc=0)"
+grep -qF "WORKER_SLOTS" "$WORK/drift.out" || fail "the refusal must name every dropped setting"
+grep -qF "WORKER_CACHE_DIR" "$WORK/drift.out" || fail "the refusal must name every dropped setting"
+grep -qF "REFUSING daemon restart" "$WORK/drift.out" || fail "a drop must refuse, not warn"
+# WORKER_REFRESH_GIT_URL is always passed (empty when unset), so it is not
+# dropped — but an empty one is its own loud line, not silence.
+grep -qF "WORKER_REFRESH_GIT_URL is undeclared" "$WORK/drift.out" \
+  || fail "an undeclared refresh URL must be loud on its own"
+if grep -qF "docker run -d --restart=always --name chug-worker" "$LOG"; then
+  fail "a dropped setting must not reach the daemon restart (live daemon untouched)"
+fi
+echo "ok: a live setting nothing declares refuses the restart and names itself"
+
+# ── Case 7b: the drop is deliberate ⇒ WORKER_SPEC_DROP_OK=1 proceeds, loudly ──
+# Removing a setting on purpose is a real thing to want; it just has to be said
+# out loud rather than happen by omission.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_SPEC_DROP_OK=1 \
+  FAKE_LIVE_ENV="WORKER_NODE=nuc
+WORKER_CACHE_DIR=/var/cache/chuggernaut/sccache" \
+  sh "$SUT" >"$WORK/dropok.out" 2>&1
+
+grep -qF "dropping WORKER_CACHE_DIR" "$WORK/dropok.out" \
+  || fail "a deliberate drop must still say what it dropped"
+grep_log "docker run -d --restart=always --name chug-worker"
+echo "ok: WORKER_SPEC_DROP_OK=1 proceeds and still names what it dropped"
+
+# ── Case 7c: a fully declared spec is clean; a CHANGED value is informational ─
+# The declaration is authoritative at node creation, so an edit to
+# chuggernaut.env is meant to change the node — it reports, it does not refuse.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_SLOTS=4 \
+  WORKER_CACHE_DIR=/var/cache/chuggernaut/sccache \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  WORKER_GIT_KEY=/data/keys/worker_git \
+  FAKE_LIVE_ENV="WORKER_NODE=nuc
+WORKER_SLOTS=2
+WORKER_CACHE_DIR=/var/cache/chuggernaut/sccache
+WORKER_REFRESH_GIT_URL=ssh://git@front:2222/acme/chug.git
+WORKER_GIT_KEY=/data/keys/worker_git" \
+  sh "$SUT" >"$WORK/clean.out" 2>&1
+
+grep -qF "REFUSING" "$WORK/clean.out" && fail "a fully declared spec must not refuse"
+grep -qF "WORKER_SLOTS: live '2' -> declared '4'" "$WORK/clean.out" \
+  || fail "a changed value must be reported before it is applied"
+grep_log "docker run -d --restart=always --name chug-worker"
+echo "ok: a declared spec proceeds, reporting what the deploy changes"
+
+# ── Case 7d: a knob this script does not FORWARD is a drop, declared or not ───
+# WORKER_SLOTS_MAX is the documented one (env.example): nothing forwards it, so
+# every daemon recreation drops it whatever chuggernaut.env says. Comparing
+# against the composed run rather than against the environment is what keeps
+# this from reading as clean.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_SLOTS_MAX=2 \
+  FAKE_LIVE_ENV="WORKER_NODE=nuc
+WORKER_SLOTS_MAX=2" \
+  sh "$SUT" >"$WORK/unforwarded.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an unforwarded live setting must fail the deploy (got rc=0)"
+grep -qF "build-worker.sh does not forward WORKER_SLOTS_MAX" "$WORK/unforwarded.out" \
+  || fail "the refusal must say the value is declared but never forwarded"
+echo "ok: a declared-but-unforwarded setting is reported as the drop it is"
 
 echo "ALL PASS"

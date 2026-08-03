@@ -18,6 +18,51 @@ fi
 cd "$(dirname "$0")/../.."             # workspace root
 TAG="${CHUG_IMAGE_TAG:-prod}"
 SHA="$(git rev-parse HEAD)"
+# The node this run builds. Read here rather than at the `docker run` below
+# because the per-node declaration layer keys off it, and everything the run
+# spec is composed from must be resolved before the first thing reads it.
+NODE="${CHUG_WORKER_NODE:-nuc}"
+
+# ── the DECLARED run spec (ticket #390) ──────────────────────────────────────
+# A fleet has more than one node and their paths differ (a colima node's cache
+# lives under the mac home that is shared into the VM; a NixOS node's under
+# /var/cache), so a single-valued `WORKER_CACHE_DIR` in chuggernaut.env can only
+# ever be true of ONE node — and the other node's spec then lives nowhere but
+# inside its running container, which is exactly how the four settings this
+# ticket found (#265 reason 3) came to survive by circulation instead of by
+# declaration. Any `WORKER_*_<node>` in the environment therefore overrides the
+# bare `WORKER_*` here, so one env file declares a FLEET.
+#
+# Derived from the environment rather than from a list of knob names: a list
+# would be a second copy of the run spec, drifting from the composition below
+# the first time a knob is added. Node names that are not shell identifiers
+# cannot be looked up this way — said once, out loud, instead of silently
+# ignoring a declaration the operator wrote.
+#
+# WORKER_SSH is deliberately NOT resolved per node: it is the switch that says
+# "this machine can reach that node at all" (the whole script no-ops without
+# it), and prod's deploy depends on that no-op — the Mini cannot ssh a tagged
+# worker. A per-node destination that switched the script ON, or retargeted it
+# after the images were built, would be a different script.
+build_worker_run_spec_per_node() {
+  case "$NODE" in
+    '' | *[!A-Za-z0-9_]*)
+      echo "build-worker: node name '$NODE' is not a shell identifier — per-node declarations (<VAR>_$NODE) cannot be looked up; using the bare values"
+      return 0
+      ;;
+  esac
+  for _var in $(env | sed -n "s/^\(WORKER_[A-Za-z0-9_]*\)_$NODE=.*/\1/p" | sort -u); do
+    [ "$_var" != "WORKER_SSH" ] || continue
+    # `env` prints VALUES too, so a multi-line one can contribute a line that
+    # merely LOOKS like a declaration; take only names that are really set,
+    # rather than clobbering a good value with an empty one.
+    eval "_set=\${${_var}_$NODE+x}"
+    [ -n "$_set" ] || continue
+    eval "$_var=\$${_var}_$NODE"
+    echo "build-worker: run spec: $_var declared per node (${_var}_$NODE)"
+  done
+}
+build_worker_run_spec_per_node
 
 # DOCKER_BUILDKIT=1 requests the in-daemon BuildKit builder so the Dockerfiles'
 # RUN --mount=type=cache dependency caches take effect (#115). It is a no-op on
@@ -38,7 +83,9 @@ PROBE_INTERVAL_SECS="${PROBE_INTERVAL_SECS:-3}"
 # deploy sailed on, leaving a stale daemon). With a staged file, `set -e` aborts
 # on the archive step itself, and the build reads a complete, verified context.
 CTX="$(mktemp)"
-trap 'rm -f "$CTX"' EXIT INT TERM
+# Scratch for the run-spec drift check below (the live daemon's environment).
+SPEC="$(mktemp)"
+trap 'rm -f "$CTX" "$SPEC"' EXIT INT TERM
 
 # Worker daemon image (repo-root context; bakes chuggernaut + channel binary).
 # --label chug.git.sha=<sha> stamps the requested SHA INTO the image so we can
@@ -74,12 +121,19 @@ ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/agent-rust:$TAG \
 # (Re)start the worker daemon on the new image. Safe mid-job: containers
 # survive, the dispatcher's poll-based wait re-attaches (spec §3.1).
 # NODE/NATS URL expand HERE (from chuggernaut.env); \$HOME expands on the node.
-NODE="${CHUG_WORKER_NODE:-nuc}"
 NATS="${WORKER_NATS_URL:?set WORKER_NATS_URL (tailnet NATS URL of the dispatcher host)}"
 # Pass the self-refresh coordinates (spec §3.1) through so a daemon started via
 # this legacy path can also be refreshed later over the worker RPC (no-ssh path).
 # Empty when unset — the daemon then just rejects refresh requests.
 REFRESH_ENV="-e WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-} -e WORKER_GIT_KEY=${WORKER_GIT_KEY:-/data/keys/worker_git}"
+# An empty URL is not a neutral default: the node comes up healthy, serves jobs,
+# and is SKIPPED by every subsequent deploy — a node that looks like it is
+# participating and has quietly stopped updating (#382, one guise over). The
+# daemon reports the skip when a deploy asks it to refresh; this says it at the
+# moment the node is given the spec, which is the moment it can still be fixed.
+if [ -z "${WORKER_REFRESH_GIT_URL:-}" ]; then
+  echo "build-worker: WARNING: WORKER_REFRESH_GIT_URL is undeclared — $NODE will be built WITHOUT self-refresh coordinates and every deploy will SKIP it ('refresh SKIPPED — no git credential'). Declare it in deploy/prod/chuggernaut.env on the Mini (README §6)." >&2
+fi
 # Node-local build cache (spec §3.1 "Node-local build caching"): pass the HOST
 # path as ENV ONLY — no bind-mount into the DAEMON container is needed. The
 # daemon adds the cache bind to each *sibling* job container via the docker
@@ -358,6 +412,81 @@ docker run -d --restart=always --name chug-worker \
   $NIX_ENV \
   $NIX_MOUNT_ARGS \
   chuggernaut/worker:$TAG >/dev/null"
+
+# ── run-spec drift (ticket #390) ─────────────────────────────────────────────
+# The live container is not a declaration. Everything above composes the run
+# spec from the environment, and `docker rm -f chug-worker` then makes that
+# composition the node's whole truth — so any setting the LIVE daemon carries
+# that this composition does not is DROPPED here, silently, and the node comes
+# back degraded in a way nothing reports: caching off (#55), the boot capacity
+# back at the daemon's default, or a node that keeps serving jobs and quietly
+# stops updating. That is #265 reason 3, and this is where it is catchable.
+#
+# The comparison is against $REMOTE, not against the shell's variables, because
+# only $REMOTE knows what will actually be passed: a knob this script does not
+# forward (WORKER_SLOTS_MAX is the documented one) is dropped no matter what
+# chuggernaut.env says about it, and a check that read the env would call that
+# clean. Presence decides the refusal; the VALUE comparison is informational
+# only, so a quoted value this cannot parse costs a noisy line and never a
+# wrong verdict.
+#
+# A drop REFUSES, with the live daemon still running, in the same spirit as the
+# label and KVM-device guards above — removing a setting on purpose is a real
+# thing to want, so WORKER_SPEC_DROP_OK=1 is the way to say so out loud.
+build_worker_run_spec_drift() {
+  # stdin from /dev/null: this ssh reads nothing, and update.sh runs this whole
+  # script over an ssh session whose stdin it must not swallow.
+  ssh "$WORKER_SSH" \
+    "docker inspect chug-worker --format '{{range .Config.Env}}{{println .}}{{end}}'" \
+    > "$SPEC" 2>/dev/null < /dev/null || true
+  if [ ! -s "$SPEC" ]; then
+    echo "build-worker: no live chug-worker on $WORKER_SSH to compare against — this run declares $NODE's whole run spec"
+    return 0
+  fi
+  _dropped=""
+  while IFS= read -r _line; do
+    case "$_line" in
+      WORKER_*=*) ;;
+      *) continue ;;
+    esac
+    _key="${_line%%=*}"
+    _live="${_line#*=}"
+    case "$_key" in
+      *[!A-Za-z0-9_]*) continue ;;
+    esac
+    _passed=""
+    case "$REMOTE" in
+      *"-e $_key="*) _passed=1 ;;
+    esac
+    if [ -z "$_passed" ]; then
+      _dropped="$_dropped $_key"
+      eval "_declared=\${$_key:-}"
+      if [ -n "$_declared" ]; then
+        echo "build-worker: run-spec DRIFT on $NODE: the live daemon runs $_key=$_live and it IS declared, but build-worker.sh does not forward $_key — recreating the daemon DROPS it (env.example says so for WORKER_SLOTS_MAX)" >&2
+      else
+        echo "build-worker: run-spec DRIFT on $NODE: the live daemon runs $_key=$_live and nothing declares it — recreating the daemon DROPS it" >&2
+      fi
+      continue
+    fi
+    case "$_key" in
+      WORKER_NODE) _declared="$NODE" ;;
+      WORKER_GIT_KEY) _declared="${WORKER_GIT_KEY:-/data/keys/worker_git}" ;;
+      *) eval "_declared=\${$_key:-}" ;;
+    esac
+    [ "$_declared" != "$_live" ] || continue
+    echo "build-worker: run-spec change on $NODE: $_key: live '$_live' -> declared '$_declared'"
+  done < "$SPEC"
+  [ -n "$_dropped" ] || return 0
+  if [ -n "${WORKER_SPEC_DROP_OK:-}" ]; then
+    echo "build-worker: WORKER_SPEC_DROP_OK is set — dropping$_dropped from $NODE's run spec deliberately"
+    return 0
+  fi
+  echo "build-worker: REFUSING daemon restart (live daemon untouched): the run spec composed here drops$_dropped, which the live daemon on $NODE is running. Declare them in deploy/prod/chuggernaut.env ON THE MINI — per node as <VAR>_$NODE (deploy/prod/README.md §6) — or set WORKER_SPEC_DROP_OK=1 to remove them on purpose." >&2
+  return 1
+}
+build_worker_run_spec_drift || exit 1
+
+echo "build-worker: run spec for $NODE: WORKER_SLOTS=${WORKER_SLOTS:-<unset: daemon default 4>} WORKER_CACHE_DIR=${WORKER_CACHE_DIR:-<unset: caching OFF>} WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-<unset: cannot self-refresh>} WORKER_GIT_KEY=${WORKER_GIT_KEY:-/data/keys/worker_git}"
 ssh "$WORKER_SSH" "$REMOTE"
 
 # Positively PROVE the daemon actually came up before we claim "deployed". An

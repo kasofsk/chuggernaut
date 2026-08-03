@@ -114,10 +114,16 @@ WORKER_NATS_URL=nats://100.x.y.z:4222 \
   `DOCKER_NODES` entry** or the dispatcher won't schedule to it. Default `nuc`.
 - `WORKER_NATS_URL` — **required**; the **tailnet** NATS URL of the dispatcher
   host (the tailnet-IP form of `NATS_URL_CONTAINER`), not `localhost`.
-- Optional but usually wanted here: `WORKER_CACHE_DIR`,
-  `WORKER_REFRESH_GIT_URL`, `WORKER_GIT_KEY` — the script forwards them to the
-  daemon's `docker run` (see §1c for why they matter). All three normally come
-  from `chuggernaut.env`. `WORKER_CACHE_DIR`'s host path is created on the node
+- The rest of the run spec — `WORKER_SLOTS`, `WORKER_CACHE_DIR`,
+  `WORKER_REFRESH_GIT_URL`, `WORKER_GIT_KEY` — comes from `chuggernaut.env`, so
+  **source it** (`set -a; . deploy/prod/chuggernaut.env; set +a`) instead of
+  retyping values: each may be declared per node as `<VAR>_<node>`, and the
+  script forwards what it resolves to the daemon's `docker run` (see §1c for why
+  they matter). Before it replaces a live daemon the script compares the
+  container's environment with the run it is about to compose and **refuses**
+  when the new run would drop something the node is running — declare it, or
+  pass `WORKER_SPEC_DROP_OK=1` to drop it deliberately.
+- `WORKER_CACHE_DIR`'s host path is created on the node
   by this script before it starts the daemon (`mkdir -p`, falling back to
   `sudo -n mkdir -p`); a path it cannot create refuses the deploy with the live
   daemon untouched, because a missing one fails every launch there (§1c).
@@ -138,6 +144,13 @@ ssh "$WORKER_SSH" 'docker ps --filter name=chug-worker --format "{{.Image}} {{.S
 **When:** the daemon is wedged, was started without the cache/refresh env, or you
 need to (re)start it standalone without a full image rebuild. This is the exact
 `docker run` `build-worker.sh` issues — reproduce it by hand:
+
+**Whatever you set here, declare it too**, in `deploy/prod/chuggernaut.env` on
+the Mini (per node as `<VAR>_<node>`, `deploy/prod/README.md` §6). A value that
+exists only in this by-hand `docker run` survives by circulation — the self-
+refresh swap re-applies the daemon's own environment — until the first
+recreation drops it silently. The next `build-worker.sh` on this node refuses
+rather than dropping it, which is the reminder, not the fix.
 
 Passing `WORKER_CACHE_DIR`? Provision the host path first, on the node. This is
 the by-hand path, so nothing does it for you here — `build-worker.sh` (§1b) is
