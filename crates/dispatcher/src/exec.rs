@@ -448,6 +448,7 @@ impl Core {
                     session_id: session_id.clone().unwrap_or_default(),
                     node: job_type.placement_node().map(String::from),
                     permissions: agent::PermissionProfile::Work,
+                    runtime_env: job_type.runtime_env().map(String::from),
                 };
                 let provider = self.provider.clone();
                 let tx = self.self_tx.clone().expect("spawned core");
@@ -1547,6 +1548,7 @@ impl Core {
             ),
             ("NATS_URL".into(), self.config.nats_url.clone()),
         ]);
+        self.inject_job_sha(owner, project, branch, &mut env).await;
         match &role {
             ChannelRole::Work { .. } => {
                 env.insert("CHANNEL_ROLE".into(), "work".into());
@@ -1628,6 +1630,28 @@ impl Core {
         }
         self.container_env_inputs(owner, project, seq, &mut env)?;
         Ok(env)
+    }
+
+    /// The job branch's commit at launch, beside the branch name it pins
+    /// (design #373 3a). A node resolving a relative `runtime.env` needs a
+    /// commit rather than a moving ref; a branch that does not resolve yet
+    /// simply carries no sha, and the node falls back to the branch.
+    async fn inject_job_sha(
+        &self,
+        owner: &str,
+        project: &str,
+        branch: &str,
+        env: &mut HashMap<String, String>,
+    ) {
+        match self.repos.resolve_ref(owner, project, branch).await {
+            Ok(sha) => {
+                env.insert("JOB_SHA".into(), sha);
+            }
+            Err(e) => tracing::debug!(
+                "{owner}/{project}: branch {branch} does not resolve to a commit yet ({e}); \
+                 a relative runtime.env resolves against the branch instead"
+            ),
+        }
     }
 
     /// The last write into a container env: the job's §1.1 inputs, under the one

@@ -898,6 +898,7 @@ impl Core {
             session_id: session_id.unwrap_or_default(),
             node: job_type.placement_node().map(String::from),
             permissions: agent::PermissionProfile::Review,
+            runtime_env: job_type.runtime_env().map(String::from),
         };
         let provider = self.provider.clone();
         let harvest = self.harvester();

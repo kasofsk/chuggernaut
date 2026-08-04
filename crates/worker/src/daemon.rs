@@ -12,7 +12,7 @@
 
 use crate::capacity::Capacity;
 use crate::config::{WorkerConfig, WorkerMode};
-use crate::nix::{NixRoots, REAP_AGE_MIN};
+use crate::nix::{NixRoots, REAP_AGE_MIN, Realised, flake_installable};
 use container::docker::{DockerBackend, DockerNodeConfig, KvmGrant};
 use container::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
@@ -525,6 +525,9 @@ async fn build_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend
         );
         backend = backend.with_kvm(grant);
     }
+    if config.nix_gcroots_dir.is_some() {
+        backend = backend.with_nix_store(config.nix_store_dir.clone());
+    }
     backend.ping_all().await?;
     Ok(Arc::new(backend))
 }
@@ -552,6 +555,12 @@ fn nix_roots(config: &WorkerConfig) -> Result<Option<Arc<NixRoots>>, WorkerRunEr
     };
     let roots = NixRoots {
         client: config.nix_client.clone(),
+        flake_client: config.nix_flake_client.clone(),
+        projects: config.nix_projects.clone(),
+        git_key: config
+            .refresh_git_key
+            .exists()
+            .then(|| config.refresh_git_key.clone()),
         gcroots_dir,
         daemon_socket: config.nix_daemon_socket.clone(),
         store_dir: config.nix_store_dir.clone(),
@@ -564,17 +573,23 @@ fn nix_roots(config: &WorkerConfig) -> Result<Option<Arc<NixRoots>>, WorkerRunEr
     roots
         .check(realise_target)
         .map_err(WorkerRunError::Config)?;
-    if config.kvm_device.is_none() {
+    if config.kvm_device.is_none() && roots.projects.is_empty() {
         tracing::warn!(
             "WORKER_NIX_GCROOTS_DIR is set but this node passes no toolchain through \
-             (WORKER_KVM unset) — nothing hands a task store paths, so no root is ever taken"
+             (WORKER_KVM unset) and allow-lists no project toolchains \
+             (WORKER_NIX_PROJECTS empty) — nothing hands a task store paths, so no root is \
+             ever taken"
         );
     }
     tracing::info!(
         gcroots_dir = %roots.gcroots_dir.display(),
         client = %roots.client.display(),
+        flake_client = %roots.flake_client.display(),
+        projects = ?roots.projects,
         realise_timeout_secs = config.nix_realise_timeout_secs,
-        "per-task nix GC roots enabled (design #373 P1)"
+        "per-task nix GC roots enabled; the allow-listed projects may have their declared \
+         runtime.env realised HERE, which evaluates their flake inside chug-worker \
+         (design #373 P2, 3b)"
     );
     Ok(Some(Arc::new(roots)))
 }
@@ -814,7 +829,7 @@ async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
             let mut env = req.env;
             inject_cache_env(&mut env, state.cache_enabled);
             inject_toolchain_env(&mut env, state.kvm.as_ref());
-            let rooted = realise_for_launch(state, &env).await?;
+            let rooted = realise_for_launch(state, &mut env, req.runtime_env.as_deref()).await?;
             let launched = state
                 .backend
                 .launch(ContainerLaunchConfig {
@@ -825,6 +840,7 @@ async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
                     cpu_limit: req.cpu_limit,
                     memory_limit: req.memory_limit,
                     node: None,
+                    runtime_env: req.runtime_env,
                 })
                 .await;
             let id = match launched {
@@ -894,13 +910,18 @@ fn inject_toolchain_env(env: &mut HashMap<String, String>, kvm: Option<&KvmGrant
 }
 
 /// Realise the toolchain this launch is about to be given, and hold a GC root
-/// over it for the task's lifetime (design #373 P1). Returns the task the root
-/// names, or `None` when this node takes no roots or this launch gets no
-/// toolchain — the same [`KvmGrant::admits`] decision the mounts already turn on.
+/// over it for the task's lifetime (design #373 P1, P2). A launch declaring
+/// `runtime.env` takes its own root; one that declares none keeps P1's behavior
+/// — the node's own toolchain, on the [`KvmGrant::admits`] decision the mounts
+/// already turn on.
 async fn realise_for_launch(
     state: &WorkerState,
-    env: &HashMap<String, String>,
+    env: &mut HashMap<String, String>,
+    runtime_env: Option<&str>,
 ) -> Result<Option<String>, WorkerError> {
+    if let Some(env_ref) = runtime_env {
+        return realise_declared_env(state, env, env_ref).await;
+    }
     let Some(roots) = state.nix.as_ref() else {
         return Ok(None);
     };
@@ -917,6 +938,72 @@ async fn realise_for_launch(
     Ok(Some(task_id))
 }
 
+/// Realise the environment the job type declared, for an allow-listed project
+/// only (design #373 P2), and point the task at what was realised. Every path
+/// out of here is either that environment or a **named refusal** — never a
+/// container running against whatever the image happens to carry.
+async fn realise_declared_env(
+    state: &WorkerState,
+    env: &mut HashMap<String, String>,
+    env_ref: &str,
+) -> Result<Option<String>, WorkerError> {
+    let (roots, task_id, installable) =
+        declared_env_plan(state.nix.as_deref(), &state.node, env, env_ref)?;
+    let realised = roots
+        .realise_env(&task_id, &installable)
+        .await
+        .map_err(launch_refused)?;
+    tracing::info!(task = %task_id, installable = %installable, path = %realised.path.display(), "realised a project-declared runtime.env");
+    inject_runtime_env_path(env, &realised);
+    Ok(Some(task_id))
+}
+
+/// The decision half of [`realise_declared_env`]: what this node would realise
+/// for a launch, or the named refusal. Pure, so every refusal is asserted
+/// without a nix daemon.
+fn declared_env_plan<'a>(
+    roots: Option<&'a NixRoots>,
+    node: &str,
+    env: &HashMap<String, String>,
+    env_ref: &str,
+) -> Result<(&'a NixRoots, String, String), WorkerError> {
+    let roots = roots.ok_or_else(|| {
+        launch_refused(format!(
+            "launch declares runtime.env {env_ref:?} and node {node} realises no environments \
+             (WORKER_NIX_GCROOTS_DIR unset) — refused rather than run without the declared \
+             toolchain (design #373 P2)"
+        ))
+    })?;
+    if !roots.admits(env) {
+        return Err(launch_refused(format!(
+            "launch declares runtime.env {env_ref:?} for project {:?}, which node {node} does not \
+             allow-list (WORKER_NIX_PROJECTS grants {:?}; empty grants nobody) — a job type asks \
+             for an environment, never for a privilege (design #373 Decision 2 rule 3)",
+            env.get("JOB_PROJECT").map_or("<unset>", String::as_str),
+            roots.projects
+        )));
+    }
+    let task_id = rooted_task_id_required(env)?;
+    let installable = flake_installable(
+        env_ref,
+        env.get("REPO_URL").map_or("", String::as_str),
+        env.get("JOB_BRANCH").map_or("", String::as_str),
+        env.get("JOB_SHA").map(String::as_str),
+    )
+    .map_err(launch_refused)?;
+    Ok((roots, task_id, installable))
+}
+
+/// Point the task at what was realised, under the one name the
+/// dispatcher-built bootstrap guard reads before it runs anything (design #373
+/// P2, C7).
+fn inject_runtime_env_path(env: &mut HashMap<String, String>, realised: &Realised) {
+    env.insert(
+        container::RUNTIME_ENV_PATH_VAR.to_string(),
+        realised.path.display().to_string(),
+    );
+}
+
 /// Which task a launch takes a GC root for: `None` when the launch gets no
 /// toolchain — the same [`KvmGrant::admits`] decision the mounts turn on — and a
 /// refusal when an admitted launch names no task. Pure, so the fork is tested
@@ -928,15 +1015,20 @@ fn rooted_task_id(
     if !kvm.is_some_and(|grant| grant.admits(env)) {
         return Ok(None);
     }
-    let task_id = env.get("CHUG_TASK_ID").ok_or_else(|| {
+    rooted_task_id_required(env).map(Some)
+}
+
+/// The task a root is named by, or the refusal for a launch that names none. A
+/// root the node cannot name is a closure nothing releases.
+fn rooted_task_id_required(env: &HashMap<String, String>) -> Result<String, WorkerError> {
+    env.get("CHUG_TASK_ID").cloned().ok_or_else(|| {
         launch_refused(
             "this node roots a launch's toolchain per task, but the launch carries no \
              CHUG_TASK_ID — refused rather than run against a collectable closure (design \
              #373 Decision 4)"
                 .to_string(),
         )
-    })?;
-    Ok(Some(task_id.clone()))
+    })
 }
 
 /// A realise that fails REFUSES the launch: `Launch`, never `NoCapacity`. A
@@ -1911,6 +2003,109 @@ mod tests {
             launch_refused("realise exceeded WORKER_NIX_REALISE_TIMEOUT_SECS=600s".into()),
             WorkerError::Launch { .. }
         ));
+    }
+
+    fn nix_roots_for(projects: &[&str]) -> NixRoots {
+        NixRoots {
+            projects: projects.iter().map(|p| (*p).to_string()).collect(),
+            gcroots_dir: PathBuf::from("/var/lib/chuggernaut/gcroots"),
+            client: PathBuf::from("/nix/var/nix/profiles/system/sw/bin/nix-store"),
+            flake_client: PathBuf::from("/nix/var/nix/profiles/system/sw/bin/nix"),
+            git_key: None,
+            daemon_socket: PathBuf::from("/nix/var/nix/daemon-socket/socket"),
+            store_dir: PathBuf::from("/nix/store"),
+            realise_timeout: Duration::from_secs(45),
+        }
+    }
+
+    fn declared_env_launch(project: &str) -> HashMap<String, String> {
+        HashMap::from([
+            ("JOB_PROJECT".to_string(), project.to_string()),
+            ("CHUG_TASK_ID".to_string(), "42".to_string()),
+            (
+                "REPO_URL".to_string(),
+                "ssh://git@front:2222/acme/beacon.git".to_string(),
+            ),
+            ("JOB_BRANCH".to_string(), "job/403".to_string()),
+        ])
+    }
+
+    /// Every refusal on the project-declared path is a NAMED `Launch` failure
+    /// (design #373 P2), never `NoCapacity` and never a fall-through to a
+    /// container without the toolchain: a node that realises nothing, a project
+    /// the node does not allow-list, an empty allow-list, and a launch that
+    /// names no task.
+    #[test]
+    fn a_declared_env_is_refused_by_name_before_anything_is_realised() {
+        let granted = nix_roots_for(&["acme/beacon"]);
+        let refusal =
+            |roots: Option<&NixRoots>, env: &HashMap<String, String>| match declared_env_plan(
+                roots,
+                "nuc",
+                env,
+                "nix:.#chug-mobile",
+            ) {
+                Err(WorkerError::Launch { message }) => message,
+                other => panic!("a declared-env refusal must be Launch, got {other:?}"),
+            };
+
+        let unrealising = refusal(None, &declared_env_launch("acme/beacon"));
+        assert!(
+            unrealising.contains("WORKER_NIX_GCROOTS_DIR"),
+            "{unrealising}"
+        );
+
+        let ungranted = refusal(Some(&granted), &declared_env_launch("acme/api"));
+        assert!(ungranted.contains("WORKER_NIX_PROJECTS"), "{ungranted}");
+        assert!(ungranted.contains("acme/api"), "{ungranted}");
+
+        let nobody = refusal(
+            Some(&nix_roots_for(&[])),
+            &declared_env_launch("acme/beacon"),
+        );
+        assert!(nobody.contains("WORKER_NIX_PROJECTS"), "{nobody}");
+
+        let mut anonymous = declared_env_launch("acme/beacon");
+        anonymous.remove("CHUG_TASK_ID");
+        assert!(
+            refusal(Some(&granted), &anonymous).contains("CHUG_TASK_ID"),
+            "a root the node cannot name is a closure nothing releases"
+        );
+    }
+
+    /// An admitted launch resolves its relative ref against the job branch AT
+    /// the commit the task will check out, and what was realised reaches the
+    /// container under the one variable the bootstrap guard reads (design #373
+    /// 3a, C7).
+    #[test]
+    fn an_admitted_declared_env_resolves_against_the_branch_and_reaches_the_container() {
+        let granted = nix_roots_for(&["acme/beacon"]);
+        let sha = "4b84d2596f0e2b1c0a9a7d3e2f1c0b9a8d7e6f5a";
+        let mut env = declared_env_launch("acme/beacon");
+        env.insert("JOB_SHA".to_string(), sha.to_string());
+
+        let (roots, task_id, installable) =
+            declared_env_plan(Some(&granted), "nuc", &env, "nix:.#chug-mobile")
+                .expect("an allow-listed project's launch is planned");
+        assert_eq!(roots.projects, vec!["acme/beacon".to_string()]);
+        assert_eq!(task_id, "42");
+        assert_eq!(
+            installable,
+            format!("git+ssh://git@front:2222/acme/beacon.git?ref=job/403&rev={sha}#chug-mobile")
+        );
+
+        inject_runtime_env_path(
+            &mut env,
+            &Realised {
+                root: PathBuf::from("/var/lib/chuggernaut/gcroots/task-42"),
+                path: PathBuf::from("/nix/store/aaaa-env"),
+            },
+        );
+        assert_eq!(
+            env.get(container::RUNTIME_ENV_PATH_VAR).map(String::as_str),
+            Some("/nix/store/aaaa-env"),
+            "the realised path is what the task is pointed at: {env:?}"
+        );
     }
 
     /// The refresh skip decision (spec §3.1 / #114): a node with no git URL, or

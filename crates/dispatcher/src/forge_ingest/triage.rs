@@ -174,6 +174,7 @@ impl Core {
             session_id: session_id.clone(),
             node: None,
             permissions: agent::PermissionProfile::Review,
+            runtime_env: None,
         };
         let provider = self.provider.clone();
         let tx = self.self_tx.clone().expect("spawned core");

@@ -310,6 +310,24 @@ fi
 # project-code half of that cost. It does incur the rest: unbounded build CPU and
 # disk are reachable through the socket, which is why the realise is bounded and
 # the node is single-tenant (#373 Decision 1).
+#
+# WORKER_NIX_PROJECTS IS WHERE THAT COST BECOMES REAL (design #373 P2). Every
+# owner/project listed there may have its OWN flake realised on this node, and
+# flake evaluation is client-side and unsandboxed: it runs inside chug-worker,
+# beside docker.sock, the NATS creds and the git key. GRANTING IT GRANTS
+# EVALUATION, not merely a package. It is tolerable only because #373 Decision 1
+# makes such a node single-tenant — the boundary crossed is platform-vs-project,
+# never project-vs-project — so list one project's repos and nothing else, and
+# read the flakes you list. Unset (the default) grants nobody and this node
+# refuses every launch that declares runtime.env, loudly and by name.
+#
+# A DECLARED TOOLCHAIN MUST ALREADY BE IN THE STORE. The realise runs inside the
+# launch RPC and is capped at 45s (#373 C6), while a cold Flutter/Android closure
+# is priced at tens of minutes — so a job type whose environment is not already
+# substituted here does not run slowly, it does not run at all. Warm it out of
+# band, on the project's own clock: a scheduled job declaring the same
+# runtime.env is warmed by this same pre-launch realise (#373 Decision 5), and a
+# binary cache in the node's nix.conf is the operator's half.
 NIX_ENV=""
 NIX_MOUNT_ARGS=""
 GCROOTS="${WORKER_NIX_GCROOTS_DIR:-}"
@@ -364,6 +382,18 @@ if [ -n "$GCROOTS" ]; then
     fi
     NIX_ENV="$NIX_ENV -e WORKER_NIX_REALISE_TIMEOUT_SECS='$WORKER_NIX_REALISE_TIMEOUT_SECS'"
   fi
+  if [ -n "${WORKER_NIX_PROJECTS:-}" ]; then
+    NIX_FLAKE_CLIENT="${WORKER_NIX_FLAKE_CLIENT:-$NIX_PROFILES_DIR/system/sw/bin/nix}"
+    if ! ssh "$WORKER_SSH" "[ -x '$NIX_FLAKE_CLIENT' ]"; then
+      echo "build-worker: WORKER_NIX_PROJECTS grants '$WORKER_NIX_PROJECTS' project-declared toolchains, but '$NIX_FLAKE_CLIENT' is not executable on $WORKER_SSH — a flake ref is built with \`nix build\`, not \`nix-store --realise\`, so the daemon refuses to start and --restart=always would loop it; REFUSING daemon restart (live daemon untouched). Point WORKER_NIX_FLAKE_CLIENT at the node's nix binary through its profiles, or unset WORKER_NIX_PROJECTS." >&2
+      exit 1
+    fi
+    NIX_ENV="$NIX_ENV -e WORKER_NIX_PROJECTS='$WORKER_NIX_PROJECTS'"
+    if [ -n "${WORKER_NIX_FLAKE_CLIENT:-}" ]; then
+      NIX_ENV="$NIX_ENV -e WORKER_NIX_FLAKE_CLIENT='$WORKER_NIX_FLAKE_CLIENT'"
+    fi
+    echo "build-worker: WORKER_NIX_PROJECTS='$WORKER_NIX_PROJECTS' — these projects' OWN flakes will be evaluated inside chug-worker, beside docker.sock and the node's credentials (design #373 3b); the node must stay single-tenant and their toolchains must already be in '$NIX_STORE_DIR' (the realise is capped at 45s)"
+  fi
   NIX_MOUNT_ARGS="-v '$NIX_STORE_DIR':'$NIX_STORE_DIR':ro -v '$NIX_PROFILES_DIR':'$NIX_PROFILES_DIR':ro -v '$NIX_SOCKET_DIR':'$NIX_SOCKET_DIR' -v '$GCROOTS':'$GCROOTS'"
   # And a FIFTH mount when a device is actually attached: the DIRECTORY HOLDING
   # the toolchain path, never that path itself. `nix-store --realise` resolves
@@ -403,6 +433,12 @@ if [ -n "$GCROOTS" ]; then
     NIX_MOUNT_ARGS="$NIX_MOUNT_ARGS -v '$SDK_PARENT':'$SDK_PARENT':ro"
   fi
   echo "build-worker: per-task nix GC roots on — roots dir $GCROOTS present on $WORKER_SSH"
+elif [ -n "${WORKER_NIX_PROJECTS:-}" ]; then
+  # A grant the daemon can never act on is worse than no grant: the operator
+  # believes those projects' toolchains are served, and every launch declaring
+  # runtime.env is refused at the node instead.
+  echo "build-worker: WORKER_NIX_PROJECTS='$WORKER_NIX_PROJECTS' grants project-declared toolchains, but WORKER_NIX_GCROOTS_DIR is unset — a realised environment with no GC root is collectable mid-task, so the daemon realises nothing and refuses every launch declaring runtime.env; REFUSING (live daemon untouched). Set WORKER_NIX_GCROOTS_DIR, or unset WORKER_NIX_PROJECTS." >&2
+  exit 1
 fi
 # Log level for the daemon (ticket #270). The binary filters on RUST_LOG and its
 # default directive is ERROR, so a daemon started without it emits nothing — not

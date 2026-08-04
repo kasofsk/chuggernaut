@@ -28,10 +28,10 @@
 #     KVM passthrough (design #367), re-applied on swap; the DEVICE itself is carried forward
 #     from the live container, never from this env (docs/runbooks/worker-kvm.md)
 #   WORKER_NIX_GCROOTS_DIR / WORKER_NIX_CLIENT / WORKER_NIX_DAEMON_SOCKET /
-#     WORKER_NIX_STORE_DIR /
-#     WORKER_NIX_REALISE_TIMEOUT_SECS   per-task nix GC roots (design #373 P1),
-#     re-applied on swap; the nix MOUNTS are carried forward from the live
-#     container, never re-derived here
+#     WORKER_NIX_STORE_DIR / WORKER_NIX_PROJECTS / WORKER_NIX_FLAKE_CLIENT /
+#     WORKER_NIX_REALISE_TIMEOUT_SECS   per-task nix GC roots (design #373 P1)
+#     and project-declared toolchains (P2), re-applied on swap; the nix MOUNTS
+#     are carried forward from the live container, never re-derived here
 set -eu
 
 PHASE="${1:?usage: worker-refresh.sh build <sha> <tag> | swap <tag>}"
@@ -573,6 +573,12 @@ swap)
     fi
     if [ -n "${WORKER_NIX_STORE_DIR:-}" ]; then
       NIX_ARGS="$NIX_ARGS -e WORKER_NIX_STORE_DIR='$WORKER_NIX_STORE_DIR'"
+    fi
+    if [ -n "${WORKER_NIX_PROJECTS:-}" ]; then
+      NIX_ARGS="$NIX_ARGS -e WORKER_NIX_PROJECTS='$WORKER_NIX_PROJECTS'"
+    fi
+    if [ -n "${WORKER_NIX_FLAKE_CLIENT:-}" ]; then
+      NIX_ARGS="$NIX_ARGS -e WORKER_NIX_FLAKE_CLIENT='$WORKER_NIX_FLAKE_CLIENT'"
     fi
     NIX_SOCKET_DIR="${WORKER_NIX_DAEMON_SOCKET:-/nix/var/nix/daemon-socket/socket}"
     NIX_SOCKET_DIR="${NIX_SOCKET_DIR%/*}"

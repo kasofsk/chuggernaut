@@ -125,12 +125,16 @@ impl AgentProvider for ClaudeProvider {
 
         let launch = ContainerLaunchConfig {
             image: config.image.clone(),
-            cmd: bootstrap_cmd(&["sh".into(), "-c".into(), invocation.command]),
+            cmd: bootstrap_cmd(
+                &["sh".into(), "-c".into(), invocation.command],
+                config.runtime_env.as_deref(),
+            ),
             env,
             files,
             cpu_limit: None,
             memory_limit: None,
             node: config.node.clone(),
+            runtime_env: config.runtime_env.clone(),
         };
         let id = self.backend.launch(launch).await?;
         on_launch.report(&id);
@@ -373,6 +377,7 @@ mod tests {
             session_id: "da08d5f3-844e-430e-8363-39b4882f437b".into(),
             node: None,
             permissions: PermissionProfile::Work,
+            runtime_env: None,
         }
     }
 

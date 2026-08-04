@@ -76,6 +76,17 @@ pub struct WorkerConfig {
     /// refuses to start when it is set and the directory is absent (design #373
     /// Decision 4).
     pub nix_gcroots_dir: Option<PathBuf>,
+    /// Projects whose job types may have this node realise their declared
+    /// `runtime.env` (`WORKER_NIX_PROJECTS`, `owner/project` entries, design
+    /// #373 Decision 2 rule 3). Empty ⇒ nobody, and granting it grants
+    /// **evaluation** of that project's flake inside `chug-worker` (design #373
+    /// 3b).
+    pub nix_projects: Vec<String>,
+    /// The flake-aware client a declared `runtime.env` is built with
+    /// (`WORKER_NIX_FLAKE_CLIENT`), defaulting to [`NIX_FLAKE_CLIENT_DEFAULT`].
+    /// Reached through the node's profiles for the same reason
+    /// [`Self::nix_client`] is.
+    pub nix_flake_client: PathBuf,
     /// The nix client the realise runs (`WORKER_NIX_CLIENT`), defaulting to
     /// [`NIX_CLIENT_DEFAULT`]. It resolves through the node's *profiles*, which
     /// are themselves a GC root, so the long-lived worker's own client cannot be
@@ -170,6 +181,7 @@ impl WorkerConfig {
         let slots = parse_slots(std::env::var("WORKER_SLOTS").ok())?;
         let slots_max = parse_slots_max(std::env::var("WORKER_SLOTS_MAX").ok(), node_cpu_count())?;
         let modes = parse_modes(std::env::var("WORKER_MODES").ok())?;
+        let nix = NixEnv::from_env()?;
         Ok(Self {
             node,
             slots,
@@ -186,29 +198,20 @@ impl WorkerConfig {
                 }),
             cache_dir: parse_cache_dir(std::env::var("WORKER_CACHE_DIR").ok()),
             kvm_device: parse_kvm_device(std::env::var("WORKER_KVM").ok())?,
-            kvm_projects: parse_kvm_projects(std::env::var("WORKER_KVM_PROJECTS").ok())?,
+            kvm_projects: parse_projects(
+                "WORKER_KVM_PROJECTS",
+                std::env::var("WORKER_KVM_PROJECTS").ok(),
+            )?,
             android_sdk_dir: parse_android_sdk_dir(std::env::var("WORKER_ANDROID_SDK_DIR").ok())?,
             flutter_dir: parse_flutter_dir(std::env::var("WORKER_FLUTTER_DIR").ok())?,
             jdk_dir: parse_jdk_dir(std::env::var("WORKER_JDK_DIR").ok())?,
-            nix_gcroots_dir: parse_nix_gcroots_dir(std::env::var("WORKER_NIX_GCROOTS_DIR").ok())?,
-            nix_client: parse_nix_path(
-                "WORKER_NIX_CLIENT",
-                std::env::var("WORKER_NIX_CLIENT").ok(),
-                NIX_CLIENT_DEFAULT,
-            )?,
-            nix_daemon_socket: parse_nix_path(
-                "WORKER_NIX_DAEMON_SOCKET",
-                std::env::var("WORKER_NIX_DAEMON_SOCKET").ok(),
-                NIX_DAEMON_SOCKET_DEFAULT,
-            )?,
-            nix_store_dir: parse_nix_path(
-                "WORKER_NIX_STORE_DIR",
-                std::env::var("WORKER_NIX_STORE_DIR").ok(),
-                NIX_STORE_DIR_DEFAULT,
-            )?,
-            nix_realise_timeout_secs: parse_nix_realise_timeout_secs(
-                std::env::var("WORKER_NIX_REALISE_TIMEOUT_SECS").ok(),
-            )?,
+            nix_gcroots_dir: nix.gcroots_dir,
+            nix_projects: nix.projects,
+            nix_flake_client: nix.flake_client,
+            nix_client: nix.client,
+            nix_daemon_socket: nix.daemon_socket,
+            nix_store_dir: nix.store_dir,
+            nix_realise_timeout_secs: nix.realise_timeout_secs,
             refresh_script: resolve_refresh_script(std::env::var("WORKER_REFRESH_SCRIPT").ok()),
             refresh_git_url: parse_git_url(std::env::var("WORKER_REFRESH_GIT_URL").ok()),
             refresh_git_key: std::env::var("WORKER_GIT_KEY")
@@ -216,6 +219,54 @@ impl WorkerConfig {
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/data/keys/worker_git")),
+        })
+    }
+}
+
+/// The node's nix settings, parsed as one group (design #373): they are one
+/// feature, and grouping them keeps [`WorkerConfig::from_env`] inside the line
+/// bound.
+struct NixEnv {
+    gcroots_dir: Option<PathBuf>,
+    projects: Vec<String>,
+    flake_client: PathBuf,
+    client: PathBuf,
+    daemon_socket: PathBuf,
+    store_dir: PathBuf,
+    realise_timeout_secs: u64,
+}
+
+impl NixEnv {
+    fn from_env() -> Result<Self, ConfigError> {
+        Ok(Self {
+            gcroots_dir: parse_nix_gcroots_dir(std::env::var("WORKER_NIX_GCROOTS_DIR").ok())?,
+            projects: parse_projects(
+                "WORKER_NIX_PROJECTS",
+                std::env::var("WORKER_NIX_PROJECTS").ok(),
+            )?,
+            flake_client: parse_nix_path(
+                "WORKER_NIX_FLAKE_CLIENT",
+                std::env::var("WORKER_NIX_FLAKE_CLIENT").ok(),
+                NIX_FLAKE_CLIENT_DEFAULT,
+            )?,
+            client: parse_nix_path(
+                "WORKER_NIX_CLIENT",
+                std::env::var("WORKER_NIX_CLIENT").ok(),
+                NIX_CLIENT_DEFAULT,
+            )?,
+            daemon_socket: parse_nix_path(
+                "WORKER_NIX_DAEMON_SOCKET",
+                std::env::var("WORKER_NIX_DAEMON_SOCKET").ok(),
+                NIX_DAEMON_SOCKET_DEFAULT,
+            )?,
+            store_dir: parse_nix_path(
+                "WORKER_NIX_STORE_DIR",
+                std::env::var("WORKER_NIX_STORE_DIR").ok(),
+                NIX_STORE_DIR_DEFAULT,
+            )?,
+            realise_timeout_secs: parse_nix_realise_timeout_secs(
+                std::env::var("WORKER_NIX_REALISE_TIMEOUT_SECS").ok(),
+            )?,
         })
     }
 }
@@ -264,12 +315,12 @@ fn parse_kvm_device(raw: Option<String>) -> Result<Option<PathBuf>, ConfigError>
     }
 }
 
-/// Parse `WORKER_KVM_PROJECTS` into the projects allowed the device and the
-/// read-only toolchain mounts (design #367 §2.3), absent or empty ⇒ nobody. Each
-/// entry is `owner/project` — the launch env's `JOB_PROJECT` shape — and a
-/// malformed or repeated entry is a hard config error rather than a grant that
-/// silently never matches.
-fn parse_kvm_projects(raw: Option<String>) -> Result<Vec<String>, ConfigError> {
+/// Parse one node-side project allow-list — the device and its toolchain mounts
+/// (`WORKER_KVM_PROJECTS`, design #367 §2.3), or project-declared toolchains
+/// (`WORKER_NIX_PROJECTS`, design #373 Decision 2 rule 3). Absent or empty ⇒
+/// **nobody**, and a malformed or repeated `owner/project` entry is a hard
+/// config error rather than a grant that silently never matches a `JOB_PROJECT`.
+fn parse_projects(var: &str, raw: Option<String>) -> Result<Vec<String>, ConfigError> {
     let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
         return Ok(Vec::new());
     };
@@ -279,12 +330,12 @@ fn parse_kvm_projects(raw: Option<String>) -> Result<Vec<String>, ConfigError> {
         let (owner, name) = project.split_once('/').unwrap_or_default();
         if owner.is_empty() || name.is_empty() || name.contains('/') {
             return Err(ConfigError(format!(
-                "WORKER_KVM_PROJECTS entry {project:?} is not an owner/project pair"
+                "{var} entry {project:?} is not an owner/project pair"
             )));
         }
         if projects.iter().any(|p| p == project) {
             return Err(ConfigError(format!(
-                "WORKER_KVM_PROJECTS lists {project:?} more than once"
+                "{var} lists {project:?} more than once"
             )));
         }
         projects.push(project.to_string());
@@ -358,6 +409,12 @@ fn parse_stable_path(var: &str, raw: &str) -> Result<PathBuf, ConfigError> {
 /// a GC root — a client resolved out of a generation's store path can be
 /// collected out from under the long-lived worker.
 pub const NIX_CLIENT_DEFAULT: &str = "/nix/var/nix/profiles/system/sw/bin/nix-store";
+
+/// The node's flake-aware client when `WORKER_NIX_FLAKE_CLIENT` is unset
+/// (design #373 P2): the multi-call `nix` binary beside [`NIX_CLIENT_DEFAULT`]
+/// in the same profiles tree, because `nix-store --realise` takes store paths
+/// and a project declares a flake ref.
+pub const NIX_FLAKE_CLIENT_DEFAULT: &str = "/nix/var/nix/profiles/system/sw/bin/nix";
 
 /// The node's nix daemon socket when `WORKER_NIX_DAEMON_SOCKET` is unset — nix's
 /// own default location, mode `0666` on a stock node, so the worker needs no uid
@@ -609,27 +666,34 @@ mod tests {
     /// than kept as a grant that can never match a `JOB_PROJECT`.
     #[test]
     fn kvm_projects_parse_empty_list_and_rejections() {
-        assert_eq!(parse_kvm_projects(None).unwrap(), Vec::<String>::new());
         assert_eq!(
-            parse_kvm_projects(Some(String::new())).unwrap(),
+            parse_projects("WORKER_KVM_PROJECTS", None).unwrap(),
             Vec::<String>::new()
         );
         assert_eq!(
-            parse_kvm_projects(Some("  ".into())).unwrap(),
+            parse_projects("WORKER_KVM_PROJECTS", Some(String::new())).unwrap(),
             Vec::<String>::new()
         );
         assert_eq!(
-            parse_kvm_projects(Some(" acme/beacon , acme/api ".into())).unwrap(),
+            parse_projects("WORKER_KVM_PROJECTS", Some("  ".into())).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            parse_projects(
+                "WORKER_KVM_PROJECTS",
+                Some(" acme/beacon , acme/api ".into())
+            )
+            .unwrap(),
             vec!["acme/beacon".to_string(), "acme/api".to_string()]
         );
 
         for bad in ["beacon", "acme/", "/beacon", "acme/b/c", "acme/beacon,", ""] {
             assert!(
-                parse_kvm_projects(Some(format!("acme/api,{bad}"))).is_err(),
+                parse_projects("WORKER_KVM_PROJECTS", Some(format!("acme/api,{bad}"))).is_err(),
                 "must reject {bad:?}"
             );
         }
-        let err = parse_kvm_projects(Some("acme/api,acme/api".into()))
+        let err = parse_projects("WORKER_KVM_PROJECTS", Some("acme/api,acme/api".into()))
             .unwrap_err()
             .to_string();
         assert!(err.contains("more than once"), "{err}");
@@ -786,6 +850,36 @@ mod tests {
         assert!(
             parse_nix_gcroots_dir(Some(store.into())).is_err(),
             "a hash is a hash wherever it is written"
+        );
+    }
+
+    /// `WORKER_NIX_PROJECTS` (design #373 Decision 2 rule 3): the same
+    /// fail-closed allow-list `WORKER_KVM_PROJECTS` is, refusals named after the
+    /// setting the operator typed, and the flake client defaults through the
+    /// profiles beside the store-path client.
+    #[test]
+    fn nix_projects_are_fail_closed_and_the_flake_client_defaults() {
+        assert_eq!(
+            parse_projects("WORKER_NIX_PROJECTS", None).unwrap(),
+            Vec::<String>::new(),
+            "unset grants nobody"
+        );
+        assert_eq!(
+            parse_projects("WORKER_NIX_PROJECTS", Some(" acme/beacon ".into())).unwrap(),
+            vec!["acme/beacon".to_string()]
+        );
+        let err = parse_projects("WORKER_NIX_PROJECTS", Some("beacon".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("WORKER_NIX_PROJECTS"), "{err}");
+
+        assert_eq!(
+            parse_nix_path("WORKER_NIX_FLAKE_CLIENT", None, NIX_FLAKE_CLIENT_DEFAULT).unwrap(),
+            PathBuf::from(NIX_FLAKE_CLIENT_DEFAULT)
+        );
+        assert!(
+            NIX_FLAKE_CLIENT_DEFAULT.starts_with("/nix/var/nix/profiles/"),
+            "the flake client must resolve through the profiles, which are a GC root"
         );
     }
 

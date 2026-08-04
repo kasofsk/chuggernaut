@@ -115,7 +115,7 @@ impl Core {
             .await?;
         Ok(ContainerLaunchConfig {
             image,
-            cmd: bootstrap_cmd(&["sh".into(), "-c".into(), run]),
+            cmd: bootstrap_cmd(&["sh".into(), "-c".into(), run], job_type.runtime_env()),
             env,
             files: self
                 .ssh_credential_files(owner, project, seq, role, timeout)
@@ -123,6 +123,7 @@ impl Core {
             cpu_limit: job_type.resources.as_ref().and_then(|r| r.cpu),
             memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
             node: job_type.placement_node().map(String::from),
+            runtime_env: job_type.runtime_env().map(String::from),
         })
     }
 

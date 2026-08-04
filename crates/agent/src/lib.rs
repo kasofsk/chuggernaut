@@ -118,6 +118,10 @@ pub struct AgentRunConfig {
     pub node: Option<String>,
     /// Which tools this run may use (spec §4.3). See [`PermissionProfile`].
     pub permissions: PermissionProfile,
+    /// The job type's declared `runtime.env` (spec §1.1, design #373 P2),
+    /// forwarded to the backend at launch beside [`Self::image`]. `None` for a
+    /// job type that declares none, and for the platform's own agents.
+    pub runtime_env: Option<String>,
 }
 
 #[derive(Debug, Clone)]

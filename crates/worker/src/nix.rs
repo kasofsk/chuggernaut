@@ -1,16 +1,20 @@
-//! Node-side nix realise and per-task GC roots (design #373 P1).
+//! Node-side nix realise and per-task GC roots (design #373 P1, P2).
 //!
-//! accepts: a task id and the node-declared toolchain path a launch will be
-//! given; emits: one indirect GC root per task under the node's roots
-//! directory, and its removal at task exit; guarantees: the realise is bounded
-//! and fails the launch loudly on expiry, and the stale-root reaper is
-//! best-effort — it leaks disk rather than ever failing a job (spec §3.1
-//! "Node-local nix GC roots").
+//! accepts: a task id, and either the node-declared toolchain path a launch
+//! will be given (P1) or the project-declared `runtime.env` it carries (P2);
+//! emits: one indirect GC root per task under the node's roots directory, the
+//! realised store path a task is pointed at, and the root's removal at task
+//! exit; guarantees: the realise is bounded and fails the launch loudly on
+//! expiry, only an allow-listed project's environment is ever realised, and the
+//! stale-root reaper is best-effort — it leaks disk rather than ever failing a
+//! job (spec §3.1 "Node-local nix GC roots", "Project-declared toolchains").
 //!
-//! The realise and the root are ONE action: `nix-store --add-root … --indirect
-//! --realise` cannot leave a realised closure unrooted, which two calls could.
+//! The realise and the root are ONE action in both shapes: `nix-store
+//! --add-root … --indirect --realise` and `nix build --out-link` each register
+//! the root as they realise, which two calls could not.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -40,6 +44,19 @@ pub struct NixRoots {
     /// The client the realise runs, resolved through the node's profiles so it
     /// cannot be collected by an old-generation GC (design #373 3b).
     pub client: PathBuf,
+    /// The flake-aware client a project-declared `runtime.env` is built with
+    /// (design #373 P2), resolved through the profiles for the same reason
+    /// [`Self::client`] is. `nix-store --realise` takes store paths, never a
+    /// flake ref, so this is `nix build`'s binary rather than a second lifecycle.
+    pub flake_client: PathBuf,
+    /// Projects allowed to have this node realise their declared `runtime.env`
+    /// (`WORKER_NIX_PROJECTS`, design #373 Decision 2 rule 3). Empty grants
+    /// nobody: a job type asks for an environment, it never asks for a privilege.
+    pub projects: Vec<String>,
+    /// The node's git key, handed to the flake fetch as `GIT_SSH_COMMAND` so a
+    /// `git+ssh://` ref resolves; `None` leaves the fetch to whatever credential
+    /// the node's own environment carries.
+    pub git_key: Option<PathBuf>,
     /// Worker-writable directory the roots are written to, at the same path
     /// inside the daemon container as on the host — the daemon registers the
     /// indirect root by the path it is given.
@@ -54,6 +71,18 @@ pub struct NixRoots {
     /// Bound on one realise (design #373 3c). The realise precedes execution, so
     /// no `task_timeout` covers it.
     pub realise_timeout: Duration,
+}
+
+/// The scheme a container-mode environment reference must carry (design #309
+/// §9); `xcode:` is host-only and refused by `JobType::validate`.
+pub const NIX_ENV_PREFIX: &str = "nix:";
+
+/// One realised project environment: the root holding it, and the store path the
+/// task is pointed at.
+#[derive(Debug, Clone)]
+pub struct Realised {
+    pub root: PathBuf,
+    pub path: PathBuf,
 }
 
 /// One root as the reaper sees it: where it is, whose task it names, and how
@@ -94,16 +123,47 @@ impl NixRoots {
                 self.daemon_socket.display()
             ));
         }
+        if !self.projects.is_empty() && !self.flake_client.exists() {
+            return Err(format!(
+                "WORKER_NIX_FLAKE_CLIENT {} is absent in the daemon's own view, and \
+                 WORKER_NIX_PROJECTS grants {:?} project-declared toolchains this node could \
+                 not realise (design #373 P2)",
+                self.flake_client.display(),
+                self.projects
+            ));
+        }
         if let Some(target) = realise_target {
             store_target(target, &self.store_dir)?;
         }
         Ok(())
     }
 
+    /// Whether this node realises the declared environment of the project a
+    /// launch names, matched on `JOB_PROJECT` exactly as the KVM grant is
+    /// (design #373 Decision 2 rule 3). An empty allow-list admits nobody.
+    pub fn admits(&self, env: &HashMap<String, String>) -> bool {
+        env.get("JOB_PROJECT")
+            .is_some_and(|project| self.projects.iter().any(|allowed| allowed == project))
+    }
+
     /// This task's root path, or `None` when the id cannot name one. Named by
     /// task id so a stale root says whose it was.
     pub fn root_path(&self, task_id: &str) -> Option<PathBuf> {
         is_root_safe(task_id).then(|| self.gcroots_dir.join(format!("{ROOT_PREFIX}{task_id}")))
+    }
+
+    /// This task's root path, or the launch refusal an operator reads. One root
+    /// per task, so a launch realises its project's environment or the node's
+    /// declared toolchain — never both under one name.
+    fn root_or_refuse(&self, task_id: &str) -> Result<PathBuf, String> {
+        let root = self.root_path(task_id).ok_or_else(|| {
+            format!("task id {task_id:?} cannot name a GC root (expected [A-Za-z0-9_-]+)")
+        })?;
+        debug_assert!(
+            root.starts_with(&self.gcroots_dir),
+            "a root lives in the node's roots dir"
+        );
+        Ok(root)
     }
 
     /// Realise `target` and register the root over it in one bounded action,
@@ -115,35 +175,89 @@ impl NixRoots {
             "a zero bound would refuse every realise"
         );
         let target = &store_target(target, &self.store_dir)?;
-        let root = self.root_path(task_id).ok_or_else(|| {
-            format!("task id {task_id:?} cannot name a GC root (expected [A-Za-z0-9_-]+)")
-        })?;
+        let root = self.root_or_refuse(task_id)?;
+        let child = self.spawn_client(
+            &self.client,
+            vec![
+                OsString::from("--add-root"),
+                root.clone().into_os_string(),
+                OsString::from("--indirect"),
+                OsString::from("--realise"),
+                target.clone().into_os_string(),
+            ],
+        )?;
+        let outcome = tokio::time::timeout(self.realise_timeout, child.wait_with_output()).await;
+        self.finish_realise(task_id, &target.display().to_string(), &root, outcome)?;
+        Ok(root)
+    }
+
+    /// Realise the environment a job type declares and root it in the same
+    /// action (design #373 P2, 3a), under the same bound every realise gets.
+    /// `installable` is already resolved against the job branch — see
+    /// [`flake_installable`].
+    pub async fn realise_env(&self, task_id: &str, installable: &str) -> Result<Realised, String> {
         debug_assert!(
-            root.starts_with(&self.gcroots_dir),
-            "a root lives in the node's roots dir"
+            !installable.is_empty(),
+            "a resolved installable is never empty"
         );
-        let child = tokio::process::Command::new(&self.client)
-            .arg("--add-root")
-            .arg(&root)
-            .arg("--indirect")
-            .arg("--realise")
-            .arg(target)
+        let root = self.root_or_refuse(task_id)?;
+        let child = self.spawn_client(
+            &self.flake_client,
+            vec![
+                OsString::from("build"),
+                OsString::from("--extra-experimental-features"),
+                OsString::from("nix-command flakes"),
+                OsString::from("--no-write-lock-file"),
+                OsString::from("--print-out-paths"),
+                OsString::from("--out-link"),
+                root.clone().into_os_string(),
+                OsString::from(installable),
+            ],
+        )?;
+        let outcome = tokio::time::timeout(self.realise_timeout, child.wait_with_output()).await;
+        let output = self.finish_realise(task_id, installable, &root, outcome)?;
+        match env_out_path(&output.stdout, &self.store_dir) {
+            Ok(path) => Ok(Realised { root, path }),
+            Err(e) => {
+                self.release(task_id);
+                Err(format!("nix build of {installable} {e}"))
+            }
+        }
+    }
+
+    /// One bounded nix child against the node's daemon, so every realise runs
+    /// the same way. The node's git key rides as `GIT_SSH_COMMAND` because a
+    /// project's flake ref is fetched from the platform's own git front.
+    fn spawn_client(
+        &self,
+        client: &Path,
+        args: Vec<OsString>,
+    ) -> Result<tokio::process::Child, String> {
+        let mut command = tokio::process::Command::new(client);
+        command
+            .args(args)
             .env("NIX_REMOTE", "daemon")
             .env("NIX_DAEMON_SOCKET_PATH", &self.daemon_socket)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| {
+            .kill_on_drop(true);
+        if let Some(key) = &self.git_key {
+            command.env(
+                "GIT_SSH_COMMAND",
                 format!(
-                    "spawning nix client {}: {e} (design #373 3b: the client comes from the \
-                     node's profiles, through the mounted store)",
-                    self.client.display()
-                )
-            })?;
-        let outcome = tokio::time::timeout(self.realise_timeout, child.wait_with_output()).await;
-        self.finish_realise(task_id, target, root, outcome)
+                    "ssh -i {} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new",
+                    key.display()
+                ),
+            );
+        }
+        command.spawn().map_err(|e| {
+            format!(
+                "spawning nix client {}: {e} (design #373 3b: the client comes from the \
+                 node's profiles, through the mounted store)",
+                client.display()
+            )
+        })
     }
 
     /// The verdict half of [`realise`](Self::realise): keep the root only for a
@@ -151,11 +265,10 @@ impl NixRoots {
     fn finish_realise(
         &self,
         task_id: &str,
-        target: &Path,
-        root: PathBuf,
+        target: &str,
+        root: &Path,
         outcome: Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed>,
-    ) -> Result<PathBuf, String> {
-        let target = target.display();
+    ) -> Result<std::process::Output, String> {
         let failed = match outcome {
             Err(_) => format!(
                 "nix realise of {target} exceeded the node's realise bound \
@@ -164,17 +277,23 @@ impl NixRoots {
                 self.realise_timeout.as_secs()
             ),
             Ok(Err(e)) => format!("nix realise of {target}: {e}"),
-            Ok(Ok(output)) if !output.status.success() => format!(
-                "nix realise of {target} exited {}: {}",
-                output.status,
-                error_tail(&output.stderr)
-            ),
-            Ok(Ok(_)) if root.symlink_metadata().is_err() => format!(
-                "nix realise of {target} reported success but wrote no GC root at {} — the \
-                 closure would be collectable mid-task (design #373 Decision 4)",
-                root.display()
-            ),
-            Ok(Ok(_)) => return Ok(root),
+            Ok(Ok(output)) => {
+                if !output.status.success() {
+                    format!(
+                        "nix realise of {target} exited {}: {}",
+                        output.status,
+                        error_tail(&output.stderr)
+                    )
+                } else if root.symlink_metadata().is_err() {
+                    format!(
+                        "nix realise of {target} reported success but wrote no GC root at {} — \
+                         the closure would be collectable mid-task (design #373 Decision 4)",
+                        root.display()
+                    )
+                } else {
+                    return Ok(output);
+                }
+            }
         };
         self.release(task_id);
         Err(failed)
@@ -285,6 +404,95 @@ fn store_target(target: &Path, store_dir: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
+/// The flake installable a launch's declared `runtime.env` resolves to (design
+/// #373 3a): a **relative** ref is rewritten against the job branch's own
+/// repository at `sha`, and every other ref passes through untouched. `rev=`
+/// rides beside `ref=` because a branch tip moves under a launch in flight.
+pub fn flake_installable(
+    env_ref: &str,
+    repo_url: &str,
+    branch: &str,
+    sha: Option<&str>,
+) -> Result<String, String> {
+    let installable = env_ref.strip_prefix(NIX_ENV_PREFIX).ok_or_else(|| {
+        format!(
+            "runtime.env {env_ref:?} does not name a nix environment (expected \
+             '{NIX_ENV_PREFIX}<flake-ref>#<attr>') — this node serves no other scheme in \
+             container mode (design #373 Decision 2 rule 1)"
+        )
+    })?;
+    if installable.is_empty() {
+        return Err(format!("runtime.env {env_ref:?} names no flake reference"));
+    }
+    let attr = match relative_attr(installable) {
+        Some(attr) => attr?,
+        None => return Ok(installable.to_string()),
+    };
+    if !is_url_safe(repo_url) || !is_url_safe(branch) {
+        return Err(format!(
+            "the relative reference {env_ref:?} resolves against branch {branch:?} of \
+             {repo_url:?}, which carries a character a flake ref cannot (design #373 3a)"
+        ));
+    }
+    let rev = match sha.filter(|s| !s.is_empty()) {
+        Some(sha) if is_commit_sha(sha) => format!("&rev={sha}"),
+        Some(sha) => return Err(format!("the job branch commit {sha:?} is not a commit sha")),
+        None => String::new(),
+    };
+    Ok(format!("git+{repo_url}?ref={branch}{rev}{attr}"))
+}
+
+/// The `#attr` half of a relative reference (`.` or `.#attr`), or `None` when
+/// the reference is absolute. A relative form nix would resolve against the
+/// worker's own working directory is refused rather than passed through, since
+/// there is no checkout on the host to resolve against (design #373 3a).
+fn relative_attr(installable: &str) -> Option<Result<&str, String>> {
+    if installable == "." {
+        return Some(Ok(""));
+    }
+    if installable.starts_with(".#") {
+        return Some(Ok(&installable[1..]));
+    } else if installable.starts_with('.') {
+        return Some(Err(format!(
+            "the relative reference {installable:?} is not the '.#<attr>' form container mode \
+             resolves against the job branch (design #373 3a)"
+        )));
+    }
+    None
+}
+
+/// Whether a value may be spliced into a flake ref's URL: no separator of the
+/// ref grammar itself, so nothing a launch carries can redirect the fetch.
+fn is_url_safe(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains(['?', '#', '&', ' ', '"', '\'', '\\'])
+        && !value.contains("..")
+}
+
+/// Whether a value is a git commit sha — hex, and long enough to name one.
+fn is_commit_sha(value: &str) -> bool {
+    (7..=64).contains(&value.len()) && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The store path `nix build --print-out-paths` reported, held to the same
+/// property a realise target is: a path outside the store is not something a
+/// task can be pointed at.
+fn env_out_path(stdout: &[u8], store_dir: &Path) -> Result<PathBuf, String> {
+    let text = String::from_utf8_lossy(stdout);
+    let path = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .ok_or_else(|| "reported success but printed no output path".to_string())?;
+    if !Path::new(path).starts_with(store_dir) {
+        return Err(format!(
+            "printed {path:?}, which is not under {}",
+            store_dir.display()
+        ));
+    }
+    Ok(PathBuf::from(path))
+}
+
 /// The reap decision, pure: a root goes only when no live task claims it AND it
 /// has outlived `age_min`. Both halves matter — the age is what keeps a root
 /// created seconds before its container exists from being reaped under it.
@@ -360,8 +568,30 @@ mod tests {
         stable
     }
 
+    /// Retry the HARNESS's own `ETXTBSY` race: a sibling test writing its fake
+    /// client while this one forks makes the exec fail, which is an artifact of
+    /// executables written by the suite itself and never something a node does.
+    async fn without_the_exec_race<F, Fut, T>(mut attempt: F) -> Result<T, String>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, String>>,
+    {
+        for _ in 0..8 {
+            match attempt().await {
+                Err(e) if e.contains("Text file busy") => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                outcome => return outcome,
+            }
+        }
+        attempt().await
+    }
+
     fn roots_for(dir: &Path, client: PathBuf, timeout: Duration) -> NixRoots {
         NixRoots {
+            flake_client: client.clone(),
+            projects: vec!["acme/beacon".to_string()],
+            git_key: None,
             client,
             gcroots_dir: dir.to_path_buf(),
             daemon_socket: dir.join("socket"),
@@ -428,7 +658,9 @@ mod tests {
         );
         let roots = roots_for(&dir, client, Duration::from_secs(30));
 
-        let root = roots.realise("7", &toolchain).await.unwrap();
+        let root = without_the_exec_race(|| roots.realise("7", &toolchain))
+            .await
+            .unwrap();
         assert_eq!(root, dir.join("task-7"));
         assert!(root.symlink_metadata().is_ok(), "the root must exist");
         assert_eq!(
@@ -453,8 +685,7 @@ mod tests {
         let client = fake_client(&dir, "nix-store", "#!/bin/sh\nsleep 30\n");
         let roots = roots_for(&dir, client, Duration::from_millis(200));
 
-        let err = roots
-            .realise("11", &toolchain)
+        let err = without_the_exec_race(|| roots.realise("11", &toolchain))
             .await
             .expect_err("an over-bound realise fails");
         assert!(
@@ -478,12 +709,16 @@ mod tests {
             "#!/bin/sh\necho 'error: path does not exist' >&2\nexit 1\n",
         );
         let roots = roots_for(&dir, broken, Duration::from_secs(30));
-        let err = roots.realise("3", &toolchain).await.unwrap_err();
+        let err = without_the_exec_race(|| roots.realise("3", &toolchain))
+            .await
+            .unwrap_err();
         assert!(err.contains("path does not exist"), "{err}");
 
         let liar = fake_client(&dir, "liar", "#!/bin/sh\nexit 0\n");
         let roots = roots_for(&dir, liar, Duration::from_secs(30));
-        let err = roots.realise("3", &toolchain).await.unwrap_err();
+        let err = without_the_exec_race(|| roots.realise("3", &toolchain))
+            .await
+            .unwrap_err();
         assert!(err.contains("wrote no GC root"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -508,6 +743,169 @@ mod tests {
             roots.reap(&live, REAP_AGE_MIN),
             0,
             "a fresh root is never old enough for the shipped grace"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R3's rewrite (design #373 3a): a RELATIVE ref resolves against the job
+    /// branch's own repository at the commit the launch carries, so a toolchain
+    /// bump and the code needing it are the same commit — and `rev=` rides
+    /// beside `ref=` because a branch tip moves under a launch in flight.
+    #[test]
+    fn a_relative_env_resolves_against_the_job_branch_and_its_commit() {
+        let url = "ssh://git@front:2222/acme/beacon.git";
+        let sha = "4b84d2596f0e2b1c0a9a7d3e2f1c0b9a8d7e6f5a";
+        assert_eq!(
+            flake_installable("nix:.#chug-mobile", url, "job/403", Some(sha)).unwrap(),
+            format!("git+{url}?ref=job/403&rev={sha}#chug-mobile")
+        );
+        assert_eq!(
+            flake_installable("nix:.#chug-mobile", url, "job/403", None).unwrap(),
+            format!("git+{url}?ref=job/403#chug-mobile")
+        );
+        assert_eq!(
+            flake_installable("nix:.", url, "main", Some(sha)).unwrap(),
+            format!("git+{url}?ref=main&rev={sha}")
+        );
+        assert_eq!(
+            flake_installable("nix:.#chug-ci", url, "job/403", Some("")).unwrap(),
+            format!("git+{url}?ref=job/403#chug-ci"),
+            "an empty sha is no sha, not a broken one"
+        );
+    }
+
+    /// An ABSOLUTE ref is the node's to fetch verbatim — the whole point of the
+    /// rewrite is that only `.#attr` has no checkout to resolve against — and
+    /// every shape the node cannot serve is refused by name rather than handed
+    /// to nix to fail on.
+    #[test]
+    fn an_absolute_env_passes_through_and_the_unservable_is_refused() {
+        let url = "ssh://git@front:2222/acme/beacon.git";
+        for absolute in [
+            "github:acme/toolchains#chug-mobile",
+            "git+https://example.invalid/t.git?ref=v2#chug-ci",
+        ] {
+            assert_eq!(
+                flake_installable(&format!("nix:{absolute}"), url, "job/403", None).unwrap(),
+                absolute
+            );
+        }
+
+        let err = flake_installable("xcode:16.2", url, "job/403", None).unwrap_err();
+        assert!(err.contains("does not name a nix environment"), "{err}");
+        assert!(flake_installable("nix:", url, "job/403", None).is_err());
+
+        let err = flake_installable("nix:./sub#a", url, "job/403", None).unwrap_err();
+        assert!(err.contains("'.#<attr>'"), "{err}");
+        let err = flake_installable("nix:.#a", url, "job/403", Some("nope")).unwrap_err();
+        assert!(err.contains("not a commit sha"), "{err}");
+        assert!(
+            flake_installable("nix:.#a", url, "job/403?x=1", Some(&"a".repeat(40))).is_err(),
+            "nothing a launch carries may redirect the fetch"
+        );
+        assert!(flake_installable("nix:.#a", "", "job/403", None).is_err());
+    }
+
+    /// The node-side allow-list (design #373 Decision 2 rule 3): a job type asks
+    /// for an environment, never for a privilege, so an empty list grants
+    /// NOBODY and only the named project is admitted.
+    #[test]
+    fn the_env_allow_list_is_fail_closed() {
+        let mut roots = roots_for(
+            Path::new("/var/lib/chuggernaut/gcroots"),
+            PathBuf::from("/bin/true"),
+            Duration::from_secs(30),
+        );
+        let env = |project: &str| HashMap::from([("JOB_PROJECT".to_string(), project.to_string())]);
+
+        assert!(roots.admits(&env("acme/beacon")));
+        assert!(!roots.admits(&env("acme/other")));
+        assert!(!roots.admits(&HashMap::new()), "no project is not a match");
+
+        roots.projects = Vec::new();
+        assert!(
+            !roots.admits(&env("acme/beacon")),
+            "an empty allow-list grants nobody"
+        );
+    }
+
+    /// A project-declared environment is realised and rooted in ONE action, the
+    /// task is pointed at what was realised, and `release` takes the root away
+    /// again — the same lifecycle the node's own toolchain gets.
+    #[tokio::test]
+    async fn realise_env_roots_the_closure_and_reports_its_path() {
+        let dir = temp_dir("env-realise");
+        let client = fake_client(
+            &dir,
+            "nix",
+            "#!/bin/sh\nout=\"$(dirname \"$7\")/store/aaaa-env\"\nmkdir -p \"$out/bin\"\n\
+             ln -sfn \"$out\" \"$7\"\necho \"$out\"\n",
+        );
+        let roots = roots_for(&dir, client, Duration::from_secs(30));
+
+        let realised = without_the_exec_race(|| {
+            roots.realise_env("9", "git+ssh://front/acme/beacon.git?ref=job/403#chug-ci")
+        })
+        .await
+        .unwrap();
+        assert_eq!(realised.root, dir.join("task-9"));
+        assert_eq!(realised.path, dir.join("store").join("aaaa-env"));
+        assert!(
+            realised.root.symlink_metadata().is_ok(),
+            "the root must exist"
+        );
+
+        roots.release("9");
+        assert!(realised.root.symlink_metadata().is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A declared environment that breaks the node's bound fails the LAUNCH
+    /// naming the bound and leaves NO root, and a client that reports a path
+    /// outside the store is refused for the same reason a realise target is.
+    #[tokio::test]
+    async fn realise_env_over_the_bound_or_outside_the_store_leaves_no_root() {
+        let dir = temp_dir("env-refusals");
+        let slow = fake_client(&dir, "slow", "#!/bin/sh\nsleep 30\n");
+        let roots = roots_for(&dir, slow, Duration::from_millis(200));
+        let err = without_the_exec_race(|| roots.realise_env("4", "github:acme/t#ci"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("WORKER_NIX_REALISE_TIMEOUT_SECS"), "{err}");
+        assert!(!dir.join("task-4").exists(), "no root may survive: {err}");
+
+        let stray = fake_client(
+            &dir,
+            "stray",
+            "#!/bin/sh\nln -sfn /tmp \"$7\"\necho /tmp/elsewhere\n",
+        );
+        let roots = roots_for(&dir, stray, Duration::from_secs(30));
+        let err = without_the_exec_race(|| roots.realise_env("4", "github:acme/t#ci"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("not under"), "{err}");
+        assert!(!dir.join("task-4").exists(), "no root may survive: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A node that allow-lists a project must be able to realise for it: a
+    /// missing flake client refuses the BOOT rather than every launch, the same
+    /// posture the store-path client already gets.
+    #[test]
+    fn the_boot_check_refuses_a_granted_node_without_a_flake_client() {
+        let dir = temp_dir("check-flake");
+        std::fs::write(dir.join("socket"), b"").unwrap();
+        let mut roots = roots_for(&dir, PathBuf::from("/bin/true"), Duration::from_secs(30));
+        roots.flake_client = PathBuf::from("/definitely/not/nix");
+
+        let err = roots.check(None).expect_err("a granted node needs it");
+        assert!(err.contains("WORKER_NIX_FLAKE_CLIENT"), "{err}");
+        assert!(err.contains("acme/beacon"), "{err}");
+
+        roots.projects = Vec::new();
+        assert!(
+            roots.check(None).is_ok(),
+            "a node granting nobody realises no flake and needs no flake client"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

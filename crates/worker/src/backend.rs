@@ -683,6 +683,7 @@ fn to_wire(config: &ContainerLaunchConfig) -> WorkerLaunchRequest {
             .collect(),
         cpu_limit: config.cpu_limit,
         memory_limit: config.memory_limit.clone(),
+        runtime_env: config.runtime_env.clone(),
     }
 }
 

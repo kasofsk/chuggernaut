@@ -44,6 +44,7 @@ pub fn cfg(cmd: &str) -> ContainerLaunchConfig {
         cpu_limit: None,
         memory_limit: Some("128Mi".into()),
         node: None,
+        runtime_env: None,
     }
 }
 

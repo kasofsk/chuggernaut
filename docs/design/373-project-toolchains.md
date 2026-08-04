@@ -603,6 +603,59 @@ the deploy has to create it. The invariant is stated **once**, in
 [STYLE.md](../../STYLE.md) Tier 2 rule 7 — where a worker reads it before writing
 code rather than after failing — and this document does not restate it.
 
+## P2 as shipped (job #403)
+
+[P2](#sequencing) landed the container-mode half: a job type's `runtime.env` is
+carried to the node, realised from the job branch, and injected into the task.
+Recorded as fact, in the shape [P1 as shipped](#p1-as-shipped-job-384) uses.
+
+- **The env rides the launch spec, and `WORKER_RPC_VERSION` does NOT move.**
+  `runtime.env` travels the path `image` travels — `ContainerLaunchConfig` →
+  `WorkerLaunchRequest.runtime_env` — because it comes from the same resolved
+  config; the node reads the project, the branch and the commit out of the launch
+  *env* it already receives. The field is optional and serde-defaulted, so an N−1
+  daemon still decodes and launches: additive by §14.1's rule, which is the rule
+  `WORKER_RPC_VERSION`'s own doc states. What that rule does not cover is the
+  *semantic* drop — an old daemon launching a container without the toolchain —
+  and a version constant nothing compares on the wire would not have caught it.
+  So the fix is where it can actually fire: the **dispatcher-built bootstrap**
+  refuses to run when the job type declared an env and no `CHUG_ENV_PATH` was
+  injected. The silent drop becomes a named task failure without a negotiation.
+- **`nix build`, not `nix-store --realise`.** P1's client takes store paths; a
+  project declares a flake ref. `WORKER_NIX_FLAKE_CLIENT` (default the `nix`
+  binary in the same profiles tree) builds it with `--out-link` pointed at the
+  task's root — [Decision 4](#decision-4--gc-roots-an-explicit-indirect-root-per-task-and-no-assertion)'s
+  own observation that this creates the same indirect root is what keeps the
+  realise and the root one action rather than a second realise path.
+- **One root per task, so the two realises are exclusive.** A launch declaring
+  `runtime.env` roots *that*, and P1's node-declared SDK realise does not also
+  run: two realises under one `task-{id}` name would leave the first closure
+  unrooted. The SDK loses nothing by it — it is in the node's system profile,
+  which is itself a GC root ([Decision 4](#decision-4--gc-roots-an-explicit-indirect-root-per-task-and-no-assertion)'s
+  first bullet) — and the `android-proof` ladder declares no env, so its behavior
+  is unchanged.
+- **`?rev=` rides beside `?ref=`, not instead of it.** [3a](#3a-a-relative-ref-has-no-checkout-to-resolve-against)
+  asks for the commit; the branch stays because nix's git fetcher wants a ref to
+  find the rev in. `JOB_SHA` is the addition to `Core::container_env` this
+  required. The residual is stated rather than closed: the container still
+  *clones* the branch, so the realise is pinned to the tip observed at launch
+  while the clone takes whatever the tip is milliseconds later. The job branch's
+  only writer during a task is that task, so the two agree in practice.
+- **The trust cost is documented at the grant.** `WORKER_NIX_PROJECTS` is the
+  first setting whose whole meaning is "evaluate this project's code inside
+  `chug-worker`", so `deploy/prod/build-worker.sh` says so where an operator
+  turning it on reads it, along with C6's warming precondition.
+- **A relative ref carries clock-1 residue: the node's git key.** The rewritten
+  `git+ssh://…` is fetched with the node's own `WORKER_GIT_KEY`, and a node
+  credential is read-only and **single-repo** (`SshCa::issue_node_credential`;
+  `auth::ssh::authorize_pull` matches `owner/project` exactly). The node holds one
+  such key — its self-refresh key — so it resolves relative refs only for the
+  project that key was minted for; every other project must name an **absolute**
+  ref. Documented at the grant (runbook §8, `env.example`) rather than closed
+  here: closing it means a per-project key on the node, which is a node-config
+  change of exactly the kind [Decision 1](#decision-1--tenancy-dedicated-nodes-only)'s
+  single tenancy makes cheap and P2 did not need.
+
 ## Corrections
 
 ### C1. #308 §H.6's "same slot" claim is mode-dependent
@@ -832,7 +885,7 @@ option-A table actually claimed. It is simply not the N−1 property.
 | Slice | Kind | Work | Depends on |
 | --- | --- | --- | --- |
 | **P1** | `code` | **Shipped (job #384, `2bd4bf3`)** — the realise step in the worker: `/nix/store:ro`, the profiles tree and the nix daemon socket mounted into `chug-worker`, client resolved through the profiles (W1, [as shipped](#p1-as-shipped-job-384)), realise bounded at 30s default / **45s ceiling** with a loud `BackendError::Launch` ([C6](#c6-the-realise-bound-has-a-45-second-ceiling-so-warming-is-a-precondition-not-an-optimization)), out-link GC root named by task id, removal at exit, bounded stale-root reaper. The shipped realise fires **only for a KVM-admitted launch** (`realise_for_launch`), so what P1 realises today is the node's declared Android SDK path, not yet an arbitrary project toolchain — that is P2 | **Nothing from #372.** The daemon socket and `/nix/var/nix/gcroots/auto` already exist on a stock node, and #372 §5 A5 declines to own GC roots, so `deploy/prod/build-worker.sh` provisions the roots dir in #380's shape ([as shipped](#p1-as-shipped-job-384)) |
-| **P2** | `code` | `runtime.env` accepted in container mode: the one field rule, the `xcode:`-is-host-only validate rule, R3's relative-ref rewriting, the commit sha on the launch spec, the store mount and env injection into the task container, `WORKER_NIX_PROJECTS` | [#309](309-host-native-execution.md) slice 4 (the `runtime:` block + epoch); P1 |
+| **P2** | `code` | **Shipped (job #403)** — `runtime.env` accepted in container mode: the one field rule and the `xcode:`-is-host-only validate rule (job #401), R3's relative-ref rewriting, the commit sha on the launch spec, the store mount and env injection into the task container, `WORKER_NIX_PROJECTS` ([as shipped](#p2-as-shipped-job-403)) | [#309](309-host-native-execution.md) slice 4 (the `runtime:` block + epoch); P1 |
 | — | — | **Warming is not a platform slice.** Per [Decision 5](#decision-5--warming-is-a-scheduled-job-not-a-platform-mechanism) it is a scheduled job declaring the same env, warmed by P1's own realise; the substituter is clock 1 | — |
 
 **P1 first, and it stands alone.** At `5aeb439`

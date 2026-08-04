@@ -87,6 +87,8 @@ async fn worker_fleet(
         flutter_dir: None,
         jdk_dir: None,
         nix_gcroots_dir: None,
+        nix_projects: Vec::new(),
+        nix_flake_client: "/nix/var/nix/profiles/system/sw/bin/nix".into(),
         nix_client: NIX_CLIENT_DEFAULT.into(),
         nix_daemon_socket: NIX_DAEMON_SOCKET_DEFAULT.into(),
         nix_store_dir: NIX_STORE_DIR_DEFAULT.into(),
@@ -134,6 +136,7 @@ fn labeled_sleep(project: &str, job: u64, task: u64) -> ContainerLaunchConfig {
         cpu_limit: None,
         memory_limit: Some("128Mi".into()),
         node: None,
+        runtime_env: None,
     }
 }
 

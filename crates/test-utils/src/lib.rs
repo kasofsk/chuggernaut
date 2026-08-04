@@ -851,6 +851,7 @@ impl AgentProvider for FakeProvider {
                         cpu_limit: None,
                         memory_limit: None,
                         node: config.node.clone(),
+                        runtime_env: config.runtime_env.clone(),
                     })
                     .await?,
             ),
@@ -901,6 +902,7 @@ mod tests {
             cpu_limit: None,
             memory_limit: None,
             node: None,
+            runtime_env: None,
         }
     }
 

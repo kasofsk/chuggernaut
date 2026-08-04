@@ -932,6 +932,13 @@ impl JobType {
         self.placement.as_ref().and_then(|p| p.node.as_deref())
     }
 
+    /// The toolchain this job type's tasks run against, if any (spec §1.1,
+    /// design #373 P2). One accessor, so every launch path reads the declaration
+    /// the same way `image` is read.
+    pub fn runtime_env(&self) -> Option<&str> {
+        self.runtime.as_ref().and_then(|r| r.env.as_deref())
+    }
+
     /// Non-fatal config warnings (spec §14): unknown top-level fields that were
     /// tolerated (config accepted, field ignored) rather than rejected. The
     /// dispatcher emits these as a loud platform event; they never block a

@@ -297,6 +297,68 @@ a leak of disk, never of a job.
 
 ---
 
+## 8. Serving a project's OWN toolchain (`WORKER_NIX_PROJECTS`)
+
+§7 realises the toolchain **this node** declares. `WORKER_NIX_PROJECTS` lets an
+allow-listed project declare its own instead, in its own repo, on its own clock:
+a job type carrying `runtime: { env: "nix:.#chug-mobile" }` (spec §1.1) has that
+environment realised here before the task starts, and the task runs with
+`$CHUG_ENV_PATH/bin` at the head of its `PATH`. A relative `nix:.#attr` resolves
+against the **job branch at its own commit**, so a toolchain bump and the code
+needing it ship together — the property the three-clock model exists to protect.
+
+```sh
+WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+WORKER_NIX_PROJECTS=acme/beacon \
+  deploy/prod/build-worker.sh
+```
+
+Read all four of these before you set it:
+
+- **Granting it grants EVALUATION, not a package.** Flake evaluation is
+  client-side and unsandboxed, so an allow-listed project's own flake code runs
+  *inside `chug-worker`* — the process that also holds `docker.sock`, the NATS
+  creds and the node's git key. That is tolerable only because such a node is
+  **single-tenant** (design #373 Decision 1): the boundary crossed is
+  platform-vs-project, never project-vs-project. List one project's repos, and
+  read the flakes you list.
+- **The toolchain must ALREADY be in the node's store.** The realise is capped at
+  45s (§7), and a cold Flutter/Android closure costs tens of minutes — so a job
+  type whose environment is not already substituted here does not run *slowly*,
+  it **does not run**. Warming is the project's, out of band: a scheduled job
+  (spec §1.1 `schedules/`) declaring the same `runtime.env` and doing nothing is
+  warmed by this very pre-launch realise, and a binary cache in the node's
+  `nix.conf` is your half. The commit that *bumps* a toolchain pays the cold
+  realise on its own branch — land the flake change ahead of the code change.
+- **A RELATIVE ref needs a git key minted for THAT project.** `nix:.#attr` is
+  rewritten to `git+<the job's repo>?ref=<branch>&rev=<sha>` and fetched from
+  inside `chug-worker` with the node's own `WORKER_GIT_KEY` (handed to nix as
+  `GIT_SSH_COMMAND`). A node credential is read-only and **single-repo** —
+  `chuggernaut admin mint-worker-git-key --project owner/project` signs a cert
+  the ssh front authorizes for that repo alone — and the node has exactly one
+  such key, the one its self-refresh uses. So a node can resolve relative refs
+  only for the project its key was minted for: allow-list *that* project, or have
+  the job type name an **absolute** ref (`github:…`, a public `git+https://…`)
+  that needs no node credential. A mismatch is not one of the named refusals
+  below — it surfaces as a raw git/ssh permission denial in the realise output.
+- **Empty grants nobody, and a refusal is loud.** A job declaring `runtime.env`
+  for a project this node does not list fails its launch by name; it never
+  quietly runs against the image's toolchain. `WORKER_NIX_PROJECTS` without
+  `WORKER_NIX_GCROOTS_DIR` is refused at deploy time, since a realised closure
+  with no GC root is collectable mid-task.
+
+| Symptom | What it means | What to do |
+| --- | --- | --- |
+| a launch fails with `which node … does not allow-list (WORKER_NIX_PROJECTS grants …)` | the job type declares an environment this node serves nobody for | add `owner/project` to `WORKER_NIX_PROJECTS` and recreate the daemon — after reading the trust note above |
+| a launch fails with a git/ssh permission denial in the realise output (`Permission denied (publickey)`, `repository not found`) | the relative ref names a repo this node's `WORKER_GIT_KEY` is not scoped to (a node credential is single-repo) | mint the node's key for the allow-listed project, or have the job type name an absolute ref |
+| a task exits immediately with `realised it somewhere this container cannot see` | the node injected `CHUG_ENV_PATH` but the store holding it is not mounted into the task container — `WORKER_NIX_STORE_DIR` names a store `build-worker.sh` did not mount | recreate the daemon with `build-worker.sh` so the declared store dir is the one mounted |
+| a task exits immediately with `this node realised none — refusing to run against the image's toolchain` | the launch reached a daemon that dropped `runtime_env` — an un-refreshed node from before design #373 P2 | refresh that node (`update.sh`), which is the deploy leg that carries the field |
+| `build-worker: WORKER_NIX_PROJECTS … but WORKER_NIX_GCROOTS_DIR is unset` | the grant could never be acted on | set the roots dir (§7), or drop the grant |
+| `build-worker: … '<path>' is not executable` for the flake client | the node's profiles have no `nix` binary where expected | point `WORKER_NIX_FLAKE_CLIENT` at it (a profiles path, never a store hash) |
+| a launch fails naming `WORKER_NIX_REALISE_TIMEOUT_SECS` for a project's env | the closure is not substituted on this node | warm it (above); raising the bound cannot buy a cold realise |
+
+---
+
 ## Related
 
 - [design #367](../design/367-android-emulator-execution.md) — §2.3 (the three
@@ -305,7 +367,9 @@ a leak of disk, never of a job.
   proof this unblocks).
 - [design #373](../design/373-project-toolchains.md) — 3b (where the realise
   runs and its trust cost), 3c (the bound), Decision 4 and Correction C5 (the
-  roots and the reaper) — the argument behind §7 above.
+  roots and the reaper) — the argument behind §7 above; Decision 1 (tenancy),
+  Decision 2 rule 3 (the allow-list), 3a (the relative ref) and Decision 5 with
+  C6 (warming as a precondition) — the argument behind §8.
 - [`spec.md`](../../spec.md) §3.1 — worker nodes, node-local properties.
 - [`worker-capacity.md`](./worker-capacity.md) — the other node knob, and the
   same "recreate the daemon to change a boot value" shape. §4.1 is the drain a

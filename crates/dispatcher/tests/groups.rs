@@ -177,12 +177,13 @@ fn commit_on_work(rig: &Rig, runs: usize) {
 }
 
 /// The env keys that legitimately differ between two *different* jobs: the
-/// job's own identity, the task's, and the per-launch credentials minted from
-/// them. Everything else is the environment the job type composes, and that is
-/// what must not move.
+/// job's own identity and the commit its branch resolves to, the task's, and
+/// the per-launch credentials minted from them. Everything else is the
+/// environment the job type composes, and that is what must not move.
 const PER_JOB_ENV_KEYS: &[&str] = &[
     "JOB_ID",
     "JOB_BRANCH",
+    "JOB_SHA",
     "CHUG_TASK_ID",
     "JOB_TASK_ID",
     "NATS_CREDS",

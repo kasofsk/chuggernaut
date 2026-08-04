@@ -704,6 +704,13 @@ Notes:
   those mounts forward from the live container, refusing rather than replacing
   a rooting daemon with one that cannot boot. Without it a task holds store
   paths no GC root protects.
+- **`WORKER_NIX_PROJECTS` is the grant that lets a PROJECT declare its own
+  toolchain** (spec §3.1, [the runbook §8](../../docs/runbooks/worker-kvm.md)):
+  an allow-listed project's `runtime.env` is realised here from its job branch
+  and put on the task's `PATH`. Empty grants nobody, granting it grants
+  *evaluation* of that project's flake inside `chug-worker`, and the environment
+  must already be substituted on the node — the realise is capped at 45s, so an
+  unwarmed toolchain fails the launch rather than running slowly.
 - The daemon's version is reported in its ping; the dispatcher logs a warning
   when it drifts from the dispatcher's own (stale node artifacts).
 - **Watch a refresh from the deploy job, not the node.** `worker-refresh.sh`

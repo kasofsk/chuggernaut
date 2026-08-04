@@ -404,6 +404,11 @@ pub struct ContainerLaunchConfig {
     /// must launch on. `None` = the default most-free placement. A pinned node
     /// that is full or unknown fails the launch rather than spilling over.
     pub node: Option<String>,
+    /// The job type's declared `runtime.env` (spec §1.1, design #373 P2): the
+    /// toolchain the node realises and mounts beside the `image`'s userland.
+    /// `None` for every job type that declares none, which launches exactly as
+    /// it does today.
+    pub runtime_env: Option<String>,
 }
 
 /// Injected via the backend's file API (Docker put-archive / k8s equivalent)
@@ -478,19 +483,47 @@ impl LogTail {
 ///   sshd_config). On v0, upload-pack refuses the promisor remote's follow-up
 ///   fetch for unadvertised blobs: the clone "succeeds" and checkout leaves an
 ///   empty workspace. git supplies the client half itself.
-pub fn bootstrap_cmd(original: &[String]) -> Vec<String> {
+pub fn bootstrap_cmd(original: &[String], runtime_env: Option<&str>) -> Vec<String> {
     let joined = original
         .iter()
         .map(|a| shell_quote(a))
         .collect::<Vec<_>>()
         .join(" ");
+    let prelude = runtime_env.map(runtime_env_prelude).unwrap_or_default();
     vec![
         "sh".into(),
         "-c".into(),
         format!(
-            "git clone --single-branch --filter=blob:none --branch \"$JOB_BRANCH\" \"$REPO_URL\" /workspace && cd /workspace && {{ git config core.hooksPath .githooks || true; }} && exec {joined}"
+            "{prelude}git clone --single-branch --filter=blob:none --branch \"$JOB_BRANCH\" \"$REPO_URL\" /workspace && cd /workspace && {{ git config core.hooksPath .githooks || true; }} && exec {joined}"
         ),
     ]
+}
+
+/// Container-side variable naming the realised environment's store path, set by
+/// the worker daemon after it realises a launch's `runtime.env` (design #373
+/// P2). One name, so the injection site and the script consuming it cannot drift.
+pub const RUNTIME_ENV_PATH_VAR: &str = "CHUG_ENV_PATH";
+
+/// The bootstrap's toolchain half: refuse the task when the declared
+/// environment is absent, and otherwise prepend its `bin` to `PATH`. The
+/// refusal is what makes a node that dropped `runtime_env` — an N-1 worker
+/// (spec §14.1) — or handed over a path it never mounted loud rather than a
+/// build against whatever the image carries.
+fn runtime_env_prelude(env_ref: &str) -> String {
+    let unrealised = shell_quote(&format!(
+        "chuggernaut: this job type declares runtime.env {env_ref:?} and this node realised \
+         none — refusing to run against the image's toolchain instead (design #373 P2)"
+    ));
+    let unmounted = shell_quote(&format!(
+        "chuggernaut: this job type declares runtime.env {env_ref:?} and this node realised it \
+         somewhere this container cannot see — refusing to run against the image's toolchain \
+         instead (design #373 P2)"
+    ));
+    format!(
+        "if [ -z \"${{{RUNTIME_ENV_PATH_VAR}:-}}\" ]; then echo {unrealised} >&2; exit 1; fi; \
+         if [ ! -d \"${RUNTIME_ENV_PATH_VAR}\" ]; then echo {unmounted} >&2; exit 1; fi; \
+         PATH=\"${RUNTIME_ENV_PATH_VAR}/bin:$PATH\"; export PATH; "
+    )
 }
 
 fn shell_quote(s: &str) -> String {
@@ -711,7 +744,7 @@ mod tests {
 
     #[test]
     fn bootstrap_wraps_and_quotes() {
-        let cmd = bootstrap_cmd(&["claude".into(), "-p".into(), "do the thing".into()]);
+        let cmd = bootstrap_cmd(&["claude".into(), "-p".into(), "do the thing".into()], None);
         assert_eq!(cmd[0], "sh");
         assert_eq!(cmd[1], "-c");
         assert!(cmd[2].starts_with("git clone "));
@@ -723,12 +756,75 @@ mod tests {
         );
     }
 
+    /// A job type declaring `runtime.env` (design #373 P2) runs against the
+    /// realised environment or NOT AT ALL: with the node's injection the env's
+    /// `bin` leads `PATH`, and without it the task refuses instead of silently
+    /// building against whatever the image carries.
+    #[test]
+    fn bootstrap_puts_a_declared_env_on_path_and_refuses_without_one() {
+        let task: Vec<String> = vec!["sh".into(), "-c".into(), "echo $PATH".into()];
+        let cmd = bootstrap_cmd(&task, Some("nix:.#chug-mobile"));
+        assert!(cmd[2].contains("nix:.#chug-mobile"), "{}", cmd[2]);
+        assert!(cmd[2].contains(RUNTIME_ENV_PATH_VAR), "{}", cmd[2]);
+
+        let undeclared = bootstrap_cmd(&task, None);
+        assert!(
+            undeclared[2].starts_with("git clone ")
+                && !undeclared[2].contains(RUNTIME_ENV_PATH_VAR),
+            "a job type declaring no env is bootstrapped exactly as it is today: {}",
+            undeclared[2]
+        );
+
+        let script = cmd[2].clone();
+        let clone = "git clone --single-branch --filter=blob:none --branch \"$JOB_BRANCH\" \"$REPO_URL\" /workspace";
+        let run = |env: &str| {
+            let body = script
+                .replace(clone, "true")
+                .replace("cd /workspace", "cd /");
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{env}{body}"))
+                .output()
+                .unwrap();
+            (
+                out.status.success(),
+                String::from_utf8_lossy(&out.stdout).trim().to_string(),
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            )
+        };
+
+        let realised = std::env::temp_dir().join(format!("chug-env-{}", std::process::id()));
+        std::fs::create_dir_all(&realised).unwrap();
+        let (ok, out, _) = run(&format!(
+            "{RUNTIME_ENV_PATH_VAR}={}; export {RUNTIME_ENV_PATH_VAR}; ",
+            realised.display()
+        ));
+        assert!(ok, "a realised env runs the task");
+        assert!(
+            out.starts_with(&format!("{}/bin:", realised.display())),
+            "the env leads PATH: {out}"
+        );
+        let _ = std::fs::remove_dir_all(&realised);
+
+        let (ok, out, err) = run("");
+        assert!(!ok, "a missing env refuses the task");
+        assert_eq!(out, "", "nothing ran");
+        assert!(err.contains("nix:.#chug-mobile"), "{err}");
+
+        let (ok, out, err) = run(&format!(
+            "{RUNTIME_ENV_PATH_VAR}=/nix/store/no-such-closure; export {RUNTIME_ENV_PATH_VAR}; "
+        ));
+        assert!(!ok, "a path this container cannot see refuses the task");
+        assert_eq!(out, "", "nothing ran");
+        assert!(err.contains("cannot see"), "{err}");
+    }
+
     /// The `.githooks` opt-in must be non-fatal while the clone stays fatal:
     /// losing the hook costs feedback, but exec'ing outside a clean /workspace
     /// costs the attempt (ticket A6).
     #[test]
     fn bootstrap_hooks_path_failure_still_execs_but_clone_failure_does_not() {
-        let script = bootstrap_cmd(&["echo".into(), "started".into()])[2].clone();
+        let script = bootstrap_cmd(&["echo".into(), "started".into()], None)[2].clone();
         let clone = "git clone --single-branch --filter=blob:none --branch \"$JOB_BRANCH\" \"$REPO_URL\" /workspace";
         let run = |s: String| {
             let out = std::process::Command::new("sh")
@@ -785,7 +881,7 @@ mod tests {
     /// are the whole cost story.
     #[test]
     fn bootstrap_clone_is_narrow() {
-        let cmd = bootstrap_cmd(&["true".into()]);
+        let cmd = bootstrap_cmd(&["true".into()], None);
         assert!(cmd[2].contains("--single-branch"), "{}", cmd[2]);
         assert!(cmd[2].contains("--filter=blob:none"), "{}", cmd[2]);
         assert!(

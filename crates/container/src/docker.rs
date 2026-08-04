@@ -171,6 +171,12 @@ pub struct DockerBackend {
     /// [`with_kvm`](DockerBackend::with_kvm); like [`Self::cache_dir`] it is a
     /// node property, never carried on the wire or the launch config.
     kvm: Option<KvmGrant>,
+    /// The node's nix store, mounted read-only into a launch that declares a
+    /// `runtime.env` (design #373 P2); `None` (the dispatcher's construction)
+    /// mounts nothing. Set worker-side via
+    /// [`with_nix_store`](DockerBackend::with_nix_store), like every other node
+    /// property here.
+    nix_store: Option<PathBuf>,
     /// Platform placement policy (spec §3.1). Defaults to
     /// [`PlacementPolicy::Busyness`]; the dispatcher sets it from
     /// `PLACEMENT_POLICY` via [`with_placement_policy`](DockerBackend::with_placement_policy).
@@ -207,6 +213,7 @@ impl DockerBackend {
             nodes,
             cache_dir: None,
             kvm: None,
+            nix_store: None,
             policy: PlacementPolicy::default(),
         })
     }
@@ -224,6 +231,7 @@ impl DockerBackend {
             }],
             cache_dir: None,
             kvm: None,
+            nix_store: None,
             policy: PlacementPolicy::default(),
         })
     }
@@ -252,6 +260,15 @@ impl DockerBackend {
     /// mount-free.
     pub fn with_kvm(mut self, grant: KvmGrant) -> Self {
         self.kvm = Some(grant);
+        self
+    }
+
+    /// Mount the node's nix store read-only into every launch that declares a
+    /// `runtime.env` (design #373 P2), at its own path — the realised closure's
+    /// wrappers name their interpreter and libraries by absolute store path.
+    /// Worker-daemon-only, exactly as [`with_kvm`](Self::with_kvm) is.
+    pub fn with_nix_store(mut self, store_dir: PathBuf) -> Self {
+        self.nix_store = Some(store_dir);
         self
     }
 
@@ -465,6 +482,7 @@ impl ContainerBackend for DockerBackend {
                 &config,
                 self.cache_dir.as_deref(),
                 self.kvm.as_ref(),
+                self.nix_store.as_deref(),
             )?),
             ..Default::default()
         };
@@ -680,20 +698,28 @@ impl ContainerBackend for DockerBackend {
 /// properties in force — factored out of Docker I/O so *which node properties
 /// are present* is unit-tested without a daemon.
 ///
-/// The dispatcher's backend passes neither and so stays bind-mount-free at
+/// The dispatcher's backend passes none of them and so stays bind-mount-free at
 /// `devices: None, binds: None, mounts: None` (spec §3.1); a worker's
-/// `cache_dir` adds one writable mount at [`CACHE_MOUNT_PATH`], and its `kvm`
-/// adds the device and the read-only toolchain mounts or none of them, per
-/// [`KvmGrant::admits`] — nothing here sets `binds`.
+/// `cache_dir` adds one writable mount at [`CACHE_MOUNT_PATH`], its `kvm` adds
+/// the device and the read-only toolchain mounts or none of them per
+/// [`KvmGrant::admits`], and its `nix_store` adds the store read-only for a
+/// launch declaring `runtime.env` — nothing here sets `binds`.
 fn build_host_config(
     config: &ContainerLaunchConfig,
     cache_dir: Option<&Path>,
     kvm: Option<&KvmGrant>,
+    nix_store: Option<&Path>,
 ) -> Result<HostConfig, BackendError> {
     let granted = kvm.filter(|g| g.admits(&config.env));
+    let env_store = nix_store.filter(|store| {
+        config.runtime_env.is_some() && (granted.is_none() || *store != Path::new(STORE_MOUNT_PATH))
+    });
     let mut mounts = Vec::new();
     if let Some(dir) = cache_dir {
         mounts.push(writable_bind(dir, CACHE_MOUNT_PATH));
+    }
+    if let Some(store) = env_store {
+        mounts.push(read_only_bind(store, &store.display().to_string()));
     }
     if let Some(g) = granted {
         mounts.push(read_only_bind(
@@ -711,7 +737,7 @@ fn build_host_config(
     let toolchain_mounts = mounts.iter().filter(|m| m.read_only == Some(true)).count();
     let toolchain_mounts_expected = granted.map_or(0, |g| {
         2 + usize::from(g.flutter_dir.is_some()) + usize::from(g.jdk_dir.is_some())
-    });
+    }) + usize::from(env_store.is_some());
     let host_config = HostConfig {
         nano_cpus: config.cpu_limit.map(|c| (c * 1e9) as i64),
         memory: config
@@ -970,6 +996,7 @@ mod tests {
             cpu_limit: Some(2.0),
             memory_limit: Some("4Gi".into()),
             node: None,
+            runtime_env: None,
         }
     }
 
@@ -979,7 +1006,7 @@ mod tests {
     /// passthrough (design #367 A1).
     #[test]
     fn host_config_without_node_properties_is_bare() {
-        let hc = build_host_config(&launch_config(), None, None).unwrap();
+        let hc = build_host_config(&launch_config(), None, None, None).unwrap();
         assert!(hc.binds.is_none(), "dispatcher path must add no binds");
         assert!(hc.devices.is_none(), "dispatcher path must add no devices");
         assert!(hc.mounts.is_none(), "dispatcher path must add no mounts");
@@ -995,7 +1022,7 @@ mod tests {
     #[test]
     fn host_config_with_cache_adds_one_writable_mount() {
         let dir = PathBuf::from("/var/cache/chuggernaut/sccache");
-        let hc = build_host_config(&launch_config(), Some(dir.as_path()), None).unwrap();
+        let hc = build_host_config(&launch_config(), Some(dir.as_path()), None, None).unwrap();
         assert!(hc.binds.is_none(), "the cache is a mount, not a bind");
         assert!(hc.devices.is_none(), "a cache dir grants no device");
 
@@ -1011,6 +1038,82 @@ mod tests {
             mounts[0].read_only,
             Some(false),
             "a write-through cache cannot be read-only"
+        );
+    }
+
+    /// A launch declaring `runtime.env` (design #373 P2) gets the node's store
+    /// read-only at its own path and NOTHING else — no device, no SDK leaf: the
+    /// realised closure is the whole toolchain, which is what retires the
+    /// one-mount-per-tool shape.
+    #[test]
+    fn host_config_mounts_the_store_for_a_declared_runtime_env() {
+        let store = PathBuf::from("/nix/store");
+        let mut config = launch_config();
+        config.runtime_env = Some("nix:.#chug-mobile".into());
+        let hc = build_host_config(&config, None, None, Some(store.as_path())).unwrap();
+
+        assert!(hc.devices.is_none(), "an environment grants no device");
+        let mounts = hc.mounts.expect("a declared env carries the store");
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].source.as_deref(), Some("/nix/store"));
+        assert_eq!(
+            mounts[0].target.as_deref(),
+            Some("/nix/store"),
+            "the store must land at its own path: the closure names it absolutely"
+        );
+        assert_eq!(mounts[0].read_only, Some(true));
+
+        let hc = build_host_config(&launch_config(), None, None, Some(store.as_path())).unwrap();
+        assert!(
+            hc.mounts.is_none(),
+            "a launch declaring no env is exactly what it is today"
+        );
+
+        let hc = build_host_config(&config, None, None, None).unwrap();
+        assert!(
+            hc.mounts.is_none(),
+            "a node that provisions no store mounts none, whatever a launch declares"
+        );
+    }
+
+    /// A KVM-admitted launch that ALSO declares an environment carries the store
+    /// once — the two grants name the same read-only mount, and a second bind at
+    /// the same target would fail the create — but the de-duplication is on the
+    /// PATH, never on the grant: a node whose store is elsewhere still gets the
+    /// store its closure actually lives in, or `CHUG_ENV_PATH` would name a
+    /// directory the container does not have.
+    #[test]
+    fn host_config_mounts_the_store_once_for_a_kvm_launch_declaring_an_env() {
+        let mut config = launch_config_for("acme/beacon");
+        config.runtime_env = Some("nix:.#chug-mobile".into());
+        let stores_in = |hc: &HostConfig| -> Vec<String> {
+            hc.mounts
+                .iter()
+                .flatten()
+                .filter_map(|m| m.target.clone())
+                .filter(|t| t.contains("store"))
+                .collect()
+        };
+
+        let hc = build_host_config(
+            &config,
+            None,
+            Some(&kvm_grant()),
+            Some(Path::new(STORE_MOUNT_PATH)),
+        )
+        .unwrap();
+        assert_eq!(
+            stores_in(&hc),
+            vec![STORE_MOUNT_PATH.to_string()],
+            "one store mount, not two"
+        );
+
+        let elsewhere = Path::new("/data/nix/store");
+        let hc = build_host_config(&config, None, Some(&kvm_grant()), Some(elsewhere)).unwrap();
+        assert_eq!(
+            stores_in(&hc),
+            vec!["/data/nix/store".to_string(), STORE_MOUNT_PATH.to_string()],
+            "the realised closure's own store is mounted even beside the KVM one"
         );
     }
 
@@ -1048,7 +1151,8 @@ mod tests {
     /// every toolchain case shares — the device, and no legacy binds — checked
     /// in passing.
     fn admitted_mounts(grant: &KvmGrant, cache: Option<&Path>) -> Vec<Mount> {
-        let hc = build_host_config(&launch_config_for("acme/beacon"), cache, Some(grant)).unwrap();
+        let hc =
+            build_host_config(&launch_config_for("acme/beacon"), cache, Some(grant), None).unwrap();
         assert_eq!(hc.devices.as_ref().map(Vec::len), Some(1));
         assert!(hc.binds.is_none(), "a toolchain leaf adds no legacy binds");
         hc.mounts
@@ -1080,8 +1184,13 @@ mod tests {
     /// (design #367 §3.3/§3.5).
     #[test]
     fn host_config_with_kvm_adds_device_and_read_only_mounts() {
-        let hc =
-            build_host_config(&launch_config_for("acme/beacon"), None, Some(&kvm_grant())).unwrap();
+        let hc = build_host_config(
+            &launch_config_for("acme/beacon"),
+            None,
+            Some(&kvm_grant()),
+            None,
+        )
+        .unwrap();
 
         let devices = hc
             .devices
@@ -1132,6 +1241,7 @@ mod tests {
             &launch_config_for("acme/beacon"),
             Some(dir.as_path()),
             Some(&kvm_grant()),
+            None,
         )
         .unwrap();
 
@@ -1284,7 +1394,7 @@ mod tests {
                 launch_config(),
                 launch_config_for(""),
             ] {
-                let hc = build_host_config(&config, None, Some(&grant)).unwrap();
+                let hc = build_host_config(&config, None, Some(&grant), None).unwrap();
                 assert!(hc.devices.is_none(), "unlisted launch got the device");
                 assert!(hc.mounts.is_none(), "unlisted launch got the mounts");
             }
@@ -1294,7 +1404,8 @@ mod tests {
             projects: vec![],
             ..kvm_grant()
         };
-        let hc = build_host_config(&launch_config_for("acme/beacon"), None, Some(&nobody)).unwrap();
+        let hc = build_host_config(&launch_config_for("acme/beacon"), None, Some(&nobody), None)
+            .unwrap();
         assert!(hc.devices.is_none(), "an empty allow-list grants nobody");
         assert!(hc.mounts.is_none(), "an empty allow-list grants nobody");
     }

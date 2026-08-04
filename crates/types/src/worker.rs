@@ -55,6 +55,12 @@ pub struct WorkerLaunchRequest {
     pub files: Vec<WireFile>,
     pub cpu_limit: Option<f64>,
     pub memory_limit: Option<String>,
+    /// The job type's declared `runtime.env` (spec §1.1, §3.1 "Project-declared
+    /// toolchains"), travelling the path `image` travels because it comes from
+    /// the same resolved config. Additive: an N-1 daemon ignores it, which is
+    /// what the bootstrap guard (spec §4.1) exists to catch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_env: Option<String>,
 }
 
 /// Mirrors `container::BackendError` so the proxy round-trips errors
@@ -751,6 +757,7 @@ mod tests {
             ],
             cpu_limit: Some(3.0),
             memory_limit: Some("5Gi".into()),
+            runtime_env: Some("nix:.#chug-ci".into()),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert_eq!(
@@ -759,6 +766,23 @@ mod tests {
         );
         assert!(!json.contains("data_b64\":\"\""));
         assert!(json.contains("local_artifact"));
+    }
+
+    /// `runtime_env` is additive in BOTH directions (§14.1): a request from an
+    /// older dispatcher carries no such key and still decodes, and a job type
+    /// declaring no environment puts nothing on the wire at all.
+    #[test]
+    fn launch_request_tolerates_a_peer_without_runtime_env() {
+        let older = r#"{"image":"img","cmd":["true"],"env":{},"files":[],
+                        "cpu_limit":null,"memory_limit":null}"#;
+        let req: WorkerLaunchRequest = serde_json::from_str(older).unwrap();
+        assert_eq!(req.runtime_env, None);
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            !json.contains("runtime_env"),
+            "an undeclared environment must not appear on the wire: {json}"
+        );
     }
 
     #[test]

@@ -570,10 +570,9 @@ async fn golden_trace_inputs_reach_work_and_eval_container_envs() {
 
 /// The regression guard for **every job type in this repo today** (#311's
 /// contracts table): a job whose type declares no inputs launches an eval
-/// container whose env is byte-identical to what it was before inputs existed —
-/// the feature is off, not merely unused. The key list is pinned rather than
-/// merely filtered for `CHUG_INPUT_*`, so *any* new env key has to be a
-/// deliberate edit here.
+/// container carrying no `CHUG_INPUT_*` key — the feature is off, not merely
+/// unused. The whole key list is pinned rather than merely filtered, so *any*
+/// new env key has to be a deliberate edit here (`JOB_SHA` is design #373's).
 #[tokio::test]
 async fn an_input_free_job_launches_a_byte_identical_eval_env() {
     let Some(rig) = rig().await else { return };
@@ -605,6 +604,7 @@ async fn an_input_free_job_launches_a_byte_identical_eval_env() {
             "JOB_BRANCH",
             "JOB_ID",
             "JOB_PROJECT",
+            "JOB_SHA",
             "JOB_TASK_ID",
             "NATS_URL",
             "REPO_URL",
